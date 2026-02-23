@@ -27,6 +27,8 @@ int main(int argc, char** argv) {
     config.device_id = args.device;
     config.max_batch_size = 1;
     config.max_seq_len = 4096;
+    config.gpu_layers = args.gpu_layers;
+    if (args.ssm_fp16) config.ssm_state_dtype = IMP_DTYPE_FP16;
 
     ImpContext ctx = nullptr;
     err = imp_context_create(model, &config, &ctx);

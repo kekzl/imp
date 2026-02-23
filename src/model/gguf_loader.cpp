@@ -293,6 +293,7 @@ static ModelArch detect_arch(const std::string& s) {
     if (s == "mistral")                     return ModelArch::MISTRAL;
     if (s == "mixtral")                     return ModelArch::MIXTRAL;
     if (s == "deepseek" || s == "deepseek2") return ModelArch::DEEPSEEK;
+    if (s == "nemotron_h_moe")              return ModelArch::NEMOTRON_H_MOE;
     return ModelArch::GENERIC;
 }
 
@@ -335,8 +336,8 @@ static bool assign_tensor(Model& model, const std::string& name,
     if (name.substr(0, 4) != "blk.") return false;
 
     auto parts = split(name, '.');
-    // Minimum: ["blk", "0", "attn_q", "weight"] = 4 parts
-    if (parts.size() < 4) return false;
+    // Minimum: ["blk", "0", "ssm_a"] = 3 parts (some SSM tensors have no suffix)
+    if (parts.size() < 3) return false;
 
     int layer_idx = 0;
     try { layer_idx = std::stoi(parts[1]); }
@@ -344,6 +345,15 @@ static bool assign_tensor(Model& model, const std::string& name,
 
     if (layer_idx < 0 || layer_idx >= model.n_layers()) return false;
     auto& layer = model.layers_[layer_idx];
+
+    // 3-part: "blk.{i}.{name}" — SSM scalar/vector tensors without .weight/.bias suffix
+    if (parts.size() == 3) {
+        const auto& field = parts[2];
+        if      (field == "ssm_a") layer.ssm_a = tensor;
+        else if (field == "ssm_d") layer.ssm_d = tensor;
+        else return false;
+        return true;
+    }
 
     // 4-part: "blk.{i}.{name}.weight" or "blk.{i}.{name}.bias"
     if (parts.size() == 4) {
@@ -368,18 +378,28 @@ static bool assign_tensor(Model& model, const std::string& name,
         else if (field == "ffn_gate_shexp") { layer.w_gate_shared = tensor; layer.w_gate_shared_qtype = qtype; }
         else if (field == "ffn_up_shexp")   { layer.w_up_shared = tensor; layer.w_up_shared_qtype = qtype; }
         else if (field == "ffn_down_shexp") { layer.w_down_shared = tensor; layer.w_down_shared_qtype = qtype; }
-        // Silently accept known but unsupported fields (SSM, biases)
-        else if (field == "ssm_a" || field == "ssm_conv1d" || field == "ssm_d" ||
-                 field == "ssm_dt" || field == "ssm_in" || field == "ssm_out" ||
-                 field == "ssm_norm" || field == "exp_probs_b") {
-            // Recognized but not yet implemented -- count as assigned to reduce noise
+        // SSM weights (Mamba2)
+        else if (field == "ssm_in")   { layer.ssm_in = tensor; layer.ssm_in_qtype = qtype; }
+        else if (field == "ssm_out")  { layer.ssm_out = tensor; layer.ssm_out_qtype = qtype; }
+        else if (field == "ssm_dt")     layer.ssm_dt_b = tensor;  // dt bias
+        else if (field == "ssm_norm")   layer.ssm_norm_w = tensor;
+        // SSM conv1d: "blk.{i}.ssm_conv1d.weight" / "blk.{i}.ssm_conv1d.bias"
+        else if (field == "ssm_conv1d") {
+            if (parts[3] == "weight")     layer.ssm_conv1d_w = tensor;
+            else if (parts[3] == "bias")  layer.ssm_conv1d_b = tensor;
+            else return false;
         }
+        // Router bias (Nemotron MoE)
+        else if (field == "exp_probs_b") layer.moe_router_bias = tensor;
         else return false;
         return true;
     }
 
-    // 5-part: "blk.{i}.{name}.{expert_idx}.weight" (MoE expert weights)
+    // 5-part: "blk.{i}.ffn_*.{expert_idx}.weight" — MoE per-expert weights
     if (parts.size() == 5) {
+        const auto& field = parts[2];
+
+        // MoE expert weights: "blk.{i}.ffn_*.{expert_idx}.weight"
         int expert_idx = 0;
         try { expert_idx = std::stoi(parts[3]); }
         catch (...) { return false; }
@@ -387,7 +407,6 @@ static bool assign_tensor(Model& model, const std::string& name,
         int n_experts = model.config().n_experts;
         if (expert_idx < 0 || expert_idx >= n_experts) return false;
 
-        const auto& field = parts[2];
         if      (field == "ffn_gate") layer.expert_w_gate[expert_idx] = tensor;
         else if (field == "ffn_up")   layer.expert_w_up[expert_idx] = tensor;
         else if (field == "ffn_down") layer.expert_w_down[expert_idx] = tensor;
@@ -547,6 +566,59 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     cfg.n_experts_active = static_cast<int>(get_uint("expert_used_count", 0));
     cfg.expert_d_ff      = static_cast<int>(get_uint("expert_feed_forward_length", cfg.d_ff));
 
+    // Per-layer arrays (Nemotron hybrid: head_count_kv and feed_forward_length are arrays)
+    {
+        auto get_int_array = [&](const std::string& key) -> std::vector<int> {
+            auto it = metadata.find(arch_str + "." + key);
+            if (it == metadata.end()) it = metadata.find(key);
+            if (it == metadata.end() || it->second.int_array.empty()) return {};
+            std::vector<int> result;
+            result.reserve(it->second.int_array.size());
+            for (auto v : it->second.int_array)
+                result.push_back(static_cast<int>(v));
+            return result;
+        };
+
+        cfg.n_kv_heads_per_layer = get_int_array("attention.head_count_kv");
+        cfg.d_ff_per_layer = get_int_array("feed_forward_length");
+
+        // If we got per-layer arrays, set the scalar config to max values (for buffer sizing)
+        if (!cfg.n_kv_heads_per_layer.empty()) {
+            int max_kv = 0;
+            for (int v : cfg.n_kv_heads_per_layer) max_kv = std::max(max_kv, v);
+            cfg.n_kv_heads = max_kv;
+            IMP_LOG_INFO("Per-layer KV heads: %zu layers, max=%d",
+                         cfg.n_kv_heads_per_layer.size(), max_kv);
+        }
+        if (!cfg.d_ff_per_layer.empty()) {
+            int max_ff = 0;
+            for (int v : cfg.d_ff_per_layer) max_ff = std::max(max_ff, v);
+            cfg.d_ff = max_ff;
+            IMP_LOG_INFO("Per-layer d_ff: %zu layers, max=%d",
+                         cfg.d_ff_per_layer.size(), max_ff);
+        }
+    }
+
+    // Mamba2 SSM config
+    cfg.ssm_conv_kernel = static_cast<int>(get_uint("ssm.conv_kernel", 0));
+    cfg.ssm_state_size  = static_cast<int>(get_uint("ssm.state_size", 0));
+    cfg.ssm_group_count = static_cast<int>(get_uint("ssm.group_count", 0));
+    cfg.ssm_inner_size  = static_cast<int>(get_uint("ssm.inner_size", 0));
+    cfg.ssm_dt_rank     = static_cast<int>(get_uint("ssm.time_step_rank", 0));
+
+    // Partial RoPE
+    cfg.rope_dim = static_cast<int>(get_uint("rope.dimension_count", 0));
+
+    // Extended MoE config
+    cfg.n_experts_shared     = static_cast<int>(get_uint("expert_shared_count", 0));
+    cfg.expert_shared_d_ff   = static_cast<int>(get_uint("expert_shared_feed_forward_length", 0));
+    cfg.expert_weights_scale = static_cast<float>(get_float("expert_weights_scale", 1.0));
+    cfg.expert_weights_norm  = (get_uint("expert_weights_norm", 0) != 0);
+    // Nemotron-H uses sigmoid gating instead of softmax
+    if (cfg.arch == ModelArch::NEMOTRON_H_MOE) {
+        cfg.moe_sigmoid_gating = true;
+    }
+
     IMP_LOG_INFO("Config: layers=%d d_model=%d d_ff=%d heads=%d kv_heads=%d head_dim=%d vocab=%d ctx=%d",
                  cfg.n_layers, cfg.d_model, cfg.d_ff, cfg.n_heads, cfg.n_kv_heads,
                  cfg.head_dim, cfg.vocab_size, cfg.max_seq_len);
@@ -554,6 +626,16 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     if (cfg.n_experts > 0) {
         IMP_LOG_INFO("MoE: %d experts, %d active, expert_d_ff=%d",
                      cfg.n_experts, cfg.n_experts_active, cfg.expert_d_ff);
+    }
+
+    if (cfg.ssm_inner_size > 0) {
+        IMP_LOG_INFO("SSM: conv_kernel=%d state_size=%d groups=%d inner=%d dt_rank=%d",
+                     cfg.ssm_conv_kernel, cfg.ssm_state_size, cfg.ssm_group_count,
+                     cfg.ssm_inner_size, cfg.ssm_dt_rank);
+    }
+
+    if (cfg.rope_dim > 0) {
+        IMP_LOG_INFO("Partial RoPE: rope_dim=%d (full head_dim=%d)", cfg.rope_dim, cfg.head_dim);
     }
 
     // 7. Allocate layers and assign weights

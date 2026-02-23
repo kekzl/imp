@@ -39,13 +39,19 @@ struct MoeRoutingBuffers {
 
 void moe_topk_gating(const Tensor& gate_logits, int top_k,
                      MoeRoutingResult& result,
-                     cudaStream_t stream = nullptr);
+                     cudaStream_t stream = nullptr,
+                     bool use_sigmoid = false,
+                     bool normalize_weights = true,
+                     const void* score_bias = nullptr);
 
 // Variant using pre-allocated buffers (no cudaMalloc inside)
 void moe_topk_gating(const Tensor& gate_logits, int top_k,
                      MoeRoutingBuffers& buffers,
                      MoeRoutingResult& result,
-                     cudaStream_t stream = nullptr);
+                     cudaStream_t stream = nullptr,
+                     bool use_sigmoid = false,
+                     bool normalize_weights = true,
+                     const void* score_bias = nullptr);
 
 void moe_gather(const Tensor& input, const MoeRoutingResult& routing,
                 Tensor& gathered, cudaStream_t stream = nullptr);

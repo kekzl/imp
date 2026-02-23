@@ -15,6 +15,14 @@ Model::~Model() {
         }
     }
     gpu_allocations_.clear();
+
+    // Unpin host-registered expert weight regions before munmap.
+    for (void* ptr : host_pinned_) {
+        if (ptr) {
+            cudaHostUnregister(ptr);
+        }
+    }
+    host_pinned_.clear();
     gpu_weights_ready_ = false;
 
 #ifdef __linux__
@@ -31,8 +39,9 @@ const char* model_arch_name(ModelArch arch) {
         case ModelArch::LLAMA:    return "llama";
         case ModelArch::MISTRAL:  return "mistral";
         case ModelArch::MIXTRAL:  return "mixtral";
-        case ModelArch::DEEPSEEK: return "deepseek";
-        case ModelArch::GENERIC:  return "generic";
+        case ModelArch::DEEPSEEK:       return "deepseek";
+        case ModelArch::NEMOTRON_H_MOE: return "nemotron_h_moe";
+        case ModelArch::GENERIC:        return "generic";
     }
     return "unknown";
 }

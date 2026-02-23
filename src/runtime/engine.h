@@ -9,6 +9,8 @@
 #include "runtime/speculative.h"
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
+#include "memory/ssm_state.h"
+#include "memory/layer_offload.h"
 #include "graph/executor.h"
 #include <memory>
 #include <string>
@@ -30,6 +32,12 @@ struct EngineConfig {
     float top_p = 1.0f;
     int top_k = 0;
     int seed = -1;
+
+    // SSM state dtype: FP32 (default) or FP16 for ~50% VRAM savings on h_state
+    DType ssm_state_dtype = DType::FP32;
+
+    // Layer offloading: number of layers to keep on GPU (-1 = all on GPU, 0 = all offloaded)
+    int gpu_layers = -1;
 
     // Speculative decoding
     bool enable_speculative = false;
@@ -78,6 +86,12 @@ private:
     CudaGraphRunner decode_graph_runner_;
     int last_decode_batch_size_ = -1;
     int last_decode_max_blocks_ = -1;
+
+    // SSM state (Mamba2 hybrid models)
+    std::unique_ptr<SSMState> ssm_state_;
+
+    // Layer weight offloading
+    std::unique_ptr<LayerOffloadManager> offload_mgr_;
 
     // Speculative decoding
     std::shared_ptr<Model> draft_model_;

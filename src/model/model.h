@@ -26,6 +26,25 @@ struct ModelConfig {
     int head_dim = 0;  // 0 = infer as d_model / n_heads
     float rope_theta = 10000.0f, rms_norm_eps = 1e-5f;
     int n_experts = 0, n_experts_active = 0, expert_d_ff = 0;
+
+    // Per-layer config (empty for standard transformers)
+    std::vector<int> n_kv_heads_per_layer;  // 0 = no attention this layer
+    std::vector<int> d_ff_per_layer;        // 0 = no dense FFN (SSM or attention-only)
+
+    // Mamba2 SSM config
+    int ssm_conv_kernel = 0;    // 4
+    int ssm_state_size = 0;     // 128
+    int ssm_group_count = 0;    // 8
+    int ssm_inner_size = 0;     // 4096
+    int ssm_dt_rank = 0;        // 64
+    int rope_dim = 0;           // 0 = full head_dim, 84 = partial
+
+    // Extended MoE config
+    int n_experts_shared = 0;       // 1
+    int expert_shared_d_ff = 0;     // 3712
+    float expert_weights_scale = 1.0f;  // 2.5
+    bool expert_weights_norm = false;
+    bool moe_sigmoid_gating = false;   // Nemotron-H uses sigmoid instead of softmax
 };
 
 struct TransformerLayer {
@@ -60,6 +79,18 @@ struct TransformerLayer {
     GGMLQuantType w_gate_qtype = GGMLQuantType::NONE;
     GGMLQuantType w_up_qtype = GGMLQuantType::NONE;
     GGMLQuantType w_down_qtype = GGMLQuantType::NONE;
+
+    // Mamba2 SSM weights
+    Tensor ssm_in, ssm_out;              // Projections
+    Tensor ssm_conv1d_w, ssm_conv1d_b;   // Conv1d weight + bias
+    Tensor ssm_dt_b;                      // dt bias
+    Tensor ssm_a, ssm_d;                  // A (log) and D (skip connection)
+    Tensor ssm_norm_w;                    // Group RMSNorm weight
+    GGMLQuantType ssm_in_qtype = GGMLQuantType::NONE;
+    GGMLQuantType ssm_out_qtype = GGMLQuantType::NONE;
+
+    // Router bias (Nemotron MoE)
+    Tensor moe_router_bias;
 };
 
 class Model {
@@ -100,6 +131,7 @@ public:
 
     bool gpu_weights_ready_ = false;
     std::vector<void*> gpu_allocations_;
+    std::vector<void*> host_pinned_;  // mmap regions pinned via cudaHostRegister
 };
 
 } // namespace imp

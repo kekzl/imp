@@ -29,13 +29,14 @@ __global__ void rope_forward_fp32_kernel(
     int n_kv_heads,
     int head_dim,
     float theta,
-    float inv_scaling)
+    float inv_scaling,
+    int rope_pairs)  // number of pairs to rotate (rope_dim/2 or head_dim/2)
 {
     const int token_idx = blockIdx.x;  // flattened batch*seq index
     const int head_idx  = blockIdx.y;
-    const int pair_idx  = threadIdx.x; // which rotation pair (0..head_dim/2-1)
+    const int pair_idx  = threadIdx.x; // which rotation pair (0..rope_pairs-1)
 
-    if (pair_idx >= head_dim / 2) return;
+    if (pair_idx >= rope_pairs) return;
 
     const int pos = positions[token_idx];
 
@@ -81,13 +82,14 @@ __global__ void rope_forward_fp16_kernel(
     int n_kv_heads,
     int head_dim,
     float theta,
-    float inv_scaling)
+    float inv_scaling,
+    int rope_pairs)
 {
     const int token_idx = blockIdx.x;
     const int head_idx  = blockIdx.y;
     const int pair_idx  = threadIdx.x;
 
-    if (pair_idx >= head_dim / 2) return;
+    if (pair_idx >= rope_pairs) return;
 
     const int pos = positions[token_idx];
 
@@ -122,6 +124,7 @@ __global__ void rope_forward_fp16_kernel(
 void rope_forward(Tensor& Q, Tensor& K,
                   const int* positions, int head_dim,
                   float theta, float scaling,
+                  int rope_dim,
                   cudaStream_t stream)
 {
     // Q: [batch, seq_len, n_heads, head_dim]
@@ -135,8 +138,9 @@ void rope_forward(Tensor& Q, Tensor& K,
 
     if (total_tokens == 0 || head_dim == 0) return;
 
-    // Block: head_dim/2 threads (one per rotation pair), capped at 512
-    const int pairs   = head_dim / 2;
+    // Partial RoPE: only rotate first rope_dim dimensions (or all if 0)
+    const int effective_rope_dim = (rope_dim > 0) ? rope_dim : head_dim;
+    const int pairs = effective_rope_dim / 2;
     const int block_x = (pairs <= 512) ? pairs : 512;
 
     dim3 grid(total_tokens, max_heads);
@@ -151,7 +155,7 @@ void rope_forward(Tensor& Q, Tensor& K,
                 static_cast<float*>(K.data),
                 positions,
                 batch, seq_len, n_heads, n_kv_heads, head_dim,
-                theta, inv_scaling);
+                theta, inv_scaling, pairs);
             break;
         case DType::FP16:
             rope_forward_fp16_kernel<<<grid, block, 0, stream>>>(
@@ -159,7 +163,7 @@ void rope_forward(Tensor& Q, Tensor& K,
                 static_cast<__half*>(K.data),
                 positions,
                 batch, seq_len, n_heads, n_kv_heads, head_dim,
-                theta, inv_scaling);
+                theta, inv_scaling, pairs);
             break;
         default:
             break;
