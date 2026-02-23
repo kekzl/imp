@@ -554,11 +554,15 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A,
 
     for (int i = lane; i < K_vec; i += 32) {
         float4 a_raw = A_row_v[i];
-        float4 x_raw = x_v[i];
+
+        // 16 FP8 values need 16 FP16 values = 2 float4 loads from x
+        float4 x_raw0 = x_v[2 * i];
+        float4 x_raw1 = x_v[2 * i + 1];
 
         // Reinterpret FP8 bytes
         const uint8_t* a_bytes = reinterpret_cast<const uint8_t*>(&a_raw);
-        const half* x_halves = reinterpret_cast<const half*>(&x_raw);
+        const half* x_lo = reinterpret_cast<const half*>(&x_raw0);  // x[0..7]
+        const half* x_hi = reinterpret_cast<const half*>(&x_raw1);  // x[8..15]
 
         // Manually dequant and accumulate 16 FP8 values
         for (int j = 0; j < 16; ++j) {
@@ -586,7 +590,7 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A,
             if (sign) a_val = -a_val;
             a_val *= scale;
 #endif
-            float x_val = (j < 8) ? __half2float(x_halves[j]) : __half2float(x_halves[j]);
+            float x_val = (j < 8) ? __half2float(x_lo[j]) : __half2float(x_hi[j - 8]);
             sum += a_val * x_val;
         }
     }
