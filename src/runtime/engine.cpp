@@ -3,6 +3,7 @@
 #include "runtime/batch.h"
 #include "memory/kv_cache.h"
 #include "model/gguf_loader.h"
+#include "model/chat_template.h"
 #include "compute/gemm.h"
 #include "core/logging.h"
 
@@ -227,6 +228,17 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
     }
 
+    // --- Initialize chat template from tokenizer metadata ---
+    {
+        Tokenizer* tok = model_->tokenizer();
+        if (tok) {
+            auto family = ChatTemplate::detect_family(tok->chat_template_str());
+            if (family != ChatTemplateFamily::RAW) {
+                chat_template_.init(family, *tok);
+            }
+        }
+    }
+
     return true;
 }
 
@@ -387,7 +399,14 @@ bool Engine::step() {
         IMP_LOG_INFO("Prefill -> token %d (ctx=%d): id=%d [%s]",
                      (int)req->output_tokens.size(), req->context_len(),
                      next_token, tok->decode_token(next_token).c_str());
-        if (next_token == tok->eos_id() ||
+
+        // Check EOS and chat template stop tokens
+        bool is_stop = (next_token == tok->eos_id());
+        for (int32_t stop_id : chat_template_.stop_token_ids()) {
+            if (next_token == stop_id) { is_stop = true; break; }
+        }
+
+        if (is_stop ||
             static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
             req->status = RequestStatus::FINISHED;
             kv_manager_->free_sequence(req->id);
@@ -534,7 +553,13 @@ bool Engine::step() {
                              req->context_len() - 1,
                              next_token, tok->decode_token(next_token).c_str());
 
-                if (next_token == tok->eos_id() ||
+                // Check EOS and chat template stop tokens
+                bool is_stop = (next_token == tok->eos_id());
+                for (int32_t stop_id : chat_template_.stop_token_ids()) {
+                    if (next_token == stop_id) { is_stop = true; break; }
+                }
+
+                if (is_stop ||
                     static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
                     req->status = RequestStatus::FINISHED;
                     kv_manager_->free_sequence(req->id);
@@ -550,48 +575,24 @@ bool Engine::step() {
 
 std::string Engine::generate(const std::string& prompt, int max_tokens,
                               float temperature, float top_p,
-                              int top_k, int seed) {
+                              int top_k, int seed,
+                              bool apply_chat_template) {
     Tokenizer* tok = model_->tokenizer();
     if (!tok) {
         return "";
     }
 
-    // Try to apply chat template if the model has <|im_start|> / <|im_end|> tokens
-    // (Qwen3, ChatML-style models). This wraps the raw prompt in the expected format.
     std::vector<int32_t> tokens;
-    int32_t im_start = tok->find_token("<|im_start|>");
-    int32_t im_end   = tok->find_token("<|im_end|>");
-    IMP_LOG_DEBUG("Chat template probe: im_start=%d, im_end=%d", im_start, im_end);
 
-    bool use_chat_template = false; // TEMP: disabled for debug comparison with llama-debug
-    // bool use_chat_template = (im_start >= 0 && im_end >= 0);
-
-    if (use_chat_template) {
-        // ChatML template: <s><|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n
-        // Match llama.cpp: BOS + user block + assistant prefix (no system block)
-        auto encode_text = [&](const std::string& text) {
-            auto ids = tok->encode(text);
-            tokens.insert(tokens.end(), ids.begin(), ids.end());
-        };
-
-        // BOS token first (llama.cpp includes it)
-        if (tok->add_bos()) {
-            tokens.push_back(static_cast<int32_t>(tok->bos_id()));
-        }
-        tokens.push_back(im_start);
-        encode_text("user\n");
-        {
-            auto user_ids = tok->encode(prompt);
-            tokens.insert(tokens.end(), user_ids.begin(), user_ids.end());
-        }
-        tokens.push_back(im_end);
-        encode_text("\n");
-        tokens.push_back(im_start);
-        encode_text("assistant\n");
-
-        IMP_LOG_INFO("Applied ChatML template (%zu tokens, im_start=%d, im_end=%d)",
-                     tokens.size(), im_start, im_end);
+    if (apply_chat_template && !chat_template_.is_raw()) {
+        // Apply detected chat template
+        std::vector<ChatMessage> messages = {{"user", prompt}};
+        tokens = chat_template_.apply(*tok, messages);
+        IMP_LOG_INFO("Applied %s chat template (%zu tokens)",
+                     chat_template_family_name(chat_template_.family()),
+                     tokens.size());
     } else {
+        // Raw encoding
         tokens = tok->encode(prompt);
         if (tok->add_bos() && (tokens.empty() || tokens[0] != tok->bos_id())) {
             tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
