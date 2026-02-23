@@ -5,6 +5,7 @@
 #include "model/gguf_loader.h"
 #include "graph/executor.h"
 #include "quant/quant_gemm.h"
+#include "quant/dequant_gpu.h"
 #include "compute/gemm.h"
 #include "core/tensor.h"
 
@@ -254,6 +255,113 @@ static std::unique_ptr<Model> make_test_model(
     return model;
 }
 
+// Build a Model with synthetic Q8_0 weights for testing.
+static std::unique_ptr<Model> make_q8_0_test_model(
+    int d_model, int d_ff, int n_heads, int n_kv_heads, int n_layers,
+    int vocab_size, float scale = 0.01f, int8_t quant_val = 2)
+{
+    auto model = std::make_unique<Model>();
+    auto& cfg = model->config_;
+    cfg.arch = ModelArch::LLAMA;
+    cfg.n_layers = n_layers;
+    cfg.n_heads = n_heads;
+    cfg.n_kv_heads = n_kv_heads;
+    cfg.d_model = d_model;
+    cfg.d_ff = d_ff;
+    cfg.vocab_size = vocab_size;
+    cfg.max_seq_len = 128;
+    cfg.rope_theta = 10000.0f;
+    cfg.rms_norm_eps = 1e-5f;
+
+    int head_dim = d_model / n_heads;
+
+    // Helper: create a Q8_0 weight tensor on host.
+    auto make_q8_0_weight = [&](int rows, int cols) -> std::pair<void*, Tensor> {
+        int blocks_per_row = cols / 32;
+        size_t total_blocks = static_cast<size_t>(rows) * blocks_per_row;
+        size_t total_bytes = total_blocks * 34;
+        auto* buf = new uint8_t[total_bytes];
+
+        for (size_t i = 0; i < total_blocks; ++i) {
+            auto blk = make_q8_0_block(scale, quant_val);
+            std::memcpy(buf + i * 34, blk.data(), 34);
+        }
+
+        int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
+        Tensor t(buf, DType::INT8, 2, shape, false);
+        return {buf, t};
+    };
+
+    // Helper: create an FP16 weight tensor on host filled with small values.
+    auto make_fp16_weight = [](int rows, int cols) -> std::pair<void*, Tensor> {
+        size_t n = static_cast<size_t>(rows) * cols;
+        auto* buf = new uint16_t[n];
+        for (size_t i = 0; i < n; ++i) buf[i] = float_to_fp16(0.01f);
+        int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
+        Tensor t(buf, DType::FP16, 2, shape, false);
+        return {buf, t};
+    };
+
+    // Helper: create 1D FP16 norm weight on host (all 1.0).
+    auto make_norm_weight = [](int dim) -> std::pair<void*, Tensor> {
+        auto* buf = new uint16_t[dim];
+        uint16_t one = float_to_fp16(1.0f);
+        for (int i = 0; i < dim; ++i) buf[i] = one;
+        int64_t shape[4] = {static_cast<int64_t>(dim), 0, 0, 0};
+        Tensor t(buf, DType::FP16, 1, shape, false);
+        return {buf, t};
+    };
+
+    // Token embedding in FP16 (small values)
+    auto [tok_emb_buf, tok_emb] = make_fp16_weight(vocab_size, d_model);
+    model->tok_emb_ = tok_emb;
+    model->tok_emb_qtype_ = GGMLQuantType::F16;
+
+    // Output norm
+    auto [out_norm_buf, out_norm] = make_norm_weight(d_model);
+    model->out_norm_ = out_norm;
+    model->out_norm_qtype_ = GGMLQuantType::F16;
+
+    // Output projection in FP16
+    auto [out_proj_buf, out_proj] = make_fp16_weight(vocab_size, d_model);
+    model->out_proj_ = out_proj;
+    model->out_proj_qtype_ = GGMLQuantType::F16;
+
+    // Layers with Q8_0 weights
+    model->layers_.resize(n_layers);
+    for (int l = 0; l < n_layers; ++l) {
+        auto& ly = model->layers_[l];
+
+        auto [wq_buf, wq] = make_q8_0_weight(n_heads * head_dim, d_model);
+        ly.wq = wq; ly.wq_qtype = GGMLQuantType::Q8_0;
+
+        auto [wk_buf, wk] = make_q8_0_weight(n_kv_heads * head_dim, d_model);
+        ly.wk = wk; ly.wk_qtype = GGMLQuantType::Q8_0;
+
+        auto [wv_buf, wv] = make_q8_0_weight(n_kv_heads * head_dim, d_model);
+        ly.wv = wv; ly.wv_qtype = GGMLQuantType::Q8_0;
+
+        auto [wo_buf, wo] = make_q8_0_weight(d_model, n_heads * head_dim);
+        ly.wo = wo; ly.wo_qtype = GGMLQuantType::Q8_0;
+
+        auto [wg_buf, wg] = make_q8_0_weight(d_ff, d_model);
+        ly.w_gate = wg; ly.w_gate_qtype = GGMLQuantType::Q8_0;
+
+        auto [wu_buf, wu] = make_q8_0_weight(d_ff, d_model);
+        ly.w_up = wu; ly.w_up_qtype = GGMLQuantType::Q8_0;
+
+        auto [wd_buf, wd] = make_q8_0_weight(d_model, d_ff);
+        ly.w_down = wd; ly.w_down_qtype = GGMLQuantType::Q8_0;
+
+        auto [an_buf, an] = make_norm_weight(d_model);
+        ly.attn_norm = an;
+        auto [fn_buf, fn] = make_norm_weight(d_model);
+        ly.ffn_norm = fn;
+    }
+
+    return model;
+}
+
 // ===========================================================================
 // Test 1: Q4_0 weight upload splits into nibbles + scales
 // ===========================================================================
@@ -312,7 +420,7 @@ TEST(QuantIntegrationTest, Q4_0WeightUpload) {
 }
 
 // ===========================================================================
-// Test 2: Q8_0 weight upload dequantizes to FP16
+// Test 2: Q8_0 weight upload keeps raw quantized bytes on GPU
 // ===========================================================================
 TEST(QuantIntegrationTest, Q8_0WeightUpload) {
     SKIP_IF_NO_CUDA();
@@ -335,7 +443,8 @@ TEST(QuantIntegrationTest, Q8_0WeightUpload) {
 
     int blocks_per_row = cols / 32;
     size_t total_blocks = static_cast<size_t>(rows) * blocks_per_row;
-    auto* q8_buf = new uint8_t[total_blocks * 34];
+    size_t raw_bytes = total_blocks * 34;
+    auto* q8_buf = new uint8_t[raw_bytes];
     for (size_t i = 0; i < total_blocks; ++i) {
         auto blk = make_q8_0_block(scale, quant_val);
         std::memcpy(q8_buf + i * 34, blk.data(), 34);
@@ -347,9 +456,7 @@ TEST(QuantIntegrationTest, Q8_0WeightUpload) {
     model->layers_[0].wq_qtype = GGMLQuantType::Q8_0;
 
     // Set other weights to minimal FP16 (just need wq for this test)
-    // Use small FP16 tensors for the rest
-    std::mt19937 rng(42);
-    auto make_fp16 = [&](int r, int c) -> Tensor {
+    auto make_fp16 = [](int r, int c) -> Tensor {
         size_t n = static_cast<size_t>(r) * c;
         auto* buf = new uint16_t[n];
         for (size_t i = 0; i < n; ++i) buf[i] = float_to_fp16(0.01f);
@@ -383,23 +490,37 @@ TEST(QuantIntegrationTest, Q8_0WeightUpload) {
     // Upload
     ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
 
-    // After upload, wq should be FP16 on device (Q8_0 dequanted)
+    // After upload, wq should be on device with logical shape [N, K]
+    // Data is raw Q8_0 bytes (not dequanted FP16)
     EXPECT_TRUE(ly.wq.on_device);
     EXPECT_EQ(ly.wq.dtype, DType::FP16);
     EXPECT_EQ(ly.wq.shape[0], rows);
     EXPECT_EQ(ly.wq.shape[1], cols);
 
-    // Read back and verify: each element = quant_val * scale = 4 * 0.25 = 1.0
-    std::vector<uint16_t> h_result(rows * cols);
-    cudaMemcpy(h_result.data(), ly.wq.data,
+    // Read back raw bytes and verify they match the original Q8_0 data
+    std::vector<uint8_t> h_raw(raw_bytes);
+    cudaMemcpy(h_raw.data(), ly.wq.data, raw_bytes, cudaMemcpyDeviceToHost);
+    for (size_t i = 0; i < raw_bytes; ++i) {
+        EXPECT_EQ(h_raw[i], q8_buf[i]) << "Raw Q8_0 byte mismatch at " << i;
+    }
+
+    // Verify on-the-fly dequant produces correct FP16 values
+    void* d_fp16 = nullptr;
+    cudaMalloc(&d_fp16, static_cast<size_t>(rows * cols) * sizeof(uint16_t));
+    dequant_gpu(ly.wq.data, d_fp16, GGMLQuantType::Q8_0, rows, cols, nullptr);
+    cudaDeviceSynchronize();
+
+    std::vector<uint16_t> h_fp16(rows * cols);
+    cudaMemcpy(h_fp16.data(), d_fp16,
                static_cast<size_t>(rows * cols) * sizeof(uint16_t),
                cudaMemcpyDeviceToHost);
+    cudaFree(d_fp16);
 
     float expected = static_cast<float>(quant_val) * fp16_to_float(float_to_fp16(scale));
     for (int i = 0; i < rows * cols; ++i) {
-        float got = fp16_to_float(h_result[i]);
+        float got = fp16_to_float(h_fp16[i]);
         EXPECT_NEAR(got, expected, 0.05f)
-            << "Q8_0 dequant mismatch at index " << i;
+            << "Q8_0 on-the-fly dequant mismatch at index " << i;
     }
 
     delete[] q8_buf;
@@ -591,18 +712,18 @@ TEST(QuantIntegrationTest, Q4_0ForwardPass) {
     cudaDeviceSynchronize();
 
     ASSERT_NE(logits.data, nullptr);
-    EXPECT_EQ(logits.shape[0], n_tokens);
+    EXPECT_EQ(logits.shape[0], 1);  // prefill: last token only
     EXPECT_EQ(logits.shape[1], 32); // vocab_size
 
-    std::vector<half> h_logits(n_tokens * 32);
+    std::vector<float> h_logits(1 * 32);
     cudaMemcpy(h_logits.data(), logits.data,
-               static_cast<size_t>(n_tokens * 32) * sizeof(half),
+               static_cast<size_t>(1 * 32) * sizeof(float),
                cudaMemcpyDeviceToHost);
 
     bool has_nan = false;
     bool has_inf = false;
     for (size_t i = 0; i < h_logits.size(); ++i) {
-        float v = __half2float(h_logits[i]);
+        float v = h_logits[i];
         if (std::isnan(v)) has_nan = true;
         if (std::isinf(v)) has_inf = true;
     }
@@ -688,9 +809,9 @@ TEST(QuantIntegrationTest, Q4_0LogitsShape) {
     cudaDeviceSynchronize();
 
     EXPECT_EQ(logits.ndim, 2);
-    EXPECT_EQ(logits.shape[0], n_tokens);
+    EXPECT_EQ(logits.shape[0], 1);  // prefill: last token only
     EXPECT_EQ(logits.shape[1], 32); // vocab_size
-    EXPECT_EQ(logits.dtype, DType::FP16);
+    EXPECT_EQ(logits.dtype, DType::FP32); // logits are FP32 for sampling precision
     EXPECT_TRUE(logits.on_device);
 
     cudaFree(d_tokens);
@@ -738,7 +859,109 @@ TEST(QuantIntegrationTest, Q4_0MultiLayer) {
 }
 
 // ===========================================================================
-// Test 10: Direct quant_gemm_int4 correctness vs CPU reference
+// Test 10: Q8_0 forward pass through executor (on-the-fly dequant)
+// ===========================================================================
+TEST(QuantIntegrationTest, Q8_0ForwardPass) {
+    SKIP_IF_NO_CUDA();
+
+    auto model = make_q8_0_test_model(32, 64, 4, 4, 1, 32, 0.01f, 2);
+    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+
+    GraphExecutor executor;
+    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+
+    std::vector<int32_t> h_tokens = {0, 1};
+    std::vector<int> h_positions = {0, 1};
+    int n_tokens = 2;
+
+    int32_t* d_tokens = nullptr;
+    int* d_positions = nullptr;
+    cudaMalloc(&d_tokens, n_tokens * sizeof(int32_t));
+    cudaMalloc(&d_positions, n_tokens * sizeof(int));
+    cudaMemcpy(d_tokens, h_tokens.data(), n_tokens * sizeof(int32_t),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_positions, h_positions.data(), n_tokens * sizeof(int),
+               cudaMemcpyHostToDevice);
+
+    InferenceState state;
+    state.token_ids = d_tokens;
+    state.positions = d_positions;
+    state.n_tokens = n_tokens;
+    state.is_prefill = true;
+    state.temperature = 0.0f;
+
+    int32_t token = executor.forward(state, nullptr);
+    EXPECT_GE(token, 0);
+    EXPECT_LT(token, 32);
+
+    // Verify logits are not NaN/Inf
+    Tensor logits;
+    executor.forward_logits(state, logits, nullptr);
+    cudaDeviceSynchronize();
+
+    ASSERT_NE(logits.data, nullptr);
+    EXPECT_EQ(logits.shape[0], 1);  // prefill: last token only
+    EXPECT_EQ(logits.shape[1], 32);
+
+    std::vector<float> h_logits(1 * 32);
+    cudaMemcpy(h_logits.data(), logits.data,
+               static_cast<size_t>(1 * 32) * sizeof(float),
+               cudaMemcpyDeviceToHost);
+
+    bool has_nan = false;
+    bool has_inf = false;
+    for (size_t i = 0; i < h_logits.size(); ++i) {
+        if (std::isnan(h_logits[i])) has_nan = true;
+        if (std::isinf(h_logits[i])) has_inf = true;
+    }
+    EXPECT_FALSE(has_nan) << "Logits contain NaN";
+    EXPECT_FALSE(has_inf) << "Logits contain Inf";
+
+    cudaFree(d_tokens);
+    cudaFree(d_positions);
+}
+
+// ===========================================================================
+// Test 11: Q8_0 multi-layer forward pass
+// ===========================================================================
+TEST(QuantIntegrationTest, Q8_0MultiLayer) {
+    SKIP_IF_NO_CUDA();
+
+    auto model = make_q8_0_test_model(32, 64, 4, 4, 4, 32, 0.01f, 2);
+    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+
+    GraphExecutor executor;
+    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+
+    std::vector<int32_t> h_tokens = {1, 2, 3};
+    std::vector<int> h_positions = {0, 1, 2};
+
+    int32_t* d_tokens = nullptr;
+    int* d_positions = nullptr;
+    cudaMalloc(&d_tokens, 3 * sizeof(int32_t));
+    cudaMalloc(&d_positions, 3 * sizeof(int));
+    cudaMemcpy(d_tokens, h_tokens.data(), 3 * sizeof(int32_t),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_positions, h_positions.data(), 3 * sizeof(int),
+               cudaMemcpyHostToDevice);
+
+    InferenceState state;
+    state.token_ids = d_tokens;
+    state.positions = d_positions;
+    state.n_tokens = 3;
+    state.is_prefill = true;
+    state.temperature = 0.0f;
+
+    int32_t token = executor.forward(state, nullptr);
+    EXPECT_GE(token, 0);
+    EXPECT_LT(token, 32);
+
+    cudaFree(d_tokens);
+    cudaFree(d_positions);
+}
+
+// ===========================================================================
+// Test 12: Direct quant_gemm_int4 correctness vs CPU reference
 // ===========================================================================
 TEST(QuantIntegrationTest, QuantGemmInt4LargerMatrix) {
     SKIP_IF_NO_CUDA();

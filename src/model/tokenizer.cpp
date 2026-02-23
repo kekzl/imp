@@ -470,4 +470,10 @@ int Tokenizer::eos_id() const {
     return eos_id_;
 }
 
+int32_t Tokenizer::find_token(const std::string& text) const {
+    auto it = token_to_id_.find(text);
+    if (it != token_to_id_.end()) return it->second;
+    return -1;
+}
+
 } // namespace imp

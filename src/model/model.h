@@ -35,6 +35,19 @@ struct TransformerLayer {
     Tensor moe_gate;
     std::vector<Tensor> expert_w_gate, expert_w_up, expert_w_down;
 
+    // Packed expert tensors (3D: [n_experts, rows, cols]) loaded from GGUF *_exps
+    // These are temporary: weight_upload slices them into the per-expert vectors above.
+    Tensor expert_gate_packed, expert_up_packed, expert_down_packed;
+    GGMLQuantType expert_gate_qtype = GGMLQuantType::NONE;
+    GGMLQuantType expert_up_qtype   = GGMLQuantType::NONE;
+    GGMLQuantType expert_down_qtype = GGMLQuantType::NONE;
+
+    // Shared expert (always-active, e.g. Nemotron/DeepSeek)
+    Tensor w_up_shared, w_down_shared, w_gate_shared;
+    GGMLQuantType w_up_shared_qtype   = GGMLQuantType::NONE;
+    GGMLQuantType w_down_shared_qtype = GGMLQuantType::NONE;
+    GGMLQuantType w_gate_shared_qtype = GGMLQuantType::NONE;
+
     // Per-group scales for quantized weights (GPU, FP16)
     Tensor wq_scales, wk_scales, wv_scales, wo_scales;
     Tensor w_gate_scales, w_up_scales, w_down_scales;

@@ -479,8 +479,9 @@ TEST(AttentionTest, PagedAttentionBasic) {
                   n_heads, n_kv_heads, head_dim, scale, /*causal=*/false);
 
     // ---------- Build paged K_cache / V_cache on CPU ----------
-    // K_cache shape: [num_physical_blocks, n_kv_heads, block_size, head_dim]
-    const int64_t cache_block_elems = n_kv_heads * block_size * head_dim;
+    // K_cache shape: [num_physical_blocks, block_size, n_kv_heads, head_dim]
+    // Matches write_kv_cache_kernel layout: each slot stores [n_kv_heads * head_dim].
+    const int64_t cache_block_elems = block_size * n_kv_heads * head_dim;
     const int64_t total_cache = num_physical_blocks * cache_block_elems;
     std::vector<float> h_K_cache(total_cache, 0.0f);
     std::vector<float> h_V_cache(total_cache, 0.0f);
@@ -495,9 +496,9 @@ TEST(AttentionTest, PagedAttentionBasic) {
     // For batch b=0, logical block blk, token-within-block t:
     //   global token index = blk * block_size + t
     //   physical block     = h_block_tables[blk]
-    //   cache index = phys_block * (n_kv_heads * block_size * head_dim)
-    //               + kv_h * (block_size * head_dim)
-    //               + t * head_dim + d
+    //   cache index = phys_block * (block_size * n_kv_heads * head_dim)
+    //               + t * (n_kv_heads * head_dim)
+    //               + kv_h * head_dim + d
     //   flat KV index = ((b * ctx_len + global_tok) * n_kv_heads + kv_h) * head_dim + d
     for (int blk = 0; blk < num_logical_blocks; blk++) {
         int phys = h_block_tables[blk];
@@ -507,8 +508,8 @@ TEST(AttentionTest, PagedAttentionBasic) {
             for (int kv_h = 0; kv_h < n_kv_heads; kv_h++) {
                 for (int d = 0; d < head_dim; d++) {
                     int64_t flat_idx = ((int64_t)(0 * context_len + global_tok) * n_kv_heads + kv_h) * head_dim + d;
-                    int64_t cache_idx = ((int64_t)phys * n_kv_heads + kv_h) * block_size * head_dim
-                                      + (int64_t)t * head_dim + d;
+                    int64_t cache_idx = ((int64_t)phys * block_size + t) * n_kv_heads * head_dim
+                                      + (int64_t)kv_h * head_dim + d;
                     h_K_cache[cache_idx] = h_K_flat[flat_idx];
                     h_V_cache[cache_idx] = h_V_flat[flat_idx];
                 }
@@ -525,8 +526,8 @@ TEST(AttentionTest, PagedAttentionBasic) {
     // O: [batch, 1, n_heads, head_dim]
     Tensor d_O = make_gpu_tensor_fp16(4, q_shape);
 
-    // K_cache, V_cache: [num_physical_blocks, n_kv_heads, block_size, head_dim]
-    int64_t cache_shape[] = {num_physical_blocks, n_kv_heads, block_size, head_dim};
+    // K_cache, V_cache: [num_physical_blocks, block_size, n_kv_heads, head_dim]
+    int64_t cache_shape[] = {num_physical_blocks, block_size, n_kv_heads, head_dim};
     Tensor d_K_cache = make_gpu_tensor_fp16(4, cache_shape);
     Tensor d_V_cache = make_gpu_tensor_fp16(4, cache_shape);
     upload_fp32_to_fp16(d_K_cache, h_K_cache.data());

@@ -43,6 +43,9 @@ public:
     int bos_id() const;
     int eos_id() const;
 
+    // Look up a token string in the vocabulary, returns -1 if not found
+    int32_t find_token(const std::string& text) const;
+
 private:
     // UTF-8 helper: returns byte length of character starting at c
     static int utf8_char_len(uint8_t c);

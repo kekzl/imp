@@ -2,6 +2,7 @@
 #include "runtime/speculative.h"
 #include "runtime/batch.h"
 #include "memory/kv_cache.h"
+#include "model/gguf_loader.h"
 #include "core/logging.h"
 
 #include <cstring>
@@ -41,48 +42,10 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // --- Initialize scheduler ---
     scheduler_ = std::make_unique<Scheduler>(config_.max_batch_size);
 
-    // --- Initialize KV cache ---
-    int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
-    int max_blocks = 0;
-
-    if (config_.kv_cache_max_blocks > 0) {
-        max_blocks = config_.kv_cache_max_blocks;
-    } else {
-        size_t free_mem = 0, total_mem = 0;
-        cudaError_t err = cudaMemGetInfo(&free_mem, &total_mem);
-        if (err != cudaSuccess) {
-            max_blocks = 512;
-        } else {
-            size_t kv_budget = static_cast<size_t>(free_mem * 0.7);
-            size_t elem_size = dtype_size(config_.compute_dtype);
-            size_t single_block_bytes = static_cast<size_t>(kKVBlockSize) *
-                                        mcfg.n_kv_heads * head_dim * elem_size;
-            size_t per_block_total = single_block_bytes * 2 * mcfg.n_layers;
-
-            if (per_block_total > 0) {
-                max_blocks = static_cast<int>(kv_budget / per_block_total);
-            } else {
-                max_blocks = 512;
-            }
-
-            max_blocks = std::min(max_blocks, 2048);
-            max_blocks = std::max(max_blocks, 16);
-        }
-    }
-
-    auto kv_cache = std::make_unique<KVCache>(
-        mcfg.n_layers, mcfg.n_kv_heads, head_dim,
-        config_.compute_dtype, max_blocks);
-
-    kv_cache_raw_ = kv_cache.get();
-    kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
-
-    // Wire up scheduler with KV cache manager for memory-aware scheduling
-    scheduler_->set_kv_manager(kv_manager_.get());
-
-    // --- Initialize graph executor ---
+    // --- Initialize graph executor (allocates activation workspace) ---
     executor_ = std::make_unique<GraphExecutor>();
-    if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl)) {
+    if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl,
+                         config_.max_batch_size)) {
         return false;
     }
 
@@ -97,10 +60,80 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         return false;
     }
 
+    // --- Initialize KV cache (AFTER weights + workspace so cudaMemGetInfo is accurate) ---
+    int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
+    int max_blocks = 0;
+
+    // Calculate how many blocks are actually needed for the configured workload.
+    int blocks_per_seq = (config_.max_seq_len + kKVBlockSize - 1) / kKVBlockSize;
+    int needed_blocks = blocks_per_seq * config_.max_batch_size;
+
+    if (config_.kv_cache_max_blocks > 0) {
+        max_blocks = config_.kv_cache_max_blocks;
+    } else {
+        // Auto-size: allocate what's needed plus headroom, bounded by free VRAM.
+        size_t elem_size = dtype_size(config_.compute_dtype);
+        size_t single_block_bytes = static_cast<size_t>(kKVBlockSize) *
+                                    mcfg.n_kv_heads * head_dim * elem_size;
+        size_t per_block_total = single_block_bytes * 2 * mcfg.n_layers;
+
+        // Target: 2x headroom for batching / prefix caching
+        int target_blocks = needed_blocks * 2;
+
+        size_t free_mem = 0, total_mem = 0;
+        cudaError_t err = cudaMemGetInfo(&free_mem, &total_mem);
+        if (err != cudaSuccess || per_block_total == 0) {
+            max_blocks = needed_blocks;
+        } else {
+            // Don't exceed 80% of remaining free VRAM
+            size_t kv_budget = static_cast<size_t>(free_mem * 0.8);
+            int budget_blocks = static_cast<int>(kv_budget / per_block_total);
+            max_blocks = std::min(target_blocks, budget_blocks);
+        }
+
+        max_blocks = std::max(max_blocks, needed_blocks);  // at least what's needed
+        max_blocks = std::max(max_blocks, 16);
+    }
+
+    {
+        size_t elem_size = dtype_size(config_.compute_dtype);
+        size_t block_bytes = static_cast<size_t>(kKVBlockSize) *
+                             mcfg.n_kv_heads * head_dim * elem_size;
+        size_t total_kv = static_cast<size_t>(mcfg.n_layers) * max_blocks * 2 * block_bytes;
+        IMP_LOG_INFO("KV cache: %d blocks (%.0f tokens), %.2f MiB "
+                     "(layers=%d, kv_heads=%d, head_dim=%d, block_size=%d)",
+                     max_blocks,
+                     static_cast<double>(max_blocks) * kKVBlockSize,
+                     static_cast<double>(total_kv) / (1024.0 * 1024.0),
+                     mcfg.n_layers, mcfg.n_kv_heads, head_dim, kKVBlockSize);
+    }
+
+    auto kv_cache = std::make_unique<KVCache>(
+        mcfg.n_layers, mcfg.n_kv_heads, head_dim,
+        config_.compute_dtype, max_blocks);
+
+    kv_cache_raw_ = kv_cache.get();
+    kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
+
+    // Wire up scheduler with KV cache manager for memory-aware scheduling
+    scheduler_->set_kv_manager(kv_manager_.get());
+
     // --- Pre-allocate decode batch pool for stable CUDA Graph pointers ---
     {
-        int max_blocks_per_seq = (config_.max_seq_len + kKVBlockSize - 1) / kKVBlockSize;
+        int max_blocks_per_seq = blocks_per_seq;
         decode_batch_pool_.allocate(config_.max_batch_size, max_blocks_per_seq);
+    }
+
+    // --- Report total GPU memory usage ---
+    {
+        size_t free_mem = 0, total_mem = 0;
+        if (cudaMemGetInfo(&free_mem, &total_mem) == cudaSuccess) {
+            size_t used = total_mem - free_mem;
+            IMP_LOG_INFO("GPU memory: %.0f MiB used / %.0f MiB total (%.0f MiB free)",
+                         used / (1024.0 * 1024.0),
+                         total_mem / (1024.0 * 1024.0),
+                         free_mem / (1024.0 * 1024.0));
+        }
     }
 
     // --- Initialize green contexts if requested ---
@@ -127,12 +160,13 @@ bool Engine::init_speculative() {
         return false;
     }
 
-    // Load draft model
-    draft_model_ = std::make_shared<Model>();
-    if (!draft_model_->load_gguf(config_.draft_model_path)) {
+    // Load draft model via GGUF loader (returns unique_ptr, convert to shared)
+    auto draft_unique = load_gguf(config_.draft_model_path);
+    if (!draft_unique) {
         IMP_LOG_ERROR("Failed to load draft model: %s", config_.draft_model_path.c_str());
         return false;
     }
+    draft_model_ = std::move(draft_unique);
 
     // Upload draft model weights
     if (!draft_model_->upload_weights_gpu(config_.compute_dtype, stream_)) {
@@ -262,6 +296,9 @@ bool Engine::step() {
         req->output_tokens.push_back(next_token);
 
         Tokenizer* tok = model_->tokenizer();
+        IMP_LOG_INFO("Prefill -> token %d (ctx=%d): id=%d [%s]",
+                     (int)req->output_tokens.size(), req->context_len(),
+                     next_token, tok->decode_token(next_token).c_str());
         if (next_token == tok->eos_id() ||
             static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
             req->status = RequestStatus::FINISHED;
@@ -395,6 +432,11 @@ bool Engine::step() {
 
                 req->output_tokens.push_back(next_token);
 
+                IMP_LOG_INFO("Decode step %d (ctx=%d, pos=%d): id=%d [%s]",
+                             (int)req->output_tokens.size(), req->context_len(),
+                             req->context_len() - 1,
+                             next_token, tok->decode_token(next_token).c_str());
+
                 if (next_token == tok->eos_id() ||
                     static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
                     req->status = RequestStatus::FINISHED;
@@ -417,15 +459,58 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
         return "";
     }
 
-    std::vector<int32_t> tokens = tok->encode(prompt);
-    if (tok->add_bos() && (tokens.empty() || tokens[0] != tok->bos_id())) {
-        tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
+    // Try to apply chat template if the model has <|im_start|> / <|im_end|> tokens
+    // (Qwen3, ChatML-style models). This wraps the raw prompt in the expected format.
+    std::vector<int32_t> tokens;
+    int32_t im_start = tok->find_token("<|im_start|>");
+    int32_t im_end   = tok->find_token("<|im_end|>");
+    IMP_LOG_DEBUG("Chat template probe: im_start=%d, im_end=%d", im_start, im_end);
+
+    bool use_chat_template = (im_start >= 0 && im_end >= 0);
+
+    if (use_chat_template) {
+        // ChatML template: <|im_start|>system\n...<|im_end|>\n<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n
+        auto encode_text = [&](const std::string& text) {
+            auto ids = tok->encode(text);
+            tokens.insert(tokens.end(), ids.begin(), ids.end());
+        };
+
+        tokens.push_back(im_start);
+        encode_text("system\nYou are a helpful assistant.");
+        tokens.push_back(im_end);
+        encode_text("\n");
+        tokens.push_back(im_start);
+        encode_text("user\n");
+        {
+            auto user_ids = tok->encode(prompt);
+            tokens.insert(tokens.end(), user_ids.begin(), user_ids.end());
+        }
+        tokens.push_back(im_end);
+        encode_text("\n");
+        tokens.push_back(im_start);
+        encode_text("assistant\n");
+
+        IMP_LOG_INFO("Applied ChatML template (%zu tokens, im_start=%d, im_end=%d)",
+                     tokens.size(), im_start, im_end);
+    } else {
+        tokens = tok->encode(prompt);
+        if (tok->add_bos() && (tokens.empty() || tokens[0] != tok->bos_id())) {
+            tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
+        }
     }
 
-    // Debug: print encoded tokens
-    IMP_LOG_INFO("Encoded %zu tokens:", tokens.size());
-    for (size_t i = 0; i < tokens.size() && i < 32; i++) {
-        IMP_LOG_INFO("  [%zu] = %d -> \"%s\"", i, tokens[i], tok->decode_token(tokens[i]).c_str());
+    IMP_LOG_INFO("Encoded %zu tokens", tokens.size());
+    // Debug: dump token IDs and their text for verification
+    {
+        std::string dump;
+        for (size_t i = 0; i < tokens.size() && i < 64; ++i) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%d", tokens[i]);
+            dump += buf;
+            if (i + 1 < tokens.size()) dump += ", ";
+        }
+        if (tokens.size() > 64) dump += "...";
+        IMP_LOG_INFO("Token IDs: [%s]", dump.c_str());
     }
 
     auto req = std::make_shared<Request>();

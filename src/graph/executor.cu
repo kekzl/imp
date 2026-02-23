@@ -10,6 +10,7 @@
 #include "compute/moe_routing.h"
 #include "compute/sampling.h"
 #include "quant/quant_gemm.h"
+#include "quant/dequant_gpu.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "runtime/pdl.h"
@@ -254,13 +255,22 @@ static Tensor slice_rows(const Tensor& buf, int n_tokens) {
 
 // Dispatch GEMM based on weight quantization type.
 // For Q4_0/Q4_1: uses fused quant_gemm_int4 with packed nibbles + scales.
+// For Q8_0/Q6_K (with dequant_scratch): dequant into scratch, then cuBLAS gemm.
 // For NONE/F16/BF16: uses standard cuBLAS gemm.
 static void gemm_dispatch(const Tensor& input, const Tensor& weight,
                            const Tensor& scales, GGMLQuantType qtype,
-                           Tensor& output, cudaStream_t stream) {
+                           Tensor& output, void* dequant_scratch,
+                           cudaStream_t stream) {
     if (qtype == GGMLQuantType::Q4_0 || qtype == GGMLQuantType::Q4_1) {
         // weight is [N, K/2] packed nibbles, scales is [N, num_groups]
         quant_gemm_int4(input, weight, scales, output, stream);
+    } else if (dequant_scratch != nullptr && dequant_gpu_supported(qtype)) {
+        // Q8_0/Q6_K: raw quantized bytes on GPU — dequant into scratch, then GEMM
+        int rows = static_cast<int>(weight.shape[0]);
+        int cols = static_cast<int>(weight.shape[1]);
+        dequant_gpu(weight.data, dequant_scratch, qtype, rows, cols, stream);
+        Tensor w_fp16(dequant_scratch, DType::FP16, weight.ndim, weight.shape, true);
+        gemm(input, w_fp16, output, 1.0f, 0.0f, stream);
     } else {
         // Standard FP16/BF16 GEMM
         gemm(input, weight, output, 1.0f, 0.0f, stream);
@@ -275,7 +285,8 @@ GraphExecutor::~GraphExecutor() {
     free_buffers();
 }
 
-bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl) {
+bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
+                         int max_batch_size) {
     if (initialized_) {
         free_buffers();
     }
@@ -291,6 +302,11 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl) 
     if (max_tokens_ <= 0) {
         max_tokens_ = 4096;
     }
+
+    // Logits buffer only needs to hold tokens that require LM head projection:
+    // - Prefill: 1 (last token only)
+    // - Decode:  n_sequences (one per batch slot)
+    max_logit_tokens_ = std::max(max_batch_size, 1);
 
     allocate_buffers(max_tokens_);
 
@@ -344,8 +360,10 @@ void GraphExecutor::allocate_buffers(int max_tokens) {
     size_t up_out_sz     = align256(static_cast<size_t>(max_tokens) * ff * es);
     size_t swiglu_out_sz = align256(static_cast<size_t>(max_tokens) * ff * es);
     size_t ffn_out_sz    = align256(static_cast<size_t>(max_tokens) * d * es);
-    // Logits are always FP32 for accurate sampling (softmax, argmax)
-    size_t logits_sz     = align256(static_cast<size_t>(max_tokens) * v * sizeof(float));
+    // Logits are always FP32 for accurate sampling (softmax, argmax).
+    // Only need max_logit_tokens_ rows (1 for prefill, max_batch_size for decode)
+    // instead of max_tokens, saving ~2 GB for large vocabularies.
+    size_t logits_sz     = align256(static_cast<size_t>(max_logit_tokens_) * v * sizeof(float));
 
     size_t total = hidden_sz + residual_sz + norm_out_sz +
                    q_sz + k_sz + v_sz + attn_out_sz + proj_out_sz +
@@ -385,9 +403,9 @@ void GraphExecutor::allocate_buffers(int max_tokens) {
     up_out_     = make(ff,       up_out_sz);
     swiglu_out_ = make(ff,       swiglu_out_sz);
     ffn_out_    = make(d,        ffn_out_sz);
-    // Logits: FP32 for accurate sampling
+    // Logits: FP32 for accurate sampling (sized for max_logit_tokens_, not max_tokens)
     {
-        int64_t shape[2] = {static_cast<int64_t>(max_tokens), static_cast<int64_t>(v)};
+        int64_t shape[2] = {static_cast<int64_t>(max_logit_tokens_), static_cast<int64_t>(v)};
         logits_ = Tensor(ptr, DType::FP32, 2, shape, /*on_device=*/true);
         ptr += logits_sz;
     }
@@ -396,10 +414,43 @@ void GraphExecutor::allocate_buffers(int max_tokens) {
     if (cfg.n_experts > 0 && cfg.n_experts_active > 0) {
         allocate_moe_buffers(max_tokens);
     }
+
+    // Allocate dequant scratch buffer for on-the-fly weight dequantization.
+    // Sized for the largest weight matrix (by element count) across all layers.
+    {
+        size_t max_weight_elems = 0;
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo,
+                                   &L.w_gate, &L.w_up, &L.w_down,
+                                   &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared}) {
+                if (w->data) max_weight_elems = std::max(max_weight_elems,
+                                                          static_cast<size_t>(w->numel()));
+            }
+        }
+        if (max_weight_elems > 0) {
+            dequant_scratch_size_ = max_weight_elems * sizeof(uint16_t);
+            cudaError_t err = cudaMalloc(&dequant_scratch_, dequant_scratch_size_);
+            if (err != cudaSuccess) {
+                IMP_LOG_ERROR("Failed to allocate dequant scratch (%zu bytes): %s",
+                              dequant_scratch_size_, cudaGetErrorString(err));
+                dequant_scratch_ = nullptr;
+                dequant_scratch_size_ = 0;
+            } else {
+                IMP_LOG_INFO("Dequant scratch buffer: %.2f MiB",
+                             dequant_scratch_size_ / (1024.0 * 1024.0));
+            }
+        }
+    }
 }
 
 void GraphExecutor::free_buffers() {
     free_moe_buffers();
+    if (dequant_scratch_) {
+        cudaFree(dequant_scratch_);
+        dequant_scratch_ = nullptr;
+        dequant_scratch_size_ = 0;
+    }
     if (workspace_) {
         cudaFree(workspace_);
         workspace_ = nullptr;
@@ -475,10 +526,33 @@ void GraphExecutor::allocate_moe_buffers(int max_tokens) {
 
     // Pre-allocate MoE routing buffers to avoid per-call cudaMalloc
     moe_routing_buffers_.allocate(max_tokens, ne, top_k);
+
+    // Dequant scratch buffer for on-the-fly expert weight dequantization.
+    // Only 1 slot needed: we dequant + GEMM one expert at a time on the same stream.
+    {
+        size_t expert_fp16_elems = static_cast<size_t>(eff) * d;
+        size_t dequant_sz = expert_fp16_elems * sizeof(uint16_t);
+        cudaError_t err = cudaMalloc(&moe_dequant_buf_, dequant_sz);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("Failed to allocate MoE dequant buffer (%zu bytes): %s",
+                          dequant_sz, cudaGetErrorString(err));
+            moe_dequant_buf_ = nullptr;
+            moe_dequant_buf_size_ = 0;
+        } else {
+            moe_dequant_buf_size_ = dequant_sz;
+            IMP_LOG_INFO("MoE dequant buffer: %.2f MiB (1 expert slot)",
+                         dequant_sz / (1024.0 * 1024.0));
+        }
+    }
 }
 
 void GraphExecutor::free_moe_buffers() {
     moe_routing_buffers_.free();
+    if (moe_dequant_buf_) {
+        cudaFree(moe_dequant_buf_);
+        moe_dequant_buf_ = nullptr;
+        moe_dequant_buf_size_ = 0;
+    }
     if (moe_workspace_) {
         cudaFree(moe_workspace_);
         moe_workspace_ = nullptr;
@@ -622,9 +696,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
 
     // 3. QKV projections:  [n, d] @ W^T -> [n, proj_dim]
     //    Uses quantized GEMM when weights are INT4-packed, standard cuBLAS otherwise.
-    gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, qv, stream);
-    gemm_dispatch(no, ly.wk, ly.wk_scales, ly.wk_qtype, kk, stream);
-    gemm_dispatch(no, ly.wv, ly.wv_scales, ly.wv_qtype, vv, stream);
+    //    For Q8_0/Q6_K: dequant into scratch buffer, then cuBLAS GEMM.
+    gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, qv, dequant_scratch_, stream);
+    gemm_dispatch(no, ly.wk, ly.wk_scales, ly.wk_qtype, kk, dequant_scratch_, stream);
+    gemm_dispatch(no, ly.wv, ly.wv_scales, ly.wv_qtype, vv, dequant_scratch_, stream);
 
     // 4. QK-norm (Qwen3): RMSNorm each head's Q/K vector independently
     if (ly.attn_q_norm.data != nullptr) {
@@ -705,7 +780,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     }
 
     // 8. O projection: [n, nh*hd] @ wo^T -> [n, d]
-    gemm_dispatch(ao, ly.wo, ly.wo_scales, ly.wo_qtype, po, stream);
+    gemm_dispatch(ao, ly.wo, ly.wo_scales, ly.wo_qtype, po, dequant_scratch_, stream);
 
     // 9. Residual connection: hidden = proj_out + residual
     //    With PDL enabled, elementwise_add's tail can overlap with the next
@@ -742,14 +817,14 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     rmsnorm(h, ly.ffn_norm, no, eps, stream);
 
     // 3. Gate and Up projections
-    gemm_dispatch(no, ly.w_gate, ly.w_gate_scales, ly.w_gate_qtype, go, stream);
-    gemm_dispatch(no, ly.w_up,   ly.w_up_scales,   ly.w_up_qtype,   uo, stream);
+    gemm_dispatch(no, ly.w_gate, ly.w_gate_scales, ly.w_gate_qtype, go, dequant_scratch_, stream);
+    gemm_dispatch(no, ly.w_up,   ly.w_up_scales,   ly.w_up_qtype,   uo, dequant_scratch_, stream);
 
     // 4. SwiGLU: out = silu(gate) * up
     swiglu(go, uo, so, stream);
 
     // 5. Down projection
-    gemm_dispatch(so, ly.w_down, ly.w_down_scales, ly.w_down_qtype, fo, stream);
+    gemm_dispatch(so, ly.w_down, ly.w_down_scales, ly.w_down_qtype, fo, dequant_scratch_, stream);
 
     // 6. Fused residual add: hidden = ffn_out + residual
     //    Use rmsnorm_residual for the NEXT layer's norm if this isn't the last layer.
@@ -854,23 +929,55 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     cudaStreamSynchronize(stream);
 
     // Build per-expert tensor views for grouped GEMM.
-    // A_gate/A_up: views into gathered [count, d_model]
-    // B_gate: ly.expert_w_gate[e]  [expert_d_ff, d_model]
-    // B_up:   ly.expert_w_up[e]    [expert_d_ff, d_model]
-    // C_gate: views into moe_expert_gate_ [count, expert_d_ff]
-    // C_up:   views into moe_expert_up_   [count, expert_d_ff]
-    // C_down: views into moe_expert_down_ [count, d_model]
-    {
-        std::vector<Tensor> A_gate, B_gate, C_gate;
-        std::vector<Tensor> A_up,   B_up,   C_up;
-        std::vector<Tensor> A_down, B_down, C_down;
+    // Two paths:
+    // - Pre-dequanted: expert_w_gate[e] etc. are FP16 on GPU (legacy / unquantized packed)
+    // - On-the-fly dequant: expert_*_packed is raw Q6_K/Q8_0/Q4_0 on GPU, dequant per GEMM
+    bool use_packed_dequant = (ly.expert_gate_packed.data != nullptr &&
+                               ly.expert_gate_packed.on_device &&
+                               moe_dequant_buf_ != nullptr);
 
+    // Validate expert_d_ff matches packed tensor shapes (critical for buffer offsets)
+    if (use_packed_dequant) {
+        int64_t gate_eff = ly.expert_gate_packed.shape[1];
+        int64_t down_eff = ly.expert_down_packed.shape[2];
+        if (gate_eff != eff || down_eff != eff) {
+            IMP_LOG_ERROR("CRITICAL: expert_d_ff mismatch! config=%d, gate_packed.shape[1]=%ld, "
+                         "down_packed.shape[2]=%ld. Using packed tensor shapes instead.",
+                         eff, (long)gate_eff, (long)down_eff);
+            eff = static_cast<int>(gate_eff);
+        }
+    }
+
+    // Helper: dequant one expert's weight from packed tensor into dequant scratch slot 0.
+    // Returns a Tensor view into the scratch buffer with shape [rows, cols], FP16.
+    // Uses slot 0 always -- safe because all ops are on the same stream, so the previous
+    // GEMM reading from slot 0 completes before the next dequant writes to it.
+    auto dequant_expert = [&](const Tensor& packed, GGMLQuantType qtype,
+                              int expert_idx) -> Tensor {
+        int64_t rows = packed.shape[1];
+        int64_t cols = packed.shape[2];
+        size_t row_bytes = ggml_quant_row_bytes(qtype, cols);
+        size_t expert_raw = static_cast<size_t>(rows) * row_bytes;
+
+        const char* src = static_cast<const char*>(packed.data) + expert_idx * expert_raw;
+        char* dst = static_cast<char*>(moe_dequant_buf_);  // always slot 0
+
+        dequant_gpu(src, dst, qtype, static_cast<int>(rows), static_cast<int>(cols), stream);
+
+        int64_t shape[2] = {rows, cols};
+        return Tensor(dst, DType::FP16, 2, shape, true);
+    };
+
+    {
         char* gathered_base     = static_cast<char*>(moe_gathered_.data);
         char* expert_gate_base  = static_cast<char*>(moe_expert_gate_.data);
         char* expert_up_base    = static_cast<char*>(moe_expert_up_.data);
         char* expert_swiglu_base= static_cast<char*>(moe_expert_swiglu_.data);
         char* expert_down_base  = static_cast<char*>(moe_expert_down_.data);
 
+        // Per-expert gate + up projections: dequant and GEMM one expert at a time.
+        // This reuses a single dequant buffer slot, avoiding the need to allocate
+        // O(n_unique_active_experts) worth of dequant memory.
         for (int e = 0; e < ne; ++e) {
             int start = h_offsets[e];
             int count = h_offsets[e + 1] - start;
@@ -878,48 +985,35 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
             int64_t count64 = static_cast<int64_t>(count);
 
-            // A = gathered[start:start+count, :] -- [count, d_model]
+            // Input: gathered tokens for this expert
             int64_t a_shape[2] = {count64, static_cast<int64_t>(d)};
             Tensor a_view(gathered_base + static_cast<size_t>(start) * d * es,
                           compute_dtype_, 2, a_shape, true);
 
-            // Gate projection
-            int64_t c_gate_shape[2] = {count64, static_cast<int64_t>(eff)};
-            Tensor c_gate_view(expert_gate_base + static_cast<size_t>(start) * eff * es,
-                               compute_dtype_, 2, c_gate_shape, true);
-            A_gate.push_back(a_view);
-            B_gate.push_back(ly.expert_w_gate[e]);  // [expert_d_ff, d_model]
-            C_gate.push_back(c_gate_view);
+            // Gate projection: A @ W_gate^T -> C_gate
+            {
+                int64_t c_shape[2] = {count64, static_cast<int64_t>(eff)};
+                Tensor c_view(expert_gate_base + static_cast<size_t>(start) * eff * es,
+                              compute_dtype_, 2, c_shape, true);
+                Tensor b = use_packed_dequant
+                    ? dequant_expert(ly.expert_gate_packed, ly.expert_gate_qtype, e)
+                    : ly.expert_w_gate[e];
+                gemm(a_view, b, c_view, 1.0f, 0.0f, stream);
+            }
 
-            // Up projection
-            int64_t c_up_shape[2] = {count64, static_cast<int64_t>(eff)};
-            Tensor c_up_view(expert_up_base + static_cast<size_t>(start) * eff * es,
-                             compute_dtype_, 2, c_up_shape, true);
-            A_up.push_back(a_view);
-            B_up.push_back(ly.expert_w_up[e]);  // [expert_d_ff, d_model]
-            C_up.push_back(c_up_view);
-
-            // Down projection (A = swiglu output, not the gathered input)
-            int64_t a_down_shape[2] = {count64, static_cast<int64_t>(eff)};
-            Tensor a_down_view(expert_swiglu_base + static_cast<size_t>(start) * eff * es,
-                               compute_dtype_, 2, a_down_shape, true);
-            int64_t c_down_shape[2] = {count64, static_cast<int64_t>(d)};
-            Tensor c_down_view(expert_down_base + static_cast<size_t>(start) * d * es,
-                               compute_dtype_, 2, c_down_shape, true);
-            A_down.push_back(a_down_view);
-            B_down.push_back(ly.expert_w_down[e]);  // [d_model, expert_d_ff]
-            C_down.push_back(c_down_view);
+            // Up projection: A @ W_up^T -> C_up
+            {
+                int64_t c_shape[2] = {count64, static_cast<int64_t>(eff)};
+                Tensor c_view(expert_up_base + static_cast<size_t>(start) * eff * es,
+                              compute_dtype_, 2, c_shape, true);
+                Tensor b = use_packed_dequant
+                    ? dequant_expert(ly.expert_up_packed, ly.expert_up_qtype, e)
+                    : ly.expert_w_up[e];
+                gemm(a_view, b, c_view, 1.0f, 0.0f, stream);
+            }
         }
 
-        // Gate projections: gathered @ W_gate^T -> expert_gate
-        gemm_grouped(A_gate, B_gate, C_gate, stream);
-
-        // Up projections: gathered @ W_up^T -> expert_up
-        gemm_grouped(A_up, B_up, C_up, stream);
-
         // SwiGLU on the full contiguous expert buffers.
-        // gate and up outputs are in expert-sorted order (same layout as gathered),
-        // so we can apply SwiGLU as one contiguous operation over all expanded tokens.
         {
             int64_t swiglu_shape[2] = {static_cast<int64_t>(expanded),
                                         static_cast<int64_t>(eff)};
@@ -929,18 +1023,37 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             swiglu(gate_buf, up_buf, swiglu_buf, stream);
         }
 
-        // Down projections: swiglu_out @ W_down^T -> expert_down
-        gemm_grouped(A_down, B_down, C_down, stream);
+        // Per-expert down projections: dequant and GEMM one expert at a time.
+        for (int e = 0; e < ne; ++e) {
+            int start = h_offsets[e];
+            int count = h_offsets[e + 1] - start;
+            if (count == 0) continue;
+
+            int64_t count64 = static_cast<int64_t>(count);
+
+            int64_t a_shape[2] = {count64, static_cast<int64_t>(eff)};
+            Tensor a_view(expert_swiglu_base + static_cast<size_t>(start) * eff * es,
+                          compute_dtype_, 2, a_shape, true);
+            int64_t c_shape[2] = {count64, static_cast<int64_t>(d)};
+            Tensor c_view(expert_down_base + static_cast<size_t>(start) * d * es,
+                          compute_dtype_, 2, c_shape, true);
+            Tensor b = use_packed_dequant
+                ? dequant_expert(ly.expert_down_packed, ly.expert_down_qtype, e)
+                : ly.expert_w_down[e];
+            gemm(a_view, b, c_view, 1.0f, 0.0f, stream);
+        }
     }
 
     // 7. Scatter: weighted scatter-add expert outputs back to token positions.
-    //    Output is FP32 (atomicAdd on floats).
+    //    Output is FP32 (atomicAdd on floats). Must zero-init before atomic adds.
     {
         int64_t expert_out_shape[2] = {static_cast<int64_t>(expanded),
                                         static_cast<int64_t>(d)};
         Tensor expert_down_view(moe_expert_down_.data, compute_dtype_,
                                 2, expert_out_shape, true);
         Tensor scatter_out = slice_rows(moe_scatter_out_, n);
+        cudaMemsetAsync(scatter_out.data, 0,
+                        static_cast<size_t>(n) * d * sizeof(float), stream);
         moe_scatter(expert_down_view, routing, scatter_out, stream);
     }
 
@@ -960,6 +1073,40 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                             static_cast<size_t>(numel) * sizeof(float),
                             cudaMemcpyDeviceToDevice, stream);
         }
+    }
+
+    // 8b. Shared expert FFN (Qwen3 MoE): all tokens pass through an additional
+    //     dense FFN whose output is added to the routed expert output.
+    //     Reuses MoE workspace buffers (routed computation is complete).
+    if (ly.w_gate_shared.data != nullptr) {
+        int eff_shared = static_cast<int>(ly.w_gate_shared.shape[0]);
+
+        // Reuse moe_expert_gate_, moe_expert_up_, moe_expert_swiglu_ as scratch.
+        // These are [max_tokens * top_k, expert_d_ff] which is >= [n, eff_shared].
+        int64_t sh_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(eff_shared)};
+        Tensor sh_gate(moe_expert_gate_.data, compute_dtype_, 2, sh_shape, true);
+        Tensor sh_up(moe_expert_up_.data, compute_dtype_, 2, sh_shape, true);
+        Tensor sh_swiglu(moe_expert_swiglu_.data, compute_dtype_, 2, sh_shape, true);
+
+        // Down projection output: [n, d_model]. Reuse moe_expert_down_.
+        int64_t sh_down_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
+        Tensor sh_down(moe_expert_down_.data, compute_dtype_, 2, sh_down_shape, true);
+
+        // Gate + Up projections (with dequant support for Q8_0/Q6_K)
+        gemm_dispatch(no, ly.w_gate_shared, Tensor(), ly.w_gate_shared_qtype,
+                      sh_gate, dequant_scratch_, stream);
+        gemm_dispatch(no, ly.w_up_shared, Tensor(), ly.w_up_shared_qtype,
+                      sh_up, dequant_scratch_, stream);
+
+        // SwiGLU
+        swiglu(sh_gate, sh_up, sh_swiglu, stream);
+
+        // Down projection
+        gemm_dispatch(sh_swiglu, ly.w_down_shared, Tensor(), ly.w_down_shared_qtype,
+                      sh_down, dequant_scratch_, stream);
+
+        // Add shared expert output to hidden (which already has routed expert output)
+        elementwise_add(h, sh_down, stream);
     }
 
     // 9. Residual connection: hidden += residual
@@ -1005,41 +1152,86 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     // views on the fly without modifying the members.
 
     // ---- Step 1: Embedding lookup ----
+    //    For Q8_0/Q6_K embeddings, dequantizes only the needed rows on the fly.
     Tensor h = view_tokens(hidden_, n);
-    embedding_lookup(model_->token_embedding(), state.token_ids, n, h, stream);
+    embedding_lookup(model_->token_embedding(), state.token_ids, n, h,
+                     model_->tok_emb_qtype_, stream);
 
     // ---- Step 2: Transformer layers ----
     bool has_moe = (cfg.n_experts > 0 && cfg.n_experts_active > 0);
     for (int i = 0; i < cfg.n_layers; ++i) {
         run_attention(i, state, stream);
-        if (has_moe && !model_->layer(i).expert_w_gate.empty()) {
+        if (has_moe && (!model_->layer(i).expert_w_gate.empty() ||
+                        (model_->layer(i).expert_gate_packed.data != nullptr &&
+                         model_->layer(i).expert_gate_packed.on_device))) {
             run_moe_ffn(i, stream);
         } else {
             run_ffn(i, stream);
         }
     }
 
-    // ---- Step 3: Final RMSNorm ----
-    Tensor h_final = view_tokens(hidden_,   n);
-    Tensor no_final = view_tokens(norm_out_, n);
-    rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream);
+    // ---- Step 3+4: Final RMSNorm + LM head projection ----
+    // Only project the tokens that actually need sampling:
+    //   Prefill: last token only (all others just populate KV cache)
+    //   Decode:  all tokens (one per sequence)
+    if (state.is_prefill) {
+        Tensor h_last  = view_tokens(hidden_,   n).slice(n - 1, n);
+        Tensor no_last = view_tokens(norm_out_,  1);
+        rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream);
 
-    // ---- Step 4: LM head projection ----
-    Tensor lg = view_tokens(logits_, n);
-    gemm(no_final, model_->output_proj(), lg, 1.0f, 0.0f, stream);
+        Tensor lg = view_tokens(logits_, 1);
+        gemm(no_last, model_->output_proj(), lg, 1.0f, 0.0f, stream);
+        logits_out = lg;
+    } else {
+        Tensor h_final  = view_tokens(hidden_,   n);
+        Tensor no_final = view_tokens(norm_out_, n);
+        rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream);
 
-    logits_out = lg;
+        Tensor lg = view_tokens(logits_, n);
+        gemm(no_final, model_->output_proj(), lg, 1.0f, 0.0f, stream);
+        logits_out = lg;
+    }
 }
 
 int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream) {
     Tensor logits;
     forward_logits(state, logits, stream);
 
+    // Check for CUDA errors after the forward pass
+    {
+        cudaError_t err = cudaStreamSynchronize(stream);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("CUDA error after forward: %s", cudaGetErrorString(err));
+        }
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("CUDA last error: %s", cudaGetErrorString(err));
+        }
+    }
+
     // Sample from the last token's logits.
-    // logits: [n_tokens, vocab_size] FP32. We want the last row as 1-D [vocab_size].
-    Tensor last_logits = logits.slice(state.n_tokens - 1, state.n_tokens);
+    // forward_logits returns [1, V] for prefill, [n, V] for decode.
+    // For single-token forward, always use row 0.
+    Tensor last_logits = logits.slice(0, 1);
     int64_t vocab_shape[1] = {last_logits.shape[1]};
     last_logits = last_logits.reshape(1, vocab_shape);
+
+    // Debug: dump top-3 logit values to check for NaN/inf
+    {
+        float top3[3];
+        int vocab_size = static_cast<int>(last_logits.shape[0]);
+        // Read first 3 logit values as a quick sanity check
+        cudaMemcpy(top3, last_logits.data, std::min(3, vocab_size) * sizeof(float),
+                   cudaMemcpyDeviceToHost);
+        bool has_nan = false;
+        for (int i = 0; i < 3; i++) {
+            if (std::isnan(top3[i]) || std::isinf(top3[i])) has_nan = true;
+        }
+        if (has_nan) {
+            IMP_LOG_ERROR("NaN/Inf in logits! vals[0..2] = %f, %f, %f",
+                         top3[0], top3[1], top3[2]);
+        }
+    }
 
     int32_t token;
     if (state.temperature <= 0.0f || state.top_k == 1) {
@@ -1063,7 +1255,6 @@ std::vector<int32_t> GraphExecutor::forward_batch(const InferenceState& state,
     forward_logits(state, logits, stream);
 
     int n_seq = state.n_sequences;
-    int n_tok = state.n_tokens;
     std::vector<int32_t> tokens(n_seq);
 
     // Helper: flatten [1, V] to [V] for sampling
@@ -1073,8 +1264,8 @@ std::vector<int32_t> GraphExecutor::forward_batch(const InferenceState& state,
     };
 
     if (state.is_prefill || n_seq <= 1) {
-        // Single sequence or prefill: sample from last token
-        Tensor last_logits = flatten_logits(logits.slice(n_tok - 1, n_tok));
+        // Single sequence or prefill: logits is [1, V] (forward_logits already sliced)
+        Tensor last_logits = flatten_logits(logits.slice(0, 1));
         tokens[0] = (state.temperature <= 0.0f || state.top_k == 1)
             ? sample_greedy(last_logits, stream)
             : sample_topk_topp(last_logits,

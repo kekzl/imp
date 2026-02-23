@@ -69,6 +69,7 @@ set(IMP_MODEL_SOURCES
 set(IMP_QUANT_SOURCES
     src/quant/dequant_fp16.cu
     src/quant/dequant_int8.cu
+    src/quant/dequant_gpu.cu
     src/quant/fp8_utils.cu
     src/quant/quant_gemm.cu
     src/quant/fp8_quant.cu

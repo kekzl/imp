@@ -29,8 +29,11 @@
 
 namespace imp {
 
-// ===== Device code -- only compiled when targeting sm_120+ ===================
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
+// ===== Device code -- compiled for all targets but runtime-guarded ==========
+// The kernel compiles for all architectures but is only launched on sm_120+.
+// On older architectures the kernel body can still be compiled (it uses only
+// standard CUDA intrinsics as a scaffold), but the launcher falls back to
+// the WMMA path.
 
 // Blackwell tile sizes -- larger than Hopper due to TCGEN05 capabilities.
 static constexpr int BW_Br             = 128;   // query tile rows
@@ -188,7 +191,8 @@ __global__ void flash_attention_blackwell_kernel(
                                : (seq_kv - kv_start);
 
         // ---- load K tile (TMA placeholder) ----------------------------------
-        load_tile(KV_tile, K_ptr, BW_Bc, head_dim,
+        load_tile(KV_tile, K_ptr + (int64_t)kv_start * kv_row_stride,
+                  BW_Bc, head_dim,
                   kv_valid, kv_row_stride, tid, BW_BLOCK_THREADS);
         __syncthreads();
 
@@ -250,7 +254,8 @@ __global__ void flash_attention_blackwell_kernel(
         // ---- load V tile into KV_tile (reuse same shared memory region) -----
         // On real hardware this would be a TMA load overlapped with the
         // softmax computation above via CTA pairing.
-        load_tile(KV_tile, V_ptr, BW_Bc, head_dim,
+        load_tile(KV_tile, V_ptr + (int64_t)kv_start * kv_row_stride,
+                  BW_Bc, head_dim,
                   kv_valid, kv_row_stride, tid, BW_BLOCK_THREADS);
         __syncthreads();
 
@@ -296,14 +301,7 @@ __global__ void flash_attention_blackwell_kernel(
     }
 }
 
-#endif // __CUDA_ARCH__ >= 1200
-
 // ===== Host-side launcher (always compiled) ==================================
-
-// Host-visible constants mirroring the device-side values.
-static constexpr int BW_Br_host            = 128;
-static constexpr int BW_Bc_host            = 128;
-static constexpr int BW_BLOCK_THREADS_host = 256;
 
 void flash_attention_blackwell(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
@@ -318,30 +316,27 @@ void flash_attention_blackwell(
     const int sm = prop.major * 10 + prop.minor;
 
     if (sm >= 120) {
-        // The kernel is only present in device code compiled for sm_120+.
-        // When the toolchain generates a compatible fatbin, we launch it here.
-#if 0  // Enable once CUDA 13.1+ toolchain support is confirmed.
-        const int batch_size = Q.shape[0];
-        const int seq_q      = Q.shape[1];
-        const int n_heads    = Q.shape[2];
-        const int head_dim   = Q.shape[3];
-        const int seq_kv     = K.shape[1];
-        const int n_kv_heads = K.shape[2];
+        const int batch_size = static_cast<int>(Q.shape[0]);
+        const int seq_q      = static_cast<int>(Q.shape[1]);
+        const int n_heads    = static_cast<int>(Q.shape[2]);
+        const int head_dim   = static_cast<int>(Q.shape[3]);
+        const int seq_kv     = static_cast<int>(K.shape[1]);
+        const int n_kv_heads = static_cast<int>(K.shape[2]);
 
-        const int num_q_tiles = (seq_q + BW_Br_host - 1) / BW_Br_host;
+        const int num_q_tiles = (seq_q + BW_Br - 1) / BW_Br;
         dim3 grid(num_q_tiles, batch_size * n_heads);
-        dim3 block(BW_BLOCK_THREADS_host);
+        dim3 block(BW_BLOCK_THREADS);
 
         // Shared memory: Q_tile + KV_tile (half) + O_acc (float)
         const size_t smem_bytes =
-            (size_t)BW_Br_host * head_dim * sizeof(half)   +   // Q_tile
-            (size_t)BW_Bc_host * head_dim * sizeof(half)   +   // KV_tile
-            (size_t)BW_Br_host * head_dim * sizeof(float);     // O_acc
+            (size_t)BW_Br * head_dim * sizeof(half)   +   // Q_tile
+            (size_t)BW_Bc * head_dim * sizeof(half)   +   // KV_tile
+            (size_t)BW_Br * head_dim * sizeof(float);     // O_acc
 
         cudaFuncSetAttribute(
             flash_attention_blackwell_kernel,
             cudaFuncAttributeMaxDynamicSharedMemorySize,
-            (int)smem_bytes);
+            static_cast<int>(smem_bytes));
 
         flash_attention_blackwell_kernel<<<grid, block, smem_bytes, stream>>>(
             reinterpret_cast<const half*>(Q.data),
@@ -352,7 +347,6 @@ void flash_attention_blackwell(
             n_heads, n_kv_heads, head_dim,
             scale, causal);
         return;
-#endif
     }
 
     // Fallback: use the existing WMMA tensor-core attention path.
