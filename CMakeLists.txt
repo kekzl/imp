@@ -66,6 +66,7 @@ set(IMP_MODEL_SOURCES
     src/model/weight_map.cpp
     src/model/weight_upload.cu
     src/model/tokenizer.cpp
+    src/model/chat_template.cpp
 )
 
 set(IMP_QUANT_SOURCES

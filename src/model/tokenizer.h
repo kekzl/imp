@@ -32,6 +32,10 @@ public:
     void set_add_bos(bool add) { add_bos_ = add; }
     bool add_bos() const { return add_bos_; }
 
+    // Chat template string from GGUF metadata (Jinja2 format, used for detection)
+    void set_chat_template_str(const std::string& tpl) { chat_template_str_ = tpl; }
+    const std::string& chat_template_str() const { return chat_template_str_; }
+
     // Encode text to token IDs
     std::vector<int32_t> encode(const std::string& text) const;
 
@@ -71,6 +75,7 @@ private:
 
     std::string type_ = "spm";  // "spm" or "gpt2"
     bool add_bos_ = true;
+    std::string chat_template_str_;  // Raw Jinja2 template from GGUF
 
     // GPT2 BPE merge ranks: "token1 token2" -> rank (lower = higher priority)
     std::unordered_map<std::string, int> merge_ranks_;

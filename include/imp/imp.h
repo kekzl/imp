@@ -47,6 +47,7 @@ typedef struct {
     int top_k;
     int max_tokens;
     int seed;                      // -1 = random
+    int apply_chat_template;       // 1 = yes (default), 0 = no
 } ImpGenerateParams;
 
 ImpGenerateParams imp_generate_params_default(void);

@@ -740,6 +740,13 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             }
         }
 
+        // Extract chat template string (Jinja2) for template family detection
+        auto it_tpl = metadata.find("tokenizer.chat_template");
+        if (it_tpl != metadata.end() && !it_tpl->second.str_val.empty()) {
+            tokenizer->set_chat_template_str(it_tpl->second.str_val);
+            IMP_LOG_INFO("Chat template: %zu chars", it_tpl->second.str_val.size());
+        }
+
         IMP_LOG_INFO("Tokenizer: type=%s, %d tokens, bos=%d, eos=%d, add_bos=%d",
                      tok_type.c_str(), tokenizer->vocab_size(), bos_id, eos_id,
                      tokenizer->add_bos() ? 1 : 0);

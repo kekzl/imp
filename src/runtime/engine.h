@@ -1,6 +1,7 @@
 #pragma once
 
 #include "model/model.h"
+#include "model/chat_template.h"
 #include "runtime/scheduler.h"
 #include "runtime/request.h"
 #include "runtime/batch.h"
@@ -58,7 +59,8 @@ public:
     // High-level generate with sampling parameters
     std::string generate(const std::string& prompt, int max_tokens,
                          float temperature = 1.0f, float top_p = 1.0f,
-                         int top_k = 0, int seed = -1);
+                         int top_k = 0, int seed = -1,
+                         bool apply_chat_template = true);
 
     void add_request(std::shared_ptr<Request> req);
 
@@ -67,6 +69,7 @@ public:
     KVCacheManager* kv_manager() { return kv_manager_.get(); }
     KVCache* kv_cache() { return kv_cache_raw_; }
     Model* model() { return model_.get(); }
+    const ChatTemplate& chat_template() const { return chat_template_; }
 
 private:
     std::shared_ptr<Model> model_;
@@ -92,6 +95,9 @@ private:
 
     // Layer weight offloading
     std::unique_ptr<LayerOffloadManager> offload_mgr_;
+
+    // Chat template for formatting prompts
+    ChatTemplate chat_template_;
 
     // Speculative decoding
     std::shared_ptr<Model> draft_model_;

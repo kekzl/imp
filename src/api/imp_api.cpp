@@ -75,6 +75,7 @@ ImpGenerateParams imp_generate_params_default(void) {
     params.top_k = 0;
     params.max_tokens = 256;
     params.seed = -1;
+    params.apply_chat_template = 1;
     return params;
 }
 
@@ -258,7 +259,8 @@ ImpError imp_generate(ImpContext ctx, const char* prompt,
         params->temperature,
         params->top_p,
         params->top_k,
-        params->seed
+        params->seed,
+        params->apply_chat_template != 0
     );
 
     // Copy result to output buffer
