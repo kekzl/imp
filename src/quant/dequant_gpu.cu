@@ -35,6 +35,9 @@ bool dequant_gpu_supported(GGMLQuantType qtype) {
         case GGMLQuantType::Q6_K:
         case GGMLQuantType::Q8_0:
         case GGMLQuantType::Q4_0:
+        case GGMLQuantType::Q5_0:
+        case GGMLQuantType::Q5_1:
+        case GGMLQuantType::Q4_K:
             return true;
         default:
             return false;
@@ -165,6 +168,149 @@ __global__ void dequant_q4_0_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// Q5_0 GPU dequantization kernel
+//
+// Block format (22 bytes per 32 elements):
+//   d[2]   : fp16 scale
+//   qh[4]  : high bits (bit 4 of each element, packed 8 per byte)
+//   qs[16] : low 4-bit nibbles (2 per byte)
+// ---------------------------------------------------------------------------
+
+__global__ void dequant_q5_0_kernel(
+    const uint8_t* __restrict__ src,
+    half* __restrict__ dst,
+    int rows, int cols)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t total = static_cast<int64_t>(rows) * cols;
+    if (idx >= total) return;
+
+    int row = static_cast<int>(idx / cols);
+    int col = static_cast<int>(idx % cols);
+    int blk = col / 32;
+    int i   = col % 32;
+    int blocks_per_row = cols / 32;
+
+    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 22;
+    half d_val = *reinterpret_cast<const half*>(block_ptr);
+    const uint8_t* qh = block_ptr + 2;   // 4 bytes high bits
+    const uint8_t* qs = block_ptr + 6;   // 16 bytes low nibbles
+
+    int byte_idx = i / 2;
+    uint8_t packed = qs[byte_idx];
+    int low4 = (i % 2 == 0) ? (packed & 0xF) : ((packed >> 4) & 0xF);
+    int high1 = (qh[i / 8] >> (i % 8)) & 1;
+    int q5 = (high1 << 4) | low4;
+
+    float val = __half2float(d_val) * static_cast<float>(q5 - 16);
+    dst[idx] = __float2half(val);
+}
+
+// ---------------------------------------------------------------------------
+// Q5_1 GPU dequantization kernel
+//
+// Block format (24 bytes per 32 elements):
+//   d[2]   : fp16 scale
+//   m[2]   : fp16 min
+//   qh[4]  : high bits (bit 4 of each element)
+//   qs[16] : low 4-bit nibbles
+// ---------------------------------------------------------------------------
+
+__global__ void dequant_q5_1_kernel(
+    const uint8_t* __restrict__ src,
+    half* __restrict__ dst,
+    int rows, int cols)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t total = static_cast<int64_t>(rows) * cols;
+    if (idx >= total) return;
+
+    int row = static_cast<int>(idx / cols);
+    int col = static_cast<int>(idx % cols);
+    int blk = col / 32;
+    int i   = col % 32;
+    int blocks_per_row = cols / 32;
+
+    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 24;
+    half d_val = *reinterpret_cast<const half*>(block_ptr);
+    half m_val = *reinterpret_cast<const half*>(block_ptr + 2);
+    const uint8_t* qh = block_ptr + 4;   // 4 bytes high bits
+    const uint8_t* qs = block_ptr + 8;   // 16 bytes low nibbles
+
+    int byte_idx = i / 2;
+    uint8_t packed = qs[byte_idx];
+    int low4 = (i % 2 == 0) ? (packed & 0xF) : ((packed >> 4) & 0xF);
+    int high1 = (qh[i / 8] >> (i % 8)) & 1;
+    int q5 = (high1 << 4) | low4;
+
+    float val = __half2float(d_val) * static_cast<float>(q5) + __half2float(m_val);
+    dst[idx] = __float2half(val);
+}
+
+// ---------------------------------------------------------------------------
+// Q4_K GPU dequantization kernel
+//
+// Super-block format (144 bytes per 256 elements):
+//   d[2]           : fp16 super-block scale
+//   dmin[2]        : fp16 super-block min
+//   scales[12]     : packed sub-block scales and mins (6 bits each)
+//   qs[128]        : 4-bit quantized values (2 per byte)
+//
+// 8 sub-blocks of 32 elements each. Each sub-block has a 6-bit scale
+// and 6-bit min packed into the 12-byte scales array.
+// ---------------------------------------------------------------------------
+
+__global__ void dequant_q4k_kernel(
+    const uint8_t* __restrict__ src,
+    half* __restrict__ dst,
+    int rows, int cols)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t total = static_cast<int64_t>(rows) * cols;
+    if (idx >= total) return;
+
+    int row = static_cast<int>(idx / cols);
+    int col = static_cast<int>(idx % cols);
+    int blk = col / 256;
+    int i   = col % 256;
+    int blocks_per_row = cols / 256;
+
+    const uint8_t* block_ptr = src + static_cast<int64_t>(row * blocks_per_row + blk) * 144;
+    float d    = __half2float(*reinterpret_cast<const half*>(block_ptr));
+    float dmin = __half2float(*reinterpret_cast<const half*>(block_ptr + 2));
+    const uint8_t* sc = block_ptr + 4;    // 12 bytes packed scales
+    const uint8_t* qs = block_ptr + 16;   // 128 bytes quants
+
+    int sub = i / 32;   // sub-block index 0..7 (= scale index)
+
+    // Unpack 6-bit scale and min for this sub-block.
+    // GGML packing (get_scale_min_k4):
+    //   sub < 4: sc_val = scales[sub] & 63,       min_val = scales[sub+4] & 63
+    //   sub >= 4: sc_val = (scales[sub+4] low4) | (scales[sub-4] top2 << 4)
+    //             min_val = (scales[sub+4] high4) | (scales[sub] top2 << 4)
+    uint8_t sc_val, min_val;
+    if (sub < 4) {
+        sc_val  = sc[sub] & 63;
+        min_val = sc[sub + 4] & 63;
+    } else {
+        sc_val  = (sc[sub + 4] & 0xF) | ((sc[sub - 4] >> 6) << 4);
+        min_val = (sc[sub + 4] >> 4)   | ((sc[sub]     >> 6) << 4);
+    }
+
+    // Extract 4-bit quant value.
+    // Q4_K layout: each 64-element chunk uses 32 bytes. First 32 elements
+    // in low nibbles, next 32 in high nibbles of the SAME 32 bytes.
+    int qs_byte = (i / 64) * 32 + (i % 32);
+    int use_high = (i / 32) & 1;
+    uint8_t packed = qs[qs_byte];
+    int q4 = use_high ? ((packed >> 4) & 0xF) : (packed & 0xF);
+
+    float val = d * static_cast<float>(sc_val) * static_cast<float>(q4)
+              - dmin * static_cast<float>(min_val);
+    dst[idx] = __float2half(val);
+}
+
+// ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
@@ -194,6 +340,27 @@ void dequant_gpu(const void* src, void* dst, GGMLQuantType qtype,
 
         case GGMLQuantType::Q4_0:
             dequant_q4_0_kernel<<<blocks, threads, 0, stream>>>(
+                static_cast<const uint8_t*>(src),
+                static_cast<half*>(dst),
+                rows, cols);
+            break;
+
+        case GGMLQuantType::Q5_0:
+            dequant_q5_0_kernel<<<blocks, threads, 0, stream>>>(
+                static_cast<const uint8_t*>(src),
+                static_cast<half*>(dst),
+                rows, cols);
+            break;
+
+        case GGMLQuantType::Q5_1:
+            dequant_q5_1_kernel<<<blocks, threads, 0, stream>>>(
+                static_cast<const uint8_t*>(src),
+                static_cast<half*>(dst),
+                rows, cols);
+            break;
+
+        case GGMLQuantType::Q4_K:
+            dequant_q4k_kernel<<<blocks, threads, 0, stream>>>(
                 static_cast<const uint8_t*>(src),
                 static_cast<half*>(dst),
                 rows, cols);

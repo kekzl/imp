@@ -39,6 +39,12 @@ typedef struct {
     ImpModelFormat draft_model_format; // format of the draft model
     int spec_k;                    // number of draft tokens (default 4)
 
+    // Layer offloading
+    int gpu_layers;                // Layers to keep on GPU (-1 = all, 0 = all offloaded)
+
+    // SSM state precision
+    ImpDType ssm_state_dtype;      // FP32 (default) or FP16 for SSM h_state
+
     // Threading
     int num_cpu_threads;           // 0 = auto (hardware_concurrency)
 } ImpConfig;

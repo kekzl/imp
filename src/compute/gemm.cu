@@ -11,7 +11,7 @@
 namespace imp {
 
 // ---------------------------------------------------------------------------
-// cuBLAS handle (lazily initialized, process-lifetime)
+// cuBLAS / cuBLASLt handles (lazily initialized, process-lifetime)
 // ---------------------------------------------------------------------------
 static cublasHandle_t get_cublas_handle() {
     static cublasHandle_t handle = nullptr;
@@ -21,10 +21,57 @@ static cublasHandle_t get_cublas_handle() {
             fprintf(stderr, "imp::gemm: cublasCreate failed (status %d)\n", (int)st);
             abort();
         }
-        // Allow tensor-core usage when available.
         cublasSetMathMode(handle, CUBLAS_DEFAULT_MATH);
     }
     return handle;
+}
+
+static cublasLtHandle_t get_cublaslt_handle() {
+    static cublasLtHandle_t handle = nullptr;
+    if (!handle) {
+        cublasStatus_t st = cublasLtCreate(&handle);
+        if (st != CUBLAS_STATUS_SUCCESS) {
+            fprintf(stderr, "imp::gemm: cublasLtCreate failed (status %d)\n", (int)st);
+            abort();
+        }
+    }
+    return handle;
+}
+
+// ---------------------------------------------------------------------------
+// Static workspace for cuBLASLt — allocated once via gemm_init(), shared by
+// all GEMM calls.  Avoids per-call cudaMalloc which fails when GPU memory is
+// saturated (e.g. 30B MoE models on 32 GB cards).
+// ---------------------------------------------------------------------------
+static void* s_workspace = nullptr;
+static size_t s_workspace_size = 0;
+
+void gemm_init() {
+    // Force handle creation early.
+    get_cublas_handle();
+    get_cublaslt_handle();
+
+    // Pre-allocate cuBLASLt workspace while GPU memory is still available.
+    if (!s_workspace) {
+        constexpr size_t kTrySizes[] = {
+            32ULL << 20,   // 32 MiB
+             8ULL << 20,   //  8 MiB
+             2ULL << 20,   //  2 MiB
+        };
+        for (size_t sz : kTrySizes) {
+            cudaError_t err = cudaMalloc(&s_workspace, sz);
+            if (err == cudaSuccess) {
+                s_workspace_size = sz;
+                break;
+            }
+            s_workspace = nullptr;
+        }
+    }
+
+    // Also let legacy cuBLAS API use the same workspace.
+    if (s_workspace) {
+        cublasSetWorkspace(get_cublas_handle(), s_workspace, s_workspace_size);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -103,44 +150,80 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C,
         return;
     }
 
-    // --- Generic path via cublasGemmEx ---
+    // --- Generic path via cuBLASLt (uses pre-allocated static workspace) ---
     cudaDataType_t cuda_dtype_A = dtype_to_cuda(A.dtype);
     cudaDataType_t cuda_dtype_B = dtype_to_cuda(B.dtype);
     cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.dtype);
     cublasComputeType_t compute_type = dtype_to_compute(A.dtype);
+    cudaDataType_t scale_type = (compute_type == CUBLAS_COMPUTE_32I)
+                                    ? CUDA_R_32I : CUDA_R_32F;
 
-    // Scalar type must match compute type.
+    cublasLtHandle_t lt = get_cublaslt_handle();
+
+    cublasLtMatmulDesc_t opDesc = nullptr;
+    cublasLtMatmulDescCreate(&opDesc, compute_type, scale_type);
+
+    cublasOperation_t transA = CUBLAS_OP_T;
+    cublasOperation_t transB = CUBLAS_OP_N;
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSA,
+                                    &transA, sizeof(transA));
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSB,
+                                    &transB, sizeof(transB));
+
+    cublasLtMatrixLayout_t Bdesc = nullptr, Adesc = nullptr, Cdesc = nullptr;
+    cublasLtMatrixLayoutCreate(&Bdesc, cuda_dtype_B, (int)K, (int)N, (int)K);
+    cublasLtMatrixLayoutCreate(&Adesc, cuda_dtype_A, (int)K, (int)M, (int)K);
+    cublasLtMatrixLayoutCreate(&Cdesc, cuda_dtype_C, (int)N, (int)M, (int)N);
+
+    cublasLtMatmulPreference_t pref = nullptr;
+    cublasLtMatmulPreferenceCreate(&pref);
+    cublasLtMatmulPreferenceSetAttribute(pref,
+        CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+        &s_workspace_size, sizeof(s_workspace_size));
+
+    cublasLtMatmulHeuristicResult_t result = {};
+    int nresults = 0;
+    cublasLtMatmulAlgoGetHeuristic(lt, opDesc, Bdesc, Adesc, Cdesc, Cdesc,
+                                    pref, 1, &result, &nresults);
+
+    size_t ws = (nresults > 0 && result.workspaceSize <= s_workspace_size)
+                    ? result.workspaceSize : 0;
+
     if (compute_type == CUBLAS_COMPUTE_32I) {
         int32_t ialpha = (int32_t)alpha;
         int32_t ibeta  = (int32_t)beta;
-        cublasStatus_t st = cublasGemmEx(
-            handle,
-            CUBLAS_OP_T, CUBLAS_OP_N,
-            (int)N, (int)M, (int)K,
-            &ialpha,
-            B.data, cuda_dtype_B, (int)K,
-            A.data, cuda_dtype_A, (int)K,
-            &ibeta,
-            C.data, cuda_dtype_C, (int)N,
-            compute_type, CUBLAS_GEMM_DEFAULT);
+        cublasStatus_t st = cublasLtMatmul(lt, opDesc,
+            &ialpha, B.data, Bdesc, A.data, Adesc,
+            &ibeta,  C.data, Cdesc, C.data, Cdesc,
+            (nresults > 0) ? &result.algo : nullptr,
+            s_workspace, ws, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr, "imp::gemm: cublasGemmEx (INT8) failed (status %d)\n", (int)st);
+            fprintf(stderr, "imp::gemm: cublasLtMatmul (INT) failed (status %d)\n", (int)st);
         }
     } else {
-        cublasStatus_t st = cublasGemmEx(
-            handle,
-            CUBLAS_OP_T, CUBLAS_OP_N,
-            (int)N, (int)M, (int)K,
-            &alpha,
-            B.data, cuda_dtype_B, (int)K,
-            A.data, cuda_dtype_A, (int)K,
-            &beta,
-            C.data, cuda_dtype_C, (int)N,
-            compute_type, CUBLAS_GEMM_DEFAULT);
+        cublasStatus_t st = cublasLtMatmul(lt, opDesc,
+            &alpha, B.data, Bdesc, A.data, Adesc,
+            &beta,  C.data, Cdesc, C.data, Cdesc,
+            (nresults > 0) ? &result.algo : nullptr,
+            s_workspace, ws, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr, "imp::gemm: cublasGemmEx failed (status %d)\n", (int)st);
+            static int err_count = 0;
+            if (++err_count <= 10) {
+                fprintf(stderr, "imp::gemm: cublasLtMatmul failed (status %d) "
+                        "M=%ld K=%ld N=%ld nresults=%d ws=%zu/%zu "
+                        "dtA=%d dtB=%d dtC=%d\n",
+                        (int)st, (long)M, (long)K, (long)N,
+                        nresults, ws, s_workspace_size,
+                        (int)cuda_dtype_A, (int)cuda_dtype_B, (int)cuda_dtype_C);
+            }
         }
     }
+
+    cublasLtMatmulPreferenceDestroy(pref);
+    cublasLtMatrixLayoutDestroy(Adesc);
+    cublasLtMatrixLayoutDestroy(Bdesc);
+    cublasLtMatrixLayoutDestroy(Cdesc);
+    cublasLtMatmulDescDestroy(opDesc);
 }
 
 // ---------------------------------------------------------------------------
@@ -371,22 +454,8 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y,
 }
 
 // ---------------------------------------------------------------------------
-// cuBLASLt handle (lazily initialized, process-lifetime)
-// ---------------------------------------------------------------------------
-static cublasLtHandle_t get_cublaslt_handle() {
-    static cublasLtHandle_t handle = nullptr;
-    if (!handle) {
-        cublasStatus_t st = cublasLtCreate(&handle);
-        if (st != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr, "imp::gemm: cublasLtCreate failed (status %d)\n", (int)st);
-            abort();
-        }
-    }
-    return handle;
-}
-
-// ---------------------------------------------------------------------------
 // gemm_cublaslt: cuBLASLt GEMM with explicit algorithm selection + FP8 scales
+//   Uses the same static workspace as gemm().
 // ---------------------------------------------------------------------------
 void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
                    float alpha, float beta,
@@ -396,88 +465,65 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
     const int64_t K = A.shape[1];
     const int64_t N = B.shape[0];
 
-    cublasLtHandle_t ltHandle = get_cublaslt_handle();
+    cublasLtHandle_t lt = get_cublaslt_handle();
 
-    // Create operation descriptor
-    cublasLtMatmulDesc_t operationDesc = nullptr;
-    cublasComputeType_t computeType = CUBLAS_COMPUTE_32F;
-    cudaDataType_t scaleType = CUDA_R_32F;
+    cublasLtMatmulDesc_t opDesc = nullptr;
+    cublasLtMatmulDescCreate(&opDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
 
-    cublasLtMatmulDescCreate(&operationDesc, computeType, scaleType);
+    cublasOperation_t transA = CUBLAS_OP_T;
+    cublasOperation_t transB = CUBLAS_OP_N;
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSA,
+                                    &transA, sizeof(transA));
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSB,
+                                    &transB, sizeof(transB));
 
-    // Set transpose modes: C^T = B @ A^T in col-major
-    cublasOperation_t transa = CUBLAS_OP_T;  // transpose B
-    cublasOperation_t transb = CUBLAS_OP_N;  // A as-is
-    cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSA,
-                                    &transa, sizeof(transa));
-    cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_TRANSB,
-                                    &transb, sizeof(transb));
-
-    // Set FP8 scales if provided
     if (aScale) {
-        // In col-major: B is matrix A in our call, so aScale applies to B (our weights)
-        cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+        cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
                                         &aScale, sizeof(aScale));
     }
     if (bScale) {
-        cublasLtMatmulDescSetAttribute(operationDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+        cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                         &bScale, sizeof(bScale));
     }
 
-    // Create matrix layouts
     cudaDataType_t cuda_dtype_A = dtype_to_cuda(A.dtype);
     cudaDataType_t cuda_dtype_B = dtype_to_cuda(B.dtype);
     cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.dtype);
 
     cublasLtMatrixLayout_t Bdesc = nullptr, Adesc = nullptr, Cdesc = nullptr;
-    // In col-major terms: B[K,N] transposed, A[K,M]
     cublasLtMatrixLayoutCreate(&Bdesc, cuda_dtype_B, (int)K, (int)N, (int)K);
     cublasLtMatrixLayoutCreate(&Adesc, cuda_dtype_A, (int)K, (int)M, (int)K);
     cublasLtMatrixLayoutCreate(&Cdesc, cuda_dtype_C, (int)N, (int)M, (int)N);
 
-    // Heuristic algorithm selection
-    cublasLtMatmulPreference_t preference = nullptr;
-    cublasLtMatmulPreferenceCreate(&preference);
-
-    size_t workspace_size = 4 * 1024 * 1024;  // 4 MB workspace
-    cublasLtMatmulPreferenceSetAttribute(preference,
+    cublasLtMatmulPreference_t pref = nullptr;
+    cublasLtMatmulPreferenceCreate(&pref);
+    cublasLtMatmulPreferenceSetAttribute(pref,
         CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-        &workspace_size, sizeof(workspace_size));
+        &s_workspace_size, sizeof(s_workspace_size));
 
-    int returnedResults = 0;
-    cublasLtMatmulHeuristicResult_t heuristicResult = {};
-    cublasLtMatmulAlgoGetHeuristic(ltHandle, operationDesc,
-                                    Bdesc, Adesc, Cdesc, Cdesc,
-                                    preference, 1, &heuristicResult,
-                                    &returnedResults);
+    cublasLtMatmulHeuristicResult_t result = {};
+    int nresults = 0;
+    cublasLtMatmulAlgoGetHeuristic(lt, opDesc, Bdesc, Adesc, Cdesc, Cdesc,
+                                    pref, 1, &result, &nresults);
 
-    void* workspace = nullptr;
-    if (returnedResults > 0 && heuristicResult.workspaceSize > 0) {
-        cudaMalloc(&workspace, heuristicResult.workspaceSize);
-    }
+    size_t ws = (nresults > 0 && result.workspaceSize <= s_workspace_size)
+                    ? result.workspaceSize : 0;
 
-    cublasStatus_t st = cublasLtMatmul(ltHandle, operationDesc,
-        &alpha,
-        B.data, Bdesc,
-        A.data, Adesc,
-        &beta,
-        C.data, Cdesc,
-        C.data, Cdesc,
-        (returnedResults > 0) ? &heuristicResult.algo : nullptr,
-        workspace,
-        workspace ? heuristicResult.workspaceSize : 0,
-        stream);
+    cublasStatus_t st = cublasLtMatmul(lt, opDesc,
+        &alpha, B.data, Bdesc, A.data, Adesc,
+        &beta,  C.data, Cdesc, C.data, Cdesc,
+        (nresults > 0) ? &result.algo : nullptr,
+        s_workspace, ws, stream);
 
     if (st != CUBLAS_STATUS_SUCCESS) {
         fprintf(stderr, "imp::gemm_cublaslt: cublasLtMatmul failed (status %d)\n", (int)st);
     }
 
-    if (workspace) cudaFree(workspace);
-    cublasLtMatmulPreferenceDestroy(preference);
+    cublasLtMatmulPreferenceDestroy(pref);
     cublasLtMatrixLayoutDestroy(Adesc);
     cublasLtMatrixLayoutDestroy(Bdesc);
     cublasLtMatrixLayoutDestroy(Cdesc);
-    cublasLtMatmulDescDestroy(operationDesc);
+    cublasLtMatmulDescDestroy(opDesc);
 }
 
 // ---------------------------------------------------------------------------

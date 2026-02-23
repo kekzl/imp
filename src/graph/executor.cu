@@ -9,6 +9,7 @@
 #include "compute/attention_paged.h"
 #include "compute/moe_routing.h"
 #include "compute/sampling.h"
+#include "compute/ssm.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
 #include "core/logging.h"
@@ -211,6 +212,27 @@ __global__ void fp16_to_fp32_kernel(const half* __restrict__ in,
     }
 }
 
+// Add FP16 bias to each row of FP32 matrix: out[i,j] += bias[j]
+// Grid: n_tokens, Block: 256, each thread handles multiple expert indices.
+__global__ void add_fp16_bias_to_fp32_kernel(float* __restrict__ data,
+                                              const half* __restrict__ bias,
+                                              int n_tokens, int n_cols) {
+    int token = blockIdx.x;
+    if (token >= n_tokens) return;
+    float* row = data + static_cast<int64_t>(token) * n_cols;
+    for (int j = threadIdx.x; j < n_cols; j += blockDim.x) {
+        row[j] += __half2float(bias[j]);
+    }
+}
+
+// Scale FP32 expert weights in-place: weights[i] *= scale
+__global__ void scale_fp32_kernel(float* __restrict__ data, float scale, int64_t n) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        data[idx] *= scale;
+    }
+}
+
 // FP32 -> FP16 conversion kernel (for scatter output back to compute_dtype)
 __global__ void fp32_to_fp16_kernel(const float* __restrict__ in,
                                     half* __restrict__ out,
@@ -265,10 +287,37 @@ static void gemm_dispatch(const Tensor& input, const Tensor& weight,
         // weight is [N, K/2] packed nibbles, scales is [N, num_groups]
         quant_gemm_int4(input, weight, scales, output, stream);
     } else if (dequant_scratch != nullptr && dequant_gpu_supported(qtype)) {
-        // Q8_0/Q6_K: raw quantized bytes on GPU — dequant into scratch, then GEMM
+        // Raw quantized bytes on GPU — dequant into scratch, then GEMM
         int rows = static_cast<int>(weight.shape[0]);
         int cols = static_cast<int>(weight.shape[1]);
+
+        // Check for pre-existing CUDA errors (from async ops like per-expert dequant)
+        {
+            cudaError_t pre_err = cudaStreamSynchronize(stream);
+            if (pre_err != cudaSuccess) {
+                static int pre_count = 0;
+                if (++pre_count <= 5) {
+                    fprintf(stderr, "imp::gemm_dispatch: PRE-EXISTING error before dequant: %s "
+                            "(qtype=%u, %dx%d)\n",
+                            cudaGetErrorString(pre_err), (unsigned)qtype, rows, cols);
+                }
+                cudaGetLastError(); // Clear the error
+            }
+        }
+
         dequant_gpu(weight.data, dequant_scratch, qtype, rows, cols, stream);
+        // Check for dequant kernel errors before cuBLASLt (sticky errors cause status 14)
+        cudaError_t dq_err = cudaStreamSynchronize(stream);
+        if (dq_err != cudaSuccess) {
+            fprintf(stderr, "imp::gemm_dispatch: dequant sync error: %s (qtype=%u, %dx%d)\n",
+                    cudaGetErrorString(dq_err), (unsigned)qtype, rows, cols);
+        }
+        dq_err = cudaGetLastError();
+        if (dq_err != cudaSuccess) {
+            fprintf(stderr, "imp::gemm_dispatch: dequant kernel error: %s (qtype=%u, %dx%d)\n",
+                    cudaGetErrorString(dq_err), (unsigned)qtype, rows, cols);
+            return;  // Don't call cuBLASLt with poisoned CUDA state
+        }
         Tensor w_fp16(dequant_scratch, DType::FP16, weight.ndim, weight.shape, true);
         gemm(input, w_fp16, output, 1.0f, 0.0f, stream);
     } else {
@@ -286,7 +335,7 @@ GraphExecutor::~GraphExecutor() {
 }
 
 bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
-                         int max_batch_size) {
+                         int max_batch_size, int max_seq_len) {
     if (initialized_) {
         free_buffers();
     }
@@ -297,8 +346,14 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
 
     const auto& cfg = model.config();
 
-    // Cap max_tokens at a reasonable limit.
-    max_tokens_ = std::min(cfg.max_seq_len, 4096);
+    // Detect model features for workspace sizing
+    has_moe_ = (cfg.n_experts > 0 && cfg.n_experts_active > 0);
+    has_ssm_ = (cfg.ssm_inner_size > 0);
+    has_dense_ffn_ = (cfg.d_ff > 0);
+
+    // Use engine-provided max_seq_len if given, otherwise fall back to model config.
+    int effective_seq_len = (max_seq_len > 0) ? max_seq_len : cfg.max_seq_len;
+    max_tokens_ = std::min(effective_seq_len, 4096);
     if (max_tokens_ <= 0) {
         max_tokens_ = 4096;
     }
@@ -308,12 +363,29 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
     // - Decode:  n_sequences (one per batch slot)
     max_logit_tokens_ = std::max(max_batch_size, 1);
 
-    allocate_buffers(max_tokens_);
+    // Allocate persistent workspace (hidden, residual, norm_out, logits)
+    allocate_persistent_workspace(max_tokens_);
+
+    // Compute shared workspace sizes and allocate unified pool
+    compute_shared_sizes(max_tokens_);
+    allocate_shared_workspace(max_tokens_);
+
+    // Allocate auxiliary buffers (dequant scratch, MoE staging, routing)
+    allocate_auxiliary_buffers();
+
+    // Build SSM layer index mapping
+    if (has_ssm_) {
+        ssm_layer_map_.resize(cfg.n_layers, -1);
+        int ssm_idx = 0;
+        for (int i = 0; i < cfg.n_layers; i++) {
+            if (model_->layer(i).ssm_in.data != nullptr) {
+                ssm_layer_map_[i] = ssm_idx++;
+            }
+        }
+        IMP_LOG_INFO("SSM layers: %d out of %d total", ssm_idx, cfg.n_layers);
+    }
 
     // Enable Programmatic Dependent Launch on custom kernels if requested.
-    // The PDL attribute is sticky: once set, it applies to all future launches
-    // of that kernel. cuBLAS/cuBLASLt kernels already have PDL support built-in
-    // when using CUDA 13.1; our custom kernels need explicit annotation.
     if (use_pdl_ && pdl::is_available()) {
         pdl::enable(reinterpret_cast<const void*>(&elementwise_add_fp16_kernel));
         pdl::enable(reinterpret_cast<const void*>(&elementwise_add_fp32_kernel));
@@ -336,11 +408,14 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
     return true;
 }
 
-void GraphExecutor::allocate_buffers(int max_tokens) {
+// ---------------------------------------------------------------------------
+// Unified workspace allocation
+// ---------------------------------------------------------------------------
+
+void GraphExecutor::compute_shared_sizes(int max_tokens) {
     const auto& cfg = model_->config();
     int d   = cfg.d_model;
     int ff  = cfg.d_ff;
-    int v   = cfg.vocab_size;
     int nh  = cfg.n_heads;
     int nkv = cfg.n_kv_heads;
     int hd  = cfg.head_dim > 0 ? cfg.head_dim : (d / nh);
@@ -348,82 +423,144 @@ void GraphExecutor::allocate_buffers(int max_tokens) {
 
     auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
 
-    size_t hidden_sz     = align256(static_cast<size_t>(max_tokens) * d * es);
-    size_t residual_sz   = align256(static_cast<size_t>(max_tokens) * d * es);
-    size_t norm_out_sz   = align256(static_cast<size_t>(max_tokens) * d * es);
-    size_t q_sz          = align256(static_cast<size_t>(max_tokens) * nh * hd * es);
-    size_t k_sz          = align256(static_cast<size_t>(max_tokens) * nkv * hd * es);
-    size_t v_sz          = align256(static_cast<size_t>(max_tokens) * nkv * hd * es);
-    size_t attn_out_sz   = align256(static_cast<size_t>(max_tokens) * nh * hd * es);
-    size_t proj_out_sz   = align256(static_cast<size_t>(max_tokens) * d * es);
-    size_t gate_out_sz   = align256(static_cast<size_t>(max_tokens) * ff * es);
-    size_t up_out_sz     = align256(static_cast<size_t>(max_tokens) * ff * es);
-    size_t swiglu_out_sz = align256(static_cast<size_t>(max_tokens) * ff * es);
-    size_t ffn_out_sz    = align256(static_cast<size_t>(max_tokens) * d * es);
-    // Logits are always FP32 for accurate sampling (softmax, argmax).
-    // Only need max_logit_tokens_ rows (1 for prefill, max_batch_size for decode)
-    // instead of max_tokens, saving ~2 GB for large vocabularies.
-    size_t logits_sz     = align256(static_cast<size_t>(max_logit_tokens_) * v * sizeof(float));
+    // Attention phase: q, k, v, attn_out, proj_out
+    attn_shared_size_ = align256(static_cast<size_t>(max_tokens) * nh * hd * es)    // q
+                       + align256(static_cast<size_t>(max_tokens) * nkv * hd * es)  // k
+                       + align256(static_cast<size_t>(max_tokens) * nkv * hd * es)  // v
+                       + align256(static_cast<size_t>(max_tokens) * nh * hd * es)   // attn_out
+                       + align256(static_cast<size_t>(max_tokens) * d * es);        // proj_out
 
-    size_t total = hidden_sz + residual_sz + norm_out_sz +
-                   q_sz + k_sz + v_sz + attn_out_sz + proj_out_sz +
-                   gate_out_sz + up_out_sz + swiglu_out_sz + ffn_out_sz +
-                   logits_sz;
+    // Dense FFN phase: gate, up, swiglu, ffn_out
+    if (has_dense_ffn_ && ff > 0) {
+        ffn_shared_size_ = align256(static_cast<size_t>(max_tokens) * ff * es)   // gate_out
+                          + align256(static_cast<size_t>(max_tokens) * ff * es)  // up_out
+                          + align256(static_cast<size_t>(max_tokens) * ff * es)  // swiglu_out
+                          + align256(static_cast<size_t>(max_tokens) * d * es);  // ffn_out
+    }
 
-    cudaError_t err = cudaMalloc(&workspace_, total);
+    // MoE phase
+    if (has_moe_) {
+        int ne    = cfg.n_experts;
+        int top_k = cfg.n_experts_active;
+        int eff   = cfg.expert_d_ff;
+        int expanded = max_tokens * top_k;
+
+        moe_shared_size_ = align256(static_cast<size_t>(max_tokens) * ne * sizeof(float))  // gate_logits
+                          + align256(static_cast<size_t>(expanded) * d * es)                // gathered
+                          + align256(static_cast<size_t>(expanded) * eff * es)              // expert_gate
+                          + align256(static_cast<size_t>(expanded) * eff * es)              // expert_up
+                          + align256(static_cast<size_t>(expanded) * eff * es)              // expert_swiglu
+                          + align256(static_cast<size_t>(expanded) * d * es)                // expert_down
+                          + align256(static_cast<size_t>(max_tokens) * d * sizeof(float));  // scatter_out
+    }
+
+    // SSM phase
+    if (has_ssm_) {
+        int inner = cfg.ssm_inner_size;
+        int n_groups = cfg.ssm_group_count;
+        int state_size = cfg.ssm_state_size;
+        int n_heads = cfg.ssm_dt_rank;
+        int conv_channels = inner + 2 * n_groups * state_size;
+        int ssm_in_dim = inner + conv_channels + n_heads;
+
+        ssm_shared_size_ = align256(static_cast<size_t>(max_tokens) * ssm_in_dim * es)       // proj
+                          + align256(static_cast<size_t>(max_tokens) * conv_channels * es)   // xBC
+                          + align256(static_cast<size_t>(max_tokens) * inner * es)           // y
+                          + align256(static_cast<size_t>(max_tokens) * inner * es)           // z
+                          + align256(static_cast<size_t>(max_tokens) * d * es)               // out
+                          + align256(static_cast<size_t>(max_tokens) * n_heads * es);        // dt
+    }
+}
+
+void GraphExecutor::allocate_persistent_workspace(int max_tokens) {
+    const auto& cfg = model_->config();
+    int d = cfg.d_model;
+    int v = cfg.vocab_size;
+    size_t es = dtype_size(compute_dtype_);
+
+    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
+
+    size_t hidden_sz   = align256(static_cast<size_t>(max_tokens) * d * es);
+    size_t residual_sz = align256(static_cast<size_t>(max_tokens) * d * es);
+    size_t norm_out_sz = align256(static_cast<size_t>(max_tokens) * d * es);
+    size_t logits_sz   = align256(static_cast<size_t>(max_logit_tokens_) * v * sizeof(float));
+
+    size_t total = hidden_sz + residual_sz + norm_out_sz + logits_sz;
+
+    cudaError_t err = cudaMalloc(&persistent_workspace_, total);
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("Failed to allocate executor workspace (%zu bytes): %s",
+        IMP_LOG_ERROR("Failed to allocate persistent workspace (%zu bytes): %s",
                       total, cudaGetErrorString(err));
         return;
     }
-    workspace_size_ = total;
+    persistent_workspace_size_ = total;
 
-    IMP_LOG_INFO("Executor workspace: %.2f MiB", total / (1024.0 * 1024.0));
-
-    // Bump-allocate tensor views into the workspace.
-    // All tensors are 2-D: [max_tokens, cols].
-    char* ptr = static_cast<char*>(workspace_);
+    char* ptr = static_cast<char*>(persistent_workspace_);
 
     auto make = [&](int64_t cols, size_t aligned_sz) -> Tensor {
         int64_t shape[2] = {static_cast<int64_t>(max_tokens), cols};
-        Tensor t(ptr, compute_dtype_, 2, shape, /*on_device=*/true);
+        Tensor t(ptr, compute_dtype_, 2, shape, true);
         ptr += aligned_sz;
         return t;
     };
 
-    hidden_     = make(d,        hidden_sz);
-    residual_   = make(d,        residual_sz);
-    norm_out_   = make(d,        norm_out_sz);
-    q_          = make(nh * hd,  q_sz);
-    k_          = make(nkv * hd, k_sz);
-    v_          = make(nkv * hd, v_sz);
-    attn_out_   = make(nh * hd,  attn_out_sz);
-    proj_out_   = make(d,        proj_out_sz);
-    gate_out_   = make(ff,       gate_out_sz);
-    up_out_     = make(ff,       up_out_sz);
-    swiglu_out_ = make(ff,       swiglu_out_sz);
-    ffn_out_    = make(d,        ffn_out_sz);
-    // Logits: FP32 for accurate sampling (sized for max_logit_tokens_, not max_tokens)
+    hidden_   = make(d, hidden_sz);
+    residual_ = make(d, residual_sz);
+    norm_out_ = make(d, norm_out_sz);
+
     {
         int64_t shape[2] = {static_cast<int64_t>(max_logit_tokens_), static_cast<int64_t>(v)};
-        logits_ = Tensor(ptr, DType::FP32, 2, shape, /*on_device=*/true);
+        logits_ = Tensor(ptr, DType::FP32, 2, shape, true);
         ptr += logits_sz;
     }
 
-    // Allocate MoE buffers if the model uses Mixture-of-Experts layers.
-    if (cfg.n_experts > 0 && cfg.n_experts_active > 0) {
-        allocate_moe_buffers(max_tokens);
-    }
+    IMP_LOG_INFO("Persistent workspace: %.2f MiB (hidden+residual+norm+logits)",
+                 total / (1024.0 * 1024.0));
+}
 
-    // Allocate dequant scratch buffer for on-the-fly weight dequantization.
-    // Sized for the largest weight matrix (by element count) across all layers.
+void GraphExecutor::allocate_shared_workspace(int max_tokens) {
+    size_t max_shared = std::max({attn_shared_size_, ffn_shared_size_,
+                                  moe_shared_size_, ssm_shared_size_});
+    if (max_shared == 0) return;
+
+    cudaError_t err = cudaMalloc(&shared_workspace_, max_shared);
+    if (err != cudaSuccess) {
+        IMP_LOG_ERROR("Failed to allocate shared workspace (%zu bytes): %s",
+                      max_shared, cudaGetErrorString(err));
+        return;
+    }
+    shared_workspace_size_ = max_shared;
+    shared_workspace_max_tokens_ = max_tokens;
+
+    IMP_LOG_INFO("Shared workspace: %.2f MiB = max(attn=%.1f, ffn=%.1f, moe=%.1f, ssm=%.1f MiB) "
+                 "— saved %.2f MiB vs separate allocation",
+                 max_shared / (1024.0 * 1024.0),
+                 attn_shared_size_ / (1024.0 * 1024.0),
+                 ffn_shared_size_ / (1024.0 * 1024.0),
+                 moe_shared_size_ / (1024.0 * 1024.0),
+                 ssm_shared_size_ / (1024.0 * 1024.0),
+                 (attn_shared_size_ + ffn_shared_size_ + moe_shared_size_ + ssm_shared_size_
+                  - max_shared) / (1024.0 * 1024.0));
+
+    // Pre-allocate MoE routing buffers (separate from shared workspace)
+    if (has_moe_) {
+        const auto& cfg = model_->config();
+        moe_routing_buffers_.allocate(max_tokens, cfg.n_experts, cfg.n_experts_active);
+    }
+}
+
+void GraphExecutor::allocate_auxiliary_buffers() {
+    const auto& cfg = model_->config();
+
+    // Dequant scratch buffer for on-the-fly weight dequantization.
     {
         size_t max_weight_elems = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
             for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo,
                                    &L.w_gate, &L.w_up, &L.w_down,
-                                   &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared}) {
+                                   &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared,
+                                   &L.ssm_in, &L.ssm_out}) {
                 if (w->data) max_weight_elems = std::max(max_weight_elems,
                                                           static_cast<size_t>(w->numel()));
             }
@@ -442,122 +579,253 @@ void GraphExecutor::allocate_buffers(int max_tokens) {
             }
         }
     }
-}
 
-void GraphExecutor::free_buffers() {
-    free_moe_buffers();
-    if (dequant_scratch_) {
-        cudaFree(dequant_scratch_);
-        dequant_scratch_ = nullptr;
-        dequant_scratch_size_ = 0;
-    }
-    if (workspace_) {
-        cudaFree(workspace_);
-        workspace_ = nullptr;
-        workspace_size_ = 0;
-    }
-    initialized_ = false;
-}
+    // MoE dequant and staging buffers
+    if (has_moe_) {
+        int d   = cfg.d_model;
+        int eff = cfg.expert_d_ff;
 
-void GraphExecutor::allocate_moe_buffers(int max_tokens) {
-    const auto& cfg = model_->config();
-    int d       = cfg.d_model;
-    int eff     = cfg.expert_d_ff;
-    int ne      = cfg.n_experts;
-    int top_k   = cfg.n_experts_active;
-    size_t es   = dtype_size(compute_dtype_);
-    int expanded = max_tokens * top_k;  // each token is routed to top_k experts
+        // Dequant buffer: 1 expert slot
+        {
+            size_t expert_fp16_elems = static_cast<size_t>(eff) * d;
+            size_t dequant_sz = expert_fp16_elems * sizeof(uint16_t);
+            cudaError_t err = cudaMalloc(&moe_dequant_buf_, dequant_sz);
+            if (err != cudaSuccess) {
+                IMP_LOG_ERROR("Failed to allocate MoE dequant buffer (%zu bytes): %s",
+                              dequant_sz, cudaGetErrorString(err));
+                moe_dequant_buf_ = nullptr;
+                moe_dequant_buf_size_ = 0;
+            } else {
+                moe_dequant_buf_size_ = dequant_sz;
+                IMP_LOG_INFO("MoE dequant buffer: %.2f MiB (1 expert slot)",
+                             dequant_sz / (1024.0 * 1024.0));
+            }
+        }
 
-    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
-
-    // Gate logits: [max_tokens, n_experts] in FP32 (required by moe_topk_gating)
-    size_t gate_logits_sz   = align256(static_cast<size_t>(max_tokens) * ne * sizeof(float));
-    // Gathered tokens: [expanded, d_model] in compute_dtype
-    size_t gathered_sz      = align256(static_cast<size_t>(expanded) * d * es);
-    // Expert gate projection: [expanded, expert_d_ff] in compute_dtype
-    size_t expert_gate_sz   = align256(static_cast<size_t>(expanded) * eff * es);
-    // Expert up projection: [expanded, expert_d_ff] in compute_dtype
-    size_t expert_up_sz     = align256(static_cast<size_t>(expanded) * eff * es);
-    // Expert SwiGLU output: [expanded, expert_d_ff] in compute_dtype
-    size_t expert_swiglu_sz = align256(static_cast<size_t>(expanded) * eff * es);
-    // Expert down projection: [expanded, d_model] in compute_dtype
-    size_t expert_down_sz   = align256(static_cast<size_t>(expanded) * d * es);
-    // Scatter output: [max_tokens, d_model] in FP32 (atomicAdd requires float)
-    size_t scatter_out_sz   = align256(static_cast<size_t>(max_tokens) * d * sizeof(float));
-
-    size_t total = gate_logits_sz + gathered_sz + expert_gate_sz +
-                   expert_up_sz + expert_swiglu_sz + expert_down_sz +
-                   scatter_out_sz;
-
-    cudaError_t err = cudaMalloc(&moe_workspace_, total);
-    if (err != cudaSuccess) {
-        IMP_LOG_ERROR("Failed to allocate MoE workspace (%zu bytes): %s",
-                      total, cudaGetErrorString(err));
-        return;
-    }
-    moe_workspace_size_ = total;
-
-    IMP_LOG_INFO("MoE workspace: %.2f MiB (top_k=%d, n_experts=%d, expert_d_ff=%d)",
-                 total / (1024.0 * 1024.0), top_k, ne, eff);
-
-    // Bump-allocate tensor views into the MoE workspace.
-    char* ptr = static_cast<char*>(moe_workspace_);
-
-    // gate_logits: FP32
-    {
-        int64_t shape[2] = {static_cast<int64_t>(max_tokens), static_cast<int64_t>(ne)};
-        moe_gate_logits_ = Tensor(ptr, DType::FP32, 2, shape, /*on_device=*/true);
-        ptr += gate_logits_sz;
-    }
-
-    // The rest use compute_dtype unless stated otherwise.
-    auto make_moe = [&](Tensor& t, int64_t rows, int64_t cols, size_t aligned_sz, DType dt) {
-        int64_t shape[2] = {rows, cols};
-        t = Tensor(ptr, dt, 2, shape, /*on_device=*/true);
-        ptr += aligned_sz;
-    };
-
-    make_moe(moe_gathered_,       expanded, d,   gathered_sz,      compute_dtype_);
-    make_moe(moe_expert_gate_,    expanded, eff, expert_gate_sz,   compute_dtype_);
-    make_moe(moe_expert_up_,      expanded, eff, expert_up_sz,     compute_dtype_);
-    make_moe(moe_expert_swiglu_,  expanded, eff, expert_swiglu_sz, compute_dtype_);
-    make_moe(moe_expert_down_,    expanded, d,   expert_down_sz,   compute_dtype_);
-    make_moe(moe_scatter_out_,    max_tokens, d, scatter_out_sz,   DType::FP32);
-
-    // Pre-allocate MoE routing buffers to avoid per-call cudaMalloc
-    moe_routing_buffers_.allocate(max_tokens, ne, top_k);
-
-    // Dequant scratch buffer for on-the-fly expert weight dequantization.
-    // Only 1 slot needed: we dequant + GEMM one expert at a time on the same stream.
-    {
-        size_t expert_fp16_elems = static_cast<size_t>(eff) * d;
-        size_t dequant_sz = expert_fp16_elems * sizeof(uint16_t);
-        cudaError_t err = cudaMalloc(&moe_dequant_buf_, dequant_sz);
-        if (err != cudaSuccess) {
-            IMP_LOG_ERROR("Failed to allocate MoE dequant buffer (%zu bytes): %s",
-                          dequant_sz, cudaGetErrorString(err));
-            moe_dequant_buf_ = nullptr;
-            moe_dequant_buf_size_ = 0;
-        } else {
-            moe_dequant_buf_size_ = dequant_sz;
-            IMP_LOG_INFO("MoE dequant buffer: %.2f MiB (1 expert slot)",
-                         dequant_sz / (1024.0 * 1024.0));
+        // Staging buffer for host→device expert weight transfer
+        {
+            size_t max_expert_raw = 0;
+            for (int li = 0; li < model_->n_layers(); li++) {
+                const auto& L = model_->layer(li);
+                auto check = [&](const Tensor& p, GGMLQuantType qt) {
+                    if (!p.data || p.ndim < 3) return;
+                    size_t rb = ggml_quant_row_bytes(qt, p.shape[2]);
+                    size_t expert_raw = static_cast<size_t>(p.shape[1]) * rb;
+                    max_expert_raw = std::max(max_expert_raw, expert_raw);
+                };
+                check(L.expert_up_packed, L.expert_up_qtype);
+                check(L.expert_down_packed, L.expert_down_qtype);
+                check(L.expert_gate_packed, L.expert_gate_qtype);
+            }
+            if (max_expert_raw > 0) {
+                cudaError_t err = cudaMalloc(&moe_raw_staging_buf_, max_expert_raw);
+                if (err != cudaSuccess) {
+                    IMP_LOG_ERROR("Failed to allocate MoE staging buffer (%zu bytes): %s",
+                                  max_expert_raw, cudaGetErrorString(err));
+                    moe_raw_staging_buf_ = nullptr;
+                    moe_raw_staging_size_ = 0;
+                } else {
+                    moe_raw_staging_size_ = max_expert_raw;
+                    IMP_LOG_INFO("MoE staging buffer: %.2f MiB (1 expert raw)",
+                                 max_expert_raw / (1024.0 * 1024.0));
+                }
+            }
         }
     }
 }
 
-void GraphExecutor::free_moe_buffers() {
+void GraphExecutor::free_buffers() {
     moe_routing_buffers_.free();
     if (moe_dequant_buf_) {
         cudaFree(moe_dequant_buf_);
         moe_dequant_buf_ = nullptr;
         moe_dequant_buf_size_ = 0;
     }
-    if (moe_workspace_) {
-        cudaFree(moe_workspace_);
-        moe_workspace_ = nullptr;
-        moe_workspace_size_ = 0;
+    if (moe_raw_staging_buf_) {
+        cudaFree(moe_raw_staging_buf_);
+        moe_raw_staging_buf_ = nullptr;
+        moe_raw_staging_size_ = 0;
     }
+    if (dequant_scratch_) {
+        cudaFree(dequant_scratch_);
+        dequant_scratch_ = nullptr;
+        dequant_scratch_size_ = 0;
+    }
+    if (shared_workspace_) {
+        cudaFree(shared_workspace_);
+        shared_workspace_ = nullptr;
+        shared_workspace_size_ = 0;
+    }
+    if (persistent_workspace_) {
+        cudaFree(persistent_workspace_);
+        persistent_workspace_ = nullptr;
+        persistent_workspace_size_ = 0;
+    }
+    ssm_layer_map_.clear();
+    initialized_ = false;
+}
+
+// ---------------------------------------------------------------------------
+// Shared workspace configuration (pure pointer arithmetic, no allocation)
+// ---------------------------------------------------------------------------
+
+void GraphExecutor::configure_attn_workspace(int max_tokens) {
+    const auto& cfg = model_->config();
+    int d   = cfg.d_model;
+    int nh  = cfg.n_heads;
+    int nkv = cfg.n_kv_heads;
+    int hd  = cfg.head_dim > 0 ? cfg.head_dim : (d / nh);
+    size_t es = dtype_size(compute_dtype_);
+
+    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
+    char* ptr = static_cast<char*>(shared_workspace_);
+
+    auto make = [&](int64_t cols, size_t aligned_sz) -> Tensor {
+        int64_t shape[2] = {static_cast<int64_t>(max_tokens), cols};
+        Tensor t(ptr, compute_dtype_, 2, shape, true);
+        ptr += aligned_sz;
+        return t;
+    };
+
+    q_        = make(nh * hd,  align256(static_cast<size_t>(max_tokens) * nh * hd * es));
+    k_        = make(nkv * hd, align256(static_cast<size_t>(max_tokens) * nkv * hd * es));
+    v_        = make(nkv * hd, align256(static_cast<size_t>(max_tokens) * nkv * hd * es));
+    attn_out_ = make(nh * hd,  align256(static_cast<size_t>(max_tokens) * nh * hd * es));
+    proj_out_ = make(d,        align256(static_cast<size_t>(max_tokens) * d * es));
+}
+
+void GraphExecutor::configure_ffn_workspace(int max_tokens) {
+    const auto& cfg = model_->config();
+    int d  = cfg.d_model;
+    int ff = cfg.d_ff;
+    size_t es = dtype_size(compute_dtype_);
+
+    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
+    char* ptr = static_cast<char*>(shared_workspace_);
+
+    auto make = [&](int64_t cols, size_t aligned_sz) -> Tensor {
+        int64_t shape[2] = {static_cast<int64_t>(max_tokens), cols};
+        Tensor t(ptr, compute_dtype_, 2, shape, true);
+        ptr += aligned_sz;
+        return t;
+    };
+
+    gate_out_   = make(ff, align256(static_cast<size_t>(max_tokens) * ff * es));
+    up_out_     = make(ff, align256(static_cast<size_t>(max_tokens) * ff * es));
+    swiglu_out_ = make(ff, align256(static_cast<size_t>(max_tokens) * ff * es));
+    ffn_out_    = make(d,  align256(static_cast<size_t>(max_tokens) * d * es));
+}
+
+void GraphExecutor::configure_moe_workspace(int max_tokens) {
+    const auto& cfg = model_->config();
+    int d     = cfg.d_model;
+    int ne    = cfg.n_experts;
+    int top_k = cfg.n_experts_active;
+    int eff   = cfg.expert_d_ff;
+    size_t es = dtype_size(compute_dtype_);
+    int expanded = max_tokens * top_k;
+
+    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
+    char* ptr = static_cast<char*>(shared_workspace_);
+
+    // gate_logits: FP32
+    {
+        int64_t shape[2] = {static_cast<int64_t>(max_tokens), static_cast<int64_t>(ne)};
+        moe_gate_logits_ = Tensor(ptr, DType::FP32, 2, shape, true);
+        ptr += align256(static_cast<size_t>(max_tokens) * ne * sizeof(float));
+    }
+
+    auto make_moe = [&](Tensor& t, int64_t rows, int64_t cols, size_t aligned_sz, DType dt) {
+        int64_t shape[2] = {rows, cols};
+        t = Tensor(ptr, dt, 2, shape, true);
+        ptr += aligned_sz;
+    };
+
+    make_moe(moe_gathered_,      expanded, d,   align256(static_cast<size_t>(expanded) * d * es),   compute_dtype_);
+    make_moe(moe_expert_gate_,   expanded, eff, align256(static_cast<size_t>(expanded) * eff * es), compute_dtype_);
+    make_moe(moe_expert_up_,     expanded, eff, align256(static_cast<size_t>(expanded) * eff * es), compute_dtype_);
+    make_moe(moe_expert_swiglu_, expanded, eff, align256(static_cast<size_t>(expanded) * eff * es), compute_dtype_);
+    make_moe(moe_expert_down_,   expanded, d,   align256(static_cast<size_t>(expanded) * d * es),   compute_dtype_);
+    make_moe(moe_scatter_out_,   max_tokens, d, align256(static_cast<size_t>(max_tokens) * d * sizeof(float)), DType::FP32);
+}
+
+void GraphExecutor::configure_ssm_workspace(int max_tokens) {
+    const auto& cfg = model_->config();
+    int d = cfg.d_model;
+    int inner = cfg.ssm_inner_size;
+    int n_groups = cfg.ssm_group_count;
+    int state_size = cfg.ssm_state_size;
+    int n_heads = cfg.ssm_dt_rank;
+    int conv_channels = inner + 2 * n_groups * state_size;
+    int ssm_in_dim = inner + conv_channels + n_heads;
+    size_t es = dtype_size(compute_dtype_);
+
+    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
+    char* ptr = static_cast<char*>(shared_workspace_);
+
+    auto make = [&](int64_t cols, size_t aligned_sz) -> Tensor {
+        int64_t shape[2] = {static_cast<int64_t>(max_tokens), cols};
+        Tensor t(ptr, compute_dtype_, 2, shape, true);
+        ptr += aligned_sz;
+        return t;
+    };
+
+    ssm_proj_buf_ = make(ssm_in_dim,    align256(static_cast<size_t>(max_tokens) * ssm_in_dim * es));
+    ssm_xBC_buf_  = make(conv_channels,  align256(static_cast<size_t>(max_tokens) * conv_channels * es));
+    ssm_y_buf_    = make(inner,          align256(static_cast<size_t>(max_tokens) * inner * es));
+    ssm_z_buf_    = make(inner,          align256(static_cast<size_t>(max_tokens) * inner * es));
+    ssm_out_buf_  = make(d,              align256(static_cast<size_t>(max_tokens) * d * es));
+    ssm_dt_buf_   = make(n_heads,        align256(static_cast<size_t>(max_tokens) * n_heads * es));
+}
+
+bool GraphExecutor::resize_workspace(int new_max_tokens, cudaStream_t stream) {
+    if (new_max_tokens == shared_workspace_max_tokens_ || new_max_tokens <= 0) return true;
+    if (new_max_tokens > max_tokens_) new_max_tokens = max_tokens_;  // never exceed init-time max
+
+    // Recompute shared sizes for the new token count
+    int saved_max = max_tokens_;
+    max_tokens_ = new_max_tokens;
+    compute_shared_sizes(new_max_tokens);
+    max_tokens_ = saved_max;
+
+    size_t new_shared = std::max({attn_shared_size_, ffn_shared_size_,
+                                  moe_shared_size_, ssm_shared_size_});
+    if (new_shared == 0) return true;
+
+    if (new_shared != shared_workspace_size_) {
+        if (shared_workspace_) {
+            cudaFreeAsync(shared_workspace_, stream);
+        }
+        cudaError_t err = cudaMallocAsync(&shared_workspace_, new_shared, stream);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("Failed to resize shared workspace to %zu bytes: %s",
+                          new_shared, cudaGetErrorString(err));
+            shared_workspace_ = nullptr;
+            shared_workspace_size_ = 0;
+            return false;
+        }
+        shared_workspace_size_ = new_shared;
+    }
+    shared_workspace_max_tokens_ = new_max_tokens;
+    return true;
+}
+
+bool GraphExecutor::layer_has_attention(int layer) const {
+    return model_->layer(layer).wq.data != nullptr;
+}
+
+bool GraphExecutor::layer_has_ssm(int layer) const {
+    return model_->layer(layer).ssm_in.data != nullptr;
+}
+
+bool GraphExecutor::layer_has_moe(int layer) const {
+    const auto& ly = model_->layer(layer);
+    return ly.moe_gate.data != nullptr;
+}
+
+bool GraphExecutor::layer_has_dense_ffn(int layer) const {
+    const auto& ly = model_->layer(layer);
+    return ly.w_up.data != nullptr && ly.moe_gate.data == nullptr;
 }
 
 Tensor GraphExecutor::view_tokens(const Tensor& buf, int n_tokens) const {
@@ -573,6 +841,13 @@ Tensor GraphExecutor::view_tokens(const Tensor& buf, int n_tokens) const {
 void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
                                    cudaStream_t stream) {
     if (!state.kv_cache || !state.block_tables) return;
+
+    // Map global layer index to KV cache layer index
+    int kv_layer = layer;
+    if (!kv_layer_map_.empty()) {
+        kv_layer = kv_layer_map_[layer];
+        if (kv_layer < 0) return;  // not an attention layer
+    }
 
     KVCache* cache = state.kv_cache;
     int n        = state.n_tokens;
@@ -597,7 +872,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
             static_cast<const half*>(kv.data),
             state.positions,
             state.block_tables,
-            static_cast<__nv_fp8_e4m3*>(cache->k_ptr(layer, 0)),
+            static_cast<__nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
             inv_scale,
             block_stride, row_elems, kKVBlockSize, n,
             state.max_blocks_per_seq, state.n_sequences);
@@ -606,7 +881,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
             static_cast<const half*>(kv.data),
             state.positions,
             state.block_tables,
-            static_cast<uint8_t*>(cache->k_ptr(layer, 0)),
+            static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
             inv_scale,
             block_stride, row_elems, kKVBlockSize, n,
             state.max_blocks_per_seq, state.n_sequences);
@@ -619,7 +894,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
             static_cast<const half*>(vv.data),
             state.positions,
             state.block_tables,
-            static_cast<__nv_fp8_e4m3*>(cache->v_ptr(layer, 0)),
+            static_cast<__nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)),
             inv_scale,
             block_stride, row_elems, kKVBlockSize, n,
             state.max_blocks_per_seq, state.n_sequences);
@@ -628,7 +903,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
             static_cast<const half*>(vv.data),
             state.positions,
             state.block_tables,
-            static_cast<uint8_t*>(cache->v_ptr(layer, 0)),
+            static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
             inv_scale,
             block_stride, row_elems, kKVBlockSize, n,
             state.max_blocks_per_seq, state.n_sequences);
@@ -641,7 +916,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
             static_cast<const half*>(kv.data),
             state.positions,
             state.block_tables,
-            static_cast<half*>(cache->k_ptr(layer, 0)),
+            static_cast<half*>(cache->k_ptr(kv_layer, 0)),
             block_stride, row_elems, kKVBlockSize, n,
             state.max_blocks_per_seq, state.n_sequences);
 
@@ -651,7 +926,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
             static_cast<const half*>(vv.data),
             state.positions,
             state.block_tables,
-            static_cast<half*>(cache->v_ptr(layer, 0)),
+            static_cast<half*>(cache->v_ptr(kv_layer, 0)),
             block_stride, row_elems, kKVBlockSize, n,
             state.max_blocks_per_seq, state.n_sequences);
     }
@@ -663,6 +938,9 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
 
 void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                   cudaStream_t stream) {
+    // Configure shared workspace for attention phase
+    configure_attn_workspace(shared_workspace_max_tokens_);
+
     const auto& cfg = model_->config();
     const auto& ly  = model_->layer(layer);
     int n   = state.n_tokens;
@@ -720,8 +998,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     Tensor q4r_t = qv.reshape(4, q4r);
     Tensor k4r_t = kk.reshape(4, k4r);
 
-    // 6. RoPE (in-place on Q and K)
-    rope_forward(q4r_t, k4r_t, state.positions, hd, cfg.rope_theta, 1.0f, stream);
+    // 6. RoPE (in-place on Q and K) — supports partial RoPE via rope_dim
+    rope_forward(q4r_t, k4r_t, state.positions, hd, cfg.rope_theta, 1.0f,
+                 cfg.rope_dim, stream);
 
     // 7. Attention
     float scale = 1.0f / std::sqrt(static_cast<float>(hd));
@@ -761,8 +1040,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                           static_cast<int64_t>(kKVBlockSize),
                           static_cast<int64_t>(nkv),
                           static_cast<int64_t>(hd)};
-        Tensor k_c(cache->k_ptr(layer, 0), cache_dtype, 4, cs, true);
-        Tensor v_c(cache->v_ptr(layer, 0), cache_dtype, 4, cs, true);
+        // Use mapped KV layer index for hybrid models (attention layers only)
+        int kv_layer = layer;
+        if (!kv_layer_map_.empty()) {
+            kv_layer = kv_layer_map_[layer];
+        }
+        Tensor k_c(cache->k_ptr(kv_layer, 0), cache_dtype, 4, cs, true);
+        Tensor v_c(cache->v_ptr(kv_layer, 0), cache_dtype, 4, cs, true);
 
         if (cache_dtype == DType::FP8_E4M3) {
             // FP8 paged attention with on-the-fly dequant
@@ -795,6 +1079,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
 // ---------------------------------------------------------------------------
 
 void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
+    // Configure shared workspace for dense FFN phase
+    configure_ffn_workspace(shared_workspace_max_tokens_);
+
     const auto& cfg = model_->config();
     const auto& ly  = model_->layer(layer);
 
@@ -812,9 +1099,11 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
 
     // 1+2. Fused: save residual + RMSNorm
     //       residual = hidden, norm_out = rmsnorm(hidden)
+    //       Nemotron-H uses attn_norm for ALL layer types (no separate ffn_norm).
+    const Tensor& ffn_norm_w = (ly.ffn_norm.data != nullptr) ? ly.ffn_norm : ly.attn_norm;
     cudaMemcpyAsync(r.data, h.data, h.nbytes(),
                     cudaMemcpyDeviceToDevice, stream);
-    rmsnorm(h, ly.ffn_norm, no, eps, stream);
+    rmsnorm(h, ffn_norm_w, no, eps, stream);
 
     // 3. Gate and Up projections
     gemm_dispatch(no, ly.w_gate, ly.w_gate_scales, ly.w_gate_qtype, go, dequant_scratch_, stream);
@@ -840,6 +1129,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
 // ---------------------------------------------------------------------------
 
 void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
+    // Configure shared workspace for MoE phase
+    configure_moe_workspace(shared_workspace_max_tokens_);
+
     const auto& cfg = model_->config();
     const auto& ly  = model_->layer(layer);
 
@@ -861,7 +1153,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     cudaMemcpyDeviceToDevice, stream);
 
     // 2. RMSNorm on hidden -> norm_out
-    rmsnorm(h, ly.ffn_norm, no, eps, stream);
+    //    Nemotron-H uses attn_norm for ALL layer types (no separate ffn_norm).
+    const Tensor& norm_w = (ly.ffn_norm.data != nullptr) ? ly.ffn_norm : ly.attn_norm;
+    rmsnorm(h, norm_w, no, eps, stream);
 
     // 3. Gate logits: norm_out [n, d_model] @ moe_gate [n_experts, d_model]^T
     //    -> gate_logits [n, n_experts]
@@ -899,14 +1193,33 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         }
     }
 
-    // 4. Top-k gating: softmax + top-k selection + sort
+    // 3b. Router bias (Nemotron/DeepSeek V3): added to sigmoid OUTPUTS for
+    //     expert SELECTION only.  The raw logits are passed unbiased to sigmoid
+    //     so that the resulting probabilities used as expert WEIGHTS are unbiased.
+    //     See llama.cpp build_moe_ffn(): "leave probs unbiased as it's later
+    //     used to get expert weights".
+    const void* router_bias_ptr = ly.moe_router_bias.data;
+
+    // 4. Top-k gating: softmax/sigmoid + top-k selection + sort
     //    Use pre-allocated routing buffers to avoid per-call cudaMalloc.
     Tensor gate_logits_f32 = slice_rows(moe_gate_logits_, n);
     MoeRoutingResult routing;
+    bool use_sigmoid = cfg.moe_sigmoid_gating;
+    bool norm_weights = cfg.expert_weights_norm;
     if (moe_routing_buffers_.pool) {
-        moe_topk_gating(gate_logits_f32, top_k, moe_routing_buffers_, routing, stream);
+        moe_topk_gating(gate_logits_f32, top_k, moe_routing_buffers_, routing, stream, use_sigmoid, norm_weights, router_bias_ptr);
     } else {
-        moe_topk_gating(gate_logits_f32, top_k, routing, stream);
+        moe_topk_gating(gate_logits_f32, top_k, routing, stream, use_sigmoid, norm_weights, router_bias_ptr);
+    }
+
+    // 4b. Expert weight scaling (Nemotron: scale = 2.5)
+    if (cfg.expert_weights_scale != 1.0f) {
+        int64_t n_weights = static_cast<int64_t>(n) * top_k;
+        int threads_s = 256;
+        int blocks_s = static_cast<int>((n_weights + threads_s - 1) / threads_s);
+        scale_fp32_kernel<<<blocks_s, threads_s, 0, stream>>>(
+            static_cast<float*>(routing.expert_weights.data),
+            cfg.expert_weights_scale, n_weights);
     }
 
     // 5. Gather: reorder tokens by expert assignment
@@ -932,19 +1245,26 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // Two paths:
     // - Pre-dequanted: expert_w_gate[e] etc. are FP16 on GPU (legacy / unquantized packed)
     // - On-the-fly dequant: expert_*_packed is raw Q6_K/Q8_0/Q4_0 on GPU, dequant per GEMM
-    bool use_packed_dequant = (ly.expert_gate_packed.data != nullptr &&
-                               ly.expert_gate_packed.on_device &&
+    bool use_packed_dequant = (ly.expert_up_packed.data != nullptr &&
                                moe_dequant_buf_ != nullptr);
+
+    // Non-gated expert FFN detection: no gate weights (Nemotron uses SiLU(up(x)) instead of SwiGLU)
+    // Note: can't use expert_w_gate.empty() because loader pre-allocates the vector for all layers.
+    // Instead check if gate data is actually present (packed or first unpacked entry).
+    bool non_gated_experts = (ly.expert_gate_packed.data == nullptr &&
+                              (ly.expert_w_gate.empty() || ly.expert_w_gate[0].data == nullptr));
 
     // Validate expert_d_ff matches packed tensor shapes (critical for buffer offsets)
     if (use_packed_dequant) {
-        int64_t gate_eff = ly.expert_gate_packed.shape[1];
+        int64_t ref_eff = non_gated_experts
+            ? ly.expert_up_packed.shape[1]
+            : ly.expert_gate_packed.shape[1];
         int64_t down_eff = ly.expert_down_packed.shape[2];
-        if (gate_eff != eff || down_eff != eff) {
-            IMP_LOG_ERROR("CRITICAL: expert_d_ff mismatch! config=%d, gate_packed.shape[1]=%ld, "
+        if (ref_eff != eff || down_eff != eff) {
+            IMP_LOG_ERROR("CRITICAL: expert_d_ff mismatch! config=%d, packed.shape=%ld, "
                          "down_packed.shape[2]=%ld. Using packed tensor shapes instead.",
-                         eff, (long)gate_eff, (long)down_eff);
-            eff = static_cast<int>(gate_eff);
+                         eff, (long)ref_eff, (long)down_eff);
+            eff = static_cast<int>(ref_eff);
         }
     }
 
@@ -958,8 +1278,37 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         int64_t cols = packed.shape[2];
         size_t row_bytes = ggml_quant_row_bytes(qtype, cols);
         size_t expert_raw = static_cast<size_t>(rows) * row_bytes;
+        size_t total_raw = static_cast<size_t>(packed.shape[0]) * expert_raw;
+        size_t offset = static_cast<size_t>(expert_idx) * expert_raw;
 
-        const char* src = static_cast<const char*>(packed.data) + expert_idx * expert_raw;
+        // Bounds check: verify offset + expert_raw <= total allocated
+        if (offset + expert_raw > total_raw) {
+            fprintf(stderr, "imp::dequant_expert: OOB! expert %d offset=%zu + raw=%zu > total=%zu "
+                    "(packed shape [%ld,%ld,%ld] qtype=%u)\n",
+                    expert_idx, offset, expert_raw, total_raw,
+                    (long)packed.shape[0], (long)packed.shape[1], (long)packed.shape[2],
+                    (unsigned)qtype);
+        }
+
+        // Check dequant buffer is large enough
+        size_t dequant_needed = static_cast<size_t>(rows) * cols * sizeof(uint16_t);
+        if (dequant_needed > moe_dequant_buf_size_) {
+            fprintf(stderr, "imp::dequant_expert: dequant buffer too small! "
+                    "need=%zu have=%zu (rows=%ld cols=%ld)\n",
+                    dequant_needed, moe_dequant_buf_size_, (long)rows, (long)cols);
+        }
+
+        const char* src;
+        if (!packed.on_device) {
+            // Expert weights offloaded to host — copy this expert's raw bytes to GPU staging buffer
+            const char* host_ptr = static_cast<const char*>(packed.data) + offset;
+            cudaMemcpyAsync(moe_raw_staging_buf_, host_ptr, expert_raw,
+                            cudaMemcpyHostToDevice, stream);
+            src = static_cast<const char*>(moe_raw_staging_buf_);
+        } else {
+            src = static_cast<const char*>(packed.data) + offset;
+        }
+
         char* dst = static_cast<char*>(moe_dequant_buf_);  // always slot 0
 
         dequant_gpu(src, dst, qtype, static_cast<int>(rows), static_cast<int>(cols), stream);
@@ -990,8 +1339,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             Tensor a_view(gathered_base + static_cast<size_t>(start) * d * es,
                           compute_dtype_, 2, a_shape, true);
 
-            // Gate projection: A @ W_gate^T -> C_gate
-            {
+            // Gate projection (only for gated experts like SwiGLU)
+            if (!non_gated_experts) {
                 int64_t c_shape[2] = {count64, static_cast<int64_t>(eff)};
                 Tensor c_view(expert_gate_base + static_cast<size_t>(start) * eff * es,
                               compute_dtype_, 2, c_shape, true);
@@ -1011,16 +1360,29 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     : ly.expert_w_up[e];
                 gemm(a_view, b, c_view, 1.0f, 0.0f, stream);
             }
+
         }
 
-        // SwiGLU on the full contiguous expert buffers.
+        // Activation: SwiGLU (gated) or relu^2 (non-gated, Nemotron-H)
         {
-            int64_t swiglu_shape[2] = {static_cast<int64_t>(expanded),
-                                        static_cast<int64_t>(eff)};
-            Tensor gate_buf(moe_expert_gate_.data, compute_dtype_, 2, swiglu_shape, true);
-            Tensor up_buf(moe_expert_up_.data, compute_dtype_, 2, swiglu_shape, true);
-            Tensor swiglu_buf(moe_expert_swiglu_.data, compute_dtype_, 2, swiglu_shape, true);
-            swiglu(gate_buf, up_buf, swiglu_buf, stream);
+            int64_t act_shape[2] = {static_cast<int64_t>(expanded),
+                                     static_cast<int64_t>(eff)};
+            if (non_gated_experts) {
+                // Non-gated: out = relu^2(up)  [Nemotron-H uses squared ReLU]
+                // Write result into swiglu buffer for down projection
+                Tensor up_buf(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                Tensor swiglu_buf(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                cudaMemcpyAsync(swiglu_buf.data, up_buf.data,
+                                static_cast<size_t>(expanded) * eff * es,
+                                cudaMemcpyDeviceToDevice, stream);
+                relu_sqr_inplace(swiglu_buf, stream);
+            } else {
+                // Gated: out = SiLU(gate) * up
+                Tensor gate_buf(moe_expert_gate_.data, compute_dtype_, 2, act_shape, true);
+                Tensor up_buf(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                Tensor swiglu_buf(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                swiglu(gate_buf, up_buf, swiglu_buf, stream);
+            }
         }
 
         // Per-expert down projections: dequant and GEMM one expert at a time.
@@ -1075,16 +1437,16 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         }
     }
 
-    // 8b. Shared expert FFN (Qwen3 MoE): all tokens pass through an additional
+    // 8b. Shared expert FFN: all tokens pass through an additional
     //     dense FFN whose output is added to the routed expert output.
     //     Reuses MoE workspace buffers (routed computation is complete).
-    if (ly.w_gate_shared.data != nullptr) {
-        int eff_shared = static_cast<int>(ly.w_gate_shared.shape[0]);
+    //     Supports both gated (Qwen3: gate+up+SwiGLU) and non-gated (Nemotron: up+SiLU).
+    if (ly.w_up_shared.data != nullptr) {
+        int eff_shared = static_cast<int>(ly.w_up_shared.shape[0]);
+        bool shared_gated = (ly.w_gate_shared.data != nullptr);
 
         // Reuse moe_expert_gate_, moe_expert_up_, moe_expert_swiglu_ as scratch.
-        // These are [max_tokens * top_k, expert_d_ff] which is >= [n, eff_shared].
         int64_t sh_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(eff_shared)};
-        Tensor sh_gate(moe_expert_gate_.data, compute_dtype_, 2, sh_shape, true);
         Tensor sh_up(moe_expert_up_.data, compute_dtype_, 2, sh_shape, true);
         Tensor sh_swiglu(moe_expert_swiglu_.data, compute_dtype_, 2, sh_shape, true);
 
@@ -1092,14 +1454,23 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         int64_t sh_down_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
         Tensor sh_down(moe_expert_down_.data, compute_dtype_, 2, sh_down_shape, true);
 
-        // Gate + Up projections (with dequant support for Q8_0/Q6_K)
-        gemm_dispatch(no, ly.w_gate_shared, Tensor(), ly.w_gate_shared_qtype,
-                      sh_gate, dequant_scratch_, stream);
+        // Up projection
         gemm_dispatch(no, ly.w_up_shared, Tensor(), ly.w_up_shared_qtype,
                       sh_up, dequant_scratch_, stream);
 
-        // SwiGLU
-        swiglu(sh_gate, sh_up, sh_swiglu, stream);
+        if (shared_gated) {
+            // Gated: gate + SwiGLU
+            Tensor sh_gate(moe_expert_gate_.data, compute_dtype_, 2, sh_shape, true);
+            gemm_dispatch(no, ly.w_gate_shared, Tensor(), ly.w_gate_shared_qtype,
+                          sh_gate, dequant_scratch_, stream);
+            swiglu(sh_gate, sh_up, sh_swiglu, stream);
+        } else {
+            // Non-gated: relu^2(up)  [Nemotron-H uses squared ReLU]
+            cudaMemcpyAsync(sh_swiglu.data, sh_up.data,
+                            static_cast<size_t>(n) * eff_shared * dtype_size(compute_dtype_),
+                            cudaMemcpyDeviceToDevice, stream);
+            relu_sqr_inplace(sh_swiglu, stream);
+        }
 
         // Down projection
         gemm_dispatch(sh_swiglu, ly.w_down_shared, Tensor(), ly.w_down_shared_qtype,
@@ -1119,6 +1490,191 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         cudaFree(routing.expert_weights.data);
         cudaFree(routing.sorted_token_ids.data);
         cudaFree(routing.expert_offsets.data);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSM (Mamba2) sub-pass for one layer
+// ---------------------------------------------------------------------------
+
+void GraphExecutor::run_ssm(int layer, const InferenceState& state,
+                            cudaStream_t stream) {
+    // Configure shared workspace for SSM phase
+    configure_ssm_workspace(shared_workspace_max_tokens_);
+
+    const auto& cfg = model_->config();
+    const auto& ly  = model_->layer(layer);
+    int n = state.n_tokens;
+    float eps = cfg.rms_norm_eps;
+    int inner = cfg.ssm_inner_size;
+    int n_groups = cfg.ssm_group_count;
+    int ssize = cfg.ssm_state_size;
+    int conv_kernel = cfg.ssm_conv_kernel;
+    int conv_channels = inner + 2 * n_groups * ssize;
+    int n_heads = cfg.ssm_dt_rank;
+    int head_dim_ssm = inner / n_heads;
+
+    Tensor h  = view_tokens(hidden_,   n);
+    Tensor r  = view_tokens(residual_, n);
+    Tensor no = view_tokens(norm_out_, n);
+
+    // 1. Save residual + RMSNorm
+    cudaMemcpyAsync(r.data, h.data, h.nbytes(),
+                    cudaMemcpyDeviceToDevice, stream);
+    rmsnorm(h, ly.attn_norm, no, eps, stream);
+
+    // 2. ssm_in projection: [n, d_model] @ ssm_in^T -> [n, ssm_in_dim]
+    //    ssm_in_dim = inner(z) + conv_channels(xBC) + n_heads(dt)
+    Tensor proj = view_tokens(ssm_proj_buf_, n);
+    gemm_dispatch(no, ly.ssm_in, Tensor(), ly.ssm_in_qtype, proj, dequant_scratch_, stream);
+
+    // 3. Split projection output [n, total_dim] into z, xBC, dt by column slices.
+    //    proj layout: each row has [z(inner) | xBC(conv_channels) | dt(n_heads)].
+    //    Use cudaMemcpy2DAsync to extract strided column slices into contiguous buffers.
+    size_t es = dtype_size(compute_dtype_);
+    int total_dim = inner + conv_channels + n_heads;
+    size_t src_pitch = static_cast<size_t>(total_dim) * es;
+
+    Tensor z_buf = view_tokens(ssm_z_buf_, n);
+    cudaMemcpy2DAsync(z_buf.data, static_cast<size_t>(inner) * es,
+                      proj.data, src_pitch,
+                      static_cast<size_t>(inner) * es, n,
+                      cudaMemcpyDeviceToDevice, stream);
+
+    Tensor xBC_in = view_tokens(ssm_xBC_buf_, n);
+    {
+        char* xBC_src = static_cast<char*>(proj.data) + static_cast<size_t>(inner) * es;
+        cudaMemcpy2DAsync(xBC_in.data, static_cast<size_t>(conv_channels) * es,
+                          xBC_src, src_pitch,
+                          static_cast<size_t>(conv_channels) * es, n,
+                          cudaMemcpyDeviceToDevice, stream);
+    }
+
+    Tensor dt_buf = view_tokens(ssm_dt_buf_, n);
+    {
+        char* dt_src = static_cast<char*>(proj.data) + static_cast<size_t>(inner + conv_channels) * es;
+        cudaMemcpy2DAsync(dt_buf.data, static_cast<size_t>(n_heads) * es,
+                          dt_src, src_pitch,
+                          static_cast<size_t>(n_heads) * es, n,
+                          cudaMemcpyDeviceToDevice, stream);
+    }
+
+    // 4. Conv1d on xBC
+    //    Output reuses ssm_proj_buf_ (proj is done, safe to reuse).
+    int64_t conv_out_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(conv_channels)};
+    Tensor xBC_out(ssm_proj_buf_.data, compute_dtype_, 2, conv_out_shape, true);
+
+    int ssm_idx = ssm_layer_map_[layer];
+    void* conv_st = (state.ssm_state && ssm_idx >= 0)
+                    ? state.ssm_state->conv_state(state.ssm_seq_id, ssm_idx)
+                    : nullptr;
+
+    if (conv_st) {
+        if (state.is_prefill) {
+            ssm_conv1d_prefill(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
+                               xBC_out, conv_kernel, stream);
+        } else {
+            ssm_conv1d_decode(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
+                              xBC_out, conv_kernel, stream);
+        }
+    }
+
+    // 5. SiLU on full conv output (x, B, and C together).
+    //    Mamba2 applies SiLU to the ENTIRE conv1d output, not just x.
+    //    This matches causal_conv1d_fn(..., activation="silu").
+    silu_inplace(xBC_out, stream);
+
+    // 6-7. Split conv output into x/B/C per token, run SSM scan.
+    int BC_size = n_groups * ssize;
+    Tensor y_buf = view_tokens(ssm_y_buf_, n);
+
+    void* h_st = (state.ssm_state && ssm_idx >= 0)
+                 ? state.ssm_state->h_state(state.ssm_seq_id, ssm_idx)
+                 : nullptr;
+
+    if (h_st) {
+        for (int t = 0; t < n; t++) {
+            char* row = static_cast<char*>(xBC_out.data)
+                        + static_cast<size_t>(t) * conv_channels * es;
+
+            int64_t x_shape[1] = {static_cast<int64_t>(inner)};
+            Tensor x_t(row, compute_dtype_, 1, x_shape, true);
+
+            int64_t bc_shape[1] = {static_cast<int64_t>(BC_size)};
+            Tensor B_t(row + static_cast<size_t>(inner) * es,
+                       compute_dtype_, 1, bc_shape, true);
+            Tensor C_t(row + static_cast<size_t>(inner + BC_size) * es,
+                       compute_dtype_, 1, bc_shape, true);
+
+            int64_t dt_shape[1] = {static_cast<int64_t>(n_heads)};
+            Tensor dt_t(static_cast<char*>(dt_buf.data)
+                        + static_cast<size_t>(t) * n_heads * es,
+                        compute_dtype_, 1, dt_shape, true);
+
+            int64_t y_shape[1] = {static_cast<int64_t>(inner)};
+            Tensor y_t(static_cast<char*>(y_buf.data)
+                       + static_cast<size_t>(t) * inner * es,
+                       compute_dtype_, 1, y_shape, true);
+
+            // Pass h_dtype from SSMState for FP16 h_state support
+            DType h_dtype = (state.ssm_state) ? state.ssm_state->h_dtype() : DType::FP32;
+            ssm_scan_decode(x_t, B_t, C_t, dt_t,
+                            ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st,
+                            y_t, n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
+        }
+    }
+
+    // 8. Gating: y = y * SiLU(z)  [BEFORE GroupRMSNorm, per llama.cpp reference]
+    silu_inplace(z_buf, stream);
+    elementwise_mul(y_buf, z_buf, y_buf, stream);
+
+    // 9. Group RMSNorm on y  [AFTER gating, per llama.cpp reference]
+    group_rmsnorm(y_buf, ly.ssm_norm_w, y_buf, n_groups, eps, stream);
+
+    // 10. ssm_out projection: [n, inner] @ ssm_out^T -> [n, d_model]
+    Tensor out_buf = view_tokens(ssm_out_buf_, n);
+    gemm_dispatch(y_buf, ly.ssm_out, Tensor(), ly.ssm_out_qtype, out_buf, dequant_scratch_, stream);
+
+    // 11. Residual add: hidden = output + residual
+    elementwise_add(out_buf, r, stream);
+    cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(),
+                    cudaMemcpyDeviceToDevice, stream);
+
+    // DEBUG: layer 0 per-stage diagnostics
+    if (layer == 0) {
+        cudaStreamSynchronize(stream);
+        auto dump3 = [](const char* name, void* data, int count, DType dt) {
+            if (dt == DType::FP16) {
+                std::vector<half> buf(count);
+                cudaMemcpy(buf.data(), data, count * sizeof(half), cudaMemcpyDeviceToHost);
+                float sum = 0;
+                for (auto v : buf) sum += __half2float(v);
+                fprintf(stderr, "[L0] %s: sum=%.6f first3=[%.4f,%.4f,%.4f] last3=[%.4f,%.4f,%.4f]\n",
+                        name, sum,
+                        __half2float(buf[0]), __half2float(buf[1]), __half2float(buf[2]),
+                        __half2float(buf[count-3]), __half2float(buf[count-2]), __half2float(buf[count-1]));
+            } else {
+                std::vector<float> buf(count);
+                cudaMemcpy(buf.data(), data, count * sizeof(float), cudaMemcpyDeviceToHost);
+                float sum = 0;
+                for (auto v : buf) sum += v;
+                fprintf(stderr, "[L0] %s: sum=%.6f first3=[%.4f,%.4f,%.4f] last3=[%.4f,%.4f,%.4f]\n",
+                        name, sum,
+                        buf[0], buf[1], buf[2],
+                        buf[count-3], buf[count-2], buf[count-1]);
+            }
+        };
+        dump3("norm_out(tok0)", no.data, cfg.d_model, compute_dtype_);
+        // Token 0 of z, xBC, dt
+        dump3("z_buf(tok0)", z_buf.data, inner, compute_dtype_);
+        dump3("xBC_out(tok0,post-silu)", xBC_out.data, conv_channels, compute_dtype_);
+        dump3("y_buf(tok0,post-scan)", y_buf.data, inner, compute_dtype_);
+        // Last token values
+        int last = n - 1;
+        dump3("norm_out(last)", static_cast<char*>(no.data) + static_cast<size_t>(last) * cfg.d_model * dtype_size(compute_dtype_), cfg.d_model, compute_dtype_);
+        dump3("y_buf(last,post-gate+norm)", static_cast<char*>(y_buf.data) + static_cast<size_t>(last) * inner * dtype_size(compute_dtype_), inner, compute_dtype_);
+        dump3("out_buf(last,ssm_out)", static_cast<char*>(out_buf.data) + static_cast<size_t>(last) * cfg.d_model * dtype_size(compute_dtype_), cfg.d_model, compute_dtype_);
+        dump3("hidden(last,final)", static_cast<char*>(h.data) + static_cast<size_t>(last) * cfg.d_model * dtype_size(compute_dtype_), cfg.d_model, compute_dtype_);
     }
 }
 
@@ -1148,6 +1704,9 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     // Store for use by run_ffn (which doesn't receive the InferenceState).
     cur_n_tokens_ = n;
 
+    // Clear any stale CUDA error state before starting the forward pass.
+    cudaGetLastError();
+
     // All member tensors are [max_tokens_, cols]. view_tokens creates [n, cols]
     // views on the fly without modifying the members.
 
@@ -1157,17 +1716,97 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     embedding_lookup(model_->token_embedding(), state.token_ids, n, h,
                      model_->tok_emb_qtype_, stream);
 
-    // ---- Step 2: Transformer layers ----
-    bool has_moe = (cfg.n_experts > 0 && cfg.n_experts_active > 0);
+    // DEBUG: embedding values
+    {
+        cudaStreamSynchronize(stream);
+        std::vector<half> ebuf(n * cfg.d_model);
+        cudaMemcpy(ebuf.data(), h.data, ebuf.size() * sizeof(half), cudaMemcpyDeviceToHost);
+        // Copy all token IDs from device
+        std::vector<int32_t> tok_ids(n);
+        cudaMemcpy(tok_ids.data(), state.token_ids, n * sizeof(int32_t), cudaMemcpyDeviceToHost);
+        // Dump token 0 embedding (compare with llama.cpp: [0.0028, 0.0193, -0.0166])
+        fprintf(stderr, "[DBG] Embedding tok[0]=%d first8: ", tok_ids[0]);
+        for (int i = 0; i < 8; i++)
+            fprintf(stderr, "%.6f ", __half2float(ebuf[i]));
+        fprintf(stderr, "\n");
+        // Dump last token embedding
+        int last_tok = n - 1;
+        fprintf(stderr, "[DBG] Embedding tok[%d]=%d first8: ", last_tok, tok_ids[last_tok]);
+        for (int i = 0; i < 8; i++)
+            fprintf(stderr, "%.6f ", __half2float(ebuf[last_tok * cfg.d_model + i]));
+        fprintf(stderr, "\n");
+        // Compute per-token sums for comparison
+        for (int t = 0; t < std::min(n, 3); t++) {
+            float sum = 0.0f;
+            for (int j = 0; j < cfg.d_model; j++)
+                sum += __half2float(ebuf[t * cfg.d_model + j]);
+            fprintf(stderr, "[DBG] Embedding tok[%d] sum=%.6f\n", t, sum);
+        }
+    }
+
+    // ---- Step 2: Transformer/Hybrid layers ----
     for (int i = 0; i < cfg.n_layers; ++i) {
-        run_attention(i, state, stream);
-        if (has_moe && (!model_->layer(i).expert_w_gate.empty() ||
-                        (model_->layer(i).expert_gate_packed.data != nullptr &&
-                         model_->layer(i).expert_gate_packed.on_device))) {
+        // Layer offloading: ensure weights are on GPU, prefetch next layer
+        if (offload_mgr_) {
+            offload_mgr_->ensure_layer(i, stream);
+            if (i + 1 < cfg.n_layers) {
+                offload_mgr_->prefetch_layer(i + 1);
+            }
+        }
+
+        // Attention or SSM (mutually exclusive per layer)
+        if (layer_has_attention(i)) {
+            run_attention(i, state, stream);
+        } else if (layer_has_ssm(i)) {
+            run_ssm(i, state, stream);
+        }
+
+        // FFN: MoE, dense, or none (attention-only layers may have no FFN)
+        if (layer_has_moe(i)) {
             run_moe_ffn(i, stream);
-        } else {
+        } else if (layer_has_dense_ffn(i)) {
             run_ffn(i, stream);
         }
+
+        // Release offloaded layer (restore host pointers)
+        if (offload_mgr_) {
+            offload_mgr_->release_layer(i);
+        }
+
+        // DEBUG: track hidden state magnitude per layer
+        if (true) {
+            cudaStreamSynchronize(stream);
+            Tensor h_dbg = view_tokens(hidden_, n);
+            // Sum over ALL tokens × d_model (matches llama-debug's nemotron_h_block_out tensor sum)
+            int64_t total_elems = static_cast<int64_t>(n) * cfg.d_model;
+            std::vector<half> hbuf(total_elems);
+            cudaMemcpy(hbuf.data(), h_dbg.data, total_elems * sizeof(half), cudaMemcpyDeviceToHost);
+            float sum_all = 0.0f;
+            for (int64_t j = 0; j < total_elems; j++) {
+                sum_all += __half2float(hbuf[j]);
+            }
+            // Also get last token's first 3 values for comparison
+            int last_off = (n - 1) * cfg.d_model;
+            const char* ltype = layer_has_attention(i) ? "ATT" : (layer_has_ssm(i) ? "SSM" : "???");
+            const char* ftype = layer_has_moe(i) ? "+MoE" : (layer_has_dense_ffn(i) ? "+FFN" : "");
+            fprintf(stderr, "[DBG] Layer %2d (%s%s): sum=%.6f first3=[%.4f,%.4f,%.4f]\n",
+                    i, ltype, ftype, sum_all,
+                    __half2float(hbuf[last_off]), __half2float(hbuf[last_off+1]), __half2float(hbuf[last_off+2]));
+        }
+    }
+
+    // DEBUG: dump first 8 hidden values of last token after all layers
+    {
+        cudaStreamSynchronize(stream);
+        Tensor h_dbg = view_tokens(hidden_, n);
+        int last = n - 1;
+        std::vector<half> hvals(cfg.d_model);
+        cudaMemcpy(hvals.data(),
+                   static_cast<char*>(h_dbg.data) + static_cast<size_t>(last) * cfg.d_model * sizeof(half),
+                   cfg.d_model * sizeof(half), cudaMemcpyDeviceToHost);
+        fprintf(stderr, "[DBG] Hidden[last tok] after all layers, first 8: ");
+        for (int i = 0; i < 8; i++) fprintf(stderr, "%.2f ", __half2float(hvals[i]));
+        fprintf(stderr, "\n");
     }
 
     // ---- Step 3+4: Final RMSNorm + LM head projection ----
@@ -1182,6 +1821,25 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         Tensor lg = view_tokens(logits_, 1);
         gemm(no_last, model_->output_proj(), lg, 1.0f, 0.0f, stream);
         logits_out = lg;
+
+        // DEBUG: inspect logits distribution
+        {
+            cudaStreamSynchronize(stream);
+            int vocab = static_cast<int>(lg.shape[1]);
+            std::vector<float> lbuf(vocab);
+            cudaMemcpy(lbuf.data(), lg.data, vocab * sizeof(float), cudaMemcpyDeviceToHost);
+            // Find top-5 tokens
+            std::vector<std::pair<float,int>> ranked;
+            for (int i = 0; i < vocab; i++) ranked.push_back({lbuf[i], i});
+            std::partial_sort(ranked.begin(), ranked.begin() + 5, ranked.end(),
+                [](auto& a, auto& b){ return a.first > b.first; });
+            fprintf(stderr, "[DBG] Logits: top5 = ");
+            for (int i = 0; i < 5; i++)
+                fprintf(stderr, "[%d]=%.2f ", ranked[i].second, ranked[i].first);
+            float minv = *std::min_element(lbuf.begin(), lbuf.end());
+            float maxv = *std::max_element(lbuf.begin(), lbuf.end());
+            fprintf(stderr, " range=[%.2f, %.2f]\n", minv, maxv);
+        }
     } else {
         Tensor h_final  = view_tokens(hidden_,   n);
         Tensor no_final = view_tokens(norm_out_, n);
@@ -1215,23 +1873,6 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
     Tensor last_logits = logits.slice(0, 1);
     int64_t vocab_shape[1] = {last_logits.shape[1]};
     last_logits = last_logits.reshape(1, vocab_shape);
-
-    // Debug: dump top-3 logit values to check for NaN/inf
-    {
-        float top3[3];
-        int vocab_size = static_cast<int>(last_logits.shape[0]);
-        // Read first 3 logit values as a quick sanity check
-        cudaMemcpy(top3, last_logits.data, std::min(3, vocab_size) * sizeof(float),
-                   cudaMemcpyDeviceToHost);
-        bool has_nan = false;
-        for (int i = 0; i < 3; i++) {
-            if (std::isnan(top3[i]) || std::isinf(top3[i])) has_nan = true;
-        }
-        if (has_nan) {
-            IMP_LOG_ERROR("NaN/Inf in logits! vals[0..2] = %f, %f, %f",
-                         top3[0], top3[1], top3[2]);
-        }
-    }
 
     int32_t token;
     if (state.temperature <= 0.0f || state.top_k == 1) {

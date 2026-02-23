@@ -60,6 +60,8 @@ ImpConfig imp_config_default(void) {
     config.green_ctx_prefill_ratio = 0.8f;
     config.enable_pdl = 0;
     config.enable_cuda_graphs = 0;
+    config.gpu_layers = -1;             // all on GPU
+    config.ssm_state_dtype = IMP_DTYPE_FP32;
     config.num_cpu_threads = 0;         // auto
     return config;
 }
@@ -205,6 +207,8 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
     ecfg.use_green_contexts = (config->enable_green_contexts != 0);
     ecfg.use_cuda_graphs = (config->enable_cuda_graphs != 0);
     ecfg.use_pdl = (config->enable_pdl != 0);
+    ecfg.gpu_layers = config->gpu_layers;
+    ecfg.ssm_state_dtype = map_dtype(config->ssm_state_dtype);
     ecfg.temperature = config->temperature;
     ecfg.top_p = config->top_p;
     ecfg.top_k = config->top_k;

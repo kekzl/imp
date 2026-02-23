@@ -18,6 +18,8 @@ void print_usage(const char* prog) {
         "  --seed <n>            Random seed, -1 for random (default: -1)\n"
         "  --interactive         Run in interactive chat mode\n"
         "  --device <n>          CUDA device ID (default: 0)\n"
+        "  --gpu-layers <n>      Layers to keep on GPU (-1 = all) (default: -1)\n"
+        "  --ssm-fp16            Use FP16 for SSM h_state (saves ~50%% SSM VRAM)\n"
         "  --help                Show this help message\n",
         prog);
 }
@@ -49,6 +51,10 @@ CliArgs parse_args(int argc, char** argv) {
             args.interactive = true;
         } else if (std::strcmp(arg, "--device") == 0 && i + 1 < argc) {
             args.device = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--gpu-layers") == 0 && i + 1 < argc) {
+            args.gpu_layers = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--ssm-fp16") == 0) {
+            args.ssm_fp16 = true;
         } else {
             fprintf(stderr, "Unknown argument: %s\n", arg);
             print_usage(argv[0]);

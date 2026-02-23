@@ -12,6 +12,8 @@ struct CliArgs {
     int seed = -1;
     bool interactive = false;
     int device = 0;
+    int gpu_layers = -1;       // -1 = all on GPU
+    bool ssm_fp16 = false;     // Use FP16 for SSM h_state
 };
 
 CliArgs parse_args(int argc, char** argv);

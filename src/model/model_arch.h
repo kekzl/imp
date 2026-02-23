@@ -9,6 +9,7 @@ enum class ModelArch {
     MISTRAL,
     MIXTRAL,
     DEEPSEEK,
+    NEMOTRON_H_MOE,
     GENERIC,
 };
 

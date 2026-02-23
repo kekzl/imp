@@ -3,6 +3,7 @@
 #include "runtime/batch.h"
 #include "memory/kv_cache.h"
 #include "model/gguf_loader.h"
+#include "compute/gemm.h"
 #include "core/logging.h"
 
 #include <cstring>
@@ -39,13 +40,16 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     const auto& mcfg = model_->config();
 
+    // --- Pre-allocate cuBLAS/cuBLASLt workspace while GPU memory is plentiful ---
+    gemm_init();
+
     // --- Initialize scheduler ---
     scheduler_ = std::make_unique<Scheduler>(config_.max_batch_size);
 
     // --- Initialize graph executor (allocates activation workspace) ---
     executor_ = std::make_unique<GraphExecutor>();
     if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl,
-                         config_.max_batch_size)) {
+                         config_.max_batch_size, config_.max_seq_len)) {
         return false;
     }
 
@@ -56,13 +60,54 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
 
     // --- Upload model weights to GPU ---
-    if (!model_->upload_weights_gpu(config_.compute_dtype, stream_)) {
-        return false;
+    {
+        size_t free_before = 0, total_before = 0;
+        cudaMemGetInfo(&free_before, &total_before);
+        IMP_LOG_INFO("GPU memory before weight upload: %zu MiB free / %zu MiB total",
+                     free_before / (1024 * 1024), total_before / (1024 * 1024));
+
+        if (!model_->upload_weights_gpu(config_.compute_dtype, stream_)) {
+            IMP_LOG_ERROR("Weight upload failed. Model may be too large for GPU. "
+                          "Try a smaller quantization (e.g. Q4_K_M instead of Q6_K).");
+            return false;
+        }
+
+        size_t free_after = 0, total_after = 0;
+        cudaMemGetInfo(&free_after, &total_after);
+        IMP_LOG_INFO("GPU memory after weight upload: %zu MiB free / %zu MiB total "
+                     "(weights used ~%zu MiB)",
+                     free_after / (1024 * 1024), total_after / (1024 * 1024),
+                     (free_before - free_after) / (1024 * 1024));
+    }
+
+    // --- Initialize layer offloading if configured ---
+    if (config_.gpu_layers >= 0) {
+        offload_mgr_ = std::make_unique<LayerOffloadManager>();
+        if (!offload_mgr_->init(model_.get(), config_.gpu_layers)) {
+            IMP_LOG_WARN("Layer offloading init failed, continuing without it");
+            offload_mgr_.reset();
+        }
     }
 
     // --- Initialize KV cache (AFTER weights + workspace so cudaMemGetInfo is accurate) ---
     int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
     int max_blocks = 0;
+
+    // Count attention layers and build KV layer mapping for hybrid models.
+    // Only attention layers need KV cache entries — SSM/MoE-only layers don't.
+    int n_attn_layers = 0;
+    std::vector<int> kv_layer_map(mcfg.n_layers, -1);
+    for (int i = 0; i < mcfg.n_layers; i++) {
+        if (model_->layer(i).wq.data != nullptr) {
+            kv_layer_map[i] = n_attn_layers++;
+        }
+    }
+    if (n_attn_layers == 0) {
+        n_attn_layers = mcfg.n_layers;  // fallback: all layers have attention
+        for (int i = 0; i < mcfg.n_layers; i++) kv_layer_map[i] = i;
+    }
+    int n_kv_layers = n_attn_layers;
+    IMP_LOG_INFO("KV cache layers: %d attention out of %d total", n_kv_layers, mcfg.n_layers);
 
     // Calculate how many blocks are actually needed for the configured workload.
     int blocks_per_seq = (config_.max_seq_len + kKVBlockSize - 1) / kKVBlockSize;
@@ -75,7 +120,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         size_t elem_size = dtype_size(config_.compute_dtype);
         size_t single_block_bytes = static_cast<size_t>(kKVBlockSize) *
                                     mcfg.n_kv_heads * head_dim * elem_size;
-        size_t per_block_total = single_block_bytes * 2 * mcfg.n_layers;
+        size_t per_block_total = single_block_bytes * 2 * n_kv_layers;
 
         // Target: 2x headroom for batching / prefix caching
         int target_blocks = needed_blocks * 2;
@@ -99,24 +144,55 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         size_t elem_size = dtype_size(config_.compute_dtype);
         size_t block_bytes = static_cast<size_t>(kKVBlockSize) *
                              mcfg.n_kv_heads * head_dim * elem_size;
-        size_t total_kv = static_cast<size_t>(mcfg.n_layers) * max_blocks * 2 * block_bytes;
+        size_t total_kv = static_cast<size_t>(n_kv_layers) * max_blocks * 2 * block_bytes;
         IMP_LOG_INFO("KV cache: %d blocks (%.0f tokens), %.2f MiB "
-                     "(layers=%d, kv_heads=%d, head_dim=%d, block_size=%d)",
+                     "(layers=%d/%d, kv_heads=%d, head_dim=%d, block_size=%d)",
                      max_blocks,
                      static_cast<double>(max_blocks) * kKVBlockSize,
                      static_cast<double>(total_kv) / (1024.0 * 1024.0),
-                     mcfg.n_layers, mcfg.n_kv_heads, head_dim, kKVBlockSize);
+                     n_kv_layers, mcfg.n_layers, mcfg.n_kv_heads, head_dim, kKVBlockSize);
     }
 
     auto kv_cache = std::make_unique<KVCache>(
-        mcfg.n_layers, mcfg.n_kv_heads, head_dim,
+        n_kv_layers, mcfg.n_kv_heads, head_dim,
         config_.compute_dtype, max_blocks);
 
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
 
+    // Pass KV layer mapping to executor for correct cache indexing
+    executor_->set_kv_layer_map(std::move(kv_layer_map));
+
+    // Pass layer offload manager to executor (if enabled)
+    if (offload_mgr_) {
+        executor_->set_offload_manager(offload_mgr_.get());
+    }
+
     // Wire up scheduler with KV cache manager for memory-aware scheduling
     scheduler_->set_kv_manager(kv_manager_.get());
+
+    // --- Initialize SSM state for Mamba2 hybrid models ---
+    if (mcfg.ssm_inner_size > 0) {
+        // Count SSM layers
+        int n_ssm_layers = 0;
+        for (int i = 0; i < mcfg.n_layers; i++) {
+            if (model_->layer(i).ssm_in.data != nullptr) n_ssm_layers++;
+        }
+        if (n_ssm_layers > 0) {
+            int conv_channels = mcfg.ssm_inner_size + 2 * mcfg.ssm_group_count * mcfg.ssm_state_size;
+            int n_heads = mcfg.ssm_dt_rank;
+            int head_dim_ssm = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
+
+            ssm_state_ = std::make_unique<SSMState>();
+            if (!ssm_state_->init(n_ssm_layers, config_.max_batch_size,
+                                   conv_channels, mcfg.ssm_conv_kernel,
+                                   n_heads, head_dim_ssm, mcfg.ssm_state_size,
+                                   config_.ssm_state_dtype)) {
+                IMP_LOG_WARN("Failed to init SSM state, continuing without it");
+                ssm_state_.reset();
+            }
+        }
+    }
 
     // --- Pre-allocate decode batch pool for stable CUDA Graph pointers ---
     {
@@ -222,6 +298,11 @@ bool Engine::step() {
 
     for (auto& req : prefill_batch) {
         int ctx_len = req->context_len();
+        int n_tokens = static_cast<int>(req->input_tokens.size());
+
+        // Resize workspace for prefill token count (may be large)
+        executor_->resize_workspace(n_tokens, pf_stream);
+
         int num_blocks = (ctx_len + kKVBlockSize - 1) / kKVBlockSize;
 
         // Allocate KV cache blocks
@@ -238,7 +319,6 @@ bool Engine::step() {
 
         const auto& block_table = kv_manager_->block_table(req->id);
 
-        int n_tokens = static_cast<int>(req->input_tokens.size());
         std::vector<int> positions(n_tokens);
         for (int i = 0; i < n_tokens; i++) {
             positions[i] = i;
@@ -283,6 +363,14 @@ bool Engine::step() {
         state.top_p = req->top_p;
         state.top_k = req->top_k;
         state.seed = req->seed;
+
+        // SSM state for hybrid models
+        if (ssm_state_) {
+            state.ssm_state = ssm_state_.get();
+            // Use request ID mod max_sequences as SSM sequence slot
+            state.ssm_seq_id = req->id % ssm_state_->max_sequences();
+            ssm_state_->reset_sequence(state.ssm_seq_id, pf_stream);
+        }
 
         int32_t next_token = executor_->forward(state, pf_stream);
 
@@ -343,6 +431,9 @@ bool Engine::step() {
         }
 
         if (!valid_decode.empty()) {
+            // Resize workspace for decode batch size (much smaller than prefill)
+            executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
+
             // 3b. Build batched decode using BatchBuilder
             BatchBuilder builder;
             builder.reset();
@@ -389,6 +480,12 @@ bool Engine::step() {
             state.top_p = valid_decode[0]->top_p;
             state.top_k = valid_decode[0]->top_k;
             state.seed = -1;
+
+            // SSM state for hybrid models (decode uses first sequence's slot)
+            if (ssm_state_) {
+                state.ssm_state = ssm_state_.get();
+                state.ssm_seq_id = valid_decode[0]->id % ssm_state_->max_sequences();
+            }
 
             // 3e. Execute batched forward pass (with CUDA Graph when enabled)
             std::vector<int32_t> tokens;
@@ -466,19 +563,21 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     int32_t im_end   = tok->find_token("<|im_end|>");
     IMP_LOG_DEBUG("Chat template probe: im_start=%d, im_end=%d", im_start, im_end);
 
-    bool use_chat_template = (im_start >= 0 && im_end >= 0);
+    bool use_chat_template = false; // TEMP: disabled for debug comparison with llama-debug
+    // bool use_chat_template = (im_start >= 0 && im_end >= 0);
 
     if (use_chat_template) {
-        // ChatML template: <|im_start|>system\n...<|im_end|>\n<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n
+        // ChatML template: <s><|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n
+        // Match llama.cpp: BOS + user block + assistant prefix (no system block)
         auto encode_text = [&](const std::string& text) {
             auto ids = tok->encode(text);
             tokens.insert(tokens.end(), ids.begin(), ids.end());
         };
 
-        tokens.push_back(im_start);
-        encode_text("system\nYou are a helpful assistant.");
-        tokens.push_back(im_end);
-        encode_text("\n");
+        // BOS token first (llama.cpp includes it)
+        if (tok->add_bos()) {
+            tokens.push_back(static_cast<int32_t>(tok->bos_id()));
+        }
         tokens.push_back(im_start);
         encode_text("user\n");
         {

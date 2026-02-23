@@ -5,6 +5,10 @@
 
 namespace imp {
 
+// Pre-initialize cuBLAS handle and workspace. Call early (before weight upload)
+// to ensure workspace is allocated while GPU memory is available.
+void gemm_init();
+
 // cuBLAS GEMM wrapper: C = alpha * A @ B^T + beta * C
 // A [M, K]  B [N, K]  C [M, N]   -- all row-major
 void gemm(const Tensor& A, const Tensor& B, Tensor& C,
