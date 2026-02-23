@@ -11,10 +11,13 @@ namespace imp {
 // K+V slots.
 //
 // Memory layout (byte offsets):
-//   pool_[layer][block_id][kv_slot][block_size * n_kv_heads * head_dim]
+//   Per layer: K blocks contiguous, then V blocks contiguous.
 //
-//   K offset(layer, block_id) = (layer * max_blocks * 2 + block_id * 2 + 0) * block_bytes_
-//   V offset(layer, block_id) = (layer * max_blocks * 2 + block_id * 2 + 1) * block_bytes_
+//   K offset(layer, block_id) = (layer * 2 * max_blocks + block_id) * block_bytes_
+//   V offset(layer, block_id) = (layer * 2 * max_blocks + max_blocks + block_id) * block_bytes_
+//
+// This ensures K (and V) blocks are contiguous within a layer, allowing
+// kernels to stride by block_bytes_ between physical blocks.
 //
 // Total = n_layers * max_blocks * 2 * block_bytes_
 // ---------------------------------------------------------------------------
@@ -103,14 +106,16 @@ void KVCache::inc_ref(int block_id) {
 // ---------------------------------------------------------------------------
 
 void* KVCache::k_ptr(int layer, int block_id) {
-    size_t offset = (static_cast<size_t>(layer) * max_blocks_ * 2 +
-                     static_cast<size_t>(block_id) * 2 + 0) * block_bytes_;
+    // K blocks: [layer * 2 * max_blocks + block_id] * block_bytes
+    size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ +
+                     static_cast<size_t>(block_id)) * block_bytes_;
     return static_cast<char*>(pool_) + offset;
 }
 
 void* KVCache::v_ptr(int layer, int block_id) {
-    size_t offset = (static_cast<size_t>(layer) * max_blocks_ * 2 +
-                     static_cast<size_t>(block_id) * 2 + 1) * block_bytes_;
+    // V blocks: [layer * 2 * max_blocks + max_blocks + block_id] * block_bytes
+    size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ +
+                     max_blocks_ + static_cast<size_t>(block_id)) * block_bytes_;
     return static_cast<char*>(pool_) + offset;
 }
 

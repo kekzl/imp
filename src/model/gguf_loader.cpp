@@ -345,7 +345,7 @@ static bool assign_tensor(Model& model, const std::string& name,
     if (layer_idx < 0 || layer_idx >= model.n_layers()) return false;
     auto& layer = model.layers_[layer_idx];
 
-    // 4-part: "blk.{i}.{name}.weight"
+    // 4-part: "blk.{i}.{name}.weight" or "blk.{i}.{name}.bias"
     if (parts.size() == 4) {
         const auto& field = parts[2];
         if      (field == "attn_q")      { layer.wq = tensor; layer.wq_qtype = qtype; }
@@ -360,6 +360,20 @@ static bool assign_tensor(Model& model, const std::string& name,
         else if (field == "ffn_down")    { layer.w_down = tensor; layer.w_down_qtype = qtype; }
         else if (field == "ffn_norm")      layer.ffn_norm = tensor;
         else if (field == "ffn_gate_inp")  layer.moe_gate = tensor;
+        // Packed expert tensors: 3D [n_experts, rows, cols]
+        else if (field == "ffn_gate_exps") { layer.expert_gate_packed = tensor; layer.expert_gate_qtype = qtype; }
+        else if (field == "ffn_up_exps")   { layer.expert_up_packed = tensor; layer.expert_up_qtype = qtype; }
+        else if (field == "ffn_down_exps") { layer.expert_down_packed = tensor; layer.expert_down_qtype = qtype; }
+        // Shared expert (always-active, e.g. Nemotron/DeepSeek)
+        else if (field == "ffn_gate_shexp") { layer.w_gate_shared = tensor; layer.w_gate_shared_qtype = qtype; }
+        else if (field == "ffn_up_shexp")   { layer.w_up_shared = tensor; layer.w_up_shared_qtype = qtype; }
+        else if (field == "ffn_down_shexp") { layer.w_down_shared = tensor; layer.w_down_shared_qtype = qtype; }
+        // Silently accept known but unsupported fields (SSM, biases)
+        else if (field == "ssm_a" || field == "ssm_conv1d" || field == "ssm_d" ||
+                 field == "ssm_dt" || field == "ssm_in" || field == "ssm_out" ||
+                 field == "ssm_norm" || field == "exp_probs_b") {
+            // Recognized but not yet implemented -- count as assigned to reduce noise
+        }
         else return false;
         return true;
     }

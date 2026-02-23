@@ -51,7 +51,8 @@ public:
     // dtype of intermediate activations (FP16 or BF16).
     // use_pdl: if true, enable Programmatic Dependent Launch on custom kernels
     // to reduce inter-kernel gaps in the forward pass.
-    bool init(const Model& model, DType compute_dtype = DType::FP16, bool use_pdl = false);
+    bool init(const Model& model, DType compute_dtype = DType::FP16, bool use_pdl = false,
+              int max_batch_size = 1);
 
     // Run the full forward pass and return the sampled token ID.
     int32_t forward(const InferenceState& state, cudaStream_t stream = nullptr);
@@ -69,6 +70,7 @@ private:
     DType compute_dtype_ = DType::FP16;
     bool initialized_ = false;
     int max_tokens_ = 0;
+    int max_logit_tokens_ = 0;  // max tokens needing LM head projection (= max_batch_size)
     int cur_n_tokens_ = 0;  // set by forward_logits for use by run_ffn
 
     // Programmatic Dependent Launch: when true, custom kernels have the PDL
@@ -92,7 +94,7 @@ private:
     Tensor up_out_;        // [max_tokens, d_ff]
     Tensor swiglu_out_;    // [max_tokens, d_ff]
     Tensor ffn_out_;       // [max_tokens, d_model]
-    Tensor logits_;        // [max_tokens, vocab_size]
+    Tensor logits_;        // [max_logit_tokens, vocab_size]
 
     // MoE workspace (only allocated when model has MoE layers)
     MoeRoutingBuffers moe_routing_buffers_;
@@ -105,6 +107,18 @@ private:
     Tensor moe_expert_swiglu_;  // [max_tokens * top_k, expert_d_ff] compute_dtype
     Tensor moe_expert_down_;    // [max_tokens * top_k, d_model] compute_dtype
     Tensor moe_scatter_out_;    // [max_tokens, d_model] FP32 (scatter output)
+
+    // On-the-fly dequant scratch buffer for quantized expert weights.
+    // Sized for n_experts × max_expert_weight_elements × sizeof(half).
+    // Reused per GEMM call (gate, up, down are sequential).
+    void* moe_dequant_buf_ = nullptr;
+    size_t moe_dequant_buf_size_ = 0;
+
+    // On-the-fly dequant scratch buffer for non-MoE quantized weights (Q8_0/Q6_K).
+    // Sized for the largest weight tensor across all layers (in FP16 elements).
+    // Reused per GEMM call within run_attention() and run_ffn().
+    void* dequant_scratch_ = nullptr;
+    size_t dequant_scratch_size_ = 0;
 
     void allocate_buffers(int max_tokens);
     void allocate_moe_buffers(int max_tokens);

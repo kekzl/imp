@@ -115,9 +115,10 @@ __global__ void paged_attention_decode_kernel(
     // ---- block_tables pointer for this batch ----
     const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
 
-    // K_cache / V_cache layout: [num_blocks_total, n_kv_heads, block_size, head_dim]
-    const int kv_block_stride = n_kv_heads * block_size * head_dim;  // stride per physical block
-    const int kv_head_stride  = block_size * head_dim;               // stride per kv_head within block
+    // K_cache / V_cache layout: [num_blocks_total, block_size, n_kv_heads, head_dim]
+    // Written by write_kv_cache_kernel which stores [slot, kv_head, hd] per block.
+    const int kv_block_stride = block_size * n_kv_heads * head_dim;  // stride per physical block
+    const int kv_slot_stride  = n_kv_heads * head_dim;               // stride per slot within block
 
     // ---- Per-warp running softmax state ----
     float m_w = -FLT_MAX;  // running max
@@ -134,11 +135,9 @@ __global__ void paged_attention_decode_kernel(
     for (int blk = warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];  // physical block index
 
-        // Base pointer for K and V in this physical block, this kv_head
-        const half* K_block = K_cache + (int64_t)phys_block * kv_block_stride
-                                      + (int64_t)kv_head    * kv_head_stride;
-        const half* V_block = V_cache + (int64_t)phys_block * kv_block_stride
-                                      + (int64_t)kv_head    * kv_head_stride;
+        // Base pointer for K and V in this physical block
+        const half* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
+        const half* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
 
         // Number of valid tokens in this block
         int tok_start = blk * block_size;
@@ -148,8 +147,8 @@ __global__ void paged_attention_decode_kernel(
 
         // Process each token in the block
         for (int t = 0; t < num_valid; t++) {
-            // K for this token: K_block[t * head_dim + d]
-            const half* K_tok = K_block + t * head_dim;
+            // K for this token: [slot=t, kv_head, head_dim]
+            const half* K_tok = K_block + t * kv_slot_stride + kv_head * head_dim;
 
             // Compute dot(Q, K) -- distributed across warp lanes
             float dot = 0.0f;
@@ -173,8 +172,8 @@ __global__ void paged_attention_decode_kernel(
             float rescale = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
             float w_new   = (l_new > 0.0f) ? (p / l_new) : 0.0f;
 
-            // V for this token
-            const half* V_tok = V_block + t * head_dim;
+            // V for this token: [slot=t, kv_head, head_dim]
+            const half* V_tok = V_block + t * kv_slot_stride + kv_head * head_dim;
 
             for (int i = 0; i < elems_per_thread; i++) {
                 int d = lane_id + i * WARP_SIZE;
@@ -266,7 +265,8 @@ void paged_attention_decode(
     // Q.shape[1] == 1  (decode: single query token)
     const int n_heads    = static_cast<int>(Q.shape[2]);
     const int head_dim   = static_cast<int>(Q.shape[3]);
-    const int n_kv_heads = static_cast<int>(K_cache.shape[1]);  // [num_blocks, n_kv_heads, block_size, hd]
+    // K_cache layout: [num_blocks, block_size, n_kv_heads, head_dim]
+    const int n_kv_heads = static_cast<int>(K_cache.shape[2]);
 
     const int max_num_blocks = (max_context_len + block_size - 1) / block_size;
 
@@ -373,10 +373,10 @@ __global__ void paged_attention_decode_fp8_kernel(
     // ---- block_tables pointer for this batch ----
     const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
 
-    // K_cache / V_cache layout: [num_blocks_total, n_kv_heads, block_size, head_dim]
+    // K_cache / V_cache layout: [num_blocks_total, block_size, n_kv_heads, head_dim]
     // Each element is 1 byte (FP8), so strides are in bytes.
-    const int kv_block_stride = n_kv_heads * block_size * head_dim;
-    const int kv_head_stride  = block_size * head_dim;
+    const int kv_block_stride = block_size * n_kv_heads * head_dim;
+    const int kv_slot_stride  = n_kv_heads * head_dim;
 
     // ---- Per-warp running softmax state ----
     float m_w = -FLT_MAX;
@@ -391,10 +391,8 @@ __global__ void paged_attention_decode_fp8_kernel(
     for (int blk = warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
 
-        const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride
-                                         + (int64_t)kv_head    * kv_head_stride;
-        const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride
-                                         + (int64_t)kv_head    * kv_head_stride;
+        const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
+        const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
 
         int tok_start = blk * block_size;
         int tok_end   = tok_start + block_size;
@@ -402,7 +400,7 @@ __global__ void paged_attention_decode_fp8_kernel(
         int num_valid = tok_end - tok_start;
 
         for (int t = 0; t < num_valid; t++) {
-            const uint8_t* K_tok = K_block + t * head_dim;
+            const uint8_t* K_tok = K_block + t * kv_slot_stride + kv_head * head_dim;
 
             // Compute dot(Q, K) with FP8 dequant
             float dot = 0.0f;
@@ -425,7 +423,7 @@ __global__ void paged_attention_decode_fp8_kernel(
             float rescale = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
             float w_new   = (l_new > 0.0f) ? (p / l_new) : 0.0f;
 
-            const uint8_t* V_tok = V_block + t * head_dim;
+            const uint8_t* V_tok = V_block + t * kv_slot_stride + kv_head * head_dim;
 
             for (int i = 0; i < elems_per_thread; i++) {
                 int d = lane_id + i * WARP_SIZE;
@@ -503,7 +501,8 @@ void paged_attention_decode_fp8(
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads    = static_cast<int>(Q.shape[2]);
     const int head_dim   = static_cast<int>(Q.shape[3]);
-    const int n_kv_heads = static_cast<int>(K_cache.shape[1]);
+    // K_cache layout: [num_blocks, block_size, n_kv_heads, head_dim]
+    const int n_kv_heads = static_cast<int>(K_cache.shape[2]);
 
     const int max_num_blocks = (max_context_len + block_size - 1) / block_size;
 

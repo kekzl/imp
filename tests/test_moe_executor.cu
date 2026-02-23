@@ -310,20 +310,20 @@ TEST(MoEExecutorTest, ForwardProducesValidOutput) {
     executor.forward_logits(state, logits, nullptr);
     cudaDeviceSynchronize();
 
-    // Check logits shape
+    // Check logits shape (prefill: only last token projected)
     ASSERT_EQ(logits.ndim, 2);
-    ASSERT_EQ(logits.shape[0], n_tokens);
+    ASSERT_EQ(logits.shape[0], 1);
     ASSERT_EQ(logits.shape[1], 256);  // vocab_size
 
-    // Read back logits and check for NaN/Inf
+    // Read back logits and check for NaN/Inf (logits are FP32)
     int64_t numel = logits.numel();
-    std::vector<half> h_logits(numel);
-    cudaMemcpy(h_logits.data(), logits.data, numel * sizeof(half), cudaMemcpyDeviceToHost);
+    std::vector<float> h_logits(numel);
+    cudaMemcpy(h_logits.data(), logits.data, numel * sizeof(float), cudaMemcpyDeviceToHost);
 
     int nan_count = 0;
     int inf_count = 0;
     for (int64_t i = 0; i < numel; i++) {
-        float v = __half2float(h_logits[i]);
+        float v = h_logits[i];
         if (std::isnan(v)) nan_count++;
         if (std::isinf(v)) inf_count++;
     }
@@ -604,25 +604,25 @@ TEST(MoEExecutorTest, MoEVsDenseDiffer) {
     moe_exec.forward_logits(state, moe_logits, nullptr);
     cudaDeviceSynchronize();
 
-    // Both should produce valid logits
-    ASSERT_EQ(dense_logits.shape[0], n_tokens);
-    ASSERT_EQ(moe_logits.shape[0], n_tokens);
+    // Both should produce valid logits (prefill: 1 token projected)
+    ASSERT_EQ(dense_logits.shape[0], 1);
+    ASSERT_EQ(moe_logits.shape[0], 1);
 
-    // Read back ALL logits (all tokens)
+    // Read back logits (last token only) - logits are FP32
     int vocab = 256;
-    int total = n_tokens * vocab;
-    std::vector<half> h_dense(total), h_moe(total);
+    int total = 1 * vocab;
+    std::vector<float> h_dense(total), h_moe(total);
 
     cudaMemcpy(h_dense.data(), dense_logits.data,
-               total * sizeof(half), cudaMemcpyDeviceToHost);
+               total * sizeof(float), cudaMemcpyDeviceToHost);
     cudaMemcpy(h_moe.data(), moe_logits.data,
-               total * sizeof(half), cudaMemcpyDeviceToHost);
+               total * sizeof(float), cudaMemcpyDeviceToHost);
 
     // Check that both outputs are non-zero (sanity check)
     float dense_sum = 0.0f, moe_sum = 0.0f;
     for (int i = 0; i < total; i++) {
-        dense_sum += std::abs(__half2float(h_dense[i]));
-        moe_sum += std::abs(__half2float(h_moe[i]));
+        dense_sum += std::abs(h_dense[i]);
+        moe_sum += std::abs(h_moe[i]);
     }
     EXPECT_GT(dense_sum, 0.0f) << "Dense logits are all zero";
     EXPECT_GT(moe_sum, 0.0f) << "MoE logits are all zero";
@@ -630,8 +630,8 @@ TEST(MoEExecutorTest, MoEVsDenseDiffer) {
     // Count how many logits differ between dense and MoE
     int diff_count = 0;
     for (int i = 0; i < total; i++) {
-        float dv = __half2float(h_dense[i]);
-        float mv = __half2float(h_moe[i]);
+        float dv = h_dense[i];
+        float mv = h_moe[i];
         if (std::abs(dv - mv) > 0.01f) diff_count++;
     }
     // With different random seeds, the embedding + projection weights differ,
@@ -689,7 +689,7 @@ TEST(MoEExecutorTest, LogitsShape) {
         cudaDeviceSynchronize();
 
         EXPECT_EQ(logits.ndim, 2) << "n_tokens=" << n_tokens;
-        EXPECT_EQ(logits.shape[0], n_tokens) << "n_tokens=" << n_tokens;
+        EXPECT_EQ(logits.shape[0], 1) << "n_tokens=" << n_tokens;  // prefill: last token only
         EXPECT_EQ(logits.shape[1], 256) << "n_tokens=" << n_tokens;
 
         cudaFree(d_tokens);

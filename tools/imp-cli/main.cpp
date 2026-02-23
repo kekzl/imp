@@ -25,6 +25,7 @@ int main(int argc, char** argv) {
 
     ImpConfig config = imp_config_default();
     config.device_id = args.device;
+    config.max_batch_size = 1;
     config.max_seq_len = 4096;
 
     ImpContext ctx = nullptr;

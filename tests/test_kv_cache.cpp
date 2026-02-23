@@ -295,24 +295,24 @@ TEST(KVCacheTest, KVCachePointers) {
     ASSERT_NE(v1_l0, nullptr);
     ASSERT_NE(k0_l1, nullptr);
 
-    // K and V pointers for the same (layer, block) should be distinct and
-    // exactly block_bytes apart (V immediately follows K).
+    // K and V pointers for the same (layer, block) should be distinct.
+    // V blocks start max_blocks * bb after K blocks within a layer.
     EXPECT_NE(k0_l0, v0_l0);
     ptrdiff_t kv_diff = static_cast<char*>(v0_l0) - static_cast<char*>(k0_l0);
-    EXPECT_EQ(static_cast<size_t>(kv_diff), bb);
+    EXPECT_EQ(static_cast<size_t>(kv_diff), static_cast<size_t>(max_blocks) * bb);
 
-    // Expected offsets:
-    //   K(layer, block) = (layer * max_blocks * 2 + block * 2 + 0) * bb
-    //   V(layer, block) = (layer * max_blocks * 2 + block * 2 + 1) * bb
+    // Expected offsets (K and V contiguous within layer):
+    //   K(layer, block) = (layer * 2 * max_blocks + block) * bb
+    //   V(layer, block) = (layer * 2 * max_blocks + max_blocks + block) * bb
     // Verify layer=1, block=0 K pointer is at the expected offset from
     // layer=0, block=0 K pointer.
     ptrdiff_t layer_diff = static_cast<char*>(k0_l1) - static_cast<char*>(k0_l0);
     size_t expected_layer_stride = static_cast<size_t>(max_blocks) * 2 * bb;
     EXPECT_EQ(static_cast<size_t>(layer_diff), expected_layer_stride);
 
-    // Verify block=1 K is 2*bb after block=0 K (within same layer).
+    // Verify block=1 K is bb after block=0 K (K blocks contiguous within layer).
     ptrdiff_t block_diff = static_cast<char*>(k1_l0) - static_cast<char*>(k0_l0);
-    EXPECT_EQ(static_cast<size_t>(block_diff), 2 * bb);
+    EXPECT_EQ(static_cast<size_t>(block_diff), bb);
 
     // Write a known value via cudaMemcpy to k_ptr(0, b0), read back, verify.
     size_t num_elements = kKVBlockSize * n_kv_heads * head_dim; // elements per block
