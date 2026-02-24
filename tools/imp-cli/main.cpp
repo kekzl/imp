@@ -4,6 +4,7 @@
 #include "model/tokenizer.h"
 #include "runtime/engine.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -170,18 +171,87 @@ int main(int argc, char** argv) {
             }
         }
     } else {
-        // Single-shot mode: engine handles template via generate()
+        // Single-shot mode with timing
         if (args.prompt.empty()) {
             fprintf(stderr, "No prompt provided. Use --prompt or --interactive\n");
         } else {
-            char output[8192];
-            size_t output_len = 0;
-            err = imp_generate(ctx, args.prompt.c_str(), &params, output, sizeof(output), &output_len);
-            if (err != IMP_SUCCESS) {
-                fprintf(stderr, "Generation error: %s\n", imp_error_string(err));
-            } else {
-                printf("%.*s\n", (int)output_len, output);
+            imp::Tokenizer* tok = model->model->tokenizer();
+            const imp::ChatTemplate& engine_tpl = ctx->engine->chat_template();
+
+            // Resolve chat template
+            imp::ChatTemplate chat_tpl;
+            bool have_template = false;
+            if (args.chat_template == "none" || !params.apply_chat_template) {
+                // No template
+            } else if (args.chat_template != "auto") {
+                auto family = imp::ChatTemplate::parse_family(args.chat_template);
+                if (family != imp::ChatTemplateFamily::RAW) {
+                    have_template = chat_tpl.init(family, *tok);
+                }
+            } else if (!engine_tpl.is_raw()) {
+                chat_tpl = engine_tpl;
+                have_template = true;
             }
+
+            // Tokenize prompt
+            std::vector<int32_t> tokens;
+            if (have_template) {
+                std::vector<imp::ChatMessage> msgs = {{"user", args.prompt}};
+                tokens = chat_tpl.apply(*tok, msgs);
+            } else {
+                tokens = tok->encode(args.prompt);
+            }
+            int n_prompt_tokens = static_cast<int>(tokens.size());
+
+            // Prefill with timing
+            auto t_prefill_start = std::chrono::high_resolution_clock::now();
+            err = imp_prefill(ctx, tokens.data(), n_prompt_tokens);
+            auto t_prefill_end = std::chrono::high_resolution_clock::now();
+            if (err != IMP_SUCCESS) {
+                fprintf(stderr, "Prefill error: %s\n", imp_error_string(err));
+                imp_context_free(ctx);
+                imp_model_free(model);
+                return 1;
+            }
+
+            // Decode with timing
+            auto t_decode_start = std::chrono::high_resolution_clock::now();
+            std::vector<int32_t> output_ids;
+            for (int step = 0; step < params.max_tokens; step++) {
+                int32_t token = 0;
+                err = imp_decode_step(ctx, &params, &token);
+                if (err != IMP_SUCCESS) break;
+
+                if (token == tok->eos_id()) break;
+                if (have_template) {
+                    bool is_stop = false;
+                    for (int32_t stop_id : chat_tpl.stop_token_ids()) {
+                        if (token == stop_id) { is_stop = true; break; }
+                    }
+                    if (is_stop) break;
+                }
+
+                output_ids.push_back(token);
+                std::string piece = tok->decode_token(token);
+                printf("%s", piece.c_str());
+                fflush(stdout);
+            }
+            auto t_decode_end = std::chrono::high_resolution_clock::now();
+            printf("\n");
+
+            int n_output_tokens = static_cast<int>(output_ids.size());
+            double prefill_ms = std::chrono::duration<double, std::milli>(t_prefill_end - t_prefill_start).count();
+            double decode_ms = std::chrono::duration<double, std::milli>(t_decode_end - t_decode_start).count();
+            double total_ms = std::chrono::duration<double, std::milli>(t_decode_end - t_prefill_start).count();
+
+            double pp_toks = (prefill_ms > 0) ? (n_prompt_tokens / (prefill_ms / 1000.0)) : 0;
+            double tg_toks = (decode_ms > 0 && n_output_tokens > 1)
+                ? ((n_output_tokens - 1) / (decode_ms / 1000.0)) : 0;
+
+            fprintf(stderr, "\n");
+            fprintf(stderr, "pp %5d tokens in %8.2f ms  (%7.2f tok/s)\n", n_prompt_tokens, prefill_ms, pp_toks);
+            fprintf(stderr, "tg %5d tokens in %8.2f ms  (%7.2f tok/s)\n", n_output_tokens, decode_ms, tg_toks);
+            fprintf(stderr, "total   %8.2f ms\n", total_ms);
         }
     }
 
