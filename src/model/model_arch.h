@@ -10,6 +10,8 @@ enum class ModelArch {
     MIXTRAL,
     DEEPSEEK,
     NEMOTRON_H_MOE,
+    QWEN3,
+    QWEN3_MOE,
     GENERIC,
 };
 

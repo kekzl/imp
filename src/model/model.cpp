@@ -42,6 +42,8 @@ const char* model_arch_name(ModelArch arch) {
         case ModelArch::MIXTRAL:  return "mixtral";
         case ModelArch::DEEPSEEK:       return "deepseek";
         case ModelArch::NEMOTRON_H_MOE: return "nemotron_h_moe";
+        case ModelArch::QWEN3:          return "qwen3";
+        case ModelArch::QWEN3_MOE:      return "qwen3moe";
         case ModelArch::GENERIC:        return "generic";
     }
     return "unknown";
@@ -53,6 +55,8 @@ ModelArch parse_model_arch(const std::string& s) {
     if (s == "mixtral")                      return ModelArch::MIXTRAL;
     if (s == "deepseek" || s == "deepseek2") return ModelArch::DEEPSEEK;
     if (s == "nemotron_h_moe")               return ModelArch::NEMOTRON_H_MOE;
+    if (s == "qwen3")                        return ModelArch::QWEN3;
+    if (s == "qwen3moe")                     return ModelArch::QWEN3_MOE;
     return ModelArch::GENERIC;
 }
 
@@ -60,6 +64,9 @@ void apply_arch_defaults(ModelConfig& cfg) {
     switch (cfg.arch) {
         case ModelArch::NEMOTRON_H_MOE:
             cfg.moe_sigmoid_gating = true;
+            break;
+        case ModelArch::QWEN3_MOE:
+            cfg.expert_weights_norm = true;
             break;
         default:
             break;
