@@ -1,4 +1,5 @@
 #include "model/safetensors_loader.h"
+#include "model/model_arch.h"
 #include "model/weight_map.h"
 #include "core/logging.h"
 
@@ -236,22 +237,28 @@ static DType safetensors_dtype(const std::string& s) {
 
 static ModelArch detect_arch_from_weights(
         const std::unordered_map<std::string, Tensor>& tensors) {
-    bool has_moe = false;
+    bool has_block_sparse_moe = false;
+    bool has_mlp_experts = false;
+    bool has_ssm = false;
     bool has_layers = false;
 
     for (const auto& kv : tensors) {
         const auto& name = kv.first;
-        if (name.find("block_sparse_moe") != std::string::npos ||
-            name.find("experts") != std::string::npos) {
-            has_moe = true;
-        }
-        if (name.find("model.layers") != std::string::npos) {
+        if (name.find("model.layers") != std::string::npos)
             has_layers = true;
-        }
+        if (name.find("block_sparse_moe") != std::string::npos)
+            has_block_sparse_moe = true;
+        if (name.find("mlp.experts") != std::string::npos)
+            has_mlp_experts = true;
+        if (name.find("mamba") != std::string::npos ||
+            name.find("ssm") != std::string::npos)
+            has_ssm = true;
     }
 
-    if (has_moe) return ModelArch::MIXTRAL;
-    if (has_layers) return ModelArch::LLAMA;  // LLAMA-style is the default HF format
+    if (has_ssm)              return ModelArch::NEMOTRON_H_MOE;
+    if (has_mlp_experts)      return ModelArch::DEEPSEEK;
+    if (has_block_sparse_moe) return ModelArch::MIXTRAL;
+    if (has_layers)           return ModelArch::LLAMA;
     return ModelArch::GENERIC;
 }
 
@@ -570,6 +577,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     ModelConfig& cfg = model->config_;
     cfg.arch = arch;
     infer_config(cfg, tensor_map);
+    apply_arch_defaults(cfg);
 
     IMP_LOG_INFO("Architecture: %s", model_arch_name(cfg.arch));
     IMP_LOG_INFO("Config: layers=%d d_model=%d d_ff=%d heads=%d kv_heads=%d vocab=%d ctx=%d",

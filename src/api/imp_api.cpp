@@ -149,12 +149,14 @@ ImpModelArch imp_model_arch(ImpModel model) {
         return IMP_ARCH_GENERIC;
     }
     switch (model->model->config().arch) {
-        case imp::ModelArch::LLAMA:    return IMP_ARCH_LLAMA;
-        case imp::ModelArch::MISTRAL:  return IMP_ARCH_MISTRAL;
-        case imp::ModelArch::MIXTRAL:  return IMP_ARCH_MIXTRAL;
-        case imp::ModelArch::DEEPSEEK: return IMP_ARCH_DEEPSEEK;
-        default:                       return IMP_ARCH_GENERIC;
+        case imp::ModelArch::LLAMA:          return IMP_ARCH_LLAMA;
+        case imp::ModelArch::MISTRAL:        return IMP_ARCH_MISTRAL;
+        case imp::ModelArch::MIXTRAL:        return IMP_ARCH_MIXTRAL;
+        case imp::ModelArch::DEEPSEEK:       return IMP_ARCH_DEEPSEEK;
+        case imp::ModelArch::NEMOTRON_H_MOE: return IMP_ARCH_NEMOTRON_H_MOE;
+        case imp::ModelArch::GENERIC:        return IMP_ARCH_GENERIC;
     }
+    return IMP_ARCH_GENERIC;
 }
 
 int imp_model_n_layers(ImpModel model) {

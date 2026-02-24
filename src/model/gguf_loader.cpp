@@ -1,4 +1,5 @@
 #include "model/gguf_loader.h"
+#include "model/model_arch.h"
 #include "core/logging.h"
 
 #include <fcntl.h>
@@ -286,17 +287,6 @@ static double val_float(const GGUFValue& v) {
     }
 }
 
-// ---- Architecture detection ----
-
-static ModelArch detect_arch(const std::string& s) {
-    if (s == "llama")                       return ModelArch::LLAMA;
-    if (s == "mistral")                     return ModelArch::MISTRAL;
-    if (s == "mixtral")                     return ModelArch::MIXTRAL;
-    if (s == "deepseek" || s == "deepseek2") return ModelArch::DEEPSEEK;
-    if (s == "nemotron_h_moe")              return ModelArch::NEMOTRON_H_MOE;
-    return ModelArch::GENERIC;
-}
-
 // ---- Split string by delimiter ----
 
 static std::vector<std::string> split(const std::string& s, char delim) {
@@ -527,7 +517,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
     auto it_arch = metadata.find("general.architecture");
     std::string arch_str = (it_arch != metadata.end()) ? it_arch->second.str_val : "llama";
-    cfg.arch = detect_arch(arch_str);
+    cfg.arch = parse_model_arch(arch_str);
 
     IMP_LOG_INFO("Architecture: %s -> %s", arch_str.c_str(), model_arch_name(cfg.arch));
 
@@ -614,10 +604,8 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     cfg.expert_shared_d_ff   = static_cast<int>(get_uint("expert_shared_feed_forward_length", 0));
     cfg.expert_weights_scale = static_cast<float>(get_float("expert_weights_scale", 1.0));
     cfg.expert_weights_norm  = (get_uint("expert_weights_norm", 0) != 0);
-    // Nemotron-H uses sigmoid gating instead of softmax
-    if (cfg.arch == ModelArch::NEMOTRON_H_MOE) {
-        cfg.moe_sigmoid_gating = true;
-    }
+    // Apply arch-specific config defaults (e.g. sigmoid gating for Nemotron)
+    apply_arch_defaults(cfg);
 
     IMP_LOG_INFO("Config: layers=%d d_model=%d d_ff=%d heads=%d kv_heads=%d head_dim=%d vocab=%d ctx=%d",
                  cfg.n_layers, cfg.d_model, cfg.d_ff, cfg.n_heads, cfg.n_kv_heads,
