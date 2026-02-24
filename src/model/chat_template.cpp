@@ -32,6 +32,17 @@ ChatTemplateFamily ChatTemplate::detect_family(const std::string& jinja2_str) {
     return ChatTemplateFamily::RAW;
 }
 
+ChatTemplateFamily ChatTemplate::default_family_for_arch(ModelArch arch) {
+    switch (arch) {
+        case ModelArch::LLAMA:          return ChatTemplateFamily::LLAMA3;
+        case ModelArch::MISTRAL:        return ChatTemplateFamily::LLAMA2;
+        case ModelArch::MIXTRAL:        return ChatTemplateFamily::LLAMA2;
+        case ModelArch::DEEPSEEK:       return ChatTemplateFamily::CHATML;
+        case ModelArch::NEMOTRON_H_MOE: return ChatTemplateFamily::NEMOTRON;
+        default:                        return ChatTemplateFamily::RAW;
+    }
+}
+
 ChatTemplateFamily ChatTemplate::parse_family(const std::string& name) {
     if (name == "auto")     return ChatTemplateFamily::RAW;  // caller handles auto
     if (name == "none")     return ChatTemplateFamily::RAW;

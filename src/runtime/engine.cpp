@@ -233,6 +233,14 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         Tokenizer* tok = model_->tokenizer();
         if (tok) {
             auto family = ChatTemplate::detect_family(tok->chat_template_str());
+            if (family == ChatTemplateFamily::RAW) {
+                family = ChatTemplate::default_family_for_arch(model_->config().arch);
+                if (family != ChatTemplateFamily::RAW) {
+                    IMP_LOG_INFO("No chat template in metadata, using %s default for %s",
+                                 chat_template_family_name(family),
+                                 model_arch_name(model_->config().arch));
+                }
+            }
             if (family != ChatTemplateFamily::RAW) {
                 chat_template_.init(family, *tok);
             }

@@ -1,4 +1,5 @@
 #include "model/model.h"
+#include "model/model_arch.h"
 #include <cuda_runtime.h>
 
 #ifdef __linux__
@@ -44,6 +45,25 @@ const char* model_arch_name(ModelArch arch) {
         case ModelArch::GENERIC:        return "generic";
     }
     return "unknown";
+}
+
+ModelArch parse_model_arch(const std::string& s) {
+    if (s == "llama")                        return ModelArch::LLAMA;
+    if (s == "mistral")                      return ModelArch::MISTRAL;
+    if (s == "mixtral")                      return ModelArch::MIXTRAL;
+    if (s == "deepseek" || s == "deepseek2") return ModelArch::DEEPSEEK;
+    if (s == "nemotron_h_moe")               return ModelArch::NEMOTRON_H_MOE;
+    return ModelArch::GENERIC;
+}
+
+void apply_arch_defaults(ModelConfig& cfg) {
+    switch (cfg.arch) {
+        case ModelArch::NEMOTRON_H_MOE:
+            cfg.moe_sigmoid_gating = true;
+            break;
+        default:
+            break;
+    }
 }
 
 } // namespace imp

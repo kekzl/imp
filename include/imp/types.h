@@ -19,11 +19,12 @@ typedef enum {
 } ImpDType;
 
 typedef enum {
-    IMP_ARCH_LLAMA     = 0,
-    IMP_ARCH_MISTRAL   = 1,
-    IMP_ARCH_MIXTRAL   = 2,
-    IMP_ARCH_DEEPSEEK  = 3,
-    IMP_ARCH_GENERIC   = 4,
+    IMP_ARCH_LLAMA          = 0,
+    IMP_ARCH_MISTRAL        = 1,
+    IMP_ARCH_MIXTRAL        = 2,
+    IMP_ARCH_DEEPSEEK       = 3,
+    IMP_ARCH_NEMOTRON_H_MOE = 4,
+    IMP_ARCH_GENERIC        = 5,
 } ImpModelArch;
 
 typedef enum {

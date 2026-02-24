@@ -1,6 +1,7 @@
 #pragma once
 
 #include "model/tokenizer.h"
+#include "model/model_arch.h"
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -31,6 +32,9 @@ public:
 
     // Parse family name from CLI string (e.g. "chatml", "llama3", "none")
     static ChatTemplateFamily parse_family(const std::string& name);
+
+    // Default template family for a given model architecture (fallback)
+    static ChatTemplateFamily default_family_for_arch(ModelArch arch);
 
     // Initialize: resolve special token IDs via tokenizer
     bool init(ChatTemplateFamily family, const Tokenizer& tokenizer);
