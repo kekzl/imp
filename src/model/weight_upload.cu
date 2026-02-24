@@ -544,6 +544,42 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream) {
         }
     }
 
+    // Pre-pass: check if quantized expert weights can fit on GPU
+    size_t total_expert_bytes = 0;
+    for (int i = 0; i < n_layers(); ++i) {
+        const TransformerLayer& L = layers_[i];
+        auto add_packed = [&](const Tensor& p, GGMLQuantType qt) {
+            if (!p.data || p.ndim < 3 || !dequant_gpu_supported(qt)) return;
+            size_t row_bytes = ggml_quant_row_bytes(qt, p.shape[2]);
+            total_expert_bytes += static_cast<size_t>(p.shape[0]) * p.shape[1] * row_bytes;
+        };
+        add_packed(L.expert_gate_packed, L.expert_gate_qtype);
+        add_packed(L.expert_up_packed, L.expert_up_qtype);
+        add_packed(L.expert_down_packed, L.expert_down_qtype);
+    }
+
+    bool experts_on_gpu = false;
+    if (total_expert_bytes > 0) {
+        size_t free_mem = 0, total_mem = 0;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        constexpr size_t kReserveBytes = 2ULL * 1024 * 1024 * 1024;  // 2 GiB for KV cache + overhead
+        if (free_mem > total_expert_bytes + kReserveBytes) {
+            experts_on_gpu = true;
+            IMP_LOG_INFO("Expert weights: %.2f GiB raw quantized -> uploading to GPU "
+                         "(%.2f GiB free, %.2f GiB reserve)",
+                         total_expert_bytes / (1024.0*1024.0*1024.0),
+                         free_mem / (1024.0*1024.0*1024.0),
+                         kReserveBytes / (1024.0*1024.0*1024.0));
+        } else {
+            IMP_LOG_INFO("Expert weights: %.2f GiB raw quantized -> keeping on host "
+                         "(only %.2f GiB free, need %.2f GiB + %.2f GiB reserve)",
+                         total_expert_bytes / (1024.0*1024.0*1024.0),
+                         free_mem / (1024.0*1024.0*1024.0),
+                         total_expert_bytes / (1024.0*1024.0*1024.0),
+                         kReserveBytes / (1024.0*1024.0*1024.0));
+        }
+    }
+
     // Upload per-layer weights
     for (int i = 0; i < n_layers(); ++i) {
         TransformerLayer& L = layers_[i];
@@ -646,22 +682,33 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream) {
             int64_t rows = packed.shape[1];
             int64_t cols = packed.shape[2];
 
-            // Path A1: Quantized types -- keep on host (mmap'd), pin for fast H2D.
-            // Expert weights are offloaded: only the active expert's raw bytes are
-            // copied to a small GPU staging buffer during the forward pass.
-            // This saves ~31 GiB VRAM for models like Nemotron-H with 128 experts.
+            // Path A1: Quantized types -- upload raw bytes to GPU if they fit,
+            // otherwise keep on host (mmap'd) with optional pinning for H2D.
             if (dequant_gpu_supported(qtype)) {
                 size_t row_bytes = ggml_quant_row_bytes(qtype, cols);
                 size_t expert_raw = static_cast<size_t>(rows) * row_bytes;
                 size_t total_raw = static_cast<size_t>(n_experts) * expert_raw;
 
-                // Pin host memory for faster H2D transfers during inference.
-                // cudaHostRegister can fail (e.g., mmap not pinnable), which is fine —
-                // cudaMemcpy still works from unpinned host memory, just slower.
-                //
-                // WSL2 workaround: cudaHostRegister succeeds on mmap'd memory but
-                // GPU DMA reads return stale/corrupted data.  Skip pinning entirely
-                // and let cudaMemcpyAsync fall back to pageable staging copies.
+                if (experts_on_gpu) {
+                    // Upload raw quantized bytes to GPU — eliminates per-expert H2D during inference
+                    void* gpu_ptr = nullptr;
+                    cudaError_t err = cudaMalloc(&gpu_ptr, total_raw);
+                    if (err == cudaSuccess) {
+                        cudaMemcpyAsync(gpu_ptr, packed.data, total_raw,
+                                        cudaMemcpyHostToDevice, stream);
+                        packed.data = gpu_ptr;
+                        packed.on_device = true;
+                        gpu_allocations_.push_back(gpu_ptr);
+                        IMP_LOG_DEBUG("  %s: %d experts uploaded to GPU (%.2f MiB)",
+                                      name, n_experts, total_raw / (1024.0 * 1024.0));
+                        return true;
+                    }
+                    // cudaMalloc failed — fall through to host path
+                    IMP_LOG_WARN("  %s: cudaMalloc failed for %.2f MiB, falling back to host",
+                                 name, total_raw / (1024.0 * 1024.0));
+                }
+
+                // Host path: keep mmap'd, optionally pin for faster H2D
                 if (is_wsl2()) {
                     IMP_LOG_INFO("  %s: WSL2 detected, skipping cudaHostRegister "
                                  "(%.2f MiB unpinned)", name,

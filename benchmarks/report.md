@@ -1,6 +1,6 @@
 # imp vs llama.cpp Benchmark Report
 
-**Date:** 2026-02-24 13:55 UTC
+**Date:** 2026-02-24 14:43 UTC
 **GPU:** NVIDIA GeForce RTX 5090 (32607 MiB)
 **Driver:** 591.86 | **CUDA:** 13.1
 **OS:** Linux 6.6.87.2-microsoft-standard-WSL2
@@ -17,12 +17,24 @@
 
 | Model | Quant | Engine | pp tok/s | tg tok/s |
 |-------|-------|--------|----------|----------|
-| Qwen3-4B-Instruct | Q8_0 | llama.cpp | 19521.44 | 218.24 |
-| Qwen3-4B-Instruct | Q8_0 | imp | 1138.28 | 25.44 |
-| Qwen3-Coder-30B-A3B-Instruct | Q6_K | llama.cpp | 6177.76 | 201.17 |
-| Qwen3-Coder-30B-A3B-Instruct | Q6_K | imp | 116.40 | 5.10 |
-| Nemotron-3-Nano-30B-A3B | Q6_K | llama.cpp | 2011.13 | 179.47 |
-| Nemotron-3-Nano-30B-A3B | Q6_K | imp | 79.74 | 7.68 |
+| Qwen3-4B-Instruct | Q8_0 | llama.cpp | 19692.67 | 213.23 |
+| Qwen3-4B-Instruct | Q8_0 | imp | 1290.73 | 42.24 |
+| Qwen3-Coder-30B-A3B-Instruct | Q6_K | llama.cpp | 6061.17 | 200.49 |
+| Qwen3-Coder-30B-A3B-Instruct | Q6_K | imp | 105.28 | 4.80 |
+| Qwen3-Coder-30B-A3B-Instruct | Q6_K | imp (GPU experts) | 9.35 | 23.71 |
+| Nemotron-3-Nano-30B-A3B | Q6_K | llama.cpp | 129.91 | 18.34 |
+| Nemotron-3-Nano-30B-A3B | Q6_K | imp | 66.64 | 7.36 |
+
+## GPU-Resident MoE Expert Weights (2026-02-24)
+
+Expert weights uploaded to GPU as raw quantized bytes when VRAM permits (2 GiB reserve).
+Eliminates per-expert H2D copy during inference — dequant runs GPU-to-GPU.
+
+| Model | Experts on GPU | tg before | tg after | Speedup |
+|-------|---------------|-----------|----------|---------|
+| Qwen3-Coder-30B-A3B Q6_K | Yes (22.15 GiB) | 4.80 tok/s | 23.71 tok/s | 4.9x |
+| Nemotron-3-Nano-30B-A3B Q6_K | No (29.07 GiB > 28.42 free) | 7.36 tok/s | — | host fallback |
+| Qwen3-4B Q8_0 (dense, no MoE) | n/a | 42.24 tok/s | 53.40 tok/s | no regression |
 
 ## Notes
 
