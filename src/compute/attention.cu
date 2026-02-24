@@ -43,7 +43,8 @@ __global__ void flash_attention_prefill_kernel(
     int n_kv_heads,
     int head_dim,
     float scale,
-    bool causal)
+    bool causal,
+    int sliding_window)
 {
     // ---- index mapping ----
     const int tile_q     = blockIdx.x;                   // query-tile index
@@ -109,6 +110,7 @@ __global__ void flash_attention_prefill_kernel(
 
     // ---- Number of KV tiles to iterate ----
     int num_kv_tiles = (seq_kv + Bc - 1) / Bc;
+    int first_kv_tile = 0;
     if (causal) {
         // No need to look at KV positions beyond the furthest query in this tile
         int max_q = q_start + Br - 1;
@@ -116,8 +118,16 @@ __global__ void flash_attention_prefill_kernel(
         int furthest_kv_tile = (max_q + Bc) / Bc;
         if (furthest_kv_tile < num_kv_tiles) num_kv_tiles = furthest_kv_tile;
     }
+    if (sliding_window > 0) {
+        // Skip KV tiles entirely before the window: earliest relevant KV pos
+        // is q_start - sliding_window + 1 (for the first query in this tile).
+        int earliest_kv = q_start - sliding_window + 1;
+        if (earliest_kv > 0) {
+            first_kv_tile = earliest_kv / Bc;
+        }
+    }
 
-    for (int j = 0; j < num_kv_tiles; j++) {
+    for (int j = first_kv_tile; j < num_kv_tiles; j++) {
         const int kv_start = j * Bc;
 
         // ---- Load K tile into KV_tile ----
@@ -152,6 +162,7 @@ __global__ void flash_attention_prefill_kernel(
                     }
                     dot *= scale;
                     if (causal && gq < gk) dot = -FLT_MAX;
+                    if (sliding_window > 0 && (gq - gk) >= sliding_window) dot = -FLT_MAX;
                 } else {
                     dot = -FLT_MAX;
                 }
@@ -245,7 +256,7 @@ __global__ void flash_attention_prefill_kernel(
 // ---------------------------------------------------------------------------
 void flash_attention_prefill(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, cudaStream_t stream)
+    float scale, bool causal, int sliding_window, cudaStream_t stream)
 {
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int seq_q      = static_cast<int>(Q.shape[1]);
@@ -273,7 +284,7 @@ void flash_attention_prefill(
         reinterpret_cast<const half*>(V.data),
         reinterpret_cast<half*>(O.data),
         batch_size, seq_q, seq_kv, n_heads, n_kv_heads, head_dim,
-        scale, causal);
+        scale, causal, sliding_window);
 }
 
 } // namespace imp

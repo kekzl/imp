@@ -38,6 +38,7 @@ struct ModelConfig {
     int ssm_inner_size = 0;     // 4096
     int ssm_dt_rank = 0;        // 64
     int rope_dim = 0;           // 0 = full head_dim, 84 = partial
+    int sliding_window = 0;     // 0 = disabled, >0 = window size (Qwen3, Mistral)
 
     // Extended MoE config
     int n_experts_shared = 0;       // 1
