@@ -21,7 +21,11 @@ static cublasHandle_t get_cublas_handle() {
             fprintf(stderr, "imp::gemm: cublasCreate failed (status %d)\n", (int)st);
             abort();
         }
-        cublasSetMathMode(handle, CUBLAS_DEFAULT_MATH);
+        // Use TF32 tensor ops for FP32 inputs (19-bit mantissa, ~8x faster
+        // than FP32 on Hopper/Blackwell tensor cores, accuracy sufficient for
+        // inference).  cuBLAS will also select FP16/BF16 tensor core paths
+        // automatically when operands match.
+        cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH);
     }
     return handle;
 }

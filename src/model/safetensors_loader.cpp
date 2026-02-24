@@ -350,6 +350,9 @@ static void infer_config(ModelConfig& cfg,
         cfg.expert_d_ff = static_cast<int>(it_expert->second.shape[0]);
     }
 
+    // sliding_window: not inferrable from tensor shapes; set from config.json
+    // or leave as 0 (disabled). The GGUF loader reads this from metadata.
+
     // Defaults for fields we couldn't infer
     if (cfg.max_seq_len == 0) cfg.max_seq_len = 4096;
     if (cfg.n_kv_heads == 0) cfg.n_kv_heads = cfg.n_heads;

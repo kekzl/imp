@@ -552,6 +552,8 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     cfg.rope_theta   = static_cast<float>(get_float("rope.freq_base", 10000.0));
     cfg.rms_norm_eps = static_cast<float>(get_float("attention.layer_norm_rms_epsilon", 1e-5));
 
+    cfg.sliding_window   = static_cast<int>(get_uint("attention.sliding_window", 0));
+
     cfg.n_experts        = static_cast<int>(get_uint("expert_count", 0));
     cfg.n_experts_active = static_cast<int>(get_uint("expert_used_count", 0));
     cfg.expert_d_ff      = static_cast<int>(get_uint("expert_feed_forward_length", cfg.d_ff));
@@ -610,6 +612,10 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     IMP_LOG_INFO("Config: layers=%d d_model=%d d_ff=%d heads=%d kv_heads=%d head_dim=%d vocab=%d ctx=%d",
                  cfg.n_layers, cfg.d_model, cfg.d_ff, cfg.n_heads, cfg.n_kv_heads,
                  cfg.head_dim, cfg.vocab_size, cfg.max_seq_len);
+
+    if (cfg.sliding_window > 0) {
+        IMP_LOG_INFO("Sliding window attention: %d tokens", cfg.sliding_window);
+    }
 
     if (cfg.n_experts > 0) {
         IMP_LOG_INFO("MoE: %d experts, %d active, expert_d_ff=%d",

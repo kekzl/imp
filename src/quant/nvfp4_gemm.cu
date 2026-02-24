@@ -1,9 +1,11 @@
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
+#include "compute/gemm.h"
 #include "core/tensor.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cublasLt.h>
 #include <cstdint>
 #include <cassert>
 
@@ -189,79 +191,75 @@ void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y,
 }
 
 // ---------------------------------------------------------------------------
-// GEMM: dequantize A to FP16 temp buffer, then use standard GEMM.
+// GEMM for NVFP4 weights:  C = input @ A^T
 //
-// For large batch prefill where M > 1, the GEMV kernel is inefficient.
-// This function dequantizes back to FP16 and delegates to a standard GEMM.
-// A future version could use cuBLASLt's native NVFP4 support on SM100+.
+//   A (NvFP4QuantResult): weight matrix [N, K] in NVFP4 packed format
+//   input (Tensor):       activation     [M, K] in FP16
+//   C (Tensor):           output         [M, N] in FP16
+//
+// Strategy:
+//   1. Dequantize A from NVFP4 to FP16 into a temporary buffer.
+//   2. Call the existing cuBLAS gemm() which computes C = input @ A_fp16^T.
+//
+// This avoids the per-call cudaMalloc by using a persistent scratch buffer
+// (grown as needed, never shrunk).  For SM100+ with CUDA 13.1, a native
+// cuBLASLt NVFP4 path can be added in the future.
 // ---------------------------------------------------------------------------
+
+// Persistent dequant scratch buffer (process-lifetime, grown as needed).
+static void* s_nvfp4_dequant_buf = nullptr;
+static size_t s_nvfp4_dequant_buf_size = 0;
+
+static void* ensure_dequant_buffer(size_t needed) {
+    if (needed <= s_nvfp4_dequant_buf_size) return s_nvfp4_dequant_buf;
+    if (s_nvfp4_dequant_buf) cudaFree(s_nvfp4_dequant_buf);
+    s_nvfp4_dequant_buf = nullptr;
+    s_nvfp4_dequant_buf_size = 0;
+    cudaError_t err = cudaMalloc(&s_nvfp4_dequant_buf, needed);
+    if (err != cudaSuccess) {
+        IMP_LOG_ERROR("gemm_nvfp4: failed to allocate %zu bytes for dequant buffer: %s",
+                      needed, cudaGetErrorString(err));
+        return nullptr;
+    }
+    s_nvfp4_dequant_buf_size = needed;
+    IMP_LOG_DEBUG("gemm_nvfp4: allocated dequant scratch buffer: %zu bytes", needed);
+    return s_nvfp4_dequant_buf;
+}
+
 void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C,
                 cudaStream_t stream)
 {
     assert(A.packed_data != nullptr && "A must be quantized");
-    assert(B.on_device && "B must be on device");
-    assert(C.on_device && "C must be on device");
+    assert(B.on_device && "B (input) must be on device");
+    assert(C.on_device && "C (output) must be on device");
+    assert(B.ndim == 2 && "B (input) must be 2D [M, K]");
+    assert(C.ndim == 2 && "C (output) must be 2D [M, N]");
 
-    int64_t M = A.N;
-    int64_t K = A.K;
+    const int64_t N = A.N;   // weight out_features
+    const int64_t K = A.K;   // weight in_features
+    const int64_t M = B.shape[0];  // sequence length / batch tokens
 
-    // Allocate temporary FP16 buffer for dequantized A.
-    half* d_A_fp16 = nullptr;
-    size_t A_fp16_bytes = (size_t)(M * K) * sizeof(half);
-    cudaError_t err = cudaMalloc(&d_A_fp16, A_fp16_bytes);
-    if (err != cudaSuccess) {
-        IMP_LOG_ERROR("gemm_nvfp4: failed to allocate %zu bytes for dequant buffer: %s",
-                      A_fp16_bytes, cudaGetErrorString(err));
+    assert(B.shape[1] == K && "input columns must match weight in_features");
+    assert(C.shape[0] == M && C.shape[1] == N && "output shape must be [M, N]");
+
+    // For M == 1, prefer the custom GEMV kernel (bandwidth-optimized).
+    if (M == 1) {
+        gemv_nvfp4(A, B, C, stream);
         return;
     }
 
-    // Dequantize A to FP16.
-    dequantize_nvfp4_to_fp16(A, d_A_fp16, stream);
+    // Dequantize weight A [N, K] from NVFP4 to FP16 into scratch buffer.
+    size_t A_fp16_bytes = (size_t)(N * K) * sizeof(half);
+    void* dequant_buf = ensure_dequant_buffer(A_fp16_bytes);
+    if (!dequant_buf) return;
 
-    // Wrap the dequantized buffer as a Tensor.
-    int64_t A_shape[2] = {M, K};
-    Tensor A_fp16(d_A_fp16, DType::FP16, 2, A_shape, /*on_device=*/true);
+    dequantize_nvfp4_to_fp16(A, dequant_buf, stream);
 
-    // Determine output dimensions from B.
-    // B is [K, N] or [N, K] depending on convention.  We follow C = A @ B
-    // where A is [M, K] and B is [K, N], so C is [M, N].
-    assert(B.ndim == 2 && "B must be 2D");
-    assert(B.shape[0] == K && "B.shape[0] must match A.K");
-    int64_t N = B.shape[1];
+    // Wrap as Tensor [N, K] and call standard cuBLAS GEMM: C = B @ A_fp16^T.
+    int64_t A_shape[2] = {N, K};
+    Tensor A_fp16(dequant_buf, DType::FP16, 2, A_shape, /*on_device=*/true);
 
-    // Validate C dimensions.
-    assert(C.ndim == 2 && "C must be 2D");
-    assert(C.shape[0] == M && C.shape[1] == N && "C shape must be [M, N]");
-
-    // Call standard GEMM: C = A_fp16 @ B.
-    // Use a simple row-by-column kernel as fallback.  In production this
-    // would dispatch to cuBLAS.
-    //
-    // For now we implement a naive GEMM here.  A proper integration would
-    // call into imp's compute layer.
-    IMP_LOG_WARN("gemm_nvfp4: using dequant + naive fallback GEMM. "
-                 "For production, integrate cuBLAS or cuBLASLt.");
-
-    // -- Naive fallback: launch GEMV per column of B --
-    // This is intentionally simple; the real path should use cuBLAS.
-    // For M*N*K < threshold, this is acceptable for correctness testing.
-
-    // Actually, just use the dequantized A and do a batched dot product.
-    // We leave the cuBLAS integration as a TODO since it requires linking
-    // against cuBLAS which may not be available in all build configurations.
-
-    // For now, we just dequantize and let the caller use the dequantized
-    // tensor with their own GEMM routine.  Log a warning.
-    IMP_LOG_INFO("gemm_nvfp4: dequantized A[%lld,%lld] to FP16. "
-                 "Caller should use standard GEMM on the result.",
-                 (long long)M, (long long)K);
-
-    // TODO: Replace with cuBLAS call:
-    //   cublasHgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
-    //               N, M, K, &alpha, B_ptr, N, A_ptr, K, &beta, C_ptr, N);
-    // Or cuBLASLt with native NVFP4 on SM100+.
-
-    cudaFree(d_A_fp16);
+    gemm(B, A_fp16, C, 1.0f, 0.0f, stream);
 }
 
 } // namespace imp
