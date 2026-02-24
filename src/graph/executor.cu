@@ -351,6 +351,27 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
     has_ssm_ = (cfg.ssm_inner_size > 0);
     has_dense_ffn_ = (cfg.d_ff > 0);
 
+    // Compute max expert FFN hidden dim from actual packed tensor shapes.
+    // cfg.expert_d_ff may not match the actual tensor dimensions (e.g. Nemotron-H).
+    max_expert_eff_ = cfg.expert_d_ff;
+    if (has_moe_) {
+        for (int li = 0; li < cfg.n_layers; li++) {
+            const auto& L = model.layer(li);
+            // gate/up packed: shape [n_experts, expert_d_ff, d_model]
+            for (const auto* p : {&L.expert_gate_packed, &L.expert_up_packed}) {
+                if (p->data && p->ndim >= 3)
+                    max_expert_eff_ = std::max(max_expert_eff_, static_cast<int>(p->shape[1]));
+            }
+            // down packed: shape [n_experts, d_model, expert_d_ff]
+            if (L.expert_down_packed.data && L.expert_down_packed.ndim >= 3)
+                max_expert_eff_ = std::max(max_expert_eff_, static_cast<int>(L.expert_down_packed.shape[2]));
+        }
+        if (max_expert_eff_ != cfg.expert_d_ff) {
+            IMP_LOG_WARN("expert_d_ff mismatch: config=%d, actual packed tensors=%d — using %d",
+                         cfg.expert_d_ff, max_expert_eff_, max_expert_eff_);
+        }
+    }
+
     // Use engine-provided max_seq_len if given, otherwise fall back to model config.
     int effective_seq_len = (max_seq_len > 0) ? max_seq_len : cfg.max_seq_len;
     max_tokens_ = std::min(effective_seq_len, 4096);
@@ -442,7 +463,7 @@ void GraphExecutor::compute_shared_sizes(int max_tokens) {
     if (has_moe_) {
         int ne    = cfg.n_experts;
         int top_k = cfg.n_experts_active;
-        int eff   = cfg.expert_d_ff;
+        int eff   = max_expert_eff_;
         int expanded = max_tokens * top_k;
 
         moe_shared_size_ = align256(static_cast<size_t>(max_tokens) * ne * sizeof(float))  // gate_logits
@@ -583,7 +604,7 @@ void GraphExecutor::allocate_auxiliary_buffers() {
     // MoE dequant and staging buffers
     if (has_moe_) {
         int d   = cfg.d_model;
-        int eff = cfg.expert_d_ff;
+        int eff = max_expert_eff_;
 
         // Dequant buffer: 1 expert slot
         {
@@ -721,7 +742,7 @@ void GraphExecutor::configure_moe_workspace(int max_tokens) {
     int d     = cfg.d_model;
     int ne    = cfg.n_experts;
     int top_k = cfg.n_experts_active;
-    int eff   = cfg.expert_d_ff;
+    int eff   = max_expert_eff_;
     size_t es = dtype_size(compute_dtype_);
     int expanded = max_tokens * top_k;
 
@@ -1139,7 +1160,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     int d       = cfg.d_model;
     int ne      = cfg.n_experts;
     int top_k   = cfg.n_experts_active;
-    int eff     = cfg.expert_d_ff;
+    int eff     = max_expert_eff_;
     float eps   = cfg.rms_norm_eps;
     size_t es   = dtype_size(compute_dtype_);
     int expanded = n * top_k;
@@ -1640,42 +1661,6 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
     cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(),
                     cudaMemcpyDeviceToDevice, stream);
 
-    // DEBUG: layer 0 per-stage diagnostics
-    if (layer == 0) {
-        cudaStreamSynchronize(stream);
-        auto dump3 = [](const char* name, void* data, int count, DType dt) {
-            if (dt == DType::FP16) {
-                std::vector<half> buf(count);
-                cudaMemcpy(buf.data(), data, count * sizeof(half), cudaMemcpyDeviceToHost);
-                float sum = 0;
-                for (auto v : buf) sum += __half2float(v);
-                fprintf(stderr, "[L0] %s: sum=%.6f first3=[%.4f,%.4f,%.4f] last3=[%.4f,%.4f,%.4f]\n",
-                        name, sum,
-                        __half2float(buf[0]), __half2float(buf[1]), __half2float(buf[2]),
-                        __half2float(buf[count-3]), __half2float(buf[count-2]), __half2float(buf[count-1]));
-            } else {
-                std::vector<float> buf(count);
-                cudaMemcpy(buf.data(), data, count * sizeof(float), cudaMemcpyDeviceToHost);
-                float sum = 0;
-                for (auto v : buf) sum += v;
-                fprintf(stderr, "[L0] %s: sum=%.6f first3=[%.4f,%.4f,%.4f] last3=[%.4f,%.4f,%.4f]\n",
-                        name, sum,
-                        buf[0], buf[1], buf[2],
-                        buf[count-3], buf[count-2], buf[count-1]);
-            }
-        };
-        dump3("norm_out(tok0)", no.data, cfg.d_model, compute_dtype_);
-        // Token 0 of z, xBC, dt
-        dump3("z_buf(tok0)", z_buf.data, inner, compute_dtype_);
-        dump3("xBC_out(tok0,post-silu)", xBC_out.data, conv_channels, compute_dtype_);
-        dump3("y_buf(tok0,post-scan)", y_buf.data, inner, compute_dtype_);
-        // Last token values
-        int last = n - 1;
-        dump3("norm_out(last)", static_cast<char*>(no.data) + static_cast<size_t>(last) * cfg.d_model * dtype_size(compute_dtype_), cfg.d_model, compute_dtype_);
-        dump3("y_buf(last,post-gate+norm)", static_cast<char*>(y_buf.data) + static_cast<size_t>(last) * inner * dtype_size(compute_dtype_), inner, compute_dtype_);
-        dump3("out_buf(last,ssm_out)", static_cast<char*>(out_buf.data) + static_cast<size_t>(last) * cfg.d_model * dtype_size(compute_dtype_), cfg.d_model, compute_dtype_);
-        dump3("hidden(last,final)", static_cast<char*>(h.data) + static_cast<size_t>(last) * cfg.d_model * dtype_size(compute_dtype_), cfg.d_model, compute_dtype_);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1716,34 +1701,6 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     embedding_lookup(model_->token_embedding(), state.token_ids, n, h,
                      model_->tok_emb_qtype_, stream);
 
-    // DEBUG: embedding values
-    {
-        cudaStreamSynchronize(stream);
-        std::vector<half> ebuf(n * cfg.d_model);
-        cudaMemcpy(ebuf.data(), h.data, ebuf.size() * sizeof(half), cudaMemcpyDeviceToHost);
-        // Copy all token IDs from device
-        std::vector<int32_t> tok_ids(n);
-        cudaMemcpy(tok_ids.data(), state.token_ids, n * sizeof(int32_t), cudaMemcpyDeviceToHost);
-        // Dump token 0 embedding (compare with llama.cpp: [0.0028, 0.0193, -0.0166])
-        fprintf(stderr, "[DBG] Embedding tok[0]=%d first8: ", tok_ids[0]);
-        for (int i = 0; i < 8; i++)
-            fprintf(stderr, "%.6f ", __half2float(ebuf[i]));
-        fprintf(stderr, "\n");
-        // Dump last token embedding
-        int last_tok = n - 1;
-        fprintf(stderr, "[DBG] Embedding tok[%d]=%d first8: ", last_tok, tok_ids[last_tok]);
-        for (int i = 0; i < 8; i++)
-            fprintf(stderr, "%.6f ", __half2float(ebuf[last_tok * cfg.d_model + i]));
-        fprintf(stderr, "\n");
-        // Compute per-token sums for comparison
-        for (int t = 0; t < std::min(n, 3); t++) {
-            float sum = 0.0f;
-            for (int j = 0; j < cfg.d_model; j++)
-                sum += __half2float(ebuf[t * cfg.d_model + j]);
-            fprintf(stderr, "[DBG] Embedding tok[%d] sum=%.6f\n", t, sum);
-        }
-    }
-
     // ---- Step 2: Transformer/Hybrid layers ----
     for (int i = 0; i < cfg.n_layers; ++i) {
         // Layer offloading: ensure weights are on GPU, prefetch next layer
@@ -1773,40 +1730,6 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             offload_mgr_->release_layer(i);
         }
 
-        // DEBUG: track hidden state magnitude per layer
-        if (true) {
-            cudaStreamSynchronize(stream);
-            Tensor h_dbg = view_tokens(hidden_, n);
-            // Sum over ALL tokens × d_model (matches llama-debug's nemotron_h_block_out tensor sum)
-            int64_t total_elems = static_cast<int64_t>(n) * cfg.d_model;
-            std::vector<half> hbuf(total_elems);
-            cudaMemcpy(hbuf.data(), h_dbg.data, total_elems * sizeof(half), cudaMemcpyDeviceToHost);
-            float sum_all = 0.0f;
-            for (int64_t j = 0; j < total_elems; j++) {
-                sum_all += __half2float(hbuf[j]);
-            }
-            // Also get last token's first 3 values for comparison
-            int last_off = (n - 1) * cfg.d_model;
-            const char* ltype = layer_has_attention(i) ? "ATT" : (layer_has_ssm(i) ? "SSM" : "???");
-            const char* ftype = layer_has_moe(i) ? "+MoE" : (layer_has_dense_ffn(i) ? "+FFN" : "");
-            fprintf(stderr, "[DBG] Layer %2d (%s%s): sum=%.6f first3=[%.4f,%.4f,%.4f]\n",
-                    i, ltype, ftype, sum_all,
-                    __half2float(hbuf[last_off]), __half2float(hbuf[last_off+1]), __half2float(hbuf[last_off+2]));
-        }
-    }
-
-    // DEBUG: dump first 8 hidden values of last token after all layers
-    {
-        cudaStreamSynchronize(stream);
-        Tensor h_dbg = view_tokens(hidden_, n);
-        int last = n - 1;
-        std::vector<half> hvals(cfg.d_model);
-        cudaMemcpy(hvals.data(),
-                   static_cast<char*>(h_dbg.data) + static_cast<size_t>(last) * cfg.d_model * sizeof(half),
-                   cfg.d_model * sizeof(half), cudaMemcpyDeviceToHost);
-        fprintf(stderr, "[DBG] Hidden[last tok] after all layers, first 8: ");
-        for (int i = 0; i < 8; i++) fprintf(stderr, "%.2f ", __half2float(hvals[i]));
-        fprintf(stderr, "\n");
     }
 
     // ---- Step 3+4: Final RMSNorm + LM head projection ----
@@ -1821,25 +1744,6 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         Tensor lg = view_tokens(logits_, 1);
         gemm(no_last, model_->output_proj(), lg, 1.0f, 0.0f, stream);
         logits_out = lg;
-
-        // DEBUG: inspect logits distribution
-        {
-            cudaStreamSynchronize(stream);
-            int vocab = static_cast<int>(lg.shape[1]);
-            std::vector<float> lbuf(vocab);
-            cudaMemcpy(lbuf.data(), lg.data, vocab * sizeof(float), cudaMemcpyDeviceToHost);
-            // Find top-5 tokens
-            std::vector<std::pair<float,int>> ranked;
-            for (int i = 0; i < vocab; i++) ranked.push_back({lbuf[i], i});
-            std::partial_sort(ranked.begin(), ranked.begin() + 5, ranked.end(),
-                [](auto& a, auto& b){ return a.first > b.first; });
-            fprintf(stderr, "[DBG] Logits: top5 = ");
-            for (int i = 0; i < 5; i++)
-                fprintf(stderr, "[%d]=%.2f ", ranked[i].second, ranked[i].first);
-            float minv = *std::min_element(lbuf.begin(), lbuf.end());
-            float maxv = *std::max_element(lbuf.begin(), lbuf.end());
-            fprintf(stderr, " range=[%.2f, %.2f]\n", minv, maxv);
-        }
     } else {
         Tensor h_final  = view_tokens(hidden_,   n);
         Tensor no_final = view_tokens(norm_out_, n);

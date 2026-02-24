@@ -174,6 +174,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         // Upload packed nibbles to GPU
         void* d_nibbles = nullptr;
         checked_cuda_malloc(&d_nibbles, nibbles_bytes);
+        if (!d_nibbles) return false;
         cudaMemcpyAsync(d_nibbles, h_nibbles.data(), nibbles_bytes,
                         cudaMemcpyHostToDevice, stream);
         gpu_allocs.push_back(d_nibbles);
@@ -182,6 +183,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         void* d_scales = nullptr;
         size_t scales_bytes = scales_count * sizeof(uint16_t);
         checked_cuda_malloc(&d_scales, scales_bytes);
+        if (!d_scales) { cudaFree(d_nibbles); return false; }
         cudaMemcpyAsync(d_scales, h_scales.data(), scales_bytes,
                         cudaMemcpyHostToDevice, stream);
         gpu_allocs.push_back(d_scales);
@@ -212,6 +214,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
             size_t raw_bytes = static_cast<size_t>(N) * ggml_quant_row_bytes(qtype, K);
             void* d_data = nullptr;
             checked_cuda_malloc(&d_data, raw_bytes);
+            if (!d_data) return false;
             cudaMemcpyAsync(d_data, weight.data, raw_bytes,
                             cudaMemcpyHostToDevice, stream);
             gpu_allocs.push_back(d_data);
@@ -250,6 +253,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         size_t bytes = fp16_count * sizeof(uint16_t);
         void* d_data = nullptr;
         checked_cuda_malloc(&d_data, bytes);
+        if (!d_data) return false;
         cudaMemcpyAsync(d_data, h_fp16.data(), bytes,
                         cudaMemcpyHostToDevice, stream);
         gpu_allocs.push_back(d_data);
@@ -274,6 +278,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
             size_t raw_bytes = static_cast<size_t>(N) * ggml_quant_row_bytes(qtype, K);
             void* d_data = nullptr;
             checked_cuda_malloc(&d_data, raw_bytes);
+            if (!d_data) return false;
             cudaMemcpyAsync(d_data, weight.data, raw_bytes,
                             cudaMemcpyHostToDevice, stream);
             gpu_allocs.push_back(d_data);
@@ -325,6 +330,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         size_t bytes = fp16_count * sizeof(uint16_t);
         void* d_data = nullptr;
         checked_cuda_malloc(&d_data, bytes);
+        if (!d_data) return false;
         cudaMemcpyAsync(d_data, h_fp16.data(), bytes,
                         cudaMemcpyHostToDevice, stream);
         gpu_allocs.push_back(d_data);
@@ -389,6 +395,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         size_t bytes = weight.nbytes();
         void* d_data = nullptr;
         checked_cuda_malloc(&d_data, bytes);
+        if (!d_data) return false;
         cudaMemcpyAsync(d_data, weight.data, bytes,
                         cudaMemcpyHostToDevice, stream);
         gpu_allocs.push_back(d_data);
@@ -406,6 +413,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
             size_t bytes = weight.nbytes();
             void* d_data = nullptr;
             checked_cuda_malloc(&d_data, bytes);
+            if (!d_data) return false;
             cudaMemcpyAsync(d_data, weight.data, bytes,
                             cudaMemcpyHostToDevice, stream);
             gpu_allocs.push_back(d_data);
@@ -425,6 +433,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         size_t bytes = static_cast<size_t>(n_elem) * sizeof(uint16_t);
         void* d_data = nullptr;
         checked_cuda_malloc(&d_data, bytes);
+        if (!d_data) return false;
         cudaMemcpyAsync(d_data, h_fp16.data(), bytes,
                         cudaMemcpyHostToDevice, stream);
         gpu_allocs.push_back(d_data);
@@ -737,6 +746,10 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream) {
                 size_t bytes = t->nbytes();
                 void* d_data = nullptr;
                 checked_cuda_malloc(&d_data, bytes);
+                if (!d_data) {
+                    IMP_LOG_ERROR("Failed to allocate GPU memory for SSM F32 tensor in layer %d", i);
+                    return false;
+                }
                 cudaMemcpyAsync(d_data, t->data, bytes,
                                 cudaMemcpyHostToDevice, stream);
                 gpu_allocations_.push_back(d_data);

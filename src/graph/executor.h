@@ -174,6 +174,9 @@ private:
     bool has_ssm_ = false;
     bool has_dense_ffn_ = false;
 
+    // Max expert FFN hidden dim from actual packed tensor shapes (may differ from cfg.expert_d_ff)
+    int max_expert_eff_ = 0;
+
     // --- Layer offload manager (non-owning, set by engine) ---
     LayerOffloadManager* offload_mgr_ = nullptr;
 
