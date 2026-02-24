@@ -8,6 +8,11 @@
 #include <cstring>
 #include <cmath>
 
+#ifdef __linux__
+#include <fstream>
+#include <string>
+#endif
+
 namespace imp {
 
 // ---------------------------------------------------------------------------
@@ -27,6 +32,31 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size) {
         return cudaErrorMemoryAllocation;
     }
     return cudaMalloc(ptr, size);
+}
+
+// ---------------------------------------------------------------------------
+// WSL2 detection: cudaHostRegister on mmap'd memory can succeed but produce
+// corrupted DMA transfers on WSL2 (stale data from GPU reads).  Detect WSL2
+// at runtime so we can skip pinning and fall back to pageable H2D copies.
+// ---------------------------------------------------------------------------
+static bool is_wsl2() {
+#ifdef __linux__
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    std::ifstream f("/proc/version");
+    if (f) {
+        std::string line;
+        std::getline(f, line);
+        cached = (line.find("microsoft") != std::string::npos ||
+                  line.find("Microsoft") != std::string::npos ||
+                  line.find("WSL") != std::string::npos) ? 1 : 0;
+    } else {
+        cached = 0;
+    }
+    return cached;
+#else
+    return false;
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -628,18 +658,28 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream) {
                 // Pin host memory for faster H2D transfers during inference.
                 // cudaHostRegister can fail (e.g., mmap not pinnable), which is fine —
                 // cudaMemcpy still works from unpinned host memory, just slower.
-                cudaError_t pin_err = cudaHostRegister(packed.data, total_raw,
-                                                       cudaHostRegisterReadOnly);
-                if (pin_err == cudaSuccess) {
-                    host_pinned_.push_back(packed.data);
-                    IMP_LOG_DEBUG("  %s: %d experts, raw %s pinned on host (%.2f MiB)",
-                                  name, n_experts,
-                                  qtype == GGMLQuantType::Q6_K ? "Q6_K" :
-                                  qtype == GGMLQuantType::Q8_0 ? "Q8_0" : "Q4_0",
-                                  total_raw / (1024.0 * 1024.0));
+                //
+                // WSL2 workaround: cudaHostRegister succeeds on mmap'd memory but
+                // GPU DMA reads return stale/corrupted data.  Skip pinning entirely
+                // and let cudaMemcpyAsync fall back to pageable staging copies.
+                if (is_wsl2()) {
+                    IMP_LOG_INFO("  %s: WSL2 detected, skipping cudaHostRegister "
+                                 "(%.2f MiB unpinned)", name,
+                                 total_raw / (1024.0 * 1024.0));
                 } else {
-                    IMP_LOG_WARN("  %s: cudaHostRegister failed (%s), H2D will be slower",
-                                 name, cudaGetErrorString(pin_err));
+                    cudaError_t pin_err = cudaHostRegister(packed.data, total_raw,
+                                                           cudaHostRegisterReadOnly);
+                    if (pin_err == cudaSuccess) {
+                        host_pinned_.push_back(packed.data);
+                        IMP_LOG_DEBUG("  %s: %d experts, raw %s pinned on host (%.2f MiB)",
+                                      name, n_experts,
+                                      qtype == GGMLQuantType::Q6_K ? "Q6_K" :
+                                      qtype == GGMLQuantType::Q8_0 ? "Q8_0" : "Q4_0",
+                                      total_raw / (1024.0 * 1024.0));
+                    } else {
+                        IMP_LOG_WARN("  %s: cudaHostRegister failed (%s), H2D will be slower",
+                                     name, cudaGetErrorString(pin_err));
+                    }
                 }
 
                 // packed.data stays as host mmap pointer
