@@ -82,7 +82,8 @@ __global__ void paged_attention_decode_kernel(
     int block_size,
     float scale,
     int max_context_len,
-    int max_num_blocks)
+    int max_num_blocks,
+    int sliding_window)
 {
     const int batch_idx = blockIdx.x;
     const int head_idx  = blockIdx.y;
@@ -129,10 +130,15 @@ __global__ void paged_attention_decode_kernel(
     for (int i = 0; i < elems_per_thread; i++) o_reg[i] = 0.0f;
 
     // ---- Iterate over KV tokens, striped across warps ----
-    // Total number of logical blocks covering the context
+    // With sliding window, only attend to the last `sliding_window` tokens.
+    int effective_start = 0;
+    if (sliding_window > 0 && ctx_len > sliding_window) {
+        effective_start = ctx_len - sliding_window;
+    }
+    const int first_block = effective_start / block_size;
     const int num_ctx_blocks = (ctx_len + block_size - 1) / block_size;
 
-    for (int blk = warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
+    for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];  // physical block index
 
         // Base pointer for K and V in this physical block
@@ -143,10 +149,15 @@ __global__ void paged_attention_decode_kernel(
         int tok_start = blk * block_size;
         int tok_end   = tok_start + block_size;
         if (tok_end > ctx_len) tok_end = ctx_len;
-        int num_valid = tok_end - tok_start;
+
+        // Skip tokens before the sliding window within the first relevant block
+        int first_tok = 0;
+        if (tok_start < effective_start) {
+            first_tok = effective_start - tok_start;
+        }
 
         // Process each token in the block
-        for (int t = 0; t < num_valid; t++) {
+        for (int t = first_tok; t < (tok_end - tok_start); t++) {
             // K for this token: [slot=t, kv_head, head_dim]
             const half* K_tok = K_block + t * kv_slot_stride + kv_head * head_dim;
 
@@ -259,7 +270,7 @@ void paged_attention_decode(
     const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache,
     Tensor& O, const int* block_tables, const int* context_lens,
     int block_size, float scale, int max_context_len,
-    cudaStream_t stream)
+    int sliding_window, cudaStream_t stream)
 {
     const int batch_size = static_cast<int>(Q.shape[0]);
     // Q.shape[1] == 1  (decode: single query token)
@@ -286,7 +297,8 @@ void paged_attention_decode(
         block_tables,
         context_lens,
         batch_size, n_heads, n_kv_heads, head_dim,
-        block_size, scale, max_context_len, max_num_blocks);
+        block_size, scale, max_context_len, max_num_blocks,
+        sliding_window);
 }
 
 // ---------------------------------------------------------------------------
@@ -346,7 +358,8 @@ __global__ void paged_attention_decode_fp8_kernel(
     float scale,
     float kv_scale,
     int max_context_len,
-    int max_num_blocks)
+    int max_num_blocks,
+    int sliding_window)
 {
     const int batch_idx = blockIdx.x;
     const int head_idx  = blockIdx.y;
@@ -386,9 +399,14 @@ __global__ void paged_attention_decode_fp8_kernel(
     for (int i = 0; i < elems_per_thread; i++) o_reg[i] = 0.0f;
 
     // ---- Iterate over KV tokens, striped across warps ----
+    int effective_start_fp8 = 0;
+    if (sliding_window > 0 && ctx_len > sliding_window) {
+        effective_start_fp8 = ctx_len - sliding_window;
+    }
+    const int first_block_fp8 = effective_start_fp8 / block_size;
     const int num_ctx_blocks = (ctx_len + block_size - 1) / block_size;
 
-    for (int blk = warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
+    for (int blk = first_block_fp8 + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
 
         const uint8_t* K_block = K_cache + (int64_t)phys_block * kv_block_stride;
@@ -397,9 +415,13 @@ __global__ void paged_attention_decode_fp8_kernel(
         int tok_start = blk * block_size;
         int tok_end   = tok_start + block_size;
         if (tok_end > ctx_len) tok_end = ctx_len;
-        int num_valid = tok_end - tok_start;
 
-        for (int t = 0; t < num_valid; t++) {
+        int first_tok_fp8 = 0;
+        if (tok_start < effective_start_fp8) {
+            first_tok_fp8 = effective_start_fp8 - tok_start;
+        }
+
+        for (int t = first_tok_fp8; t < (tok_end - tok_start); t++) {
             const uint8_t* K_tok = K_block + t * kv_slot_stride + kv_head * head_dim;
 
             // Compute dot(Q, K) with FP8 dequant
@@ -495,7 +517,7 @@ void paged_attention_decode_fp8(
     const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache,
     Tensor& O, const int* block_tables, const int* context_lens,
     int block_size, float scale, float kv_scale,
-    int max_context_len,
+    int max_context_len, int sliding_window,
     cudaStream_t stream)
 {
     const int batch_size = static_cast<int>(Q.shape[0]);
@@ -521,7 +543,8 @@ void paged_attention_decode_fp8(
         block_tables,
         context_lens,
         batch_size, n_heads, n_kv_heads, head_dim,
-        block_size, scale, kv_scale, max_context_len, max_num_blocks);
+        block_size, scale, kv_scale, max_context_len, max_num_blocks,
+        sliding_window);
 }
 
 } // namespace imp

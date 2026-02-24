@@ -63,7 +63,8 @@ __global__ void flash_attention_prefill_tc_kernel(
     int n_kv_heads,
     int head_dim,
     float scale,
-    bool causal)
+    bool causal,
+    int sliding_window)
 {
     // ---- index mapping ----
     const int tile_q     = blockIdx.x;                   // query-tile index
@@ -135,11 +136,18 @@ __global__ void flash_attention_prefill_tc_kernel(
 
     // ---- Number of KV tiles to iterate ----
     int num_kv_tiles = (seq_kv + TC_Bc - 1) / TC_Bc;
+    int first_kv_tile = 0;
     if (causal) {
         int max_q = q_start + TC_Br - 1;
         if (max_q >= seq_q) max_q = seq_q - 1;
         int furthest_kv_tile = (max_q + TC_Bc) / TC_Bc;
         if (furthest_kv_tile < num_kv_tiles) num_kv_tiles = furthest_kv_tile;
+    }
+    if (sliding_window > 0) {
+        int earliest_kv = q_start - sliding_window + 1;
+        if (earliest_kv > 0) {
+            first_kv_tile = earliest_kv / TC_Bc;
+        }
     }
 
     // Derived constants for WMMA tiling
@@ -155,7 +163,7 @@ __global__ void flash_attention_prefill_tc_kernel(
     // ================================================================
     // Main loop over KV tiles
     // ================================================================
-    for (int j = 0; j < num_kv_tiles; j++) {
+    for (int j = first_kv_tile; j < num_kv_tiles; j++) {
         const int kv_start = j * TC_Bc;
 
         // ---- Load K tile into KV_tile ----
@@ -249,6 +257,7 @@ __global__ void flash_attention_prefill_tc_kernel(
                 if (gq < seq_q && gk < seq_kv) {
                     float val = S_tile[i] * scale;
                     if (causal && gq < gk) val = -FLT_MAX;
+                    if (sliding_window > 0 && (gq - gk) >= sliding_window) val = -FLT_MAX;
                     S_tile[i] = val;
                 } else {
                     S_tile[i] = -FLT_MAX;
@@ -404,7 +413,7 @@ __global__ void flash_attention_prefill_tc_kernel(
 // ---------------------------------------------------------------------------
 void flash_attention_prefill_tc(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, cudaStream_t stream)
+    float scale, bool causal, int sliding_window, cudaStream_t stream)
 {
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int seq_q      = static_cast<int>(Q.shape[1]);
@@ -441,7 +450,7 @@ void flash_attention_prefill_tc(
         reinterpret_cast<const half*>(V.data),
         reinterpret_cast<half*>(O.data),
         batch_size, seq_q, seq_kv, n_heads, n_kv_heads, head_dim,
-        scale, causal);
+        scale, causal, sliding_window);
 }
 
 // ---------------------------------------------------------------------------

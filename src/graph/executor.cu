@@ -253,17 +253,19 @@ static void elementwise_add(Tensor& a, const Tensor& b, cudaStream_t stream) {
         int64_t n2 = (n + 1) / 2;
         int threads = 256;
         int blocks = static_cast<int>((n2 + threads - 1) / threads);
-        elementwise_add_fp16_kernel<<<blocks, threads, 0, stream>>>(
-            static_cast<half*>(a.data),
-            static_cast<const half*>(b.data),
-            n);
+        pdl::launch(elementwise_add_fp16_kernel,
+                    dim3(blocks), dim3(threads), 0, stream,
+                    static_cast<half*>(a.data),
+                    static_cast<const half*>(b.data),
+                    n);
     } else {
         int threads = 256;
         int blocks = static_cast<int>((n + threads - 1) / threads);
-        elementwise_add_fp32_kernel<<<blocks, threads, 0, stream>>>(
-            static_cast<float*>(a.data),
-            static_cast<const float*>(b.data),
-            n);
+        pdl::launch(elementwise_add_fp32_kernel,
+                    dim3(blocks), dim3(threads), 0, stream,
+                    static_cast<float*>(a.data),
+                    static_cast<const float*>(b.data),
+                    n);
     }
 }
 
@@ -1038,7 +1040,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         Tensor o4  = ao.reshape(4, o4s);
 
         // Use runtime dispatch: TCGEN05 (sm_120) > WMMA (sm_90) > scalar
-        attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true, stream);
+        attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true,
+                                   cfg.sliding_window, stream);
 
         // Persist K, V into cache for later decode steps
         write_kv_cache(layer, state, stream);
@@ -1075,12 +1078,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             paged_attention_decode_fp8(q4, k_c, v_c, o4,
                                         state.block_tables, state.context_lens,
                                         kKVBlockSize, scale, kv_scale,
-                                        state.max_context_len, stream);
+                                        state.max_context_len, cfg.sliding_window,
+                                        stream);
         } else {
             paged_attention_decode(q4, k_c, v_c, o4,
                                     state.block_tables, state.context_lens,
                                     kKVBlockSize, scale, state.max_context_len,
-                                    stream);
+                                    cfg.sliding_window, stream);
         }
     }
 
