@@ -24,7 +24,9 @@ typedef enum {
     IMP_ARCH_MIXTRAL        = 2,
     IMP_ARCH_DEEPSEEK       = 3,
     IMP_ARCH_NEMOTRON_H_MOE = 4,
-    IMP_ARCH_GENERIC        = 5,
+    IMP_ARCH_QWEN3          = 5,
+    IMP_ARCH_QWEN3_MOE      = 6,
+    IMP_ARCH_GENERIC        = 7,
 } ImpModelArch;
 
 typedef enum {

@@ -39,6 +39,8 @@ ChatTemplateFamily ChatTemplate::default_family_for_arch(ModelArch arch) {
         case ModelArch::MIXTRAL:        return ChatTemplateFamily::LLAMA2;
         case ModelArch::DEEPSEEK:       return ChatTemplateFamily::CHATML;
         case ModelArch::NEMOTRON_H_MOE: return ChatTemplateFamily::NEMOTRON;
+        case ModelArch::QWEN3:          return ChatTemplateFamily::CHATML;
+        case ModelArch::QWEN3_MOE:      return ChatTemplateFamily::CHATML;
         default:                        return ChatTemplateFamily::RAW;
     }
 }
