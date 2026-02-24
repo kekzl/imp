@@ -87,7 +87,7 @@ void elementwise_mul(const Tensor& a, const Tensor& b, Tensor& out,
 __global__ void ssm_conv1d_decode_kernel(
     float* __restrict__ conv_state,       // [channels, kernel_size]
     const half* __restrict__ x_in,        // [channels]
-    const half* __restrict__ weight,      // [kernel_size, channels] row-major from GGUF
+    const half* __restrict__ weight,      // [channels, kernel_size] from GGUF (ne[0]=K, ne[1]=C)
     const half* __restrict__ bias,        // [channels] or nullptr
     half* __restrict__ x_out,             // [channels]
     int channels, int kernel_size)
@@ -104,11 +104,11 @@ __global__ void ssm_conv1d_decode_kernel(
     // Insert new value
     state[kernel_size - 1] = __half2float(x_in[ch]);
 
-    // Compute conv: sum(state[k] * weight[k, ch]) + bias
-    // Weight layout: [kernel_size, channels] — stride is channels
+    // Compute conv: sum(state[k] * weight[ch, k]) + bias
+    // Weight layout: [channels, kernel_size] — kernel_size is contiguous per channel
     float sum = 0.0f;
     for (int k = 0; k < kernel_size; k++) {
-        sum += state[k] * __half2float(weight[k * channels + ch]);
+        sum += state[k] * __half2float(weight[ch * kernel_size + k]);
     }
     if (bias) {
         sum += __half2float(bias[ch]);
@@ -143,7 +143,7 @@ void ssm_conv1d_decode(void* conv_state, const Tensor& x_in,
 __global__ void ssm_conv1d_prefill_kernel(
     float* __restrict__ conv_state,       // [channels, kernel_size] — updated with last K values
     const half* __restrict__ x_in,        // [n_tokens, channels]
-    const half* __restrict__ weight,      // [kernel_size, channels] row-major from GGUF
+    const half* __restrict__ weight,      // [channels, kernel_size] from GGUF (ne[0]=K, ne[1]=C)
     const half* __restrict__ bias,        // [channels] or nullptr
     half* __restrict__ x_out,             // [n_tokens, channels]
     int n_tokens, int channels, int kernel_size)
@@ -160,8 +160,8 @@ __global__ void ssm_conv1d_prefill_kernel(
             if (src_t >= 0) {
                 val = __half2float(x_in[src_t * channels + ch]);
             }
-            // Weight layout: [kernel_size, channels] — stride is channels
-            sum += val * __half2float(weight[k * channels + ch]);
+            // Weight layout: [channels, kernel_size] — kernel_size is contiguous per channel
+            sum += val * __half2float(weight[ch * kernel_size + k]);
         }
         if (bias) {
             sum += __half2float(bias[ch]);
