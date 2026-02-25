@@ -71,6 +71,19 @@ public:
     void forward_logits(const InferenceState& state, Tensor& logits_out,
                         cudaStream_t stream = nullptr);
 
+    // Sample tokens from pre-computed logits (for use after CUDA graph execution).
+    std::vector<int32_t> sample_from_logits(const Tensor& logits,
+                                             const InferenceState& state,
+                                             cudaStream_t stream = nullptr);
+
+    // Async decode: runs forward pass reading token from device memory (d_token_id),
+    // then samples and writes result back to d_token_id. No host-device sync.
+    // h_mapped: mapped pinned memory for host-side token readback (polled async).
+    // Returns immediately. Host reads *h_mapped to get the token.
+    void forward_decode_async(const InferenceState& state,
+                              int32_t* d_token_id, int32_t* h_mapped,
+                              cudaStream_t stream = nullptr);
+
     // Set KV layer mapping (must be called before forward pass for hybrid models)
     void set_kv_layer_map(std::vector<int> map) { kv_layer_map_ = std::move(map); }
 
@@ -80,6 +93,13 @@ public:
     // Resize workspace for a different max token count (Phase 4: decode-mode optimization).
     // Uses cudaFreeAsync/cudaMallocAsync for near-instant resize via CUDA memory pool.
     bool resize_workspace(int new_max_tokens, cudaStream_t stream);
+
+    // Get a view of the logits buffer for n tokens (for CUDA graph replay,
+    // where forward_logits isn't called but the graph writes to this buffer).
+    Tensor get_logits_view(int n) const { return view_tokens(logits_, n); }
+
+    // Pre-allocated device buffer for sampling output (stable address for CUDA graph).
+    int32_t* d_sample_result() const { return d_sample_result_; }
 
 private:
     const Model* model_ = nullptr;
@@ -160,6 +180,20 @@ private:
     // On-the-fly dequant scratch buffer for non-MoE quantized weights (Q8_0/Q6_K).
     void* dequant_scratch_ = nullptr;
     size_t dequant_scratch_size_ = 0;
+
+    // Pre-allocated sampling result buffers (avoids cudaMalloc/cudaFree per token).
+    int32_t* d_sample_result_ = nullptr;  // device buffer for argmax/sample kernel output
+
+    // MMVQ (dp4a) scratch buffers for quantized input vector.
+    // Allocated once during init, reused each layer for decode GEMV.
+    void* q8_1_buf_ = nullptr;   // block_q8_1 array, size = max_dim / 32 * sizeof(block_q8_1)
+    float* d8_buf_ = nullptr;    // float scale array, size = max_dim / 32 * sizeof(float)
+    int q8_1_max_blocks_ = 0;    // max K/32 across all weight matrices
+
+    // Split-K paged attention scratch buffer.
+    // Holds partial softmax states: [batch * n_heads * max_splits * (2 + head_dim)] floats.
+    void* splitk_scratch_ = nullptr;
+    size_t splitk_scratch_size_ = 0;
 
     // --- Layer index mappings ---
 

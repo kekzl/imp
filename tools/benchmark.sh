@@ -9,9 +9,9 @@ LLAMA_BENCH="/home/kekz/llama.cpp/build/bin/llama-bench"
 REPORT_DIR="$ROOT_DIR/benchmarks"
 REPORT="$REPORT_DIR/report.md"
 
-PP_TOKENS=512          # prompt tokens for llama-bench (imp uses actual prompt length)
+PP_TOKENS=512          # prompt tokens for benchmarks
 TG_TOKENS=128          # tokens to generate
-LLAMA_REPS=3           # repetitions for llama-bench
+BENCH_REPS=3           # repetitions for benchmarks
 TEMPERATURE=0          # greedy decoding for reproducibility
 
 # Models: name | path | quant
@@ -76,6 +76,16 @@ parse_imp_output() {
     IMP_TG_N=$(grep "^tg " "$stderr_file" | awk '{print $2}' || echo "0")
 }
 
+# ─── Helper: parse imp-cli --bench stderr output ─────────────────────────────
+# Expects lines like:
+#   pp   512 tokens  avg  1234.56 ms  ( 414.88 tok/s)  [3 reps]
+#   tg   128 tokens  avg  5678.90 ms  (  22.54 tok/s)  [3 reps]
+parse_imp_bench_output() {
+    local stderr_file="$1"
+    IMP_BENCH_PP_TOKS=$(grep "^pp " "$stderr_file" | sed 's/.*(\s*\([0-9.]*\) tok\/s).*/\1/' || echo "0")
+    IMP_BENCH_TG_TOKS=$(grep "^tg " "$stderr_file" | sed 's/.*(\s*\([0-9.]*\) tok\/s).*/\1/' || echo "0")
+}
+
 # ─── Helper: parse llama-bench JSON output ────────────────────────────────────
 parse_llama_output() {
     local json_file="$1"
@@ -104,14 +114,16 @@ cat > "$REPORT" << EOF
 **Date:** $(date -u '+%Y-%m-%d %H:%M UTC')
 **GPU:** $GPU_NAME ($GPU_VRAM)
 **Driver:** $GPU_DRIVER | **CUDA:** $CUDA_VER
+**Build:** sm_120 native, -O3 -Xptxas -O3 --use_fast_math, CUDA graphs ON, PDL ON
 **OS:** $(uname -sr)
 
 ## Methodology
 
-- **Prompt processing (pp):** llama-bench uses synthetic $PP_TOKENS-token prompt; imp uses a real ~500-token text prompt
+- **Prompt processing (pp):** synthetic $PP_TOKENS-token prompt (both imp bench and llama-bench); imp (real) uses a ~500-token text prompt
 - **Text generation (tg):** $TG_TOKENS tokens, temperature=$TEMPERATURE (greedy)
-- **llama-bench:** $LLAMA_REPS repetitions, flash attention enabled, all layers on GPU
-- **imp:** single run, all layers on GPU, chat template disabled for fair comparison
+- **Repetitions:** $BENCH_REPS reps averaged (imp bench + llama-bench); imp (real) is a single run
+- **llama-bench:** flash attention enabled, all layers on GPU
+- **imp:** CUDA graphs + PDL enabled (default), non-blocking stream, all layers on GPU
 - Both engines: batch size 1, single sequence
 
 ## Results
@@ -146,7 +158,7 @@ for i in "${!MODEL_NAMES[@]}"; do
             -m "$path" \
             -p "$PP_TOKENS" -n "$TG_TOKENS" \
             -ngl 99 -fa 1 \
-            -r "$LLAMA_REPS" \
+            -r "$BENCH_REPS" \
             -o json > "$LLAMA_JSON" 2>/dev/null; then
             parse_llama_output "$LLAMA_JSON"
             echo "  llama.cpp: pp=$LLAMA_PP_TOKS tok/s, tg=$LLAMA_TG_TOKS tok/s"
@@ -160,7 +172,7 @@ for i in "${!MODEL_NAMES[@]}"; do
         LLAMA_TG_TOKS="N/A"
     fi
 
-    # ── imp-cli ──
+    # ── imp-cli (all features enabled — default) ──
     echo "  Running imp-cli..."
     IMP_STDERR="$TMPDIR/imp_${i}.stderr"
     IMP_STDOUT="$TMPDIR/imp_${i}.stdout"
@@ -180,9 +192,30 @@ for i in "${!MODEL_NAMES[@]}"; do
         cat "$IMP_STDERR" | tail -5
     fi
 
+    # ── imp-cli --bench (synthetic, matches llama-bench methodology) ──
+    echo "  Running imp-cli --bench..."
+    IMP_BENCH_STDERR="$TMPDIR/imp_bench_${i}.stderr"
+    IMP_BENCH_STDOUT="$TMPDIR/imp_bench_${i}.stdout"
+    if "$IMP_CLI" \
+        --model "$path" \
+        --bench \
+        --bench-pp "$PP_TOKENS" \
+        --bench-reps "$BENCH_REPS" \
+        --max-tokens "$TG_TOKENS" \
+        > "$IMP_BENCH_STDOUT" 2> "$IMP_BENCH_STDERR"; then
+        parse_imp_bench_output "$IMP_BENCH_STDERR"
+        echo "  imp bench: pp=$IMP_BENCH_PP_TOKS tok/s, tg=$IMP_BENCH_TG_TOKS tok/s"
+    else
+        IMP_BENCH_PP_TOKS="ERR"
+        IMP_BENCH_TG_TOKS="ERR"
+        echo "  imp-cli --bench failed! stderr:"
+        tail -5 "$IMP_BENCH_STDERR"
+    fi
+
     # Write to report
     echo "| $name | $quant | llama.cpp | $LLAMA_PP_TOKS | $LLAMA_TG_TOKS |" >> "$REPORT"
-    echo "| $name | $quant | imp | $IMP_PP_TOKS | $IMP_TG_TOKS |" >> "$REPORT"
+    echo "| $name | $quant | imp (bench) | $IMP_BENCH_PP_TOKS | $IMP_BENCH_TG_TOKS |" >> "$REPORT"
+    echo "| $name | $quant | imp (real) | $IMP_PP_TOKS | $IMP_TG_TOKS |" >> "$REPORT"
     echo ""
 done
 
@@ -193,9 +226,11 @@ cat >> "$REPORT" << 'EOF'
 
 - **pp tok/s** = prompt processing throughput (prefill phase)
 - **tg tok/s** = text generation throughput (autoregressive decode phase)
-- llama.cpp uses synthetic prompt tokens; imp tokenizes a real text prompt, so pp token counts may differ slightly
+- **imp (bench)** uses synthetic tokens with warmup + averaged reps (apples-to-apples with llama-bench)
+- **imp (real)** tokenizes a real text prompt (single run, no warmup)
 - Both engines offload all layers to GPU (`-ngl 99` / default)
-- imp uses Blackwell-optimized TCGEN05 attention on sm_120; llama.cpp uses its own Flash Attention
+- imp features: CUDA graphs (decode), PDL (kernel overlap), MoE decode fast path (device-side expert dispatch), non-blocking stream, 64 MiB cuBLAS workspace
+- Build: sm_120 native (RTX 5090), `-O3 -Xptxas -O3 --use_fast_math -march=native`
 EOF
 
 echo "━━━ Done ━━━"

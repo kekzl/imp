@@ -73,6 +73,10 @@ cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
 No other external dependencies. The project is self-contained.
 
+### Hardware Constraints
+
+Only one GPU is available. **Always test models sequentially** — never run multiple model instances in parallel.
+
 ## Running Tests
 
 ```bash

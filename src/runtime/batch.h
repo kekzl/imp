@@ -60,6 +60,7 @@ public:
     void free_pool();
 
     bool is_allocated() const { return pool_ != nullptr; }
+    int max_blocks_per_seq() const { return max_blocks_per_seq_; }
 
     // Pre-allocated single int32 result buffer for sampling kernels
     int32_t* d_sample_result() const { return d_sample_result_; }

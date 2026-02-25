@@ -47,9 +47,6 @@ void launch(KernelFunc func, dim3 grid, dim3 block, size_t smem,
 {
     const void* func_ptr = reinterpret_cast<const void*>(func);
     if (is_enabled(func_ptr)) {
-        // Pack kernel arguments into a void* array for cudaLaunchKernelEx.
-        void* kernel_args[] = { (void*)&args... };
-
         cudaLaunchConfig_t config = {};
         config.gridDim = grid;
         config.blockDim = block;
@@ -63,7 +60,7 @@ void launch(KernelFunc func, dim3 grid, dim3 block, size_t smem,
         config.attrs = &attr;
         config.numAttrs = 1;
 
-        cudaLaunchKernelEx(&config, func, kernel_args);
+        cudaLaunchKernelEx(&config, func, args...);
     } else {
         func<<<grid, block, smem, stream>>>(args...);
     }

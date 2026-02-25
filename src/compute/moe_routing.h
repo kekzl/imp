@@ -44,19 +44,51 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
                      bool normalize_weights = true,
                      const void* score_bias = nullptr);
 
-// Variant using pre-allocated buffers (no cudaMalloc inside)
+// Variant using pre-allocated buffers (no cudaMalloc inside).
+// skip_sorting: when true, only runs the top-k gating kernel and skips
+// count/scan/scatter (useful for n=1 decode where gather/scatter is skipped).
 void moe_topk_gating(const Tensor& gate_logits, int top_k,
                      MoeRoutingBuffers& buffers,
                      MoeRoutingResult& result,
                      cudaStream_t stream = nullptr,
                      bool use_sigmoid = false,
                      bool normalize_weights = true,
-                     const void* score_bias = nullptr);
+                     const void* score_bias = nullptr,
+                     bool skip_sorting = false);
 
 void moe_gather(const Tensor& input, const MoeRoutingResult& routing,
                 Tensor& gathered, cudaStream_t stream = nullptr);
 
 void moe_scatter(const Tensor& expert_output, const MoeRoutingResult& routing,
                  Tensor& output, cudaStream_t stream = nullptr);
+
+// Weighted sum of expert outputs for single-token decode (replaces gather+scatter).
+// expert_outputs: [top_k, d_model] FP16 (passed as void*). expert_weights: [top_k] FP32 on device.
+// output: [d_model] FP32. Accumulates in FP32.
+void moe_weighted_sum(const void* expert_outputs, const float* expert_weights,
+                      float* output, int d_model, int top_k,
+                      cudaStream_t stream = nullptr);
+
+// Fused weighted sum + FP16 output + optional residual add.
+// Combines moe_weighted_sum + fp32_to_fp16 + residual_add into one kernel.
+// expert_outputs: [top_k, d_model] FP16. expert_weights: [top_k] FP32 on device.
+// residual: [d_model] FP16 (or nullptr to skip). output: [d_model] FP16.
+void moe_weighted_sum_residual(const void* expert_outputs, const float* expert_weights,
+                               const void* residual, void* output,
+                               int d_model, int top_k,
+                               cudaStream_t stream = nullptr);
+
+// Fused gate GEMV + softmax/sigmoid + top-k selection in a single kernel.
+// For n=1 decode: replaces gemv_gate_fp32 + moe_topk_gating(skip_sorting=true).
+// W_gate: [n_experts, d_model] FP16. x: [d_model] FP16.
+// Writes to buffers.expert_indices and buffers.expert_weights directly.
+void moe_gate_topk_fused(const void* W_gate, const void* x,
+                         int n_experts, int d_model, int top_k,
+                         MoeRoutingBuffers& buffers,
+                         MoeRoutingResult& result,
+                         cudaStream_t stream = nullptr,
+                         bool use_sigmoid = false,
+                         bool normalize_weights = true,
+                         const void* score_bias = nullptr);
 
 } // namespace imp

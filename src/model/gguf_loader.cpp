@@ -612,14 +612,19 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     IMP_LOG_INFO("Config: layers=%d d_model=%d d_ff=%d heads=%d kv_heads=%d head_dim=%d vocab=%d ctx=%d",
                  cfg.n_layers, cfg.d_model, cfg.d_ff, cfg.n_heads, cfg.n_kv_heads,
                  cfg.head_dim, cfg.vocab_size, cfg.max_seq_len);
+    IMP_LOG_INFO("RoPE: theta=%.1f, rope_dim=%d, neox=%d, eps=%.2e",
+                 cfg.rope_theta, cfg.rope_dim, cfg.rope_neox ? 1 : 0, cfg.rms_norm_eps);
 
     if (cfg.sliding_window > 0) {
         IMP_LOG_INFO("Sliding window attention: %d tokens", cfg.sliding_window);
     }
 
     if (cfg.n_experts > 0) {
-        IMP_LOG_INFO("MoE: %d experts, %d active, expert_d_ff=%d",
-                     cfg.n_experts, cfg.n_experts_active, cfg.expert_d_ff);
+        IMP_LOG_INFO("MoE: %d experts, %d active, expert_d_ff=%d, shared=%d (shared_d_ff=%d), "
+                     "norm_weights=%d",
+                     cfg.n_experts, cfg.n_experts_active, cfg.expert_d_ff,
+                     cfg.n_experts_shared, cfg.expert_shared_d_ff,
+                     cfg.expert_weights_norm ? 1 : 0);
     }
 
     if (cfg.ssm_inner_size > 0) {
@@ -684,6 +689,81 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     }
 
     IMP_LOG_INFO("Weights: %d assigned, %d skipped", assigned, skipped);
+
+    // 7b. Tensor validation and shared expert detection
+    //     Inspect actual loaded tensors to detect capabilities, remap shared
+    //     experts stored as regular FFN tensors, and warn about mismatches.
+    {
+        int n_attn = 0, n_moe = 0, n_dense_ffn = 0, n_shared_exp = 0;
+        int n_qk_norm = 0, n_ssm = 0, n_remapped = 0;
+
+        for (int i = 0; i < cfg.n_layers; i++) {
+            auto& ly = model->layers_[i];
+            bool has_moe   = (ly.moe_gate.data != nullptr);
+            bool has_dense = (ly.w_up.data != nullptr);
+            bool has_shared = (ly.w_up_shared.data != nullptr);
+
+            if (ly.wq.data != nullptr) n_attn++;
+            if (has_moe) n_moe++;
+            if (ly.attn_q_norm.data != nullptr) n_qk_norm++;
+            if (ly.ssm_in.data != nullptr) n_ssm++;
+
+            // Detect shared expert: MoE layer with dense FFN tensors loaded
+            // alongside expert tensors → remap dense FFN to shared expert.
+            // Some GGUF converters output shared experts as ffn_gate/ffn_up/ffn_down.
+            if (has_moe && has_dense && !has_shared) {
+                ly.w_gate_shared = ly.w_gate;   ly.w_gate_shared_qtype = ly.w_gate_qtype;
+                ly.w_up_shared   = ly.w_up;     ly.w_up_shared_qtype   = ly.w_up_qtype;
+                ly.w_down_shared = ly.w_down;   ly.w_down_shared_qtype = ly.w_down_qtype;
+                ly.w_gate = Tensor();  ly.w_gate_qtype = GGMLQuantType::NONE;
+                ly.w_up   = Tensor();  ly.w_up_qtype   = GGMLQuantType::NONE;
+                ly.w_down = Tensor();  ly.w_down_qtype = GGMLQuantType::NONE;
+                n_remapped++;
+                has_shared = true;
+            }
+
+            if (has_shared) n_shared_exp++;
+            if (has_dense && !has_moe) n_dense_ffn++;
+        }
+
+        IMP_LOG_INFO("Layer census: %d attn, %d MoE, %d dense FFN, %d shared expert, "
+                     "%d QK-norm, %d SSM  (of %d layers)",
+                     n_attn, n_moe, n_dense_ffn, n_shared_exp, n_qk_norm, n_ssm,
+                     cfg.n_layers);
+
+        if (n_remapped > 0) {
+            IMP_LOG_INFO("Remapped %d layers: dense FFN tensors -> shared expert", n_remapped);
+        }
+
+        // Update config from actual tensor presence
+        if (n_shared_exp > 0 && cfg.n_experts_shared == 0) {
+            cfg.n_experts_shared = 1;
+            for (int i = 0; i < cfg.n_layers; i++) {
+                if (model->layers_[i].w_up_shared.data != nullptr) {
+                    cfg.expert_shared_d_ff = static_cast<int>(model->layers_[i].w_up_shared.shape[0]);
+                    break;
+                }
+            }
+            IMP_LOG_INFO("Inferred shared expert config: n_shared=%d, shared_d_ff=%d",
+                         cfg.n_experts_shared, cfg.expert_shared_d_ff);
+        }
+
+        // Warn about config/tensor mismatches
+        if (cfg.n_experts_shared > 0 && n_shared_exp == 0) {
+            IMP_LOG_WARN("Config declares %d shared expert(s) but no shared expert "
+                         "tensors found — GGUF may be incomplete", cfg.n_experts_shared);
+        }
+
+        if (cfg.n_experts > 0 && n_moe == 0) {
+            IMP_LOG_WARN("Config declares %d experts but no MoE gate tensors found",
+                         cfg.n_experts);
+        }
+
+        if (n_moe > 0 && n_moe < cfg.n_layers && n_dense_ffn == 0 && n_ssm == 0) {
+            IMP_LOG_WARN("Only %d/%d layers have MoE, remaining layers have no FFN",
+                         n_moe, cfg.n_layers);
+        }
+    }
 
     // 8. Extract tokenizer from GGUF metadata
     auto tokenizer = std::make_unique<Tokenizer>();

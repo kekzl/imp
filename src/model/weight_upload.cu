@@ -533,12 +533,14 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream) {
         }
     }
 
-    // Upload output projection — keep as CPU-dequanted FP16 (too large for
-    // on-the-fly dequant scratch buffer)
+    // Upload output projection — raw Q6_K/Q8_0 for dp4a GEMV (saves ~60% VRAM).
+    // Falls back to FP16 dequant for unsupported quant types.
     if (out_proj_.data && !out_proj_.on_device) {
+        bool raw_ok = (out_proj_qtype_ == GGMLQuantType::Q6_K ||
+                       out_proj_qtype_ == GGMLQuantType::Q8_0);
         if (!upload_unquantized_weight(out_proj_, out_proj_qtype_, compute_dtype,
                                        stream, gpu_allocations_,
-                                       /*raw_quant=*/false)) {
+                                       /*raw_quant=*/raw_ok)) {
             IMP_LOG_ERROR("Failed to upload output projection");
             return false;
         }

@@ -19,4 +19,13 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids,
                       GGMLQuantType qtype,
                       cudaStream_t stream);
 
+// Device-side embedding lookup: reads token ID from device memory (d_token_id[0]).
+// Used for async sampling where the token ID stays on GPU between decode steps.
+void embedding_lookup_from_device(const Tensor& table, const int32_t* d_token_id,
+                                   Tensor& out, cudaStream_t stream = nullptr);
+
+void embedding_lookup_from_device(const Tensor& table, const int32_t* d_token_id,
+                                   Tensor& out, GGMLQuantType qtype,
+                                   cudaStream_t stream);
+
 } // namespace imp
