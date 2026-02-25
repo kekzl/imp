@@ -350,7 +350,7 @@ void flash_attention_blackwell(
     }
 
     // Fallback: use the existing WMMA tensor-core attention path.
-    flash_attention_prefill_tc(Q, K, V, O, scale, causal, stream);
+    flash_attention_prefill_tc(Q, K, V, O, scale, causal, 0, stream);
 }
 
 } // namespace imp

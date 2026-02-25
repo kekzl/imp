@@ -14,7 +14,11 @@ struct CliArgs {
     int device = 0;
     int gpu_layers = -1;       // -1 = all on GPU
     bool ssm_fp16 = false;     // Use FP16 for SSM h_state
+    bool no_cuda_graphs = false;  // Disable CUDA Graph capture for decode
     std::string chat_template = "auto";  // auto, none, chatml, llama2, llama3, nemotron
+    bool bench = false;        // --bench: synthetic benchmark mode
+    int bench_pp = 512;        // --bench-pp: synthetic prompt token count
+    int bench_reps = 3;        // --bench-reps: repetitions to average
 };
 
 CliArgs parse_args(int argc, char** argv);

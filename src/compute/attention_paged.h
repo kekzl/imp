@@ -17,6 +17,12 @@ void paged_attention_decode(
     int sliding_window = 0,
     cudaStream_t stream = nullptr);
 
+// Set split-K scratch buffer for paged attention. Must be called before
+// paged_attention_decode if split-K is desired. The scratch buffer holds
+// partial softmax state: size = batch * n_heads * num_splits * (2 + head_dim) * sizeof(float).
+// Pass nullptr to disable split-K.
+void paged_attention_set_splitk_scratch(void* ptr, size_t size);
+
 // FP8 E4M3 Paged attention for decode: KV cache stored in FP8 with on-the-fly dequant.
 // Q: [batch, 1, n_heads, head_dim] FP16
 // K_cache/V_cache: [num_blocks, n_kv_heads, block_size, head_dim] FP8_E4M3

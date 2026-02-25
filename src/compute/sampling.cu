@@ -551,4 +551,58 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
     return h_result;
 }
 
+// ===========================================================================
+// Async (device-side) sampling — no host sync
+// ===========================================================================
+
+void sample_greedy_device(const Tensor& logits, int32_t* d_result,
+                          int32_t* h_mapped, cudaStream_t stream) {
+    const int vocab_size = static_cast<int>(logits.shape[0]);
+    const float* d_logits = static_cast<const float*>(logits.data);
+
+    argmax_kernel<<<1, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, d_result);
+
+    // Async copy to mapped pinned memory — no sync needed.
+    // The host can poll h_mapped at its own pace.
+    cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream);
+}
+
+void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p,
+                              float temperature, unsigned int seed,
+                              int32_t* d_result, int32_t* h_mapped,
+                              cudaStream_t stream) {
+    const int vocab_size = static_cast<int>(logits.shape[0]);
+    float* d_logits = static_cast<float*>(logits.data);
+
+    if (top_k <= 0 || top_k > vocab_size) top_k = vocab_size;
+    if (top_k > MAX_TOP_K) top_k = MAX_TOP_K;
+    if (temperature <= 0.0f) temperature = 1.0f;
+    float inv_temperature = 1.0f / temperature;
+
+    int grid = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    apply_temperature_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
+        d_logits, vocab_size, inv_temperature);
+
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    size_t smem_bytes = static_cast<size_t>(top_k) * sizeof(float)
+                      + static_cast<size_t>(top_k) * sizeof(int)
+                      + BLOCK_SIZE * sizeof(float)
+                      + 1 * sizeof(float)
+                      + 1 * sizeof(float)
+                      + NUM_WARPS * top_k * sizeof(float)
+                      + NUM_WARPS * top_k * sizeof(int);
+
+    topk_topp_sample_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(
+        d_logits, vocab_size, top_k, top_p, seed, d_result);
+
+    float temperature_restore = temperature;
+    apply_temperature_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
+        d_logits, vocab_size, temperature_restore);
+
+    // Async copy to mapped pinned memory — no sync needed.
+    cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream);
+}
+
 } // namespace imp

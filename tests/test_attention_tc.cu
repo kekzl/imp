@@ -71,7 +71,7 @@ TEST_F(AttentionTCTest, SmallPrefill) {
     Tensor O(d_o, DType::FP16, 4, qo_shape, true);
 
     float scale = 1.0f / std::sqrt(static_cast<float>(HD));
-    flash_attention_prefill_tc(Q, K, V, O, scale, true, stream_);
+    flash_attention_prefill_tc(Q, K, V, O, scale, true, 0, stream_);
     cudaStreamSynchronize(stream_);
 
     // Verify no CUDA errors from the kernel launch
@@ -117,7 +117,7 @@ TEST_F(AttentionTCTest, DispatchSelectsCorrectKernel) {
     Tensor O(d_o, DType::FP16, 4, shape, true);
 
     float scale = 1.0f / std::sqrt(static_cast<float>(HD));
-    EXPECT_NO_THROW(attention_prefill_dispatch(Q, K, V, O, scale, true, stream_));
+    EXPECT_NO_THROW(attention_prefill_dispatch(Q, K, V, O, scale, true, 0, stream_));
     cudaStreamSynchronize(stream_);
 
     cudaFree(d_q); cudaFree(d_k); cudaFree(d_v); cudaFree(d_o);

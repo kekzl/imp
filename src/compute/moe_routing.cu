@@ -123,61 +123,247 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits,
     }
     __syncthreads();
 
-    // Thread 0 finds top-k using insertion sort (n_experts is small)
+    // Parallel top-k selection: find top_k experts using block-wide argmax reduction.
+    // Each iteration finds the global max, records it, and masks it out.
     // When score_bias is provided, select based on biased scores (s_sel_probs)
     // but use UNBIASED scores (s_probs) for weight values.
-    if (tid == 0) {
+    {
+        // Shared memory for argmax reduction across warps
+        __shared__ float s_warp_max[NUM_WARPS];
+        __shared__ int   s_warp_argmax[NUM_WARPS];
+
         const float* sel = score_bias ? s_sel_probs : s_probs;
 
-        for (int j = 0; j < top_k; ++j) {
-            s_topk_val[j] = -1.0f;
-            s_topk_idx[j] = -1;
-        }
+        // Each thread owns one element (tid < n_experts), or -FLT_MAX if out of range
+        float my_val = (tid < n_experts) ? sel[tid] : -FLT_MAX;
+        int my_idx = tid;
 
-        for (int i = 0; i < n_experts; ++i) {
-            float p = sel[i];
-            // Find position to insert (keep sorted descending)
-            int pos = -1;
-            for (int j = 0; j < top_k; ++j) {
-                if (p > s_topk_val[j]) {
-                    pos = j;
-                    break;
+        for (int k = 0; k < top_k; k++) {
+            // Warp-level argmax
+            float wmax = my_val;
+            int widx = my_idx;
+            #pragma unroll
+            for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
+                float other_val = __shfl_xor_sync(0xFFFFFFFF, wmax, off);
+                int other_idx = __shfl_xor_sync(0xFFFFFFFF, widx, off);
+                if (other_val > wmax) { wmax = other_val; widx = other_idx; }
+            }
+
+            // Write per-warp results
+            if (lane_id == 0) {
+                s_warp_max[warp_id] = wmax;
+                s_warp_argmax[warp_id] = widx;
+            }
+            __syncthreads();
+
+            // First warp reduces across all warps
+            if (warp_id == 0) {
+                float v = (lane_id < NUM_WARPS) ? s_warp_max[lane_id] : -FLT_MAX;
+                int ix = (lane_id < NUM_WARPS) ? s_warp_argmax[lane_id] : -1;
+                #pragma unroll
+                for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
+                    float ov = __shfl_xor_sync(0xFFFFFFFF, v, off);
+                    int oi = __shfl_xor_sync(0xFFFFFFFF, ix, off);
+                    if (ov > v) { v = ov; ix = oi; }
+                }
+                if (lane_id == 0) {
+                    s_topk_idx[k] = ix;
+                    // Store UNBIASED weight for the selected expert
+                    s_topk_val[k] = score_bias ? s_probs[ix] : v;
                 }
             }
-            if (pos >= 0) {
-                // Shift elements down
-                for (int j = top_k - 1; j > pos; --j) {
-                    s_topk_val[j] = s_topk_val[j - 1];
-                    s_topk_idx[j] = s_topk_idx[j - 1];
+            __syncthreads();
+
+            // Mask out the selected expert so it won't be picked again
+            if (tid == s_topk_idx[k]) my_val = -FLT_MAX;
+        }
+
+        // Thread 0: normalize weights and write output
+        if (tid == 0) {
+            float multiplier = 1.0f;
+            if (normalize_weights) {
+                float norm = 0.0f;
+                for (int j = 0; j < top_k; ++j) norm += s_topk_val[j];
+                multiplier = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
+            }
+            int base = token * top_k;
+            for (int j = 0; j < top_k; ++j) {
+                expert_indices[base + j] = s_topk_idx[j];
+                expert_weights[base + j] = s_topk_val[j] * multiplier;
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Fused kernel: Gate GEMV + softmax/sigmoid + top-k selection
+//
+// For n=1 decode: combines gate weight dot-products with routing in a single
+// kernel, eliminating the intermediate FP32 logits buffer and 1 kernel launch.
+//
+// 1 block × 256 threads (8 warps). Each warp computes ceil(n_experts/8) dot
+// products, stores logits to shared memory, then all threads cooperate on
+// softmax/sigmoid + top-k selection (same algorithm as topk_gating_kernel).
+// ============================================================================
+
+__global__ void gemv_gate_topk_fused_kernel(
+        const half* __restrict__ W_gate,        // [n_experts, d_model] FP16
+        const half* __restrict__ x,             // [d_model] FP16 input
+        int n_experts,
+        int d_model,
+        int top_k,
+        int32_t* __restrict__ expert_indices,   // [top_k] output
+        float* __restrict__ expert_weights,     // [top_k] output
+        bool use_sigmoid,
+        bool normalize_weights,
+        const half* __restrict__ score_bias) {
+
+    const int tid = threadIdx.x;
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    const int warp_id = tid / WARP_SIZE;
+    const int lane_id = tid % WARP_SIZE;
+
+    // Shared memory layout:
+    //   s_logits[n_experts]       — gate logit / probability values
+    //   s_sel_probs[n_experts]    — biased selection probs (only if score_bias)
+    //   s_topk_val[top_k]        — selected top-k values
+    //   s_topk_idx[top_k]        — selected top-k indices
+    //   s_warp_max[NUM_WARPS]    — warp reduction scratch
+    //   s_warp_argmax[NUM_WARPS] — warp reduction scratch
+    extern __shared__ char smem_raw[];
+    float* s_logits = reinterpret_cast<float*>(smem_raw);
+    float* s_sel_probs = s_logits + (score_bias ? n_experts : 0);
+    float* s_topk_val  = s_logits + (score_bias ? 2 * n_experts : n_experts);
+    int32_t* s_topk_idx = reinterpret_cast<int32_t*>(s_topk_val + top_k);
+    float* s_warp_scratch = reinterpret_cast<float*>(s_topk_idx + top_k);
+    int*   s_warp_argmax  = reinterpret_cast<int*>(s_warp_scratch + NUM_WARPS);
+
+    // ---- Phase 1: Gate GEMV — compute dot(W_gate[e], x) for all experts ----
+    const int K2 = d_model / 2;
+    const half2* x2 = reinterpret_cast<const half2*>(x);
+
+    for (int e = warp_id; e < n_experts; e += NUM_WARPS) {
+        const half2* W2 = reinterpret_cast<const half2*>(W_gate + static_cast<size_t>(e) * d_model);
+        float sum = 0.0f;
+
+        for (int i = lane_id; i < K2; i += WARP_SIZE) {
+            half2 w = W2[i];
+            half2 v = x2[i];
+            sum += __half2float(w.x) * __half2float(v.x);
+            sum += __half2float(w.y) * __half2float(v.y);
+        }
+
+        // Warp shuffle reduction
+        #pragma unroll
+        for (int off = WARP_SIZE / 2; off > 0; off >>= 1)
+            sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
+
+        if (lane_id == 0) s_logits[e] = sum;
+    }
+    __syncthreads();
+
+    // ---- Phase 2: Softmax or sigmoid ----
+    if (use_sigmoid) {
+        for (int i = tid; i < n_experts; i += blockDim.x) {
+            float p = 1.0f / (1.0f + expf(-s_logits[i]));
+            s_logits[i] = p;  // overwrite logit with prob
+            if (score_bias) {
+                s_sel_probs[i] = p + __half2float(score_bias[i]);
+            }
+        }
+    } else {
+        // Softmax: find max
+        float local_max = -FLT_MAX;
+        for (int i = tid; i < n_experts; i += blockDim.x) {
+            local_max = fmaxf(local_max, s_logits[i]);
+        }
+        local_max = warp_reduce_max(local_max);
+        if (lane_id == 0) s_warp_scratch[warp_id] = local_max;
+        __syncthreads();
+        if (warp_id == 0) {
+            float val = (lane_id < NUM_WARPS) ? s_warp_scratch[lane_id] : -FLT_MAX;
+            val = warp_reduce_max(val);
+            if (lane_id == 0) s_warp_scratch[0] = val;
+        }
+        __syncthreads();
+        float gmax = s_warp_scratch[0];
+
+        // Compute exp and sum
+        float local_sum = 0.0f;
+        for (int i = tid; i < n_experts; i += blockDim.x) {
+            local_sum += expf(s_logits[i] - gmax);
+        }
+        local_sum = warp_reduce_sum(local_sum);
+        if (lane_id == 0) s_warp_scratch[warp_id] = local_sum;
+        __syncthreads();
+        if (warp_id == 0) {
+            float val = (lane_id < NUM_WARPS) ? s_warp_scratch[lane_id] : 0.0f;
+            val = warp_reduce_sum(val);
+            if (lane_id == 0) s_warp_scratch[0] = val;
+        }
+        __syncthreads();
+        float inv_sum = 1.0f / s_warp_scratch[0];
+
+        // Normalize
+        for (int i = tid; i < n_experts; i += blockDim.x) {
+            s_logits[i] = expf(s_logits[i] - gmax) * inv_sum;
+        }
+    }
+    __syncthreads();
+
+    // ---- Phase 3: Top-k selection (same algorithm as topk_gating_kernel) ----
+    {
+        const float* sel = score_bias ? s_sel_probs : s_logits;
+        float my_val = (tid < n_experts) ? sel[tid] : -FLT_MAX;
+        int my_idx = tid;
+
+        for (int k = 0; k < top_k; k++) {
+            float wmax = my_val;
+            int widx = my_idx;
+            #pragma unroll
+            for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
+                float other_val = __shfl_xor_sync(0xFFFFFFFF, wmax, off);
+                int other_idx = __shfl_xor_sync(0xFFFFFFFF, widx, off);
+                if (other_val > wmax) { wmax = other_val; widx = other_idx; }
+            }
+
+            if (lane_id == 0) {
+                s_warp_scratch[warp_id] = wmax;
+                s_warp_argmax[warp_id] = widx;
+            }
+            __syncthreads();
+
+            if (warp_id == 0) {
+                float v = (lane_id < NUM_WARPS) ? s_warp_scratch[lane_id] : -FLT_MAX;
+                int ix = (lane_id < NUM_WARPS) ? s_warp_argmax[lane_id] : -1;
+                #pragma unroll
+                for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
+                    float ov = __shfl_xor_sync(0xFFFFFFFF, v, off);
+                    int oi = __shfl_xor_sync(0xFFFFFFFF, ix, off);
+                    if (ov > v) { v = ov; ix = oi; }
                 }
-                s_topk_val[pos] = p;
-                s_topk_idx[pos] = i;
+                if (lane_id == 0) {
+                    s_topk_idx[k] = ix;
+                    s_topk_val[k] = score_bias ? s_logits[ix] : v;
+                }
             }
+            __syncthreads();
+
+            if (tid == s_topk_idx[k]) my_val = -FLT_MAX;
         }
 
-        // Gather UNBIASED weights for selected experts
-        // (s_topk_val holds selection scores; need original s_probs for weights)
-        if (score_bias) {
+        // Thread 0: normalize weights and write output
+        if (tid == 0) {
+            float multiplier = 1.0f;
+            if (normalize_weights) {
+                float norm = 0.0f;
+                for (int j = 0; j < top_k; ++j) norm += s_topk_val[j];
+                multiplier = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
+            }
             for (int j = 0; j < top_k; ++j) {
-                s_topk_val[j] = s_probs[s_topk_idx[j]];
+                expert_indices[j] = s_topk_idx[j];
+                expert_weights[j] = s_topk_val[j] * multiplier;
             }
-        }
-
-        // Normalize top-k weights to sum to 1 (only when normalize_weights is true)
-        float multiplier = 1.0f;
-        if (normalize_weights) {
-            float norm = 0.0f;
-            for (int j = 0; j < top_k; ++j) {
-                norm += s_topk_val[j];
-            }
-            multiplier = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
-        }
-
-        // Write output
-        int base = token * top_k;
-        for (int j = 0; j < top_k; ++j) {
-            expert_indices[base + j] = s_topk_idx[j];
-            expert_weights[base + j] = s_topk_val[j] * multiplier;
         }
     }
 }
@@ -650,6 +836,27 @@ void MoeRoutingBuffers::free() {
 }
 
 // ============================================================================
+// Kernel 7: Weighted sum for single-token decode (replaces gather+scatter)
+//
+// output[i] = Σ_k expert_weights[k] * expert_outputs[k * d_model + i]
+// Each thread handles one output element, looping over top_k.
+// ============================================================================
+
+__global__ void moe_weighted_sum_kernel(const half* __restrict__ expert_outputs,
+                                         const float* __restrict__ expert_weights,
+                                         float* __restrict__ output,
+                                         int d_model, int top_k) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= d_model) return;
+
+    float sum = 0.0f;
+    for (int k = 0; k < top_k; ++k) {
+        sum += expert_weights[k] * __half2float(expert_outputs[k * d_model + i]);
+    }
+    output[i] = sum;
+}
+
+// ============================================================================
 // moe_topk_gating with pre-allocated buffers
 // ============================================================================
 
@@ -659,7 +866,8 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
                      cudaStream_t stream,
                      bool use_sigmoid,
                      bool normalize_weights,
-                     const void* score_bias) {
+                     const void* score_bias,
+                     bool skip_sorting) {
     const int n_tokens  = static_cast<int>(gate_logits.shape[0]);
     const int n_experts = static_cast<int>(gate_logits.shape[1]);
     const float* d_logits = static_cast<const float*>(gate_logits.data);
@@ -668,15 +876,7 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
     int32_t* d_expert_indices    = buffers.expert_indices;
     float*   d_expert_weights    = buffers.expert_weights;
     int32_t* d_sorted_token_ids  = buffers.sorted_token_ids;
-    int32_t* d_sorted_flat_idx   = d_sorted_token_ids + total_assignments;
     int32_t* d_expert_offsets    = buffers.expert_offsets;
-    int32_t* d_expert_counts     = buffers.expert_counts;
-    int32_t* d_expert_write_pos  = buffers.expert_write_pos;
-
-    // Zero-initialize counts and write positions
-    int grid_z = (n_experts + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    zero_int32_kernel<<<grid_z, BLOCK_SIZE, 0, stream>>>(d_expert_counts, n_experts);
-    zero_int32_kernel<<<grid_z, BLOCK_SIZE, 0, stream>>>(d_expert_write_pos, n_experts);
 
     // Kernel 1: Softmax + top-k selection per token
     int probs_arrays = score_bias ? 2 : 1;
@@ -688,18 +888,29 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
         d_logits, n_experts, top_k, d_expert_indices, d_expert_weights, use_sigmoid, normalize_weights,
         static_cast<const half*>(score_bias));
 
-    // Kernel 2: Count tokens per expert
-    int grid_count = (total_assignments + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    count_tokens_per_expert_kernel<<<grid_count, BLOCK_SIZE, 0, stream>>>(
-        d_expert_indices, n_tokens, top_k, d_expert_counts);
+    if (!skip_sorting) {
+        int32_t* d_sorted_flat_idx   = d_sorted_token_ids + total_assignments;
+        int32_t* d_expert_counts     = buffers.expert_counts;
+        int32_t* d_expert_write_pos  = buffers.expert_write_pos;
 
-    // Kernel 3: Exclusive prefix sum for offsets
-    exclusive_scan_kernel<<<1, 1, 0, stream>>>(d_expert_counts, d_expert_offsets, n_experts);
+        // Zero-initialize counts and write positions
+        int grid_z = (n_experts + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        zero_int32_kernel<<<grid_z, BLOCK_SIZE, 0, stream>>>(d_expert_counts, n_experts);
+        zero_int32_kernel<<<grid_z, BLOCK_SIZE, 0, stream>>>(d_expert_write_pos, n_experts);
 
-    // Kernel 4: Scatter token IDs (and flat indices) into sorted order
-    scatter_token_ids_with_flat_idx_kernel<<<grid_count, BLOCK_SIZE, 0, stream>>>(
-        d_expert_indices, d_expert_offsets, n_tokens, top_k,
-        d_sorted_token_ids, d_sorted_flat_idx, d_expert_write_pos);
+        // Kernel 2: Count tokens per expert
+        int grid_count = (total_assignments + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        count_tokens_per_expert_kernel<<<grid_count, BLOCK_SIZE, 0, stream>>>(
+            d_expert_indices, n_tokens, top_k, d_expert_counts);
+
+        // Kernel 3: Exclusive prefix sum for offsets
+        exclusive_scan_kernel<<<1, 1, 0, stream>>>(d_expert_counts, d_expert_offsets, n_experts);
+
+        // Kernel 4: Scatter token IDs (and flat indices) into sorted order
+        scatter_token_ids_with_flat_idx_kernel<<<grid_count, BLOCK_SIZE, 0, stream>>>(
+            d_expert_indices, d_expert_offsets, n_tokens, top_k,
+            d_sorted_token_ids, d_sorted_flat_idx, d_expert_write_pos);
+    }
 
     // Fill result struct (no ownership -- memory belongs to buffers)
     result.owns_memory = false;
@@ -710,6 +921,93 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
     result.sorted_token_ids = make_tensor_1d(d_sorted_token_ids, DType::INT32,
                                              total_assignments, true);
     result.expert_offsets = make_tensor_1d(d_expert_offsets, DType::INT32,
+                                           n_experts + 1, true);
+}
+
+// ============================================================================
+// Public API: moe_weighted_sum
+// ============================================================================
+
+void moe_weighted_sum(const void* expert_outputs, const float* expert_weights,
+                      float* output, int d_model, int top_k,
+                      cudaStream_t stream) {
+    int threads = 256;
+    int blocks = (d_model + threads - 1) / threads;
+    moe_weighted_sum_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const half*>(expert_outputs), expert_weights, output, d_model, top_k);
+}
+
+// ============================================================================
+// Fused weighted sum + FP16 output + optional residual add.
+// Eliminates the FP32 intermediate buffer and fp32_to_fp16 conversion kernel.
+// ============================================================================
+
+__global__ void moe_weighted_sum_residual_kernel(
+        const half* __restrict__ expert_outputs,
+        const float* __restrict__ expert_weights,
+        const half* residual,  // may be nullptr, may alias output
+        half* output,          // no __restrict__ — may alias residual
+        int d_model, int top_k) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= d_model) return;
+
+    float sum = 0.0f;
+    for (int k = 0; k < top_k; ++k) {
+        sum += expert_weights[k] * __half2float(expert_outputs[k * d_model + i]);
+    }
+    if (residual) sum += __half2float(residual[i]);
+    output[i] = __float2half(sum);
+}
+
+void moe_weighted_sum_residual(const void* expert_outputs, const float* expert_weights,
+                               const void* residual, void* output,
+                               int d_model, int top_k, cudaStream_t stream) {
+    int threads = 256;
+    int blocks = (d_model + threads - 1) / threads;
+    moe_weighted_sum_residual_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const half*>(expert_outputs), expert_weights,
+        static_cast<const half*>(residual),
+        static_cast<half*>(output), d_model, top_k);
+}
+
+// ============================================================================
+// Fused gate GEMV + topk routing launcher
+// ============================================================================
+
+void moe_gate_topk_fused(const void* W_gate, const void* x,
+                         int n_experts, int d_model, int top_k,
+                         MoeRoutingBuffers& buffers,
+                         MoeRoutingResult& result,
+                         cudaStream_t stream,
+                         bool use_sigmoid,
+                         bool normalize_weights,
+                         const void* score_bias) {
+    // Shared memory: logits + optional sel_probs + topk_val + topk_idx
+    //                + warp scratch (float[8] + int[8])
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    int probs_arrays = score_bias ? 2 : 1;
+    size_t smem = static_cast<size_t>(n_experts) * probs_arrays * sizeof(float)
+                + static_cast<size_t>(top_k) * sizeof(float)
+                + static_cast<size_t>(top_k) * sizeof(int32_t)
+                + NUM_WARPS * sizeof(float)
+                + NUM_WARPS * sizeof(int);
+
+    gemv_gate_topk_fused_kernel<<<1, BLOCK_SIZE, smem, stream>>>(
+        static_cast<const half*>(W_gate), static_cast<const half*>(x),
+        n_experts, d_model, top_k,
+        buffers.expert_indices, buffers.expert_weights,
+        use_sigmoid, normalize_weights,
+        static_cast<const half*>(score_bias));
+
+    // Fill result struct (no ownership — memory belongs to buffers)
+    result.owns_memory = false;
+    result.expert_indices = make_tensor_2d(buffers.expert_indices, DType::INT32,
+                                           1, top_k, true);
+    result.expert_weights = make_tensor_2d(buffers.expert_weights, DType::FP32,
+                                           1, top_k, true);
+    result.sorted_token_ids = make_tensor_1d(buffers.sorted_token_ids, DType::INT32,
+                                             top_k, true);
+    result.expert_offsets = make_tensor_1d(buffers.expert_offsets, DType::INT32,
                                            n_experts + 1, true);
 }
 

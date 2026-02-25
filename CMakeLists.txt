@@ -17,11 +17,17 @@ message(STATUS "CUDA ${CUDAToolkit_VERSION} detected")
 add_compile_definitions(IMP_CUDA_13_1=1)
 
 # --- CUDA Architecture ---
-# sm_90a = Hopper, sm_100 = Blackwell B200, sm_120 = Blackwell B300
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+# sm_90a = Hopper, sm_100 = Blackwell B200, sm_120 = Blackwell B300/RTX 5090
+option(IMP_NATIVE_SM120 "Build exclusively for sm_120 (RTX 5090) — enables native Blackwell SASS" OFF)
+if(IMP_NATIVE_SM120)
+    set(CMAKE_CUDA_ARCHITECTURES "120")
+    message(STATUS "CUDA architectures: 120 (native RTX 5090 build)")
+elseif(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_ARCHITECTURES "90a;100;120")
+    message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+else()
+    message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 endif()
-message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 
 # --- Options ---
 option(IMP_BUILD_TESTS "Build tests" ON)

@@ -58,8 +58,8 @@ ImpConfig imp_config_default(void) {
     config.max_tokens = 256;
     config.enable_green_contexts = 0;
     config.green_ctx_prefill_ratio = 0.8f;
-    config.enable_pdl = 0;
-    config.enable_cuda_graphs = 0;
+    config.enable_pdl = 1;
+    config.enable_cuda_graphs = 1;
     config.gpu_layers = -1;             // all on GPU
     config.ssm_state_dtype = IMP_DTYPE_FP32;
     config.num_cpu_threads = 0;         // auto
@@ -337,9 +337,11 @@ ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
         return IMP_ERROR_INTERNAL;
     }
 
-    // If there is an existing active request, free its KV cache first
+    // If there is an existing active request, free its KV cache and mark
+    // cancelled so the scheduler removes it from active_ on next schedule().
     if (ctx->active_request) {
         ctx->engine->kv_manager()->free_sequence(ctx->active_request->id);
+        ctx->active_request->status = imp::RequestStatus::CANCELLED;
         ctx->active_request = nullptr;
     }
 
@@ -426,9 +428,11 @@ ImpError imp_context_reset(ImpContext ctx) {
         return IMP_ERROR_INTERNAL;
     }
 
-    // Free the active request's KV cache if present
+    // Free the active request's KV cache and mark it cancelled so the
+    // scheduler removes it from active_ on the next schedule() call.
     if (ctx->active_request) {
         ctx->engine->kv_manager()->free_sequence(ctx->active_request->id);
+        ctx->active_request->status = imp::RequestStatus::CANCELLED;
         ctx->active_request = nullptr;
     }
 

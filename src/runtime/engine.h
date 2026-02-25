@@ -25,7 +25,7 @@ struct EngineConfig {
     int kv_cache_max_blocks = 0;  // 0 = auto
     bool use_green_contexts = false;
     bool use_cuda_graphs = false;
-    bool use_pdl = false;
+    bool use_pdl = true;
     DType compute_dtype = DType::FP16;
 
     // Default sampling parameters
@@ -104,12 +104,37 @@ private:
     std::unique_ptr<KVCacheManager> draft_kv_manager_;
     std::unique_ptr<SpeculativeDecoder> spec_decoder_;
 
+    // Pinned host buffer for graph-captured greedy sampling results.
+    // When sampling is included in the CUDA graph, the argmax kernel writes
+    // to d_sample_result_ (in executor) and a D2H memcpy copies to this
+    // pinned buffer — all inside the graph. After replay, just sync + read.
+    int32_t* h_sample_pinned_ = nullptr;
+    bool graph_includes_sampling_ = false;  // true when graph was captured with sampling
+
+    // Async conditional graph loop: runs the entire decode autonomously on GPU.
+    // Tokens are polled from a ring buffer and delivered one per step() call.
+    CudaGraphConditionalRunner async_graph_runner_;
+    std::shared_ptr<Request> async_graph_req_;
+    int* async_d_block_tables_ = nullptr;  // device memory for async graph loop
+    std::vector<int32_t> async_pending_tokens_;  // polled but not yet delivered
+    int async_pending_cursor_ = 0;
+
     // Stream helpers: return green context stream or default stream
     cudaStream_t prefill_stream() const;
     cudaStream_t decode_stream() const;
 
     // Initialize speculative decoding (called from init() if configured)
     bool init_speculative();
+
+    // GPU-autonomous decode loop using conditional CUDA graph.
+    // Returns generated tokens (empty if graph setup failed → caller falls back).
+    std::vector<int32_t> try_graph_loop_decode(
+        std::shared_ptr<Request> req, int32_t first_token, cudaStream_t stream);
+
+    // Launch async conditional graph loop for single-sequence decode.
+    // Returns true if successfully launched; subsequent step() calls poll from ring buffer.
+    bool try_launch_async_graph_loop(std::shared_ptr<Request> req,
+                                     int32_t first_token, cudaStream_t stream);
 };
 
 } // namespace imp

@@ -5,6 +5,7 @@
 #include "model/gguf_loader.h"
 #include "model/chat_template.h"
 #include "compute/gemm.h"
+#include "compute/sampling.h"
 #include "core/logging.h"
 
 #include <cstring>
@@ -15,6 +16,18 @@
 namespace imp {
 
 Engine::~Engine() {
+    gemm_cleanup();
+    if (async_graph_runner_.is_setup()) {
+        async_graph_runner_.cleanup();
+    }
+    if (async_d_block_tables_) {
+        cudaFree(async_d_block_tables_);
+        async_d_block_tables_ = nullptr;
+    }
+    if (h_sample_pinned_) {
+        cudaFreeHost(h_sample_pinned_);
+        h_sample_pinned_ = nullptr;
+    }
     if (stream_) {
         cudaStreamDestroy(stream_);
         stream_ = nullptr;
@@ -55,7 +68,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
 
     // --- Create CUDA stream ---
-    cudaError_t stream_err = cudaStreamCreate(&stream_);
+    // Non-blocking stream avoids implicit synchronization with the default stream,
+    // preventing hidden stalls when other CUDA work is in flight.
+    cudaError_t stream_err = cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking);
     if (stream_err != cudaSuccess) {
         stream_ = nullptr;
     }
@@ -247,6 +262,11 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
     }
 
+    // Allocate pinned host buffer for graph-captured sampling
+    if (config_.use_cuda_graphs && !h_sample_pinned_) {
+        cudaHostAlloc(&h_sample_pinned_, sizeof(int32_t), cudaHostAllocDefault);
+    }
+
     return true;
 }
 
@@ -302,6 +322,62 @@ bool Engine::init_speculative() {
 }
 
 bool Engine::step() {
+    // ====================================================================
+    // Fast path: async conditional graph loop completed on GPU.
+    // All tokens were generated at full GPU speed (no per-step host
+    // overhead). We deliver them one per step() call from the buffer.
+    // ====================================================================
+    if (async_graph_runner_.is_setup() && async_graph_req_) {
+        auto& req = async_graph_req_;
+
+        // First entry: sync on GPU completion and collect all tokens.
+        // WSL2's GPU-PV delays mapped memory writes, so we must sync
+        // before reading the ring buffer (polling without sync is unreliable).
+        if (async_pending_tokens_.empty() && async_pending_cursor_ == 0) {
+            cudaStream_t dec_stream = decode_stream();
+            async_pending_tokens_ = async_graph_runner_.wait_and_get_tokens(dec_stream);
+        }
+
+        // Deliver one token per step() call
+        int32_t token = -1;
+        if (async_pending_cursor_ < static_cast<int>(async_pending_tokens_.size())) {
+            token = async_pending_tokens_[async_pending_cursor_++];
+        }
+
+        if (token >= 0) {
+            req->output_tokens.push_back(token);
+
+            // Check stop conditions
+            Tokenizer* tok = model_->tokenizer();
+            bool is_stop = (token == tok->eos_id());
+            for (int32_t stop_id : chat_template_.stop_token_ids()) {
+                if (token == stop_id) { is_stop = true; break; }
+            }
+            bool finished = is_stop ||
+                static_cast<int>(req->output_tokens.size()) >= req->max_tokens;
+            if (!finished) return true;
+        }
+
+        // Token was stop/max_tokens OR graph ran out of tokens → finish
+        req->status = RequestStatus::FINISHED;
+        kv_manager_->free_sequence(req->id);
+        async_graph_runner_.cleanup();
+        if (async_d_block_tables_) {
+            cudaFree(async_d_block_tables_);
+            async_d_block_tables_ = nullptr;
+        }
+        async_graph_req_ = nullptr;
+        async_pending_tokens_.clear();
+        async_pending_cursor_ = 0;
+        return scheduler_->has_pending() || scheduler_->active_count() > 0;
+    }
+
+    // Clean up stale async graph state
+    if (async_graph_req_ && !async_graph_runner_.is_setup()) {
+        async_graph_req_ = nullptr;
+        async_pending_tokens_.clear();
+        async_pending_cursor_ = 0;
+    }
     // 1. Call scheduler to get prefill and decode batches
     std::vector<std::shared_ptr<Request>> prefill_batch;
     std::vector<std::shared_ptr<Request>> decode_batch;
@@ -350,10 +426,10 @@ bool Engine::step() {
         int* d_block_tables = nullptr;
         int* d_context_lens = nullptr;
 
-        cudaMalloc(&d_token_ids, n_tokens * sizeof(int32_t));
-        cudaMalloc(&d_positions, n_tokens * sizeof(int));
-        cudaMalloc(&d_block_tables, block_table.size() * sizeof(int));
-        cudaMalloc(&d_context_lens, sizeof(int));
+        cudaMallocAsync(&d_token_ids, n_tokens * sizeof(int32_t), pf_stream);
+        cudaMallocAsync(&d_positions, n_tokens * sizeof(int), pf_stream);
+        cudaMallocAsync(&d_block_tables, block_table.size() * sizeof(int), pf_stream);
+        cudaMallocAsync(&d_context_lens, sizeof(int), pf_stream);
 
         cudaMemcpyAsync(d_token_ids, req->input_tokens.data(),
                         n_tokens * sizeof(int32_t),
@@ -396,17 +472,17 @@ bool Engine::step() {
 
         cudaStreamSynchronize(pf_stream);
 
-        cudaFree(d_token_ids);
-        cudaFree(d_positions);
-        cudaFree(d_block_tables);
-        cudaFree(d_context_lens);
+        cudaFreeAsync(d_token_ids, pf_stream);
+        cudaFreeAsync(d_positions, pf_stream);
+        cudaFreeAsync(d_block_tables, pf_stream);
+        cudaFreeAsync(d_context_lens, pf_stream);
 
         req->output_tokens.push_back(next_token);
 
         Tokenizer* tok = model_->tokenizer();
-        IMP_LOG_INFO("Prefill -> token %d (ctx=%d): id=%d [%s]",
-                     (int)req->output_tokens.size(), req->context_len(),
-                     next_token, tok->decode_token(next_token).c_str());
+        IMP_LOG_DEBUG("Prefill -> token %d (ctx=%d): id=%d [%s]",
+                      (int)req->output_tokens.size(), req->context_len(),
+                      next_token, tok->decode_token(next_token).c_str());
 
         // Check EOS and chat template stop tokens
         bool is_stop = (next_token == tok->eos_id());
@@ -486,6 +562,23 @@ bool Engine::step() {
             // 3c. Upload to GPU using pre-allocated pool (stable pointers for CUDA Graph)
             GPUBatch gpu_batch;
             if (decode_batch_pool_.is_allocated()) {
+                // Pad max_blocks_per_seq to pool capacity so the block_table
+                // stride is stable across tokens. This prevents CUDA graph
+                // invalidation every time a new KV cache block is allocated.
+                int pool_max = decode_batch_pool_.max_blocks_per_seq();
+                if (batch.max_blocks_per_seq < pool_max) {
+                    // Re-pad the 2D block_table to the pool's stride
+                    int n_seq = batch.n_sequences;
+                    int old_stride = batch.max_blocks_per_seq;
+                    std::vector<int> padded(n_seq * pool_max, 0);
+                    for (int s = 0; s < n_seq; s++) {
+                        for (int b = 0; b < old_stride; b++) {
+                            padded[s * pool_max + b] = batch.block_tables[s * old_stride + b];
+                        }
+                    }
+                    batch.block_tables = std::move(padded);
+                    batch.max_blocks_per_seq = pool_max;
+                }
                 gpu_batch = decode_batch_pool_.upload_into_pool(batch, dec_stream);
             } else {
                 gpu_batch.upload(batch, dec_stream);
@@ -517,7 +610,9 @@ bool Engine::step() {
             // 3e. Execute batched forward pass (with CUDA Graph when enabled)
             std::vector<int32_t> tokens;
 
-            if (config_.use_cuda_graphs && gpu_batch.n_sequences > 0 &&
+            static const bool profiling = (std::getenv("IMP_PROFILE") != nullptr);
+            if (config_.use_cuda_graphs && !profiling &&
+                gpu_batch.n_sequences > 0 &&
                 decode_batch_pool_.is_allocated()) {
                 // Invalidate graph when batch config changes
                 if (gpu_batch.n_sequences != last_decode_batch_size_ ||
@@ -527,21 +622,53 @@ bool Engine::step() {
                     last_decode_max_blocks_ = gpu_batch.max_blocks_per_seq;
                 }
 
-                // Set the compute-only forward pass as the graph body
-                Tensor logits_out;
-                decode_graph_runner_.set_decode_fn(
-                    [this, &state, &logits_out](cudaStream_t s) {
-                        executor_->forward_logits(state, logits_out, s);
-                    });
-                decode_graph_runner_.execute(dec_stream);
+                // Check if we can include greedy sampling in the graph.
+                // This captures argmax + D2H memcpy inside the graph, eliminating
+                // separate kernel launch + sync overhead per step.
+                bool greedy_single = (state.temperature <= 0.0f || state.top_k == 1) &&
+                                     gpu_batch.n_sequences == 1 &&
+                                     h_sample_pinned_ != nullptr &&
+                                     executor_->d_sample_result() != nullptr;
 
-                // Sample outside the graph (sampling has host sync)
-                tokens = executor_->forward_batch(state, dec_stream);
+                // Invalidate graph if sampling mode changed
+                if (greedy_single != graph_includes_sampling_) {
+                    decode_graph_runner_.invalidate();
+                    graph_includes_sampling_ = greedy_single;
+                }
+
+                if (greedy_single) {
+                    // Graph captures: forward_logits + argmax + D2H copy
+                    decode_graph_runner_.set_decode_fn(
+                        [this, &state](cudaStream_t s) {
+                            Tensor logits_out;
+                            executor_->forward_logits(state, logits_out, s);
+                            if (logits_out.data == nullptr)
+                                logits_out = executor_->get_logits_view(1);
+                            int64_t vshape[1] = {logits_out.shape[logits_out.ndim - 1]};
+                            Tensor flat = logits_out.slice(0, 1).reshape(1, vshape);
+                            sample_greedy_device(flat, executor_->d_sample_result(),
+                                                  h_sample_pinned_, s);
+                        });
+                    decode_graph_runner_.execute(dec_stream);
+                    cudaStreamSynchronize(dec_stream);
+                    tokens = {*h_sample_pinned_};
+                } else {
+                    // Forward-only graph + sample outside
+                    Tensor logits_out;
+                    decode_graph_runner_.set_decode_fn(
+                        [this, &state, &logits_out](cudaStream_t s) {
+                            executor_->forward_logits(state, logits_out, s);
+                        });
+                    decode_graph_runner_.execute(dec_stream);
+
+                    if (logits_out.data == nullptr) {
+                        logits_out = executor_->get_logits_view(gpu_batch.n_sequences);
+                    }
+                    tokens = executor_->sample_from_logits(logits_out, state, dec_stream);
+                }
             } else {
                 tokens = executor_->forward_batch(state, dec_stream);
             }
-
-            cudaStreamSynchronize(dec_stream);
 
             // Only free if not using pool (pool memory is reused)
             if (!decode_batch_pool_.is_allocated()) {
@@ -556,10 +683,10 @@ bool Engine::step() {
 
                 req->output_tokens.push_back(next_token);
 
-                IMP_LOG_INFO("Decode step %d (ctx=%d, pos=%d): id=%d [%s]",
-                             (int)req->output_tokens.size(), req->context_len(),
-                             req->context_len() - 1,
-                             next_token, tok->decode_token(next_token).c_str());
+                IMP_LOG_DEBUG("Decode step %d (ctx=%d, pos=%d): id=%d [%s]",
+                              (int)req->output_tokens.size(), req->context_len(),
+                              req->context_len() - 1,
+                              next_token, tok->decode_token(next_token).c_str());
 
                 // Check EOS and chat template stop tokens
                 bool is_stop = (next_token == tok->eos_id());
@@ -574,6 +701,21 @@ bool Engine::step() {
                 }
 
                 kv_manager_->touch(req->id);
+            }
+
+            // After first decode with graph ready, launch the async
+            // conditional graph loop for all remaining tokens. This runs the
+            // entire decode on GPU autonomously — subsequent step() calls just
+            // poll from the ring buffer at full GPU speed.
+            if (decode_graph_runner_.is_ready() && valid_decode.size() == 1 &&
+                !offload_mgr_ && !ssm_state_ && !config_.enable_speculative &&
+                config_.use_cuda_graphs && !async_graph_runner_.is_setup()) {
+                auto& dreq = valid_decode[0];
+                if (dreq->status == RequestStatus::DECODING &&
+                    !dreq->output_tokens.empty()) {
+                    int32_t last_token = dreq->output_tokens.back();
+                    try_launch_async_graph_loop(dreq, last_token, dec_stream);
+                }
             }
         }
     }
@@ -633,6 +775,31 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
 
     scheduler_->add_request(req);
 
+    // ---- Step 1: Prefill (always via step()) ----
+    while (req->status == RequestStatus::PENDING ||
+           req->status == RequestStatus::PREFILLING) {
+        bool has_work = step();
+        if (!has_work) break;
+    }
+
+    // ---- Step 2: Decode — try conditional graph loop, fall back to step() ----
+    if (req->status == RequestStatus::DECODING && !req->output_tokens.empty() &&
+        config_.use_cuda_graphs && !offload_mgr_ && !ssm_state_ &&
+        !config_.enable_speculative) {
+        int32_t first_token = req->output_tokens.back();
+        auto graph_tokens = try_graph_loop_decode(req, first_token, decode_stream());
+        if (!graph_tokens.empty()) {
+            // Graph loop produced tokens — append to request
+            for (int32_t t : graph_tokens) {
+                req->output_tokens.push_back(t);
+            }
+            req->status = RequestStatus::FINISHED;
+            kv_manager_->free_sequence(req->id);
+        }
+        // If graph_tokens is empty, fall through to step() loop
+    }
+
+    // ---- Step 3: Fallback — per-step decode ----
     while (req->status != RequestStatus::FINISHED &&
            req->status != RequestStatus::CANCELLED) {
         bool has_work = step();
@@ -648,6 +815,196 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
 
     std::string result = tok->decode(req->output_tokens);
     return result;
+}
+
+std::vector<int32_t> Engine::try_graph_loop_decode(
+        std::shared_ptr<Request> req, int32_t first_token, cudaStream_t stream) {
+    // Only attempt for single-sequence decode
+    Tokenizer* tok = model_->tokenizer();
+    if (!tok) return {};
+
+    int remaining = req->max_tokens - static_cast<int>(req->output_tokens.size());
+    if (remaining <= 0) return {};
+
+    int ctx_len = req->context_len();
+    int position = ctx_len - 1;
+    IMP_LOG_DEBUG("try_graph_loop_decode: first_token=%d ctx_len=%d position=%d remaining=%d",
+                  first_token, ctx_len, position, remaining);
+
+    // Pre-allocate KV blocks for the full generation
+    int final_ctx = ctx_len + remaining;
+    int blocks_needed = (final_ctx + kKVBlockSize - 1) / kKVBlockSize;
+    const auto& current_bt = kv_manager_->block_table(req->id);
+    int blocks_have = static_cast<int>(current_bt.size());
+
+    for (int b = blocks_have; b < blocks_needed; b++) {
+        int new_block = kv_manager_->append_block(req->id);
+        if (new_block < 0) {
+            // Try eviction
+            int evicted = kv_manager_->evict_lru();
+            if (evicted >= 0) new_block = kv_manager_->append_block(req->id);
+            if (new_block < 0) {
+                IMP_LOG_WARN("ConditionalGraph: failed to pre-allocate KV blocks, "
+                             "falling back to step() loop");
+                return {};
+            }
+        }
+    }
+
+    // Upload full block table
+    const auto& full_bt = kv_manager_->block_table(req->id);
+    int max_blocks_per_seq = static_cast<int>(full_bt.size());
+
+    int* d_block_tables = nullptr;
+    cudaMallocAsync(&d_block_tables, max_blocks_per_seq * sizeof(int), stream);
+    cudaMemcpyAsync(d_block_tables, full_bt.data(),
+                     max_blocks_per_seq * sizeof(int),
+                     cudaMemcpyHostToDevice, stream);
+
+    // Resize workspace for decode (1 token)
+    executor_->resize_workspace(1, stream);
+
+    // Build the state template — all pointers are device memory
+    InferenceState state_template;
+    state_template.kv_cache = kv_cache_raw_;
+    state_template.block_tables = d_block_tables;
+    state_template.n_sequences = 1;
+    state_template.max_blocks_per_seq = max_blocks_per_seq;
+    state_template.is_prefill = false;
+
+    // Configure the conditional runner
+    CudaGraphConditionalRunner::Config gcfg;
+    gcfg.max_steps = remaining;
+    gcfg.initial_context_len = ctx_len;
+    gcfg.initial_position = position;
+    gcfg.eos_id = tok->eos_id();
+    gcfg.stop_ids = chat_template_.stop_token_ids();
+    gcfg.temperature = req->temperature;
+    gcfg.top_p = req->top_p;
+    gcfg.top_k = req->top_k;
+    gcfg.seed = req->seed;
+
+    CudaGraphConditionalRunner runner;
+    if (!runner.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
+        cudaFreeAsync(d_block_tables, stream);
+        return {};  // setup failed, fall back
+    }
+
+    // Launch the graph
+    if (!runner.launch(stream)) {
+        cudaFreeAsync(d_block_tables, stream);
+        return {};
+    }
+
+    // Wait for completion and get tokens
+    auto tokens = runner.wait_and_get_tokens(stream);
+
+    cudaFreeAsync(d_block_tables, stream);
+
+    // Filter out EOS/stop tokens from the result
+    if (!tokens.empty()) {
+        int32_t last = tokens.back();
+        bool last_is_stop = (last == tok->eos_id());
+        for (int32_t stop_id : chat_template_.stop_token_ids()) {
+            if (last == stop_id) { last_is_stop = true; break; }
+        }
+        if (last_is_stop) {
+            tokens.pop_back();  // don't include stop token in output
+        }
+    }
+
+    IMP_LOG_INFO("ConditionalGraph: generated %zu tokens in graph loop",
+                 tokens.size());
+
+    runner.cleanup();
+    return tokens;
+}
+
+bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
+                                          int32_t first_token, cudaStream_t stream) {
+    Tokenizer* tok = model_->tokenizer();
+    if (!tok) return false;
+
+    int remaining = req->max_tokens - static_cast<int>(req->output_tokens.size());
+    if (remaining <= 0) return false;
+
+    int ctx_len = req->context_len();
+    int position = ctx_len - 1;
+    IMP_LOG_DEBUG("try_launch_async: first_token=%d ctx_len=%d position=%d remaining=%d",
+                  first_token, ctx_len, position, remaining);
+
+    // Pre-allocate KV blocks for the full generation
+    int final_ctx = ctx_len + remaining;
+    int blocks_needed = (final_ctx + kKVBlockSize - 1) / kKVBlockSize;
+    const auto& current_bt = kv_manager_->block_table(req->id);
+    int blocks_have = static_cast<int>(current_bt.size());
+
+    for (int b = blocks_have; b < blocks_needed; b++) {
+        int new_block = kv_manager_->append_block(req->id);
+        if (new_block < 0) {
+            int evicted = kv_manager_->evict_lru();
+            if (evicted >= 0) new_block = kv_manager_->append_block(req->id);
+            if (new_block < 0) {
+                IMP_LOG_WARN("AsyncGraphLoop: failed to pre-allocate KV blocks");
+                return false;
+            }
+        }
+    }
+
+    // Upload full block table
+    const auto& full_bt = kv_manager_->block_table(req->id);
+    int max_blocks_per_seq = static_cast<int>(full_bt.size());
+
+    int* d_bt = nullptr;
+    cudaMalloc(&d_bt, max_blocks_per_seq * sizeof(int));
+    cudaMemcpyAsync(d_bt, full_bt.data(),
+                     max_blocks_per_seq * sizeof(int),
+                     cudaMemcpyHostToDevice, stream);
+
+    // Resize workspace for decode (1 token)
+    executor_->resize_workspace(1, stream);
+
+    // Build state template
+    InferenceState state_template;
+    state_template.kv_cache = kv_cache_raw_;
+    state_template.block_tables = d_bt;
+    state_template.n_sequences = 1;
+    state_template.max_blocks_per_seq = max_blocks_per_seq;
+    state_template.is_prefill = false;
+
+    // Configure
+    CudaGraphConditionalRunner::Config gcfg;
+    gcfg.max_steps = remaining;
+    gcfg.initial_context_len = ctx_len;
+    gcfg.initial_position = position;
+    gcfg.eos_id = tok->eos_id();
+    gcfg.stop_ids = chat_template_.stop_token_ids();
+    gcfg.temperature = req->temperature;
+    gcfg.top_p = req->top_p;
+    gcfg.top_k = req->top_k;
+    gcfg.seed = req->seed;
+
+    if (!async_graph_runner_.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
+        cudaFree(d_bt);
+        IMP_LOG_WARN("AsyncGraphLoop: setup failed, falling back to per-step decode");
+        return false;
+    }
+
+    if (!async_graph_runner_.launch(stream)) {
+        async_graph_runner_.cleanup();
+        cudaFree(d_bt);
+        IMP_LOG_WARN("AsyncGraphLoop: launch failed, falling back to per-step decode");
+        return false;
+    }
+
+    // Store state for step() polling
+    async_graph_req_ = req;
+    async_d_block_tables_ = d_bt;
+    async_pending_tokens_.clear();
+    async_pending_cursor_ = 0;
+
+    IMP_LOG_INFO("AsyncGraphLoop: launched for %d remaining tokens", remaining);
+    return true;
 }
 
 void Engine::add_request(std::shared_ptr<Request> req) {
