@@ -267,7 +267,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     // Allocate pinned host buffer for graph-captured sampling
     if (config_.use_cuda_graphs && !h_sample_pinned_) {
-        cudaHostAlloc(&h_sample_pinned_, sizeof(int32_t), cudaHostAllocDefault);
+        cudaError_t err = cudaHostAlloc(&h_sample_pinned_, sizeof(int32_t), cudaHostAllocDefault);
+        if (err != cudaSuccess) {
+            IMP_LOG_WARN("cudaHostAlloc for sample buffer failed: %s — disabling CUDA graphs",
+                         cudaGetErrorString(err));
+            config_.use_cuda_graphs = false;
+            h_sample_pinned_ = nullptr;
+        }
     }
 
     return true;
@@ -419,15 +425,19 @@ bool Engine::step() {
 
         int num_blocks = (ctx_len + kKVBlockSize - 1) / kKVBlockSize;
 
-        // Allocate KV cache blocks
-        if (!kv_manager_->allocate_blocks(req->id, num_blocks)) {
-            while (kv_manager_->num_free_blocks() < num_blocks) {
-                int evicted = kv_manager_->evict_lru();
-                if (evicted < 0) break;
-            }
-            if (!kv_manager_->allocate_blocks(req->id, num_blocks)) {
-                req->status = RequestStatus::CANCELLED;
-                continue;
+        // Allocate KV cache blocks (scheduler may have pre-allocated some)
+        int existing = static_cast<int>(kv_manager_->block_table(req->id).size());
+        int additional = num_blocks - existing;
+        if (additional > 0) {
+            if (!kv_manager_->allocate_blocks(req->id, additional)) {
+                while (kv_manager_->num_free_blocks() < additional) {
+                    int evicted = kv_manager_->evict_lru();
+                    if (evicted < 0) break;
+                }
+                if (!kv_manager_->allocate_blocks(req->id, additional)) {
+                    req->status = RequestStatus::CANCELLED;
+                    continue;
+                }
             }
         }
 
@@ -444,16 +454,23 @@ bool Engine::step() {
         int* d_block_tables = nullptr;
         int* d_context_lens = nullptr;
 
-        auto check = [](cudaError_t err, const char* op) {
+        auto check = [&req](cudaError_t err, const char* op) {
             if (err != cudaSuccess) {
                 IMP_LOG_ERROR("Engine::step prefill %s failed: %s", op, cudaGetErrorString(err));
+                req->status = RequestStatus::CANCELLED;
             }
             return err == cudaSuccess;
         };
-        check(cudaMallocAsync(&d_token_ids, n_tokens * sizeof(int32_t), pf_stream), "malloc token_ids");
-        check(cudaMallocAsync(&d_positions, n_tokens * sizeof(int), pf_stream), "malloc positions");
-        check(cudaMallocAsync(&d_block_tables, block_table.size() * sizeof(int), pf_stream), "malloc block_tables");
-        check(cudaMallocAsync(&d_context_lens, sizeof(int), pf_stream), "malloc context_lens");
+        if (!check(cudaMallocAsync(&d_token_ids, n_tokens * sizeof(int32_t), pf_stream), "malloc token_ids") ||
+            !check(cudaMallocAsync(&d_positions, n_tokens * sizeof(int), pf_stream), "malloc positions") ||
+            !check(cudaMallocAsync(&d_block_tables, block_table.size() * sizeof(int), pf_stream), "malloc block_tables") ||
+            !check(cudaMallocAsync(&d_context_lens, sizeof(int), pf_stream), "malloc context_lens")) {
+            if (d_token_ids) cudaFreeAsync(d_token_ids, pf_stream);
+            if (d_positions) cudaFreeAsync(d_positions, pf_stream);
+            if (d_block_tables) cudaFreeAsync(d_block_tables, pf_stream);
+            if (d_context_lens) cudaFreeAsync(d_context_lens, pf_stream);
+            continue;
+        }
 
         check(cudaMemcpyAsync(d_token_ids, req->input_tokens.data(),
                         n_tokens * sizeof(int32_t),
