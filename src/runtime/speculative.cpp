@@ -4,8 +4,16 @@
 #include <cmath>
 #include <algorithm>
 #include <cstring>
+#include <stdexcept>
 
 namespace imp {
+
+static void check_cuda(cudaError_t err, const char* msg) {
+    if (err != cudaSuccess) {
+        throw std::runtime_error(
+            std::string(msg) + ": " + cudaGetErrorString(err));
+    }
+}
 
 // ─── Init ────────────────────────────────────────────────────────────────────
 
@@ -58,14 +66,19 @@ std::vector<int32_t> SpeculativeDecoder::draft_tokens(int32_t last_token,
                                                        int position,
                                                        int seq_id,
                                                        cudaStream_t stream) {
+    if (!draft_executor_ || !draft_kv_manager_) {
+        IMP_LOG_ERROR("speculative: draft_tokens called without initialized draft model");
+        return {};
+    }
+
     std::vector<int32_t> drafts;
     drafts.reserve(config_.spec_k);
 
     // Small device buffers for single-token decode (1 element each).
     int32_t* d_token = nullptr;
     int*     d_pos   = nullptr;
-    cudaMalloc(&d_token, sizeof(int32_t));
-    cudaMalloc(&d_pos, sizeof(int));
+    check_cuda(cudaMalloc(&d_token, sizeof(int32_t)), "draft cudaMalloc d_token");
+    check_cuda(cudaMalloc(&d_pos, sizeof(int)), "draft cudaMalloc d_pos");
 
     const auto& draft_blocks = draft_kv_manager_->block_table(seq_id);
     int max_blocks = static_cast<int>(draft_blocks.size());
@@ -73,25 +86,25 @@ std::vector<int32_t> SpeculativeDecoder::draft_tokens(int32_t last_token,
     // Upload block table for this sequence (may change as we append blocks).
     int* d_block_table = nullptr;
     if (max_blocks > 0) {
-        cudaMalloc(&d_block_table, max_blocks * sizeof(int));
-        cudaMemcpy(d_block_table, draft_blocks.data(),
-                   max_blocks * sizeof(int), cudaMemcpyHostToDevice);
+        check_cuda(cudaMalloc(&d_block_table, max_blocks * sizeof(int)), "draft cudaMalloc d_block_table");
+        check_cuda(cudaMemcpy(d_block_table, draft_blocks.data(),
+                   max_blocks * sizeof(int), cudaMemcpyHostToDevice), "draft memcpy block_table");
     }
 
     int* d_ctx_len = nullptr;
-    cudaMalloc(&d_ctx_len, sizeof(int));
+    check_cuda(cudaMalloc(&d_ctx_len, sizeof(int)), "draft cudaMalloc d_ctx_len");
 
     int32_t cur_token = last_token;
     int cur_pos = position;
 
     for (int k = 0; k < config_.spec_k; ++k) {
         // Upload current token and position.
-        cudaMemcpy(d_token, &cur_token, sizeof(int32_t), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_pos, &cur_pos, sizeof(int), cudaMemcpyHostToDevice);
+        check_cuda(cudaMemcpy(d_token, &cur_token, sizeof(int32_t), cudaMemcpyHostToDevice), "draft memcpy token");
+        check_cuda(cudaMemcpy(d_pos, &cur_pos, sizeof(int), cudaMemcpyHostToDevice), "draft memcpy pos");
 
         // Context length is cur_pos + 1 (all tokens seen so far including this one).
         int ctx_len = cur_pos + 1;
-        cudaMemcpy(d_ctx_len, &ctx_len, sizeof(int), cudaMemcpyHostToDevice);
+        check_cuda(cudaMemcpy(d_ctx_len, &ctx_len, sizeof(int), cudaMemcpyHostToDevice), "draft memcpy ctx_len");
 
         // Re-upload block table in case we appended a new block.
         const auto& cur_blocks = draft_kv_manager_->block_table(seq_id);
@@ -99,11 +112,11 @@ std::vector<int32_t> SpeculativeDecoder::draft_tokens(int32_t last_token,
         if (cur_max_blocks > max_blocks) {
             cudaFree(d_block_table);
             max_blocks = cur_max_blocks;
-            cudaMalloc(&d_block_table, max_blocks * sizeof(int));
+            check_cuda(cudaMalloc(&d_block_table, max_blocks * sizeof(int)), "draft cudaMalloc d_block_table realloc");
         }
         if (max_blocks > 0) {
-            cudaMemcpy(d_block_table, cur_blocks.data(),
-                       max_blocks * sizeof(int), cudaMemcpyHostToDevice);
+            check_cuda(cudaMemcpy(d_block_table, cur_blocks.data(),
+                       max_blocks * sizeof(int), cudaMemcpyHostToDevice), "draft memcpy block_table");
         }
 
         InferenceState state;
@@ -157,6 +170,11 @@ SpeculativeDecoder::verify(const std::vector<int32_t>& draft,
                            int seed,
                            cudaStream_t stream) {
     VerifyResult result;
+    if (!target_executor_ || !target_kv_manager_) {
+        IMP_LOG_ERROR("speculative: verify called without initialized target model");
+        return result;
+    }
+
     const int K = static_cast<int>(draft.size());
     if (K == 0) {
         IMP_LOG_WARN("speculative: verify called with empty draft");
@@ -181,10 +199,10 @@ SpeculativeDecoder::verify(const std::vector<int32_t>& draft,
     // Allocate device buffers for the verification pass.
     int32_t* d_tokens = nullptr;
     int*     d_positions = nullptr;
-    cudaMalloc(&d_tokens, n_verify * sizeof(int32_t));
-    cudaMalloc(&d_positions, n_verify * sizeof(int));
-    cudaMemcpy(d_tokens, h_tokens.data(), n_verify * sizeof(int32_t), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_positions, h_positions.data(), n_verify * sizeof(int), cudaMemcpyHostToDevice);
+    check_cuda(cudaMalloc(&d_tokens, n_verify * sizeof(int32_t)), "verify cudaMalloc d_tokens");
+    check_cuda(cudaMalloc(&d_positions, n_verify * sizeof(int)), "verify cudaMalloc d_positions");
+    check_cuda(cudaMemcpy(d_tokens, h_tokens.data(), n_verify * sizeof(int32_t), cudaMemcpyHostToDevice), "verify memcpy tokens");
+    check_cuda(cudaMemcpy(d_positions, h_positions.data(), n_verify * sizeof(int), cudaMemcpyHostToDevice), "verify memcpy positions");
 
     // Ensure the target KV cache has enough blocks.
     int final_pos = position + K;
@@ -202,13 +220,13 @@ SpeculativeDecoder::verify(const std::vector<int32_t>& draft,
     int* d_block_table = nullptr;
     int* d_ctx_len = nullptr;
     if (max_blocks > 0) {
-        cudaMalloc(&d_block_table, max_blocks * sizeof(int));
-        cudaMemcpy(d_block_table, target_blocks.data(),
-                   max_blocks * sizeof(int), cudaMemcpyHostToDevice);
+        check_cuda(cudaMalloc(&d_block_table, max_blocks * sizeof(int)), "verify cudaMalloc d_block_table");
+        check_cuda(cudaMemcpy(d_block_table, target_blocks.data(),
+                   max_blocks * sizeof(int), cudaMemcpyHostToDevice), "verify memcpy block_table");
     }
-    cudaMalloc(&d_ctx_len, sizeof(int));
+    check_cuda(cudaMalloc(&d_ctx_len, sizeof(int)), "verify cudaMalloc d_ctx_len");
     int ctx_len = position + n_verify;
-    cudaMemcpy(d_ctx_len, &ctx_len, sizeof(int), cudaMemcpyHostToDevice);
+    check_cuda(cudaMemcpy(d_ctx_len, &ctx_len, sizeof(int), cudaMemcpyHostToDevice), "verify memcpy ctx_len");
 
     // Build InferenceState for pseudo-prefill (all n_verify tokens at once).
     InferenceState state;
@@ -242,7 +260,7 @@ SpeculativeDecoder::verify(const std::vector<int32_t>& draft,
     std::vector<float> h_logits(n_verify * vocab_size);
 
     if (logits.dtype == DType::FP32) {
-        cudaMemcpy(h_logits.data(), logits.data, logits_bytes, cudaMemcpyDeviceToHost);
+        check_cuda(cudaMemcpy(h_logits.data(), logits.data, logits_bytes, cudaMemcpyDeviceToHost), "verify memcpy logits");
     } else {
         // For FP16/BF16 logits, we need a conversion -- but for now, the
         // executor's logits buffer is already FP32 (as used by sampling).
@@ -250,8 +268,8 @@ SpeculativeDecoder::verify(const std::vector<int32_t>& draft,
         // This path should not normally be hit since logits are computed in FP32.
         IMP_LOG_WARN("speculative: logits dtype is %s, expected FP32",
                      dtype_name(logits.dtype));
-        cudaMemcpy(h_logits.data(), logits.data,
-                   n_verify * vocab_size * sizeof(float), cudaMemcpyDeviceToHost);
+        check_cuda(cudaMemcpy(h_logits.data(), logits.data,
+                   n_verify * vocab_size * sizeof(float), cudaMemcpyDeviceToHost), "verify memcpy logits fallback");
     }
 
     cudaStreamSynchronize(stream);
