@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 260" width="600" height="260">
+  <defs>
+    <linearGradient id="horn" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ff2222"/>
+      <stop offset="100%" stop-color="#990000"/>
+    </linearGradient>
+    <linearGradient id="txt" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="40%" stop-color="#f0f0f0"/>
+      <stop offset="100%" stop-color="#b0b0b0"/>
+    </linearGradient>
+    <linearGradient id="tail" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#990000"/>
+      <stop offset="100%" stop-color="#ff2222"/>
+    </linearGradient>
+    <filter id="glow" x="-15%" y="-15%" width="130%" height="130%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="glow-hot" x="-25%" y="-25%" width="150%" height="150%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="shadow">
+      <feDropShadow dx="0" dy="3" stdDeviation="5" flood-color="#000" flood-opacity="0.6"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="600" height="260" rx="20" fill="#080808"/>
+
+  <!-- Faint grid -->
+  <g opacity="0.025" stroke="#fff" stroke-width="0.5">
+    <line x1="0" y1="60" x2="600" y2="60"/>
+    <line x1="0" y1="120" x2="600" y2="120"/>
+    <line x1="0" y1="180" x2="600" y2="180"/>
+  </g>
+
+  <!-- Red ambient glow behind horns -->
+  <ellipse cx="142" cy="50" rx="60" ry="45" fill="#ff0000" opacity="0.07"/>
+
+  <!-- ===== HORNS ===== -->
+  <g filter="url(#glow-hot)">
+    <!-- Left horn — thick, curved, sharp -->
+    <path d="M 120 72 C 112 50, 98 30, 82 6
+             C 80 2, 84 4, 86 6
+             C 100 26, 116 50, 134 72 Z"
+          fill="url(#horn)"/>
+    <!-- Right horn -->
+    <path d="M 150 72 C 158 50, 172 30, 190 6
+             C 192 2, 188 4, 186 6
+             C 172 26, 156 50, 138 72 Z"
+          fill="url(#horn)"/>
+  </g>
+
+  <!-- ===== MAIN LETTERS ===== -->
+  <g filter="url(#shadow)">
+
+    <!-- ── i ── -->
+    <!-- Glowing red dot -->
+    <circle cx="137" cy="68" r="10" fill="url(#horn)" filter="url(#glow-hot)"/>
+    <!-- Thick stem -->
+    <rect x="119" y="90" width="36" height="86" rx="5" fill="url(#txt)"/>
+
+    <!-- ── m ── -->
+    <path d="M 178 176 L 178 126
+             C 178 96, 206 86, 226 86
+             C 244 86, 256 94, 262 108
+             C 268 94, 280 86, 298 86
+             C 318 86, 346 96, 346 126
+             L 346 176 L 314 176 L 314 130
+             C 314 112, 304 104, 292 104
+             C 280 104, 270 112, 270 130 L 270 176
+             L 238 176 L 238 130
+             C 238 112, 228 104, 216 104
+             C 204 104, 194 112, 194 130
+             L 194 176 Z"
+          fill="url(#txt)"/>
+
+    <!-- ── p ── -->
+    <path d="M 370 86 L 370 210 L 388 210 L 388 170
+             C 396 176, 410 180, 424 180
+             C 458 180, 480 158, 480 132
+             C 480 106, 458 86, 424 86
+             C 410 86, 396 90, 388 98 L 388 86 Z
+             M 420 104
+             C 445 104, 460 116, 460 132
+             C 460 148, 445 160, 420 160
+             C 400 160, 388 150, 388 132
+             C 388 114, 400 104, 420 104 Z"
+          fill="url(#txt)" fill-rule="evenodd"/>
+  </g>
+
+  <!-- ===== DEVIL TAIL from p descender ===== -->
+  <g filter="url(#glow-hot)">
+    <path d="M 388 210 C 410 214, 438 208, 460 198
+             C 482 188, 498 184, 508 190"
+          fill="none" stroke="url(#tail)" stroke-width="7" stroke-linecap="round"/>
+    <!-- Spade tip -->
+    <path d="M 508 190
+             C 512 180, 522 176, 524 184
+             C 526 176, 520 170, 514 176
+             C 518 168, 528 172, 526 182
+             L 524 184
+             C 526 192, 520 196, 514 190
+             C 518 198, 508 198, 508 190 Z"
+          fill="#ff2222"/>
+  </g>
+
+  <!-- ===== TAGLINE ===== -->
+  <text x="300" y="244" text-anchor="middle"
+        font-family="'SF Mono','Fira Code','Cascadia Code','Consolas',monospace"
+        font-size="12" font-weight="500" letter-spacing="5" fill="#444">
+    LLM INFERENCE ENGINE
+  </text>
+</svg>

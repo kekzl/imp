@@ -9,3 +9,4 @@ inspect_gguf.py
 test_detail.json
 models
 __pycache__/
+.playwright-mcp/

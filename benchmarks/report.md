@@ -25,3 +25,16 @@
 | Qwen3-Coder-30B-A3B-Instruct | Q6_K | llama.cpp | 6091.02 | 200.04 |
 | Qwen3-Coder-30B-A3B-Instruct | Q6_K | imp (bench) | 6167.31 | 210.10 |
 | Qwen3-Coder-30B-A3B-Instruct | Q6_K | imp (real) | 1354.42 | 202.48 |
+| Nemotron-3-Nano-30B-A3B | Q6_K | llama.cpp | 122.85 | 17.91 |
+| Nemotron-3-Nano-30B-A3B | Q6_K | imp (bench) | 226.65 | 22.01 |
+| Nemotron-3-Nano-30B-A3B | Q6_K | imp (real) | 11.91 | 6.80 |
+
+## Notes
+
+- **pp tok/s** = prompt processing throughput (prefill phase)
+- **tg tok/s** = text generation throughput (autoregressive decode phase)
+- **imp (bench)** uses synthetic tokens with warmup + averaged reps (apples-to-apples with llama-bench)
+- **imp (real)** tokenizes a real text prompt (single run, no warmup)
+- Both engines offload all layers to GPU (`-ngl 99` / default)
+- imp features: CUDA graphs (decode), PDL (kernel overlap), MoE decode fast path (device-side expert dispatch), non-blocking stream, 64 MiB cuBLAS workspace
+- Build: sm_120 native (RTX 5090), `-O3 -Xptxas -O3 --use_fast_math -march=native`
