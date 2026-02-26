@@ -209,6 +209,8 @@ For multi-token prefill (n>1), weights are pre-dequantized to FP16 at init time:
 
 ## Acknowledgments
 
+imp was built by [@kekzl](https://github.com/kekzl) with [Claude Code](https://claude.ai/claude-code).
+
 imp stands on the shoulders of [llama.cpp](https://github.com/ggerganov/llama.cpp). The GGUF format, the quantization schemes, and the entire concept of practical local LLM inference were pioneered by Georgi Gerganov and the llama.cpp community. See [`docs/comparison-llama-cpp.md`](docs/comparison-llama-cpp.md) for a detailed technical comparison and full acknowledgment.
 
 ## License
