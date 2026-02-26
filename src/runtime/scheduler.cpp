@@ -39,9 +39,9 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 // Not enough memory even with eviction -- stop admitting
                 break;
             }
-            // Reserve blocks so subsequent requests see reduced availability
-            int seq_id = static_cast<int>(active_.size()) + next_seq_id_++;
-            if (!kv_manager_->allocate_blocks(seq_id, blocks_needed)) {
+            // Reserve blocks under req->id so subsequent requests see reduced
+            // availability and the engine can reuse them during prefill.
+            if (!kv_manager_->allocate_blocks(req->id, blocks_needed)) {
                 break;
             }
         }
