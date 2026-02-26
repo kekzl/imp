@@ -27,4 +27,10 @@ bool dequant_gpu_supported(GGMLQuantType qtype);
 void dequant_gpu(const void* src, void* dst, GGMLQuantType qtype,
                  int rows, int cols, cudaStream_t stream);
 
+// Dequantize raw GGML quantized data to FP8 E4M3 on GPU.
+// Same interface as dequant_gpu() but writes FP8 E4M3 (1 byte/element).
+// Currently supports Q6_K only. Q6_K values are within FP8 E4M3 range (±448).
+void dequant_gpu_fp8(const void* src, void* dst, GGMLQuantType qtype,
+                     int rows, int cols, cudaStream_t stream);
+
 } // namespace imp

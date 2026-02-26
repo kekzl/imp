@@ -96,6 +96,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                      (free_before - free_after) / (1024 * 1024));
     }
 
+    // --- Pre-dequantize quantized weights to FP16 for fast prefill GEMM ---
+    executor_->pre_dequant_weights(stream_);
+
     // --- Initialize layer offloading if configured ---
     if (config_.gpu_layers >= 0) {
         offload_mgr_ = std::make_unique<LayerOffloadManager>();

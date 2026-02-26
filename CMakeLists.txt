@@ -47,6 +47,22 @@ if(IMP_BUILD_TESTS)
     FetchContent_MakeAvailable(googletest)
 endif()
 
+option(IMP_USE_CUTLASS "Use CUTLASS for MoE GEMM (requires sm_90+)" ON)
+if(IMP_USE_CUTLASS)
+    FetchContent_Declare(cutlass
+        GIT_REPOSITORY https://github.com/NVIDIA/cutlass.git
+        GIT_TAG v3.7.0
+        GIT_SHALLOW TRUE
+        EXCLUDE_FROM_ALL
+    )
+    # CUTLASS is header-only for our use — disable all build targets
+    set(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "" FORCE)
+    set(CUTLASS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+    set(CUTLASS_ENABLE_TOOLS OFF CACHE BOOL "" FORCE)
+    set(CUTLASS_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(cutlass)
+endif()
+
 # --- Core library sources ---
 set(IMP_CORE_SOURCES
     src/core/tensor.cpp
@@ -89,10 +105,13 @@ set(IMP_QUANT_SOURCES
 set(IMP_COMPUTE_SOURCES
     src/compute/gemm.cu
     src/compute/gemm_grouped.cu
+    src/compute/gemm_moe_fused.cu
+    src/compute/gemm_q6k.cu
     src/compute/attention.cu
     src/compute/attention_paged.cu
     src/compute/attention_tc.cu
     src/compute/attention_blackwell.cu
+    src/compute/attention_cublas.cu
     src/compute/attention_dispatch.cu
     src/compute/rope.cu
     src/compute/layernorm.cu
@@ -104,6 +123,10 @@ set(IMP_COMPUTE_SOURCES
     src/compute/reduce.cu
     src/compute/ssm.cu
 )
+
+if(IMP_USE_CUTLASS)
+    list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass.cu)
+endif()
 
 set(IMP_RUNTIME_SOURCES
     src/runtime/green_ctx.cu
@@ -155,6 +178,14 @@ target_link_libraries(imp
     PRIVATE
         pthread
 )
+
+if(IMP_USE_CUTLASS)
+    target_include_directories(imp PRIVATE
+        ${cutlass_SOURCE_DIR}/include
+        ${cutlass_SOURCE_DIR}/tools/util/include
+    )
+    target_compile_definitions(imp PRIVATE IMP_USE_CUTLASS=1)
+endif()
 
 # Enable separable compilation for device-side launches (PDL)
 set_target_properties(imp PROPERTIES

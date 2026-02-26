@@ -114,6 +114,13 @@ void gemv_qkv_fused_q8_0_q8_1(const void* W_q, const void* W_k, const void* W_v,
                                 int q_rows, int k_rows, int v_rows, int K,
                                 cudaStream_t stream = nullptr);
 
+// Batched K/V projection: input @ [wk; wv]^T → k_out, v_out in a single cuBLAS call.
+// weight_kv: [2 * nkv_hd, d_model] — wk at rows [0..nkv_hd), wv at [nkv_hd..2*nkv_hd)
+// k_out, v_out: [n_tokens, nkv_hd] — must be contiguous (v_out = k_out + stride)
+void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv,
+                     Tensor& k_out, Tensor& v_out,
+                     cudaStream_t stream = nullptr);
+
 // MoE decode GEMV: processes all top_k experts in a single kernel launch.
 // packed_weights: base pointer to packed expert tensor (all experts contiguous).
 // expert_indices: [top_k] int32 on device — selects which expert's weights to use.

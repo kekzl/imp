@@ -4,14 +4,21 @@
 #include "compute/rope.h"
 #include "compute/gemm.h"
 #include "compute/gemm_grouped.h"
+#include "compute/gemm_moe_fused.h"
+#include "compute/gemm_q6k.h"
+#ifdef IMP_USE_CUTLASS
+#include "compute/gemm_cutlass.h"
+#endif
 #include "compute/activation.h"
 #include "compute/attention.h"
+#include "compute/attention_cublas.h"
 #include "compute/attention_paged.h"
 #include "compute/moe_routing.h"
 #include "compute/sampling.h"
 #include "compute/ssm.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
+#include "quant/fp8_quant.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "runtime/pdl.h"
@@ -342,7 +349,8 @@ static void gemm_dispatch(const Tensor& input, const Tensor& weight,
                            Tensor& output, void* dequant_scratch,
                            cudaStream_t stream,
                            block_q8_1* q8_1_buf = nullptr,
-                           float* d8_buf = nullptr) {
+                           float* d8_buf = nullptr,
+                           const std::unordered_map<const void*, Tensor>* fp16_cache = nullptr) {
     if (qtype == GGMLQuantType::Q4_0 || qtype == GGMLQuantType::Q4_1) {
         // weight is [N, K/2] packed nibbles, scales is [N, num_groups]
         quant_gemm_int4(input, weight, scales, output, stream);
@@ -376,6 +384,21 @@ static void gemm_dispatch(const Tensor& input, const Tensor& weight,
         gemv_q8_0(weight.data, static_cast<const half*>(input.data),
                   static_cast<half*>(output.data),
                   static_cast<int>(weight.shape[0]), static_cast<int>(weight.shape[1]), stream);
+    } else if (fp16_cache != nullptr && dequant_gpu_supported(qtype)) {
+        // Pre-dequantized FP16 cache: zero per-GEMM dequant overhead
+        auto it = fp16_cache->find(weight.data);
+        if (it != fp16_cache->end()) {
+            gemm(input, it->second, output, 1.0f, 0.0f, stream);
+        } else if (dequant_scratch != nullptr) {
+            // Cache miss (shouldn't happen) — fall back to on-the-fly dequant
+            int rows = static_cast<int>(weight.shape[0]);
+            int cols = static_cast<int>(weight.shape[1]);
+            dequant_gpu(weight.data, dequant_scratch, qtype, rows, cols, stream);
+            Tensor w_fp16(dequant_scratch, DType::FP16, weight.ndim, weight.shape, true);
+            gemm(input, w_fp16, output, 1.0f, 0.0f, stream);
+        } else {
+            gemm(input, weight, output, 1.0f, 0.0f, stream);
+        }
     } else if (dequant_scratch != nullptr && dequant_gpu_supported(qtype)) {
         // Raw quantized bytes on GPU — dequant into scratch, then GEMM
         int rows = static_cast<int>(weight.shape[0]);
@@ -508,10 +531,10 @@ void GraphExecutor::compute_shared_sizes(int max_tokens) {
 
     auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
 
-    // Attention phase: q, k, v, attn_out, proj_out
+    // Attention phase: q, k+v (contiguous for batched GEMM), attn_out, proj_out
+    size_t kv_raw = static_cast<size_t>(max_tokens) * nkv * hd * es;
     attn_shared_size_ = align256(static_cast<size_t>(max_tokens) * nh * hd * es)    // q
-                       + align256(static_cast<size_t>(max_tokens) * nkv * hd * es)  // k
-                       + align256(static_cast<size_t>(max_tokens) * nkv * hd * es)  // v
+                       + align256(2 * kv_raw)                                       // k+v contiguous
                        + align256(static_cast<size_t>(max_tokens) * nh * hd * es)   // attn_out
                        + align256(static_cast<size_t>(max_tokens) * d * es);        // proj_out
 
@@ -746,6 +769,44 @@ void GraphExecutor::allocate_auxiliary_buffers() {
         }
     }
 
+    // cuBLAS attention S-matrix workspace: [n_heads, attn_seq, attn_seq] FP16
+    // Only useful for prefill; budget-capped to avoid eating VRAM needed for KV cache.
+    // For prefills longer than attn_seq, falls back to WMMA attention.
+    {
+        int nh = cfg.n_heads;
+        constexpr size_t kMaxAttnScoresMiB = 256;  // cap at 256 MiB
+        size_t max_s_sz = kMaxAttnScoresMiB << 20;
+        // max seq = sqrt(budget / (n_heads * sizeof(half)))
+        int attn_seq = max_tokens_;
+        size_t s_sz = static_cast<size_t>(nh) * attn_seq * attn_seq * sizeof(half);
+        if (s_sz > max_s_sz) {
+            attn_seq = static_cast<int>(std::sqrt(
+                static_cast<double>(max_s_sz) / (nh * sizeof(half))));
+            attn_seq = (attn_seq / 16) * 16;  // round down to multiple of 16
+            if (attn_seq < 32) attn_seq = 0;  // too small to be useful
+            s_sz = static_cast<size_t>(nh) * attn_seq * attn_seq * sizeof(half);
+        }
+        if (attn_seq > 0) {
+            cudaError_t err = cudaMalloc(&attn_scores_buf_, s_sz);
+            if (err != cudaSuccess) {
+                cudaGetLastError();
+                IMP_LOG_WARN("Failed to allocate cuBLAS attention S-matrix (%zu bytes, %.1f MiB), "
+                             "will fall back to WMMA attention for prefill",
+                             s_sz, s_sz / (1024.0 * 1024.0));
+                attn_scores_buf_ = nullptr;
+                attn_scores_buf_size_ = 0;
+            } else {
+                attn_scores_buf_size_ = s_sz;
+                int64_t s_shape[3] = {static_cast<int64_t>(nh),
+                                      static_cast<int64_t>(attn_seq),
+                                      static_cast<int64_t>(attn_seq)};
+                attn_scores_ = Tensor(attn_scores_buf_, DType::FP16, 3, s_shape, true);
+                IMP_LOG_INFO("cuBLAS attention S-matrix: %.2f MiB (%d heads x %d x %d)",
+                             s_sz / (1024.0 * 1024.0), nh, attn_seq, attn_seq);
+            }
+        }
+    }
+
     // MoE dequant and staging buffers
     if (has_moe_) {
         int d   = cfg.d_model;
@@ -797,10 +858,64 @@ void GraphExecutor::allocate_auxiliary_buffers() {
                 }
             }
         }
+
+        // Batch dequant buffer: sized for a chunk of experts (L2-resident strategy).
+        // We dequant a chunk of experts to FP16, then immediately GEMM while the
+        // FP16 data is still warm in L2 cache (~96 MB on RTX 5090). This avoids
+        // writing the FP16 intermediate to DRAM entirely, saving ~5x DRAM traffic.
+        {
+            int targets[] = {cfg.n_experts, cfg.n_experts / 2, 32, 16};
+            bool allocated = false;
+            for (int ne_try : targets) {
+                if (ne_try <= 0) continue;
+                ne_try = std::min(ne_try, cfg.n_experts);
+                size_t sz = static_cast<size_t>(ne_try) * eff * d * sizeof(half);
+                cudaError_t err = cudaMalloc(&moe_batch_dequant_buf_, sz);
+                if (err != cudaSuccess) { cudaGetLastError(); continue; }
+                moe_batch_dequant_buf_size_ = sz;
+                allocated = true;
+                IMP_LOG_INFO("MoE batch dequant buffer: %.2f MiB (%d experts)",
+                             sz / (1024.0 * 1024.0), ne_try);
+                break;
+            }
+            if (!allocated) {
+                IMP_LOG_INFO("MoE batch dequant buffer: skipped (VRAM insufficient)");
+                moe_batch_dequant_buf_ = nullptr;
+                moe_batch_dequant_buf_size_ = 0;
+            }
+        }
+
+        // Pre-allocated device pointer arrays for batched MoE GEMM.
+        // 3 arrays × n_experts void pointers = trivial memory (< 4 KB).
+        // Eliminates cudaMallocAsync/FreeAsync from the hot path.
+        if (cfg.n_experts > 0) {
+            size_t ptr_bytes = 3 * static_cast<size_t>(cfg.n_experts) * sizeof(void*);
+            cudaError_t err = cudaMalloc(&d_moe_work_ptrs_, ptr_bytes);
+            if (err == cudaSuccess) {
+                d_moe_work_ptrs_count_ = cfg.n_experts;
+            } else {
+                cudaGetLastError();
+                d_moe_work_ptrs_ = nullptr;
+                d_moe_work_ptrs_count_ = 0;
+            }
+        }
     }
 }
 
 void GraphExecutor::free_buffers() {
+    // Free fused KV weight cache
+    for (auto& [idx, tensor] : fused_kv_cache_) {
+        if (tensor.data) cudaFree(tensor.data);
+    }
+    fused_kv_cache_.clear();
+
+    // Free FP16 weight cache
+    for (auto& [ptr, tensor] : fp16_cache_) {
+        cudaFree(tensor.data);
+    }
+    fp16_cache_.clear();
+    fp16_cache_bytes_ = 0;
+
     moe_routing_buffers_.free();
     if (moe_dequant_buf_) {
         cudaFree(moe_dequant_buf_);
@@ -811,6 +926,16 @@ void GraphExecutor::free_buffers() {
         cudaFree(moe_raw_staging_buf_);
         moe_raw_staging_buf_ = nullptr;
         moe_raw_staging_size_ = 0;
+    }
+    if (moe_batch_dequant_buf_) {
+        cudaFree(moe_batch_dequant_buf_);
+        moe_batch_dequant_buf_ = nullptr;
+    }
+    moe_batch_dequant_buf_size_ = 0;
+    if (d_moe_work_ptrs_) {
+        cudaFree(d_moe_work_ptrs_);
+        d_moe_work_ptrs_ = nullptr;
+        d_moe_work_ptrs_count_ = 0;
     }
     if (dequant_scratch_) {
         cudaFree(dequant_scratch_);
@@ -835,6 +960,11 @@ void GraphExecutor::free_buffers() {
         splitk_scratch_ = nullptr;
         splitk_scratch_size_ = 0;
     }
+    if (attn_scores_buf_) {
+        cudaFree(attn_scores_buf_);
+        attn_scores_buf_ = nullptr;
+        attn_scores_buf_size_ = 0;
+    }
     if (shared_workspace_) {
         cudaFree(shared_workspace_);
         shared_workspace_ = nullptr;
@@ -847,6 +977,120 @@ void GraphExecutor::free_buffers() {
     }
     ssm_layer_map_.clear();
     initialized_ = false;
+}
+
+// ---------------------------------------------------------------------------
+// Pre-dequantize quantized weights to FP16 on GPU
+// ---------------------------------------------------------------------------
+
+void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
+    if (!initialized_ || !model_) return;
+
+    const auto& cfg = model_->config();
+    size_t total_fp16_bytes = 0;
+    int cached_count = 0;
+    bool budget_exhausted = false;
+
+    // Query free VRAM and set a budget. Reserve enough for KV cache + runtime.
+    // On WSL2/WDDM, cudaMalloc succeeds beyond physical VRAM via overcommit,
+    // which exhausts virtual address space and causes OOM for later allocations.
+    size_t free_vram = 0, total_vram = 0;
+    cudaMemGetInfo(&free_vram, &total_vram);
+    constexpr size_t kVramReserveMiB = 1536;  // 1.5 GiB reserve for KV cache + overhead
+    size_t vram_budget = (free_vram > kVramReserveMiB * 1024ULL * 1024)
+                         ? (free_vram - kVramReserveMiB * 1024ULL * 1024) : 0;
+
+    auto cache_weight = [&](const Tensor& w, GGMLQuantType qtype) {
+        if (!w.data || !dequant_gpu_supported(qtype)) return;
+        if (fp16_cache_.count(w.data)) return;  // already cached
+        if (budget_exhausted) return;
+
+        int rows = static_cast<int>(w.shape[0]);
+        int cols = static_cast<int>(w.shape[1]);
+        size_t fp16_bytes = static_cast<size_t>(rows) * cols * sizeof(half);
+
+        if (total_fp16_bytes + fp16_bytes > vram_budget) {
+            budget_exhausted = true;
+            IMP_LOG_INFO("FP16 cache: VRAM budget reached after %d tensors (%.1f / %.1f MiB), "
+                         "remaining weights will use on-the-fly dequant",
+                         cached_count, total_fp16_bytes / (1024.0 * 1024.0),
+                         vram_budget / (1024.0 * 1024.0));
+            return;
+        }
+
+        void* fp16_buf = nullptr;
+        cudaError_t err = cudaMalloc(&fp16_buf, fp16_bytes);
+        if (err != cudaSuccess) {
+            cudaGetLastError();
+            budget_exhausted = true;
+            IMP_LOG_WARN("FP16 cache: cudaMalloc failed after %d tensors (%.1f MiB)",
+                         cached_count, total_fp16_bytes / (1024.0 * 1024.0));
+            return;
+        }
+
+        dequant_gpu(w.data, fp16_buf, qtype, rows, cols, stream);
+
+        Tensor fp16_tensor(fp16_buf, DType::FP16, w.ndim, w.shape, true);
+        fp16_cache_[w.data] = fp16_tensor;
+        total_fp16_bytes += fp16_bytes;
+        cached_count++;
+    };
+
+    for (int i = 0; i < cfg.n_layers; i++) {
+        const auto& L = model_->layer(i);
+        cache_weight(L.wq, L.wq_qtype);
+        cache_weight(L.wk, L.wk_qtype);
+        cache_weight(L.wv, L.wv_qtype);
+        cache_weight(L.wo, L.wo_qtype);
+        cache_weight(L.w_gate, L.w_gate_qtype);
+        cache_weight(L.w_up, L.w_up_qtype);
+        cache_weight(L.w_down, L.w_down_qtype);
+        cache_weight(L.w_gate_shared, L.w_gate_shared_qtype);
+        cache_weight(L.w_up_shared, L.w_up_shared_qtype);
+        cache_weight(L.w_down_shared, L.w_down_shared_qtype);
+        cache_weight(L.ssm_in, L.ssm_in_qtype);
+        cache_weight(L.ssm_out, L.ssm_out_qtype);
+    }
+
+    // Create fused KV weights for strided batched prefill GEMM.
+    // Each entry concatenates [wk; wv] as [2*nkv*hd, d_model] FP16 for one layer.
+    int fused_kv_count = 0;
+    for (int i = 0; i < cfg.n_layers; i++) {
+        const auto& L = model_->layer(i);
+        if (!L.wk.data || !L.wv.data) continue;
+        auto wk_it = fp16_cache_.find(L.wk.data);
+        auto wv_it = fp16_cache_.find(L.wv.data);
+        if (wk_it == fp16_cache_.end() || wv_it == fp16_cache_.end()) continue;
+
+        int k_rows = static_cast<int>(L.wk.shape[0]);  // nkv * hd
+        int K = static_cast<int>(L.wk.shape[1]);        // d_model
+        size_t one_sz = static_cast<size_t>(k_rows) * K * sizeof(half);
+
+        void* fused_buf = nullptr;
+        cudaError_t err = cudaMalloc(&fused_buf, 2 * one_sz);
+        if (err != cudaSuccess) {
+            cudaGetLastError();
+            break;
+        }
+
+        cudaMemcpyAsync(fused_buf, wk_it->second.data, one_sz,
+                         cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(static_cast<char*>(fused_buf) + one_sz,
+                         wv_it->second.data, one_sz,
+                         cudaMemcpyDeviceToDevice, stream);
+
+        int64_t shape[2] = {2 * k_rows, static_cast<int64_t>(K)};
+        fused_kv_cache_[i] = Tensor(fused_buf, DType::FP16, 2, shape, true);
+        total_fp16_bytes += 2 * one_sz;
+        fused_kv_count++;
+    }
+
+    if (cached_count > 0) {
+        cudaStreamSynchronize(stream);
+        fp16_cache_bytes_ = total_fp16_bytes;
+        IMP_LOG_INFO("FP16 weight cache: %d tensors, %.2f MiB (incl. %d fused KV)",
+                     cached_count, total_fp16_bytes / (1024.0 * 1024.0), fused_kv_count);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -872,8 +1116,15 @@ void GraphExecutor::configure_attn_workspace(int max_tokens) {
     };
 
     q_        = make(nh * hd,  align256(static_cast<size_t>(max_tokens) * nh * hd * es));
-    k_        = make(nkv * hd, align256(static_cast<size_t>(max_tokens) * nkv * hd * es));
-    v_        = make(nkv * hd, align256(static_cast<size_t>(max_tokens) * nkv * hd * es));
+    // K and V are contiguous (no alignment gap) to enable strided batched GEMM.
+    // v_.data == k_.data + kv_raw exactly, so output_stride = kv_raw / es.
+    {
+        size_t kv_raw = static_cast<size_t>(max_tokens) * nkv * hd * es;
+        int64_t kv_shape[2] = {static_cast<int64_t>(max_tokens), static_cast<int64_t>(nkv * hd)};
+        k_ = Tensor(ptr, compute_dtype_, 2, kv_shape, true);
+        v_ = Tensor(ptr + kv_raw, compute_dtype_, 2, kv_shape, true);
+        ptr += align256(2 * kv_raw);
+    }
     attn_out_ = make(nh * hd,  align256(static_cast<size_t>(max_tokens) * nh * hd * es));
     proj_out_ = make(d,        align256(static_cast<size_t>(max_tokens) * d * es));
 }
@@ -1222,13 +1473,15 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     Tensor po = view_tokens(proj_out_, n);
 
     // 1. Save residual for later add-back.
-    //    Optimization: if the fused O-proj+residual path will be used, we can
-    //    skip this memcpy and use h.data directly as residual (since nothing
-    //    writes to h between here and the O-proj output).
+    //    Optimization: for decode (n=1) with dp4a, fuse residual into GEMV.
+    //    For prefill (n>1) with FP16 cache, use cuBLAS beta=1 to fuse residual
+    //    into the wo projection GEMM — no separate residual save/add/copy needed.
     bool will_fuse_o_residual = (n == 1 && q8_1_buf_ != nullptr && d8_buf_ != nullptr &&
                                   h.dtype == DType::FP16 &&
                                   (ly.wo_qtype == GGMLQuantType::Q6_K || ly.wo_qtype == GGMLQuantType::Q8_0));
-    if (!will_fuse_o_residual) {
+    bool will_fuse_o_beta1 = (!will_fuse_o_residual && n > 1 &&
+                               fp16_cache_.count(ly.wo.data));
+    if (!will_fuse_o_residual && !will_fuse_o_beta1) {
         cudaMemcpyAsync(r.data, h.data, h.nbytes(),
                         cudaMemcpyDeviceToDevice, stream);
     }
@@ -1271,9 +1524,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         } else {
             // Separate RMSNorm + dispatch
             rmsnorm(h, ly.attn_norm, no, eps, stream);
-            gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, qv, dequant_scratch_, stream, q8, d8_buf_);
-            gemm_dispatch(no, ly.wk, ly.wk_scales, ly.wk_qtype, kk, dequant_scratch_, stream, q8, d8_buf_);
-            gemm_dispatch(no, ly.wv, ly.wv_scales, ly.wv_qtype, vv, dequant_scratch_, stream, q8, d8_buf_);
+
+            // Try fused K+V path: single strided batched GEMM for both projections
+            auto fused_kv_it = fused_kv_cache_.find(layer);
+            if (n > 1 && fused_kv_it != fused_kv_cache_.end()) {
+                // Q: still separate (different output dim with GQA)
+                gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, qv,
+                              dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                // K+V: one batched cuBLAS call
+                gemm_kv_batched(no, fused_kv_it->second, kk, vv, stream);
+            } else {
+                gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, qv, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                gemm_dispatch(no, ly.wk, ly.wk_scales, ly.wk_qtype, kk, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                gemm_dispatch(no, ly.wv, ly.wv_scales, ly.wv_qtype, vv, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+            }
         }
     }
 
@@ -1317,19 +1581,32 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     float scale = 1.0f / std::sqrt(static_cast<float>(hd));
 
     if (state.is_prefill) {
-        // Flash attention: [batch=1, seq, heads, hd]
-        int64_t q4s[4]  = {1, n, nh,  hd};
-        int64_t kv4s[4] = {1, n, nkv, hd};
-        int64_t o4s[4]  = {1, n, nh,  hd};
+        // cuBLAS batched-GEMM attention for prefill (when S-matrix workspace is available
+        // and sliding window is not used — cuBLAS path doesn't support sliding window).
+        if (attn_scores_buf_ && n <= static_cast<int>(attn_scores_.shape[1]) &&
+            cfg.sliding_window == 0) {
+            // S workspace view: [n_heads, n, n]
+            int64_t s_shape[3] = {static_cast<int64_t>(nh),
+                                  static_cast<int64_t>(n),
+                                  static_cast<int64_t>(n)};
+            Tensor s_view(attn_scores_buf_, DType::FP16, 3, s_shape, true);
 
-        Tensor q4  = qv.reshape(4, q4s);
-        Tensor k4  = kk.reshape(4, kv4s);
-        Tensor v4  = vv.reshape(4, kv4s);
-        Tensor o4  = ao.reshape(4, o4s);
+            attention_cublas_prefill(qv, kk, vv, ao, s_view,
+                                     nh, nkv, hd, scale, /*causal=*/true, stream);
+        } else {
+            // Fallback: WMMA / scalar flash attention
+            int64_t q4s[4]  = {1, n, nh,  hd};
+            int64_t kv4s[4] = {1, n, nkv, hd};
+            int64_t o4s[4]  = {1, n, nh,  hd};
 
-        // Use runtime dispatch: TCGEN05 (sm_120) > WMMA (sm_90) > scalar
-        attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true,
-                                   cfg.sliding_window, stream);
+            Tensor q4  = qv.reshape(4, q4s);
+            Tensor k4  = kk.reshape(4, kv4s);
+            Tensor v4  = vv.reshape(4, kv4s);
+            Tensor o4  = ao.reshape(4, o4s);
+
+            attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true,
+                                       cfg.sliding_window, stream);
+        }
 
         // Persist K, V into cache for later decode steps
         write_kv_cache(layer, state, stream);
@@ -1401,10 +1678,15 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                       static_cast<half*>(h.data), residual_ptr,
                                       M_o, K_o, stream);
         }
+    } else if (will_fuse_o_beta1) {
+        // Fused: hidden = attn_out @ wo^T + hidden (cuBLAS beta=1).
+        // Safe: hidden is only READ (never written) between attn_norm and here.
+        const Tensor& wo_fp16 = fp16_cache_.at(ly.wo.data);
+        gemm(ao, wo_fp16, h, 1.0f, 1.0f, stream);
     } else {
         // Fallback: separate O-projection + residual add + copy
         gemm_dispatch(ao, ly.wo, ly.wo_scales, ly.wo_qtype, po, dequant_scratch_, stream,
-                      static_cast<block_q8_1*>(q8_1_buf_), d8_buf_);
+                      static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_);
         elementwise_add(po, r, stream);
         cudaMemcpyAsync(h.data, po.data, h.nbytes(),
                         cudaMemcpyDeviceToDevice, stream);
@@ -1441,7 +1723,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                      h.dtype == DType::FP16 &&
                                      (ly.w_down_qtype == GGMLQuantType::Q6_K ||
                                       ly.w_down_qtype == GGMLQuantType::Q8_0));
-    if (!will_fuse_down_residual) {
+    bool will_fuse_down_beta1 = (!will_fuse_down_residual && n > 1 &&
+                                  fp16_cache_.count(ly.w_down.data));
+    if (!will_fuse_down_residual && !will_fuse_down_beta1) {
         cudaMemcpyAsync(r.data, h.data, h.nbytes(),
                         cudaMemcpyDeviceToDevice, stream);
     }
@@ -1477,8 +1761,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             }
         } else {
             rmsnorm(h, ffn_norm_w, no, eps, stream);
-            gemm_dispatch(no, ly.w_gate, ly.w_gate_scales, ly.w_gate_qtype, go, dequant_scratch_, stream, q8, d8_buf_);
-            gemm_dispatch(no, ly.w_up,   ly.w_up_scales,   ly.w_up_qtype,   uo, dequant_scratch_, stream, q8, d8_buf_);
+            gemm_dispatch(no, ly.w_gate, ly.w_gate_scales, ly.w_gate_qtype, go, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+            gemm_dispatch(no, ly.w_up,   ly.w_up_scales,   ly.w_up_qtype,   uo, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
         }
     }
 
@@ -1508,9 +1792,13 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                           static_cast<half*>(h.data), residual_ptr,
                                           M_d, K_d, stream);
             }
+        } else if (will_fuse_down_beta1) {
+            // Fused: hidden = swiglu_out @ w_down^T + hidden (cuBLAS beta=1).
+            const Tensor& wd_fp16 = fp16_cache_.at(ly.w_down.data);
+            gemm(so, wd_fp16, h, 1.0f, 1.0f, stream);
         } else {
             gemm_dispatch(so, ly.w_down, ly.w_down_scales, ly.w_down_qtype, fo, dequant_scratch_, stream,
-                          static_cast<block_q8_1*>(q8_1_buf_), d8_buf_);
+                          static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_);
             elementwise_add(fo, r, stream);
             cudaMemcpyAsync(h.data, fo.data, h.nbytes(),
                             cudaMemcpyDeviceToDevice, stream);
@@ -1857,7 +2145,110 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         moe_gather(no, routing, gathered, stream);
     }
 
-    // 6. Per-expert FFN via grouped GEMM
+    // =========================================================================
+    // FP8 TENSOR CORE PREFILL PATH: Q6_K → FP8 dequant + cuBLAS FP8 GEMM.
+    // 1.7x less DRAM traffic than FP16 path + 2x tensor core throughput.
+    // Dequants Q6_K weights to FP8 E4M3 (half the FP16 size), quantizes
+    // FP16 activations to FP8, then runs FP8×FP8→FP16 grouped GEMM.
+    // =========================================================================
+    {
+    bool can_fp8_batch = (moe_batch_dequant_buf_ != nullptr &&
+                          ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
+                          ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
+                          up_qtype == GGMLQuantType::Q6_K &&
+                          ly.expert_down_qtype == GGMLQuantType::Q6_K &&
+                          compute_dtype_ == DType::FP16 &&
+                          !fp16_cache_.count(ly.expert_up_packed.data));
+    if (can_fp8_batch && !non_gated_experts)
+        can_fp8_batch = (ly.expert_gate_packed.data &&
+                         ly.expert_gate_packed.on_device &&
+                         ly.expert_gate_qtype == GGMLQuantType::Q6_K);
+
+    if (can_fp8_batch) {
+        // D2H copy of expert offsets (needed for batched GEMM pointer setup)
+        std::vector<int32_t> h_offsets(ne + 1);
+        cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
+                        static_cast<size_t>(ne + 1) * sizeof(int32_t),
+                        cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+
+        char* buf = static_cast<char*>(moe_batch_dequant_buf_);
+
+        // FP8 batched GEMM lambda: dequant Q6_K→FP8, quantize FP16 acts→FP8, cuBLAS FP8 GEMM→FP16
+        auto chunked_fp8_gemm = [&](const Tensor& packed, GGMLQuantType qtype,
+                                     const char* a_base_fp16, char* c_base_fp16,
+                                     int K_dim, int N_dim) {
+            int64_t rows = packed.shape[1];
+            int64_t cols = packed.shape[2];
+            size_t weight_fp8_bytes = static_cast<size_t>(ne) * rows * cols;  // 1 byte per FP8 element
+
+            // Buffer layout in moe_batch_dequant_buf_:
+            //   [0 .. weight_fp8_bytes)                     = FP8 weights for all experts
+            //   [weight_fp8_bytes .. weight_fp8_bytes + act) = FP8 activations
+            uint8_t* fp8_weights = reinterpret_cast<uint8_t*>(buf);
+            uint8_t* fp8_acts = fp8_weights + weight_fp8_bytes;
+
+            // 1. Dequant all experts Q6_K → FP8 E4M3
+            dequant_gpu_fp8(packed.data, fp8_weights, qtype,
+                            ne * static_cast<int>(rows), static_cast<int>(cols), stream);
+
+            // 2. Quantize gathered FP16 activations → FP8 E4M3 (scale=1.0)
+            quantize_fp16_to_fp8_e4m3_scaled(a_base_fp16, fp8_acts,
+                                              expanded * K_dim, 1.0f, stream);
+
+            // 3. Build per-expert FP8 weight pointers
+            std::vector<const void*> weight_ptrs(ne);
+            size_t expert_fp8_sz = static_cast<size_t>(rows) * cols;
+            for (int e = 0; e < ne; ++e)
+                weight_ptrs[e] = fp8_weights + static_cast<size_t>(e) * expert_fp8_sz;
+
+            // 4. FP8 × FP8 → FP16 batched GEMM
+            gemm_moe_batched(fp8_acts, c_base_fp16,
+                             h_offsets.data(), weight_ptrs.data(),
+                             K_dim, N_dim, DType::FP8_E4M3, ne, stream,
+                             d_moe_work_ptrs_, /*output_dtype=*/DType::FP16);
+        };
+
+        char* gathered_base     = static_cast<char*>(moe_gathered_.data);
+        char* expert_gate_base  = static_cast<char*>(moe_expert_gate_.data);
+        char* expert_up_base    = static_cast<char*>(moe_expert_up_.data);
+        char* expert_swiglu_base= static_cast<char*>(moe_expert_swiglu_.data);
+        char* expert_down_base  = static_cast<char*>(moe_expert_down_.data);
+
+        // Gate projection (gated models only)
+        if (!non_gated_experts)
+            chunked_fp8_gemm(ly.expert_gate_packed, ly.expert_gate_qtype,
+                             gathered_base, expert_gate_base, d, eff);
+
+        // Up projection
+        chunked_fp8_gemm(ly.expert_up_packed, up_qtype,
+                         gathered_base, expert_up_base, d, eff);
+
+        // Activation (FP16 — reuse existing kernels)
+        {
+            int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
+            if (non_gated_experts) {
+                Tensor up_t(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                Tensor act_t(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                cudaMemcpyAsync(act_t.data, up_t.data, (size_t)expanded * eff * es,
+                                cudaMemcpyDeviceToDevice, stream);
+                relu_sqr_inplace(act_t, stream);
+            } else {
+                Tensor g(moe_expert_gate_.data, compute_dtype_, 2, act_shape, true);
+                Tensor u(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                Tensor a(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                swiglu(g, u, a, stream);
+            }
+        }
+
+        // Down projection (activation output is FP16 in expert_swiglu_base)
+        chunked_fp8_gemm(ly.expert_down_packed, ly.expert_down_qtype,
+                         expert_swiglu_base, expert_down_base, eff, d);
+
+        // Falls through to existing scatter (step 7)
+
+    } else {
+    // 6b. Per-expert FFN via grouped GEMM (non-fused paths)
     //
     //    Read expert_offsets from device to host to determine per-expert token
     //    counts. This is a small transfer (n_experts+1 ints).
@@ -1942,87 +2333,241 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         }
     };
 
-    {
         char* gathered_base     = static_cast<char*>(moe_gathered_.data);
         char* expert_gate_base  = static_cast<char*>(moe_expert_gate_.data);
         char* expert_up_base    = static_cast<char*>(moe_expert_up_.data);
         char* expert_swiglu_base= static_cast<char*>(moe_expert_swiglu_.data);
         char* expert_down_base  = static_cast<char*>(moe_expert_down_.data);
 
-        // Per-expert gate + up projections: dequant and GEMM one expert at a time.
-        // This reuses a single dequant buffer slot, avoiding the need to allocate
-        // O(n_unique_active_experts) worth of dequant memory.
-        for (int e = 0; e < ne; ++e) {
-            int start = h_offsets[e];
-            int count = h_offsets[e + 1] - start;
-            if (count == 0) continue;
+        // Helper: get FP16 expert weight pointer from pre-dequant cache or unpacked weights.
+        auto get_fp16_expert_ptr = [&](const Tensor& packed, GGMLQuantType qtype,
+                                        const std::vector<Tensor>& fallback,
+                                        int eidx) -> const void* {
+            if (packed.data && fp16_cache_.count(packed.data)) {
+                const Tensor& cached = fp16_cache_.at(packed.data);
+                int64_t rows = packed.shape[1];
+                int64_t cols = packed.shape[2];
+                size_t expert_offset = static_cast<size_t>(eidx) * rows * cols * sizeof(half);
+                return static_cast<const char*>(cached.data) + expert_offset;
+            }
+            if (!fallback.empty() && static_cast<size_t>(eidx) < fallback.size() &&
+                fallback[eidx].data && fallback[eidx].dtype == DType::FP16 &&
+                fallback[eidx].on_device) {
+                return fallback[eidx].data;
+            }
+            return nullptr;
+        };
 
-            int64_t count64 = static_cast<int64_t>(count);
+        // Helper: batch dequant all experts + single grouped GEMM.
+        // Dequants all experts to FP16, then runs a single batched GEMM.
+        // CUTLASS 2.x GemmGrouped provides lower launch overhead than cuBLAS.
+        auto chunked_dequant_gemm = [&](const Tensor& packed, GGMLQuantType qtype,
+                                        const std::vector<Tensor>& fallback,
+                                        const char* a_base, char* c_base,
+                                        int K_dim, int N_dim) {
+            int64_t rows = packed.shape[1];
+            int64_t cols = packed.shape[2];
+            size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
+            size_t expert_raw_sz = static_cast<size_t>(rows)
+                                   * ggml_quant_row_bytes(qtype, cols);
 
-            // Input: gathered tokens for this expert
-            int64_t a_shape[2] = {count64, static_cast<int64_t>(d)};
-            Tensor a_view(gathered_base + static_cast<size_t>(start) * d * es,
-                          compute_dtype_, 2, a_shape, true);
-
-            // Gate projection (only for gated experts like SwiGLU)
-            if (!non_gated_experts) {
-                int64_t c_shape[2] = {count64, static_cast<int64_t>(eff)};
-                Tensor c_view(expert_gate_base + static_cast<size_t>(start) * eff * es,
-                              compute_dtype_, 2, c_shape, true);
-                expert_gemm(a_view, c_view, ly.expert_gate_packed,
-                            ly.expert_gate_qtype, ly.expert_w_gate, e);
+            if (!moe_batch_dequant_buf_ || expert_fp16_sz == 0) {
+                // No buffer — serial fallback
+                for (int e = 0; e < ne; ++e) {
+                    int start = h_offsets[e];
+                    int count = h_offsets[e + 1] - start;
+                    if (count == 0) continue;
+                    int64_t count64 = static_cast<int64_t>(count);
+                    int64_t a_shape[2] = {count64, static_cast<int64_t>(K_dim)};
+                    Tensor a_view(const_cast<void*>(static_cast<const void*>(
+                                  a_base + static_cast<size_t>(start) * K_dim * es)),
+                                  compute_dtype_, 2, a_shape, true);
+                    int64_t c_shape[2] = {count64, static_cast<int64_t>(N_dim)};
+                    Tensor c_view(c_base + static_cast<size_t>(start) * N_dim * es,
+                                  compute_dtype_, 2, c_shape, true);
+                    expert_gemm(a_view, c_view, packed, qtype, fallback, e);
+                }
+                return;
             }
 
-            // Up projection: A @ W_up^T -> C_up
+            const uint8_t* raw_base = static_cast<const uint8_t*>(packed.data);
+            char* buf = static_cast<char*>(moe_batch_dequant_buf_);
+
+            // Dequant all experts in one batch, then single GEMM.
+            // With pp=512 and top_k=8, nearly all 128 experts are active, so
+            // dequanting all at once is optimal (one big bandwidth-saturating kernel).
+            dequant_gpu(raw_base, buf, qtype,
+                        ne * static_cast<int>(rows), static_cast<int>(cols), stream);
+
+            std::vector<const void*> b_ptrs(ne);
+            for (int e = 0; e < ne; ++e)
+                b_ptrs[e] = buf + static_cast<size_t>(e) * expert_fp16_sz;
+
+#ifdef IMP_USE_CUTLASS
+            gemm_moe_cutlass(a_base, c_base,
+                             h_offsets.data(), b_ptrs.data(),
+                             K_dim, N_dim, DType::FP16, ne, stream,
+                             d_moe_work_ptrs_);
+#else
+            gemm_moe_batched(a_base, c_base,
+                             h_offsets.data(), b_ptrs.data(),
+                             K_dim, N_dim, DType::FP16, ne, stream,
+                             d_moe_work_ptrs_);
+#endif
+        };
+
+        // Determine which path to use:
+        // 1. Pre-cached FP16 path: all experts in fp16_cache_ (fastest, no dequant)
+        // 2. Dequant-then-batch path: packed experts on device + batch buffer available
+        // 3. Serial path: fallback (one expert at a time)
+        // Note: fused Q6K dp4a path is handled above (before the D2H sync).
+
+        bool has_precached_up = (ly.expert_up_packed.data && fp16_cache_.count(ly.expert_up_packed.data));
+        bool can_dequant_batch = (moe_batch_dequant_buf_ != nullptr &&
+                                   ly.expert_up_packed.data != nullptr &&
+                                   ly.expert_up_packed.on_device &&
+                                   dequant_gpu_supported(ly.expert_up_qtype));
+
+        if (has_precached_up) {
+            // Pre-cached FP16 path — all expert packs in fp16_cache_
+            // ===== PRE-CACHED FP16 BATCHED GEMM PATH =====
+            std::vector<const void*> gate_w_ptrs(ne, nullptr);
+            std::vector<const void*> up_w_ptrs(ne, nullptr);
+            std::vector<const void*> down_w_ptrs(ne, nullptr);
+
+            for (int e = 0; e < ne; e++) {
+                up_w_ptrs[e] = get_fp16_expert_ptr(ly.expert_up_packed, ly.expert_up_qtype,
+                                                     ly.expert_w_up, e);
+                if (!non_gated_experts)
+                    gate_w_ptrs[e] = get_fp16_expert_ptr(ly.expert_gate_packed, ly.expert_gate_qtype,
+                                                           ly.expert_w_gate, e);
+                down_w_ptrs[e] = get_fp16_expert_ptr(ly.expert_down_packed, ly.expert_down_qtype,
+                                                       ly.expert_w_down, e);
+            }
+
+            if (!non_gated_experts)
+                gemm_moe_batched(gathered_base, expert_gate_base,
+                                  h_offsets.data(), gate_w_ptrs.data(),
+                                  d, eff, compute_dtype_, ne, stream, d_moe_work_ptrs_);
+            gemm_moe_batched(gathered_base, expert_up_base,
+                              h_offsets.data(), up_w_ptrs.data(),
+                              d, eff, compute_dtype_, ne, stream, d_moe_work_ptrs_);
+
             {
-                int64_t c_shape[2] = {count64, static_cast<int64_t>(eff)};
-                Tensor c_view(expert_up_base + static_cast<size_t>(start) * eff * es,
+                int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
+                if (non_gated_experts) {
+                    Tensor up_t(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                    Tensor act_t(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                    cudaMemcpyAsync(act_t.data, up_t.data, (size_t)expanded * eff * es,
+                                    cudaMemcpyDeviceToDevice, stream);
+                    relu_sqr_inplace(act_t, stream);
+                } else {
+                    Tensor g(moe_expert_gate_.data, compute_dtype_, 2, act_shape, true);
+                    Tensor u(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                    Tensor a(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                    swiglu(g, u, a, stream);
+                }
+            }
+
+            gemm_moe_batched(expert_swiglu_base, expert_down_base,
+                              h_offsets.data(), down_w_ptrs.data(),
+                              eff, d, compute_dtype_, ne, stream, d_moe_work_ptrs_);
+
+        } else if (can_dequant_batch) {
+            // ===== BATCH DEQUANT + GROUPED GEMM =====
+            // Dequant all experts to FP16, then single grouped GEMM via CUTLASS.
+
+            if (!non_gated_experts)
+                chunked_dequant_gemm(ly.expert_gate_packed, ly.expert_gate_qtype,
+                                     ly.expert_w_gate, gathered_base, expert_gate_base, d, eff);
+            chunked_dequant_gemm(ly.expert_up_packed, ly.expert_up_qtype,
+                                 ly.expert_w_up, gathered_base, expert_up_base, d, eff);
+
+            {
+                int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
+                if (non_gated_experts) {
+                    Tensor up_t(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                    Tensor act_t(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                    cudaMemcpyAsync(act_t.data, up_t.data, (size_t)expanded * eff * es,
+                                    cudaMemcpyDeviceToDevice, stream);
+                    relu_sqr_inplace(act_t, stream);
+                } else {
+                    Tensor g(moe_expert_gate_.data, compute_dtype_, 2, act_shape, true);
+                    Tensor u(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                    Tensor a(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                    swiglu(g, u, a, stream);
+                }
+            }
+
+            chunked_dequant_gemm(ly.expert_down_packed, ly.expert_down_qtype,
+                                 ly.expert_w_down, expert_swiglu_base, expert_down_base, eff, d);
+
+        } else {
+            // ===== SERIAL PATH (fallback) =====
+            for (int e = 0; e < ne; ++e) {
+                int start = h_offsets[e];
+                int count = h_offsets[e + 1] - start;
+                if (count == 0) continue;
+
+                int64_t count64 = static_cast<int64_t>(count);
+
+                int64_t a_shape[2] = {count64, static_cast<int64_t>(d)};
+                Tensor a_view(gathered_base + static_cast<size_t>(start) * d * es,
+                              compute_dtype_, 2, a_shape, true);
+
+                if (!non_gated_experts) {
+                    int64_t c_shape[2] = {count64, static_cast<int64_t>(eff)};
+                    Tensor c_view(expert_gate_base + static_cast<size_t>(start) * eff * es,
+                                  compute_dtype_, 2, c_shape, true);
+                    expert_gemm(a_view, c_view, ly.expert_gate_packed,
+                                ly.expert_gate_qtype, ly.expert_w_gate, e);
+                }
+
+                {
+                    int64_t c_shape[2] = {count64, static_cast<int64_t>(eff)};
+                    Tensor c_view(expert_up_base + static_cast<size_t>(start) * eff * es,
+                                  compute_dtype_, 2, c_shape, true);
+                    expert_gemm(a_view, c_view, ly.expert_up_packed,
+                                ly.expert_up_qtype, ly.expert_w_up, e);
+                }
+            }
+
+            {
+                int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
+                if (non_gated_experts) {
+                    Tensor up_t(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                    Tensor act_t(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                    cudaMemcpyAsync(act_t.data, up_t.data, (size_t)expanded * eff * es,
+                                    cudaMemcpyDeviceToDevice, stream);
+                    relu_sqr_inplace(act_t, stream);
+                } else {
+                    Tensor g(moe_expert_gate_.data, compute_dtype_, 2, act_shape, true);
+                    Tensor u(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                    Tensor a(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                    swiglu(g, u, a, stream);
+                }
+            }
+
+            for (int e = 0; e < ne; ++e) {
+                int start = h_offsets[e];
+                int count = h_offsets[e + 1] - start;
+                if (count == 0) continue;
+
+                int64_t count64 = static_cast<int64_t>(count);
+
+                int64_t a_shape[2] = {count64, static_cast<int64_t>(eff)};
+                Tensor a_view(expert_swiglu_base + static_cast<size_t>(start) * eff * es,
+                              compute_dtype_, 2, a_shape, true);
+                int64_t c_shape[2] = {count64, static_cast<int64_t>(d)};
+                Tensor c_view(expert_down_base + static_cast<size_t>(start) * d * es,
                               compute_dtype_, 2, c_shape, true);
-                expert_gemm(a_view, c_view, ly.expert_up_packed,
-                            ly.expert_up_qtype, ly.expert_w_up, e);
+                expert_gemm(a_view, c_view, ly.expert_down_packed,
+                            ly.expert_down_qtype, ly.expert_w_down, e);
             }
-        }
-
-        // Activation: SwiGLU (gated) or relu^2 (non-gated, Nemotron-H)
-        {
-            int64_t act_shape[2] = {static_cast<int64_t>(expanded),
-                                     static_cast<int64_t>(eff)};
-            if (non_gated_experts) {
-                // Non-gated: out = relu^2(up)  [Nemotron-H uses squared ReLU]
-                // Write result into swiglu buffer for down projection
-                Tensor up_buf(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
-                Tensor swiglu_buf(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
-                cudaMemcpyAsync(swiglu_buf.data, up_buf.data,
-                                static_cast<size_t>(expanded) * eff * es,
-                                cudaMemcpyDeviceToDevice, stream);
-                relu_sqr_inplace(swiglu_buf, stream);
-            } else {
-                // Gated: out = SiLU(gate) * up
-                Tensor gate_buf(moe_expert_gate_.data, compute_dtype_, 2, act_shape, true);
-                Tensor up_buf(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
-                Tensor swiglu_buf(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
-                swiglu(gate_buf, up_buf, swiglu_buf, stream);
-            }
-        }
-
-        // Per-expert down projections: dequant and GEMM one expert at a time.
-        for (int e = 0; e < ne; ++e) {
-            int start = h_offsets[e];
-            int count = h_offsets[e + 1] - start;
-            if (count == 0) continue;
-
-            int64_t count64 = static_cast<int64_t>(count);
-
-            int64_t a_shape[2] = {count64, static_cast<int64_t>(eff)};
-            Tensor a_view(expert_swiglu_base + static_cast<size_t>(start) * eff * es,
-                          compute_dtype_, 2, a_shape, true);
-            int64_t c_shape[2] = {count64, static_cast<int64_t>(d)};
-            Tensor c_view(expert_down_base + static_cast<size_t>(start) * d * es,
-                          compute_dtype_, 2, c_shape, true);
-            expert_gemm(a_view, c_view, ly.expert_down_packed,
-                        ly.expert_down_qtype, ly.expert_w_down, e);
         }
     }
+    } // non-fused path scope (else branch of can_fp8_batch)
+    } // FP8 prefill scope
 
     // 7. Scatter: weighted scatter-add expert outputs back to token positions.
     //    Output is FP32 (atomicAdd on floats). Must zero-init before atomic adds.
@@ -2054,7 +2599,6 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                             cudaMemcpyDeviceToDevice, stream);
         }
     }
-    } // end general path scope
 
 moe_after_experts:
     // 8b. Shared expert FFN: all tokens pass through an additional
@@ -2078,13 +2622,13 @@ moe_after_experts:
         {
             auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
             gemm_dispatch(no, ly.w_up_shared, Tensor(), ly.w_up_shared_qtype,
-                          sh_up, dequant_scratch_, stream, q8, d8_buf_);
+                          sh_up, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
 
             if (shared_gated) {
                 // Gated: gate + SwiGLU
                 Tensor sh_gate(moe_expert_gate_.data, compute_dtype_, 2, sh_shape, true);
                 gemm_dispatch(no, ly.w_gate_shared, Tensor(), ly.w_gate_shared_qtype,
-                              sh_gate, dequant_scratch_, stream, q8, d8_buf_);
+                              sh_gate, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
                 swiglu(sh_gate, sh_up, sh_swiglu, stream);
             } else {
                 // Non-gated: relu^2(up)  [Nemotron-H uses squared ReLU]
@@ -2096,7 +2640,7 @@ moe_after_experts:
 
             // Down projection
             gemm_dispatch(sh_swiglu, ly.w_down_shared, Tensor(), ly.w_down_shared_qtype,
-                          sh_down, dequant_scratch_, stream, q8, d8_buf_);
+                          sh_down, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
         }
 
         // Add shared expert output to hidden (which already has routed expert output)
@@ -2153,7 +2697,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
     //    ssm_in_dim = inner(z) + conv_channels(xBC) + n_heads(dt)
     Tensor proj = view_tokens(ssm_proj_buf_, n);
     gemm_dispatch(no, ly.ssm_in, Tensor(), ly.ssm_in_qtype, proj, dequant_scratch_, stream,
-                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_);
+                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_);
 
     // 3. Split projection output [n, total_dim] into z, xBC, dt by column slices.
     //    proj layout: each row has [z(inner) | xBC(conv_channels) | dt(n_heads)].
@@ -2261,7 +2805,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
     // 10. ssm_out projection: [n, inner] @ ssm_out^T -> [n, d_model]
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
     gemm_dispatch(y_buf, ly.ssm_out, Tensor(), ly.ssm_out_qtype, out_buf, dequant_scratch_, stream,
-                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_);
+                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_);
 
     // 11. Residual add: hidden = output + residual
     elementwise_add(out_buf, r, stream);
@@ -2305,7 +2849,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     static const bool do_profile = (std::getenv("IMP_PROFILE") != nullptr);
     static int profile_step_ = 0;
     static float acc_total = 0, acc_attn = 0, acc_ffn = 0, acc_lm = 0;
-    bool profiling = do_profile && !state.is_prefill;
+    bool profiling = do_profile;
     int profile_idx = profiling ? profile_step_++ : 0;
     // Skip first 2 decode steps (warmup / graph capture attempt)
     bool profile_active = profiling && (profile_idx >= 2);
