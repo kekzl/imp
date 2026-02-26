@@ -1,6 +1,9 @@
 #include "quant/dequant_gpu.h"
 #include "core/logging.h"
 #include <cuda_fp16.h>
+#ifdef __CUDA_FP8_TYPES_EXIST__
+#include <cuda_fp8.h>
+#endif
 #include <cstdio>
 
 namespace imp {
@@ -62,6 +65,7 @@ bool dequant_gpu_supported(GGMLQuantType qtype) {
 // Second group (vals 128..255) offsets: ql+=64, qh+=32, sc+=8.
 // ---------------------------------------------------------------------------
 
+// Original scalar kernel (fallback)
 __global__ void dequant_q6k_kernel(
     const uint8_t* __restrict__ src,
     half* __restrict__ dst,
@@ -99,6 +103,139 @@ __global__ void dequant_q6k_kernel(
 
     float val = __half2float(d_val) * static_cast<float>(scales[i >> 4]) * static_cast<float>(q6);
     dst[idx] = __float2half(val);
+}
+
+// ---------------------------------------------------------------------------
+// Optimized Q6_K dequant kernel — block-centric indexing
+//
+// One CUDA thread block per Q6_K super-block (256 elements).
+// 128 threads, each processing 2 consecutive elements with half2 writes.
+//
+// Eliminates expensive integer division (row/col from flat index) by
+// mapping blockIdx.x directly to a Q6_K block.  Consecutive Q6_K blocks
+// in memory map to consecutive blockIdx values, so:
+//   src_ptr  = src + blockIdx.x * 210
+//   dst_ptr  = dst + blockIdx.x * 256
+// No row/col computation needed.
+// ---------------------------------------------------------------------------
+
+__device__ __forceinline__ int dequant_q6k_element(
+    const uint8_t* __restrict__ bp, int i)
+{
+    int group  = i >> 7;
+    int within = i & 127;
+    int quad   = within >> 5;
+    int l      = within & 31;
+
+    int ql_idx = (group << 6) + ((quad & 1) << 5) + l;
+    int qh_idx = (group << 5) + l;
+
+    uint8_t ql_byte = bp[ql_idx];
+    uint8_t low4 = (quad >= 2) ? ((ql_byte >> 4) & 0xFu) : (ql_byte & 0xFu);
+    uint8_t high2 = (bp[128 + qh_idx] >> (quad * 2)) & 0x3u;
+    return static_cast<int>((high2 << 4) | low4) - 32;
+}
+
+__global__ void dequant_q6k_v2_kernel(
+    const uint8_t* __restrict__ src,
+    half* __restrict__ dst,
+    int total_blocks)
+{
+    int blk_id = blockIdx.x;
+    if (blk_id >= total_blocks) return;
+
+    const uint8_t* bp = src + static_cast<int64_t>(blk_id) * 210;
+    half2* out = reinterpret_cast<half2*>(dst + static_cast<int64_t>(blk_id) * 256);
+
+    // Super-block scale — same for all 256 elements.
+    // All threads in the block read the same address; hits L1 cache.
+    float d_w = __half2float(*reinterpret_cast<const half*>(bp + 208));
+    const int8_t* scales = reinterpret_cast<const int8_t*>(bp + 192);
+
+    // Each thread handles 2 consecutive elements → half2 vectorized write
+    int i0 = threadIdx.x * 2;
+    int i1 = i0 + 1;
+
+    int q0 = dequant_q6k_element(bp, i0);
+    int q1 = dequant_q6k_element(bp, i1);
+
+    float sc0 = static_cast<float>(scales[i0 >> 4]);
+    float sc1 = static_cast<float>(scales[i1 >> 4]);
+
+    half2 result;
+    result.x = __float2half(d_w * sc0 * static_cast<float>(q0));
+    result.y = __float2half(d_w * sc1 * static_cast<float>(q1));
+
+    out[threadIdx.x] = result;
+}
+
+// ---------------------------------------------------------------------------
+// High-throughput Q6_K dequant kernel — grid-stride, no shared memory
+//
+// v2 launches one CTA per Q6_K super-block (256 elements), creating ~786K
+// CTAs for a typical MoE projection. CTA scheduling overhead can limit
+// bandwidth utilization on large GPUs (192 SMs).
+//
+// v3 uses a grid-stride loop: each CTA processes many Q6_K blocks,
+// reducing the CTA count. No shared memory or sync barriers needed —
+// each thread independently dequants its 2 elements from L1-cached
+// global memory reads (the 210-byte Q6K block fits in 2 cache lines,
+// broadcast to all threads in the warp).
+// ---------------------------------------------------------------------------
+
+__global__ void dequant_q6k_v3_kernel(
+    const uint8_t* __restrict__ src,
+    half* __restrict__ dst,
+    int total_blocks)
+{
+    const int tid = threadIdx.x;  // 0..127
+    // Pre-compute element indices (constant across loop iterations)
+    const int i0 = tid * 2;
+    const int i1 = i0 + 1;
+
+    // Pre-compute Q6K decode indices for both elements
+    const int group0  = i0 >> 7;
+    const int within0 = i0 & 127;
+    const int quad0   = within0 >> 5;
+    const int l0      = within0 & 31;
+    const int ql_idx0 = (group0 << 6) + ((quad0 & 1) << 5) + l0;
+    const int qh_idx0 = (group0 << 5) + l0;
+
+    const int group1  = i1 >> 7;
+    const int within1 = i1 & 127;
+    const int quad1   = within1 >> 5;
+    const int l1      = within1 & 31;
+    const int ql_idx1 = (group1 << 6) + ((quad1 & 1) << 5) + l1;
+    const int qh_idx1 = (group1 << 5) + l1;
+
+    for (int blk_id = blockIdx.x; blk_id < total_blocks; blk_id += gridDim.x) {
+        const uint8_t* bp = src + static_cast<int64_t>(blk_id) * 210;
+
+        // Super-block scale — broadcast via L1 cache to all 128 threads
+        float d_w = __half2float(*reinterpret_cast<const half*>(bp + 208));
+        const int8_t* scales = reinterpret_cast<const int8_t*>(bp + 192);
+
+        // Dequant element 0
+        uint8_t ql_byte0 = bp[ql_idx0];
+        uint8_t low4_0 = (quad0 >= 2) ? ((ql_byte0 >> 4) & 0xFu) : (ql_byte0 & 0xFu);
+        uint8_t high2_0 = (bp[128 + qh_idx0] >> (quad0 * 2)) & 0x3u;
+        int q0 = static_cast<int>((high2_0 << 4) | low4_0) - 32;
+
+        // Dequant element 1
+        uint8_t ql_byte1 = bp[ql_idx1];
+        uint8_t low4_1 = (quad1 >= 2) ? ((ql_byte1 >> 4) & 0xFu) : (ql_byte1 & 0xFu);
+        uint8_t high2_1 = (bp[128 + qh_idx1] >> (quad1 * 2)) & 0x3u;
+        int q1 = static_cast<int>((high2_1 << 4) | low4_1) - 32;
+
+        float sc0 = static_cast<float>(scales[i0 >> 4]);
+        float sc1 = static_cast<float>(scales[i1 >> 4]);
+
+        half2* out = reinterpret_cast<half2*>(dst + static_cast<int64_t>(blk_id) * 256);
+        half2 result;
+        result.x = __float2half(d_w * sc0 * static_cast<float>(q0));
+        result.y = __float2half(d_w * sc1 * static_cast<float>(q1));
+        out[tid] = result;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -311,7 +448,75 @@ __global__ void dequant_q4k_kernel(
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch
+// Q6_K → FP8 E4M3 dequantization kernel
+//
+// Same Q6_K block decoding as dequant_q6k_v2_kernel, but writes FP8 E4M3
+// instead of FP16. Uses the existing dequant_q6k_element() helper.
+// Q6_K dequanted values are typically |val| < 10 — well within FP8 E4M3
+// range (max 448), so scale=1.0 with saturating conversion is safe.
+//
+// One CTA per Q6_K super-block (256 elements), 128 threads, 2 elements/thread.
+// Writes uint16_t (2 packed FP8 bytes) per thread for coalesced 2-byte stores.
+// ---------------------------------------------------------------------------
+
+__global__ void dequant_q6k_to_fp8_kernel(
+    const uint8_t* __restrict__ src,
+    uint8_t* __restrict__ dst,
+    int total_blocks)
+{
+    int blk_id = blockIdx.x;
+    if (blk_id >= total_blocks) return;
+
+#ifdef __CUDA_FP8_TYPES_EXIST__
+    const uint8_t* bp = src + static_cast<int64_t>(blk_id) * 210;
+    uint16_t* out = reinterpret_cast<uint16_t*>(dst + static_cast<int64_t>(blk_id) * 256);
+    float d_w = __half2float(*reinterpret_cast<const half*>(bp + 208));
+    const int8_t* scales = reinterpret_cast<const int8_t*>(bp + 192);
+    int i0 = threadIdx.x * 2;
+    int i1 = i0 + 1;
+    int q0 = dequant_q6k_element(bp, i0);
+    int q1 = dequant_q6k_element(bp, i1);
+    float v0 = d_w * static_cast<float>(scales[i0 >> 4]) * static_cast<float>(q0);
+    float v1 = d_w * static_cast<float>(scales[i1 >> 4]) * static_cast<float>(q1);
+    __nv_fp8_e4m3 f0 = __nv_fp8_e4m3(v0);
+    __nv_fp8_e4m3 f1 = __nv_fp8_e4m3(v1);
+    uint8_t b0, b1;
+    memcpy(&b0, &f0, 1);
+    memcpy(&b1, &f1, 1);
+    out[threadIdx.x] = static_cast<uint16_t>(b0) | (static_cast<uint16_t>(b1) << 8);
+#else
+    // FP8 types unavailable — zero fill (should not be reached on sm_90+)
+    uint16_t* out = reinterpret_cast<uint16_t*>(dst + static_cast<int64_t>(blk_id) * 256);
+    out[threadIdx.x] = 0;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch: Q6_K → FP8 E4M3
+// ---------------------------------------------------------------------------
+
+void dequant_gpu_fp8(const void* src, void* dst, GGMLQuantType qtype,
+                     int rows, int cols, cudaStream_t stream)
+{
+    if (rows == 0 || cols == 0) return;
+
+    switch (qtype) {
+        case GGMLQuantType::Q6_K: {
+            int total_blocks = rows * (cols / 256);
+            dequant_q6k_to_fp8_kernel<<<total_blocks, 128, 0, stream>>>(
+                static_cast<const uint8_t*>(src),
+                static_cast<uint8_t*>(dst),
+                total_blocks);
+            break;
+        }
+        default:
+            IMP_LOG_ERROR("dequant_gpu_fp8: unsupported qtype %u", static_cast<unsigned>(qtype));
+            break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch: FP16
 // ---------------------------------------------------------------------------
 
 void dequant_gpu(const void* src, void* dst, GGMLQuantType qtype,
@@ -324,12 +529,14 @@ void dequant_gpu(const void* src, void* dst, GGMLQuantType qtype,
     int blocks = static_cast<int>((total + threads - 1) / threads);
 
     switch (qtype) {
-        case GGMLQuantType::Q6_K:
-            dequant_q6k_kernel<<<blocks, threads, 0, stream>>>(
+        case GGMLQuantType::Q6_K: {
+            int total_q6k_blocks = rows * (cols / 256);
+            dequant_q6k_v2_kernel<<<total_q6k_blocks, 128, 0, stream>>>(
                 static_cast<const uint8_t*>(src),
                 static_cast<half*>(dst),
-                rows, cols);
+                total_q6k_blocks);
             break;
+        }
 
         case GGMLQuantType::Q8_0:
             dequant_q8_0_kernel<<<blocks, threads, 0, stream>>>(

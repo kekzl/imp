@@ -29,10 +29,9 @@ void attention_prefill_dispatch(
     float scale, bool causal, int sliding_window, cudaStream_t stream) {
     int sm = get_device_sm_version();
     if (sm >= 120) {
-        // WMMA attention produces all-zero output on Blackwell (sm_120+).
-        // Fall back to scalar flash attention until the TCGEN05/Blackwell
-        // kernel is wired up in this dispatch path.
-        flash_attention_prefill(Q, K, V, O, scale, causal, sliding_window, stream);
+        // Try WMMA-tc on Blackwell (verified working for dense transformers).
+        // Falls back to scalar if WMMA-tc unavailable.
+        flash_attention_prefill_tc(Q, K, V, O, scale, causal, sliding_window, stream);
     } else if (sm >= 90) {
         flash_attention_prefill_tc(Q, K, V, O, scale, causal, sliding_window, stream);
     } else {

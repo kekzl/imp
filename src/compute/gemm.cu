@@ -290,6 +290,24 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C,
                 new_entry.workspace_size = 0;
             }
 
+            // Diagnostic logging gated by IMP_DEBUG_GEMM=1
+            static const bool debug_gemm = (std::getenv("IMP_DEBUG_GEMM") != nullptr);
+            if (debug_gemm) {
+                if (nresults == 0) {
+                    fprintf(stderr, "[GEMM] WARNING: AlgoGetHeuristic returned 0 results "
+                            "M=%ld K=%ld N=%ld dtA=%d dtB=%d dtC=%d ws=%zu\n",
+                            (long)M, (long)K, (long)N,
+                            (int)cuda_dtype_A, (int)cuda_dtype_B, (int)cuda_dtype_C,
+                            s_workspace_size);
+                } else {
+                    fprintf(stderr, "[GEMM] cache miss M=%ld K=%ld N=%ld "
+                            "dtA=%d dtB=%d dtC=%d algo_ws=%zu/%zu\n",
+                            (long)M, (long)K, (long)N,
+                            (int)cuda_dtype_A, (int)cuda_dtype_B, (int)cuda_dtype_C,
+                            result.workspaceSize, s_workspace_size);
+                }
+            }
+
             auto [inserted_it, _] = s_gemm_cache.emplace(cache_key, new_entry);
             entry = &inserted_it->second;
         }
@@ -2468,6 +2486,51 @@ void gemv_fp8(const Tensor& A, const Tensor& x, Tensor& y,
         static_cast<const half*>(x.data),
         static_cast<half*>(y.data),
         M, K, scale);
+}
+
+// ---------------------------------------------------------------------------
+// Batched K/V projection via cublasGemmStridedBatchedEx
+// ---------------------------------------------------------------------------
+
+void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv,
+                     Tensor& k_out, Tensor& v_out, cudaStream_t stream) {
+    int M = static_cast<int>(input.shape[0]);       // n_tokens
+    int K = static_cast<int>(input.shape[1]);       // d_model
+    int N = static_cast<int>(k_out.shape[1]);       // nkv * hd
+
+    cublasHandle_t handle = get_cublas_handle();
+    cublasSetStream(handle, stream);
+
+    cudaDataType_t dt = dtype_to_cuda(input.dtype);
+    float alpha = 1.0f, beta = 0.0f;
+
+    // Col-major interpretation (same trick as gemm()):
+    //   weight [N,K] row-major = [K,N] col-major; CUBLAS_OP_T → [N,K]
+    //   input  [M,K] row-major = [K,M] col-major; CUBLAS_OP_N
+    //   result [N,M] col-major = [M,N] row-major
+    long long weight_stride = static_cast<long long>(N) * K;  // stride between wk and wv in weight_kv
+    long long output_stride = static_cast<long long>(M) * N;  // stride between k_out and v_out
+
+    cublasStatus_t st = cublasGemmStridedBatchedEx(
+        handle,
+        CUBLAS_OP_T, CUBLAS_OP_N,
+        N, M, K,                                    // cuBLAS m, n, k
+        &alpha,
+        weight_kv.data, dt, K,                      // A (weight), lda=K
+        weight_stride,                               // strideA: offset to wv
+        input.data, dt, K,                           // B (input), ldb=K
+        0,                                           // strideB: 0 (same input for both)
+        &beta,
+        k_out.data, dt, N,                           // C (output), ldc=N
+        output_stride,                               // strideC: offset to v_out
+        2,                                           // batch_count = 2 (K and V)
+        CUBLAS_COMPUTE_32F,
+        CUBLAS_GEMM_DEFAULT);
+
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        fprintf(stderr, "imp::gemm_kv_batched: cublasGemmStridedBatchedEx failed (status %d)\n",
+                (int)st);
+    }
 }
 
 } // namespace imp

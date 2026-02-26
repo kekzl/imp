@@ -8,3 +8,4 @@ compile_commands.json
 inspect_gguf.py
 test_detail.json
 models
+__pycache__/

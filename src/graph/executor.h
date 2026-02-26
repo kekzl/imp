@@ -8,6 +8,7 @@
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <vector>
+#include <unordered_map>
 
 namespace imp {
 
@@ -84,6 +85,10 @@ public:
                               int32_t* d_token_id, int32_t* h_mapped,
                               cudaStream_t stream = nullptr);
 
+    // Pre-dequantize quantized weights to FP16 on GPU for fast prefill GEMM.
+    // Must be called AFTER model weights are uploaded to GPU.
+    void pre_dequant_weights(cudaStream_t stream = nullptr);
+
     // Set KV layer mapping (must be called before forward pass for hybrid models)
     void set_kv_layer_map(std::vector<int> map) { kv_layer_map_ = std::move(map); }
 
@@ -143,6 +148,12 @@ private:
     Tensor attn_out_;      // [max_tokens, n_heads * head_dim]
     Tensor proj_out_;      // [max_tokens, d_model]
 
+    // cuBLAS attention S-matrix workspace (separately allocated, not part of shared workspace).
+    // [n_heads, max_tokens, max_tokens] FP16 — used only during prefill.
+    void* attn_scores_buf_ = nullptr;
+    size_t attn_scores_buf_size_ = 0;
+    Tensor attn_scores_;   // 3D tensor view into attn_scores_buf_
+
     // Dense FFN phase tensors (views into shared_workspace_, set by configure_ffn_workspace)
     Tensor gate_out_;      // [max_tokens, d_ff]
     Tensor up_out_;        // [max_tokens, d_ff]
@@ -169,9 +180,20 @@ private:
 
     // --- Separately allocated buffers (not part of unified workspace) ---
 
-    // On-the-fly dequant scratch buffer for quantized expert weights.
+    // On-the-fly dequant scratch buffer for quantized expert weights (1 expert).
     void* moe_dequant_buf_ = nullptr;
     size_t moe_dequant_buf_size_ = 0;
+
+    // Batch dequant buffer for MoE prefill: holds a chunk of experts' weights
+    // dequanted to FP16. Sized for L2-resident chunked processing: dequant a
+    // chunk of experts, then immediately GEMM while FP16 data is still in L2.
+    void* moe_batch_dequant_buf_ = nullptr;
+    size_t moe_batch_dequant_buf_size_ = 0;
+
+    // Pre-allocated device pointer array for batched MoE GEMM (avoids per-call cudaMallocAsync).
+    // Layout: [A_ptrs..., B_ptrs..., C_ptrs...] = 3 * n_experts void pointers.
+    void** d_moe_work_ptrs_ = nullptr;
+    int d_moe_work_ptrs_count_ = 0;  // n_experts used for allocation
 
     // GPU staging buffer for one expert's raw quantized bytes (H2D copy).
     void* moe_raw_staging_buf_ = nullptr;
@@ -180,6 +202,17 @@ private:
     // On-the-fly dequant scratch buffer for non-MoE quantized weights (Q8_0/Q6_K).
     void* dequant_scratch_ = nullptr;
     size_t dequant_scratch_size_ = 0;
+
+    // Pre-dequantized FP16 weight cache for prefill GEMM (avoids per-layer dequant overhead).
+    // Maps raw quantized weight pointer -> pre-dequanted FP16 Tensor on GPU.
+    // Populated at init time; decode still uses dp4a GEMV on raw quantized weights.
+    std::unordered_map<const void*, Tensor> fp16_cache_;
+    size_t fp16_cache_bytes_ = 0;  // total VRAM used by FP16 cache
+
+    // Fused KV weight cache: concatenated [wk; wv] as [2*nkv*hd, d_model] FP16.
+    // Enables strided batched GEMM for K+V in a single cuBLAS call during prefill.
+    // Key = layer index. Only populated for layers where both wk/wv are FP16-cached.
+    std::unordered_map<int, Tensor> fused_kv_cache_;
 
     // Pre-allocated sampling result buffers (avoids cudaMalloc/cudaFree per token).
     int32_t* d_sample_result_ = nullptr;  // device buffer for argmax/sample kernel output

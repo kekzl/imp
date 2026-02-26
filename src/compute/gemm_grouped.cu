@@ -160,4 +160,189 @@ void gemm_grouped(const std::vector<Tensor>& A,
     }
 }
 
+// ---------------------------------------------------------------------------
+// gemm_moe_batched: single cublasGemmBatchedEx call for all active MoE experts.
+//
+// Groups all experts with non-zero token counts into one batched call.
+// This eliminates per-expert kernel launch overhead (critical for 128-expert
+// models like Qwen3-Coder where serial dispatch causes 9,216 launches/pass).
+//
+// All experts share the same K and N dimensions (same weight shape), but have
+// different M (token count). cublasGemmBatchedEx requires uniform M across
+// batches, so we group experts by M and issue one call per unique M value.
+// In practice during prefill, most experts have similar M (tokens are spread
+// roughly evenly), so this is typically 2-5 calls instead of 128.
+// ---------------------------------------------------------------------------
+void gemm_moe_batched(const void* a_base, void* c_base,
+                      const int32_t* offsets,
+                      const void* const* b_ptrs,
+                      int K, int N, DType dtype,
+                      int n_experts,
+                      cudaStream_t stream,
+                      void** d_work_ptrs,
+                      DType output_dtype)
+{
+    if (n_experts == 0) return;
+
+    cublasHandle_t handle = get_cublas_handle();
+    cublasSetStream(handle, stream);
+
+    cudaDataType_t cuda_dt_ab = dtype_to_cuda(dtype);
+    cublasComputeType_t compute_type = dtype_to_compute(dtype);
+    size_t elem_sz = dtype_size(dtype);
+
+    // Output type: defaults to input type if not specified
+    DType out_dt = (output_dtype != DType(255)) ? output_dtype : dtype;
+    cudaDataType_t cuda_dt_c = dtype_to_cuda(out_dt);
+    size_t out_elem_sz = dtype_size(out_dt);
+
+    float alpha = 1.0f;
+    float beta  = 0.0f;
+
+    const char* a_bytes = static_cast<const char*>(a_base);
+    char* c_bytes = static_cast<char*>(c_base);
+
+    // Count active experts and group by M (token count).
+    // Build flat host pointer arrays sorted by group for efficient upload.
+    int n_active = 0;
+    struct GroupInfo { int M; int start; int count; };
+    std::vector<GroupInfo> groups;
+
+    // First pass: count active experts and identify groups
+    for (int e = 0; e < n_experts; e++) {
+        int count = offsets[e + 1] - offsets[e];
+        if (count == 0) continue;
+        n_active++;
+        bool found = false;
+        for (auto& g : groups) {
+            if (g.M == count) { g.count++; found = true; break; }
+        }
+        if (!found) groups.push_back({count, 0, 1});
+    }
+
+    if (n_active == 0) return;
+
+    // Compute group start offsets (prefix sum)
+    int offset_acc = 0;
+    for (auto& g : groups) {
+        g.start = offset_acc;
+        offset_acc += g.count;
+        g.count = 0;  // reset for second pass
+    }
+
+    // Second pass: build flat pointer arrays in group order
+    std::vector<const void*> h_A(n_active);
+    std::vector<const void*> h_B(n_active);
+    std::vector<void*> h_C(n_active);
+
+    for (int e = 0; e < n_experts; e++) {
+        int count = offsets[e + 1] - offsets[e];
+        if (count == 0) continue;
+
+        // Find this expert's group
+        for (auto& g : groups) {
+            if (g.M == count) {
+                int idx = g.start + g.count;
+                g.count++;
+                int start = offsets[e];
+                h_A[idx] = a_bytes + static_cast<size_t>(start) * K * elem_sz;
+                h_B[idx] = b_ptrs[e];
+                h_C[idx] = c_bytes + static_cast<size_t>(start) * N * out_elem_sz;
+                break;
+            }
+        }
+    }
+
+    // Device pointer arrays: use pre-allocated or allocate once
+    void** d_A_ptrs;
+    void** d_B_ptrs;
+    void** d_C_ptrs;
+    bool owns_ptrs = false;
+
+    if (d_work_ptrs && n_active <= n_experts) {
+        // Use pre-allocated device memory: [A..., B..., C...]
+        d_A_ptrs = d_work_ptrs;
+        d_B_ptrs = d_work_ptrs + n_experts;
+        d_C_ptrs = d_work_ptrs + 2 * n_experts;
+    } else {
+        // Allocate once for all groups (not per-group)
+        size_t ptr_bytes = n_active * sizeof(void*);
+        cudaMallocAsync(&d_A_ptrs, ptr_bytes, stream);
+        cudaMallocAsync(&d_B_ptrs, ptr_bytes, stream);
+        cudaMallocAsync(&d_C_ptrs, ptr_bytes, stream);
+        owns_ptrs = true;
+    }
+
+    // Single upload of all pointer arrays
+    size_t active_bytes = n_active * sizeof(void*);
+    cudaMemcpyAsync(d_A_ptrs, h_A.data(), active_bytes, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_B_ptrs, h_B.data(), active_bytes, cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_C_ptrs, h_C.data(), active_bytes, cudaMemcpyHostToDevice, stream);
+
+    // Use cublasGemmGroupedBatchedEx: single cuBLAS call for ALL groups.
+    // This eliminates per-group launch overhead (critical for 61+ groups with 128 experts).
+    {
+        int group_count = static_cast<int>(groups.size());
+
+        // Per-group descriptor arrays (host)
+        std::vector<cublasOperation_t> transa_arr(group_count, CUBLAS_OP_T);
+        std::vector<cublasOperation_t> transb_arr(group_count, CUBLAS_OP_N);
+        std::vector<int> m_arr(group_count);    // cuBLAS m = N (col-major trick: result cols)
+        std::vector<int> n_arr(group_count);    // cuBLAS n = M (result rows)
+        std::vector<int> k_arr(group_count);
+        std::vector<int> lda_arr(group_count);  // B leading dim
+        std::vector<int> ldb_arr(group_count);  // A leading dim
+        std::vector<int> ldc_arr(group_count);  // C leading dim
+        std::vector<int> group_size_arr(group_count);
+        std::vector<float> alpha_arr(group_count, 1.0f);
+        std::vector<float> beta_arr(group_count, 0.0f);
+
+        for (int gi = 0; gi < group_count; gi++) {
+            m_arr[gi] = N;              // output columns (row-major N)
+            n_arr[gi] = groups[gi].M;   // output rows (token count for this group)
+            k_arr[gi] = K;
+            lda_arr[gi] = K;            // B stride (weight matrix [N,K], col-major [K,N])
+            ldb_arr[gi] = K;            // A stride (activation [M,K], col-major [K,M])
+            ldc_arr[gi] = N;            // C stride (output [M,N], col-major [N,M])
+            group_size_arr[gi] = groups[gi].count;
+        }
+
+        cublasStatus_t st = cublasGemmGroupedBatchedEx(
+            handle,
+            transa_arr.data(), transb_arr.data(),
+            m_arr.data(), n_arr.data(), k_arr.data(),
+            alpha_arr.data(),
+            (const void* const*)d_B_ptrs, cuda_dt_ab, lda_arr.data(),
+            (const void* const*)d_A_ptrs, cuda_dt_ab, ldb_arr.data(),
+            beta_arr.data(),
+            (void* const*)d_C_ptrs, cuda_dt_c, ldc_arr.data(),
+            group_count,
+            group_size_arr.data(),
+            compute_type);
+
+        if (st != CUBLAS_STATUS_SUCCESS) {
+            fprintf(stderr, "imp::gemm_moe_batched: cublasGemmGroupedBatchedEx failed "
+                            "(groups=%d, active=%d, K=%d, N=%d, status %d)\n",
+                    group_count, n_active, K, N, (int)st);
+            // Fallback: per-group cublasGemmBatchedEx
+            for (const auto& g : groups) {
+                cublasGemmBatchedEx(
+                    handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                    N, g.M, K, &alpha,
+                    (const void**)(d_B_ptrs + g.start), cuda_dt_ab, K,
+                    (const void**)(d_A_ptrs + g.start), cuda_dt_ab, K,
+                    &beta,
+                    (void**)(d_C_ptrs + g.start), cuda_dt_c, N,
+                    g.count, compute_type, CUBLAS_GEMM_DEFAULT);
+            }
+        }
+    }
+
+    if (owns_ptrs) {
+        cudaFreeAsync(d_A_ptrs, stream);
+        cudaFreeAsync(d_B_ptrs, stream);
+        cudaFreeAsync(d_C_ptrs, stream);
+    }
+}
+
 } // namespace imp
