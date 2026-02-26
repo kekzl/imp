@@ -429,22 +429,28 @@ bool Engine::step() {
         int* d_block_tables = nullptr;
         int* d_context_lens = nullptr;
 
-        cudaMallocAsync(&d_token_ids, n_tokens * sizeof(int32_t), pf_stream);
-        cudaMallocAsync(&d_positions, n_tokens * sizeof(int), pf_stream);
-        cudaMallocAsync(&d_block_tables, block_table.size() * sizeof(int), pf_stream);
-        cudaMallocAsync(&d_context_lens, sizeof(int), pf_stream);
+        auto check = [](cudaError_t err, const char* op) {
+            if (err != cudaSuccess) {
+                IMP_LOG_ERROR("Engine::step prefill %s failed: %s", op, cudaGetErrorString(err));
+            }
+            return err == cudaSuccess;
+        };
+        check(cudaMallocAsync(&d_token_ids, n_tokens * sizeof(int32_t), pf_stream), "malloc token_ids");
+        check(cudaMallocAsync(&d_positions, n_tokens * sizeof(int), pf_stream), "malloc positions");
+        check(cudaMallocAsync(&d_block_tables, block_table.size() * sizeof(int), pf_stream), "malloc block_tables");
+        check(cudaMallocAsync(&d_context_lens, sizeof(int), pf_stream), "malloc context_lens");
 
-        cudaMemcpyAsync(d_token_ids, req->input_tokens.data(),
+        check(cudaMemcpyAsync(d_token_ids, req->input_tokens.data(),
                         n_tokens * sizeof(int32_t),
-                        cudaMemcpyHostToDevice, pf_stream);
-        cudaMemcpyAsync(d_positions, positions.data(),
+                        cudaMemcpyHostToDevice, pf_stream), "memcpy token_ids");
+        check(cudaMemcpyAsync(d_positions, positions.data(),
                         n_tokens * sizeof(int),
-                        cudaMemcpyHostToDevice, pf_stream);
-        cudaMemcpyAsync(d_block_tables, block_table.data(),
+                        cudaMemcpyHostToDevice, pf_stream), "memcpy positions");
+        check(cudaMemcpyAsync(d_block_tables, block_table.data(),
                         block_table.size() * sizeof(int),
-                        cudaMemcpyHostToDevice, pf_stream);
-        cudaMemcpyAsync(d_context_lens, &ctx_len, sizeof(int),
-                        cudaMemcpyHostToDevice, pf_stream);
+                        cudaMemcpyHostToDevice, pf_stream), "memcpy block_tables");
+        check(cudaMemcpyAsync(d_context_lens, &ctx_len, sizeof(int),
+                        cudaMemcpyHostToDevice, pf_stream), "memcpy context_lens");
 
         // Build InferenceState (single-sequence prefill)
         InferenceState state;
@@ -859,7 +865,13 @@ std::vector<int32_t> Engine::try_graph_loop_decode(
     int max_blocks_per_seq = static_cast<int>(full_bt.size());
 
     int* d_block_tables = nullptr;
-    cudaMallocAsync(&d_block_tables, max_blocks_per_seq * sizeof(int), stream);
+    {
+        cudaError_t err = cudaMallocAsync(&d_block_tables, max_blocks_per_seq * sizeof(int), stream);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("ConditionalGraph: cudaMallocAsync failed: %s", cudaGetErrorString(err));
+            return {};
+        }
+    }
     cudaMemcpyAsync(d_block_tables, full_bt.data(),
                      max_blocks_per_seq * sizeof(int),
                      cudaMemcpyHostToDevice, stream);
@@ -959,7 +971,13 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
     int max_blocks_per_seq = static_cast<int>(full_bt.size());
 
     int* d_bt = nullptr;
-    cudaMalloc(&d_bt, max_blocks_per_seq * sizeof(int));
+    {
+        cudaError_t err = cudaMalloc(&d_bt, max_blocks_per_seq * sizeof(int));
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("AsyncGraphLoop: cudaMalloc failed: %s", cudaGetErrorString(err));
+            return false;
+        }
+    }
     cudaMemcpyAsync(d_bt, full_bt.data(),
                      max_blocks_per_seq * sizeof(int),
                      cudaMemcpyHostToDevice, stream);

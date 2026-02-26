@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMP_CLI="$ROOT_DIR/build/imp-cli"
-LLAMA_BENCH="/home/kekz/llama.cpp/build/bin/llama-bench"
+LLAMA_BENCH="${LLAMA_BENCH:-$(command -v llama-bench 2>/dev/null || echo "$ROOT_DIR/../llama.cpp/build/bin/llama-bench")}"
 REPORT_DIR="$ROOT_DIR/benchmarks"
 REPORT="$REPORT_DIR/report.md"
 
@@ -15,21 +15,51 @@ BENCH_REPS=3           # repetitions for benchmarks
 TEMPERATURE=0          # greedy decoding for reproducibility
 
 # Models: name | path | quant
-declare -a MODEL_NAMES=(
-    "Qwen3-4B-Instruct"
-    "Qwen3-Coder-30B-A3B-Instruct"
-    "Nemotron-3-Nano-30B-A3B"
-)
-declare -a MODEL_PATHS=(
-    "$ROOT_DIR/models/models--unsloth--Qwen3-4B-Instruct-2507-GGUF/snapshots/a06e946bb6b655725eafa393f4a9745d460374c9/Qwen3-4B-Instruct-2507-Q8_0.gguf"
-    "$ROOT_DIR/models/models--unsloth--Qwen3-Coder-30B-A3B-Instruct-GGUF/snapshots/b17cb02dd882d5b6ab62fc777ad2995f19668350/Qwen3-Coder-30B-A3B-Instruct-Q6_K.gguf"
-    "$ROOT_DIR/models/models--unsloth--Nemotron-3-Nano-30B-A3B-GGUF/snapshots/9ad8b366c308f931b2a96b9306f0b41aef9cd405/Nemotron-3-Nano-30B-A3B-Q6_K.gguf"
-)
-declare -a MODEL_QUANTS=(
-    "Q8_0"
-    "Q6_K"
-    "Q6_K"
-)
+# Override via environment: IMP_BENCH_MODELS="name1:path1:quant1 name2:path2:quant2"
+# Or use the HuggingFace cache auto-detection below.
+HF_CACHE="${HF_HOME:-${HOME}/.cache/huggingface}/hub"
+
+find_gguf() {
+    # Find a GGUF file matching a pattern in the HF cache or models/ directory
+    local pattern="$1"
+    local result=""
+    result=$(find "$ROOT_DIR/models" "$HF_CACHE" -name "$pattern" -type f 2>/dev/null | head -1)
+    # Follow symlinks in HF cache
+    if [[ -L "$result" ]]; then
+        result=$(readlink -f "$result")
+    fi
+    echo "$result"
+}
+
+if [[ -n "${IMP_BENCH_MODELS:-}" ]]; then
+    # Parse from environment
+    declare -a MODEL_NAMES=()
+    declare -a MODEL_PATHS=()
+    declare -a MODEL_QUANTS=()
+    for entry in $IMP_BENCH_MODELS; do
+        IFS=':' read -r name path quant <<< "$entry"
+        MODEL_NAMES+=("$name")
+        MODEL_PATHS+=("$path")
+        MODEL_QUANTS+=("$quant")
+    done
+else
+    # Auto-detect models from HF cache
+    declare -a MODEL_NAMES=(
+        "Qwen3-4B-Instruct"
+        "Qwen3-Coder-30B-A3B-Instruct"
+        "Nemotron-3-Nano-30B-A3B"
+    )
+    declare -a MODEL_PATHS=(
+        "$(find_gguf '*Qwen3-4B*Q8_0.gguf')"
+        "$(find_gguf '*Qwen3-Coder-30B*Q6_K.gguf')"
+        "$(find_gguf '*Nemotron-3-Nano*Q6_K.gguf')"
+    )
+    declare -a MODEL_QUANTS=(
+        "Q8_0"
+        "Q6_K"
+        "Q6_K"
+    )
+fi
 
 # Long prompt (~500 tokens) for imp-cli
 PROMPT="Explain the complete history of the development of the transformer architecture in deep learning, starting from the original 2017 paper 'Attention Is All You Need' by Vaswani et al. Cover the key innovations including self-attention mechanisms, multi-head attention, positional encoding, and the encoder-decoder structure. Then discuss how this architecture evolved through BERT, GPT, GPT-2, GPT-3, T5, and other notable models. Explain the scaling laws discovered by Kaplan et al. and how they influenced the development of increasingly large language models. Discuss the emergence of capabilities like in-context learning, chain-of-thought reasoning, and instruction following. Cover the technical challenges of training large transformers including distributed training, mixed precision, gradient checkpointing, and data parallelism. Explain the role of RLHF in aligning language models with human preferences. Discuss the hardware implications including the shift toward specialized AI accelerators and the memory bandwidth bottleneck in inference. Finally, analyze current trends in efficient inference including quantization, speculative decoding, KV cache optimization, paged attention, and continuous batching. Provide specific examples and technical details throughout your explanation."
