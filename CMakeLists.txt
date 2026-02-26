@@ -33,6 +33,7 @@ endif()
 option(IMP_BUILD_TESTS "Build tests" ON)
 option(IMP_BUILD_TOOLS "Build CLI and benchmark tools" ON)
 option(IMP_BUILD_BENCH "Build benchmarks" ON)
+option(IMP_BUILD_SERVER "Build imp-server (OpenAI-compatible HTTP server)" ON)
 
 # --- Third-party dependencies ---
 include(FetchContent)
@@ -215,6 +216,31 @@ if(IMP_BUILD_TOOLS)
         target_link_libraries(imp-bench PRIVATE imp)
         target_include_directories(imp-bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     endif()
+endif()
+
+# --- Server ---
+if(IMP_BUILD_SERVER)
+    FetchContent_Declare(httplib
+        GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+        GIT_TAG v0.18.3
+        GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(httplib)
+
+    FetchContent_Declare(nlohmann_json
+        GIT_REPOSITORY https://github.com/nlohmann/json.git
+        GIT_TAG v3.11.3
+        GIT_SHALLOW TRUE
+    )
+    set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(nlohmann_json)
+
+    add_executable(imp-server
+        tools/imp-server/main.cpp
+        tools/imp-server/args.cpp
+    )
+    target_link_libraries(imp-server PRIVATE imp httplib::httplib nlohmann_json::nlohmann_json)
+    target_include_directories(imp-server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 endif()
 
 # --- Tests ---
