@@ -16,8 +16,8 @@ Measured on RTX 5090 (Blackwell, 32 GB), CUDA 13.1, batch size 1, 512-token prom
 
 | Model | Quant | pp (tok/s) | tg (tok/s) |
 |-------|-------|------------|------------|
-| Qwen3-4B | Q8_0 | 18,687 | 205 |
-| Qwen3-30B-A3B (MoE) | Q6_K | 6,167 | 210 |
+| Qwen3-4B | Q8_0 | 18,487 | 203 |
+| Qwen3-30B-A3B (MoE) | Q6_K | 5,807 | 209 |
 
 See [`benchmarks/report.md`](benchmarks/report.md) for full results including llama.cpp comparison, and [`docs/comparison-llama-cpp.md`](docs/comparison-llama-cpp.md) for a detailed technical comparison.
 

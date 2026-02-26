@@ -1,7 +1,7 @@
 # imp vs llama.cpp — Technical Comparison
 
 **Date:** 2026-02-26
-**Scope:** Architecture, features, and performance of imp (commit c96deee) vs llama.cpp (mainline, Feb 2026)
+**Scope:** Architecture, features, and performance of imp (commit 33cd6a1) vs llama.cpp (build c830f99, Feb 2026)
 
 ---
 
@@ -9,7 +9,7 @@
 
 imp and llama.cpp occupy different positions in the LLM inference landscape. llama.cpp prioritizes **hardware breadth** — running on CPUs, NVIDIA/AMD/Intel GPUs, Apple Silicon, and browsers — with support for 161 model architectures and 30+ quantization formats. imp prioritizes **depth on NVIDIA Hopper/Blackwell**, exploiting architecture-specific features (WMMA, TCGEN05, Green Contexts, PDL, CUDA Graphs) to minimize latency on a narrow hardware target.
 
-On an RTX 5090 (Blackwell, sm_120) with Qwen3-4B Q8_0, both engines achieve comparable throughput: imp trails llama.cpp by ~3% on prefill and ~4% on decode. On the MoE model (Qwen3-Coder-30B-A3B Q6_K), imp matches or slightly exceeds llama.cpp on both prefill (+1.3%) and decode (+5%).
+On an RTX 5090 (Blackwell, sm_120) with Qwen3-4B Q8_0, imp trails llama.cpp by ~9% on prefill and ~4% on decode. On the MoE model (Qwen3-Coder-30B-A3B Q6_K), imp trails by ~4% on prefill but leads by ~6% on decode.
 
 ---
 
@@ -20,10 +20,10 @@ On an RTX 5090 (Blackwell, sm_120) with Qwen3-4B Q8_0, both engines achieve comp
 
 | Model | Quant | Engine | pp (tok/s) | tg (tok/s) |
 |-------|-------|--------|------------|------------|
-| Qwen3-4B | Q8_0 | llama.cpp | 19,280 | 214 |
-| Qwen3-4B | Q8_0 | imp | 18,687 | 205 |
-| Qwen3-30B-A3B (MoE) | Q6_K | llama.cpp | 6,091 | 200 |
-| Qwen3-30B-A3B (MoE) | Q6_K | imp | 6,167 | 210 |
+| Qwen3-4B | Q8_0 | llama.cpp | 20,324 | 212 |
+| Qwen3-4B | Q8_0 | imp | 18,487 | 203 |
+| Qwen3-30B-A3B (MoE) | Q6_K | llama.cpp | 6,070 | 197 |
+| Qwen3-30B-A3B (MoE) | Q6_K | imp | 5,807 | 209 |
 
 Both engines: flash attention enabled, all layers on GPU, single sequence.
 imp: CUDA graphs + PDL enabled. llama.cpp: default CUDA settings.
