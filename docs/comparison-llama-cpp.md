@@ -214,3 +214,13 @@ llama.cpp runs on essentially any platform with a C compiler. imp requires a mod
 - Multi-GPU inference required
 - Production HTTP serving with OpenAI API compatibility
 - Platforms beyond Linux (macOS, Windows, mobile, web)
+
+---
+
+## Acknowledgment
+
+imp would not exist without llama.cpp. Georgi Gerganov and the llama.cpp community have done extraordinary work in making LLM inference accessible to everyone — on every platform, every hardware vendor, every budget. The GGUF format that imp loads natively is a llama.cpp creation. The quantization schemes (Q4_0, Q4_K_M, Q6_K, Q8_0) that imp implements originate from the GGML ecosystem. The benchmark methodology, the model support matrix, the entire concept of "local LLM inference" as a practical reality — all of this was pioneered and popularized by llama.cpp.
+
+imp takes a different path: trading hardware breadth for depth on a single vendor. But every optimization in imp is measured against llama.cpp as the baseline. When imp is faster, it's often by single-digit percentages — a testament to how well-optimized llama.cpp already is despite supporting orders of magnitude more hardware. When llama.cpp is faster (as on dense prefill), it serves as motivation to find the next bottleneck.
+
+We have deep respect for the engineering quality, the relentless pace of development, and the open-source ethos of the llama.cpp project. It has raised the bar for the entire local inference ecosystem.

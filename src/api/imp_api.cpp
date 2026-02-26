@@ -3,6 +3,7 @@
 #include "model/gguf_loader.h"
 #include "model/safetensors_loader.h"
 #include "model/tokenizer.h"
+#include "model/chat_template.h"
 #include "runtime/engine.h"
 #include "runtime/request.h"
 #include "memory/kv_cache.h"
@@ -243,6 +244,76 @@ void imp_context_free(ImpContext ctx) {
 }
 
 // --- Generation ---
+
+ImpError imp_generate_streaming(ImpContext ctx, const char* prompt,
+                                const ImpGenerateParams* params,
+                                ImpTokenCallback cb, void* user_data) {
+    if (!ctx || !prompt || !params || !cb) {
+        return IMP_ERROR_INVALID_ARG;
+    }
+    if (!ctx->engine) {
+        return IMP_ERROR_INTERNAL;
+    }
+
+    auto* tok = ctx->model_handle->model->tokenizer();
+    if (!tok) return IMP_ERROR_INVALID_MODEL;
+
+    // Tokenize the prompt (reuse the engine's chat template logic via prefill path)
+    std::vector<int32_t> tokens;
+    const auto& tmpl = ctx->engine->chat_template();
+    if (params->apply_chat_template && !tmpl.is_raw()) {
+        std::vector<imp::ChatMessage> messages = {{"user", prompt}};
+        tokens = tmpl.apply(*tok, messages);
+    } else {
+        tokens = tok->encode(prompt);
+        if (tok->add_bos() && (tokens.empty() || tokens[0] != tok->bos_id())) {
+            tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
+        }
+    }
+
+    // Create request
+    auto req = std::make_shared<imp::Request>();
+    req->input_tokens = std::move(tokens);
+    req->max_tokens = params->max_tokens;
+    req->temperature = params->temperature;
+    req->top_p = params->top_p;
+    req->top_k = params->top_k;
+    req->seed = params->seed;
+    req->status = imp::RequestStatus::PENDING;
+
+    ctx->engine->add_request(req);
+
+    // Prefill
+    while (req->status == imp::RequestStatus::PENDING ||
+           req->status == imp::RequestStatus::PREFILLING) {
+        bool has_work = ctx->engine->step();
+        if (!has_work) break;
+    }
+
+    // Decode with streaming callback
+    size_t prev_output_size = req->output_tokens.size();
+    while (req->status != imp::RequestStatus::FINISHED &&
+           req->status != imp::RequestStatus::CANCELLED) {
+        bool has_work = ctx->engine->step();
+        if (!has_work && req->status != imp::RequestStatus::FINISHED) break;
+
+        // Deliver new tokens via callback
+        while (prev_output_size < req->output_tokens.size()) {
+            int32_t token = req->output_tokens[prev_output_size];
+            std::string text = tok->decode({token});
+            int stop = cb(text.c_str(), text.size(), user_data);
+            prev_output_size++;
+            if (stop != 0) {
+                // User requested stop
+                ctx->engine->kv_manager()->free_sequence(req->id);
+                req->status = imp::RequestStatus::CANCELLED;
+                return IMP_ERROR_CANCELLED;
+            }
+        }
+    }
+
+    return IMP_SUCCESS;
+}
 
 ImpError imp_generate(ImpContext ctx, const char* prompt,
                       const ImpGenerateParams* params,

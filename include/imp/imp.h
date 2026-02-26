@@ -52,6 +52,18 @@ typedef struct {
 
 ImpGenerateParams imp_generate_params_default(void);
 
+// Callback for streaming token output. Return 0 to continue, non-zero to stop.
+typedef int (*ImpTokenCallback)(const char* text, size_t len, void* user_data);
+
+// Synchronous generation with streaming callback. Calls cb for each generated token.
+ImpError imp_generate_streaming(
+    ImpContext ctx,
+    const char* prompt,
+    const ImpGenerateParams* params,
+    ImpTokenCallback cb,
+    void* user_data
+);
+
 // Synchronous generation from a text prompt
 ImpError imp_generate(
     ImpContext ctx,
