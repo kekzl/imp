@@ -1,0 +1,60 @@
+#include "args.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+
+void print_server_usage(const char* prog) {
+    fprintf(stderr,
+        "Usage: %s [options]\n"
+        "\n"
+        "Options:\n"
+        "  --model <path>        Path to model file (required)\n"
+        "  --host <addr>         Listen address (default: 127.0.0.1)\n"
+        "  --port <n>            Listen port (default: 8080)\n"
+        "  --max-tokens <n>      Default max tokens (default: 2048)\n"
+        "  --gpu-layers <n>      Layers on GPU, -1 = all (default: -1)\n"
+        "  --device <n>          CUDA device ID (default: 0)\n"
+        "  --chat-template <t>   auto, none, chatml, llama2, llama3, nemotron\n"
+        "  --no-cuda-graphs      Disable CUDA Graph capture for decode\n"
+        "  --ssm-fp16            Use FP16 for SSM h_state\n"
+        "  --help                Show this help message\n",
+        prog);
+}
+
+ServerArgs parse_server_args(int argc, char** argv) {
+    ServerArgs args;
+
+    for (int i = 1; i < argc; ++i) {
+        const char* arg = argv[i];
+
+        if (std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0) {
+            print_server_usage(argv[0]);
+            std::exit(0);
+        } else if (std::strcmp(arg, "--model") == 0 && i + 1 < argc) {
+            args.model_path = argv[++i];
+        } else if (std::strcmp(arg, "--host") == 0 && i + 1 < argc) {
+            args.host = argv[++i];
+        } else if (std::strcmp(arg, "--port") == 0 && i + 1 < argc) {
+            args.port = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--max-tokens") == 0 && i + 1 < argc) {
+            args.max_tokens = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--gpu-layers") == 0 && i + 1 < argc) {
+            args.gpu_layers = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--device") == 0 && i + 1 < argc) {
+            args.device = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--chat-template") == 0 && i + 1 < argc) {
+            args.chat_template = argv[++i];
+        } else if (std::strcmp(arg, "--no-cuda-graphs") == 0) {
+            args.no_cuda_graphs = true;
+        } else if (std::strcmp(arg, "--ssm-fp16") == 0) {
+            args.ssm_fp16 = true;
+        } else {
+            fprintf(stderr, "Unknown argument: %s\n", arg);
+            print_server_usage(argv[0]);
+            std::exit(1);
+        }
+    }
+
+    return args;
+}

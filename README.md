@@ -55,6 +55,7 @@ Build options:
 | `IMP_BUILD_TESTS` | ON | Build Google Test suite |
 | `IMP_BUILD_TOOLS` | ON | Build imp-cli and imp-bench |
 | `IMP_BUILD_BENCH` | ON | Build benchmark tool |
+| `IMP_BUILD_SERVER` | ON | Build imp-server (OpenAI-compatible HTTP server) |
 | `CMAKE_CUDA_ARCHITECTURES` | `90a;100;120` | Target GPU architectures |
 
 ## Usage
@@ -123,6 +124,53 @@ imp_model_free(model);
 
 The C API also supports token-level control via `imp_prefill` / `imp_decode_step` for custom generation loops, and `imp_set_draft_model` for speculative decoding.
 
+### Server (OpenAI-compatible API)
+
+imp includes an OpenAI-compatible HTTP server for drop-in use with the OpenAI Python SDK, `curl`, or any OpenAI-compatible client.
+
+```bash
+# Start the server
+./build/imp-server --model path/to/model.gguf
+
+# Health check
+curl http://localhost:8080/health
+
+# Non-streaming chat completion
+curl -s http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Hello!"}],"max_tokens":64}'
+
+# Streaming (SSE)
+curl -N http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Hello!"}],"stream":true,"max_tokens":64}'
+```
+
+Works with the OpenAI Python SDK:
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="none")
+for chunk in client.chat.completions.create(
+    model="imp", messages=[{"role": "user", "content": "Hi"}],
+    stream=True, max_tokens=64
+):
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+Server options:
+
+```
+--model <path>          Path to model file (required)
+--host <addr>           Listen address (default: 127.0.0.1)
+--port <n>              Listen port (default: 8080)
+--max-tokens <n>        Default max tokens (default: 2048)
+--gpu-layers <n>        Layers on GPU, -1 = all (default: -1)
+--device <n>            CUDA device ID (default: 0)
+--chat-template <t>     auto, none, chatml, llama2, llama3, nemotron
+--no-cuda-graphs        Disable CUDA Graph capture for decode
+```
+
 ## Project Structure
 
 ```
@@ -141,6 +189,7 @@ imp/
 │   └── api/              C API implementation
 ├── tools/
 │   ├── imp-cli/          CLI tool (interactive + single-prompt + benchmark)
+│   ├── imp-server/       OpenAI-compatible HTTP server (SSE streaming)
 │   └── imp-bench/        Standalone benchmarks (GEMM, attention, end-to-end)
 ├── tests/                Google Test suite (17 test files)
 ├── benchmarks/           Performance reports
