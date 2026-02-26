@@ -64,6 +64,10 @@ public:
 
     void add_request(std::shared_ptr<Request> req);
 
+    // Set draft model for speculative decoding after init.
+    // Can only be called once, before any generate/decode_step calls.
+    bool set_draft_model(const std::string& path, int spec_k = 4);
+
     // Accessors for C API
     Scheduler* scheduler() { return scheduler_.get(); }
     KVCacheManager* kv_manager() { return kv_manager_.get(); }

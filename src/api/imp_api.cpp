@@ -515,3 +515,26 @@ ImpError imp_context_reset(ImpContext ctx) {
 
     return IMP_SUCCESS;
 }
+
+// --- Speculative Decoding ---
+
+ImpError imp_set_draft_model(ImpContext ctx, const char* draft_model_path,
+                              ImpModelFormat format) {
+    if (!ctx || !draft_model_path) {
+        return IMP_ERROR_INVALID_ARG;
+    }
+    if (!ctx->engine) {
+        return IMP_ERROR_INTERNAL;
+    }
+
+    // Currently only GGUF is supported for draft models (same as init_speculative)
+    if (format != IMP_FORMAT_GGUF) {
+        return IMP_ERROR_UNSUPPORTED;
+    }
+
+    if (!ctx->engine->set_draft_model(draft_model_path)) {
+        return IMP_ERROR_INTERNAL;
+    }
+
+    return IMP_SUCCESS;
+}

@@ -324,6 +324,21 @@ bool Engine::init_speculative() {
     return true;
 }
 
+bool Engine::set_draft_model(const std::string& path, int spec_k) {
+    if (path.empty()) {
+        IMP_LOG_ERROR("set_draft_model: empty path");
+        return false;
+    }
+    if (spec_decoder_) {
+        IMP_LOG_ERROR("set_draft_model: draft model already set");
+        return false;
+    }
+    config_.draft_model_path = path;
+    config_.spec_k = spec_k;
+    config_.enable_speculative = true;
+    return init_speculative();
+}
+
 bool Engine::step() {
     // ====================================================================
     // Fast path: async conditional graph loop completed on GPU.
