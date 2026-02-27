@@ -482,11 +482,14 @@ bool Engine::step() {
         if (token >= 0) {
             req->output_tokens.push_back(token);
 
-            // Check stop conditions
+            // Check stop conditions (respect ignore_eos for bench mode)
             Tokenizer* tok = model_->tokenizer();
-            bool is_stop = (token == tok->eos_id());
-            for (int32_t stop_id : chat_template_.stop_token_ids()) {
-                if (token == stop_id) { is_stop = true; break; }
+            bool is_stop = false;
+            if (!req->ignore_eos) {
+                is_stop = (token == tok->eos_id());
+                for (int32_t stop_id : chat_template_.stop_token_ids()) {
+                    if (token == stop_id) { is_stop = true; break; }
+                }
             }
             bool finished = is_stop ||
                 static_cast<int>(req->output_tokens.size()) >= req->max_tokens;
@@ -870,7 +873,7 @@ bool Engine::step() {
                 config_.use_cuda_graphs && !async_graph_runner_.is_setup()) {
                 auto& dreq = valid_decode[0];
                 if (dreq->status == RequestStatus::DECODING &&
-                    !dreq->output_tokens.empty()) {
+                    !dreq->output_tokens.empty() && !dreq->ignore_eos) {
                     int32_t last_token = dreq->output_tokens.back();
                     try_launch_async_graph_loop(dreq, last_token, dec_stream);
                 }
@@ -943,7 +946,7 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     // ---- Step 2: Decode — try conditional graph loop, fall back to step() ----
     if (req->status == RequestStatus::DECODING && !req->output_tokens.empty() &&
         config_.use_cuda_graphs && !offload_mgr_ && !ssm_state_ &&
-        !config_.enable_speculative) {
+        !config_.enable_speculative && !req->ignore_eos) {
         int32_t first_token = req->output_tokens.back();
         auto graph_tokens = try_graph_loop_decode(req, first_token, decode_stream());
         if (!graph_tokens.empty()) {
