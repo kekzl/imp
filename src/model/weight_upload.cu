@@ -530,6 +530,7 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
     // Embedding lookup only supports Q8_0/Q6_K natively; other quant types
     // need to be dequanted to FP16 (raw_quant=false) so the standard FP16
     // embedding gather works.
+    const void* tok_emb_host_ptr = tok_emb_.data;  // save for weight-tying check below
     if (tok_emb_.data && !tok_emb_.on_device) {
         bool emb_raw = (tok_emb_qtype_ == GGMLQuantType::Q8_0 ||
                         tok_emb_qtype_ == GGMLQuantType::Q6_K);
@@ -558,8 +559,13 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
     // Falls back to FP16 dequant for unsupported quant types.
     // For weight-tied models (out_proj == tok_emb), share the GPU data directly.
     if (out_proj_.data && !out_proj_.on_device) {
-        if (tok_emb_.on_device && out_proj_qtype_ == tok_emb_qtype_) {
-            // Weight tying: reuse the already-uploaded tok_emb_ GPU data
+        // Weight tying: share GPU data only if both point to the same host tensor
+        // (i.e. GGUF had no output.weight and the loader aliased out_proj = tok_emb).
+        // Checking the host pointer prevents incorrectly sharing when a model has
+        // separate output.weight and token_embd.weight tensors of the same qtype.
+        bool actually_tied = (out_proj_.data == tok_emb_host_ptr &&
+                              out_proj_qtype_ == tok_emb_qtype_);
+        if (actually_tied && tok_emb_.on_device) {
             out_proj_ = tok_emb_;
             IMP_LOG_INFO("Output projection shares GPU data with token embedding (weight tying)");
         } else {
