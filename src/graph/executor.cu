@@ -432,7 +432,16 @@ static void gemm_dispatch(const Tensor& input, const Tensor& weight,
                            block_q8_1* q8_1_buf = nullptr,
                            float* d8_buf = nullptr,
                            const std::unordered_map<const void*, Tensor>* fp16_cache = nullptr) {
-    if (qtype == GGMLQuantType::Q4_0 || qtype == GGMLQuantType::Q4_1) {
+    if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
+               q8_1_buf != nullptr && d8_buf != nullptr && qtype == GGMLQuantType::Q4_0) {
+        // dp4a MMVQ Q4_0: quantize input to Q8_1, then dp4a dot product
+        int K = static_cast<int>(weight.shape[1]);
+        quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
+                               q8_1_buf, d8_buf, K, stream);
+        gemv_q4_0_q8_1(weight.data, q8_1_buf, d8_buf,
+                        static_cast<half*>(output.data),
+                        static_cast<int>(weight.shape[0]), K, stream);
+    } else if (qtype == GGMLQuantType::Q4_1) {
         // weight is [N, K/2] packed nibbles, scales is [N, num_groups]
         quant_gemm_int4(input, weight, scales, output, stream);
     } else if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
@@ -576,7 +585,11 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
         pdl::enable(reinterpret_cast<const void*>(&write_kv_cache_fused_kernel));
         pdl::enable(reinterpret_cast<const void*>(&fp16_to_fp32_kernel));
         pdl::enable(reinterpret_cast<const void*>(&fp32_to_fp16_kernel));
-        IMP_LOG_INFO("PDL enabled on executor kernels");
+        // Register compute kernels for PDL overlap (run between GEMMs in hot path)
+        layernorm_pdl_register();
+        rope_pdl_register();
+        activation_pdl_register();
+        IMP_LOG_INFO("PDL enabled on executor + compute kernels");
     } else if (use_pdl_) {
         IMP_LOG_WARN("PDL requested but not available on this device/CUDA version");
         use_pdl_ = false;
@@ -1085,6 +1098,12 @@ void GraphExecutor::free_buffers() {
     }
     fused_kv_cache_.clear();
 
+    // Free fused gate+up weight cache
+    for (auto& [idx, tensor] : fused_gate_up_cache_) {
+        if (tensor.data) cudaFree(tensor.data);
+    }
+    fused_gate_up_cache_.clear();
+
     // Free FP16 weight cache
     for (auto& [ptr, tensor] : fp16_cache_) {
         cudaFree(tensor.data);
@@ -1281,11 +1300,48 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
         fused_kv_count++;
     }
 
+    // Create fused gate+up weights for strided batched prefill GEMM.
+    // Each entry concatenates [w_gate; w_up] as [2*d_ff, d_model] FP16 for one layer.
+    int fused_gu_count = 0;
+    for (int i = 0; i < cfg.n_layers; i++) {
+        const auto& L = model_->layer(i);
+        if (!L.w_gate.data || !L.w_up.data) continue;
+        // Both must be the same shape (d_ff x d_model)
+        if (L.w_gate.shape[0] != L.w_up.shape[0] ||
+            L.w_gate.shape[1] != L.w_up.shape[1]) continue;
+        auto wg_it = fp16_cache_.find(L.w_gate.data);
+        auto wu_it = fp16_cache_.find(L.w_up.data);
+        if (wg_it == fp16_cache_.end() || wu_it == fp16_cache_.end()) continue;
+
+        int g_rows = static_cast<int>(L.w_gate.shape[0]);  // d_ff
+        int K = static_cast<int>(L.w_gate.shape[1]);        // d_model
+        size_t one_sz = static_cast<size_t>(g_rows) * K * sizeof(half);
+
+        void* fused_buf = nullptr;
+        cudaError_t err = cudaMalloc(&fused_buf, 2 * one_sz);
+        if (err != cudaSuccess) {
+            IMP_LOG_DEBUG("Cleared fused gate+up alloc error: %s", cudaGetErrorString(cudaGetLastError()));
+            break;
+        }
+
+        cudaMemcpyAsync(fused_buf, wg_it->second.data, one_sz,
+                         cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(static_cast<char*>(fused_buf) + one_sz,
+                         wu_it->second.data, one_sz,
+                         cudaMemcpyDeviceToDevice, stream);
+
+        int64_t shape[2] = {2 * g_rows, static_cast<int64_t>(K)};
+        fused_gate_up_cache_[i] = Tensor(fused_buf, DType::FP16, 2, shape, true);
+        total_fp16_bytes += 2 * one_sz;
+        fused_gu_count++;
+    }
+
     if (cached_count > 0) {
         cudaStreamSynchronize(stream);
         fp16_cache_bytes_ = total_fp16_bytes;
-        IMP_LOG_INFO("FP16 weight cache: %d tensors, %.2f MiB (incl. %d fused KV)",
-                     cached_count, total_fp16_bytes / (1024.0 * 1024.0), fused_kv_count);
+        IMP_LOG_INFO("FP16 weight cache: %d tensors, %.2f MiB (incl. %d fused KV, %d fused gate+up)",
+                     cached_count, total_fp16_bytes / (1024.0 * 1024.0),
+                     fused_kv_count, fused_gu_count);
     }
 }
 
@@ -1695,7 +1751,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         bool fused_qkv = (n == 1 && q8 != nullptr && d8_buf_ != nullptr &&
                           no.dtype == DType::FP16 &&
                           ly.wq_qtype == ly.wk_qtype && ly.wk_qtype == ly.wv_qtype &&
-                          (ly.wq_qtype == GGMLQuantType::Q6_K || ly.wq_qtype == GGMLQuantType::Q8_0));
+                          (ly.wq_qtype == GGMLQuantType::Q6_K ||
+                           ly.wq_qtype == GGMLQuantType::Q8_0 ||
+                           ly.wq_qtype == GGMLQuantType::Q4_0));
         if (fused_qkv) {
             // Fused: RMSNorm + Q8_1 quantization in one kernel (no norm_out write)
             int K = static_cast<int>(ly.wq.shape[1]);
@@ -1713,6 +1771,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                           static_cast<half*>(kk.data),
                                           static_cast<half*>(vv.data),
                                           q_rows, k_rows, v_rows, K, stream);
+            } else if (ly.wq_qtype == GGMLQuantType::Q4_0) {
+                gemv_qkv_fused_q4_0_q8_1(ly.wq.data, ly.wk.data, ly.wv.data,
+                                           q8, d8_buf_,
+                                           static_cast<half*>(qv.data),
+                                           static_cast<half*>(kk.data),
+                                           static_cast<half*>(vv.data),
+                                           q_rows, k_rows, v_rows, K, stream);
             } else {
                 gemv_qkv_fused_q8_0_q8_1(ly.wq.data, ly.wk.data, ly.wv.data,
                                            q8, d8_buf_,
@@ -1972,10 +2037,16 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                      n == 1 && q8_1_buf_ != nullptr && d8_buf_ != nullptr &&
                                      h.dtype == DType::FP16 &&
                                      (ly.w_down_qtype == GGMLQuantType::Q6_K ||
-                                      ly.w_down_qtype == GGMLQuantType::Q8_0));
+                                      ly.w_down_qtype == GGMLQuantType::Q8_0 ||
+                                      ly.w_down_qtype == GGMLQuantType::Q4_0));
     bool will_fuse_down_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual && n > 1 &&
                                   fp16_cache_.count(ly.w_down.data));
-    if (!will_fuse_down_residual && !will_fuse_down_beta1 && !using_fp32_accum) {
+    bool will_fuse_down_dequant_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual &&
+                                          !will_fuse_down_beta1 && n > 1 &&
+                                          dequant_scratch_ != nullptr &&
+                                          dequant_gpu_supported(ly.w_down_qtype));
+    if (!will_fuse_down_residual && !will_fuse_down_beta1 &&
+        !will_fuse_down_dequant_beta1 && !using_fp32_accum) {
         cudaMemcpyAsync(r.data, h.data, h.nbytes(),
                         cudaMemcpyDeviceToDevice, stream);
     }
@@ -1988,7 +2059,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         bool fused_ffn_norm = (n == 1 && q8 != nullptr && d8_buf_ != nullptr &&
                                h.dtype == DType::FP16 &&
                                (ly.w_gate_qtype == GGMLQuantType::Q6_K ||
-                                ly.w_gate_qtype == GGMLQuantType::Q8_0));
+                                ly.w_gate_qtype == GGMLQuantType::Q8_0 ||
+                                ly.w_gate_qtype == GGMLQuantType::Q4_0));
         if (fused_ffn_norm) {
             // Fused RMSNorm + Q8_1: quantize once, use for both gate and up
             rmsnorm_quantize_q8_1(static_cast<const half*>(h.data),
@@ -2003,6 +2075,11 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                static_cast<half*>(go.data), gate_rows, d, stream);
                 gemv_q6k_q8_1(ly.w_up.data, q8, d8_buf_,
                                static_cast<half*>(uo.data), up_rows, d, stream);
+            } else if (ly.w_gate_qtype == GGMLQuantType::Q4_0) {
+                gemv_q4_0_q8_1(ly.w_gate.data, q8, d8_buf_,
+                                static_cast<half*>(go.data), gate_rows, d, stream);
+                gemv_q4_0_q8_1(ly.w_up.data, q8, d8_buf_,
+                                static_cast<half*>(uo.data), up_rows, d, stream);
             } else {
                 gemv_q8_0_q8_1(ly.w_gate.data, q8, d8_buf_,
                                 static_cast<half*>(go.data), gate_rows, d, stream);
@@ -2011,8 +2088,14 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             }
         } else {
             rmsnorm(h, ffn_norm_w, no, eps, stream, norm_w_off_);
-            gemm_dispatch(no, ly.w_gate, ly.w_gate_scales, ly.w_gate_qtype, go, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
-            gemm_dispatch(no, ly.w_up,   ly.w_up_scales,   ly.w_up_qtype,   uo, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+            auto fused_gu_it = fused_gate_up_cache_.find(layer);
+            if (n > 1 && fused_gu_it != fused_gate_up_cache_.end()) {
+                // Batched gate+up: single cuBLAS call for both projections
+                gemm_pair_batched(no, fused_gu_it->second, go, uo, stream);
+            } else {
+                gemm_dispatch(no, ly.w_gate, ly.w_gate_scales, ly.w_gate_qtype, go, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                gemm_dispatch(no, ly.w_up,   ly.w_up_scales,   ly.w_up_qtype,   uo, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+            }
         }
     }
 
@@ -2030,7 +2113,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                      n == 1 && q8 != nullptr && d8_buf_ != nullptr &&
                                      so.dtype == DType::FP16 &&
                                      (ly.w_down_qtype == GGMLQuantType::Q6_K ||
-                                      ly.w_down_qtype == GGMLQuantType::Q8_0));
+                                      ly.w_down_qtype == GGMLQuantType::Q8_0 ||
+                                      ly.w_down_qtype == GGMLQuantType::Q4_0));
         if (fused_down_residual) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
@@ -2041,6 +2125,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 gemv_q6k_q8_1_residual(ly.w_down.data, q8, d8_buf_,
                                         static_cast<half*>(h.data), residual_ptr,
                                         M_d, K_d, stream);
+            } else if (ly.w_down_qtype == GGMLQuantType::Q4_0) {
+                gemv_q4_0_q8_1_residual(ly.w_down.data, q8, d8_buf_,
+                                          static_cast<half*>(h.data), residual_ptr,
+                                          M_d, K_d, stream);
             } else {
                 gemv_q8_0_q8_1_residual(ly.w_down.data, q8, d8_buf_,
                                           static_cast<half*>(h.data), residual_ptr,
@@ -2050,6 +2138,13 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             // Fused: hidden = swiglu_out @ w_down^T + hidden (cuBLAS beta=1).
             const Tensor& wd_fp16 = fp16_cache_.at(ly.w_down.data);
             gemm(so, wd_fp16, h, 1.0f, 1.0f, stream);
+        } else if (will_fuse_down_dequant_beta1) {
+            // Dequant into scratch, then beta=1.0 GEMM directly into hidden (which holds residual)
+            int rows = static_cast<int>(ly.w_down.shape[0]);
+            int cols = static_cast<int>(ly.w_down.shape[1]);
+            dequant_gpu(ly.w_down.data, dequant_scratch_, ly.w_down_qtype, rows, cols, stream);
+            Tensor w_fp16(dequant_scratch_, DType::FP16, ly.w_down.ndim, ly.w_down.shape, true);
+            gemm(so, w_fp16, h, 1.0f, 1.0f, stream);
         } else {
             gemm_dispatch(so, ly.w_down, ly.w_down_scales, ly.w_down_qtype, fo, dequant_scratch_, stream,
                           static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_);
@@ -3415,7 +3510,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     // bandwidth vs cuBLAS FP16 path (reads quantized weights directly).
     const auto out_qtype = model_->out_proj_qtype_;
     const bool use_dp4a_lm = q8_1_buf_ && compute_dtype_ == DType::FP16 &&
-        (out_qtype == GGMLQuantType::Q6_K || out_qtype == GGMLQuantType::Q8_0);
+        (out_qtype == GGMLQuantType::Q6_K || out_qtype == GGMLQuantType::Q8_0 ||
+         out_qtype == GGMLQuantType::Q4_0);
 
     if (state.is_prefill) {
         Tensor h_last = view_tokens(hidden_, n).slice(n - 1, n);
@@ -3436,6 +3532,9 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             if (out_qtype == GGMLQuantType::Q6_K)
                 gemv_q6k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+            else if (out_qtype == GGMLQuantType::Q4_0)
+                gemv_q4_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else
                 gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
@@ -3465,6 +3564,9 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             if (out_qtype == GGMLQuantType::Q6_K)
                 gemv_q6k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+            else if (out_qtype == GGMLQuantType::Q4_0)
+                gemv_q4_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else
                 gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
@@ -3712,7 +3814,8 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
 
     const auto out_qtype = model_->out_proj_qtype_;
     if (q8_1_buf_ && compute_dtype_ == DType::FP16 &&
-        (out_qtype == GGMLQuantType::Q6_K || out_qtype == GGMLQuantType::Q8_0)) {
+        (out_qtype == GGMLQuantType::Q6_K || out_qtype == GGMLQuantType::Q8_0 ||
+         out_qtype == GGMLQuantType::Q4_0)) {
         auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
         rmsnorm_quantize_q8_1(
             static_cast<const half*>(h_final.data),
@@ -3721,8 +3824,11 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
         if (out_qtype == GGMLQuantType::Q6_K)
             gemv_q6k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-        else
+        else if (out_qtype == GGMLQuantType::Q8_0)
             gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+        else
+            gemv_q4_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
     } else {
         Tensor no_final = view_tokens(norm_out_, n);

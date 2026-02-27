@@ -363,7 +363,7 @@ static std::unique_ptr<Model> make_q8_0_test_model(
 }
 
 // ===========================================================================
-// Test 1: Q4_0 weight upload splits into nibbles + scales
+// Test 1: Q4_0 weight upload keeps raw quantized bytes on GPU (dp4a GEMV path)
 // ===========================================================================
 TEST(QuantIntegrationTest, Q4_0WeightUpload) {
     SKIP_IF_NO_CUDA();
@@ -380,37 +380,36 @@ TEST(QuantIntegrationTest, Q4_0WeightUpload) {
     ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
     EXPECT_TRUE(model->gpu_weights_ready());
 
-    // Check layer 0 wq: should be on device with INT4 dtype
+    // Check layer 0 wq: raw upload keeps logical shape [N, K] and FP16 dtype
     const auto& ly = model->layer(0);
     EXPECT_TRUE(ly.wq.on_device);
-    EXPECT_EQ(ly.wq.dtype, DType::INT4);
+    EXPECT_EQ(ly.wq.dtype, DType::FP16);
     EXPECT_EQ(ly.wq.ndim, 2);
-    // wq shape: [n_heads * head_dim, d_model/2] = [32, 16]
+    // wq shape: [n_heads * head_dim, d_model] = [32, 32]
     EXPECT_EQ(ly.wq.shape[0], 32);
-    EXPECT_EQ(ly.wq.shape[1], 16);
+    EXPECT_EQ(ly.wq.shape[1], 32);
 
-    // Check wq_scales exists and is on device
-    EXPECT_TRUE(ly.wq_scales.on_device);
-    EXPECT_EQ(ly.wq_scales.dtype, DType::FP16);
-    // scales shape: [32, 1] (1 block per row, 1 group)
-    EXPECT_EQ(ly.wq_scales.shape[0], 32);
-    EXPECT_EQ(ly.wq_scales.shape[1], 1);
-
-    // Read back scales and verify
-    std::vector<uint16_t> h_scales(32);
-    cudaMemcpy(h_scales.data(), ly.wq_scales.data, 32 * sizeof(uint16_t),
+    // Read back raw Q4_0 data and verify block structure
+    // Each Q4_0 block: 18 bytes = 2B (FP16 scale) + 16B (packed nibbles)
+    const int blocks_per_row = 1;  // 32 / 32
+    const int raw_bytes_per_row = blocks_per_row * 18;
+    const int total_raw_bytes = 32 * raw_bytes_per_row;
+    std::vector<uint8_t> h_raw(total_raw_bytes);
+    cudaMemcpy(h_raw.data(), ly.wq.data, total_raw_bytes,
                cudaMemcpyDeviceToHost);
-    for (int i = 0; i < 32; ++i) {
-        float s = fp16_to_float(h_scales[i]);
-        EXPECT_NEAR(s, 0.5f, 0.01f) << "Scale mismatch at row " << i;
-    }
 
-    // Read back nibbles and verify: all should be 0xAA (nibble 10 packed)
-    std::vector<uint8_t> h_nibbles(32 * 16);
-    cudaMemcpy(h_nibbles.data(), ly.wq.data, 32 * 16,
-               cudaMemcpyDeviceToHost);
-    for (int i = 0; i < 32 * 16; ++i) {
-        EXPECT_EQ(h_nibbles[i], 0xAA) << "Nibble byte mismatch at " << i;
+    for (int row = 0; row < 32; ++row) {
+        const uint8_t* blk = h_raw.data() + row * raw_bytes_per_row;
+        // Check scale (first 2 bytes = FP16 0.5)
+        uint16_t scale_bits;
+        std::memcpy(&scale_bits, blk, 2);
+        float s = fp16_to_float(scale_bits);
+        EXPECT_NEAR(s, 0.5f, 0.01f) << "Scale mismatch at row " << row;
+        // Check nibbles (next 16 bytes = 0xAA for nibble 10)
+        for (int j = 0; j < 16; ++j) {
+            EXPECT_EQ(blk[2 + j], 0xAA)
+                << "Nibble byte mismatch at row " << row << " byte " << j;
+        }
     }
 
     // Also check embedding and output are on device

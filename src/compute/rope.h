@@ -30,4 +30,7 @@ void qknorm_rope_fused(half* Q, half* K,
                         cudaStream_t stream = nullptr,
                         float weight_offset = 0.0f);
 
+// Register RoPE kernels for PDL tail/head overlap.
+void rope_pdl_register();
+
 } // namespace imp

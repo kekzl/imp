@@ -2080,6 +2080,318 @@ void gemv_qkv_fused_q8_0_q8_1(const void* W_q, const void* W_k, const void* W_v,
 }
 
 // ---------------------------------------------------------------------------
+// dp4a Q4_0 × Q8_1 GEMV kernels
+//
+// Q4_0 block = 18 bytes for 32 elements: d[2] (FP16 scale) + qs[16] (packed nibbles).
+// Each byte holds two 4-bit unsigned values (low nibble first, range [0,15]).
+// Actual weight = d * (nibble - 8).
+//
+// dp4a approach:
+//   Unpack 2 bytes → 4 unsigned int8 nibbles → 1 dp4a operand.
+//   16 nibble bytes → 8 dp4a operands (matching 32 elements).
+//   Correction: subtract 8 * d_w * q8_sum per block (for unsigned→signed offset).
+// ---------------------------------------------------------------------------
+
+// Helper: unpack 2 packed nibble bytes into an int32 with 4 nibble values.
+// byte0 = (n0 | n1<<4), byte1 = (n2 | n3<<4)
+// Returns int32 with 4 bytes = {n0, n1, n2, n3} (each 0-15, fits in signed int8).
+// Returns int (not unsigned int) to match __dp4a(int, int, int) overload.
+__device__ __forceinline__ int unpack_nibbles_2(uint8_t b0, uint8_t b1) {
+    int r;
+    int8_t vals[4] = { static_cast<int8_t>(b0 & 0xF), static_cast<int8_t>(b0 >> 4),
+                       static_cast<int8_t>(b1 & 0xF), static_cast<int8_t>(b1 >> 4) };
+    memcpy(&r, vals, 4);
+    return r;
+}
+
+template<int N_ROWS, bool ADD_RESIDUAL>
+__global__ void gemv_q4_0_q8_1_kernel(const uint8_t* __restrict__ W,
+                                       const block_q8_1* __restrict__ q8_1,
+                                       const float* __restrict__ d8,
+                                       half* y,
+                                       const half* residual,
+                                       int M, int K) {
+    const int warps_per_block = blockDim.x / 32;
+    const int warp_id = threadIdx.x / 32;
+    const int lane    = threadIdx.x % 32;
+    const int row_base = (blockIdx.x * warps_per_block + warp_id) * N_ROWS;
+
+    if (row_base >= M) return;
+
+    const int blocks_per_row = K / 32;
+    const size_t row_bytes = (size_t)blocks_per_row * 18;  // 18 bytes per Q4_0 block
+
+    float sum[N_ROWS];
+    #pragma unroll
+    for (int r = 0; r < N_ROWS; r++) sum[r] = 0.0f;
+
+    for (int b = lane; b < blocks_per_row; b += 32) {
+        // Pre-load Q8_1 input data (shared across all rows)
+        int xi[8];
+        memcpy(xi, q8_1[b].qs, 32);
+        float dq = d8[b];
+        float q8_sum = __half2float(q8_1[b].s);  // sum of qs * d_input
+
+        #pragma unroll
+        for (int r = 0; r < N_ROWS; r++) {
+            const int row = row_base + r;
+            if (row >= M) break;
+
+            const uint8_t* bp = W + (size_t)row * row_bytes + b * 18;
+            half d_w_h;
+            memcpy(&d_w_h, bp, sizeof(half));
+            float d_w = __half2float(d_w_h);
+            const uint8_t* qs = bp + 2;
+
+            // Unpack 16 nibble bytes into 8 uint32 dp4a operands
+            int ni0 = unpack_nibbles_2(qs[0],  qs[1]);
+            int ni1 = unpack_nibbles_2(qs[2],  qs[3]);
+            int ni2 = unpack_nibbles_2(qs[4],  qs[5]);
+            int ni3 = unpack_nibbles_2(qs[6],  qs[7]);
+            int ni4 = unpack_nibbles_2(qs[8],  qs[9]);
+            int ni5 = unpack_nibbles_2(qs[10], qs[11]);
+            int ni6 = unpack_nibbles_2(qs[12], qs[13]);
+            int ni7 = unpack_nibbles_2(qs[14], qs[15]);
+
+            int32_t sumi = 0;
+            sumi = __dp4a(ni0, xi[0], sumi);
+            sumi = __dp4a(ni1, xi[1], sumi);
+            sumi = __dp4a(ni2, xi[2], sumi);
+            sumi = __dp4a(ni3, xi[3], sumi);
+            sumi = __dp4a(ni4, xi[4], sumi);
+            sumi = __dp4a(ni5, xi[5], sumi);
+            sumi = __dp4a(ni6, xi[6], sumi);
+            sumi = __dp4a(ni7, xi[7], sumi);
+
+            // Correct for unsigned nibbles: subtract 8 * d_w * sum(input_qs * d_input)
+            sum[r] += d_w * (dq * (float)sumi - 8.0f * q8_sum);
+        }
+    }
+
+    #pragma unroll
+    for (int r = 0; r < N_ROWS; r++) {
+        for (int off = 16; off > 0; off >>= 1)
+            sum[r] += __shfl_down_sync(0xFFFFFFFF, sum[r], off);
+        if (lane == 0) {
+            const int row = row_base + r;
+            if (row < M) {
+                float s = sum[r];
+                if constexpr (ADD_RESIDUAL) s += __half2float(residual[row]);
+                y[row] = __float2half(s);
+            }
+        }
+    }
+}
+
+static void launch_gemv_q4_0_q8_1(const uint8_t* W, const block_q8_1* q8_1, const float* d8,
+                                    half* y, const half* residual, bool add_residual,
+                                    int M, int K, cudaStream_t stream) {
+    const int threads_per_block = 256;
+    const int warps_per_block = threads_per_block / 32;
+
+    auto launch = [&](auto n_rows_tag) {
+        constexpr int NR = decltype(n_rows_tag)::value;
+        const int rows_per_block = warps_per_block * NR;
+        const int blocks = (M + rows_per_block - 1) / rows_per_block;
+        if (add_residual)
+            gemv_q4_0_q8_1_kernel<NR, true><<<blocks, threads_per_block, 0, stream>>>(
+                W, q8_1, d8, y, residual, M, K);
+        else
+            gemv_q4_0_q8_1_kernel<NR, false><<<blocks, threads_per_block, 0, stream>>>(
+                W, q8_1, d8, y, nullptr, M, K);
+    };
+
+    if (M >= 1024) launch(std::integral_constant<int, 2>{});
+    else           launch(std::integral_constant<int, 1>{});
+}
+
+void gemv_q4_0_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
+                     half* y, int M, int K, cudaStream_t stream) {
+    launch_gemv_q4_0_q8_1(static_cast<const uint8_t*>(W), q8_1, d8,
+                            y, nullptr, false, M, K, stream);
+}
+
+void gemv_q4_0_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
+                               half* y, const half* residual,
+                               int M, int K, cudaStream_t stream) {
+    launch_gemv_q4_0_q8_1(static_cast<const uint8_t*>(W), q8_1, d8,
+                            y, residual, true, M, K, stream);
+}
+
+// Q4_0 × Q8_1 with FP32 output (for LM head)
+__global__ void gemv_q4_0_q8_1_fp32_kernel(const uint8_t* __restrict__ W,
+                                            const block_q8_1* __restrict__ q8_1,
+                                            const float* __restrict__ d8,
+                                            float* __restrict__ y,
+                                            int M, int K) {
+    const int warps_per_block = blockDim.x / 32;
+    const int warp_id = threadIdx.x / 32;
+    const int lane    = threadIdx.x % 32;
+    const int row     = blockIdx.x * warps_per_block + warp_id;
+
+    if (row >= M) return;
+
+    const int blocks_per_row = K / 32;
+    const size_t row_bytes = (size_t)blocks_per_row * 18;
+    const uint8_t* W_row = W + (size_t)row * row_bytes;
+
+    float sum = 0.0f;
+
+    for (int b = lane; b < blocks_per_row; b += 32) {
+        const uint8_t* bp = W_row + b * 18;
+        half d_w_h;
+        memcpy(&d_w_h, bp, sizeof(half));
+        float d_w = __half2float(d_w_h);
+        const uint8_t* qs = bp + 2;
+        float q8_sum = __half2float(q8_1[b].s);
+
+        int ni0 = unpack_nibbles_2(qs[0],  qs[1]);
+        int ni1 = unpack_nibbles_2(qs[2],  qs[3]);
+        int ni2 = unpack_nibbles_2(qs[4],  qs[5]);
+        int ni3 = unpack_nibbles_2(qs[6],  qs[7]);
+        int ni4 = unpack_nibbles_2(qs[8],  qs[9]);
+        int ni5 = unpack_nibbles_2(qs[10], qs[11]);
+        int ni6 = unpack_nibbles_2(qs[12], qs[13]);
+        int ni7 = unpack_nibbles_2(qs[14], qs[15]);
+
+        int xi0, xi1, xi2, xi3, xi4, xi5, xi6, xi7;
+        memcpy(&xi0, q8_1[b].qs +  0, 4);
+        memcpy(&xi1, q8_1[b].qs +  4, 4);
+        memcpy(&xi2, q8_1[b].qs +  8, 4);
+        memcpy(&xi3, q8_1[b].qs + 12, 4);
+        memcpy(&xi4, q8_1[b].qs + 16, 4);
+        memcpy(&xi5, q8_1[b].qs + 20, 4);
+        memcpy(&xi6, q8_1[b].qs + 24, 4);
+        memcpy(&xi7, q8_1[b].qs + 28, 4);
+
+        int32_t sumi = 0;
+        sumi = __dp4a(ni0, xi0, sumi);
+        sumi = __dp4a(ni1, xi1, sumi);
+        sumi = __dp4a(ni2, xi2, sumi);
+        sumi = __dp4a(ni3, xi3, sumi);
+        sumi = __dp4a(ni4, xi4, sumi);
+        sumi = __dp4a(ni5, xi5, sumi);
+        sumi = __dp4a(ni6, xi6, sumi);
+        sumi = __dp4a(ni7, xi7, sumi);
+
+        sum += d_w * (d8[b] * (float)sumi - 8.0f * q8_sum);
+    }
+
+    for (int off = 16; off > 0; off >>= 1)
+        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
+
+    if (lane == 0) y[row] = sum;
+}
+
+void gemv_q4_0_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
+                           float* y, int M, int K, cudaStream_t stream) {
+    const int threads_per_block = 256;
+    const int warps_per_block = threads_per_block / 32;
+    const int blocks = (M + warps_per_block - 1) / warps_per_block;
+    gemv_q4_0_q8_1_fp32_kernel<<<blocks, threads_per_block, 0, stream>>>(
+        static_cast<const uint8_t*>(W), q8_1, d8, y, M, K);
+}
+
+// Q4_0 fused QKV GEMV
+__global__ void gemv_qkv_fused_q4_0_q8_1_kernel(
+        const uint8_t* __restrict__ W_q,
+        const uint8_t* __restrict__ W_k,
+        const uint8_t* __restrict__ W_v,
+        const block_q8_1* __restrict__ q8_1,
+        const float* __restrict__ d8,
+        half* __restrict__ y_q,
+        half* __restrict__ y_k,
+        half* __restrict__ y_v,
+        int q_rows, int k_rows, int v_rows, int K) {
+    const int warps_per_block = blockDim.x / 32;
+    const int warp_id = threadIdx.x / 32;
+    const int lane    = threadIdx.x % 32;
+    const int global_row = blockIdx.x * warps_per_block + warp_id;
+    const int total_rows = q_rows + k_rows + v_rows;
+
+    if (global_row >= total_rows) return;
+
+    const uint8_t* W;
+    half* y;
+    int local_row;
+
+    if (global_row < q_rows) {
+        local_row = global_row;
+        y = y_q;
+    } else if (global_row < q_rows + k_rows) {
+        local_row = global_row - q_rows;
+        y = y_k;
+    } else {
+        local_row = global_row - q_rows - k_rows;
+        y = y_v;
+    }
+
+    const int blocks_per_row = K / 32;
+    const size_t row_bytes = (size_t)blocks_per_row * 18;
+
+    if (global_row < q_rows) W = W_q + (size_t)local_row * row_bytes;
+    else if (global_row < q_rows + k_rows) W = W_k + (size_t)local_row * row_bytes;
+    else W = W_v + (size_t)local_row * row_bytes;
+
+    float sum = 0.0f;
+
+    for (int b = lane; b < blocks_per_row; b += 32) {
+        const uint8_t* bp = W + b * 18;
+        half d_w_h;
+        memcpy(&d_w_h, bp, sizeof(half));
+        float d_w = __half2float(d_w_h);
+        const uint8_t* qs = bp + 2;
+        float q8_sum = __half2float(q8_1[b].s);
+
+        int ni0 = unpack_nibbles_2(qs[0],  qs[1]);
+        int ni1 = unpack_nibbles_2(qs[2],  qs[3]);
+        int ni2 = unpack_nibbles_2(qs[4],  qs[5]);
+        int ni3 = unpack_nibbles_2(qs[6],  qs[7]);
+        int ni4 = unpack_nibbles_2(qs[8],  qs[9]);
+        int ni5 = unpack_nibbles_2(qs[10], qs[11]);
+        int ni6 = unpack_nibbles_2(qs[12], qs[13]);
+        int ni7 = unpack_nibbles_2(qs[14], qs[15]);
+
+        int xi[8];
+        memcpy(xi, q8_1[b].qs, 32);
+
+        int32_t sumi = 0;
+        sumi = __dp4a(ni0, xi[0], sumi);
+        sumi = __dp4a(ni1, xi[1], sumi);
+        sumi = __dp4a(ni2, xi[2], sumi);
+        sumi = __dp4a(ni3, xi[3], sumi);
+        sumi = __dp4a(ni4, xi[4], sumi);
+        sumi = __dp4a(ni5, xi[5], sumi);
+        sumi = __dp4a(ni6, xi[6], sumi);
+        sumi = __dp4a(ni7, xi[7], sumi);
+
+        sum += d_w * (d8[b] * (float)sumi - 8.0f * q8_sum);
+    }
+
+    for (int off = 16; off > 0; off >>= 1)
+        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
+
+    if (lane == 0) y[local_row] = __float2half(sum);
+}
+
+void gemv_qkv_fused_q4_0_q8_1(const void* W_q, const void* W_k, const void* W_v,
+                                const block_q8_1* q8_1, const float* d8,
+                                half* y_q, half* y_k, half* y_v,
+                                int q_rows, int k_rows, int v_rows, int K,
+                                cudaStream_t stream) {
+    const int threads_per_block = 256;
+    const int warps_per_block = threads_per_block / 32;
+    const int total = q_rows + k_rows + v_rows;
+    const int blocks = (total + warps_per_block - 1) / warps_per_block;
+    gemv_qkv_fused_q4_0_q8_1_kernel<<<blocks, threads_per_block, 0, stream>>>(
+        static_cast<const uint8_t*>(W_q),
+        static_cast<const uint8_t*>(W_k),
+        static_cast<const uint8_t*>(W_v),
+        q8_1, d8, y_q, y_k, y_v,
+        q_rows, k_rows, v_rows, K);
+}
+
+// ---------------------------------------------------------------------------
 // dp4a MoE decode GEMV variants (Q6_K × Q8_1 and Q8_0 × Q8_1)
 // ---------------------------------------------------------------------------
 
@@ -2638,6 +2950,46 @@ void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv,
 
     if (st != CUBLAS_STATUS_SUCCESS) {
         fprintf(stderr, "imp::gemm_kv_batched: cublasGemmStridedBatchedEx failed (status %d)\n",
+                (int)st);
+    }
+}
+
+void gemm_pair_batched(const Tensor& input, const Tensor& weight_fused,
+                       Tensor& out1, Tensor& out2, cudaStream_t stream) {
+    int M = static_cast<int>(input.shape[0]);       // n_tokens
+    int K = static_cast<int>(input.shape[1]);       // d_model
+    int N = static_cast<int>(out1.shape[1]);        // d_ff (or nkv*hd)
+
+    cublasHandle_t handle = get_cublas_handle();
+    cublasSetStream(handle, stream);
+
+    cudaDataType_t dt = dtype_to_cuda(input.dtype);
+    float alpha = 1.0f, beta = 0.0f;
+
+    long long weight_stride = static_cast<long long>(N) * K;
+    // Compute actual byte offset between out1 and out2, then convert to element offset
+    long long output_stride = (static_cast<const char*>(out2.data) -
+                               static_cast<const char*>(out1.data)) /
+                              dtype_size(input.dtype);
+
+    cublasStatus_t st = cublasGemmStridedBatchedEx(
+        handle,
+        CUBLAS_OP_T, CUBLAS_OP_N,
+        N, M, K,
+        &alpha,
+        weight_fused.data, dt, K,
+        weight_stride,
+        input.data, dt, K,
+        0,
+        &beta,
+        out1.data, dt, N,
+        output_stride,
+        2,
+        CUBLAS_COMPUTE_32F,
+        kGemmAlgo);
+
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        fprintf(stderr, "imp::gemm_pair_batched: cublasGemmStridedBatchedEx failed (status %d)\n",
                 (int)st);
     }
 }

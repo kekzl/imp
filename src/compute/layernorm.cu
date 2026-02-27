@@ -1,4 +1,5 @@
 #include "compute/layernorm.h"
+#include "runtime/pdl.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -208,14 +209,14 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out,
 
     switch (x.dtype) {
         case DType::FP32:
-            rmsnorm_fp32_kernel<<<rows, block, 0, stream>>>(
+            pdl::launch(rmsnorm_fp32_kernel, dim3(rows), dim3(block), 0, stream,
                 static_cast<const float*>(x.data),
                 static_cast<const float*>(weight.data),
                 static_cast<float*>(out.data),
                 d_model, eps, weight_offset);
             break;
         case DType::FP16:
-            rmsnorm_fp16_kernel<<<rows, block, 0, stream>>>(
+            pdl::launch(rmsnorm_fp16_kernel, dim3(rows), dim3(block), 0, stream,
                 static_cast<const __half*>(x.data),
                 static_cast<const __half*>(weight.data),
                 static_cast<__half*>(out.data),
@@ -241,7 +242,7 @@ void rmsnorm_residual(const Tensor& x, const Tensor& residual,
 
     switch (x.dtype) {
         case DType::FP32:
-            rmsnorm_residual_fp32_kernel<<<rows, block, 0, stream>>>(
+            pdl::launch(rmsnorm_residual_fp32_kernel, dim3(rows), dim3(block), 0, stream,
                 static_cast<float*>(x.data),
                 static_cast<const float*>(residual.data),
                 static_cast<const float*>(weight.data),
@@ -249,7 +250,7 @@ void rmsnorm_residual(const Tensor& x, const Tensor& residual,
                 d_model, eps, weight_offset);
             break;
         case DType::FP16:
-            rmsnorm_residual_fp16_kernel<<<rows, block, 0, stream>>>(
+            pdl::launch(rmsnorm_residual_fp16_kernel, dim3(rows), dim3(block), 0, stream,
                 static_cast<__half*>(x.data),
                 static_cast<const __half*>(residual.data),
                 static_cast<const __half*>(weight.data),
@@ -259,6 +260,16 @@ void rmsnorm_residual(const Tensor& x, const Tensor& residual,
         default:
             break;
     }
+}
+
+// --------------------------------------------------------------------------
+// PDL registration
+// --------------------------------------------------------------------------
+void layernorm_pdl_register() {
+    pdl::enable(reinterpret_cast<const void*>(&rmsnorm_fp16_kernel));
+    pdl::enable(reinterpret_cast<const void*>(&rmsnorm_fp32_kernel));
+    pdl::enable(reinterpret_cast<const void*>(&rmsnorm_residual_fp16_kernel));
+    pdl::enable(reinterpret_cast<const void*>(&rmsnorm_residual_fp32_kernel));
 }
 
 } // namespace imp

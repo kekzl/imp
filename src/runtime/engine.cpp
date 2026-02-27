@@ -28,6 +28,10 @@ Engine::~Engine() {
         cudaFreeHost(h_sample_pinned_);
         h_sample_pinned_ = nullptr;
     }
+    if (prefill_done_) {
+        cudaEventDestroy(prefill_done_);
+        prefill_done_ = nullptr;
+    }
     if (stream_) {
         cudaStreamDestroy(stream_);
         stream_ = nullptr;
@@ -144,10 +148,25 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         IMP_LOG_INFO("GPU memory before weight upload: %zu MiB free / %zu MiB total",
                      free_before / (1024 * 1024), total_before / (1024 * 1024));
 
-        if (!model_->upload_weights_gpu(config_.compute_dtype, stream_, expert_reserve)) {
+        // Use a separate upload stream so H2D transfers can overlap with
+        // workspace allocation and other init work on stream_.
+        cudaStream_t upload_stream = nullptr;
+        cudaStreamCreateWithFlags(&upload_stream, cudaStreamNonBlocking);
+
+        if (!model_->upload_weights_gpu(config_.compute_dtype,
+                                         upload_stream ? upload_stream : stream_,
+                                         expert_reserve)) {
             IMP_LOG_ERROR("Weight upload failed. Model may be too large for GPU. "
                           "Try a smaller quantization (e.g. Q4_K_M instead of Q6_K).");
+            if (upload_stream) cudaStreamDestroy(upload_stream);
             return false;
+        }
+
+        // Record event on upload stream so main stream can wait before using weights
+        cudaEvent_t upload_done = nullptr;
+        if (upload_stream) {
+            cudaEventCreate(&upload_done);
+            cudaEventRecord(upload_done, upload_stream);
         }
 
         size_t free_after = 0, total_after = 0;
@@ -156,6 +175,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                      "(weights used ~%zu MiB)",
                      free_after / (1024 * 1024), total_after / (1024 * 1024),
                      (free_before - free_after) / (1024 * 1024));
+
+        // Ensure upload completes before any weight access on main stream
+        if (upload_done) {
+            cudaStreamWaitEvent(stream_, upload_done);
+            cudaEventDestroy(upload_done);
+        }
+        if (upload_stream) cudaStreamDestroy(upload_stream);
     }
 
     // --- Check if any expert weights ended up on host ---
@@ -376,13 +402,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
     }
 
-    // Allocate pinned host buffer for graph-captured sampling
-    if (config_.use_cuda_graphs && !h_sample_pinned_) {
+    // Allocate pinned host buffer for graph-captured sampling and prefill event sync
+    if (!h_sample_pinned_) {
         cudaError_t err = cudaHostAlloc(&h_sample_pinned_, sizeof(int32_t), cudaHostAllocDefault);
         if (err != cudaSuccess) {
-            IMP_LOG_WARN("cudaHostAlloc for sample buffer failed: %s — disabling CUDA graphs",
+            IMP_LOG_WARN("cudaHostAlloc for sample buffer failed: %s",
                          cudaGetErrorString(err));
-            config_.use_cuda_graphs = false;
+            if (config_.use_cuda_graphs) config_.use_cuda_graphs = false;
             h_sample_pinned_ = nullptr;
         }
     }
@@ -623,14 +649,43 @@ bool Engine::step() {
             ssm_state_->reset_sequence(state.ssm_seq_id, pf_stream);
         }
 
-        int32_t next_token = executor_->forward(state, pf_stream);
+        // Use forward_logits + device-side sampling with event sync to overlap
+        // host bookkeeping (frees, status updates) with GPU sampling tail.
+        int32_t next_token;
+        bool use_event_sync = (h_sample_pinned_ != nullptr &&
+                               executor_->d_sample_result() != nullptr &&
+                               (state.temperature <= 0.0f || state.top_k == 1));
 
-        cudaStreamSynchronize(pf_stream);
+        if (use_event_sync) {
+            Tensor logits_out;
+            executor_->forward_logits(state, logits_out, pf_stream);
+            Tensor last_logits = logits_out.slice(0, 1);
+            int64_t vocab_shape[1] = {last_logits.shape[1]};
+            last_logits = last_logits.reshape(1, vocab_shape);
+            sample_greedy_device(last_logits, executor_->d_sample_result(),
+                                  h_sample_pinned_, pf_stream);
 
-        cudaFreeAsync(d_token_ids, pf_stream);
-        cudaFreeAsync(d_positions, pf_stream);
-        cudaFreeAsync(d_block_tables, pf_stream);
-        cudaFreeAsync(d_context_lens, pf_stream);
+            // Create event lazily
+            if (!prefill_done_) cudaEventCreate(&prefill_done_);
+            cudaEventRecord(prefill_done_, pf_stream);
+
+            // Enqueue frees while GPU finishes sampling + D2H copy
+            cudaFreeAsync(d_token_ids, pf_stream);
+            cudaFreeAsync(d_positions, pf_stream);
+            cudaFreeAsync(d_block_tables, pf_stream);
+            cudaFreeAsync(d_context_lens, pf_stream);
+
+            // Wait only when token value is needed
+            cudaEventSynchronize(prefill_done_);
+            next_token = *h_sample_pinned_;
+        } else {
+            next_token = executor_->forward(state, pf_stream);
+
+            cudaFreeAsync(d_token_ids, pf_stream);
+            cudaFreeAsync(d_positions, pf_stream);
+            cudaFreeAsync(d_block_tables, pf_stream);
+            cudaFreeAsync(d_context_lens, pf_stream);
+        }
 
         req->output_tokens.push_back(next_token);
 

@@ -172,6 +172,24 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         int64_t N = weight.shape[0]; // out_features (rows)
         int64_t K = weight.shape[1]; // in_features (cols), logical
 
+        // Raw upload: keep quantized bytes on GPU for dp4a GEMV decode path.
+        // Prefill uses fp16_cache or on-the-fly dequant_gpu → cuBLAS GEMM.
+        if (raw_quant) {
+            size_t raw_bytes = static_cast<size_t>(N) * ggml_quant_row_bytes(qtype, K);
+            void* d_data = nullptr;
+            checked_cuda_malloc(&d_data, raw_bytes);
+            if (!d_data) return false;
+            cudaMemcpyAsync(d_data, weight.data, raw_bytes,
+                            cudaMemcpyHostToDevice, stream);
+            gpu_allocs.push_back(d_data);
+
+            // Logical shape [N, K] — qtype tells executor data is raw quantized
+            int64_t new_shape[4] = {N, K, 0, 0};
+            weight = Tensor(d_data, DType::FP16, 2, new_shape, true);
+            return true;
+        }
+
+        // Split upload fallback: separate nibbles + scales for quant_gemm_int4.
         int blocks_per_row = static_cast<int>(K) / 32;
         int num_groups     = blocks_per_row;
         int half_K         = static_cast<int>(K) / 2;
@@ -570,7 +588,8 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
             IMP_LOG_INFO("Output projection shares GPU data with token embedding (weight tying)");
         } else {
             bool raw_ok = (out_proj_qtype_ == GGMLQuantType::Q6_K ||
-                           out_proj_qtype_ == GGMLQuantType::Q8_0);
+                           out_proj_qtype_ == GGMLQuantType::Q8_0 ||
+                           out_proj_qtype_ == GGMLQuantType::Q4_0);
             if (!upload_unquantized_weight(out_proj_, out_proj_qtype_, compute_dtype,
                                            stream, gpu_allocations_,
                                            /*raw_quant=*/raw_ok)) {

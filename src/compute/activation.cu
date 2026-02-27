@@ -1,4 +1,5 @@
 #include "compute/activation.h"
+#include "runtime/pdl.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -271,7 +272,7 @@ void swiglu(const Tensor& gate, const Tensor& up, Tensor& out,
             // Each thread handles 2 elements
             const int64_t half_n = (n + 1) / 2;
             const int grid = static_cast<int>((half_n + block - 1) / block);
-            swiglu_fp16_kernel<<<grid, block, 0, stream>>>(
+            pdl::launch(swiglu_fp16_kernel, dim3(grid), dim3(block), size_t(0), stream,
                 static_cast<const __half*>(gate.data),
                 static_cast<const __half*>(up.data),
                 static_cast<__half*>(out.data),
@@ -307,7 +308,7 @@ void geglu(const Tensor& gate, const Tensor& up, Tensor& out,
         case DType::FP16: {
             const int64_t half_n = (n + 1) / 2;
             const int grid = static_cast<int>((half_n + block - 1) / block);
-            geglu_fp16_kernel<<<grid, block, 0, stream>>>(
+            pdl::launch(geglu_fp16_kernel, dim3(grid), dim3(block), size_t(0), stream,
                 static_cast<const __half*>(gate.data),
                 static_cast<const __half*>(up.data),
                 static_cast<__half*>(out.data),
@@ -358,6 +359,14 @@ void gelu(const Tensor& x, Tensor& out, cudaStream_t stream)
         default:
             break;
     }
+}
+
+// --------------------------------------------------------------------------
+// PDL registration
+// --------------------------------------------------------------------------
+void activation_pdl_register() {
+    pdl::enable(reinterpret_cast<const void*>(&swiglu_fp16_kernel));
+    pdl::enable(reinterpret_cast<const void*>(&geglu_fp16_kernel));
 }
 
 } // namespace imp

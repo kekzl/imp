@@ -244,6 +244,11 @@ private:
     // Key = layer index. Only populated for layers where both wk/wv are FP16-cached.
     std::unordered_map<int, Tensor> fused_kv_cache_;
 
+    // Fused gate+up weight cache: concatenated [w_gate; w_up] as [2*d_ff, d_model] FP16.
+    // Enables strided batched GEMM for gate+up in a single cuBLAS call during prefill.
+    // Key = layer index. Only populated for layers where both w_gate/w_up are FP16-cached.
+    std::unordered_map<int, Tensor> fused_gate_up_cache_;
+
     // Pre-allocated sampling result buffers (avoids cudaMalloc/cudaFree per token).
     int32_t* d_sample_result_ = nullptr;  // device buffer for argmax/sample kernel output
 
