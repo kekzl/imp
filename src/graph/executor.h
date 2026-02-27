@@ -120,6 +120,7 @@ public:
 private:
     const Model* model_ = nullptr;
     DType compute_dtype_ = DType::FP16;
+    float norm_w_off_ = 0.0f;  // Gemma: 1.0 (norms use w+1 instead of w)
     bool initialized_ = false;
     int max_tokens_ = 0;
     int max_logit_tokens_ = 0;  // max tokens needing LM head projection (= max_batch_size)
@@ -134,10 +135,18 @@ private:
     size_t persistent_workspace_size_ = 0;
 
     // Persistent activation tensors (views into persistent_workspace_)
-    Tensor hidden_;        // [max_tokens, d_model]
-    Tensor residual_;      // [max_tokens, d_model]
-    Tensor norm_out_;      // [max_tokens, d_model]
+    Tensor hidden_;        // [max_tokens, d_model] FP16
+    Tensor residual_;      // [max_tokens, d_model] FP16
+    Tensor norm_out_;      // [max_tokens, d_model] FP16
     Tensor logits_;        // [max_logit_tokens, vocab_size]
+
+    // FP32 residual accumulator for post-norm architectures (Gemma-3).
+    // Prevents FP16 overflow in the residual stream over many layers.
+    // The FP32 tensor is the "true" hidden state; the FP16 hidden_ is only
+    // used as input to RMSNorm (which is scale-invariant, so clamping is safe).
+    // nullptr for pre-norm models (LLaMA, Qwen, etc.).
+    void* fp32_accum_buf_ = nullptr;
+    Tensor fp32_hidden_;   // [max_tokens, d_model] FP32 — true hidden state
 
     // --- Shared GPU workspace (reconfigured per layer phase) ---
     // Sized to max(attn_size, ffn_size, moe_size, ssm_size).

@@ -9,6 +9,10 @@ namespace imp {
 void swiglu(const Tensor& gate, const Tensor& up, Tensor& out,
             cudaStream_t stream = nullptr);
 
+// Fused GeGLU: out = gelu_tanh(gate) * up  (Gemma-3)
+void geglu(const Tensor& gate, const Tensor& up, Tensor& out,
+           cudaStream_t stream = nullptr);
+
 void gelu(const Tensor& x, Tensor& out, cudaStream_t stream = nullptr);
 
 } // namespace imp

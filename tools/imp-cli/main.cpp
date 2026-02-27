@@ -276,6 +276,10 @@ int main(int argc, char** argv) {
                 tokens = chat_tpl.apply(*tok, msgs);
             } else {
                 tokens = tok->encode(args.prompt);
+                // Prepend BOS when the tokenizer requires it (e.g. Gemma)
+                if (tok->add_bos()) {
+                    tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
+                }
             }
             int n_prompt_tokens = static_cast<int>(tokens.size());
 
@@ -309,6 +313,7 @@ int main(int argc, char** argv) {
 
                 output_ids.push_back(token);
                 std::string piece = tok->decode_token(token);
+                if (step < 10) fprintf(stderr, "[tok=%d '%s'] ", token, piece.c_str());
                 printf("%s", piece.c_str());
                 fflush(stdout);
             }

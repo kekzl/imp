@@ -53,6 +53,7 @@ const char* model_arch_name(ModelArch arch) {
         case ModelArch::NEMOTRON_H_MOE: return "nemotron_h_moe";
         case ModelArch::QWEN3:          return "qwen3";
         case ModelArch::QWEN3_MOE:      return "qwen3moe";
+        case ModelArch::GEMMA3:         return "gemma3";
         case ModelArch::GENERIC:        return "generic";
     }
     return "unknown";
@@ -66,6 +67,8 @@ ModelArch parse_model_arch(const std::string& s) {
     if (s == "nemotron_h_moe")               return ModelArch::NEMOTRON_H_MOE;
     if (s == "qwen3")                        return ModelArch::QWEN3;
     if (s == "qwen3moe")                     return ModelArch::QWEN3_MOE;
+    if (s == "gemma3")                       return ModelArch::GEMMA3;
+    if (s == "gemma" || s == "gemma2")       return ModelArch::GEMMA3;  // treat all gemma as gemma3
     return ModelArch::GENERIC;
 }
 

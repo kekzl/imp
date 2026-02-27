@@ -88,7 +88,8 @@ void rmsnorm_quantize_q8_1(const half* x, const half* weight,
                              block_q8_1* q8_out, float* d8_out,
                              half* norm_out,
                              int d_model, float eps,
-                             cudaStream_t stream = nullptr);
+                             cudaStream_t stream = nullptr,
+                             float weight_offset = 0.0f);
 
 // dp4a-accelerated GEMV: W_quant @ x_q8_1 using native INT8 SIMD.
 // W: raw quantized bytes, q8_1: pre-quantized input, d8: pre-extracted scales, y: [M] FP16.

@@ -159,6 +159,7 @@ ImpModelArch imp_model_arch(ImpModel model) {
         case imp::ModelArch::NEMOTRON_H_MOE: return IMP_ARCH_NEMOTRON_H_MOE;
         case imp::ModelArch::QWEN3:          return IMP_ARCH_QWEN3;
         case imp::ModelArch::QWEN3_MOE:      return IMP_ARCH_QWEN3_MOE;
+        case imp::ModelArch::GEMMA3:         return IMP_ARCH_GEMMA3;
         case imp::ModelArch::GENERIC:        return IMP_ARCH_GENERIC;
     }
     return IMP_ARCH_GENERIC;

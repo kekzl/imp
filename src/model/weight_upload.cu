@@ -556,14 +556,21 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
 
     // Upload output projection — raw Q6_K/Q8_0 for dp4a GEMV (saves ~60% VRAM).
     // Falls back to FP16 dequant for unsupported quant types.
+    // For weight-tied models (out_proj == tok_emb), share the GPU data directly.
     if (out_proj_.data && !out_proj_.on_device) {
-        bool raw_ok = (out_proj_qtype_ == GGMLQuantType::Q6_K ||
-                       out_proj_qtype_ == GGMLQuantType::Q8_0);
-        if (!upload_unquantized_weight(out_proj_, out_proj_qtype_, compute_dtype,
-                                       stream, gpu_allocations_,
-                                       /*raw_quant=*/raw_ok)) {
-            IMP_LOG_ERROR("Failed to upload output projection");
-            return false;
+        if (tok_emb_.on_device && out_proj_qtype_ == tok_emb_qtype_) {
+            // Weight tying: reuse the already-uploaded tok_emb_ GPU data
+            out_proj_ = tok_emb_;
+            IMP_LOG_INFO("Output projection shares GPU data with token embedding (weight tying)");
+        } else {
+            bool raw_ok = (out_proj_qtype_ == GGMLQuantType::Q6_K ||
+                           out_proj_qtype_ == GGMLQuantType::Q8_0);
+            if (!upload_unquantized_weight(out_proj_, out_proj_qtype_, compute_dtype,
+                                           stream, gpu_allocations_,
+                                           /*raw_quant=*/raw_ok)) {
+                IMP_LOG_ERROR("Failed to upload output projection");
+                return false;
+            }
         }
     }
 
@@ -625,6 +632,28 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
                                            compute_dtype, stream, gpu_allocations_)) {
                 IMP_LOG_ERROR("Failed to upload attn_k_norm for layer %d", i);
                 return false;
+            }
+        }
+
+        // Attention biases (Qwen2-style Q/K/V biases, F32)
+        for (auto* bias : {&L.q_bias, &L.k_bias, &L.v_bias}) {
+            if (bias->data && !bias->on_device) {
+                if (!upload_unquantized_weight(*bias, GGMLQuantType::NONE,
+                                               compute_dtype, stream, gpu_allocations_)) {
+                    IMP_LOG_ERROR("Failed to upload attention bias for layer %d", i);
+                    return false;
+                }
+            }
+        }
+
+        // Post-layer norms (Gemma-3 style)
+        for (auto* norm : {&L.post_attn_norm, &L.post_ffn_norm}) {
+            if (norm->data && !norm->on_device) {
+                if (!upload_unquantized_weight(*norm, GGMLQuantType::NONE,
+                                               compute_dtype, stream, gpu_allocations_)) {
+                    IMP_LOG_ERROR("Failed to upload post-layer norm for layer %d", i);
+                    return false;
+                }
             }
         }
 
