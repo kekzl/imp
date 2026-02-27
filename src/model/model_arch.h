@@ -12,6 +12,7 @@ enum class ModelArch {
     NEMOTRON_H_MOE,
     QWEN3,
     QWEN3_MOE,
+    GEMMA3,
     GENERIC,
 };
 

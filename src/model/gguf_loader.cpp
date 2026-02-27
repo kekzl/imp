@@ -1,5 +1,6 @@
 #include "model/gguf_loader.h"
 #include "model/model_arch.h"
+#include "quant/dequant_gpu.h"
 #include "core/logging.h"
 
 #include <fcntl.h>
@@ -8,6 +9,7 @@
 #include <unistd.h>
 
 #include <cassert>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -359,13 +361,51 @@ static bool assign_tensor(Model& model, const std::string& name,
     // 4-part: "blk.{i}.{name}.weight" or "blk.{i}.{name}.bias"
     if (parts.size() == 4) {
         const auto& field = parts[2];
-        if      (field == "attn_q")      { layer.wq = tensor; layer.wq_qtype = qtype; }
-        else if (field == "attn_k")      { layer.wk = tensor; layer.wk_qtype = qtype; }
-        else if (field == "attn_v")      { layer.wv = tensor; layer.wv_qtype = qtype; }
+        const auto& suffix = parts[3];  // "weight" or "bias"
+
+        // Attention projections: distinguish weight vs bias
+        if (field == "attn_q") {
+            if (suffix == "bias")       { layer.q_bias = tensor; }
+            else                        { layer.wq = tensor; layer.wq_qtype = qtype; }
+        }
+        else if (field == "attn_k") {
+            if (suffix == "bias")       { layer.k_bias = tensor; }
+            else                        { layer.wk = tensor; layer.wk_qtype = qtype; }
+        }
+        else if (field == "attn_v") {
+            if (suffix == "bias")       { layer.v_bias = tensor; }
+            else                        { layer.wv = tensor; layer.wv_qtype = qtype; }
+        }
         else if (field == "attn_output") { layer.wo = tensor; layer.wo_qtype = qtype; }
         else if (field == "attn_norm")     layer.attn_norm = tensor;
         else if (field == "attn_q_norm") layer.attn_q_norm = tensor;
         else if (field == "attn_k_norm") layer.attn_k_norm = tensor;
+        // Fused QKV (Phi-4/phi3): split into separate Q, K, V
+        else if (field == "attn_qkv") {
+            const auto& cfg = model.config();
+            int q_rows = cfg.n_heads * cfg.head_dim;
+            int k_rows = cfg.n_kv_heads * cfg.head_dim;
+            int v_rows = cfg.n_kv_heads * cfg.head_dim;
+            int64_t d_model = tensor.shape[1];  // inner dim after our reversal
+            size_t row_bytes = ggml_quant_row_bytes(qtype, d_model);
+
+            uint8_t* base = static_cast<uint8_t*>(tensor.data);
+            int64_t q_shape[4] = {q_rows, d_model, 1, 1};
+            int64_t kv_shape[4] = {k_rows, d_model, 1, 1};
+
+            layer.wq = Tensor(base, tensor.dtype, 2, q_shape, tensor.on_device);
+            layer.wq_qtype = qtype;
+            layer.wk = Tensor(base + static_cast<size_t>(q_rows) * row_bytes,
+                               tensor.dtype, 2, kv_shape, tensor.on_device);
+            layer.wk_qtype = qtype;
+            layer.wv = Tensor(base + static_cast<size_t>(q_rows + k_rows) * row_bytes,
+                               tensor.dtype, 2, kv_shape, tensor.on_device);
+            layer.wv_qtype = qtype;
+        }
+        // Post-layer norms (Gemma-3)
+        else if (field == "post_attention_norm") layer.post_attn_norm = tensor;
+        else if (field == "post_ffw_norm")       layer.post_ffn_norm = tensor;
+        // FFN
         else if (field == "ffn_gate")    { layer.w_gate = tensor; layer.w_gate_qtype = qtype; }
         else if (field == "ffn_up")      { layer.w_up = tensor; layer.w_up_qtype = qtype; }
         else if (field == "ffn_down")    { layer.w_down = tensor; layer.w_down_qtype = qtype; }
@@ -386,8 +426,8 @@ static bool assign_tensor(Model& model, const std::string& name,
         else if (field == "ssm_norm")   layer.ssm_norm_w = tensor;
         // SSM conv1d: "blk.{i}.ssm_conv1d.weight" / "blk.{i}.ssm_conv1d.bias"
         else if (field == "ssm_conv1d") {
-            if (parts[3] == "weight")     layer.ssm_conv1d_w = tensor;
-            else if (parts[3] == "bias")  layer.ssm_conv1d_b = tensor;
+            if (suffix == "weight")     layer.ssm_conv1d_w = tensor;
+            else if (suffix == "bias")  layer.ssm_conv1d_b = tensor;
             else return false;
         }
         // Router bias (Nemotron MoE)
@@ -581,6 +621,30 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     cfg.rope_theta   = static_cast<float>(get_float("rope.freq_base", 10000.0));
     cfg.rms_norm_eps = static_cast<float>(get_float("attention.layer_norm_rms_epsilon", 1e-5));
 
+    // RoPE frequency scaling (linear: divide frequencies by factor)
+    cfg.rope_freq_scale = static_cast<float>(get_float("rope.scaling.factor", 1.0));
+
+    // Gemma-specific: embedding scaling, GeGLU, per-layer RoPE/sliding window
+    // Note: GGUF norm weights for Gemma already include the +1 offset, so
+    // norm_weight_offset stays at 0.0.
+    if (arch_str == "gemma" || arch_str == "gemma2" || arch_str == "gemma3") {
+        cfg.embed_scale = sqrtf(static_cast<float>(cfg.d_model));
+        cfg.use_geglu = true;  // Gemma uses gelu_tanh gated activation, not SwiGLU
+
+        // Per-layer sliding window pattern: every Nth layer is global (no window)
+        // Gemma-3 uses pattern=6 (5 local + 1 global)
+        cfg.sliding_window_pattern = static_cast<int>(get_uint("attention.sliding_window_pattern", 0));
+        if (cfg.sliding_window_pattern == 0 && arch_str == "gemma3") {
+            cfg.sliding_window_pattern = 6;  // Gemma-3 default: 5 local + 1 global
+        }
+
+        // Local RoPE theta (used for sliding window layers; global layers use rope_theta)
+        cfg.rope_local_theta = static_cast<float>(get_float("rope.local.freq_base", 0.0));
+        if (cfg.rope_local_theta == 0.0f && cfg.sliding_window_pattern > 0) {
+            cfg.rope_local_theta = 10000.0f;  // Gemma-3 default local theta
+        }
+    }
+
     cfg.sliding_window   = static_cast<int>(get_uint("attention.sliding_window", 0));
 
     cfg.n_experts        = static_cast<int>(get_uint("expert_count", 0));
@@ -641,12 +705,21 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     IMP_LOG_INFO("Config: layers=%d d_model=%d d_ff=%d heads=%d kv_heads=%d head_dim=%d vocab=%d ctx=%d",
                  cfg.n_layers, cfg.d_model, cfg.d_ff, cfg.n_heads, cfg.n_kv_heads,
                  cfg.head_dim, cfg.vocab_size, cfg.max_seq_len);
-    IMP_LOG_INFO("RoPE: theta=%.1f, rope_dim=%d, neox=%d, eps=%.2e",
-                 cfg.rope_theta, cfg.rope_dim, cfg.rope_neox ? 1 : 0, cfg.rms_norm_eps);
+    IMP_LOG_INFO("RoPE: theta=%.1f, rope_dim=%d, neox=%d, freq_scale=%.1f, eps=%.2e",
+                 cfg.rope_theta, cfg.rope_dim, cfg.rope_neox ? 1 : 0,
+                 cfg.rope_freq_scale, cfg.rms_norm_eps);
+    if (cfg.embed_scale > 0.0f)
+        IMP_LOG_INFO("Embedding scale: %.2f (sqrt(d_model))", cfg.embed_scale);
 
     if (cfg.sliding_window > 0) {
         IMP_LOG_INFO("Sliding window attention: %d tokens", cfg.sliding_window);
+        if (cfg.sliding_window_pattern > 0) {
+            IMP_LOG_INFO("Sliding window pattern: every %dth layer is global, local_theta=%.1f",
+                         cfg.sliding_window_pattern, cfg.rope_local_theta);
+        }
     }
+    if (cfg.use_geglu)
+        IMP_LOG_INFO("Activation: GeGLU (gelu_tanh gated)");
 
     if (cfg.n_experts > 0) {
         IMP_LOG_INFO("MoE: %d experts, %d active, expert_d_ff=%d, shared=%d (shared_d_ff=%d), "
@@ -708,6 +781,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     // Infer vocab_size from token_embd if not in metadata
     if (cfg.vocab_size == 0 && model->tok_emb_.data != nullptr) {
         cfg.vocab_size = static_cast<int>(model->tok_emb_.shape[0]);
+        IMP_LOG_INFO("Inferred vocab_size=%d from token_embd.weight", cfg.vocab_size);
     }
 
     // Weight tying: if no output.weight, share token_embd
@@ -715,6 +789,34 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         model->out_proj_ = model->tok_emb_;
         model->out_proj_qtype_ = model->tok_emb_qtype_;
         IMP_LOG_INFO("Weight tying: output projection shares token embedding");
+    }
+
+    // Split fused gate+up FFN (Phi-4/phi3): ffn_up contains gate||up concatenated
+    // Detected when: w_gate is null, w_up exists, and w_up.shape[0] == 2 * d_ff
+    if (cfg.d_ff > 0) {
+        int fused_count = 0;
+        for (int i = 0; i < cfg.n_layers; i++) {
+            auto& ly = model->layers_[i];
+            if (ly.w_gate.data == nullptr && ly.w_up.data != nullptr &&
+                ly.w_up.shape[0] == 2 * cfg.d_ff) {
+                int64_t d_model = ly.w_up.shape[1];
+                int64_t d_ff = cfg.d_ff;
+                size_t row_bytes = ggml_quant_row_bytes(ly.w_up_qtype, d_model);
+
+                uint8_t* base = static_cast<uint8_t*>(ly.w_up.data);
+                int64_t half_shape[4] = {d_ff, d_model, 1, 1};
+
+                ly.w_gate = Tensor(base, ly.w_up.dtype, 2, half_shape, ly.w_up.on_device);
+                ly.w_gate_qtype = ly.w_up_qtype;
+                ly.w_up = Tensor(base + static_cast<size_t>(d_ff) * row_bytes,
+                                  ly.w_up.dtype, 2, half_shape, ly.w_up.on_device);
+                // w_up_qtype unchanged
+                fused_count++;
+            }
+        }
+        if (fused_count > 0) {
+            IMP_LOG_INFO("Split fused gate+up FFN in %d layers (d_ff=%d)", fused_count, cfg.d_ff);
+        }
     }
 
     IMP_LOG_INFO("Weights: %d assigned, %d skipped", assigned, skipped);

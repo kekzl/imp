@@ -24,7 +24,9 @@ struct ModelConfig {
     int n_layers = 0, n_heads = 0, n_kv_heads = 0;
     int d_model = 0, d_ff = 0, vocab_size = 0, max_seq_len = 0;
     int head_dim = 0;  // 0 = infer as d_model / n_heads
-    float rope_theta = 10000.0f, rms_norm_eps = 1e-5f;
+    float rope_theta = 10000.0f, rms_norm_eps = 1e-5f, rope_freq_scale = 1.0f;
+    float embed_scale = 0.0f;   // >0 = multiply embeddings by this (e.g. sqrt(d_model) for Gemma)
+    float norm_weight_offset = 0.0f;  // Gemma: 1.0 (norms use w+1 instead of w)
     int n_experts = 0, n_experts_active = 0, expert_d_ff = 0;
 
     // Per-layer config (empty for standard transformers)
@@ -40,6 +42,9 @@ struct ModelConfig {
     int rope_dim = 0;           // 0 = full head_dim, 84 = partial
     bool rope_neox = true;      // true = NeoX/split (i, i+d/2), false = interleaved (2i, 2i+1)
     int sliding_window = 0;     // 0 = disabled, >0 = window size (Qwen3, Mistral)
+    int sliding_window_pattern = 0;  // Gemma-3: 6 = every 6th layer is global (no window)
+    float rope_local_theta = 0.0f;   // Gemma-3: RoPE theta for local/sliding layers (10000)
+    bool use_geglu = false;          // Gemma-3: GeGLU activation instead of SwiGLU
 
     // Extended MoE config
     int n_experts_shared = 0;       // 1
@@ -51,7 +56,9 @@ struct ModelConfig {
 
 struct TransformerLayer {
     Tensor wq, wk, wv, wo, attn_norm;
+    Tensor q_bias, k_bias, v_bias;    // Attention biases (Qwen2)
     Tensor attn_q_norm, attn_k_norm;  // QK-norm (Qwen3-style per-head RMSNorm)
+    Tensor post_attn_norm, post_ffn_norm;  // Post-layer norms (Gemma-3)
     Tensor w_gate, w_up, w_down, ffn_norm;
     Tensor moe_gate;
     std::vector<Tensor> expert_w_gate, expert_w_up, expert_w_down;

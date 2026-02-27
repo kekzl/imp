@@ -227,7 +227,8 @@ __global__ void qknorm_rope_fused_fp16_kernel(
     float theta,
     float inv_scaling,
     int rope_pairs,
-    bool neox)
+    bool neox,
+    float weight_offset)
 {
     const int head_idx = blockIdx.x;
     const int pos = positions[0];  // read from device memory
@@ -259,7 +260,7 @@ __global__ void qknorm_rope_fused_fp16_kernel(
         // Phase 2: Normalize and store to shared memory
         for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
             float v = __half2float(q_head[i]);
-            float w = __half2float(q_norm_w[i]);
+            float w = __half2float(q_norm_w[i]) + weight_offset;
             normed_vals[i] = v * inv_rms * w;
         }
         __syncthreads();
@@ -309,7 +310,7 @@ __global__ void qknorm_rope_fused_fp16_kernel(
 
         for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
             float v = __half2float(k_head[i]);
-            float w = __half2float(k_norm_w[i]);
+            float w = __half2float(k_norm_w[i]) + weight_offset;
             normed_vals[i] = v * inv_rms * w;
         }
         __syncthreads();
@@ -341,7 +342,8 @@ void qknorm_rope_fused(half* Q, half* K,
                         float eps, const int* positions,
                         float theta, float scaling,
                         int rope_dim, bool neox,
-                        cudaStream_t stream) {
+                        cudaStream_t stream,
+                        float weight_offset) {
     const int max_heads = (n_heads > n_kv_heads) ? n_heads : n_kv_heads;
     if (max_heads == 0 || head_dim == 0) return;
 
@@ -361,7 +363,7 @@ void qknorm_rope_fused(half* Q, half* K,
         reinterpret_cast<const __half*>(k_norm_weight),
         positions,
         n_heads, n_kv_heads, head_dim, eps,
-        theta, inv_scaling, rope_pairs, neox);
+        theta, inv_scaling, rope_pairs, neox, weight_offset);
 }
 
 } // namespace imp

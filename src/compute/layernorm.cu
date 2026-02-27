@@ -51,7 +51,8 @@ __global__ void rmsnorm_fp32_kernel(
     const float* __restrict__ weight,
     float* __restrict__ out,
     int d_model,
-    float eps)
+    float eps,
+    float weight_offset)
 {
     const int row = blockIdx.x;
     const float* x_row = x + static_cast<int64_t>(row) * d_model;
@@ -75,7 +76,7 @@ __global__ void rmsnorm_fp32_kernel(
 
     // Normalize and scale
     for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
-        out_row[i] = x_row[i] * inv_rms * weight[i];
+        out_row[i] = x_row[i] * inv_rms * (weight[i] + weight_offset);
     }
 }
 
@@ -87,7 +88,8 @@ __global__ void rmsnorm_fp16_kernel(
     const __half* __restrict__ weight,
     __half* __restrict__ out,
     int d_model,
-    float eps)
+    float eps,
+    float weight_offset)
 {
     const int row = blockIdx.x;
     const __half* x_row = x + static_cast<int64_t>(row) * d_model;
@@ -109,7 +111,7 @@ __global__ void rmsnorm_fp16_kernel(
 
     for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
         float v = __half2float(x_row[i]);
-        float w = __half2float(weight[i]);
+        float w = __half2float(weight[i]) + weight_offset;
         out_row[i] = __float2half(v * inv_rms * w);
     }
 }
@@ -125,7 +127,8 @@ __global__ void rmsnorm_residual_fp32_kernel(
     const float* __restrict__ weight,
     float* __restrict__ out,
     int d_model,
-    float eps)
+    float eps,
+    float weight_offset)
 {
     const int row = blockIdx.x;
     float*       x_row = x + static_cast<int64_t>(row) * d_model;
@@ -148,7 +151,7 @@ __global__ void rmsnorm_residual_fp32_kernel(
     const float inv_rms = s_inv_rms;
 
     for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
-        out_row[i] = x_row[i] * inv_rms * weight[i];
+        out_row[i] = x_row[i] * inv_rms * (weight[i] + weight_offset);
     }
 }
 
@@ -161,7 +164,8 @@ __global__ void rmsnorm_residual_fp16_kernel(
     const __half* __restrict__ weight,
     __half* __restrict__ out,
     int d_model,
-    float eps)
+    float eps,
+    float weight_offset)
 {
     const int row = blockIdx.x;
     __half*       x_row = x + static_cast<int64_t>(row) * d_model;
@@ -185,7 +189,7 @@ __global__ void rmsnorm_residual_fp16_kernel(
 
     for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
         float v = __half2float(x_row[i]);
-        float w = __half2float(weight[i]);
+        float w = __half2float(weight[i]) + weight_offset;
         out_row[i] = __float2half(v * inv_rms * w);
     }
 }
@@ -194,7 +198,7 @@ __global__ void rmsnorm_residual_fp16_kernel(
 // Host dispatch: rmsnorm
 // --------------------------------------------------------------------------
 void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out,
-             float eps, cudaStream_t stream)
+             float eps, cudaStream_t stream, float weight_offset)
 {
     const int rows    = static_cast<int>(x.shape[0]);
     const int d_model = static_cast<int>(x.shape[1]);
@@ -208,14 +212,14 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out,
                 static_cast<const float*>(x.data),
                 static_cast<const float*>(weight.data),
                 static_cast<float*>(out.data),
-                d_model, eps);
+                d_model, eps, weight_offset);
             break;
         case DType::FP16:
             rmsnorm_fp16_kernel<<<rows, block, 0, stream>>>(
                 static_cast<const __half*>(x.data),
                 static_cast<const __half*>(weight.data),
                 static_cast<__half*>(out.data),
-                d_model, eps);
+                d_model, eps, weight_offset);
             break;
         default:
             break;
@@ -227,7 +231,7 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out,
 // --------------------------------------------------------------------------
 void rmsnorm_residual(const Tensor& x, const Tensor& residual,
                       const Tensor& weight, Tensor& out,
-                      float eps, cudaStream_t stream)
+                      float eps, cudaStream_t stream, float weight_offset)
 {
     const int rows    = static_cast<int>(x.shape[0]);
     const int d_model = static_cast<int>(x.shape[1]);
@@ -242,7 +246,7 @@ void rmsnorm_residual(const Tensor& x, const Tensor& residual,
                 static_cast<const float*>(residual.data),
                 static_cast<const float*>(weight.data),
                 static_cast<float*>(out.data),
-                d_model, eps);
+                d_model, eps, weight_offset);
             break;
         case DType::FP16:
             rmsnorm_residual_fp16_kernel<<<rows, block, 0, stream>>>(
@@ -250,7 +254,7 @@ void rmsnorm_residual(const Tensor& x, const Tensor& residual,
                 static_cast<const __half*>(residual.data),
                 static_cast<const __half*>(weight.data),
                 static_cast<__half*>(out.data),
-                d_model, eps);
+                d_model, eps, weight_offset);
             break;
         default:
             break;

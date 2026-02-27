@@ -1255,7 +1255,8 @@ __global__ void rmsnorm_quantize_q8_1_kernel(
         float* __restrict__ d8_out,         // [d_model/32] Q8_1 block scales
         half* __restrict__ norm_out_ptr,    // [d_model] optional FP16 output (can be null)
         int d_model,
-        float eps) {
+        float eps,
+        float weight_offset) {
     // Minimal shared memory: 8 floats for cross-warp reduction + 1 for inv_rms.
     // All intermediate values kept in registers — no d_model-sized shared buffer.
     __shared__ float warp_reduce[8];
@@ -1304,7 +1305,7 @@ __global__ void rmsnorm_quantize_q8_1_kernel(
     // No intermediate shared memory buffer needed.
     int cache_idx = 0;
     for (int b = warp_id; b < n_q8_blocks; b += n_warps) {
-        float val = x_cache[cache_idx++] * inv_rms * __half2float(weight[b * 32 + lane]);
+        float val = x_cache[cache_idx++] * inv_rms * (__half2float(weight[b * 32 + lane]) + weight_offset);
 
         if (norm_out_ptr) norm_out_ptr[b * 32 + lane] = __float2half(val);
 
@@ -1331,12 +1332,13 @@ void rmsnorm_quantize_q8_1(const half* x, const half* weight,
                              block_q8_1* q8_out, float* d8_out,
                              half* norm_out,
                              int d_model, float eps,
-                             cudaStream_t stream) {
+                             cudaStream_t stream,
+                             float weight_offset) {
     const int threads = 256;
     // Shared memory: only warp_reduce[8] + s_inv_rms declared as __shared__ in kernel
     // (no dynamic shared memory needed).
     rmsnorm_quantize_q8_1_kernel<<<1, threads, 0, stream>>>(
-        x, weight, q8_out, d8_out, norm_out, d_model, eps);
+        x, weight, q8_out, d8_out, norm_out, d_model, eps, weight_offset);
 }
 
 // ---------------------------------------------------------------------------

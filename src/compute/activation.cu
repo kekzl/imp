@@ -96,6 +96,65 @@ __global__ void swiglu_fp16_kernel(
 }
 
 // --------------------------------------------------------------------------
+// GeGLU kernels: out = gelu_tanh(gate) * up  (Gemma-3 activation)
+// --------------------------------------------------------------------------
+
+__global__ void geglu_fp16_kernel(
+    const __half* __restrict__ gate,
+    const __half* __restrict__ up,
+    __half* __restrict__ out,
+    int64_t n)
+{
+    constexpr float SQRT_2_PI = 0.7978845608028654f;
+    constexpr float COEFF = 0.044715f;
+
+    const int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x) * 2;
+    if (idx + 1 < n) {
+        __half2 g2 = *reinterpret_cast<const __half2*>(gate + idx);
+        __half2 u2 = *reinterpret_cast<const __half2*>(up + idx);
+
+        float g0 = __half2float(g2.x);
+        float g1 = __half2float(g2.y);
+        float u0 = __half2float(u2.x);
+        float u1 = __half2float(u2.y);
+
+        float gelu0 = g0 * 0.5f * (1.0f + tanhf(SQRT_2_PI * (g0 + COEFF * g0 * g0 * g0)));
+        float gelu1 = g1 * 0.5f * (1.0f + tanhf(SQRT_2_PI * (g1 + COEFF * g1 * g1 * g1)));
+
+        // Clamp to FP16 range to avoid Inf (products can exceed 65504 during prefill)
+        float r0 = fminf(fmaxf(gelu0 * u0, -65504.0f), 65504.0f);
+        float r1 = fminf(fmaxf(gelu1 * u1, -65504.0f), 65504.0f);
+        __half2 out2;
+        out2.x = __float2half(r0);
+        out2.y = __float2half(r1);
+        *reinterpret_cast<__half2*>(out + idx) = out2;
+    } else if (idx < n) {
+        float g = __half2float(gate[idx]);
+        float u = __half2float(up[idx]);
+        float gelu_g = g * 0.5f * (1.0f + tanhf(SQRT_2_PI * (g + COEFF * g * g * g)));
+        float result = fminf(fmaxf(gelu_g * u, -65504.0f), 65504.0f);
+        out[idx] = __float2half(result);
+    }
+}
+
+__global__ void geglu_fp32_kernel(
+    const float* __restrict__ gate,
+    const float* __restrict__ up,
+    float* __restrict__ out,
+    int64_t n)
+{
+    constexpr float SQRT_2_PI = 0.7978845608028654f;
+    constexpr float COEFF = 0.044715f;
+
+    const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float g = gate[idx];
+        float gelu_g = g * 0.5f * (1.0f + tanhf(SQRT_2_PI * (g + COEFF * g * g * g)));
+        out[idx] = gelu_g * up[idx];
+    }
+}
+
+// --------------------------------------------------------------------------
 // GELU FP32 vectorized kernel
 // gelu(x) = x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 // --------------------------------------------------------------------------
@@ -213,6 +272,42 @@ void swiglu(const Tensor& gate, const Tensor& up, Tensor& out,
             const int64_t half_n = (n + 1) / 2;
             const int grid = static_cast<int>((half_n + block - 1) / block);
             swiglu_fp16_kernel<<<grid, block, 0, stream>>>(
+                static_cast<const __half*>(gate.data),
+                static_cast<const __half*>(up.data),
+                static_cast<__half*>(out.data),
+                n);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+// --------------------------------------------------------------------------
+// Host dispatch: geglu
+// --------------------------------------------------------------------------
+void geglu(const Tensor& gate, const Tensor& up, Tensor& out,
+           cudaStream_t stream)
+{
+    const int64_t n = gate.numel();
+    if (n == 0) return;
+
+    const int block = 256;
+
+    switch (gate.dtype) {
+        case DType::FP32: {
+            const int grid = static_cast<int>((n + block - 1) / block);
+            geglu_fp32_kernel<<<grid, block, 0, stream>>>(
+                static_cast<const float*>(gate.data),
+                static_cast<const float*>(up.data),
+                static_cast<float*>(out.data),
+                n);
+            break;
+        }
+        case DType::FP16: {
+            const int64_t half_n = (n + 1) / 2;
+            const int grid = static_cast<int>((half_n + block - 1) / block);
+            geglu_fp16_kernel<<<grid, block, 0, stream>>>(
                 static_cast<const __half*>(gate.data),
                 static_cast<const __half*>(up.data),
                 static_cast<__half*>(out.data),

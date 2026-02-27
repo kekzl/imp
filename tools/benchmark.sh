@@ -5,7 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 IMP_CLI="$ROOT_DIR/build/imp-cli"
-LLAMA_BENCH="${LLAMA_BENCH:-$(command -v llama-bench 2>/dev/null || echo "$ROOT_DIR/../llama.cpp/build/bin/llama-bench")}"
+LLAMA_BENCH="${LLAMA_BENCH:-$(command -v llama-bench 2>/dev/null || echo "$HOME/llama.cpp/build/bin/llama-bench")}"
 REPORT_DIR="$ROOT_DIR/benchmarks"
 REPORT="$REPORT_DIR/report.md"
 
@@ -46,17 +46,29 @@ if [[ -n "${IMP_BENCH_MODELS:-}" ]]; then
 else
     # Auto-detect models from HF cache
     declare -a MODEL_NAMES=(
+        "Phi-4-Mini-Instruct"
         "Qwen3-4B-Instruct"
+        "DeepSeek-R1-Distill-Qwen-7B"
+        "Gemma-3-12B-IT"
+        "DeepSeek-R1-Distill-Qwen-14B"
         "Qwen3-Coder-30B-A3B-Instruct"
         "Nemotron-3-Nano-30B-A3B"
     )
     declare -a MODEL_PATHS=(
+        "$(find_gguf '*Phi-4-mini-instruct*Q8_0.gguf')"
         "$(find_gguf '*Qwen3-4B*Q8_0.gguf')"
+        "$(find_gguf '*DeepSeek-R1-Distill-Qwen-7B*Q8_0.gguf')"
+        "$(find_gguf '*gemma-3-12b*Q8_0.gguf')"
+        "$(find_gguf '*DeepSeek-R1-Distill-Qwen-14B*Q6_K.gguf')"
         "$(find_gguf '*Qwen3-Coder-30B*Q6_K.gguf')"
         "$(find_gguf '*Nemotron-3-Nano*Q6_K.gguf')"
     )
     declare -a MODEL_QUANTS=(
         "Q8_0"
+        "Q8_0"
+        "Q8_0"
+        "Q8_0"
+        "Q6_K"
         "Q6_K"
         "Q6_K"
     )

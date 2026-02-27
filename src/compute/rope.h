@@ -27,6 +27,7 @@ void qknorm_rope_fused(half* Q, half* K,
                         float eps, const int* positions,
                         float theta = 10000.0f, float scaling = 1.0f,
                         int rope_dim = 0, bool neox = false,
-                        cudaStream_t stream = nullptr);
+                        cudaStream_t stream = nullptr,
+                        float weight_offset = 0.0f);
 
 } // namespace imp
