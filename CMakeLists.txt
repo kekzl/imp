@@ -268,6 +268,9 @@ if(IMP_BUILD_TESTS)
         tests/test_sampling.cu
         tests/test_activation.cu
         tests/test_embedding.cu
+        tests/test_gemm.cu
+        tests/test_paged_attention.cu
+        tests/test_reduce.cu
     )
 
     add_executable(imp-tests ${IMP_TEST_SOURCES})
@@ -276,4 +279,28 @@ if(IMP_BUILD_TESTS)
 
     include(GoogleTest)
     gtest_discover_tests(imp-tests)
+endif()
+
+# --- Install ---
+include(GNUInstallDirs)
+
+install(TARGETS imp
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+
+install(DIRECTORY include/imp/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/imp
+    FILES_MATCHING PATTERN "*.h"
+)
+
+if(IMP_BUILD_TOOLS)
+    install(TARGETS imp-cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    if(IMP_BUILD_BENCH)
+        install(TARGETS imp-bench RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    endif()
+endif()
+
+if(IMP_BUILD_SERVER)
+    install(TARGETS imp-server RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()

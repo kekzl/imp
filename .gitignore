@@ -1,12 +1,36 @@
+# Build
 build/
-.cache/
 *.o
 *.so
 *.a
 *.d
 compile_commands.json
+
+# Model files
+models/
+*.gguf
+*.safetensors
+
+# IDE / editor
+.cache/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+tags
+TAGS
+
+# Python
+__pycache__/
+
+# Credentials
+.env
+*.key
+*.pem
+
+# Misc
 inspect_gguf.py
 test_detail.json
-models
-__pycache__/
 .playwright-mcp/
