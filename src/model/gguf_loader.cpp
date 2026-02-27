@@ -624,13 +624,9 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     // RoPE frequency scaling (linear: divide frequencies by factor)
     cfg.rope_freq_scale = static_cast<float>(get_float("rope.scaling.factor", 1.0));
 
-    // Gemma-specific: embedding scaling, GeGLU, per-layer RoPE/sliding window
-    // Note: GGUF norm weights for Gemma already include the +1 offset, so
-    // norm_weight_offset stays at 0.0.
+    // Gemma-specific: per-layer sliding window and local RoPE (metadata-dependent)
+    // Note: embed_scale, ffn_activation, norm_placement are set by apply_arch_defaults().
     if (arch_str == "gemma" || arch_str == "gemma2" || arch_str == "gemma3") {
-        cfg.embed_scale = sqrtf(static_cast<float>(cfg.d_model));
-        cfg.use_geglu = true;  // Gemma uses gelu_tanh gated activation, not SwiGLU
-
         // Per-layer sliding window pattern: every Nth layer is global (no window)
         // Gemma-3 uses pattern=6 (5 local + 1 global)
         cfg.sliding_window_pattern = static_cast<int>(get_uint("attention.sliding_window_pattern", 0));
@@ -718,8 +714,12 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                          cfg.sliding_window_pattern, cfg.rope_local_theta);
         }
     }
-    if (cfg.use_geglu)
-        IMP_LOG_INFO("Activation: GeGLU (gelu_tanh gated)");
+    if (cfg.ffn_activation != FFNActivation::SWIGLU) {
+        const char* act_name = (cfg.ffn_activation == FFNActivation::GEGLU) ? "GeGLU" : "ReLU²";
+        IMP_LOG_INFO("FFN activation: %s", act_name);
+    }
+    if (cfg.norm_placement == NormPlacement::POST_NORM)
+        IMP_LOG_INFO("Norm placement: post-norm (residual after norm)");
 
     if (cfg.n_experts > 0) {
         IMP_LOG_INFO("MoE: %d experts, %d active, expert_d_ff=%d, shared=%d (shared_d_ff=%d), "
