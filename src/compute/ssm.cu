@@ -196,15 +196,16 @@ void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in,
 }
 
 // ---------------------------------------------------------------------------
-// Mamba2 SSM scan decode (single step)
+// Mamba2 SSM scan — fused multi-token kernel
 // ---------------------------------------------------------------------------
-
+//
 // One block per head. Threads iterate over head_dim_ssm.
-// For each (head, dim): reduce over state_size using shared memory.
+// The token loop runs INSIDE the kernel to avoid per-token launch overhead.
+// For prefill (n_tokens >> 1), this reduces kernel launches from n_tokens to 1.
 //
 // Mamba2 scan equations (discrete-time):
 //   dt_h = softplus(dt_raw[h] + dt_bias[h])
-//   a_bar = exp(dt_h * A_log[h])     // A_log is log(A), so exp(dt*A_log) = A^dt
+//   a_bar = exp(dt_h * A_log[h])
 //   For each d in [0, head_dim_ssm):
 //     For each s in [0, state_size):
 //       h_state[h,d,s] = a_bar * h_state[h,d,s] + dt_h * x[h*hd+d] * B[g*S+s]
@@ -213,60 +214,83 @@ void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in,
 // Template parameter H_FP16: when true, h_state is stored as FP16 (loaded/stored
 // via __half2float/__float2half) but all computation remains in FP32.
 template <bool H_FP16>
-__global__ void ssm_scan_decode_kernel(
-    const half* __restrict__ x,          // [inner_size]
-    const half* __restrict__ B_in,       // [n_groups * state_size]
-    const half* __restrict__ C_in,       // [n_groups * state_size]
-    const half* __restrict__ dt_raw,     // [n_heads]
+__global__ void ssm_scan_kernel(
+    const half* __restrict__ x,          // [n_tokens, inner_size]
+    const half* __restrict__ B_in,       // [n_tokens, n_groups * state_size]
+    const half* __restrict__ C_in,       // [n_tokens, n_groups * state_size]
+    const half* __restrict__ dt_raw,     // [n_tokens, n_heads]
     const float* __restrict__ A_log,     // [n_heads]
     const float* __restrict__ D_skip,    // [n_heads]
     const float* __restrict__ dt_bias,   // [n_heads]
     void* __restrict__ h_state,          // [n_heads, head_dim_ssm, state_size]
-    half* __restrict__ y,                // [inner_size]
-    int n_heads, int head_dim_ssm, int state_size, int n_groups)
+    half* __restrict__ y,                // [n_tokens, inner_size]
+    int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups)
 {
     int h = blockIdx.x;
     if (h >= n_heads) return;
 
     int heads_per_group = n_heads / n_groups;
     int g = h / heads_per_group;
-
-    // Compute dt
-    float dt_val = __half2float(dt_raw[h]) + dt_bias[h];
-    // softplus: log(1 + exp(x))
-    dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
-
-    float a_bar = expf(dt_val * A_log[h]);
+    float a_log_h = A_log[h];
     float d_val = D_skip[h];
+    float dt_b = dt_bias[h];
+    int inner_size = n_heads * head_dim_ssm;
+    int BC_size = n_groups * state_size;
 
     int64_t h_offset = static_cast<int64_t>(h) * head_dim_ssm * state_size;
-    const half* B_g = B_in + g * state_size;
-    const half* C_g = C_in + g * state_size;
 
-    for (int d = threadIdx.x; d < head_dim_ssm; d += blockDim.x) {
-        float x_val = __half2float(x[h * head_dim_ssm + d]);
-        int64_t state_off = h_offset + d * state_size;
+    for (int t = 0; t < n_tokens; t++) {
+        const half* B_g = B_in + t * BC_size + g * state_size;
+        const half* C_g = C_in + t * BC_size + g * state_size;
 
-        float y_acc = 0.0f;
-        for (int s = 0; s < state_size; s++) {
-            float b_s = __half2float(B_g[s]);
-            float c_s = __half2float(C_g[s]);
-            float h_old;
-            if constexpr (H_FP16) {
-                h_old = __half2float(static_cast<half*>(h_state)[state_off + s]);
-            } else {
-                h_old = static_cast<float*>(h_state)[state_off + s];
+        // Compute dt for this token
+        float dt_val = __half2float(dt_raw[t * n_heads + h]) + dt_b;
+        dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
+        float a_bar = expf(dt_val * a_log_h);
+
+        for (int d = threadIdx.x; d < head_dim_ssm; d += blockDim.x) {
+            float x_val = __half2float(x[t * inner_size + h * head_dim_ssm + d]);
+            int64_t state_off = h_offset + d * state_size;
+
+            float y_acc = 0.0f;
+            for (int s = 0; s < state_size; s++) {
+                float b_s = __half2float(B_g[s]);
+                float c_s = __half2float(C_g[s]);
+                float h_old;
+                if constexpr (H_FP16) {
+                    h_old = __half2float(static_cast<half*>(h_state)[state_off + s]);
+                } else {
+                    h_old = static_cast<float*>(h_state)[state_off + s];
+                }
+                float h_new = a_bar * h_old + dt_val * x_val * b_s;
+                if constexpr (H_FP16) {
+                    static_cast<half*>(h_state)[state_off + s] = __float2half(h_new);
+                } else {
+                    static_cast<float*>(h_state)[state_off + s] = h_new;
+                }
+                y_acc += h_new * c_s;
             }
-            float h_new = a_bar * h_old + dt_val * x_val * b_s;
-            if constexpr (H_FP16) {
-                static_cast<half*>(h_state)[state_off + s] = __float2half(h_new);
-            } else {
-                static_cast<float*>(h_state)[state_off + s] = h_new;
-            }
-            y_acc += h_new * c_s;
+
+            y[t * inner_size + h * head_dim_ssm + d] = __float2half(y_acc + d_val * x_val);
         }
+    }
+}
 
-        y[h * head_dim_ssm + d] = __float2half(y_acc + d_val * x_val);
+static void ssm_scan_launch(const half* x, const half* B, const half* C,
+                             const half* dt, const float* A_log, const float* D,
+                             const float* dt_bias, void* h_state, half* y,
+                             int n_tokens, int n_heads, int head_dim_ssm,
+                             int state_size, int n_groups, DType h_dtype,
+                             cudaStream_t stream) {
+    int threads = std::min(head_dim_ssm, 256);
+    if (h_dtype == DType::FP16) {
+        ssm_scan_kernel<true><<<n_heads, threads, 0, stream>>>(
+            x, B, C, dt, A_log, D, dt_bias, h_state, y,
+            n_tokens, n_heads, head_dim_ssm, state_size, n_groups);
+    } else {
+        ssm_scan_kernel<false><<<n_heads, threads, 0, stream>>>(
+            x, B, C, dt, A_log, D, dt_bias, h_state, y,
+            n_tokens, n_heads, head_dim_ssm, state_size, n_groups);
     }
 }
 
@@ -277,32 +301,16 @@ void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C,
                      int state_size, int n_groups,
                      DType h_dtype,
                      cudaStream_t stream) {
-    int threads = std::min(head_dim_ssm, 256);
-    if (h_dtype == DType::FP16) {
-        ssm_scan_decode_kernel<true><<<n_heads, threads, 0, stream>>>(
-            static_cast<const half*>(x.data),
-            static_cast<const half*>(B.data),
-            static_cast<const half*>(C.data),
-            static_cast<const half*>(dt.data),
-            static_cast<const float*>(A_log.data),
-            static_cast<const float*>(D.data),
-            static_cast<const float*>(dt_bias.data),
-            h_state,
-            static_cast<half*>(y.data),
-            n_heads, head_dim_ssm, state_size, n_groups);
-    } else {
-        ssm_scan_decode_kernel<false><<<n_heads, threads, 0, stream>>>(
-            static_cast<const half*>(x.data),
-            static_cast<const half*>(B.data),
-            static_cast<const half*>(C.data),
-            static_cast<const half*>(dt.data),
-            static_cast<const float*>(A_log.data),
-            static_cast<const float*>(D.data),
-            static_cast<const float*>(dt_bias.data),
-            h_state,
-            static_cast<half*>(y.data),
-            n_heads, head_dim_ssm, state_size, n_groups);
-    }
+    ssm_scan_launch(static_cast<const half*>(x.data),
+                    static_cast<const half*>(B.data),
+                    static_cast<const half*>(C.data),
+                    static_cast<const half*>(dt.data),
+                    static_cast<const float*>(A_log.data),
+                    static_cast<const float*>(D.data),
+                    static_cast<const float*>(dt_bias.data),
+                    h_state, static_cast<half*>(y.data),
+                    1, n_heads, head_dim_ssm, state_size, n_groups,
+                    h_dtype, stream);
 }
 
 void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C,
@@ -312,30 +320,16 @@ void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C,
                       int state_size, int n_groups,
                       DType h_dtype,
                       cudaStream_t stream) {
-    int inner_size = n_heads * head_dim_ssm;
-    int BC_size = n_groups * state_size;
-
-    for (int t = 0; t < n_tokens; t++) {
-        // Create per-token views
-        const char* x_base = static_cast<const char*>(x.data) + t * inner_size * sizeof(half);
-        const char* B_base = static_cast<const char*>(B.data) + t * BC_size * sizeof(half);
-        const char* C_base = static_cast<const char*>(C.data) + t * BC_size * sizeof(half);
-        const char* dt_base = static_cast<const char*>(dt.data) + t * n_heads * sizeof(half);
-        char* y_base = static_cast<char*>(y.data) + t * inner_size * sizeof(half);
-
-        int64_t x_shape[1] = {inner_size};
-        int64_t BC_shape[1] = {BC_size};
-        int64_t dt_shape[1] = {n_heads};
-
-        Tensor x_t(const_cast<void*>(static_cast<const void*>(x_base)), DType::FP16, 1, x_shape, true);
-        Tensor B_t(const_cast<void*>(static_cast<const void*>(B_base)), DType::FP16, 1, BC_shape, true);
-        Tensor C_t(const_cast<void*>(static_cast<const void*>(C_base)), DType::FP16, 1, BC_shape, true);
-        Tensor dt_t(const_cast<void*>(static_cast<const void*>(dt_base)), DType::FP16, 1, dt_shape, true);
-        Tensor y_t(y_base, DType::FP16, 1, x_shape, true);
-
-        ssm_scan_decode(x_t, B_t, C_t, dt_t, A_log, D, dt_bias, h_state,
-                        y_t, n_heads, head_dim_ssm, state_size, n_groups, h_dtype, stream);
-    }
+    ssm_scan_launch(static_cast<const half*>(x.data),
+                    static_cast<const half*>(B.data),
+                    static_cast<const half*>(C.data),
+                    static_cast<const half*>(dt.data),
+                    static_cast<const float*>(A_log.data),
+                    static_cast<const float*>(D.data),
+                    static_cast<const float*>(dt_bias.data),
+                    h_state, static_cast<half*>(y.data),
+                    n_tokens, n_heads, head_dim_ssm, state_size, n_groups,
+                    h_dtype, stream);
 }
 
 // ---------------------------------------------------------------------------

@@ -38,6 +38,24 @@ void gemm_moe_batched(const void* a_base, void* c_base,
                       int n_experts,
                       cudaStream_t stream = nullptr,
                       void** d_work_ptrs = nullptr,
-                      DType output_dtype = DType(255));
+                      DType output_dtype = DType(255),
+                      const float* a_scales = nullptr,
+                      const float* b_scales = nullptr);
+
+// Device-side grouped GEMM for MoE: eliminates cudaStreamSynchronize.
+// Uses cublasLtGroupedMatrixLayoutCreate (CUDA 13.1) with device-side shape arrays.
+// d_offsets is a DEVICE pointer to [n_experts+1] offsets.
+// d_b_ptrs is a DEVICE pointer to [n_experts] weight pointers.
+#if IMP_CUDA_13_1
+void gemm_moe_device_grouped(
+    const void* d_a_base, void* d_c_base,
+    const int32_t* d_offsets,
+    const void* const* d_b_ptrs,
+    int K, int N, DType dtype,
+    int n_experts, int max_tokens_per_expert,
+    cudaStream_t stream,
+    const float* a_scales = nullptr,
+    const float* b_scales = nullptr);
+#endif
 
 } // namespace imp

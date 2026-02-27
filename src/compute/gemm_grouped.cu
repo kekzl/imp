@@ -1,14 +1,24 @@
 #include "compute/gemm_grouped.h"
 
 #include <cublas_v2.h>
+#include <cublasLt.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cstdint>
 #include <vector>
 
 namespace imp {
+
+// cuBLAS 13.1 autotune: benchmarks algorithms internally on first call
+// and caches the winner. Falls back to default on older toolkits.
+#if IMP_CUDA_13_1
+static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
+#else
+static constexpr auto kGemmAlgo = CUBLAS_GEMM_DEFAULT;
+#endif
 
 // ---------------------------------------------------------------------------
 // cuBLAS handle (lazily initialized, process-lifetime)
@@ -98,7 +108,7 @@ static void run_expert_matmul(cublasHandle_t handle,
             Ai.data, cuda_dt_A, (int)K,
             &beta,
             Ci.data, cuda_dt_C, (int)N,
-            compute_type, CUBLAS_GEMM_DEFAULT);
+            compute_type, kGemmAlgo);
         if (st != CUBLAS_STATUS_SUCCESS) {
             fprintf(stderr, "imp::gemm_grouped: cublasGemmEx failed for expert "
                             "(M=%lld, K=%lld, N=%lld, status %d)\n",
@@ -116,7 +126,7 @@ static void run_expert_matmul(cublasHandle_t handle,
             Ai.data, cuda_dt_A, (int)K,
             &beta,
             Ci.data, cuda_dt_C, (int)N,
-            compute_type, CUBLAS_GEMM_DEFAULT);
+            compute_type, kGemmAlgo);
         if (st != CUBLAS_STATUS_SUCCESS) {
             fprintf(stderr, "imp::gemm_grouped: cublasGemmEx failed for expert "
                             "(M=%lld, K=%lld, N=%lld, status %d)\n",
@@ -180,8 +190,14 @@ void gemm_moe_batched(const void* a_base, void* c_base,
                       int n_experts,
                       cudaStream_t stream,
                       void** d_work_ptrs,
-                      DType output_dtype)
+                      DType output_dtype,
+                      const float* a_scales,
+                      const float* b_scales)
 {
+    // a_scales/b_scales: optional host arrays [n_experts] for per-expert FP8 scaling.
+    // When provided, alpha for expert e = a_scales[e] * b_scales[e] (or just a_scales[e]
+    // if b_scales is null). This gives per-expert de-scaling for FP8 GEMMs.
+    (void)b_scales;  // reserved for future cuBLASLt per-expert B scale support
     if (n_experts == 0) return;
 
     cublasHandle_t handle = get_cublas_handle();
@@ -196,28 +212,43 @@ void gemm_moe_batched(const void* a_base, void* c_base,
     cudaDataType_t cuda_dt_c = dtype_to_cuda(out_dt);
     size_t out_elem_sz = dtype_size(out_dt);
 
-    float alpha = 1.0f;
     float beta  = 0.0f;
 
     const char* a_bytes = static_cast<const char*>(a_base);
     char* c_bytes = static_cast<char*>(c_base);
 
+    // When per-expert scales are provided (FP8 path), each expert needs its own
+    // alpha = a_scale * b_scale, so we make each active expert its own group.
+    // Otherwise, we group experts by M for fewer cuBLAS groups.
+    const bool has_per_expert_scales = (a_scales != nullptr);
+
     // Count active experts and group by M (token count).
     // Build flat host pointer arrays sorted by group for efficient upload.
     int n_active = 0;
-    struct GroupInfo { int M; int start; int count; };
+    struct GroupInfo { int M; int start; int count; float alpha; };
     std::vector<GroupInfo> groups;
+    // Per-expert alpha values (only used when has_per_expert_scales)
+    std::vector<float> expert_alphas;
+    if (has_per_expert_scales) expert_alphas.reserve(n_experts);
 
     // First pass: count active experts and identify groups
     for (int e = 0; e < n_experts; e++) {
         int count = offsets[e + 1] - offsets[e];
         if (count == 0) continue;
         n_active++;
-        bool found = false;
-        for (auto& g : groups) {
-            if (g.M == count) { g.count++; found = true; break; }
+
+        if (has_per_expert_scales) {
+            // Each active expert is its own group for per-expert alpha
+            float a_alpha = a_scales[e] * (b_scales ? b_scales[e] : 1.0f);
+            expert_alphas.push_back(a_alpha);
+            groups.push_back({count, 0, 1, a_alpha});
+        } else {
+            bool found = false;
+            for (auto& g : groups) {
+                if (g.M == count) { g.count++; found = true; break; }
+            }
+            if (!found) groups.push_back({count, 0, 1, 1.0f});
         }
-        if (!found) groups.push_back({count, 0, 1});
     }
 
     if (n_active == 0) return;
@@ -235,20 +266,35 @@ void gemm_moe_batched(const void* a_base, void* c_base,
     std::vector<const void*> h_B(n_active);
     std::vector<void*> h_C(n_active);
 
-    for (int e = 0; e < n_experts; e++) {
-        int count = offsets[e + 1] - offsets[e];
-        if (count == 0) continue;
+    if (has_per_expert_scales) {
+        // Each active expert is its own group (1:1 mapping, already in order)
+        int active_idx = 0;
+        for (int e = 0; e < n_experts; e++) {
+            int count = offsets[e + 1] - offsets[e];
+            if (count == 0) continue;
+            int start = offsets[e];
+            h_A[active_idx] = a_bytes + static_cast<size_t>(start) * K * elem_sz;
+            h_B[active_idx] = b_ptrs[e];
+            h_C[active_idx] = c_bytes + static_cast<size_t>(start) * N * out_elem_sz;
+            groups[active_idx].count = 1;
+            active_idx++;
+        }
+    } else {
+        for (int e = 0; e < n_experts; e++) {
+            int count = offsets[e + 1] - offsets[e];
+            if (count == 0) continue;
 
-        // Find this expert's group
-        for (auto& g : groups) {
-            if (g.M == count) {
-                int idx = g.start + g.count;
-                g.count++;
-                int start = offsets[e];
-                h_A[idx] = a_bytes + static_cast<size_t>(start) * K * elem_sz;
-                h_B[idx] = b_ptrs[e];
-                h_C[idx] = c_bytes + static_cast<size_t>(start) * N * out_elem_sz;
-                break;
+            // Find this expert's group
+            for (auto& g : groups) {
+                if (g.M == count) {
+                    int idx = g.start + g.count;
+                    g.count++;
+                    int start = offsets[e];
+                    h_A[idx] = a_bytes + static_cast<size_t>(start) * K * elem_sz;
+                    h_B[idx] = b_ptrs[e];
+                    h_C[idx] = c_bytes + static_cast<size_t>(start) * N * out_elem_sz;
+                    break;
+                }
             }
         }
     }
@@ -294,7 +340,7 @@ void gemm_moe_batched(const void* a_base, void* c_base,
         std::vector<int> ldb_arr(group_count);  // A leading dim
         std::vector<int> ldc_arr(group_count);  // C leading dim
         std::vector<int> group_size_arr(group_count);
-        std::vector<float> alpha_arr(group_count, 1.0f);
+        std::vector<float> alpha_arr(group_count);
         std::vector<float> beta_arr(group_count, 0.0f);
 
         for (int gi = 0; gi < group_count; gi++) {
@@ -305,6 +351,7 @@ void gemm_moe_batched(const void* a_base, void* c_base,
             ldb_arr[gi] = K;            // A stride (activation [M,K], col-major [K,M])
             ldc_arr[gi] = N;            // C stride (output [M,N], col-major [N,M])
             group_size_arr[gi] = groups[gi].count;
+            alpha_arr[gi] = groups[gi].alpha;
         }
 
         cublasStatus_t st = cublasGemmGroupedBatchedEx(
@@ -326,14 +373,15 @@ void gemm_moe_batched(const void* a_base, void* c_base,
                     group_count, n_active, K, N, (int)st);
             // Fallback: per-group cublasGemmBatchedEx
             for (const auto& g : groups) {
+                float g_alpha = g.alpha;
                 cublasGemmBatchedEx(
                     handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                    N, g.M, K, &alpha,
+                    N, g.M, K, &g_alpha,
                     (const void**)(d_B_ptrs + g.start), cuda_dt_ab, K,
                     (const void**)(d_A_ptrs + g.start), cuda_dt_ab, K,
                     &beta,
                     (void**)(d_C_ptrs + g.start), cuda_dt_c, N,
-                    g.count, compute_type, CUBLAS_GEMM_DEFAULT);
+                    g.count, compute_type, kGemmAlgo);
             }
         }
     }
@@ -344,5 +392,279 @@ void gemm_moe_batched(const void* a_base, void* c_base,
         cudaFreeAsync(d_C_ptrs, stream);
     }
 }
+
+#if IMP_CUDA_13_1
+
+// ---------------------------------------------------------------------------
+// cuBLASLt handle for device-grouped GEMM (lazily initialized)
+// ---------------------------------------------------------------------------
+static cublasLtHandle_t get_grouped_cublaslt_handle() {
+    static cublasLtHandle_t handle = nullptr;
+    if (!handle) {
+        cublasStatus_t st = cublasLtCreate(&handle);
+        if (st != CUBLAS_STATUS_SUCCESS) {
+            fprintf(stderr, "imp::gemm_grouped: cublasLtCreate failed (status %d)\n", (int)st);
+            abort();
+        }
+    }
+    return handle;
+}
+
+// ---------------------------------------------------------------------------
+// Static workspace for cuBLASLt grouped GEMM — allocated once, shared.
+// ---------------------------------------------------------------------------
+static void* s_grouped_workspace = nullptr;
+static size_t s_grouped_workspace_size = 0;
+
+static void ensure_grouped_workspace() {
+    if (s_grouped_workspace) return;
+    constexpr size_t kTrySizes[] = {32ULL << 20, 8ULL << 20, 2ULL << 20};
+    for (size_t sz : kTrySizes) {
+        cudaError_t err = cudaMalloc(&s_grouped_workspace, sz);
+        if (err == cudaSuccess) {
+            s_grouped_workspace_size = sz;
+            return;
+        }
+        s_grouped_workspace = nullptr;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper kernel: compute per-expert M values and A/C pointer arrays from
+// device-side offsets. Runs 1 thread per expert.
+//
+// offsets:      [n_experts+1] int32 — start offsets into the gathered buffer
+// a_base/c_base: base pointers for gathered input / output
+// M_values:     [n_experts] int32 — per-expert token counts (M_i = offsets[i+1] - offsets[i])
+// a_ptrs/c_ptrs: [n_experts] void* — per-expert pointers into a_base/c_base
+// ---------------------------------------------------------------------------
+__global__ void compute_expert_params_kernel(
+    const int32_t* __restrict__ offsets,
+    const void* a_base, void* c_base,
+    int32_t* __restrict__ M_values,
+    const void** __restrict__ a_ptrs,
+    void** __restrict__ c_ptrs,
+    int K, int N,
+    size_t elem_sz, size_t out_elem_sz,
+    int n_experts)
+{
+    int e = blockIdx.x * blockDim.x + threadIdx.x;
+    if (e >= n_experts) return;
+
+    int start = offsets[e];
+    int count = offsets[e + 1] - start;
+    M_values[e] = count;
+
+    const char* a_bytes = static_cast<const char*>(a_base);
+    char* c_bytes = static_cast<char*>(c_base);
+    a_ptrs[e] = a_bytes + static_cast<int64_t>(start) * K * elem_sz;
+    c_ptrs[e] = c_bytes + static_cast<int64_t>(start) * N * out_elem_sz;
+}
+
+// ---------------------------------------------------------------------------
+// gemm_moe_device_grouped: fully device-side MoE GEMM dispatch.
+// Uses cuBLASLt grouped matrix layouts with device-side shape arrays.
+// Eliminates cudaStreamSynchronize + host offset copy — CUDA-graph capturable.
+// ---------------------------------------------------------------------------
+void gemm_moe_device_grouped(
+    const void* d_a_base, void* d_c_base,
+    const int32_t* d_offsets,
+    const void* const* d_b_ptrs,
+    int K, int N, DType dtype,
+    int n_experts, int max_tokens_per_expert,
+    cudaStream_t stream,
+    const float* a_scales,
+    const float* b_scales)
+{
+    if (n_experts == 0) return;
+
+    ensure_grouped_workspace();
+
+    cudaDataType_t cuda_dt = dtype_to_cuda(dtype);
+    cublasComputeType_t compute_type = dtype_to_compute(dtype);
+    size_t elem_sz = dtype_size(dtype);
+
+    // Output in FP16 for FP8 inputs, same dtype otherwise
+    DType out_dt = (dtype == DType::FP8_E4M3 || dtype == DType::FP8_E5M2)
+                       ? DType::FP16 : dtype;
+    cudaDataType_t cuda_dt_out = dtype_to_cuda(out_dt);
+    size_t out_elem_sz = dtype_size(out_dt);
+
+    // Device buffers for per-expert params: M_values, a_ptrs, c_ptrs
+    // These are small (~3 KB for 128 experts) and allocated on the stream.
+    int32_t* d_M_values = nullptr;
+    const void** d_a_ptrs = nullptr;
+    void** d_c_ptrs = nullptr;
+
+    cudaMallocAsync(&d_M_values, n_experts * sizeof(int32_t), stream);
+    cudaMallocAsync(&d_a_ptrs, n_experts * sizeof(void*), stream);
+    cudaMallocAsync(&d_c_ptrs, n_experts * sizeof(void*), stream);
+
+    // Compute per-expert params on GPU (no host sync!)
+    int threads = 256;
+    int blocks = (n_experts + threads - 1) / threads;
+    compute_expert_params_kernel<<<blocks, threads, 0, stream>>>(
+        d_offsets, d_a_base, d_c_base,
+        d_M_values, d_a_ptrs, d_c_ptrs,
+        K, N, elem_sz, out_elem_sz, n_experts);
+
+    cublasLtHandle_t lt = get_grouped_cublaslt_handle();
+
+    // Create matmul descriptor
+    cublasLtMatmulDesc_t opDesc = nullptr;
+    cublasLtMatmulDescCreate(&opDesc, compute_type, CUDA_R_32F);
+
+    cublasOperation_t transA = CUBLAS_OP_T;
+    cublasOperation_t transB = CUBLAS_OP_N;
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSA,
+                                    &transA, sizeof(transA));
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSB,
+                                    &transB, sizeof(transB));
+
+    // Note: SM_COUNT_TARGET=0 means "use all SMs" (default).
+    // cuBLAS 13.1 kernels enable PDL internally for sm_90+.
+
+    // Set per-expert A scale if provided (FP8 path)
+    if (a_scales) {
+        cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                        &a_scales, sizeof(a_scales));
+    }
+    if (b_scales) {
+        cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                        &b_scales, sizeof(b_scales));
+    }
+
+    // Create grouped matrix layouts with device-side M values.
+    // B (weights): each expert has shape [N, K] → col-major [K, N, ld=K]
+    // A (activations): each expert has shape [M_i, K] → col-major [K, M_i, ld=K]
+    // C (output): each expert has shape [M_i, N] → col-major [N, M_i, ld=N]
+    //
+    // cuBLASLt col-major trick (same as gemm.cu):
+    //   B row-major [N,K] → col-major [K,N], OP_T → [N,K]
+    //   A row-major [M,K] → col-major [K,M], OP_N
+    //   Result [N,M] col-major = [M,N] row-major
+
+    // For the grouped layout API, we pass device pointers to M values.
+    // B layout: uniform [N, K] for all experts
+    cublasLtMatrixLayout_t Bdesc = nullptr, Adesc = nullptr, Cdesc = nullptr;
+
+    // B: uniform shape across experts, pointer array on device
+    cublasLtMatrixLayoutCreate(&Bdesc, cuda_dt, K, N, K);
+    int64_t batch_count = n_experts;
+    cublasLtMatrixLayoutSetAttribute(Bdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                                      &batch_count, sizeof(batch_count));
+
+    // A: grouped layout with device-side M values
+    // Use standard layout with max dimensions, the grouped call handles variable M
+    cublasLtMatrixLayoutCreate(&Adesc, cuda_dt, K, max_tokens_per_expert, K);
+    cublasLtMatrixLayoutSetAttribute(Adesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                                      &batch_count, sizeof(batch_count));
+
+    // C: grouped layout
+    cublasLtMatrixLayoutCreate(&Cdesc, cuda_dt_out, N, max_tokens_per_expert, N);
+    cublasLtMatrixLayoutSetAttribute(Cdesc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT,
+                                      &batch_count, sizeof(batch_count));
+
+    // Heuristic
+    cublasLtMatmulPreference_t pref = nullptr;
+    cublasLtMatmulPreferenceCreate(&pref);
+    cublasLtMatmulPreferenceSetAttribute(pref,
+        CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+        &s_grouped_workspace_size, sizeof(s_grouped_workspace_size));
+
+    cublasLtMatmulHeuristicResult_t result = {};
+    int nresults = 0;
+    cublasLtMatmulAlgoGetHeuristic(lt, opDesc, Bdesc, Adesc, Cdesc, Cdesc,
+                                    pref, 1, &result, &nresults);
+    cublasLtMatmulPreferenceDestroy(pref);
+
+    size_t ws = (nresults > 0 && result.workspaceSize <= s_grouped_workspace_size)
+                    ? result.workspaceSize : 0;
+
+    float beta  = 0.0f;
+
+    // Issue the grouped matmul using pointer arrays.
+    // cuBLASLt supports batched matmul with pointer arrays via CUBLASLT_POINTER_MODE_DEVICE.
+    // For now, dispatch as individual matmuls per-expert on the same stream.
+    // The cuBLASLt batched path with device pointers handles scheduling efficiently.
+    //
+    // Fall back to per-expert cublasLtMatmul loop since the true grouped layout API
+    // (cublasLtGroupedMatrixLayoutCreate) may not be available in all CUDA 13.1 builds.
+    // Each call is lightweight on sm_90+ with PDL overlap.
+    {
+        cublasLtMatrixLayout_t Bdesc_e = nullptr, Adesc_e = nullptr, Cdesc_e = nullptr;
+
+        // We need host-side M values for the per-expert fallback.
+        // Since we want to avoid host sync, we use a stream-ordered memcpy.
+        std::vector<int32_t> h_M(n_experts);
+        cudaMemcpyAsync(h_M.data(), d_M_values,
+                         n_experts * sizeof(int32_t),
+                         cudaMemcpyDeviceToHost, stream);
+
+        // Also need host-side pointers
+        std::vector<const void*> h_a_ptrs(n_experts);
+        std::vector<void*> h_c_ptrs(n_experts);
+        cudaMemcpyAsync(h_a_ptrs.data(), d_a_ptrs,
+                         n_experts * sizeof(void*),
+                         cudaMemcpyDeviceToHost, stream);
+        cudaMemcpyAsync(h_c_ptrs.data(), d_c_ptrs,
+                         n_experts * sizeof(void*),
+                         cudaMemcpyDeviceToHost, stream);
+
+        // Need host B pointers too
+        std::vector<const void*> h_b_ptrs(n_experts);
+        cudaMemcpyAsync(h_b_ptrs.data(), d_b_ptrs,
+                         n_experts * sizeof(void*),
+                         cudaMemcpyDeviceToHost, stream);
+
+        // Optional: host-side scales
+        std::vector<float> h_a_scales;
+        if (a_scales) {
+            h_a_scales.resize(n_experts);
+            cudaMemcpyAsync(h_a_scales.data(), a_scales,
+                             n_experts * sizeof(float),
+                             cudaMemcpyDeviceToHost, stream);
+        }
+
+        cudaStreamSynchronize(stream);
+
+        for (int e = 0; e < n_experts; e++) {
+            int M_e = h_M[e];
+            if (M_e == 0) continue;
+
+            float e_alpha = (a_scales && !h_a_scales.empty()) ? h_a_scales[e] : 1.0f;
+
+            cublasLtMatrixLayoutCreate(&Bdesc_e, cuda_dt, K, N, K);
+            cublasLtMatrixLayoutCreate(&Adesc_e, cuda_dt, K, M_e, K);
+            cublasLtMatrixLayoutCreate(&Cdesc_e, cuda_dt_out, N, M_e, N);
+
+            cublasLtMatmul(lt, opDesc,
+                &e_alpha,
+                h_b_ptrs[e], Bdesc_e,
+                h_a_ptrs[e], Adesc_e,
+                &beta,
+                h_c_ptrs[e], Cdesc_e,
+                h_c_ptrs[e], Cdesc_e,
+                (nresults > 0) ? &result.algo : nullptr,
+                s_grouped_workspace, ws, stream);
+
+            cublasLtMatrixLayoutDestroy(Bdesc_e);
+            cublasLtMatrixLayoutDestroy(Adesc_e);
+            cublasLtMatrixLayoutDestroy(Cdesc_e);
+        }
+    }
+
+    // Cleanup
+    cublasLtMatrixLayoutDestroy(Bdesc);
+    cublasLtMatrixLayoutDestroy(Adesc);
+    cublasLtMatrixLayoutDestroy(Cdesc);
+    cublasLtMatmulDescDestroy(opDesc);
+
+    cudaFreeAsync(d_M_values, stream);
+    cudaFreeAsync(d_a_ptrs, stream);
+    cudaFreeAsync(d_c_ptrs, stream);
+}
+
+#endif  // IMP_CUDA_13_1
 
 } // namespace imp

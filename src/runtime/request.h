@@ -28,6 +28,7 @@ struct Request {
     float top_p = 1.0f;
     int top_k = 0;
     int seed = -1;
+    bool ignore_eos = false;   // Don't stop on EOS (benchmark mode)
 
     int context_len() const {
         return static_cast<int>(input_tokens.size() + output_tokens.size());

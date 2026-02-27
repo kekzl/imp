@@ -12,6 +12,12 @@
 
 namespace imp {
 
+#if IMP_CUDA_13_1
+static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
+#else
+static constexpr auto kGemmAlgo = CUBLAS_GEMM_DEFAULT;
+#endif
+
 // ---------------------------------------------------------------------------
 // cuBLAS / cuBLASLt handles (lazily initialized, process-lifetime)
 // ---------------------------------------------------------------------------
@@ -408,8 +414,61 @@ __global__ void gemv_fp16_kernel(const half* __restrict__ A,
 
     float sum = 0.0f;
 
-    // Vectorized loads: load 4 halves (8 bytes) at a time via float2-sized loads
-    // half2 packing: process 2 halves at a time via half2 multiply-add.
+#if __CUDA_ARCH__ >= 1200
+    // Blackwell (sm_120+): 256-bit loads via paired float4 (16 halves per iteration).
+    // 2× wider than the default 128-bit path, better saturating memory bandwidth.
+    const int K_vec16 = K / 16;  // 16 halves = 32 bytes = 2 × sizeof(float4)
+    const float4* A_row_v = reinterpret_cast<const float4*>(A_row);
+    const float4* x_v     = reinterpret_cast<const float4*>(x);
+
+    for (int i = lane; i < K_vec16; i += 32) {
+        float4 a0 = A_row_v[2*i];
+        float4 a1 = A_row_v[2*i + 1];
+        float4 x0 = x_v[2*i];
+        float4 x1 = x_v[2*i + 1];
+
+        const half2* a_h2_0 = reinterpret_cast<const half2*>(&a0);
+        const half2* x_h2_0 = reinterpret_cast<const half2*>(&x0);
+        const half2* a_h2_1 = reinterpret_cast<const half2*>(&a1);
+        const half2* x_h2_1 = reinterpret_cast<const half2*>(&x1);
+
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            half2 prod = __hmul2(a_h2_0[j], x_h2_0[j]);
+            sum += __half2float(prod.x) + __half2float(prod.y);
+        }
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            half2 prod = __hmul2(a_h2_1[j], x_h2_1[j]);
+            sum += __half2float(prod.x) + __half2float(prod.y);
+        }
+    }
+
+    // Handle elements between K_vec16*16 and K_vec8*8 (0 or 8 elements).
+    int base16 = K_vec16 * 16;
+    if (base16 + 8 <= K) {
+        int K_vec8_rem = (K - base16) / 8;
+        const float4* A_rem = reinterpret_cast<const float4*>(A_row + base16);
+        const float4* x_rem = reinterpret_cast<const float4*>(x + base16);
+        for (int i = lane; i < K_vec8_rem; i += 32) {
+            float4 a_raw = A_rem[i];
+            float4 x_raw = x_rem[i];
+            const half2* a_h2 = reinterpret_cast<const half2*>(&a_raw);
+            const half2* x_h2 = reinterpret_cast<const half2*>(&x_raw);
+            for (int j = 0; j < 4; ++j) {
+                half2 prod = __hmul2(a_h2[j], x_h2[j]);
+                sum += __half2float(prod.x) + __half2float(prod.y);
+            }
+        }
+        base16 = base16 + K_vec8_rem * 8;
+    }
+
+    // Scalar remainder.
+    for (int i = base16 + lane; i < K; i += 32) {
+        sum += __half2float(A_row[i]) * __half2float(x[i]);
+    }
+#else
+    // Default path: 128-bit loads (8 halves per float4).
     const int K_vec = K / 8;  // 8 halves = 16 bytes = sizeof(float4)
     const float4* A_row_v = reinterpret_cast<const float4*>(A_row);
     const float4* x_v     = reinterpret_cast<const float4*>(x);
@@ -433,6 +492,7 @@ __global__ void gemv_fp16_kernel(const half* __restrict__ A,
     for (int i = base + lane; i < K; i += 32) {
         sum += __half2float(A_row[i]) * __half2float(x[i]);
     }
+#endif
 
     // Warp shuffle reduction.
     for (int offset = 16; offset > 0; offset >>= 1) {
@@ -1125,6 +1185,53 @@ void swiglu_quantize_q8_1(const half* gate, const half* up,
     if (n_blocks <= 0) return;
     swiglu_quantize_q8_1_kernel<<<n_blocks, 32, 0, stream>>>(
         gate, up, q8_out, d8_out, total_elements);
+}
+
+// ---------------------------------------------------------------------------
+// Fused relu² + Q8_1 quantization kernel.
+//
+// Reads FP16 input, applies relu²(x) = max(0, x)², quantizes to Q8_1.
+// Replaces 3 separate operations (memcpy + relu_sqr_inplace + quantize).
+// Used by non-gated MoE experts (Nemotron).
+// ---------------------------------------------------------------------------
+__global__ void relu_sqr_quantize_q8_1_kernel(
+        const half* __restrict__ input,      // [total_elements] FP16
+        block_q8_1* __restrict__ q8_out,     // [total_elements/32] Q8_1 blocks
+        float* __restrict__ d8_out,          // [total_elements/32] block scales
+        int total_elements) {
+    int blk = blockIdx.x;
+    int tid = threadIdx.x;
+    int base = blk * 32 + tid;
+    if (base >= total_elements) return;
+
+    // Read input and apply relu²
+    float v = __half2float(input[base]);
+    v = (v > 0.0f) ? v * v : 0.0f;
+
+    // Warp reduction for absmax
+    float amax = fabsf(v);
+    for (int mask = 16; mask >= 1; mask >>= 1)
+        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, mask));
+
+    float d = amax / 127.0f;
+    float id = (d > 0.0f) ? 127.0f / amax : 0.0f;
+    int8_t q = (int8_t)fminf(fmaxf(roundf(v * id), -127.0f), 127.0f);
+
+    // Write Q8_1 block
+    q8_out[blk].qs[tid] = q;
+    if (tid == 0) {
+        q8_out[blk].d = __float2half(d);
+        d8_out[blk] = d;
+    }
+}
+
+void relu_sqr_quantize_q8_1(const half* input,
+                              block_q8_1* q8_out, float* d8_out,
+                              int total_elements, cudaStream_t stream) {
+    int n_blocks = total_elements / 32;
+    if (n_blocks <= 0) return;
+    relu_sqr_quantize_q8_1_kernel<<<n_blocks, 32, 0, stream>>>(
+        input, q8_out, d8_out, total_elements);
 }
 
 // ---------------------------------------------------------------------------
@@ -2525,7 +2632,7 @@ void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv,
         output_stride,                               // strideC: offset to v_out
         2,                                           // batch_count = 2 (K and V)
         CUBLAS_COMPUTE_32F,
-        CUBLAS_GEMM_DEFAULT);
+        kGemmAlgo);
 
     if (st != CUBLAS_STATUS_SUCCESS) {
         fprintf(stderr, "imp::gemm_kv_batched: cublasGemmStridedBatchedEx failed (status %d)\n",

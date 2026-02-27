@@ -3,10 +3,6 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 
-#if IMP_CUDA_13_1
-#include <cuda.h>
-#endif
-
 namespace imp {
 
 GreenContextManager::~GreenContextManager() {
@@ -52,111 +48,82 @@ bool GreenContextManager::init(int device, float prefill_sm_ratio) {
                  decode_sms_, 100.0f * decode_sms_ / total_sms_);
 
 #if IMP_CUDA_13_1
-    // --- CUDA 13.1 Green Contexts: true SM partitioning ---
-    CUdevice cu_dev;
-    CUresult cu_err = cuDeviceGet(&cu_dev, device);
-    if (cu_err != CUDA_SUCCESS) {
-        IMP_LOG_WARN("GreenContextManager: cuDeviceGet failed, falling back to regular streams");
-        goto fallback;
-    }
-
+    // --- CUDA 13.1 Green Contexts (Runtime API): true SM partitioning ---
     {
         // Get the full SM resource for this device
-        CUdevResource full_sm_resource;
-        cu_err = cuDeviceGetDevResource(cu_dev, &full_sm_resource, CU_DEV_RESOURCE_TYPE_SM);
-        if (cu_err != CUDA_SUCCESS) {
-            IMP_LOG_WARN("GreenContextManager: cuDeviceGetDevResource failed (%d), "
-                         "falling back to regular streams", cu_err);
+        cudaDevResource full_sm_resource;
+        err = cudaDeviceGetDevResource(device, &full_sm_resource, cudaDevResourceTypeSm);
+        if (err != cudaSuccess) {
+            IMP_LOG_WARN("GreenContextManager: cudaDeviceGetDevResource failed (%s), "
+                         "falling back to regular streams", cudaGetErrorString(err));
             goto fallback;
         }
 
         // Split SMs for prefill partition
-        // cuDevSmResourceSplitByCount(result, nbGroups, input, remainder, flags, minCount)
-        CUdevResource prefill_dev_res;
-        CUdevResource decode_dev_res;
+        cudaDevResource prefill_dev_res;
+        cudaDevResource decode_dev_res;
         unsigned int nb_groups = 1;
         unsigned int prefill_count = static_cast<unsigned int>(prefill_sms_);
-        cu_err = cuDevSmResourceSplitByCount(&prefill_dev_res, &nb_groups,
-                                              &full_sm_resource, &decode_dev_res,
-                                              0, prefill_count);
-        if (cu_err != CUDA_SUCCESS) {
-            IMP_LOG_WARN("GreenContextManager: cuDevSmResourceSplitByCount failed (%d), "
-                         "falling back to regular streams", cu_err);
+        err = cudaDevSmResourceSplitByCount(&prefill_dev_res, &nb_groups,
+                                             &full_sm_resource, &decode_dev_res,
+                                             0, prefill_count);
+        if (err != cudaSuccess) {
+            IMP_LOG_WARN("GreenContextManager: cudaDevSmResourceSplitByCount failed (%s), "
+                         "falling back to regular streams", cudaGetErrorString(err));
             goto fallback;
         }
 
-        cu_err = cuDevResourceGenerateDesc(&prefill_resource_desc_, &prefill_dev_res, 1);
-        if (cu_err != CUDA_SUCCESS) {
-            IMP_LOG_WARN("GreenContextManager: cuDevResourceGenerateDesc (prefill) "
-                         "failed (%d)", cu_err);
+        err = cudaDevResourceGenerateDesc(&prefill_resource_desc_, &prefill_dev_res, 1);
+        if (err != cudaSuccess) {
+            IMP_LOG_WARN("GreenContextManager: cudaDevResourceGenerateDesc (prefill) "
+                         "failed (%s)", cudaGetErrorString(err));
             goto fallback;
         }
 
-        cu_err = cuDevResourceGenerateDesc(&decode_resource_desc_, &decode_dev_res, 1);
-        if (cu_err != CUDA_SUCCESS) {
-            IMP_LOG_WARN("GreenContextManager: cuDevResourceGenerateDesc (decode) "
-                         "failed (%d)", cu_err);
+        err = cudaDevResourceGenerateDesc(&decode_resource_desc_, &decode_dev_res, 1);
+        if (err != cudaSuccess) {
+            IMP_LOG_WARN("GreenContextManager: cudaDevResourceGenerateDesc (decode) "
+                         "failed (%s)", cudaGetErrorString(err));
             goto fallback;
         }
 
-        // Create green contexts
-        cu_err = cuGreenCtxCreate(&prefill_green_ctx_, prefill_resource_desc_,
-                                   cu_dev, CU_GREEN_CTX_DEFAULT_STREAM);
-        if (cu_err != CUDA_SUCCESS) {
-            IMP_LOG_WARN("GreenContextManager: cuGreenCtxCreate (prefill) "
-                         "failed (%d)", cu_err);
+        // Create green contexts (flags=0 for Runtime API)
+        err = cudaGreenCtxCreate(&prefill_green_ctx_, prefill_resource_desc_,
+                                  device, 0);
+        if (err != cudaSuccess) {
+            IMP_LOG_WARN("GreenContextManager: cudaGreenCtxCreate (prefill) "
+                         "failed (%s)", cudaGetErrorString(err));
             goto fallback;
         }
 
-        cu_err = cuGreenCtxCreate(&decode_green_ctx_, decode_resource_desc_,
-                                   cu_dev, CU_GREEN_CTX_DEFAULT_STREAM);
-        if (cu_err != CUDA_SUCCESS) {
-            IMP_LOG_WARN("GreenContextManager: cuGreenCtxCreate (decode) "
-                         "failed (%d)", cu_err);
-            cuGreenCtxDestroy(prefill_green_ctx_);
+        err = cudaGreenCtxCreate(&decode_green_ctx_, decode_resource_desc_,
+                                  device, 0);
+        if (err != cudaSuccess) {
+            IMP_LOG_WARN("GreenContextManager: cudaGreenCtxCreate (decode) "
+                         "failed (%s)", cudaGetErrorString(err));
+            cudaExecutionCtxDestroy(prefill_green_ctx_);
             prefill_green_ctx_ = nullptr;
             goto fallback;
         }
 
-        // Get CUcontext from green contexts
-        cu_err = cuCtxFromGreenCtx(&prefill_ctx_, prefill_green_ctx_);
-        if (cu_err != CUDA_SUCCESS) {
-            IMP_LOG_WARN("GreenContextManager: cuCtxFromGreenCtx (prefill) "
-                         "failed (%d)", cu_err);
+        // Create streams directly on green contexts — no push/pop needed
+        err = cudaExecutionCtxStreamCreate(&prefill_stream_, prefill_green_ctx_,
+                                            cudaStreamNonBlocking, 0);
+        if (err != cudaSuccess) {
+            IMP_LOG_WARN("GreenContextManager: failed to create prefill stream (%s)",
+                         cudaGetErrorString(err));
             goto cleanup_green;
         }
 
-        cu_err = cuCtxFromGreenCtx(&decode_ctx_, decode_green_ctx_);
-        if (cu_err != CUDA_SUCCESS) {
-            IMP_LOG_WARN("GreenContextManager: cuCtxFromGreenCtx (decode) "
-                         "failed (%d)", cu_err);
-            goto cleanup_green;
-        }
-
-        // Create streams on the green contexts
-        // Push prefill context, create stream, pop
-        cuCtxPushCurrent(prefill_ctx_);
-        CUstream cu_prefill_stream;
-        cu_err = cuStreamCreate(&cu_prefill_stream, CU_STREAM_NON_BLOCKING);
-        cuCtxPopCurrent(nullptr);
-        if (cu_err != CUDA_SUCCESS) {
-            IMP_LOG_WARN("GreenContextManager: failed to create prefill stream");
-            goto cleanup_green;
-        }
-        prefill_stream_ = reinterpret_cast<cudaStream_t>(cu_prefill_stream);
-
-        // Push decode context, create stream, pop
-        cuCtxPushCurrent(decode_ctx_);
-        CUstream cu_decode_stream;
-        cu_err = cuStreamCreate(&cu_decode_stream, CU_STREAM_NON_BLOCKING);
-        cuCtxPopCurrent(nullptr);
-        if (cu_err != CUDA_SUCCESS) {
-            IMP_LOG_WARN("GreenContextManager: failed to create decode stream");
+        err = cudaExecutionCtxStreamCreate(&decode_stream_, decode_green_ctx_,
+                                            cudaStreamNonBlocking, 0);
+        if (err != cudaSuccess) {
+            IMP_LOG_WARN("GreenContextManager: failed to create decode stream (%s)",
+                         cudaGetErrorString(err));
             cudaStreamDestroy(prefill_stream_);
             prefill_stream_ = nullptr;
             goto cleanup_green;
         }
-        decode_stream_ = reinterpret_cast<cudaStream_t>(cu_decode_stream);
 
         has_green_ctx_ = true;
         available_ = true;
@@ -166,17 +133,15 @@ bool GreenContextManager::init(int device, float prefill_sm_ratio) {
 
     cleanup_green:
         if (prefill_green_ctx_) {
-            cuGreenCtxDestroy(prefill_green_ctx_);
+            cudaExecutionCtxDestroy(prefill_green_ctx_);
             prefill_green_ctx_ = nullptr;
         }
         if (decode_green_ctx_) {
-            cuGreenCtxDestroy(decode_green_ctx_);
+            cudaExecutionCtxDestroy(decode_green_ctx_);
             decode_green_ctx_ = nullptr;
         }
         prefill_resource_desc_ = nullptr;
         decode_resource_desc_ = nullptr;
-        prefill_ctx_ = nullptr;
-        decode_ctx_ = nullptr;
     }
 
 fallback:
@@ -226,17 +191,15 @@ void GreenContextManager::destroy() {
 
 #if IMP_CUDA_13_1
     if (prefill_green_ctx_) {
-        cuGreenCtxDestroy(prefill_green_ctx_);
+        cudaExecutionCtxDestroy(prefill_green_ctx_);
         prefill_green_ctx_ = nullptr;
     }
     if (decode_green_ctx_) {
-        cuGreenCtxDestroy(decode_green_ctx_);
+        cudaExecutionCtxDestroy(decode_green_ctx_);
         decode_green_ctx_ = nullptr;
     }
     prefill_resource_desc_ = nullptr;
     decode_resource_desc_ = nullptr;
-    prefill_ctx_ = nullptr;
-    decode_ctx_ = nullptr;
 #endif
 
     has_green_ctx_ = false;

@@ -494,10 +494,31 @@ static bool upload_unquantized_weight(Tensor& weight,
 }
 
 // ---------------------------------------------------------------------------
+// Model::estimate_expert_bytes
+// ---------------------------------------------------------------------------
+
+size_t Model::estimate_expert_bytes() const {
+    size_t total = 0;
+    for (int i = 0; i < n_layers(); ++i) {
+        const TransformerLayer& L = layers_[i];
+        auto add_packed = [&](const Tensor& p, GGMLQuantType qt) {
+            if (!p.data || p.ndim < 3 || !dequant_gpu_supported(qt)) return;
+            size_t row_bytes = ggml_quant_row_bytes(qt, p.shape[2]);
+            total += static_cast<size_t>(p.shape[0]) * p.shape[1] * row_bytes;
+        };
+        add_packed(L.expert_gate_packed, L.expert_gate_qtype);
+        add_packed(L.expert_up_packed, L.expert_up_qtype);
+        add_packed(L.expert_down_packed, L.expert_down_qtype);
+    }
+    return total;
+}
+
+// ---------------------------------------------------------------------------
 // Model::upload_weights_gpu
 // ---------------------------------------------------------------------------
 
-bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream) {
+bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
+                                size_t expert_reserve_bytes) {
     if (gpu_weights_ready_) {
         IMP_LOG_WARN("Weights already uploaded to GPU");
         return true;
@@ -546,43 +567,17 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream) {
         }
     }
 
-    // Pre-pass: check if quantized expert weights can fit on GPU
-    size_t total_expert_bytes = 0;
-    for (int i = 0; i < n_layers(); ++i) {
-        const TransformerLayer& L = layers_[i];
-        auto add_packed = [&](const Tensor& p, GGMLQuantType qt) {
-            if (!p.data || p.ndim < 3 || !dequant_gpu_supported(qt)) return;
-            size_t row_bytes = ggml_quant_row_bytes(qt, p.shape[2]);
-            total_expert_bytes += static_cast<size_t>(p.shape[0]) * p.shape[1] * row_bytes;
-        };
-        add_packed(L.expert_gate_packed, L.expert_gate_qtype);
-        add_packed(L.expert_up_packed, L.expert_up_qtype);
-        add_packed(L.expert_down_packed, L.expert_down_qtype);
-    }
+    // =========================================================================
+    // Two-pass upload strategy:
+    // Pass 1: Upload all non-expert per-layer weights (attention, FFN, norms,
+    //         SSM, shared experts, routing). This consumes a variable amount
+    //         of VRAM that's hard to estimate accurately.
+    // Pass 2: After non-expert weights are on GPU, cudaMemGetInfo gives us
+    //         the actual remaining VRAM. We then greedily upload expert
+    //         layers until the budget is exhausted.
+    // =========================================================================
 
-    bool experts_on_gpu = false;
-    if (total_expert_bytes > 0) {
-        size_t free_mem = 0, total_mem = 0;
-        cudaMemGetInfo(&free_mem, &total_mem);
-        constexpr size_t kReserveBytes = 2ULL * 1024 * 1024 * 1024;  // 2 GiB for KV cache + overhead
-        if (free_mem > total_expert_bytes + kReserveBytes) {
-            experts_on_gpu = true;
-            IMP_LOG_INFO("Expert weights: %.2f GiB raw quantized -> uploading to GPU "
-                         "(%.2f GiB free, %.2f GiB reserve)",
-                         total_expert_bytes / (1024.0*1024.0*1024.0),
-                         free_mem / (1024.0*1024.0*1024.0),
-                         kReserveBytes / (1024.0*1024.0*1024.0));
-        } else {
-            IMP_LOG_INFO("Expert weights: %.2f GiB raw quantized -> keeping on host "
-                         "(only %.2f GiB free, need %.2f GiB + %.2f GiB reserve)",
-                         total_expert_bytes / (1024.0*1024.0*1024.0),
-                         free_mem / (1024.0*1024.0*1024.0),
-                         total_expert_bytes / (1024.0*1024.0*1024.0),
-                         kReserveBytes / (1024.0*1024.0*1024.0));
-        }
-    }
-
-    // Upload per-layer weights
+    // --- Pass 1: Non-expert per-layer weights ---
     for (int i = 0; i < n_layers(); ++i) {
         TransformerLayer& L = layers_[i];
 
@@ -668,141 +663,7 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream) {
             }
         }
 
-        // MoE expert weights -- two paths:
-        // A) Packed 3D tensors (*_exps):
-        //    - For quantized types (Q6_K, Q8_0, Q4_0): upload raw bytes to GPU,
-        //      keep packed tensor. Dequant happens on-the-fly in run_moe_ffn.
-        //    - For F16/BF16/F32: dequant/upload and slice into per-expert views.
-        // B) Per-expert 2D tensors: upload individually (legacy per-expert GGUF format)
-
-        auto upload_packed_experts = [&](Tensor& packed, GGMLQuantType qtype,
-                                         std::vector<Tensor>& expert_vec,
-                                         const char* name) -> bool {
-            if (!packed.data || packed.ndim < 3) return true;  // nothing to do
-
-            int n_experts = static_cast<int>(packed.shape[0]);
-            int64_t rows = packed.shape[1];
-            int64_t cols = packed.shape[2];
-
-            // Path A1: Quantized types -- upload raw bytes to GPU if they fit,
-            // otherwise keep on host (mmap'd) with optional pinning for H2D.
-            if (dequant_gpu_supported(qtype)) {
-                size_t row_bytes = ggml_quant_row_bytes(qtype, cols);
-                size_t expert_raw = static_cast<size_t>(rows) * row_bytes;
-                size_t total_raw = static_cast<size_t>(n_experts) * expert_raw;
-
-                if (experts_on_gpu) {
-                    // Upload raw quantized bytes to GPU — eliminates per-expert H2D during inference
-                    void* gpu_ptr = nullptr;
-                    cudaError_t err = cudaMalloc(&gpu_ptr, total_raw);
-                    if (err == cudaSuccess) {
-                        cudaMemcpyAsync(gpu_ptr, packed.data, total_raw,
-                                        cudaMemcpyHostToDevice, stream);
-                        packed.data = gpu_ptr;
-                        packed.on_device = true;
-                        gpu_allocations_.push_back(gpu_ptr);
-                        IMP_LOG_DEBUG("  %s: %d experts uploaded to GPU (%.2f MiB)",
-                                      name, n_experts, total_raw / (1024.0 * 1024.0));
-                        return true;
-                    }
-                    // cudaMalloc failed — fall through to host path
-                    IMP_LOG_WARN("  %s: cudaMalloc failed for %.2f MiB, falling back to host",
-                                 name, total_raw / (1024.0 * 1024.0));
-                }
-
-                // Host path: keep mmap'd, optionally pin for faster H2D
-                if (is_wsl2()) {
-                    IMP_LOG_INFO("  %s: WSL2 detected, skipping cudaHostRegister "
-                                 "(%.2f MiB unpinned)", name,
-                                 total_raw / (1024.0 * 1024.0));
-                } else {
-                    cudaError_t pin_err = cudaHostRegister(packed.data, total_raw,
-                                                           cudaHostRegisterReadOnly);
-                    if (pin_err == cudaSuccess) {
-                        host_pinned_.push_back(packed.data);
-                        IMP_LOG_DEBUG("  %s: %d experts, raw %s pinned on host (%.2f MiB)",
-                                      name, n_experts,
-                                      qtype == GGMLQuantType::Q6_K ? "Q6_K" :
-                                      qtype == GGMLQuantType::Q8_0 ? "Q8_0" : "Q4_0",
-                                      total_raw / (1024.0 * 1024.0));
-                    } else {
-                        IMP_LOG_WARN("  %s: cudaHostRegister failed (%s), H2D will be slower",
-                                     name, cudaGetErrorString(pin_err));
-                    }
-                }
-
-                // packed.data stays as host mmap pointer
-                // packed.on_device stays false
-                // No gpu_allocations_.push_back — nothing allocated on GPU
-                // expert_vec stays empty -- executor uses packed + on-the-fly dequant
-                return true;
-            }
-
-            // Path A2: Unquantized (F16/BF16/F32) -- dequant to FP16, slice per-expert.
-            int64_t flat_shape[4] = {static_cast<int64_t>(n_experts) * rows, cols, 0, 0};
-            Tensor flat(packed.data, packed.dtype, 2, flat_shape, packed.on_device);
-
-            Tensor dummy_scales;
-            if (!upload_weight(flat, qtype, dummy_scales, compute_dtype,
-                               stream, gpu_allocations_)) {
-                IMP_LOG_ERROR("Failed to upload packed %s for layer %d", name, i);
-                return false;
-            }
-
-            // flat.data now points to GPU FP16 [n_experts*rows, cols]
-            // Slice into per-expert views
-            expert_vec.resize(n_experts);
-            size_t expert_bytes = static_cast<size_t>(rows) * cols * sizeof(uint16_t);
-            for (int e = 0; e < n_experts; e++) {
-                char* ptr = static_cast<char*>(flat.data) + e * expert_bytes;
-                int64_t eshape[4] = {rows, cols, 0, 0};
-                expert_vec[e] = Tensor(ptr, DType::FP16, 2, eshape, true);
-            }
-            packed = Tensor();  // clear packed (data owned by GPU allocation)
-            return true;
-        };
-
-        if (!upload_packed_experts(L.expert_gate_packed, L.expert_gate_qtype,
-                                   L.expert_w_gate, "expert_gate_exps"))
-            return false;
-        if (!upload_packed_experts(L.expert_up_packed, L.expert_up_qtype,
-                                   L.expert_w_up, "expert_up_exps"))
-            return false;
-        if (!upload_packed_experts(L.expert_down_packed, L.expert_down_qtype,
-                                   L.expert_w_down, "expert_down_exps"))
-            return false;
-
-        // Path B: per-expert 2D tensors (from per-expert GGUF naming)
-        for (size_t e = 0; e < L.expert_w_gate.size(); ++e) {
-            if (!L.expert_w_gate[e].data || L.expert_w_gate[e].on_device) continue;
-            Tensor dummy_scales;
-            if (!upload_weight(L.expert_w_gate[e], L.w_gate_qtype, dummy_scales,
-                               compute_dtype, stream, gpu_allocations_)) {
-                IMP_LOG_ERROR("Failed to upload expert_w_gate[%zu] for layer %d",
-                              e, i);
-                return false;
-            }
-        }
-        for (size_t e = 0; e < L.expert_w_up.size(); ++e) {
-            if (!L.expert_w_up[e].data || L.expert_w_up[e].on_device) continue;
-            Tensor dummy_scales;
-            if (!upload_weight(L.expert_w_up[e], L.w_up_qtype, dummy_scales,
-                               compute_dtype, stream, gpu_allocations_)) {
-                IMP_LOG_ERROR("Failed to upload expert_w_up[%zu] for layer %d",
-                              e, i);
-                return false;
-            }
-        }
-        for (size_t e = 0; e < L.expert_w_down.size(); ++e) {
-            if (!L.expert_w_down[e].data || L.expert_w_down[e].on_device) continue;
-            Tensor dummy_scales;
-            if (!upload_weight(L.expert_w_down[e], L.w_down_qtype, dummy_scales,
-                               compute_dtype, stream, gpu_allocations_)) {
-                IMP_LOG_ERROR("Failed to upload expert_w_down[%zu] for layer %d",
-                              e, i);
-                return false;
-            }
-        }
+        // (Expert weights are uploaded in Pass 2 below)
 
         // SSM weights (Mamba2)
         if (L.ssm_in.data && !L.ssm_in.on_device) {
@@ -882,10 +743,232 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream) {
             }
         }
 
-        IMP_LOG_DEBUG("Layer %d/%d uploaded", i + 1, n_layers());
+        IMP_LOG_DEBUG("Layer %d/%d non-expert weights uploaded", i + 1, n_layers());
     }
 
-    // Synchronize to ensure all async copies are complete
+    // Sync Pass 1 before measuring free VRAM for expert budget
+    if (stream) {
+        cudaStreamSynchronize(stream);
+    } else {
+        cudaDeviceSynchronize();
+    }
+
+    // =========================================================================
+    // --- Pass 2: Expert weight upload ---
+    // Now that all non-expert weights are on GPU, measure actual free VRAM
+    // and greedily upload expert layers until the budget is exhausted.
+    // =========================================================================
+
+    // Compute per-layer expert weight costs
+    size_t total_expert_bytes = 0;
+    std::vector<size_t> layer_expert_bytes(n_layers(), 0);
+    for (int i = 0; i < n_layers(); ++i) {
+        const TransformerLayer& L = layers_[i];
+        auto add_packed = [&](const Tensor& p, GGMLQuantType qt) {
+            if (!p.data || p.ndim < 3 || !dequant_gpu_supported(qt)) return;
+            size_t row_bytes = ggml_quant_row_bytes(qt, p.shape[2]);
+            size_t bytes = static_cast<size_t>(p.shape[0]) * p.shape[1] * row_bytes;
+            layer_expert_bytes[i] += bytes;
+            total_expert_bytes += bytes;
+        };
+        add_packed(L.expert_gate_packed, L.expert_gate_qtype);
+        add_packed(L.expert_up_packed, L.expert_up_qtype);
+        add_packed(L.expert_down_packed, L.expert_down_qtype);
+    }
+
+    // Decide which expert layers to upload based on actual remaining VRAM
+    std::vector<bool> experts_upload_layer(n_layers(), false);
+    if (total_expert_bytes > 0) {
+        size_t free_mem = 0, total_mem = 0;
+        cudaMemGetInfo(&free_mem, &total_mem);
+
+        // Reserve for KV cache + SSM state + activation workspace + FP16 cache.
+        // Engine passes the exact reserve based on computed workspace sizes.
+        size_t budget = (free_mem > expert_reserve_bytes) ? (free_mem - expert_reserve_bytes) : 0;
+
+        if (budget >= total_expert_bytes) {
+            // All experts fit
+            for (int i = 0; i < n_layers(); ++i) {
+                if (layer_expert_bytes[i] > 0) experts_upload_layer[i] = true;
+            }
+            IMP_LOG_INFO("Expert weights: %.2f GiB -> uploading ALL to GPU "
+                         "(%.2f GiB free, %.2f GiB reserve)",
+                         total_expert_bytes / (1024.0*1024.0*1024.0),
+                         free_mem / (1024.0*1024.0*1024.0),
+                         expert_reserve_bytes / (1024.0*1024.0*1024.0));
+        } else {
+            // Partial upload: greedily upload layers until budget exhausted
+            size_t uploaded = 0;
+            int n_uploaded = 0, n_total_moe = 0;
+            for (int i = 0; i < n_layers(); ++i) {
+                if (layer_expert_bytes[i] == 0) continue;
+                n_total_moe++;
+                if (uploaded + layer_expert_bytes[i] <= budget) {
+                    experts_upload_layer[i] = true;
+                    uploaded += layer_expert_bytes[i];
+                    n_uploaded++;
+                }
+            }
+            IMP_LOG_INFO("Expert weights: %.2f GiB total, uploading %d/%d MoE layers "
+                         "(%.2f GiB on GPU, %.2f GiB on host, %.2f GiB free, "
+                         "%.2f GiB reserve)",
+                         total_expert_bytes / (1024.0*1024.0*1024.0),
+                         n_uploaded, n_total_moe,
+                         uploaded / (1024.0*1024.0*1024.0),
+                         (total_expert_bytes - uploaded) / (1024.0*1024.0*1024.0),
+                         free_mem / (1024.0*1024.0*1024.0),
+                         expert_reserve_bytes / (1024.0*1024.0*1024.0));
+        }
+    }
+
+    // Upload expert weights for each layer
+    for (int i = 0; i < n_layers(); ++i) {
+        TransformerLayer& L = layers_[i];
+
+        // MoE expert weights -- two paths:
+        // A) Packed 3D tensors (*_exps):
+        //    - For quantized types (Q6_K, Q8_0, Q4_0): upload raw bytes to GPU,
+        //      keep packed tensor. Dequant happens on-the-fly in run_moe_ffn.
+        //    - For F16/BF16/F32: dequant/upload and slice into per-expert views.
+        // B) Per-expert 2D tensors: upload individually (legacy per-expert GGUF format)
+
+        auto upload_packed_experts = [&](Tensor& packed, GGMLQuantType qtype,
+                                         std::vector<Tensor>& expert_vec,
+                                         const char* name) -> bool {
+            if (!packed.data || packed.ndim < 3) return true;  // nothing to do
+
+            int n_experts = static_cast<int>(packed.shape[0]);
+            int64_t rows = packed.shape[1];
+            int64_t cols = packed.shape[2];
+
+            // Path A1: Quantized types -- upload raw bytes to GPU if they fit,
+            // otherwise keep on host (mmap'd) with optional pinning for H2D.
+            if (dequant_gpu_supported(qtype)) {
+                size_t row_bytes = ggml_quant_row_bytes(qtype, cols);
+                size_t expert_raw = static_cast<size_t>(rows) * row_bytes;
+                size_t total_raw = static_cast<size_t>(n_experts) * expert_raw;
+
+                if (experts_upload_layer[i]) {
+                    // Upload raw quantized bytes to GPU
+                    void* gpu_ptr = nullptr;
+                    cudaError_t err = cudaMalloc(&gpu_ptr, total_raw);
+                    if (err == cudaSuccess) {
+                        cudaMemcpyAsync(gpu_ptr, packed.data, total_raw,
+                                        cudaMemcpyHostToDevice, stream);
+                        packed.data = gpu_ptr;
+                        packed.on_device = true;
+                        gpu_allocations_.push_back(gpu_ptr);
+                        IMP_LOG_DEBUG("  %s: %d experts uploaded to GPU (%.2f MiB)",
+                                      name, n_experts, total_raw / (1024.0 * 1024.0));
+                        return true;
+                    }
+                    // cudaMalloc failed — fall through to host path
+                    IMP_LOG_WARN("  %s: cudaMalloc failed for %.2f MiB, falling back to host",
+                                 name, total_raw / (1024.0 * 1024.0));
+                }
+
+                // Host path: pin memory for fast async DMA H2D during decode.
+                if (is_wsl2()) {
+                    // WSL2: cudaHostRegister fails on mmap'd memory. Instead,
+                    // allocate fresh pinned memory and copy mmap'd data there.
+                    // This enables true async DMA H2D (no per-token CPU memcpy).
+                    void* pinned_buf = nullptr;
+                    cudaError_t pin_err = cudaHostAlloc(&pinned_buf, total_raw,
+                                                         cudaHostAllocDefault);
+                    if (pin_err == cudaSuccess) {
+                        memcpy(pinned_buf, packed.data, total_raw);
+                        packed.data = pinned_buf;
+                        host_pinned_allocs_.push_back(pinned_buf);
+                        IMP_LOG_INFO("  %s: WSL2 pinned copy (%.2f MiB, DMA-ready)",
+                                     name, total_raw / (1024.0 * 1024.0));
+                    } else {
+                        cudaGetLastError();
+                        IMP_LOG_INFO("  %s: WSL2 cudaHostAlloc failed, falling back to "
+                                     "unpinned mmap (%.2f MiB)", name,
+                                     total_raw / (1024.0 * 1024.0));
+                    }
+                } else {
+                    cudaError_t pin_err = cudaHostRegister(packed.data, total_raw,
+                                                           cudaHostRegisterReadOnly);
+                    if (pin_err == cudaSuccess) {
+                        host_pinned_.push_back(packed.data);
+                        IMP_LOG_DEBUG("  %s: %d experts, raw %s pinned on host (%.2f MiB)",
+                                      name, n_experts,
+                                      qtype == GGMLQuantType::Q6_K ? "Q6_K" :
+                                      qtype == GGMLQuantType::Q8_0 ? "Q8_0" : "Q4_0",
+                                      total_raw / (1024.0 * 1024.0));
+                    } else {
+                        IMP_LOG_WARN("  %s: cudaHostRegister failed (%s), H2D will be slower",
+                                     name, cudaGetErrorString(pin_err));
+                    }
+                }
+
+                return true;
+            }
+
+            // Path A2: Unquantized (F16/BF16/F32) -- dequant to FP16, slice per-expert.
+            int64_t flat_shape[4] = {static_cast<int64_t>(n_experts) * rows, cols, 0, 0};
+            Tensor flat(packed.data, packed.dtype, 2, flat_shape, packed.on_device);
+
+            Tensor dummy_scales;
+            if (!upload_weight(flat, qtype, dummy_scales, compute_dtype,
+                               stream, gpu_allocations_)) {
+                IMP_LOG_ERROR("Failed to upload packed %s for layer %d", name, i);
+                return false;
+            }
+
+            expert_vec.resize(n_experts);
+            size_t expert_bytes = static_cast<size_t>(rows) * cols * sizeof(uint16_t);
+            for (int e = 0; e < n_experts; e++) {
+                char* ptr = static_cast<char*>(flat.data) + e * expert_bytes;
+                int64_t eshape[4] = {rows, cols, 0, 0};
+                expert_vec[e] = Tensor(ptr, DType::FP16, 2, eshape, true);
+            }
+            packed = Tensor();
+            return true;
+        };
+
+        if (!upload_packed_experts(L.expert_gate_packed, L.expert_gate_qtype,
+                                   L.expert_w_gate, "expert_gate_exps"))
+            return false;
+        if (!upload_packed_experts(L.expert_up_packed, L.expert_up_qtype,
+                                   L.expert_w_up, "expert_up_exps"))
+            return false;
+        if (!upload_packed_experts(L.expert_down_packed, L.expert_down_qtype,
+                                   L.expert_w_down, "expert_down_exps"))
+            return false;
+
+        // Path B: per-expert 2D tensors (from per-expert GGUF naming)
+        for (size_t e = 0; e < L.expert_w_gate.size(); ++e) {
+            if (!L.expert_w_gate[e].data || L.expert_w_gate[e].on_device) continue;
+            Tensor dummy_scales;
+            if (!upload_weight(L.expert_w_gate[e], L.w_gate_qtype, dummy_scales,
+                               compute_dtype, stream, gpu_allocations_)) {
+                IMP_LOG_ERROR("Failed to upload expert_w_gate[%zu] for layer %d", e, i);
+                return false;
+            }
+        }
+        for (size_t e = 0; e < L.expert_w_up.size(); ++e) {
+            if (!L.expert_w_up[e].data || L.expert_w_up[e].on_device) continue;
+            Tensor dummy_scales;
+            if (!upload_weight(L.expert_w_up[e], L.w_up_qtype, dummy_scales,
+                               compute_dtype, stream, gpu_allocations_)) {
+                IMP_LOG_ERROR("Failed to upload expert_w_up[%zu] for layer %d", e, i);
+                return false;
+            }
+        }
+        for (size_t e = 0; e < L.expert_w_down.size(); ++e) {
+            if (!L.expert_w_down[e].data || L.expert_w_down[e].on_device) continue;
+            Tensor dummy_scales;
+            if (!upload_weight(L.expert_w_down[e], L.w_down_qtype, dummy_scales,
+                               compute_dtype, stream, gpu_allocations_)) {
+                IMP_LOG_ERROR("Failed to upload expert_w_down[%zu] for layer %d", e, i);
+                return false;
+            }
+        }
+    }
+
+    // Final sync
     if (stream) {
         cudaStreamSynchronize(stream);
     } else {

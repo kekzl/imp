@@ -37,6 +37,9 @@ struct EngineConfig {
     // SSM state dtype: FP32 (default) or FP16 for ~50% VRAM savings on h_state
     DType ssm_state_dtype = DType::FP32;
 
+    // VRAM budget: max GPU memory to use (MiB), 0 = use all available
+    size_t vram_budget_mb = 0;
+
     // Layer offloading: number of layers to keep on GPU (-1 = all on GPU, 0 = all offloaded)
     int gpu_layers = -1;
 
@@ -67,6 +70,9 @@ public:
     // Set draft model for speculative decoding after init.
     // Can only be called once, before any generate/decode_step calls.
     bool set_draft_model(const std::string& path, int spec_k = 4);
+
+    // Reset SSM state for a sequence (call on context_reset for hybrid models)
+    void reset_ssm_state(int seq_id);
 
     // Accessors for C API
     Scheduler* scheduler() { return scheduler_.get(); }
@@ -100,6 +106,9 @@ private:
     // Layer weight offloading
     std::unique_ptr<LayerOffloadManager> offload_mgr_;
 
+    // True when MoE expert weights are on host (not graph-capturable)
+    bool experts_on_host_ = false;
+
     // Chat template for formatting prompts
     ChatTemplate chat_template_;
 
@@ -126,6 +135,9 @@ private:
     // Stream helpers: return green context stream or default stream
     cudaStream_t prefill_stream() const;
     cudaStream_t decode_stream() const;
+
+    // Returns effective free VRAM, capped by vram_budget_mb if set
+    size_t effective_free_vram() const;
 
     // Initialize speculative decoding (called from init() if configured)
     bool init_speculative();

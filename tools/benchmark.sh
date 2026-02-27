@@ -20,12 +20,13 @@ TEMPERATURE=0          # greedy decoding for reproducibility
 HF_CACHE="${HF_HOME:-${HOME}/.cache/huggingface}/hub"
 
 find_gguf() {
-    # Find a GGUF file matching a pattern in the HF cache or models/ directory
+    # Find a GGUF file matching a pattern in the HF cache or models/ directory.
+    # HuggingFace cache uses symlinks (snapshot -> blobs), so match both -type f and -type l.
     local pattern="$1"
     local result=""
-    result=$(find "$ROOT_DIR/models" "$HF_CACHE" -name "$pattern" -type f 2>/dev/null | head -1)
-    # Follow symlinks in HF cache
-    if [[ -L "$result" ]]; then
+    result=$(find "$ROOT_DIR/models" "$HF_CACHE" \( -name "$pattern" \) \( -type f -o -type l \) 2>/dev/null | head -1)
+    # Resolve symlinks to get the real path
+    if [[ -n "$result" ]]; then
         result=$(readlink -f "$result")
     fi
     echo "$result"

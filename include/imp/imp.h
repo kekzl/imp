@@ -48,6 +48,7 @@ typedef struct {
     int max_tokens;
     int seed;                      // -1 = random
     int apply_chat_template;       // 1 = yes (default), 0 = no
+    int ignore_eos;                // 1 = don't stop on EOS (benchmark mode)
 } ImpGenerateParams;
 
 ImpGenerateParams imp_generate_params_default(void);
