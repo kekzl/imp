@@ -917,7 +917,7 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
                         IMP_LOG_INFO("  %s: WSL2 pinned copy (%.2f MiB, DMA-ready)",
                                      name, total_raw / (1024.0 * 1024.0));
                     } else {
-                        cudaGetLastError();
+                        IMP_LOG_DEBUG("Cleared WSL2 cudaHostAlloc error: %s", cudaGetErrorString(cudaGetLastError()));
                         IMP_LOG_INFO("  %s: WSL2 cudaHostAlloc failed, falling back to "
                                      "unpinned mmap (%.2f MiB)", name,
                                      total_raw / (1024.0 * 1024.0));
