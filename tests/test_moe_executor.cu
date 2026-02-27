@@ -2,6 +2,7 @@
 #include "graph/executor.h"
 #include "model/model.h"
 #include "core/tensor.h"
+#include "compute/gemm.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -285,6 +286,8 @@ TEST(MoEExecutorTest, ForwardProducesValidOutput) {
 
     GraphExecutor executor;
     ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
 
     // Create input tokens
     const int n_tokens = 4;
@@ -348,6 +351,8 @@ TEST(MoEExecutorTest, ForwardSamplesToken) {
 
     GraphExecutor executor;
     ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
 
     const int n_tokens = 3;
     std::vector<int32_t> h_tokens = {1, 2, 3};
@@ -393,6 +398,8 @@ TEST(MoEExecutorTest, Deterministic) {
 
     GraphExecutor executor;
     ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
 
     const int n_tokens = 4;
     std::vector<int32_t> h_tokens = {5, 10, 15, 20};
@@ -439,6 +446,8 @@ TEST(MoEExecutorTest, MultiLayer) {
 
     GraphExecutor executor;
     ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
 
     const int n_tokens = 4;
     std::vector<int32_t> h_tokens = {1, 2, 3, 4};
@@ -483,6 +492,8 @@ TEST(MoEExecutorTest, EightExperts) {
 
     GraphExecutor executor;
     ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
 
     const int n_tokens = 8;
     std::vector<int32_t> h_tokens = {1, 2, 3, 4, 5, 6, 7, 8};
@@ -527,6 +538,8 @@ TEST(MoEExecutorTest, SingleToken) {
 
     GraphExecutor executor;
     ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
 
     int32_t h_token = 42;
     int h_position = 0;
@@ -578,7 +591,10 @@ TEST(MoEExecutorTest, MoEVsDenseDiffer) {
 
     GraphExecutor dense_exec, moe_exec;
     ASSERT_TRUE(dense_exec.init(*dense.model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(dense_exec.allocate_workspaces(false));
     ASSERT_TRUE(moe_exec.init(*moe.model, DType::FP16, false));
+    ASSERT_TRUE(moe_exec.allocate_workspaces(false));
 
     const int n_tokens = 4;
     std::vector<int32_t> h_tokens = {1, 2, 3, 4};
@@ -661,6 +677,8 @@ TEST(MoEExecutorTest, LogitsShape) {
 
     GraphExecutor executor;
     ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
 
     for (int n_tokens : {1, 2, 4, 8, 16}) {
         std::vector<int32_t> h_tokens(n_tokens);
@@ -736,6 +754,8 @@ TEST(MoEExecutorTest, MixedMoEDense) {
 
     GraphExecutor executor;
     ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
 
     const int n_tokens = 4;
     std::vector<int32_t> h_tokens = {1, 2, 3, 4};
