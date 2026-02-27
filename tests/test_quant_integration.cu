@@ -633,6 +633,8 @@ TEST(QuantIntegrationTest, FP16ForwardPass) {
 
     GraphExecutor executor;
     ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
 
     // Create input tokens on device
     std::vector<int32_t> h_tokens = {1, 5, 10};
@@ -679,6 +681,8 @@ TEST(QuantIntegrationTest, Q4_0ForwardPass) {
 
     GraphExecutor executor;
     ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
 
     // Input tokens
     std::vector<int32_t> h_tokens = {0, 1};
@@ -745,6 +749,8 @@ TEST(QuantIntegrationTest, Q4_0Deterministic) {
 
     GraphExecutor executor;
     ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
 
     std::vector<int32_t> h_tokens = {3, 7};
     std::vector<int> h_positions = {0, 1};
@@ -784,6 +790,8 @@ TEST(QuantIntegrationTest, Q4_0LogitsShape) {
 
     GraphExecutor executor;
     ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
 
     std::vector<int32_t> h_tokens = {1, 2, 3, 4, 5};
     std::vector<int> h_positions = {0, 1, 2, 3, 4};
@@ -830,6 +838,8 @@ TEST(QuantIntegrationTest, Q4_0MultiLayer) {
 
     GraphExecutor executor;
     ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
 
     std::vector<int32_t> h_tokens = {1, 2, 3};
     std::vector<int> h_positions = {0, 1, 2};
@@ -869,6 +879,8 @@ TEST(QuantIntegrationTest, Q8_0ForwardPass) {
 
     GraphExecutor executor;
     ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
 
     std::vector<int32_t> h_tokens = {0, 1};
     std::vector<int> h_positions = {0, 1};
@@ -932,6 +944,8 @@ TEST(QuantIntegrationTest, Q8_0MultiLayer) {
 
     GraphExecutor executor;
     ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
 
     std::vector<int32_t> h_tokens = {1, 2, 3};
     std::vector<int> h_positions = {0, 1, 2};

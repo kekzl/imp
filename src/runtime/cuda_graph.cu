@@ -1,10 +1,87 @@
 #include "runtime/cuda_graph.h"
+#include "runtime/pdl.h"
 #include "graph/executor.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cstring>
+#include <vector>
 
 namespace imp {
+
+// ---------------------------------------------------------------------------
+// apply_pdl_edges — convert kernel→kernel edges to PDL edges in a graph
+// ---------------------------------------------------------------------------
+#if IMP_CUDA_13_1
+static int apply_pdl_edges(cudaGraph_t graph) {
+    if (!graph) return 0;
+
+    // 1. Enumerate all nodes
+    size_t num_nodes = 0;
+    cudaError_t err = cudaGraphGetNodes(graph, nullptr, &num_nodes);
+    if (err != cudaSuccess || num_nodes == 0) return 0;
+
+    std::vector<cudaGraphNode_t> nodes(num_nodes);
+    err = cudaGraphGetNodes(graph, nodes.data(), &num_nodes);
+    if (err != cudaSuccess) return 0;
+
+    // 2. Build set of kernel nodes (use linear scan — node counts are small)
+    std::vector<cudaGraphNode_t> kernel_nodes;
+    kernel_nodes.reserve(num_nodes);
+    for (size_t i = 0; i < num_nodes; i++) {
+        cudaGraphNodeType type;
+        if (cudaGraphNodeGetType(nodes[i], &type) == cudaSuccess &&
+            type == cudaGraphNodeTypeKernel) {
+            kernel_nodes.push_back(nodes[i]);
+        }
+    }
+    if (kernel_nodes.size() < 2) return 0;
+
+    // 3. Enumerate all edges with edge data
+    size_t num_edges = 0;
+    err = cudaGraphGetEdges(graph, nullptr, nullptr, nullptr, &num_edges);
+    if (err != cudaSuccess || num_edges == 0) return 0;
+
+    std::vector<cudaGraphNode_t> from(num_edges), to(num_edges);
+    std::vector<cudaGraphEdgeData> edge_data(num_edges);
+    err = cudaGraphGetEdges(graph, from.data(), to.data(), edge_data.data(), &num_edges);
+    if (err != cudaSuccess) return 0;
+
+    // Helper: check if a node is a kernel node
+    auto is_kernel = [&](cudaGraphNode_t n) -> bool {
+        for (const auto& kn : kernel_nodes) {
+            if (kn == n) return true;
+        }
+        return false;
+    };
+
+    // 4. Replace default kernel→kernel edges with PDL edges
+    cudaGraphEdgeData pdl_edge{};
+    pdl_edge.from_port = cudaGraphKernelNodePortProgrammatic;
+    pdl_edge.to_port = 0;
+    pdl_edge.type = cudaGraphDependencyTypeProgrammatic;
+
+    int converted = 0;
+    for (size_t i = 0; i < num_edges; i++) {
+        if (edge_data[i].type != cudaGraphDependencyTypeDefault) continue;
+        if (!is_kernel(from[i]) || !is_kernel(to[i])) continue;
+
+        // Remove old default edge
+        err = cudaGraphRemoveDependencies(graph, &from[i], &to[i], &edge_data[i], 1);
+        if (err != cudaSuccess) continue;
+
+        // Add PDL edge
+        err = cudaGraphAddDependencies(graph, &from[i], &to[i], &pdl_edge, 1);
+        if (err != cudaSuccess) {
+            // Rollback: re-add the default edge
+            cudaGraphAddDependencies(graph, &from[i], &to[i], &edge_data[i], 1);
+            continue;
+        }
+        converted++;
+    }
+
+    return converted;
+}
+#endif // IMP_CUDA_13_1
 
 // ---------------------------------------------------------------------------
 // CudaGraphCapture
@@ -42,6 +119,15 @@ bool CudaGraphCapture::end_capture() {
         capture_stream_ = nullptr;
         return false;
     }
+
+    // Convert kernel→kernel edges to PDL edges for tail/head overlap
+#if IMP_CUDA_13_1
+    if (pdl::is_available()) {
+        int converted = apply_pdl_edges(graph_);
+        if (converted > 0)
+            IMP_LOG_DEBUG("CudaGraphCapture: %d edges converted to PDL", converted);
+    }
+#endif
 
     err = cudaGraphInstantiate(&graph_exec_, graph_, 0);
     if (err != cudaSuccess) {
@@ -388,6 +474,15 @@ bool CudaGraphConditionalRunner::setup(
                          cudaGetErrorString(err));
             goto fail;
         }
+
+        // 5d. Convert kernel→kernel edges to PDL in the body graph
+#if IMP_CUDA_13_1
+        if (pdl::is_available()) {
+            int converted = apply_pdl_edges(body_graph);
+            if (converted > 0)
+                IMP_LOG_INFO("ConditionalRunner: %d body graph edges converted to PDL", converted);
+        }
+#endif
 
         // 6. Instantiate the top-level graph
         err = cudaGraphInstantiate(&exec_, graph_, 0);
