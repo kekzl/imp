@@ -2274,19 +2274,21 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
         // Bounds check: verify offset + expert_raw <= total allocated
         if (offset + expert_raw > total_raw) {
-            fprintf(stderr, "imp::dequant_expert: OOB! expert %d offset=%zu + raw=%zu > total=%zu "
-                    "(packed shape [%ld,%ld,%ld] qtype=%u)\n",
+            IMP_LOG_ERROR("dequant_expert: OOB! expert %d offset=%zu + raw=%zu > total=%zu "
+                    "(packed shape [%ld,%ld,%ld] qtype=%u)",
                     expert_idx, offset, expert_raw, total_raw,
                     (long)packed.shape[0], (long)packed.shape[1], (long)packed.shape[2],
                     (unsigned)qtype);
+            return Tensor();
         }
 
         // Check dequant buffer is large enough
         size_t dequant_needed = static_cast<size_t>(rows) * cols * sizeof(uint16_t);
         if (dequant_needed > moe_dequant_buf_size_) {
-            fprintf(stderr, "imp::dequant_expert: dequant buffer too small! "
-                    "need=%zu have=%zu (rows=%ld cols=%ld)\n",
+            IMP_LOG_ERROR("dequant_expert: dequant buffer too small! "
+                    "need=%zu have=%zu (rows=%ld cols=%ld)",
                     dequant_needed, moe_dequant_buf_size_, (long)rows, (long)cols);
+            return Tensor();
         }
 
         const char* src;
@@ -2329,6 +2331,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             Tensor b = use_packed_dequant
                 ? dequant_expert(packed, qtype, eidx)
                 : fallback[eidx];
+            if (!b.data) return;  // dequant_expert failed (OOB or buffer too small)
             gemm(a, b, c, 1.0f, 0.0f, stream);
         }
     };
