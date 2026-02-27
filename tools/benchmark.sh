@@ -224,7 +224,6 @@ for i in "${!MODEL_NAMES[@]}"; do
         --prompt "$PROMPT" \
         --max-tokens "$TG_TOKENS" \
         --temperature "$TEMPERATURE" \
-        --chat-template none \
         > "$IMP_STDOUT" 2> "$IMP_STDERR"; then
         parse_imp_output "$IMP_STDERR"
         echo "  imp:       pp=$IMP_PP_TOKS tok/s (${IMP_PP_N} tokens), tg=$IMP_TG_TOKS tok/s (${IMP_TG_N} tokens)"
