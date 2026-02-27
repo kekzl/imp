@@ -73,6 +73,13 @@ void swiglu_quantize_q8_1(const half* gate, const half* up,
                             block_q8_1* q8_out, float* d8_out,
                             int total_elements, cudaStream_t stream = nullptr);
 
+// Fused relu² + Q8_1 quantization: applies relu²(x) = max(0,x)² and quantizes
+// directly to Q8_1 format. Used by non-gated MoE experts (Nemotron).
+// input: [total_elements] FP16, q8_out: [total_elements/32] Q8_1 blocks.
+void relu_sqr_quantize_q8_1(const half* input,
+                              block_q8_1* q8_out, float* d8_out,
+                              int total_elements, cudaStream_t stream = nullptr);
+
 // Fused RMSNorm + Q8_1 quantization: applies RMSNorm to input, then quantizes
 // the normalized result directly to Q8_1 format. Eliminates the intermediate
 // FP16 norm_out buffer write+read. Single-row only (n=1 decode).

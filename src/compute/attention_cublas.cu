@@ -10,6 +10,12 @@
 
 namespace imp {
 
+#if IMP_CUDA_13_1
+static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
+#else
+static constexpr auto kGemmAlgo = CUBLAS_GEMM_DEFAULT;
+#endif
+
 // ---------------------------------------------------------------------------
 // cuBLAS handle (reuse global — same as gemm.cu)
 // ---------------------------------------------------------------------------
@@ -208,7 +214,7 @@ void attention_cublas_prefill(
             strideS,
             n_heads,
             CUBLAS_COMPUTE_32F,
-            CUBLAS_GEMM_DEFAULT);
+            kGemmAlgo);
 
         // Softmax
         {
@@ -234,7 +240,7 @@ void attention_cublas_prefill(
             static_cast<long long>(head_dim),
             n_heads,
             CUBLAS_COMPUTE_32F,
-            CUBLAS_GEMM_DEFAULT);
+            kGemmAlgo);
 
     } else {
         // ---------------------------------------------------------------
@@ -271,7 +277,7 @@ void attention_cublas_prefill(
             (void**)(s_attn_d_ptrs + 2 * n_heads),     CUDA_R_16F, ld_s,
             n_heads,
             CUBLAS_COMPUTE_32F,
-            CUBLAS_GEMM_DEFAULT);
+            kGemmAlgo);
 
         // Step 2: Softmax
         {
@@ -305,7 +311,7 @@ void attention_cublas_prefill(
             (void**)(s_attn_d_ptrs + 2 * n_heads),     CUDA_R_16F, ld_o,
             n_heads,
             CUBLAS_COMPUTE_32F,
-            CUBLAS_GEMM_DEFAULT);
+            kGemmAlgo);
     }
 }
 

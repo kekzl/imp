@@ -518,4 +518,159 @@ void dequantize_fp8_e4m3_to_fp16(const void* input_fp8, void* output_fp16,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Per-expert FP8 scale calibration kernel for MoE.
+// One block per expert: finds absmax within [offsets[e], offsets[e+1]) × K,
+// writes scale = absmax / 448.0.
+// ---------------------------------------------------------------------------
+
+__global__ void calibrate_fp8_scales_per_expert_kernel(
+    const half*    __restrict__ input,
+    const int32_t* __restrict__ offsets,
+    float*         __restrict__ scales_out,
+    int K)
+{
+    __shared__ float sdata[kBlockSize];
+
+    const int expert = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int start = offsets[expert];
+    const int end   = offsets[expert + 1];
+    const int n_elems = (end - start) * K;
+
+    const half* expert_base = input + static_cast<int64_t>(start) * K;
+
+    float local_max = 0.0f;
+    for (int i = tid; i < n_elems; i += kBlockSize) {
+        float v = fabsf(__half2float(expert_base[i]));
+        local_max = fmaxf(local_max, v);
+    }
+
+    sdata[tid] = local_max;
+    __syncthreads();
+
+    for (int s = kBlockSize / 2; s > 0; s >>= 1) {
+        if (tid < s) {
+            sdata[tid] = fmaxf(sdata[tid], sdata[tid + s]);
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        float absmax = sdata[0];
+        scales_out[expert] = (absmax > 0.0f) ? (absmax / kFP8E4M3Max) : 1.0f;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-expert FP8 quantization kernel for MoE.
+// Each block handles one expert's activations with its own scale.
+// ---------------------------------------------------------------------------
+
+__global__ void quantize_fp16_to_fp8_per_expert_kernel(
+    const half*    __restrict__ input,
+    uint8_t*       __restrict__ output,
+    const int32_t* __restrict__ offsets,
+    const float*   __restrict__ scales,
+    int K)
+{
+    const int expert = blockIdx.y;
+    const int start = offsets[expert];
+    const int end   = offsets[expert + 1];
+    const int n_elems = (end - start) * K;
+
+    if (n_elems == 0) return;
+
+    float scale = scales[expert];
+    float inv_scale = (scale > 0.0f) ? (1.0f / scale) : 1.0f;
+
+    const half* expert_in  = input  + static_cast<int64_t>(start) * K;
+    uint8_t*    expert_out = output + static_cast<int64_t>(start) * K;
+
+    int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
+    if (base >= n_elems) return;
+
+#if defined(__CUDA_FP8_TYPES_EXIST__)
+    #pragma unroll
+    for (int i = 0; i < kElemsPerThread; ++i) {
+        int idx = base + i;
+        if (idx < n_elems) {
+            float val = __half2float(expert_in[idx]) * inv_scale;
+            val = fminf(fmaxf(val, -kFP8E4M3Max), kFP8E4M3Max);
+            __nv_fp8_e4m3 fp8_val = __nv_fp8_e4m3(val);
+            memcpy(&expert_out[idx], &fp8_val, 1);
+        }
+    }
+#else
+    #pragma unroll
+    for (int i = 0; i < kElemsPerThread; ++i) {
+        int idx = base + i;
+        if (idx < n_elems) {
+            float val = __half2float(expert_in[idx]) * inv_scale;
+            expert_out[idx] = float_to_fp8_e4m3_sw(val);
+        }
+    }
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Host-side launch wrappers for per-expert FP8 operations
+// ---------------------------------------------------------------------------
+
+void calibrate_fp8_scales_per_expert(const void* input_fp16, int K,
+                                      const int32_t* d_offsets, int n_experts,
+                                      float* d_scales_out,
+                                      cudaStream_t stream)
+{
+    if (n_experts <= 0 || !input_fp16 || !d_offsets || !d_scales_out) return;
+
+    calibrate_fp8_scales_per_expert_kernel<<<n_experts, kBlockSize, 0, stream>>>(
+        static_cast<const half*>(input_fp16),
+        d_offsets,
+        d_scales_out,
+        K);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        IMP_LOG_ERROR("calibrate_fp8_scales_per_expert launch failed: %s",
+                      cudaGetErrorString(err));
+    }
+}
+
+void quantize_fp16_to_fp8_e4m3_per_expert(const void* input_fp16, void* output_fp8,
+                                            int K, const int32_t* d_offsets,
+                                            int n_experts, const float* d_scales,
+                                            cudaStream_t stream)
+{
+    if (n_experts <= 0 || !input_fp16 || !output_fp8 || !d_offsets || !d_scales) return;
+
+    // Launch with enough blocks per expert for the maximum possible token count.
+    // We use a 2D grid: x = blocks within expert, y = expert index.
+    // Conservative upper bound: use total token count for grid.x sizing.
+    // Each expert's kernel skips work if base >= n_elems for that expert.
+    //
+    // For efficiency, we estimate max tokens per expert. In the worst case,
+    // all tokens go to one expert. We read offsets[n_experts] via the last
+    // cudaMemcpy that the caller already did, but here we don't have host
+    // offsets. Use a generous grid.x that covers max_tokens * K.
+    // A 128-expert model with 4096 tokens: max ~4096 tokens/expert × K.
+    // With K=7168, that's 29M elements per expert. Grid.x = 29M/(256*4) = 28K blocks.
+    // This is fine — excess blocks return immediately.
+    constexpr int kMaxBlocksPerExpert = 32768;
+    dim3 grid(kMaxBlocksPerExpert, n_experts);
+    quantize_fp16_to_fp8_per_expert_kernel<<<grid, kBlockSize, 0, stream>>>(
+        static_cast<const half*>(input_fp16),
+        static_cast<uint8_t*>(output_fp8),
+        d_offsets,
+        d_scales,
+        K);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3_per_expert launch failed: %s",
+                      cudaGetErrorString(err));
+    }
+}
+
 } // namespace imp
+

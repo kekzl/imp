@@ -63,6 +63,7 @@ ImpConfig imp_config_default(void) {
     config.enable_cuda_graphs = 1;
     config.gpu_layers = -1;             // all on GPU
     config.ssm_state_dtype = IMP_DTYPE_FP32;
+    config.vram_budget_mb = 0;          // use all available
     config.num_cpu_threads = 0;         // auto
     return config;
 }
@@ -77,6 +78,7 @@ ImpGenerateParams imp_generate_params_default(void) {
     params.max_tokens = 256;
     params.seed = -1;
     params.apply_chat_template = 1;
+    params.ignore_eos = 0;
     return params;
 }
 
@@ -215,6 +217,7 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
     ecfg.use_pdl = (config->enable_pdl != 0);
     ecfg.gpu_layers = config->gpu_layers;
     ecfg.ssm_state_dtype = map_dtype(config->ssm_state_dtype);
+    ecfg.vram_budget_mb = config->vram_budget_mb;
     ecfg.temperature = config->temperature;
     ecfg.top_p = config->top_p;
     ecfg.top_k = config->top_k;
@@ -412,6 +415,7 @@ ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
     // cancelled so the scheduler removes it from active_ on next schedule().
     if (ctx->active_request) {
         ctx->engine->kv_manager()->free_sequence(ctx->active_request->id);
+        ctx->engine->reset_ssm_state(ctx->active_request->id);
         ctx->active_request->status = imp::RequestStatus::CANCELLED;
         ctx->active_request = nullptr;
     }
@@ -466,6 +470,7 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params,
     req->top_k = params->top_k;
     req->seed = params->seed;
     req->max_tokens = params->max_tokens;
+    req->ignore_eos = (params->ignore_eos != 0);
 
     // Record output size before the step
     size_t prev_output_size = req->output_tokens.size();
@@ -503,6 +508,8 @@ ImpError imp_context_reset(ImpContext ctx) {
     // scheduler removes it from active_ on the next schedule() call.
     if (ctx->active_request) {
         ctx->engine->kv_manager()->free_sequence(ctx->active_request->id);
+        // Reset SSM state for hybrid models (Mamba2)
+        ctx->engine->reset_ssm_state(ctx->active_request->id);
         ctx->active_request->status = imp::RequestStatus::CANCELLED;
         ctx->active_request = nullptr;
     }

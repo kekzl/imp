@@ -45,6 +45,9 @@ typedef struct {
     // SSM state precision
     ImpDType ssm_state_dtype;      // FP32 (default) or FP16 for SSM h_state
 
+    // VRAM budget
+    size_t vram_budget_mb;         // Max GPU memory to use (MiB), 0 = use all available
+
     // Threading
     int num_cpu_threads;           // 0 = auto (hardware_concurrency)
 } ImpConfig;

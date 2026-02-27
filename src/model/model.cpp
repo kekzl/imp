@@ -24,6 +24,15 @@ Model::~Model() {
         }
     }
     host_pinned_.clear();
+
+    // Free cudaHostAlloc'd expert buffers (WSL2 DMA path).
+    for (void* ptr : host_pinned_allocs_) {
+        if (ptr) {
+            cudaFreeHost(ptr);
+        }
+    }
+    host_pinned_allocs_.clear();
+
     gpu_weights_ready_ = false;
 
 #ifdef __linux__

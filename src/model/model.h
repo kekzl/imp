@@ -116,9 +116,13 @@ public:
     // For Q8_0: dequantizes to FP16 on GPU.
     // For F16/BF16: direct upload.
     // For F32: converts to compute_dtype and uploads.
-    bool upload_weights_gpu(DType compute_dtype = DType::FP16, cudaStream_t stream = nullptr);
+    bool upload_weights_gpu(DType compute_dtype = DType::FP16, cudaStream_t stream = nullptr,
+                            size_t expert_reserve_bytes = 1ULL << 30);
 
     bool gpu_weights_ready() const { return gpu_weights_ready_; }
+
+    // Estimate total raw bytes for all expert packed tensors (for VRAM budget decisions).
+    size_t estimate_expert_bytes() const;
 
     ModelConfig config_;
     Tensor tok_emb_, out_norm_, out_proj_;
@@ -133,7 +137,8 @@ public:
 
     bool gpu_weights_ready_ = false;
     std::vector<void*> gpu_allocations_;
-    std::vector<void*> host_pinned_;  // mmap regions pinned via cudaHostRegister
+    std::vector<void*> host_pinned_;        // mmap regions pinned via cudaHostRegister
+    std::vector<void*> host_pinned_allocs_; // cudaHostAlloc'd expert buffers (WSL2 DMA path)
 };
 
 } // namespace imp

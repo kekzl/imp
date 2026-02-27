@@ -54,12 +54,19 @@ public:
     GraphExecutor() = default;
     ~GraphExecutor();
 
-    // Initialize buffers for the given model. compute_dtype controls the
-    // dtype of intermediate activations (FP16 or BF16).
-    // use_pdl: if true, enable Programmatic Dependent Launch on custom kernels
-    // to reduce inter-kernel gaps in the forward pass.
+    // Phase 1: Initialize model reference, compute workspace sizes, enable PDL.
+    // Does NOT allocate GPU memory — call allocate_workspaces() after weight upload.
     bool init(const Model& model, DType compute_dtype = DType::FP16, bool use_pdl = false,
               int max_batch_size = 1, int max_seq_len = 0);
+
+    // Phase 2: Allocate all GPU workspace buffers.
+    // Call AFTER weight upload to maximize VRAM available for expert layers.
+    // experts_on_host: if true, skip MoE batch dequant buffer allocation.
+    bool allocate_workspaces(bool experts_on_host = false);
+
+    // Estimated GPU memory needed by allocate_workspaces().
+    // Used by Engine to compute the expert upload reserve.
+    size_t workspace_estimate() const;
 
     // Run the full forward pass and return the sampled token ID.
     int32_t forward(const InferenceState& state, cudaStream_t stream = nullptr);
@@ -102,6 +109,10 @@ public:
     // Get a view of the logits buffer for n tokens (for CUDA graph replay,
     // where forward_logits isn't called but the graph writes to this buffer).
     Tensor get_logits_view(int n) const { return view_tokens(logits_, n); }
+
+    // Release the MoE batch dequant buffer when expert weights are on host.
+    // Call after weight upload if experts didn't fit on GPU.
+    void release_moe_batch_buf();
 
     // Pre-allocated device buffer for sampling output (stable address for CUDA graph).
     int32_t* d_sample_result() const { return d_sample_result_; }
@@ -195,6 +206,16 @@ private:
     void** d_moe_work_ptrs_ = nullptr;
     int d_moe_work_ptrs_count_ = 0;  // n_experts used for allocation
 
+    // Per-expert FP8 scale buffer: [n_experts] floats on device.
+    // Used by calibrate_fp8_scales_per_expert() for dynamic per-expert scaling.
+    float* d_moe_fp8_scales_ = nullptr;
+
+    // Device-side weight pointer array for device-grouped GEMM.
+    // Eliminates host sync by keeping weight pointers on GPU.
+    // Stored as void** for easy cudaMemcpy; cast to const void** at call sites.
+    void** d_moe_weight_ptrs_ = nullptr;
+    int d_moe_weight_ptrs_count_ = 0;
+
     // GPU staging buffer for one expert's raw quantized bytes (H2D copy).
     void* moe_raw_staging_buf_ = nullptr;
     size_t moe_raw_staging_size_ = 0;
@@ -251,7 +272,7 @@ private:
 
     void allocate_persistent_workspace(int max_tokens);
     void allocate_shared_workspace(int max_tokens);
-    void allocate_auxiliary_buffers();  // dequant scratch, MoE staging, routing buffers
+    void allocate_auxiliary_buffers(bool skip_batch_dequant = false);  // dequant scratch, MoE staging, routing buffers
     void free_buffers();
 
     // Compute shared workspace sizes for each phase (stored in *_shared_size_ members)

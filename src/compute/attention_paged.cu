@@ -160,7 +160,7 @@ paged_attention_gqa_kernel(
     for (int i = 0; i < elems_per_thread; i++) o_reg[i] = 0.0f;
 
     // ---- Shared memory for K/V tile ----
-    extern __shared__ char smem_gqa[];
+    extern __shared__ __align__(32) char smem_gqa[];
     float* s_k_tile = reinterpret_cast<float*>(smem_gqa);
     float* s_v_tile = s_k_tile + block_size * head_dim;
 
@@ -547,9 +547,48 @@ __global__ void paged_attention_splitk_kernel(
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
             const half* K_tok = K_block + t * kv_slot_stride + kv_head * head_dim;
 
-            // Vectorized Q.K dot product using half2 loads
+            // Vectorized Q.K dot product
             float dot = 0.0f;
             {
+#if __CUDA_ARCH__ >= 1200
+                // Blackwell (sm_120+): 256-bit loads when elems_per_thread >= 16,
+                // 128-bit loads when >= 8, otherwise half2 fallback.
+                if constexpr (true) {
+                    // Use float4 loads (128-bit, 8 halves) for elems_per_thread >= 8
+                    const int K_vec8 = elems_per_thread / 8;
+                    if (K_vec8 > 0) {
+                        const float4* K_v = reinterpret_cast<const float4*>(K_tok + lane_offset);
+                        #pragma unroll
+                        for (int i = 0; i < K_vec8; i++) {
+                            float4 k_raw = K_v[i];
+                            const half2* k_h2 = reinterpret_cast<const half2*>(&k_raw);
+                            #pragma unroll
+                            for (int j = 0; j < 4; j++) {
+                                dot += q_reg[i*8 + 2*j]   * __half2float(k_h2[j].x);
+                                dot += q_reg[i*8 + 2*j+1] * __half2float(k_h2[j].y);
+                            }
+                        }
+                        // Remainder via half2
+                        const int done = K_vec8 * 8;
+                        const half2* K_rem = reinterpret_cast<const half2*>(K_tok + lane_offset + done);
+                        #pragma unroll
+                        for (int i = 0; i < (elems_per_thread - done) / 2; i++) {
+                            half2 k2 = K_rem[i];
+                            dot += q_reg[done + 2*i]   * __half2float(k2.x);
+                            dot += q_reg[done + 2*i+1] * __half2float(k2.y);
+                        }
+                    } else {
+                        // Small head_dim: use half2 path
+                        const half2* K_tok2 = reinterpret_cast<const half2*>(K_tok + lane_offset);
+                        #pragma unroll
+                        for (int i = 0; i < elems_per_thread / 2; i++) {
+                            half2 k2 = K_tok2[i];
+                            dot += q_reg[2*i]   * __half2float(k2.x);
+                            dot += q_reg[2*i+1] * __half2float(k2.y);
+                        }
+                    }
+                }
+#else
                 const half2* K_tok2 = reinterpret_cast<const half2*>(K_tok + lane_offset);
                 #pragma unroll
                 for (int i = 0; i < elems_per_thread / 2; i++) {
@@ -557,6 +596,7 @@ __global__ void paged_attention_splitk_kernel(
                     dot += q_reg[2*i]   * __half2float(k2.x);
                     dot += q_reg[2*i+1] * __half2float(k2.y);
                 }
+#endif
             }
             dot = warp_reduce_sum(dot);
             dot *= scale;
@@ -569,9 +609,43 @@ __global__ void paged_attention_splitk_kernel(
             float rescale = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
             float w_new   = (l_new > 0.0f) ? (p / l_new) : 0.0f;
 
-            // Vectorized V accumulation using half2 loads
+            // Vectorized V accumulation
             const half* V_tok = V_block + t * kv_slot_stride + kv_head * head_dim;
             {
+#if __CUDA_ARCH__ >= 1200
+                if constexpr (true) {
+                    const int V_vec8 = elems_per_thread / 8;
+                    if (V_vec8 > 0) {
+                        const float4* V_v = reinterpret_cast<const float4*>(V_tok + lane_offset);
+                        #pragma unroll
+                        for (int i = 0; i < V_vec8; i++) {
+                            float4 v_raw = V_v[i];
+                            const half2* v_h2 = reinterpret_cast<const half2*>(&v_raw);
+                            #pragma unroll
+                            for (int j = 0; j < 4; j++) {
+                                o_reg[i*8 + 2*j]   = rescale * o_reg[i*8 + 2*j]   + w_new * __half2float(v_h2[j].x);
+                                o_reg[i*8 + 2*j+1] = rescale * o_reg[i*8 + 2*j+1] + w_new * __half2float(v_h2[j].y);
+                            }
+                        }
+                        const int done = V_vec8 * 8;
+                        const half2* V_rem = reinterpret_cast<const half2*>(V_tok + lane_offset + done);
+                        #pragma unroll
+                        for (int i = 0; i < (elems_per_thread - done) / 2; i++) {
+                            half2 v2 = V_rem[i];
+                            o_reg[done + 2*i]   = rescale * o_reg[done + 2*i]   + w_new * __half2float(v2.x);
+                            o_reg[done + 2*i+1] = rescale * o_reg[done + 2*i+1] + w_new * __half2float(v2.y);
+                        }
+                    } else {
+                        const half2* V_tok2 = reinterpret_cast<const half2*>(V_tok + lane_offset);
+                        #pragma unroll
+                        for (int i = 0; i < elems_per_thread / 2; i++) {
+                            half2 v2 = V_tok2[i];
+                            o_reg[2*i]   = rescale * o_reg[2*i]   + w_new * __half2float(v2.x);
+                            o_reg[2*i+1] = rescale * o_reg[2*i+1] + w_new * __half2float(v2.y);
+                        }
+                    }
+                }
+#else
                 const half2* V_tok2 = reinterpret_cast<const half2*>(V_tok + lane_offset);
                 #pragma unroll
                 for (int i = 0; i < elems_per_thread / 2; i++) {
@@ -579,6 +653,7 @@ __global__ void paged_attention_splitk_kernel(
                     o_reg[2*i]   = rescale * o_reg[2*i]   + w_new * __half2float(v2.x);
                     o_reg[2*i+1] = rescale * o_reg[2*i+1] + w_new * __half2float(v2.y);
                 }
+#endif
             }
 
             m_w = m_new;

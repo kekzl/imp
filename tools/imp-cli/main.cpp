@@ -82,6 +82,7 @@ int main(int argc, char** argv) {
         // Greedy decode params for deterministic benchmarking
         ImpGenerateParams bench_params = imp_generate_params_default();
         bench_params.temperature = 0.0f;
+        bench_params.ignore_eos = 1;  // Don't stop on EOS during benchmark
         // +1 because imp_prefill already produces the first output token;
         // without this the request hits max_tokens one decode step early.
         bench_params.max_tokens = tg_tokens + 1;

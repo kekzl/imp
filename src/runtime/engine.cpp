@@ -44,6 +44,25 @@ cudaStream_t Engine::decode_stream() const {
            ? green_ctx_.decode_stream() : stream_;
 }
 
+void Engine::reset_ssm_state(int seq_id) {
+    if (ssm_state_) {
+        ssm_state_->reset_sequence(seq_id % ssm_state_->max_sequences(), stream_);
+    }
+}
+
+size_t Engine::effective_free_vram() const {
+    size_t free_mem = 0, total_mem = 0;
+    if (cudaMemGetInfo(&free_mem, &total_mem) != cudaSuccess) {
+        return 0;
+    }
+    if (config_.vram_budget_mb > 0) {
+        size_t budget = config_.vram_budget_mb * 1024ULL * 1024;
+        size_t used = total_mem - free_mem;
+        free_mem = (budget > used) ? (budget - used) : 0;
+    }
+    return free_mem;
+}
+
 bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     if (!model) {
         return false;
@@ -60,7 +79,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // --- Initialize scheduler ---
     scheduler_ = std::make_unique<Scheduler>(config_.max_batch_size);
 
-    // --- Initialize graph executor (allocates activation workspace) ---
+    // --- Initialize graph executor (Phase 1: compute sizes, no GPU allocation) ---
+    // GPU workspace allocation is deferred to AFTER weight upload to maximize
+    // VRAM available for expert layers during upload.
     executor_ = std::make_unique<GraphExecutor>();
     if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl,
                          config_.max_batch_size, config_.max_seq_len)) {
@@ -76,13 +97,54 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
 
     // --- Upload model weights to GPU ---
+    // Compute dynamic reserve: workspace + KV cache + SSM state + safety margin.
+    // The workspace is not allocated yet, so all VRAM above this reserve is
+    // available for expert weight upload — fitting more layers on GPU.
+    size_t expert_reserve = executor_->workspace_estimate();
+    {
+        // Add estimated KV cache + SSM state footprint
+        int head_dim_est = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
+        size_t elem_sz = dtype_size(config_.compute_dtype);
+        // Minimum KV: enough for max_seq_len * max_batch_size
+        int blocks_per_seq = (config_.max_seq_len + kKVBlockSize - 1) / kKVBlockSize;
+        int n_attn = 0;
+        for (int i = 0; i < mcfg.n_layers; i++)
+            if (model_->layer(i).wq.data != nullptr) n_attn++;
+        if (n_attn == 0) n_attn = mcfg.n_layers;
+        size_t kv_block_bytes = static_cast<size_t>(kKVBlockSize) * mcfg.n_kv_heads * head_dim_est * elem_sz;
+        size_t kv_est = static_cast<size_t>(blocks_per_seq * config_.max_batch_size) * 2 * n_attn * kv_block_bytes;
+        expert_reserve += kv_est;
+
+        // SSM state estimate
+        if (mcfg.ssm_inner_size > 0) {
+            int conv_ch = mcfg.ssm_inner_size + 2 * mcfg.ssm_group_count * mcfg.ssm_state_size;
+            int n_heads = mcfg.ssm_dt_rank;
+            int hd_ssm = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
+            int n_ssm = 0;
+            for (int i = 0; i < mcfg.n_layers; i++)
+                if (model_->layer(i).ssm_in.data != nullptr) n_ssm++;
+            size_t ssm_est = static_cast<size_t>(n_ssm) * config_.max_batch_size *
+                             (conv_ch * std::max(mcfg.ssm_conv_kernel - 1, 0) * sizeof(float) +
+                              n_heads * hd_ssm * mcfg.ssm_state_size * dtype_size(config_.ssm_state_dtype));
+            expert_reserve += ssm_est;
+        }
+
+        // Safety margin for FP16 cache + fragmentation
+        expert_reserve += 128ULL * 1024 * 1024;
+
+        IMP_LOG_INFO("Expert upload reserve: %.2f MiB (workspace=%.2f, kv=%.2f, ssm+safety=rest)",
+                     expert_reserve / (1024.0 * 1024.0),
+                     executor_->workspace_estimate() / (1024.0 * 1024.0),
+                     kv_est / (1024.0 * 1024.0));
+    }
+
     {
         size_t free_before = 0, total_before = 0;
         cudaMemGetInfo(&free_before, &total_before);
         IMP_LOG_INFO("GPU memory before weight upload: %zu MiB free / %zu MiB total",
                      free_before / (1024 * 1024), total_before / (1024 * 1024));
 
-        if (!model_->upload_weights_gpu(config_.compute_dtype, stream_)) {
+        if (!model_->upload_weights_gpu(config_.compute_dtype, stream_, expert_reserve)) {
             IMP_LOG_ERROR("Weight upload failed. Model may be too large for GPU. "
                           "Try a smaller quantization (e.g. Q4_K_M instead of Q6_K).");
             return false;
@@ -96,8 +158,27 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                      (free_before - free_after) / (1024 * 1024));
     }
 
-    // --- Pre-dequantize quantized weights to FP16 for fast prefill GEMM ---
-    executor_->pre_dequant_weights(stream_);
+    // --- Check if any expert weights ended up on host ---
+    bool experts_on_host = false;
+    if (mcfg.n_experts > 0) {
+        for (int i = 0; i < mcfg.n_layers; i++) {
+            const auto& ly = model_->layer(i);
+            if (ly.expert_up_packed.data && !ly.expert_up_packed.on_device) {
+                experts_on_host = true;
+                break;
+            }
+        }
+        if (experts_on_host) {
+            experts_on_host_ = true;
+            if (config_.use_cuda_graphs) {
+                IMP_LOG_INFO("Disabling CUDA graphs: expert weights on host (H2D not graph-capturable)");
+                config_.use_cuda_graphs = false;
+            }
+        }
+    }
+
+    // --- Initialize graph executor (Phase 2: allocate GPU workspace) ---
+    executor_->allocate_workspaces(experts_on_host);
 
     // --- Initialize layer offloading if configured ---
     if (config_.gpu_layers >= 0) {
@@ -136,21 +217,46 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         max_blocks = config_.kv_cache_max_blocks;
     } else {
         // Auto-size: allocate what's needed plus headroom, bounded by free VRAM.
+        // Pre-calculate SSM footprint so we don't starve SSM state allocation.
         size_t elem_size = dtype_size(config_.compute_dtype);
         size_t single_block_bytes = static_cast<size_t>(kKVBlockSize) *
                                     mcfg.n_kv_heads * head_dim * elem_size;
         size_t per_block_total = single_block_bytes * 2 * n_kv_layers;
 
+        // Estimate SSM state footprint for hybrid models
+        size_t ssm_footprint = 0;
+        if (mcfg.ssm_inner_size > 0) {
+            int n_ssm_layers = 0;
+            for (int i = 0; i < mcfg.n_layers; i++) {
+                if (model_->layer(i).ssm_in.data != nullptr) n_ssm_layers++;
+            }
+            if (n_ssm_layers > 0) {
+                int conv_channels = mcfg.ssm_inner_size + 2 * mcfg.ssm_group_count * mcfg.ssm_state_size;
+                int n_heads = mcfg.ssm_dt_rank;
+                int head_dim_ssm = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
+                size_t ssm_elem = dtype_size(config_.ssm_state_dtype);
+                // conv_state: [n_ssm_layers * max_batch * conv_channels * (kernel-1)]
+                ssm_footprint += static_cast<size_t>(n_ssm_layers) * config_.max_batch_size *
+                                 conv_channels * std::max(mcfg.ssm_conv_kernel - 1, 0) * sizeof(float);
+                // h_state: [n_ssm_layers * max_batch * n_heads * head_dim_ssm * state_size]
+                ssm_footprint += static_cast<size_t>(n_ssm_layers) * config_.max_batch_size *
+                                 n_heads * head_dim_ssm * mcfg.ssm_state_size * ssm_elem;
+            }
+        }
+
         // Target: 2x headroom for batching / prefix caching
         int target_blocks = needed_blocks * 2;
 
-        size_t free_mem = 0, total_mem = 0;
-        cudaError_t err = cudaMemGetInfo(&free_mem, &total_mem);
-        if (err != cudaSuccess || per_block_total == 0) {
+        size_t free_mem = effective_free_vram();
+        if (free_mem == 0 || per_block_total == 0) {
             max_blocks = needed_blocks;
         } else {
-            // Don't exceed 80% of remaining free VRAM
-            size_t kv_budget = static_cast<size_t>(free_mem * 0.8);
+            // Reserve space for SSM state + 256 MiB safety margin, then cap KV
+            // at 80% of what remains to leave room for FP16 weight caching.
+            constexpr size_t kSafetyMarginBytes = 256ULL * 1024 * 1024;
+            size_t reserved = ssm_footprint + kSafetyMarginBytes;
+            size_t available = (free_mem > reserved) ? (free_mem - reserved) : 0;
+            size_t kv_budget = static_cast<size_t>(available * 0.8);
             int budget_blocks = static_cast<int>(kv_budget / per_block_total);
             max_blocks = std::min(target_blocks, budget_blocks);
         }
@@ -212,6 +318,11 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             }
         }
     }
+
+    // --- Pre-dequantize quantized weights to FP16 for fast prefill GEMM ---
+    // Always attempt this — FP16 cache is critical for prefill throughput.
+    // The function handles partial caching internally when VRAM is tight.
+    executor_->pre_dequant_weights(stream_);
 
     // --- Pre-allocate decode batch pool for stable CUDA Graph pointers ---
     {
@@ -526,9 +637,12 @@ bool Engine::step() {
                       next_token, tok->decode_token(next_token).c_str());
 
         // Check EOS and chat template stop tokens
-        bool is_stop = (next_token == tok->eos_id());
-        for (int32_t stop_id : chat_template_.stop_token_ids()) {
-            if (next_token == stop_id) { is_stop = true; break; }
+        bool is_stop = false;
+        if (!req->ignore_eos) {
+            is_stop = (next_token == tok->eos_id());
+            for (int32_t stop_id : chat_template_.stop_token_ids()) {
+                if (next_token == stop_id) { is_stop = true; break; }
+            }
         }
 
         if (is_stop ||
@@ -730,9 +844,12 @@ bool Engine::step() {
                               next_token, tok->decode_token(next_token).c_str());
 
                 // Check EOS and chat template stop tokens
-                bool is_stop = (next_token == tok->eos_id());
-                for (int32_t stop_id : chat_template_.stop_token_ids()) {
-                    if (next_token == stop_id) { is_stop = true; break; }
+                bool is_stop = false;
+                if (!req->ignore_eos) {
+                    is_stop = (next_token == tok->eos_id());
+                    for (int32_t stop_id : chat_template_.stop_token_ids()) {
+                        if (next_token == stop_id) { is_stop = true; break; }
+                    }
                 }
 
                 if (is_stop ||

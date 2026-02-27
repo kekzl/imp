@@ -2,10 +2,6 @@
 
 #include <cuda_runtime.h>
 
-#if IMP_CUDA_13_1
-#include <cuda.h>
-#endif
-
 namespace imp {
 
 class GreenContextManager {
@@ -47,12 +43,10 @@ private:
     float prefill_ratio_ = 0.8f;
 
 #if IMP_CUDA_13_1
-    CUgreenCtx prefill_green_ctx_ = nullptr;
-    CUgreenCtx decode_green_ctx_ = nullptr;
-    CUdevResourceDesc prefill_resource_desc_ = nullptr;
-    CUdevResourceDesc decode_resource_desc_ = nullptr;
-    CUcontext prefill_ctx_ = nullptr;
-    CUcontext decode_ctx_ = nullptr;
+    cudaExecutionContext_t prefill_green_ctx_ = nullptr;
+    cudaExecutionContext_t decode_green_ctx_ = nullptr;
+    cudaDevResourceDesc_t prefill_resource_desc_ = nullptr;
+    cudaDevResourceDesc_t decode_resource_desc_ = nullptr;
 #endif
 };
 
