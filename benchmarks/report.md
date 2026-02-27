@@ -1,6 +1,6 @@
 # imp vs llama.cpp Benchmark Report
 
-**Date:** 2026-02-27 16:16 UTC
+**Date:** 2026-02-27 16:53 UTC
 **GPU:** NVIDIA GeForce RTX 5090 (32607 MiB)
 **Driver:** 591.86 | **CUDA:** 13.1
 **Build:** sm_120 native, -O3 -Xptxas -O3 --use_fast_math, CUDA graphs ON, PDL ON
@@ -20,14 +20,14 @@
 | Model | Quant | Engine | pp tok/s | tg tok/s |
 |-------|-------|--------|----------|----------|
 | Qwen3-4B-Instruct | Q8_0 | llama.cpp | N/A | N/A |
-| Qwen3-4B-Instruct | Q8_0 | imp (bench) | 19868.42 | 208.76 |
-| Qwen3-4B-Instruct | Q8_0 | imp (real) | 1416.53 | 205.41 |
+| Qwen3-4B-Instruct | Q8_0 | imp (bench) | 19851.67 | 209.41 |
+| Qwen3-4B-Instruct | Q8_0 | imp (real) | 1178.97 | 202.70 |
 | Qwen3-Coder-30B-A3B-Instruct | Q6_K | llama.cpp | N/A | N/A |
-| Qwen3-Coder-30B-A3B-Instruct | Q6_K | imp (bench) | 883.01 | 212.71 |
-| Qwen3-Coder-30B-A3B-Instruct | Q6_K | imp (real) | 354.20 | 208.22 |
+| Qwen3-Coder-30B-A3B-Instruct | Q6_K | imp (bench) | 952.99 | 216.69 |
+| Qwen3-Coder-30B-A3B-Instruct | Q6_K | imp (real) | 319.66 | 209.97 |
 | Nemotron-3-Nano-30B-A3B | Q6_K | llama.cpp | N/A | N/A |
-| Nemotron-3-Nano-30B-A3B | Q6_K | imp (bench) | 1331.60 | 76.05 |
-| Nemotron-3-Nano-30B-A3B | Q6_K | imp (real) | 513.82 | 75.97 |
+| Nemotron-3-Nano-30B-A3B | Q6_K | imp (bench) | 1401.78 | 68.83 |
+| Nemotron-3-Nano-30B-A3B | Q6_K | imp (real) | 454.10 | 62.32 |
 
 ## Notes
 
