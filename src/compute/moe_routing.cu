@@ -1,4 +1,5 @@
 #include "compute/moe_routing.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cfloat>
@@ -637,29 +638,64 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
 
     // ---- Allocate result tensors ----
 
+    auto check_alloc = [](cudaError_t err, const char* name) -> bool {
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("moe_topk_gating: cudaMalloc failed for %s: %s",
+                          name, cudaGetErrorString(err));
+            return false;
+        }
+        return true;
+    };
+
     // expert_indices: [n_tokens, top_k] int32
     int32_t* d_expert_indices = nullptr;
-    cudaMalloc(&d_expert_indices, static_cast<size_t>(total_assignments) * sizeof(int32_t));
+    if (!check_alloc(cudaMalloc(&d_expert_indices,
+            static_cast<size_t>(total_assignments) * sizeof(int32_t)), "expert_indices"))
+        return;
 
     // expert_weights: [n_tokens, top_k] float
     float* d_expert_weights = nullptr;
-    cudaMalloc(&d_expert_weights, static_cast<size_t>(total_assignments) * sizeof(float));
+    if (!check_alloc(cudaMalloc(&d_expert_weights,
+            static_cast<size_t>(total_assignments) * sizeof(float)), "expert_weights")) {
+        cudaFree(d_expert_indices);
+        return;
+    }
 
     // sorted_token_ids: [total_assignments] int32
     // We allocate 2x to hold a parallel sorted_flat_idx array right after.
     int32_t* d_sorted_token_ids = nullptr;
-    cudaMalloc(&d_sorted_token_ids, static_cast<size_t>(total_assignments) * 2 * sizeof(int32_t));
+    if (!check_alloc(cudaMalloc(&d_sorted_token_ids,
+            static_cast<size_t>(total_assignments) * 2 * sizeof(int32_t)), "sorted_token_ids")) {
+        cudaFree(d_expert_indices);
+        cudaFree(d_expert_weights);
+        return;
+    }
     int32_t* d_sorted_flat_idx = d_sorted_token_ids + total_assignments;
 
     // expert_offsets: [n_experts + 1] int32
     int32_t* d_expert_offsets = nullptr;
-    cudaMalloc(&d_expert_offsets, static_cast<size_t>(n_experts + 1) * sizeof(int32_t));
+    if (!check_alloc(cudaMalloc(&d_expert_offsets,
+            static_cast<size_t>(n_experts + 1) * sizeof(int32_t)), "expert_offsets")) {
+        cudaFree(d_expert_indices);
+        cudaFree(d_expert_weights);
+        cudaFree(d_sorted_token_ids);
+        return;
+    }
 
     // Temporary: expert_counts [n_experts], expert_write_pos [n_experts]
     int32_t* d_expert_counts = nullptr;
     int32_t* d_expert_write_pos = nullptr;
-    cudaMalloc(&d_expert_counts, static_cast<size_t>(n_experts) * sizeof(int32_t));
-    cudaMalloc(&d_expert_write_pos, static_cast<size_t>(n_experts) * sizeof(int32_t));
+    if (!check_alloc(cudaMalloc(&d_expert_counts,
+            static_cast<size_t>(n_experts) * sizeof(int32_t)), "expert_counts") ||
+        !check_alloc(cudaMalloc(&d_expert_write_pos,
+            static_cast<size_t>(n_experts) * sizeof(int32_t)), "expert_write_pos")) {
+        cudaFree(d_expert_indices);
+        cudaFree(d_expert_weights);
+        cudaFree(d_sorted_token_ids);
+        cudaFree(d_expert_offsets);
+        cudaFree(d_expert_counts);  // safe even if null
+        return;
+    }
 
     // Zero-initialize counts and write positions
     int grid_z = (n_experts + BLOCK_SIZE - 1) / BLOCK_SIZE;

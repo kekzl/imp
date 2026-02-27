@@ -154,20 +154,30 @@ public:
     size_t pos() const { return pos_; }
     size_t remaining() const { return size_ - pos_; }
     const uint8_t* ptr() const { return data_ + pos_; }
+    bool failed() const { return failed_; }
 
     bool check(size_t n) const { return pos_ + n <= size_; }
 
     void skip(size_t n) {
+        if (!check(n)) { failed_ = true; return; }
         pos_ += n;
     }
 
     void align(size_t alignment) {
         size_t rem = pos_ % alignment;
-        if (rem != 0) pos_ += alignment - rem;
+        if (rem != 0) {
+            size_t pad = alignment - rem;
+            if (!check(pad)) { failed_ = true; return; }
+            pos_ += pad;
+        }
     }
 
     template<typename T>
     T read() {
+        if (!check(sizeof(T))) {
+            failed_ = true;
+            return T{};
+        }
         T val;
         std::memcpy(&val, data_ + pos_, sizeof(T));
         pos_ += sizeof(T);
@@ -197,6 +207,7 @@ private:
     const uint8_t* data_;
     size_t size_;
     size_t pos_;
+    bool failed_ = false;
 };
 
 // ---- GGUF metadata value (variant-like) ----
@@ -457,6 +468,12 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     uint64_t tensor_count = reader.read_u64();
     uint64_t kv_count = reader.read_u64();
 
+    if (reader.failed()) {
+        IMP_LOG_ERROR("GGUF header truncated: %s", path.c_str());
+        munmap(mmap_base, file_size);
+        return nullptr;
+    }
+
     IMP_LOG_INFO("GGUF v%u: %lu tensors, %lu metadata KVs",
                  version, (unsigned long)tensor_count, (unsigned long)kv_count);
 
@@ -464,18 +481,24 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     std::unordered_map<std::string, GGUFValue> metadata;
     metadata.reserve(static_cast<size_t>(kv_count));
 
-    for (uint64_t i = 0; i < kv_count; i++) {
+    for (uint64_t i = 0; i < kv_count && !reader.failed(); i++) {
         std::string key = reader.read_string();
         auto vtype = static_cast<GGUFValueType>(reader.read_u32());
         GGUFValue value = read_gguf_value(reader, vtype);
         metadata.emplace(std::move(key), std::move(value));
     }
 
+    if (reader.failed()) {
+        IMP_LOG_ERROR("GGUF metadata truncated: %s", path.c_str());
+        munmap(mmap_base, file_size);
+        return nullptr;
+    }
+
     // 4. Parse tensor info entries
     std::vector<GGUFTensorInfo> tensor_infos;
     tensor_infos.reserve(static_cast<size_t>(tensor_count));
 
-    for (uint64_t i = 0; i < tensor_count; i++) {
+    for (uint64_t i = 0; i < tensor_count && !reader.failed(); i++) {
         GGUFTensorInfo info;
         info.name = reader.read_string();
         info.n_dims = reader.read_u32();
@@ -493,6 +516,12 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         info.type = static_cast<GGMLType>(reader.read_u32());
         info.offset = reader.read_u64();
         tensor_infos.push_back(std::move(info));
+    }
+
+    if (reader.failed()) {
+        IMP_LOG_ERROR("GGUF tensor info truncated: %s", path.c_str());
+        munmap(mmap_base, file_size);
+        return nullptr;
     }
 
     // 5. Compute tensor data start offset (aligned)
