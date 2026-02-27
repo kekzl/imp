@@ -1,6 +1,7 @@
 #include "model/model.h"
 #include "model/model_arch.h"
 #include <cuda_runtime.h>
+#include <cmath>
 
 #ifdef __linux__
 #include <sys/mman.h>
@@ -74,8 +75,14 @@ ModelArch parse_model_arch(const std::string& s) {
 
 void apply_arch_defaults(ModelConfig& cfg) {
     switch (cfg.arch) {
+        case ModelArch::GEMMA3:
+            cfg.embed_scale = std::sqrt(static_cast<float>(cfg.d_model));
+            cfg.ffn_activation = FFNActivation::GEGLU;
+            cfg.norm_placement = NormPlacement::POST_NORM;
+            break;
         case ModelArch::NEMOTRON_H_MOE:
             cfg.moe_sigmoid_gating = true;
+            cfg.ffn_activation = FFNActivation::RELU_SQR;
             break;
         case ModelArch::QWEN3_MOE:
             cfg.expert_weights_norm = true;

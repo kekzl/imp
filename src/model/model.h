@@ -10,6 +10,12 @@
 
 namespace imp {
 
+// FFN activation function type
+enum class FFNActivation { SWIGLU, GEGLU, RELU_SQR };
+
+// Norm placement relative to residual connection
+enum class NormPlacement { PRE_NORM, POST_NORM };
+
 // GGML quantization type stored alongside tensor for dequant dispatch
 enum class GGMLQuantType : uint32_t {
     NONE = 0,
@@ -44,7 +50,8 @@ struct ModelConfig {
     int sliding_window = 0;     // 0 = disabled, >0 = window size (Qwen3, Mistral)
     int sliding_window_pattern = 0;  // Gemma-3: 6 = every 6th layer is global (no window)
     float rope_local_theta = 0.0f;   // Gemma-3: RoPE theta for local/sliding layers (10000)
-    bool use_geglu = false;          // Gemma-3: GeGLU activation instead of SwiGLU
+    FFNActivation ffn_activation = FFNActivation::SWIGLU;
+    NormPlacement norm_placement = NormPlacement::PRE_NORM;
 
     // Extended MoE config
     int n_experts_shared = 0;       // 1
