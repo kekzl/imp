@@ -90,6 +90,7 @@ private:
     std::unique_ptr<GraphExecutor> executor_;
     GreenContextManager green_ctx_;
     cudaStream_t stream_ = nullptr;
+    cudaEvent_t prefill_done_ = nullptr;
     int next_request_id_ = 0;
 
     // Pre-allocated GPU batch pool for decode (stable pointers for CUDA Graphs)

@@ -1,4 +1,5 @@
 #include "compute/rope.h"
+#include "runtime/pdl.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -159,7 +160,7 @@ void rope_forward(Tensor& Q, Tensor& K,
 
     switch (Q.dtype) {
         case DType::FP32:
-            rope_forward_fp32_kernel<<<grid, block, 0, stream>>>(
+            pdl::launch(rope_forward_fp32_kernel, grid, block, 0, stream,
                 static_cast<float*>(Q.data),
                 static_cast<float*>(K.data),
                 positions,
@@ -167,7 +168,7 @@ void rope_forward(Tensor& Q, Tensor& K,
                 theta, inv_scaling, pairs, neox);
             break;
         case DType::FP16:
-            rope_forward_fp16_kernel<<<grid, block, 0, stream>>>(
+            pdl::launch(rope_forward_fp16_kernel, grid, block, 0, stream,
                 static_cast<__half*>(Q.data),
                 static_cast<__half*>(K.data),
                 positions,
@@ -356,7 +357,7 @@ void qknorm_rope_fused(half* Q, half* K,
     // Shared memory: 8 floats for reduction + head_dim floats for normed values
     const int smem_bytes = (8 + head_dim) * sizeof(float);
 
-    qknorm_rope_fused_fp16_kernel<<<max_heads, block_size, smem_bytes, stream>>>(
+    pdl::launch(qknorm_rope_fused_fp16_kernel, dim3(max_heads), dim3(block_size), smem_bytes, stream,
         reinterpret_cast<__half*>(Q),
         reinterpret_cast<__half*>(K),
         reinterpret_cast<const __half*>(q_norm_weight),
@@ -364,6 +365,15 @@ void qknorm_rope_fused(half* Q, half* K,
         positions,
         n_heads, n_kv_heads, head_dim, eps,
         theta, inv_scaling, rope_pairs, neox, weight_offset);
+}
+
+// --------------------------------------------------------------------------
+// PDL registration
+// --------------------------------------------------------------------------
+void rope_pdl_register() {
+    pdl::enable(reinterpret_cast<const void*>(&rope_forward_fp16_kernel));
+    pdl::enable(reinterpret_cast<const void*>(&rope_forward_fp32_kernel));
+    pdl::enable(reinterpret_cast<const void*>(&qknorm_rope_fused_fp16_kernel));
 }
 
 } // namespace imp

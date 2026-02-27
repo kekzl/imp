@@ -159,10 +159,17 @@ paged_attention_gqa_kernel(
     float o_reg[8];
     for (int i = 0; i < elems_per_thread; i++) o_reg[i] = 0.0f;
 
-    // ---- Shared memory for K/V tile ----
+    // ---- Shared memory for K/V tile (double-buffered FP16) ----
+    // Two FP16 buffers use the same total smem as one FP32 buffer:
+    //   FP32 single: 2 * block_size * head_dim * 4 = 16 KiB (bs=16, hd=128)
+    //   FP16 double: 4 * block_size * head_dim * 2 = 16 KiB
+    // FP16→FP32 conversion happens during compute (negligible cost on Hopper+).
     extern __shared__ __align__(32) char smem_gqa[];
-    float* s_k_tile = reinterpret_cast<float*>(smem_gqa);
-    float* s_v_tile = s_k_tile + block_size * head_dim;
+    half* s_kv_h = reinterpret_cast<half*>(smem_gqa);
+    const int tile_elems = block_size * head_dim;
+    // Buffer layout: [buf0_K, buf0_V, buf1_K, buf1_V], each tile_elems halfs
+    // s_k(buf) = s_kv_h + buf * 2 * tile_elems
+    // s_v(buf) = s_kv_h + buf * 2 * tile_elems + tile_elems
 
     // ---- Context range ----
     int effective_start = 0;
@@ -172,27 +179,53 @@ paged_attention_gqa_kernel(
     const int first_block = effective_start / block_size;
     const int num_ctx_blocks = (ctx_len + block_size - 1) / block_size;
 
-    // ---- Iterate over KV blocks ----
-    for (int blk = first_block; blk < num_ctx_blocks; blk++) {
-        int phys_block = bt[blk];
+    // ---- Double-buffered KV block iteration ----
+    int buf = 0;
 
-        // === Cooperative K/V tile load ===
+    // Prefetch first block into buffer 0
+    if (first_block < num_ctx_blocks) {
+        int phys_block = bt[first_block];
         const half* K_block_base = K_cache + (int64_t)phys_block * kv_block_stride
                                    + kv_head * head_dim;
         const half* V_block_base = V_cache + (int64_t)phys_block * kv_block_stride
                                    + kv_head * head_dim;
-
-        int tile_elems = block_size * head_dim;
+        half* s_k = s_kv_h;
+        half* s_v = s_kv_h + tile_elems;
         for (int idx = threadIdx.x; idx < tile_elems; idx += blockDim.x) {
             int slot = idx / head_dim;
             int d    = idx % head_dim;
             int src_offset = slot * kv_slot_stride + d;
-            s_k_tile[idx] = __half2float(K_block_base[src_offset]);
-            s_v_tile[idx] = __half2float(V_block_base[src_offset]);
+            s_k[idx] = K_block_base[src_offset];
+            s_v[idx] = V_block_base[src_offset];
         }
-        __syncthreads();
+    }
+    __syncthreads();
 
-        // === Per-Q-head attention computation ===
+    for (int blk = first_block; blk < num_ctx_blocks; blk++) {
+        // Current data is in buffer `buf`
+        const half* s_k_cur = s_kv_h + buf * 2 * tile_elems;
+        const half* s_v_cur = s_k_cur + tile_elems;
+
+        // Start loading next block into the other buffer (overlaps with compute)
+        int next_buf = 1 - buf;
+        if (blk + 1 < num_ctx_blocks) {
+            int next_phys = bt[blk + 1];
+            const half* K_next = K_cache + (int64_t)next_phys * kv_block_stride
+                                 + kv_head * head_dim;
+            const half* V_next = V_cache + (int64_t)next_phys * kv_block_stride
+                                 + kv_head * head_dim;
+            half* s_k_next = s_kv_h + next_buf * 2 * tile_elems;
+            half* s_v_next = s_k_next + tile_elems;
+            for (int idx = threadIdx.x; idx < tile_elems; idx += blockDim.x) {
+                int slot = idx / head_dim;
+                int d    = idx % head_dim;
+                int src_offset = slot * kv_slot_stride + d;
+                s_k_next[idx] = K_next[src_offset];
+                s_v_next[idx] = V_next[src_offset];
+            }
+        }
+
+        // === Per-Q-head attention computation (on current buffer) ===
         int tok_start = blk * block_size;
         int tok_end   = tok_start + block_size;
         if (tok_end > ctx_len) tok_end = ctx_len;
@@ -206,7 +239,7 @@ paged_attention_gqa_kernel(
                 for (int i = 0; i < elems_per_thread; i++) {
                     int d = lane_id + i * WARP_SIZE;
                     if (d < head_dim) {
-                        dot += q_reg[i] * s_k_tile[ti * head_dim + d];
+                        dot += q_reg[i] * __half2float(s_k_cur[ti * head_dim + d]);
                     }
                 }
                 dot = warp_reduce_sum(dot);
@@ -222,7 +255,7 @@ paged_attention_gqa_kernel(
 
                 for (int i = 0; i < elems_per_thread; i++) {
                     int d = lane_id + i * WARP_SIZE;
-                    float v_val = (d < head_dim) ? s_v_tile[ti * head_dim + d] : 0.0f;
+                    float v_val = (d < head_dim) ? __half2float(s_v_cur[ti * head_dim + d]) : 0.0f;
                     o_reg[i] = rescale * o_reg[i] + w_new * v_val;
                 }
 
@@ -231,7 +264,8 @@ paged_attention_gqa_kernel(
             }
         }
 
-        __syncthreads();
+        __syncthreads();  // Wait for both next-block load and current compute
+        buf = next_buf;
     }
 
     if (!active) return;
@@ -873,7 +907,8 @@ void paged_attention_decode(
         int total_warps_gqa = n_q_per_kv * NUM_WARPS_PER_Q;
         int gqa_threads = total_warps_gqa * WARP_SIZE;
 
-        size_t kv_tile_bytes = 2 * block_size * head_dim * sizeof(float);
+        // Double-buffered FP16: 4 tiles (2 buffers x {K,V}) of block_size * head_dim halfs
+        size_t kv_tile_bytes = 4 * block_size * head_dim * sizeof(half);
         size_t red_bytes = total_warps_gqa * sizeof(float) * 2
                          + total_warps_gqa * head_dim * sizeof(float);
         size_t gqa_smem = (kv_tile_bytes > red_bytes) ? kv_tile_bytes : red_bytes;

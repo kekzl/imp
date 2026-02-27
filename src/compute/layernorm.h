@@ -18,4 +18,7 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out,
              float eps = 1e-5f, cudaStream_t stream = nullptr,
              float weight_offset = 0.0f);
 
+// Register layernorm kernels for PDL tail/head overlap.
+void layernorm_pdl_register();
+
 } // namespace imp

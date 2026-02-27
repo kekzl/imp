@@ -15,4 +15,7 @@ void geglu(const Tensor& gate, const Tensor& up, Tensor& out,
 
 void gelu(const Tensor& x, Tensor& out, cudaStream_t stream = nullptr);
 
+// Register activation kernels for PDL tail/head overlap.
+void activation_pdl_register();
+
 } // namespace imp

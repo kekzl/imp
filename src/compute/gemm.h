@@ -97,12 +97,17 @@ void gemv_q6k_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
                     half* y, int M, int K, cudaStream_t stream = nullptr);
 void gemv_q8_0_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
                      half* y, int M, int K, cudaStream_t stream = nullptr);
+void gemv_q4_0_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
+                     half* y, int M, int K, cudaStream_t stream = nullptr);
 
 // Residual-fused variants: y[i] = dot(W[i], x) + residual[i]
 void gemv_q6k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
                               half* y, const half* residual,
                               int M, int K, cudaStream_t stream = nullptr);
 void gemv_q8_0_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
+                               half* y, const half* residual,
+                               int M, int K, cudaStream_t stream = nullptr);
+void gemv_q4_0_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
                                half* y, const half* residual,
                                int M, int K, cudaStream_t stream = nullptr);
 
@@ -121,6 +126,11 @@ void gemv_qkv_fused_q8_0_q8_1(const void* W_q, const void* W_k, const void* W_v,
                                 half* y_q, half* y_k, half* y_v,
                                 int q_rows, int k_rows, int v_rows, int K,
                                 cudaStream_t stream = nullptr);
+void gemv_qkv_fused_q4_0_q8_1(const void* W_q, const void* W_k, const void* W_v,
+                                const block_q8_1* q8_1, const float* d8,
+                                half* y_q, half* y_k, half* y_v,
+                                int q_rows, int k_rows, int v_rows, int K,
+                                cudaStream_t stream = nullptr);
 
 // Batched K/V projection: input @ [wk; wv]^T → k_out, v_out in a single cuBLAS call.
 // weight_kv: [2 * nkv_hd, d_model] — wk at rows [0..nkv_hd), wv at [nkv_hd..2*nkv_hd)
@@ -128,6 +138,13 @@ void gemv_qkv_fused_q8_0_q8_1(const void* W_q, const void* W_k, const void* W_v,
 void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv,
                      Tensor& k_out, Tensor& v_out,
                      cudaStream_t stream = nullptr);
+
+// Batched two-way GEMM: input @ [w1; w2]^T → out1, out2 in a single cuBLAS call.
+// weight_fused: [2 * N, K] — w1 at rows [0..N), w2 at [N..2*N)
+// out1, out2: [M, N] — may have arbitrary memory stride between them.
+void gemm_pair_batched(const Tensor& input, const Tensor& weight_fused,
+                       Tensor& out1, Tensor& out2,
+                       cudaStream_t stream = nullptr);
 
 // MoE decode GEMV: processes all top_k experts in a single kernel launch.
 // packed_weights: base pointer to packed expert tensor (all experts contiguous).
@@ -204,6 +221,8 @@ void gemv_q8_0_q8_1_moe_gate_up_fused(
 void gemv_q6k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
                           float* y, int M, int K, cudaStream_t stream = nullptr);
 void gemv_q8_0_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
+                           float* y, int M, int K, cudaStream_t stream = nullptr);
+void gemv_q4_0_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
                            float* y, int M, int K, cudaStream_t stream = nullptr);
 
 } // namespace imp

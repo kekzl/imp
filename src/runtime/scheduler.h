@@ -2,7 +2,7 @@
 
 #include "runtime/request.h"
 #include <vector>
-#include <queue>
+#include <deque>
 #include <memory>
 
 namespace imp {
@@ -28,7 +28,7 @@ public:
 
 private:
     int max_batch_size_;
-    std::queue<std::shared_ptr<Request>> pending_;
+    std::deque<std::shared_ptr<Request>> pending_;
     std::vector<std::shared_ptr<Request>> active_;
     KVCacheManager* kv_manager_ = nullptr;  // optional, for memory-aware scheduling
 };

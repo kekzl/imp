@@ -9,7 +9,7 @@ Scheduler::Scheduler(int max_batch_size)
     : max_batch_size_(max_batch_size) {}
 
 void Scheduler::add_request(std::shared_ptr<Request> req) {
-    pending_.push(std::move(req));
+    pending_.push_back(std::move(req));
 }
 
 void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
@@ -26,7 +26,14 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
             }),
         active_.end());
 
-    // 2. Promote pending requests to prefill (up to max_batch_size_ budget)
+    // 2. Sort pending by ascending input token count (shortest-first)
+    //    to reduce head-of-line blocking in continuous batching.
+    std::sort(pending_.begin(), pending_.end(),
+              [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
+                  return a->input_tokens.size() < b->input_tokens.size();
+              });
+
+    // 3. Promote pending requests to prefill (up to max_batch_size_ budget)
     while (!pending_.empty() &&
            static_cast<int>(active_.size()) < max_batch_size_) {
         auto& req = pending_.front();
@@ -47,7 +54,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
         }
 
         auto r = pending_.front();
-        pending_.pop();
+        pending_.pop_front();
         r->status = RequestStatus::PREFILLING;
         prefill_batch.push_back(r);
         active_.push_back(r);
