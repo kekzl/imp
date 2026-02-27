@@ -8,9 +8,13 @@
 #include "runtime/request.h"
 #include "memory/kv_cache.h"
 
+#include "core/logging.h"
+
 #include <cstring>
 #include <memory>
 #include <vector>
+#include <new>
+#include <exception>
 
 // --- Internal handle types ---
 
@@ -113,34 +117,40 @@ ImpError imp_model_load(const char* path, ImpModelFormat format,
     }
     *out_model = nullptr;
 
-    std::unique_ptr<imp::Model> model;
+    try {
+        std::unique_ptr<imp::Model> model;
 
-    switch (format) {
-        case IMP_FORMAT_GGUF:
-            model = imp::load_gguf(path);
-            break;
-        case IMP_FORMAT_SAFETENSORS:
-            model = imp::load_safetensors(path);
-            break;
-        default:
-            return IMP_ERROR_INVALID_ARG;
-    }
+        switch (format) {
+            case IMP_FORMAT_GGUF:
+                model = imp::load_gguf(path);
+                break;
+            case IMP_FORMAT_SAFETENSORS:
+                model = imp::load_safetensors(path);
+                break;
+            default:
+                return IMP_ERROR_INVALID_ARG;
+        }
 
-    if (!model) {
-        return IMP_ERROR_FILE_NOT_FOUND;
-    }
+        if (!model) {
+            return IMP_ERROR_FILE_NOT_FOUND;
+        }
 
-    auto handle = new (std::nothrow) ImpModel_T();
-    if (!handle) {
+        auto handle = new (std::nothrow) ImpModel_T();
+        if (!handle) {
+            return IMP_ERROR_OUT_OF_MEMORY;
+        }
+
+        handle->model = std::move(model);
+        *out_model = handle;
+        return IMP_SUCCESS;
+    } catch (const std::bad_alloc&) {
         return IMP_ERROR_OUT_OF_MEMORY;
+    } catch (const std::exception& e) {
+        IMP_LOG_ERROR("imp_model_load: %s", e.what());
+        return IMP_ERROR_INTERNAL;
+    } catch (...) {
+        return IMP_ERROR_INTERNAL;
     }
-
-    // Keep tokenizer in model so Engine::generate() can use it.
-    // API functions access it via handle->model->tokenizer().
-
-    handle->model = std::move(model);
-    *out_model = handle;
-    return IMP_SUCCESS;
 }
 
 void imp_model_free(ImpModel model) {
@@ -207,40 +217,49 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
         return IMP_ERROR_INVALID_MODEL;
     }
 
-    // Build EngineConfig from ImpConfig
-    imp::EngineConfig ecfg;
-    ecfg.max_batch_size = config->max_batch_size;
-    ecfg.max_seq_len = config->max_seq_len;
-    ecfg.kv_cache_max_blocks = static_cast<int>(config->kv_cache_max_blocks);
-    ecfg.compute_dtype = map_dtype(config->compute_dtype);
-    ecfg.use_green_contexts = (config->enable_green_contexts != 0);
-    ecfg.use_cuda_graphs = (config->enable_cuda_graphs != 0);
-    ecfg.use_pdl = (config->enable_pdl != 0);
-    ecfg.gpu_layers = config->gpu_layers;
-    ecfg.ssm_state_dtype = map_dtype(config->ssm_state_dtype);
-    ecfg.vram_budget_mb = config->vram_budget_mb;
-    ecfg.temperature = config->temperature;
-    ecfg.top_p = config->top_p;
-    ecfg.top_k = config->top_k;
+    try {
+        // Build EngineConfig from ImpConfig
+        imp::EngineConfig ecfg;
+        ecfg.max_batch_size = config->max_batch_size;
+        ecfg.max_seq_len = config->max_seq_len;
+        ecfg.kv_cache_max_blocks = static_cast<int>(config->kv_cache_max_blocks);
+        ecfg.compute_dtype = map_dtype(config->compute_dtype);
+        ecfg.use_green_contexts = (config->enable_green_contexts != 0);
+        ecfg.use_cuda_graphs = (config->enable_cuda_graphs != 0);
+        ecfg.use_pdl = (config->enable_pdl != 0);
+        ecfg.gpu_layers = config->gpu_layers;
+        ecfg.ssm_state_dtype = map_dtype(config->ssm_state_dtype);
+        ecfg.vram_budget_mb = config->vram_budget_mb;
+        ecfg.temperature = config->temperature;
+        ecfg.top_p = config->top_p;
+        ecfg.top_k = config->top_k;
 
-    // Create and initialize the engine
-    auto engine = std::make_unique<imp::Engine>();
-    if (!engine->init(model->model, ecfg)) {
+        // Create and initialize the engine
+        auto engine = std::make_unique<imp::Engine>();
+        if (!engine->init(model->model, ecfg)) {
+            return IMP_ERROR_INTERNAL;
+        }
+
+        // Create the context handle
+        auto ctx = new (std::nothrow) ImpContext_T();
+        if (!ctx) {
+            return IMP_ERROR_OUT_OF_MEMORY;
+        }
+
+        ctx->model_handle = model;
+        ctx->engine = std::move(engine);
+        ctx->active_request = nullptr;
+
+        *out_ctx = ctx;
+        return IMP_SUCCESS;
+    } catch (const std::bad_alloc&) {
+        return IMP_ERROR_OUT_OF_MEMORY;
+    } catch (const std::exception& e) {
+        IMP_LOG_ERROR("imp_context_create: %s", e.what());
+        return IMP_ERROR_INTERNAL;
+    } catch (...) {
         return IMP_ERROR_INTERNAL;
     }
-
-    // Create the context handle
-    auto ctx = new (std::nothrow) ImpContext_T();
-    if (!ctx) {
-        return IMP_ERROR_OUT_OF_MEMORY;
-    }
-
-    ctx->model_handle = model;
-    ctx->engine = std::move(engine);
-    ctx->active_request = nullptr;
-
-    *out_ctx = ctx;
-    return IMP_SUCCESS;
 }
 
 void imp_context_free(ImpContext ctx) {
@@ -259,64 +278,73 @@ ImpError imp_generate_streaming(ImpContext ctx, const char* prompt,
         return IMP_ERROR_INTERNAL;
     }
 
-    auto* tok = ctx->model_handle->model->tokenizer();
-    if (!tok) return IMP_ERROR_INVALID_MODEL;
+    try {
+        auto* tok = ctx->model_handle->model->tokenizer();
+        if (!tok) return IMP_ERROR_INVALID_MODEL;
 
-    // Tokenize the prompt (reuse the engine's chat template logic via prefill path)
-    std::vector<int32_t> tokens;
-    const auto& tmpl = ctx->engine->chat_template();
-    if (params->apply_chat_template && !tmpl.is_raw()) {
-        std::vector<imp::ChatMessage> messages = {{"user", prompt}};
-        tokens = tmpl.apply(*tok, messages);
-    } else {
-        tokens = tok->encode(prompt);
-        if (tok->add_bos() && (tokens.empty() || tokens[0] != tok->bos_id())) {
-            tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
-        }
-    }
-
-    // Create request
-    auto req = std::make_shared<imp::Request>();
-    req->input_tokens = std::move(tokens);
-    req->max_tokens = params->max_tokens;
-    req->temperature = params->temperature;
-    req->top_p = params->top_p;
-    req->top_k = params->top_k;
-    req->seed = params->seed;
-    req->status = imp::RequestStatus::PENDING;
-
-    ctx->engine->add_request(req);
-
-    // Prefill
-    while (req->status == imp::RequestStatus::PENDING ||
-           req->status == imp::RequestStatus::PREFILLING) {
-        bool has_work = ctx->engine->step();
-        if (!has_work) break;
-    }
-
-    // Decode with streaming callback
-    size_t prev_output_size = req->output_tokens.size();
-    while (req->status != imp::RequestStatus::FINISHED &&
-           req->status != imp::RequestStatus::CANCELLED) {
-        bool has_work = ctx->engine->step();
-        if (!has_work && req->status != imp::RequestStatus::FINISHED) break;
-
-        // Deliver new tokens via callback
-        while (prev_output_size < req->output_tokens.size()) {
-            int32_t token = req->output_tokens[prev_output_size];
-            std::string text = tok->decode({token});
-            int stop = cb(text.c_str(), text.size(), user_data);
-            prev_output_size++;
-            if (stop != 0) {
-                // User requested stop
-                ctx->engine->kv_manager()->free_sequence(req->id);
-                req->status = imp::RequestStatus::CANCELLED;
-                return IMP_ERROR_CANCELLED;
+        // Tokenize the prompt (reuse the engine's chat template logic via prefill path)
+        std::vector<int32_t> tokens;
+        const auto& tmpl = ctx->engine->chat_template();
+        if (params->apply_chat_template && !tmpl.is_raw()) {
+            std::vector<imp::ChatMessage> messages = {{"user", prompt}};
+            tokens = tmpl.apply(*tok, messages);
+        } else {
+            tokens = tok->encode(prompt);
+            if (tok->add_bos() && (tokens.empty() || tokens[0] != tok->bos_id())) {
+                tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
             }
         }
-    }
 
-    return IMP_SUCCESS;
+        // Create request
+        auto req = std::make_shared<imp::Request>();
+        req->input_tokens = std::move(tokens);
+        req->max_tokens = params->max_tokens;
+        req->temperature = params->temperature;
+        req->top_p = params->top_p;
+        req->top_k = params->top_k;
+        req->seed = params->seed;
+        req->status = imp::RequestStatus::PENDING;
+
+        ctx->engine->add_request(req);
+
+        // Prefill
+        while (req->status == imp::RequestStatus::PENDING ||
+               req->status == imp::RequestStatus::PREFILLING) {
+            bool has_work = ctx->engine->step();
+            if (!has_work) break;
+        }
+
+        // Decode with streaming callback
+        size_t prev_output_size = req->output_tokens.size();
+        while (req->status != imp::RequestStatus::FINISHED &&
+               req->status != imp::RequestStatus::CANCELLED) {
+            bool has_work = ctx->engine->step();
+            if (!has_work && req->status != imp::RequestStatus::FINISHED) break;
+
+            // Deliver new tokens via callback
+            while (prev_output_size < req->output_tokens.size()) {
+                int32_t token = req->output_tokens[prev_output_size];
+                std::string text = tok->decode({token});
+                int stop = cb(text.c_str(), text.size(), user_data);
+                prev_output_size++;
+                if (stop != 0) {
+                    // User requested stop
+                    ctx->engine->kv_manager()->free_sequence(req->id);
+                    req->status = imp::RequestStatus::CANCELLED;
+                    return IMP_ERROR_CANCELLED;
+                }
+            }
+        }
+
+        return IMP_SUCCESS;
+    } catch (const std::bad_alloc&) {
+        return IMP_ERROR_OUT_OF_MEMORY;
+    } catch (const std::exception& e) {
+        IMP_LOG_ERROR("imp_generate_streaming: %s", e.what());
+        return IMP_ERROR_INTERNAL;
+    } catch (...) {
+        return IMP_ERROR_INTERNAL;
+    }
 }
 
 ImpError imp_generate(ImpContext ctx, const char* prompt,
@@ -331,30 +359,39 @@ ImpError imp_generate(ImpContext ctx, const char* prompt,
         return IMP_ERROR_INTERNAL;
     }
 
-    // Call engine generate with sampling parameters
-    std::string result = ctx->engine->generate(
-        prompt,
-        params->max_tokens,
-        params->temperature,
-        params->top_p,
-        params->top_k,
-        params->seed,
-        params->apply_chat_template != 0
-    );
+    try {
+        // Call engine generate with sampling parameters
+        std::string result = ctx->engine->generate(
+            prompt,
+            params->max_tokens,
+            params->temperature,
+            params->top_p,
+            params->top_k,
+            params->seed,
+            params->apply_chat_template != 0
+        );
 
-    // Copy result to output buffer
-    size_t copy_len = result.size();
-    if (copy_len >= output_buf_size) {
-        copy_len = output_buf_size - 1;
+        // Copy result to output buffer
+        size_t copy_len = result.size();
+        if (copy_len >= output_buf_size) {
+            copy_len = output_buf_size - 1;
+        }
+        std::memcpy(output_buf, result.data(), copy_len);
+        output_buf[copy_len] = '\0';
+
+        if (output_len) {
+            *output_len = copy_len;
+        }
+
+        return IMP_SUCCESS;
+    } catch (const std::bad_alloc&) {
+        return IMP_ERROR_OUT_OF_MEMORY;
+    } catch (const std::exception& e) {
+        IMP_LOG_ERROR("imp_generate: %s", e.what());
+        return IMP_ERROR_INTERNAL;
+    } catch (...) {
+        return IMP_ERROR_INTERNAL;
     }
-    std::memcpy(output_buf, result.data(), copy_len);
-    output_buf[copy_len] = '\0';
-
-    if (output_len) {
-        *output_len = copy_len;
-    }
-
-    return IMP_SUCCESS;
 }
 
 ImpError imp_tokenize(ImpModel model, const char* text,
@@ -369,15 +406,24 @@ ImpError imp_tokenize(ImpModel model, const char* text,
         return IMP_ERROR_INVALID_MODEL;
     }
 
-    auto ids = tok->encode(text);
-    int count = static_cast<int>(ids.size());
-    if (count > max_tokens) count = max_tokens;
+    try {
+        auto ids = tok->encode(text);
+        int count = static_cast<int>(ids.size());
+        if (count > max_tokens) count = max_tokens;
 
-    for (int i = 0; i < count; i++) {
-        tokens[i] = ids[i];
+        for (int i = 0; i < count; i++) {
+            tokens[i] = ids[i];
+        }
+        *n_tokens = count;
+        return IMP_SUCCESS;
+    } catch (const std::bad_alloc&) {
+        return IMP_ERROR_OUT_OF_MEMORY;
+    } catch (const std::exception& e) {
+        IMP_LOG_ERROR("imp_tokenize: %s", e.what());
+        return IMP_ERROR_INTERNAL;
+    } catch (...) {
+        return IMP_ERROR_INTERNAL;
     }
-    *n_tokens = count;
-    return IMP_SUCCESS;
 }
 
 ImpError imp_detokenize(ImpModel model, const int32_t* tokens,
@@ -393,14 +439,23 @@ ImpError imp_detokenize(ImpModel model, const int32_t* tokens,
         return IMP_ERROR_INVALID_MODEL;
     }
 
-    std::vector<int32_t> ids(tokens, tokens + n_tokens);
-    std::string text = tok->decode(ids);
+    try {
+        std::vector<int32_t> ids(tokens, tokens + n_tokens);
+        std::string text = tok->decode(ids);
 
-    size_t copy_len = text.size();
-    if (copy_len >= output_buf_size) copy_len = output_buf_size - 1;
-    std::memcpy(output_buf, text.data(), copy_len);
-    output_buf[copy_len] = '\0';
-    return IMP_SUCCESS;
+        size_t copy_len = text.size();
+        if (copy_len >= output_buf_size) copy_len = output_buf_size - 1;
+        std::memcpy(output_buf, text.data(), copy_len);
+        output_buf[copy_len] = '\0';
+        return IMP_SUCCESS;
+    } catch (const std::bad_alloc&) {
+        return IMP_ERROR_OUT_OF_MEMORY;
+    } catch (const std::exception& e) {
+        IMP_LOG_ERROR("imp_detokenize: %s", e.what());
+        return IMP_ERROR_INTERNAL;
+    } catch (...) {
+        return IMP_ERROR_INTERNAL;
+    }
 }
 
 ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
@@ -412,37 +467,46 @@ ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
         return IMP_ERROR_INTERNAL;
     }
 
-    // If there is an existing active request, free its KV cache and mark
-    // cancelled so the scheduler removes it from active_ on next schedule().
-    if (ctx->active_request) {
-        ctx->engine->kv_manager()->free_sequence(ctx->active_request->id);
-        ctx->engine->reset_ssm_state(ctx->active_request->id);
-        ctx->active_request->status = imp::RequestStatus::CANCELLED;
-        ctx->active_request = nullptr;
-    }
+    try {
+        // If there is an existing active request, free its KV cache and mark
+        // cancelled so the scheduler removes it from active_ on next schedule().
+        if (ctx->active_request) {
+            ctx->engine->kv_manager()->free_sequence(ctx->active_request->id);
+            ctx->engine->reset_ssm_state(ctx->active_request->id);
+            ctx->active_request->status = imp::RequestStatus::CANCELLED;
+            ctx->active_request = nullptr;
+        }
 
-    // Create a request with the input tokens
-    auto req = std::make_shared<imp::Request>();
-    req->input_tokens.assign(tokens, tokens + n_tokens);
-    req->max_tokens = 4096;  // Large default; decode_step controls actual stopping
-    req->status = imp::RequestStatus::PENDING;
+        // Create a request with the input tokens
+        auto req = std::make_shared<imp::Request>();
+        req->input_tokens.assign(tokens, tokens + n_tokens);
+        req->max_tokens = 4096;  // Large default; decode_step controls actual stopping
+        req->status = imp::RequestStatus::PENDING;
 
-    // Add to engine (assigns request id)
-    ctx->engine->add_request(req);
+        // Add to engine (assigns request id)
+        ctx->engine->add_request(req);
 
-    // Store as the active request for subsequent decode_step calls
-    ctx->active_request = req;
+        // Store as the active request for subsequent decode_step calls
+        ctx->active_request = req;
 
-    // Run one step -- this will process the prefill
-    ctx->engine->step();
+        // Run one step -- this will process the prefill
+        ctx->engine->step();
 
-    // Verify the request was prefilled
-    if (req->status == imp::RequestStatus::CANCELLED) {
-        ctx->active_request = nullptr;
+        // Verify the request was prefilled
+        if (req->status == imp::RequestStatus::CANCELLED) {
+            ctx->active_request = nullptr;
+            return IMP_ERROR_OUT_OF_MEMORY;
+        }
+
+        return IMP_SUCCESS;
+    } catch (const std::bad_alloc&) {
         return IMP_ERROR_OUT_OF_MEMORY;
+    } catch (const std::exception& e) {
+        IMP_LOG_ERROR("imp_prefill: %s", e.what());
+        return IMP_ERROR_INTERNAL;
+    } catch (...) {
+        return IMP_ERROR_INTERNAL;
     }
-
-    return IMP_SUCCESS;
 }
 
 ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params,
@@ -457,43 +521,52 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params,
         return IMP_ERROR_INTERNAL;
     }
 
-    auto& req = ctx->active_request;
+    try {
+        auto& req = ctx->active_request;
 
-    // Check if already finished
-    if (req->status == imp::RequestStatus::FINISHED ||
-        req->status == imp::RequestStatus::CANCELLED) {
+        // Check if already finished
+        if (req->status == imp::RequestStatus::FINISHED ||
+            req->status == imp::RequestStatus::CANCELLED) {
+            return IMP_ERROR_INTERNAL;
+        }
+
+        // Update sampling params on the request for this step
+        req->temperature = params->temperature;
+        req->top_p = params->top_p;
+        req->top_k = params->top_k;
+        req->seed = params->seed;
+        req->max_tokens = params->max_tokens;
+        req->ignore_eos = (params->ignore_eos != 0);
+
+        // Record output size before the step
+        size_t prev_output_size = req->output_tokens.size();
+
+        // Run one decode step
+        ctx->engine->step();
+
+        // Return the newly generated token
+        if (req->output_tokens.size() > prev_output_size) {
+            *out_token = req->output_tokens.back();
+        } else {
+            // No token was generated (should not happen in normal operation)
+            return IMP_ERROR_INTERNAL;
+        }
+
+        // If the request finished (eos or max_tokens), clean up
+        if (req->status == imp::RequestStatus::FINISHED) {
+            // KV cache is already freed by engine step() on FINISHED
+            ctx->active_request = nullptr;
+        }
+
+        return IMP_SUCCESS;
+    } catch (const std::bad_alloc&) {
+        return IMP_ERROR_OUT_OF_MEMORY;
+    } catch (const std::exception& e) {
+        IMP_LOG_ERROR("imp_decode_step: %s", e.what());
+        return IMP_ERROR_INTERNAL;
+    } catch (...) {
         return IMP_ERROR_INTERNAL;
     }
-
-    // Update sampling params on the request for this step
-    req->temperature = params->temperature;
-    req->top_p = params->top_p;
-    req->top_k = params->top_k;
-    req->seed = params->seed;
-    req->max_tokens = params->max_tokens;
-    req->ignore_eos = (params->ignore_eos != 0);
-
-    // Record output size before the step
-    size_t prev_output_size = req->output_tokens.size();
-
-    // Run one decode step
-    ctx->engine->step();
-
-    // Return the newly generated token
-    if (req->output_tokens.size() > prev_output_size) {
-        *out_token = req->output_tokens.back();
-    } else {
-        // No token was generated (should not happen in normal operation)
-        return IMP_ERROR_INTERNAL;
-    }
-
-    // If the request finished (eos or max_tokens), clean up
-    if (req->status == imp::RequestStatus::FINISHED) {
-        // KV cache is already freed by engine step() on FINISHED
-        ctx->active_request = nullptr;
-    }
-
-    return IMP_SUCCESS;
 }
 
 ImpError imp_context_reset(ImpContext ctx) {
@@ -540,9 +613,18 @@ ImpError imp_set_draft_model(ImpContext ctx, const char* draft_model_path,
         return IMP_ERROR_UNSUPPORTED;
     }
 
-    if (!ctx->engine->set_draft_model(draft_model_path)) {
+    try {
+        if (!ctx->engine->set_draft_model(draft_model_path)) {
+            return IMP_ERROR_INTERNAL;
+        }
+
+        return IMP_SUCCESS;
+    } catch (const std::bad_alloc&) {
+        return IMP_ERROR_OUT_OF_MEMORY;
+    } catch (const std::exception& e) {
+        IMP_LOG_ERROR("imp_set_draft_model: %s", e.what());
+        return IMP_ERROR_INTERNAL;
+    } catch (...) {
         return IMP_ERROR_INTERNAL;
     }
-
-    return IMP_SUCCESS;
 }

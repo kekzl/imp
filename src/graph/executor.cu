@@ -626,11 +626,7 @@ size_t GraphExecutor::workspace_estimate() const {
     // S-matrix is allocated opportunistically from remaining VRAM.
 
     // FP32 accumulator for post-norm models (Gemma-3): 1 × max_tokens × d_model × 4
-    bool has_post_norms = false;
-    for (int li = 0; li < cfg.n_layers && !has_post_norms; li++) {
-        const auto& L = model_->layer(li);
-        if (L.post_attn_norm.data || L.post_ffn_norm.data) has_post_norms = true;
-    }
+    bool has_post_norms = (cfg.norm_placement == NormPlacement::POST_NORM);
     size_t fp32_accum = has_post_norms ? align256(static_cast<size_t>(max_tokens_) * d * sizeof(float)) : 0;
 
     // Auxiliary: dequant scratch, MoE dequant/staging, sampling, split-K, etc.
@@ -749,16 +745,7 @@ void GraphExecutor::allocate_persistent_workspace(int max_tokens) {
                  total / (1024.0 * 1024.0));
 
     // FP32 residual accumulator for post-norm architectures (Gemma-3).
-    // Detects post-norm by checking if any layer has post_attn_norm or post_ffn_norm.
-    bool has_post_norms = false;
-    for (int li = 0; li < cfg.n_layers; li++) {
-        const auto& L = model_->layer(li);
-        if (L.post_attn_norm.data != nullptr || L.post_ffn_norm.data != nullptr) {
-            has_post_norms = true;
-            break;
-        }
-    }
-    if (has_post_norms) {
+    if (cfg.norm_placement == NormPlacement::POST_NORM) {
         size_t fp32_sz = align256(static_cast<size_t>(max_tokens) * d * sizeof(float));
         cudaError_t e2 = cudaMalloc(&fp32_accum_buf_, fp32_sz);
         if (e2 == cudaSuccess) {
@@ -937,7 +924,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         if (attn_seq > 0) {
             cudaError_t err = cudaMalloc(&attn_scores_buf_, s_sz);
             if (err != cudaSuccess) {
-                cudaGetLastError();
+                cudaGetLastError();  // clear sticky error from failed cudaMalloc
                 IMP_LOG_WARN("Failed to allocate cuBLAS attention S-matrix (%zu bytes, %.1f MiB), "
                              "will fall back to WMMA attention for prefill",
                              s_sz, s_sz / (1024.0 * 1024.0));
@@ -1022,7 +1009,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 ne_try = std::min(ne_try, cfg.n_experts);
                 size_t sz = static_cast<size_t>(ne_try) * eff * d * sizeof(half);
                 cudaError_t err = cudaMalloc(&moe_batch_dequant_buf_, sz);
-                if (err != cudaSuccess) { cudaGetLastError(); continue; }
+                if (err != cudaSuccess) {
+                    IMP_LOG_DEBUG("MoE dequant buf alloc failed for %d experts: %s",
+                                 ne_try, cudaGetErrorString(cudaGetLastError()));
+                    continue;
+                }
                 moe_batch_dequant_buf_size_ = sz;
                 allocated = true;
                 IMP_LOG_INFO("MoE batch dequant buffer: %.2f MiB (%d experts)",
@@ -1049,7 +1040,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             if (err == cudaSuccess) {
                 d_moe_work_ptrs_count_ = cfg.n_experts;
             } else {
-                cudaGetLastError();
+                IMP_LOG_DEBUG("Cleared optional MoE work ptrs alloc error: %s", cudaGetErrorString(cudaGetLastError()));
                 d_moe_work_ptrs_ = nullptr;
                 d_moe_work_ptrs_count_ = 0;
             }
@@ -1058,7 +1049,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             size_t scale_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(float);
             err = cudaMalloc(&d_moe_fp8_scales_, scale_bytes);
             if (err != cudaSuccess) {
-                cudaGetLastError();
+                IMP_LOG_DEBUG("Cleared optional MoE FP8 scales alloc error: %s", cudaGetErrorString(cudaGetLastError()));
                 d_moe_fp8_scales_ = nullptr;
             }
 
@@ -1068,7 +1059,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             if (err == cudaSuccess) {
                 d_moe_weight_ptrs_count_ = cfg.n_experts;
             } else {
-                cudaGetLastError();
+                IMP_LOG_DEBUG("Cleared optional MoE weight ptrs alloc error: %s", cudaGetErrorString(cudaGetLastError()));
                 d_moe_weight_ptrs_ = nullptr;
                 d_moe_weight_ptrs_count_ = 0;
             }
@@ -1219,7 +1210,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
         void* fp16_buf = nullptr;
         cudaError_t err = cudaMalloc(&fp16_buf, fp16_bytes);
         if (err != cudaSuccess) {
-            cudaGetLastError();
+            IMP_LOG_DEBUG("Cleared FP16 cache alloc error: %s", cudaGetErrorString(cudaGetLastError()));
             budget_exhausted = true;
             IMP_LOG_WARN("FP16 cache: cudaMalloc failed after %d tensors (%.1f MiB)",
                          cached_count, total_fp16_bytes / (1024.0 * 1024.0));
@@ -1274,7 +1265,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
         void* fused_buf = nullptr;
         cudaError_t err = cudaMalloc(&fused_buf, 2 * one_sz);
         if (err != cudaSuccess) {
-            cudaGetLastError();
+            IMP_LOG_DEBUG("Cleared fused KV alloc error: %s", cudaGetErrorString(cudaGetLastError()));
             break;
         }
 
@@ -2025,11 +2016,11 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         }
     }
 
-    // 4. Gated activation: SwiGLU (silu * up) or GeGLU (gelu_tanh * up)
-    if (cfg.use_geglu)
-        geglu(go, uo, so, stream);
-    else
-        swiglu(go, uo, so, stream);
+    // 4. Gated activation
+    switch (cfg.ffn_activation) {
+        case FFNActivation::GEGLU:  geglu(go, uo, so, stream);  break;
+        default:                    swiglu(go, uo, so, stream);  break;
+    }
 
     // 5+6. Down projection + residual add.
     //    For decode (n=1) with dp4a: fuse residual into GEMV output, write to hidden.
@@ -3290,7 +3281,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     cur_n_tokens_ = n;
 
     // Clear any stale CUDA error state before starting the forward pass.
-    cudaGetLastError();
+    { cudaError_t e_ = cudaGetLastError();
+      if (e_ != cudaSuccess) IMP_LOG_DEBUG("Cleared stale error before forward: %s", cudaGetErrorString(e_)); }
 
     // ---- Optional per-component profiling (IMP_PROFILE=1) ----
     // Profiling disables CUDA graph capture (they are incompatible).
@@ -3668,7 +3660,9 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
     const auto& cfg = model_->config();
     int n = state.n_tokens;  // should be 1 for decode
     cur_n_tokens_ = n;
-    cudaGetLastError();
+    // Clear any stale CUDA error state before starting the decode pass.
+    { cudaError_t e_ = cudaGetLastError();
+      if (e_ != cudaSuccess) IMP_LOG_DEBUG("Cleared stale error before decode: %s", cudaGetErrorString(e_)); }
 
     // ---- Step 1: Embedding lookup from device-side token ID ----
     Tensor h = view_tokens(hidden_, n);

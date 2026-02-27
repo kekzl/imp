@@ -8,6 +8,20 @@
 extern "C" {
 #endif
 
+/**
+ * Thread-safety contract:
+ *
+ * - ImpModel handles are read-only after creation and safe to share
+ *   across threads.
+ * - ImpContext handles are NOT thread-safe. Each context must be used
+ *   from a single thread at a time. Create one context per thread for
+ *   concurrent inference.
+ * - imp_model_load() and imp_model_free() are NOT thread-safe with
+ *   respect to the same model handle.
+ * - Global state (CUDA device, cuBLAS handles) is initialized once
+ *   during the first imp_context_create() call.
+ */
+
 // Opaque handles
 typedef struct ImpModel_T* ImpModel;
 typedef struct ImpContext_T* ImpContext;
