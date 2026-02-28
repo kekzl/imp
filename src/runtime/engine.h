@@ -101,6 +101,9 @@ private:
     int last_decode_batch_size_ = -1;
     int last_decode_max_blocks_ = -1;
 
+    // Pre-allocated block table padding buffer (reused across decode steps)
+    std::vector<int> padded_block_table_;
+
     // SSM state (Mamba2 hybrid models)
     std::unique_ptr<SSMState> ssm_state_;
 

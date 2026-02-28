@@ -1,4 +1,5 @@
 #include "compute/gemm.h"
+#include "model/model.h"
 
 #include <cublas_v2.h>
 #include <cublasLt.h>
@@ -2216,6 +2217,203 @@ void gemv_q4_0_q8_1_residual(const void* W, const block_q8_1* q8_1, const float*
                                int M, int K, cudaStream_t stream) {
     launch_gemv_q4_0_q8_1(static_cast<const uint8_t*>(W), q8_1, d8,
                             y, residual, true, M, K, stream);
+}
+
+// ---------------------------------------------------------------------------
+// Fused gate+up dense GEMV: both projections in a single kernel launch.
+// blockIdx.y selects gate (0) or up (1). Reads Q8_1 input once for both.
+// ---------------------------------------------------------------------------
+
+__global__ void gemv_gate_up_fused_q6k_q8_1_kernel(
+        const uint8_t* __restrict__ gate_weights,
+        const uint8_t* __restrict__ up_weights,
+        const block_q8_1* __restrict__ q8_1,
+        const float* __restrict__ d8,
+        half* __restrict__ y_gate,
+        half* __restrict__ y_up,
+        int M, int K) {
+    const int warps_per_block = blockDim.x / 32;
+    const int warp_id = threadIdx.x / 32;
+    const int lane    = threadIdx.x % 32;
+    const int row     = blockIdx.x * warps_per_block + warp_id;
+
+    if (row >= M) return;
+
+    const bool is_up = (blockIdx.y == 1);
+    const uint8_t* W = is_up ? up_weights : gate_weights;
+    half* y = is_up ? y_up : y_gate;
+
+    const int blocks_per_row = K / 256;
+    const size_t row_bytes = (size_t)blocks_per_row * 210;
+    const uint8_t* W_row = W + (size_t)row * row_bytes;
+    const int total_q8 = blocks_per_row * 8;
+    float sum = 0.0f;
+
+    for (int q8_idx = lane; q8_idx < total_q8; q8_idx += 32) {
+        const int q6k_blk = q8_idx / 8;
+        const int g = q8_idx % 8;
+        int xqs_packed[8];
+        memcpy(xqs_packed, q8_1[q8_idx].qs, 32);
+        float dq = d8[q8_idx];
+
+        const uint8_t* bp = W_row + q6k_blk * 210;
+        float d_w = __half2float(*(const half*)(bp + 208));
+        sum += q6k_dp4a_group_preloaded(
+            bp, bp + 128, (const int8_t*)(bp + 192),
+            d_w, xqs_packed, dq, g);
+    }
+
+    for (int off = 16; off > 0; off >>= 1)
+        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
+
+    if (lane == 0) y[row] = __float2half(sum);
+}
+
+__global__ void gemv_gate_up_fused_q8_0_q8_1_kernel(
+        const uint8_t* __restrict__ gate_weights,
+        const uint8_t* __restrict__ up_weights,
+        const block_q8_1* __restrict__ q8_1,
+        const float* __restrict__ d8,
+        half* __restrict__ y_gate,
+        half* __restrict__ y_up,
+        int M, int K) {
+    const int warps_per_block = blockDim.x / 32;
+    const int warp_id = threadIdx.x / 32;
+    const int lane    = threadIdx.x % 32;
+    const int row     = blockIdx.x * warps_per_block + warp_id;
+
+    if (row >= M) return;
+
+    const bool is_up = (blockIdx.y == 1);
+    const uint8_t* W = is_up ? up_weights : gate_weights;
+    half* y = is_up ? y_up : y_gate;
+
+    const int blocks_per_row = K / 32;
+    const size_t row_bytes = (size_t)blocks_per_row * 34;
+    const uint8_t* W_row = W + (size_t)row * row_bytes;
+    float sum = 0.0f;
+
+    for (int b = lane; b < blocks_per_row; b += 32) {
+        int xi[8];
+        memcpy(xi, q8_1[b].qs, 32);
+        float dq = d8[b];
+
+        const uint8_t* bp = W_row + b * 34;
+        half d_w_h;
+        memcpy(&d_w_h, bp, sizeof(half));
+        float d_w = __half2float(d_w_h);
+        int wi[8];
+        memcpy(wi, bp + 2, 32);
+
+        int32_t sumi = 0;
+        sumi = __dp4a(wi[0], xi[0], sumi);
+        sumi = __dp4a(wi[1], xi[1], sumi);
+        sumi = __dp4a(wi[2], xi[2], sumi);
+        sumi = __dp4a(wi[3], xi[3], sumi);
+        sumi = __dp4a(wi[4], xi[4], sumi);
+        sumi = __dp4a(wi[5], xi[5], sumi);
+        sumi = __dp4a(wi[6], xi[6], sumi);
+        sumi = __dp4a(wi[7], xi[7], sumi);
+
+        sum += d_w * dq * (float)sumi;
+    }
+
+    for (int off = 16; off > 0; off >>= 1)
+        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
+
+    if (lane == 0) y[row] = __float2half(sum);
+}
+
+__global__ void gemv_gate_up_fused_q4_0_q8_1_kernel(
+        const uint8_t* __restrict__ gate_weights,
+        const uint8_t* __restrict__ up_weights,
+        const block_q8_1* __restrict__ q8_1,
+        const float* __restrict__ d8,
+        half* __restrict__ y_gate,
+        half* __restrict__ y_up,
+        int M, int K) {
+    const int warps_per_block = blockDim.x / 32;
+    const int warp_id = threadIdx.x / 32;
+    const int lane    = threadIdx.x % 32;
+    const int row     = blockIdx.x * warps_per_block + warp_id;
+
+    if (row >= M) return;
+
+    const bool is_up = (blockIdx.y == 1);
+    const uint8_t* W = is_up ? up_weights : gate_weights;
+    half* y = is_up ? y_up : y_gate;
+
+    const int blocks_per_row = K / 32;
+    const size_t row_bytes = (size_t)blocks_per_row * 18;
+    const uint8_t* W_row = W + (size_t)row * row_bytes;
+    float sum = 0.0f;
+
+    for (int b = lane; b < blocks_per_row; b += 32) {
+        int xi[8];
+        memcpy(xi, q8_1[b].qs, 32);
+        float dq = d8[b];
+        float q8_sum = __half2float(q8_1[b].s);
+
+        const uint8_t* bp = W_row + b * 18;
+        half d_w_h;
+        memcpy(&d_w_h, bp, sizeof(half));
+        float d_w = __half2float(d_w_h);
+        const uint8_t* qs = bp + 2;
+
+        int ni0 = unpack_nibbles_2(qs[0],  qs[1]);
+        int ni1 = unpack_nibbles_2(qs[2],  qs[3]);
+        int ni2 = unpack_nibbles_2(qs[4],  qs[5]);
+        int ni3 = unpack_nibbles_2(qs[6],  qs[7]);
+        int ni4 = unpack_nibbles_2(qs[8],  qs[9]);
+        int ni5 = unpack_nibbles_2(qs[10], qs[11]);
+        int ni6 = unpack_nibbles_2(qs[12], qs[13]);
+        int ni7 = unpack_nibbles_2(qs[14], qs[15]);
+
+        int32_t sumi = 0;
+        sumi = __dp4a(ni0, xi[0], sumi);
+        sumi = __dp4a(ni1, xi[1], sumi);
+        sumi = __dp4a(ni2, xi[2], sumi);
+        sumi = __dp4a(ni3, xi[3], sumi);
+        sumi = __dp4a(ni4, xi[4], sumi);
+        sumi = __dp4a(ni5, xi[5], sumi);
+        sumi = __dp4a(ni6, xi[6], sumi);
+        sumi = __dp4a(ni7, xi[7], sumi);
+
+        sum += d_w * (dq * (float)sumi - 8.0f * q8_sum);
+    }
+
+    for (int off = 16; off > 0; off >>= 1)
+        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
+
+    if (lane == 0) y[row] = __float2half(sum);
+}
+
+void gemv_gate_up_fused(const void* gate_weights, const void* up_weights,
+                         const block_q8_1* q8_1, const float* d8,
+                         half* y_gate, half* y_up,
+                         int M, int K, GGMLQuantType qtype,
+                         cudaStream_t stream) {
+    const int threads_per_block = 256;
+    const int warps_per_block = threads_per_block / 32;
+    const int blocks = (M + warps_per_block - 1) / warps_per_block;
+    dim3 grid(blocks, 2);  // y=0: gate, y=1: up
+
+    if (qtype == GGMLQuantType::Q6_K) {
+        gemv_gate_up_fused_q6k_q8_1_kernel<<<grid, threads_per_block, 0, stream>>>(
+            static_cast<const uint8_t*>(gate_weights),
+            static_cast<const uint8_t*>(up_weights),
+            q8_1, d8, y_gate, y_up, M, K);
+    } else if (qtype == GGMLQuantType::Q8_0) {
+        gemv_gate_up_fused_q8_0_q8_1_kernel<<<grid, threads_per_block, 0, stream>>>(
+            static_cast<const uint8_t*>(gate_weights),
+            static_cast<const uint8_t*>(up_weights),
+            q8_1, d8, y_gate, y_up, M, K);
+    } else if (qtype == GGMLQuantType::Q4_0) {
+        gemv_gate_up_fused_q4_0_q8_1_kernel<<<grid, threads_per_block, 0, stream>>>(
+            static_cast<const uint8_t*>(gate_weights),
+            static_cast<const uint8_t*>(up_weights),
+            q8_1, d8, y_gate, y_up, M, K);
+    }
 }
 
 // Q4_0 × Q8_1 with FP32 output (for LM head)

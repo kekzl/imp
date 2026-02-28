@@ -6,6 +6,8 @@
 
 namespace imp {
 
+enum class GGMLQuantType : uint32_t;  // forward declaration
+
 // Pre-initialize cuBLAS handle and workspace. Call early (before weight upload)
 // to ensure workspace is allocated while GPU memory is available.
 void gemm_init();
@@ -110,6 +112,16 @@ void gemv_q8_0_q8_1_residual(const void* W, const block_q8_1* q8_1, const float*
 void gemv_q4_0_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
                                half* y, const half* residual,
                                int M, int K, cudaStream_t stream = nullptr);
+
+// ---------------------------------------------------------------------------
+// Fused gate+up dense GEMV: both projections in a single kernel launch.
+// Dispatches internally by quant type. M = output rows, K = inner dim.
+// ---------------------------------------------------------------------------
+void gemv_gate_up_fused(const void* gate_weights, const void* up_weights,
+                         const block_q8_1* q8_1, const float* d8,
+                         half* y_gate, half* y_up,
+                         int M, int K, GGMLQuantType qtype,
+                         cudaStream_t stream = nullptr);
 
 // ---------------------------------------------------------------------------
 // Fused QKV GEMV: reads input once, computes Q, K, V projections in one kernel.
