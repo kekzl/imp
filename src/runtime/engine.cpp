@@ -133,8 +133,11 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             expert_reserve += ssm_est;
         }
 
-        // Safety margin for FP16 cache + fragmentation
-        expert_reserve += 128ULL * 1024 * 1024;
+        // Safety margin for FP16 cache, CUDA graph driver memory, and runtime overhead.
+        // On WSL2/WDDM, exceeding physical VRAM silently spills to shared system memory,
+        // causing massive slowdowns. 768 MiB covers driver internals + graph capture +
+        // cuBLAS growth + misc stream-ordered allocations during inference.
+        expert_reserve += 768ULL * 1024 * 1024;
 
         IMP_LOG_INFO("Expert upload reserve: %.2f MiB (workspace=%.2f, kv=%.2f, ssm+safety=rest)",
                      expert_reserve / (1024.0 * 1024.0),
@@ -1042,6 +1045,32 @@ std::vector<int32_t> Engine::try_graph_loop_decode(
     int remaining = req->max_tokens - static_cast<int>(req->output_tokens.size());
     if (remaining <= 0) return {};
 
+    // Skip conditional graph for large models — the WHILE body has ~600 nodes
+    // (48 layers × ~12 kernels) and per-iteration scheduling overhead dominates.
+    // Fall back to per-step CudaGraphRunner which captures a flat graph.
+    constexpr int kMaxLayersForConditionalGraph = 40;
+    if (model_->config().n_layers > kMaxLayersForConditionalGraph) {
+        IMP_LOG_INFO("ConditionalGraph: skipping — %d layers exceeds threshold (%d), "
+                     "using per-step graph instead",
+                     model_->config().n_layers, kMaxLayersForConditionalGraph);
+        return {};
+    }
+
+    // Skip conditional graph when VRAM is constrained — graph instantiation
+    // needs driver-internal memory for the execution plan. With 0 MiB free,
+    // the driver uses slow allocation paths that hurt every replay iteration.
+    {
+        size_t free_mem = 0, total_mem = 0;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        constexpr size_t kMinVramForGraphMiB = 256;
+        if (free_mem < kMinVramForGraphMiB * 1024ULL * 1024) {
+            IMP_LOG_INFO("ConditionalGraph: skipping — only %zu MiB VRAM free (need %zu), "
+                         "using per-step graph instead",
+                         free_mem / (1024 * 1024), kMinVramForGraphMiB);
+            return {};
+        }
+    }
+
     int ctx_len = req->context_len();
     int position = ctx_len - 1;
     IMP_LOG_DEBUG("try_graph_loop_decode: first_token=%d ctx_len=%d position=%d remaining=%d",
@@ -1149,6 +1178,26 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
 
     int remaining = req->max_tokens - static_cast<int>(req->output_tokens.size());
     if (remaining <= 0) return false;
+
+    // Skip conditional graph for large models (same rationale as try_graph_loop_decode)
+    constexpr int kMaxLayersForConditionalGraph = 40;
+    if (model_->config().n_layers > kMaxLayersForConditionalGraph) {
+        IMP_LOG_DEBUG("AsyncGraphLoop: skipping — %d layers exceeds threshold (%d)",
+                      model_->config().n_layers, kMaxLayersForConditionalGraph);
+        return false;
+    }
+
+    // Skip when VRAM is constrained
+    {
+        size_t free_mem = 0, total_mem = 0;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        constexpr size_t kMinVramForGraphMiB = 256;
+        if (free_mem < kMinVramForGraphMiB * 1024ULL * 1024) {
+            IMP_LOG_DEBUG("AsyncGraphLoop: skipping — only %zu MiB VRAM free (need %zu)",
+                          free_mem / (1024 * 1024), kMinVramForGraphMiB);
+            return false;
+        }
+    }
 
     int ctx_len = req->context_len();
     int position = ctx_len - 1;

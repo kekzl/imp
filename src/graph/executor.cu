@@ -1204,7 +1204,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
     // which exhausts virtual address space and causes OOM for later allocations.
     size_t free_vram = 0, total_vram = 0;
     cudaMemGetInfo(&free_vram, &total_vram);
-    constexpr size_t kVramReserveMiB = 128;  // Small safety margin (KV cache + SSM already allocated)
+    constexpr size_t kVramReserveMiB = 1024;  // Reserve headroom for CUDA graph instantiation + runtime + driver
     size_t vram_budget = (free_vram > kVramReserveMiB * 1024ULL * 1024)
                          ? (free_vram - kVramReserveMiB * 1024ULL * 1024) : 0;
 
@@ -1281,6 +1281,10 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
         int K = static_cast<int>(L.wk.shape[1]);        // d_model
         size_t one_sz = static_cast<size_t>(k_rows) * K * sizeof(half);
 
+        // Respect VRAM budget — on WSL2/WDDM, cudaMalloc silently spills to
+        // shared (system) memory beyond physical VRAM, causing massive slowdowns.
+        if (total_fp16_bytes + 2 * one_sz > vram_budget) break;
+
         void* fused_buf = nullptr;
         cudaError_t err = cudaMalloc(&fused_buf, 2 * one_sz);
         if (err != cudaSuccess) {
@@ -1316,6 +1320,9 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
         int g_rows = static_cast<int>(L.w_gate.shape[0]);  // d_ff
         int K = static_cast<int>(L.w_gate.shape[1]);        // d_model
         size_t one_sz = static_cast<size_t>(g_rows) * K * sizeof(half);
+
+        // Respect VRAM budget (see fused KV comment above)
+        if (total_fp16_bytes + 2 * one_sz > vram_budget) break;
 
         void* fused_buf = nullptr;
         cudaError_t err = cudaMalloc(&fused_buf, 2 * one_sz);
