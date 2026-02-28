@@ -783,16 +783,18 @@ bool Engine::step() {
                 // invalidation every time a new KV cache block is allocated.
                 int pool_max = decode_batch_pool_.max_blocks_per_seq();
                 if (batch.max_blocks_per_seq < pool_max) {
-                    // Re-pad the 2D block_table to the pool's stride
+                    // Re-pad the 2D block_table to the pool's stride (reuse member buffer)
                     int n_seq = batch.n_sequences;
                     int old_stride = batch.max_blocks_per_seq;
-                    std::vector<int> padded(n_seq * pool_max, 0);
+                    size_t needed = static_cast<size_t>(n_seq) * pool_max;
+                    padded_block_table_.resize(needed);
+                    std::memset(padded_block_table_.data(), 0, needed * sizeof(int));
                     for (int s = 0; s < n_seq; s++) {
                         for (int b = 0; b < old_stride; b++) {
-                            padded[s * pool_max + b] = batch.block_tables[s * old_stride + b];
+                            padded_block_table_[s * pool_max + b] = batch.block_tables[s * old_stride + b];
                         }
                     }
-                    batch.block_tables = std::move(padded);
+                    batch.block_tables = padded_block_table_;
                     batch.max_blocks_per_seq = pool_max;
                 }
                 gpu_batch = decode_batch_pool_.upload_into_pool(batch, dec_stream);

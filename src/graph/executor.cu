@@ -79,6 +79,22 @@ __global__ void elementwise_add_fp16_kernel(half* a, const half* b, int64_t n) {
     }
 }
 
+// Element-wise add-store: out[i] = a[i] + b[i], for FP16 data
+__global__ void elementwise_add_store_fp16_kernel(const half* a, const half* b,
+                                                   half* out, int64_t n) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t n2 = n / 2;
+    if (idx < n2) {
+        const half2* a2 = reinterpret_cast<const half2*>(a);
+        const half2* b2 = reinterpret_cast<const half2*>(b);
+        half2* o2 = reinterpret_cast<half2*>(out);
+        o2[idx] = __hadd2(a2[idx], b2[idx]);
+    }
+    if (idx == 0 && (n & 1)) {
+        out[n - 1] = __hadd(a[n - 1], b[n - 1]);
+    }
+}
+
 // FP32 accumulator += FP16 branch: accum[i] += __half2float(branch[i])
 __global__ void fp32_accum_add_fp16_kernel(float* accum, const half* branch, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -337,6 +353,133 @@ __global__ void write_kv_cache_fp8_kernel(
 }
 #endif
 
+// Fused KV cache write with RoPE on K: applies RoPE to K during write, copies V directly.
+// blockIdx.x = token index, blockIdx.y = 0 (K+RoPE) or 1 (V copy).
+// Eliminates the separate RoPE kernel launch for K in the decode path.
+__global__ void write_kv_cache_rope_fused_kernel(
+    const half* __restrict__ k_in,       // [n_tokens, n_kv_heads * head_dim] raw K (no RoPE)
+    const half* __restrict__ v_in,       // [n_tokens, n_kv_heads * head_dim]
+    const int* __restrict__ positions,
+    const int* __restrict__ block_tables,
+    half* k_cache_base,
+    half* v_cache_base,
+    int block_stride,
+    int row_elems,
+    int block_size,
+    int n_tokens,
+    int max_blocks_per_seq,
+    int n_sequences,
+    int n_kv_heads,
+    int head_dim,
+    float theta,
+    float inv_scaling,
+    int rope_pairs,      // effective_rope_dim / 2
+    bool neox
+) {
+    int token_idx = blockIdx.x;
+    if (token_idx >= n_tokens) return;
+
+    int pos = positions[token_idx];
+    int block_idx_kv = pos / block_size;
+    int slot_in_block = pos % block_size;
+
+    int block_id;
+    if (max_blocks_per_seq > 0 && n_sequences > 1) {
+        int seq_idx = token_idx;
+        block_id = block_tables[seq_idx * max_blocks_per_seq + block_idx_kv];
+    } else {
+        block_id = block_tables[block_idx_kv];
+    }
+
+    if (blockIdx.y == 0) {
+        // K path: apply RoPE during write
+        const half* k_src = k_in + static_cast<int64_t>(token_idx) * row_elems;
+        half* k_dst = k_cache_base + static_cast<int64_t>(block_id) * block_stride
+                                   + static_cast<int64_t>(slot_in_block) * row_elems;
+
+        // Process RoPE pairs
+        int total_pairs = n_kv_heads * rope_pairs;
+        for (int p = threadIdx.x; p < total_pairs; p += blockDim.x) {
+            int head = p / rope_pairs;
+            int pair_idx = p % rope_pairs;
+            int head_offset = head * head_dim;
+
+            int idx0, idx1;
+            if (neox) {
+                idx0 = head_offset + pair_idx;
+                idx1 = head_offset + pair_idx + rope_pairs;
+            } else {
+                idx0 = head_offset + 2 * pair_idx;
+                idx1 = head_offset + 2 * pair_idx + 1;
+            }
+
+            float freq = 1.0f / (powf(theta, (2.0f * pair_idx) / static_cast<float>(head_dim)));
+            freq *= inv_scaling;
+            float angle = static_cast<float>(pos) * freq;
+            float cos_val = __cosf(angle);
+            float sin_val = __sinf(angle);
+
+            float k0 = __half2float(k_src[idx0]);
+            float k1 = __half2float(k_src[idx1]);
+            k_dst[idx0] = __float2half(k0 * cos_val - k1 * sin_val);
+            k_dst[idx1] = __float2half(k0 * sin_val + k1 * cos_val);
+        }
+
+        // Copy non-rotated dimensions (partial RoPE: rope_dim < head_dim)
+        int effective_rope_dim = rope_pairs * 2;
+        if (effective_rope_dim < head_dim) {
+            for (int h = 0; h < n_kv_heads; h++) {
+                int base = h * head_dim;
+                for (int d = effective_rope_dim + threadIdx.x; d < head_dim; d += blockDim.x) {
+                    k_dst[base + d] = k_src[base + d];
+                }
+            }
+        }
+    } else {
+        // V path: direct copy (no RoPE)
+        const half* v_src = v_in + static_cast<int64_t>(token_idx) * row_elems;
+        half* v_dst = v_cache_base + static_cast<int64_t>(block_id) * block_stride
+                                   + static_cast<int64_t>(slot_in_block) * row_elems;
+        for (int i = threadIdx.x; i < row_elems; i += blockDim.x) {
+            v_dst[i] = v_src[i];
+        }
+    }
+}
+
+// Q-only RoPE for decode (n=1): applies RoPE to Q in-place.
+// Grid: (1, n_heads), Block: rope_pairs.
+__global__ void rope_q_only_fp16_kernel(
+    half* __restrict__ Q,       // [n_heads * head_dim]
+    const int* __restrict__ positions,
+    int n_heads,
+    int head_dim,
+    float theta,
+    float inv_scaling,
+    int rope_pairs,
+    bool neox
+) {
+    int head_idx  = blockIdx.y;
+    int pair_idx  = threadIdx.x;
+    if (head_idx >= n_heads || pair_idx >= rope_pairs) return;
+
+    int pos = positions[0];  // decode: single token
+
+    float freq = 1.0f / (powf(theta, (2.0f * pair_idx) / static_cast<float>(head_dim)));
+    freq *= inv_scaling;
+    float angle = static_cast<float>(pos) * freq;
+    float cos_val = __cosf(angle);
+    float sin_val = __sinf(angle);
+
+    int64_t base = static_cast<int64_t>(head_idx) * head_dim;
+    int idx0 = neox ? pair_idx : (2 * pair_idx);
+    int idx1 = neox ? (pair_idx + rope_pairs) : (2 * pair_idx + 1);
+
+    float q0 = __half2float(Q[base + idx0]);
+    float q1 = __half2float(Q[base + idx1]);
+    Q[base + idx0] = __float2half(q0 * cos_val - q1 * sin_val);
+    Q[base + idx1] = __float2half(q0 * sin_val + q1 * cos_val);
+}
+
 // Add FP16 bias to each row of FP32 matrix: out[i,j] += bias[j]
 // Grid: n_tokens, Block: 256, each thread handles multiple expert indices.
 __global__ void add_fp16_bias_to_fp32_kernel(float* __restrict__ data,
@@ -392,6 +535,21 @@ static void elementwise_add(Tensor& a, const Tensor& b, cudaStream_t stream) {
                     static_cast<const float*>(b.data),
                     n);
     }
+}
+
+// Element-wise add-store: out[i] = a[i] + b[i] — avoids in-place + copy pattern
+static void elementwise_add_store(const Tensor& a, const Tensor& b, Tensor& out,
+                                   cudaStream_t stream) {
+    int64_t n = a.numel();
+    int64_t n2 = (n + 1) / 2;
+    int threads = 256;
+    int blocks = static_cast<int>((n2 + threads - 1) / threads);
+    pdl::launch(elementwise_add_store_fp16_kernel,
+                dim3(blocks), dim3(threads), 0, stream,
+                static_cast<const half*>(a.data),
+                static_cast<const half*>(b.data),
+                static_cast<half*>(out.data),
+                n);
 }
 
 // Add 1D bias to each row of a 2D output: out[row, col] += bias[col]
@@ -583,6 +741,7 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
         pdl::enable(reinterpret_cast<const void*>(&elementwise_add_fp32_kernel));
         pdl::enable(reinterpret_cast<const void*>(&write_kv_cache_kernel));
         pdl::enable(reinterpret_cast<const void*>(&write_kv_cache_fused_kernel));
+        pdl::enable(reinterpret_cast<const void*>(&write_kv_cache_rope_fused_kernel));
         pdl::enable(reinterpret_cast<const void*>(&fp16_to_fp32_kernel));
         pdl::enable(reinterpret_cast<const void*>(&fp32_to_fp16_kernel));
         // Register compute kernels for PDL overlap (run between GEMMs in hot path)
@@ -1837,8 +1996,15 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
 
     // 4+5+6. QK-norm + RoPE: fused into single kernel for decode (n=1)
     //    For prefill or models without QK-norm, use separate kernels.
+    //    For decode with FP16 cache: fuse K-RoPE into KV write (saves 1 launch).
+    bool rope_k_deferred = false;  // true when K-RoPE will be fused into KV write
     {
         bool has_qk_norm = (ly.attn_q_norm.data != nullptr && ly.attn_k_norm.data != nullptr);
+        // Determine if we can fuse K-RoPE into KV cache write
+        bool can_fuse_rope_kv = (!state.is_prefill && n == 1 &&
+                                  qv.dtype == DType::FP16 &&
+                                  state.kv_cache &&
+                                  state.kv_cache->dtype() != DType::FP8_E4M3);
         if (has_qk_norm && n == 1 && qv.dtype == DType::FP16) {
             // Fused: QK-norm + RoPE in one kernel launch (saves 2 launches)
             qknorm_rope_fused(static_cast<half*>(qv.data),
@@ -1849,8 +2015,17 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                state.positions,  // device pointer
                                layer_rope_theta, layer_rope_freq_scale,
                                cfg.rope_dim, cfg.rope_neox, stream, norm_w_off_);
+        } else if (can_fuse_rope_kv && !has_qk_norm) {
+            // Fused path: Q-only RoPE here, K-RoPE deferred to KV write
+            const int effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
+            const int pairs = effective_rope_dim / 2;
+            const float inv_scaling = 1.0f / layer_rope_freq_scale;
+            rope_q_only_fp16_kernel<<<dim3(1, nh), pairs, 0, stream>>>(
+                static_cast<half*>(qv.data), state.positions,
+                nh, hd, layer_rope_theta, inv_scaling, pairs, cfg.rope_neox);
+            rope_k_deferred = true;
         } else {
-            // Separate path: QK-norm (if present) + RoPE
+            // Separate path: QK-norm (if present) + RoPE on both Q and K
             if (ly.attn_q_norm.data != nullptr) {
                 int64_t q_flat[2] = {static_cast<int64_t>(n) * nh, static_cast<int64_t>(hd)};
                 Tensor q_flat_view = qv.reshape(2, q_flat);
@@ -1907,7 +2082,32 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         write_kv_cache(layer, state, stream);
     } else {
         // Decode: write new token's K/V to cache first
-        write_kv_cache(layer, state, stream);
+        if (rope_k_deferred) {
+            // Fused: apply RoPE to K during KV cache write (saves 1 kernel launch)
+            int kv_layer = layer;
+            if (!kv_layer_map_.empty()) kv_layer = kv_layer_map_[layer];
+            KVCache* cache = state.kv_cache;
+            int row_elems    = nkv * hd;
+            int block_stride = kKVBlockSize * row_elems;
+            int threads = std::min(row_elems, 256);
+            const int effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
+            const int pairs = effective_rope_dim / 2;
+            const float inv_scaling = 1.0f / layer_rope_freq_scale;
+            Tensor kv_view = view_tokens(k_, n);
+            Tensor vv_view = view_tokens(v_, n);
+            dim3 fused_grid(n, 2);
+            write_kv_cache_rope_fused_kernel<<<fused_grid, threads, 0, stream>>>(
+                static_cast<const half*>(kv_view.data),
+                static_cast<const half*>(vv_view.data),
+                state.positions, state.block_tables,
+                static_cast<half*>(cache->k_ptr(kv_layer, 0)),
+                static_cast<half*>(cache->v_ptr(kv_layer, 0)),
+                block_stride, row_elems, kKVBlockSize, n,
+                state.max_blocks_per_seq, state.n_sequences,
+                nkv, hd, layer_rope_theta, inv_scaling, pairs, cfg.rope_neox);
+        } else {
+            write_kv_cache(layer, state, stream);
+        }
 
         // Paged attention: Q shape depends on batch size
         int n_seq = state.n_sequences;
@@ -1979,34 +2179,30 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         const Tensor& wo_fp16 = fp16_cache_.at(ly.wo.data);
         gemm(ao, wo_fp16, h, 1.0f, 1.0f, stream);
     } else {
-        // Fallback: separate O-projection + optional post-norm + residual add + copy
+        // Fallback: separate O-projection + optional post-norm + residual add
         gemm_dispatch(ao, ly.wo, ly.wo_scales, ly.wo_qtype, po, dequant_scratch_, stream,
                       static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_);
-        // Post-attention norm (Gemma-3): normalize O-proj output BEFORE residual add
-        if (has_post_attn_norm) {
+        if (has_post_attn_norm && using_fp32_accum) {
+            // Post-attn norm → FP32 accumulation (no D2D copy needed)
             Tensor tmp = view_tokens(norm_out_, n);
             rmsnorm(po, ly.post_attn_norm, tmp, eps, stream, norm_w_off_);
-            cudaMemcpyAsync(po.data, tmp.data, po.nbytes(),
-                            cudaMemcpyDeviceToDevice, stream);
-        }
-        if (using_fp32_accum) {
-            // FP32 residual accumulation: add FP16 branch to FP32 hidden, then sync back
             int64_t total = static_cast<int64_t>(n) * cfg.d_model;
             int threads = 256;
             int blocks = static_cast<int>((total + threads - 1) / threads);
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             fp32_accum_add_fp16_kernel<<<blocks, threads, 0, stream>>>(
                 static_cast<float*>(fp32_h.data),
-                static_cast<const half*>(po.data), total);
-            // Update FP16 hidden from FP32 for next layer's norm input.
-            // Per-row scaling preserves element ratios (RMSNorm is scale-invariant).
+                static_cast<const half*>(tmp.data), total);
             fp32_to_fp16_rowscale_kernel<<<n, 256, 256 * sizeof(float), stream>>>(
                 static_cast<const float*>(fp32_h.data),
                 static_cast<half*>(h.data), n, cfg.d_model);
+        } else if (has_post_attn_norm) {
+            // Post-attn norm → residual add (norm directly to h, no copies)
+            rmsnorm(po, ly.post_attn_norm, h, eps, stream, norm_w_off_);
+            elementwise_add(h, r, stream);
         } else {
-            elementwise_add(po, r, stream);
-            cudaMemcpyAsync(h.data, po.data, h.nbytes(),
-                            cudaMemcpyDeviceToDevice, stream);
+            // No post-norm: h = po + residual (fused add-store, no copy)
+            elementwise_add_store(po, r, h, stream);
         }
     }
 
@@ -2074,25 +2270,12 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                     static_cast<const half*>(ffn_norm_w.data),
                                     q8, d8_buf_, static_cast<half*>(no.data),
                                     d, eps, stream, norm_w_off_);
-            // Gate GEMV (uses pre-quantized Q8_1)
-            int gate_rows = static_cast<int>(ly.w_gate.shape[0]);
-            int up_rows = static_cast<int>(ly.w_up.shape[0]);
-            if (ly.w_gate_qtype == GGMLQuantType::Q6_K) {
-                gemv_q6k_q8_1(ly.w_gate.data, q8, d8_buf_,
-                               static_cast<half*>(go.data), gate_rows, d, stream);
-                gemv_q6k_q8_1(ly.w_up.data, q8, d8_buf_,
-                               static_cast<half*>(uo.data), up_rows, d, stream);
-            } else if (ly.w_gate_qtype == GGMLQuantType::Q4_0) {
-                gemv_q4_0_q8_1(ly.w_gate.data, q8, d8_buf_,
-                                static_cast<half*>(go.data), gate_rows, d, stream);
-                gemv_q4_0_q8_1(ly.w_up.data, q8, d8_buf_,
-                                static_cast<half*>(uo.data), up_rows, d, stream);
-            } else {
-                gemv_q8_0_q8_1(ly.w_gate.data, q8, d8_buf_,
-                                static_cast<half*>(go.data), gate_rows, d, stream);
-                gemv_q8_0_q8_1(ly.w_up.data, q8, d8_buf_,
-                                static_cast<half*>(uo.data), up_rows, d, stream);
-            }
+            // Fused gate+up GEMV: single kernel launch for both projections
+            int ffn_rows = static_cast<int>(ly.w_gate.shape[0]);
+            gemv_gate_up_fused(ly.w_gate.data, ly.w_up.data, q8, d8_buf_,
+                                static_cast<half*>(go.data),
+                                static_cast<half*>(uo.data),
+                                ffn_rows, d, ly.w_gate_qtype, stream);
         } else {
             rmsnorm(h, ffn_norm_w, no, eps, stream, norm_w_off_);
             auto fused_gu_it = fused_gate_up_cache_.find(layer);
@@ -2155,30 +2338,27 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         } else {
             gemm_dispatch(so, ly.w_down, ly.w_down_scales, ly.w_down_qtype, fo, dequant_scratch_, stream,
                           static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_);
-            // Post-FFN norm (Gemma-3): normalize down-proj output BEFORE residual add
-            if (has_post_ffn_norm) {
+            if (has_post_ffn_norm && using_fp32_accum) {
+                // Post-FFN norm → FP32 accumulation (no D2D copy needed)
                 Tensor tmp = view_tokens(norm_out_, n);
                 rmsnorm(fo, ly.post_ffn_norm, tmp, eps, stream, norm_w_off_);
-                cudaMemcpyAsync(fo.data, tmp.data, fo.nbytes(),
-                                cudaMemcpyDeviceToDevice, stream);
-            }
-            if (using_fp32_accum) {
-                // FP32 residual accumulation: add FP16 branch to FP32 hidden, then sync back
                 int64_t total = static_cast<int64_t>(n) * cfg.d_model;
                 int threads = 256;
                 int blocks = static_cast<int>((total + threads - 1) / threads);
                 Tensor fp32_h = view_tokens(fp32_hidden_, n);
                 fp32_accum_add_fp16_kernel<<<blocks, threads, 0, stream>>>(
                     static_cast<float*>(fp32_h.data),
-                    static_cast<const half*>(fo.data), total);
-                // Update FP16 hidden from FP32 for next layer's norm input
+                    static_cast<const half*>(tmp.data), total);
                 fp32_to_fp16_rowscale_kernel<<<n, 256, 256 * sizeof(float), stream>>>(
                     static_cast<const float*>(fp32_h.data),
                     static_cast<half*>(h.data), n, cfg.d_model);
+            } else if (has_post_ffn_norm) {
+                // Post-FFN norm → residual add (norm directly to h, no copies)
+                rmsnorm(fo, ly.post_ffn_norm, h, eps, stream, norm_w_off_);
+                elementwise_add(h, r, stream);
             } else {
-                elementwise_add(fo, r, stream);
-                cudaMemcpyAsync(h.data, fo.data, h.nbytes(),
-                                cudaMemcpyDeviceToDevice, stream);
+                // No post-norm: h = fo + residual (fused add-store, no copy)
+                elementwise_add_store(fo, r, h, stream);
             }
         }
     }
