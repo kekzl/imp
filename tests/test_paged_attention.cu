@@ -571,5 +571,92 @@ TEST(PagedAttentionTest, SingleTokenContext) {
     cudaFree(d_bt); cudaFree(d_ctx);
 }
 
+// =========================================================================
+// GQA with long context: exercises cluster kernel path (n_q_per_kv=4, 256 tokens)
+// =========================================================================
+
+TEST(PagedAttentionTest, GQALongContext) {
+    constexpr int batch = 1, n_heads = 8, n_kv_heads = 2, head_dim = 64;
+    constexpr int seq_len = 256;
+    constexpr int num_blocks = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;  // 16
+    constexpr int max_blocks = num_blocks;
+    const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
+
+    std::vector<float> h_Q(n_heads * head_dim);
+    for (int i = 0; i < n_heads * head_dim; i++)
+        h_Q[i] = sinf(static_cast<float>(i) * 0.03f);
+
+    std::vector<float> h_K(seq_len * n_kv_heads * head_dim);
+    std::vector<float> h_V(seq_len * n_kv_heads * head_dim);
+    for (int i = 0; i < seq_len * n_kv_heads * head_dim; i++) {
+        h_K[i] = cosf(static_cast<float>(i) * 0.02f);
+        h_V[i] = sinf(static_cast<float>(i) * 0.04f + 0.5f);
+    }
+
+    // CPU reference
+    std::vector<float> h_O(n_heads * head_dim, 0.0f);
+    for (int qh = 0; qh < n_heads; qh++) {
+        int kvh = qh / (n_heads / n_kv_heads);
+        std::vector<float> K_head(seq_len * head_dim), V_head(seq_len * head_dim);
+        for (int s = 0; s < seq_len; s++) {
+            for (int d = 0; d < head_dim; d++) {
+                K_head[s * head_dim + d] = h_K[s * n_kv_heads * head_dim + kvh * head_dim + d];
+                V_head[s * head_dim + d] = h_V[s * n_kv_heads * head_dim + kvh * head_dim + d];
+            }
+        }
+        cpu_attention(h_Q.data() + qh * head_dim, K_head.data(), V_head.data(),
+                      h_O.data() + qh * head_dim, seq_len, head_dim, scale);
+    }
+
+    // Block table: identity mapping
+    std::vector<int> bt(num_blocks);
+    for (int i = 0; i < num_blocks; i++) bt[i] = i;
+
+    int total_cache_elems = num_blocks * BLOCK_SIZE * n_kv_heads * head_dim;
+    std::vector<float> h_K_cache(total_cache_elems, 0.0f);
+    std::vector<float> h_V_cache(total_cache_elems, 0.0f);
+    for (int h = 0; h < n_kv_heads; h++) {
+        std::vector<float> K_head(seq_len * head_dim), V_head(seq_len * head_dim);
+        for (int s = 0; s < seq_len; s++) {
+            for (int d = 0; d < head_dim; d++) {
+                K_head[s * head_dim + d] = h_K[s * n_kv_heads * head_dim + h * head_dim + d];
+                V_head[s * head_dim + d] = h_V[s * n_kv_heads * head_dim + h * head_dim + d];
+            }
+        }
+        fill_kv_cache(h_K_cache, K_head.data(), h, n_kv_heads, head_dim, seq_len, num_blocks, bt);
+        fill_kv_cache(h_V_cache, V_head.data(), h, n_kv_heads, head_dim, seq_len, num_blocks, bt);
+    }
+
+    Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
+    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(),
+                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(),
+                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_O = alloc_gpu_tensor_fp16({batch, 1, n_heads, head_dim});
+
+    int* d_bt = nullptr; int* d_ctx = nullptr;
+    cudaMalloc(&d_bt, max_blocks * sizeof(int));
+    cudaMalloc(&d_ctx, sizeof(int));
+    cudaMemcpy(d_bt, bt.data(), max_blocks * sizeof(int), cudaMemcpyHostToDevice);
+    int ctx = seq_len;
+    cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
+
+    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx,
+                           BLOCK_SIZE, scale, seq_len);
+    cudaDeviceSynchronize();
+
+    auto result = read_gpu_fp16(d_O);
+    for (int qh = 0; qh < n_heads; qh++) {
+        for (int d = 0; d < head_dim; d++) {
+            int idx = qh * head_dim + d;
+            EXPECT_NEAR(result[idx], h_O[idx], 0.05f)
+                << "GQA long-context mismatch at Q-head " << qh << " dim " << d;
+        }
+    }
+
+    free_gpu(d_Q); free_gpu(d_K); free_gpu(d_V); free_gpu(d_O);
+    cudaFree(d_bt); cudaFree(d_ctx);
+}
+
 } // namespace
 } // namespace imp

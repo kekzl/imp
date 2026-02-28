@@ -1527,11 +1527,26 @@ __global__ void gemv_q6k_q8_1_kernel(const uint8_t* __restrict__ W,
     const int lane    = threadIdx.x % 32;
     const int row_base = (blockIdx.x * warps_per_block + warp_id) * N_ROWS;
 
-    if (row_base >= M) return;
-
     const int blocks_per_row = K / 256;
     const size_t row_bytes = (size_t)blocks_per_row * 210;
     const int total_q8 = blocks_per_row * 8;
+
+    // Cache Q8_1 input in shared memory — eliminates 7/8 redundant L2 reads
+    // across the 8 warps in this block. Layout: qs[total_q8*8] int32 + d8[total_q8] float.
+    extern __shared__ char smem_q8[];
+    int* smem_qs = (int*)smem_q8;
+    float* smem_d = (float*)(smem_q8 + total_q8 * 32);
+
+    for (int i = threadIdx.x; i < total_q8 * 8; i += blockDim.x) {
+        int blk = i >> 3, w = i & 7;
+        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
+        smem_qs[i] = val;
+    }
+    for (int i = threadIdx.x; i < total_q8; i += blockDim.x)
+        smem_d[i] = d8[i];
+    __syncthreads();
+
+    if (row_base >= M) return;
 
     float sum[N_ROWS];
     #pragma unroll
@@ -1541,10 +1556,10 @@ __global__ void gemv_q6k_q8_1_kernel(const uint8_t* __restrict__ W,
         const int q6k_blk = q8_idx / 8;
         const int g = q8_idx % 8;
 
-        // Pre-load Q8_1 data into registers (shared across all rows)
+        // Read Q8_1 data from shared memory (loaded once per block above)
         int xqs_packed[8];
-        memcpy(xqs_packed, q8_1[q8_idx].qs, 32);
-        float dq = d8[q8_idx];
+        memcpy(xqs_packed, smem_qs + q8_idx * 8, 32);
+        float dq = smem_d[q8_idx];
 
         #pragma unroll
         for (int r = 0; r < N_ROWS; r++) {
@@ -1580,23 +1595,21 @@ static void launch_gemv_q6k_q8_1(const uint8_t* W, const block_q8_1* q8_1, const
                                    int M, int K, cudaStream_t stream) {
     const int threads_per_block = 256;
     const int warps_per_block = threads_per_block / 32;
+    const int total_q8 = (K / 256) * 8;
+    const size_t smem_size = (size_t)total_q8 * 36;  // qs[total_q8*32] + d8[total_q8*4]
 
     auto launch = [&](auto n_rows_tag) {
         constexpr int NR = decltype(n_rows_tag)::value;
         const int rows_per_block = warps_per_block * NR;
         const int blocks = (M + rows_per_block - 1) / rows_per_block;
         if (add_residual)
-            gemv_q6k_q8_1_kernel<NR, true><<<blocks, threads_per_block, 0, stream>>>(
+            gemv_q6k_q8_1_kernel<NR, true><<<blocks, threads_per_block, smem_size, stream>>>(
                 W, q8_1, d8, y, residual, M, K);
         else
-            gemv_q6k_q8_1_kernel<NR, false><<<blocks, threads_per_block, 0, stream>>>(
+            gemv_q6k_q8_1_kernel<NR, false><<<blocks, threads_per_block, smem_size, stream>>>(
                 W, q8_1, d8, y, nullptr, M, K);
     };
 
-    // Grid-size aware N_ROWS selection: use N_ROWS=2 only when it yields enough
-    // blocks for good SM utilization (at least 256 blocks ≈ 1.5× SM count).
-    // For O-proj (M=2048) with N_ROWS=2, blocks=128 → only 75% SM utilization.
-    // Switching to N_ROWS=1 gives blocks=256 → 94% SM utilization.
     int nr2_blocks = (M + warps_per_block * 2 - 1) / (warps_per_block * 2);
     if (nr2_blocks >= 256) launch(std::integral_constant<int, 2>{});
     else                   launch(std::integral_constant<int, 1>{});
@@ -1628,11 +1641,25 @@ __global__ void gemv_q6k_q8_1_fp32_kernel(const uint8_t* __restrict__ W,
     const int lane    = threadIdx.x % 32;
     const int row_base = (blockIdx.x * warps_per_block + warp_id) * N_ROWS;
 
-    if (row_base >= M) return;
-
     const int blocks_per_row = K / 256;
     const size_t row_bytes = (size_t)blocks_per_row * 210;
     const int total_q8 = blocks_per_row * 8;
+
+    // Cache Q8_1 input in shared memory
+    extern __shared__ char smem_q8[];
+    int* smem_qs = (int*)smem_q8;
+    float* smem_d = (float*)(smem_q8 + total_q8 * 32);
+
+    for (int i = threadIdx.x; i < total_q8 * 8; i += blockDim.x) {
+        int blk = i >> 3, w = i & 7;
+        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
+        smem_qs[i] = val;
+    }
+    for (int i = threadIdx.x; i < total_q8; i += blockDim.x)
+        smem_d[i] = d8[i];
+    __syncthreads();
+
+    if (row_base >= M) return;
 
     float sum[N_ROWS];
     #pragma unroll
@@ -1642,8 +1669,8 @@ __global__ void gemv_q6k_q8_1_fp32_kernel(const uint8_t* __restrict__ W,
         const int q6k_blk = q8_idx / 8;
         const int g = q8_idx % 8;
         int xqs_packed[8];
-        memcpy(xqs_packed, q8_1[q8_idx].qs, 32);
-        float dq = d8[q8_idx];
+        memcpy(xqs_packed, smem_qs + q8_idx * 8, 32);
+        float dq = smem_d[q8_idx];
 
         #pragma unroll
         for (int r = 0; r < N_ROWS; r++) {
@@ -1668,14 +1695,17 @@ void gemv_q6k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
                           float* y, int M, int K, cudaStream_t stream) {
     const int threads_per_block = 256;
     const int warps_per_block = threads_per_block / 32;
-    // LM head: M=vocab_size (large), always use N_ROWS=2
+    const int total_q8 = (K / 256) * 8;
+    const size_t smem_size = (size_t)total_q8 * 36;
     const int rows_per_block = warps_per_block * 2;
     const int blocks = (M + rows_per_block - 1) / rows_per_block;
-    gemv_q6k_q8_1_fp32_kernel<2><<<blocks, threads_per_block, 0, stream>>>(
+    gemv_q6k_q8_1_fp32_kernel<2><<<blocks, threads_per_block, smem_size, stream>>>(
         static_cast<const uint8_t*>(W), q8_1, d8, y, M, K);
 }
 
 // FP32-output Q8_0 dp4a GEMV — for LM head.
+// Uses shared-memory Q8_1 caching + multi-row (N_ROWS=2).
+template<int N_ROWS>
 __global__ void gemv_q8_0_q8_1_fp32_kernel(const uint8_t* __restrict__ W,
                                             const block_q8_1* __restrict__ q8_1,
                                             const float* __restrict__ d8,
@@ -1684,76 +1714,79 @@ __global__ void gemv_q8_0_q8_1_fp32_kernel(const uint8_t* __restrict__ W,
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
     const int lane    = threadIdx.x % 32;
-    const int row     = blockIdx.x * warps_per_block + warp_id;
-
-    if (row >= M) return;
+    const int row_base = (blockIdx.x * warps_per_block + warp_id) * N_ROWS;
 
     const int blocks_per_row = K / 32;
     const size_t row_bytes = (size_t)blocks_per_row * 34;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
 
-    float sum = 0.0f;
+    // Cache Q8_1 input in shared memory
+    extern __shared__ char smem_q8[];
+    int* smem_qs = (int*)smem_q8;
+    float* smem_d = (float*)(smem_q8 + blocks_per_row * 32);
+
+    for (int i = threadIdx.x; i < blocks_per_row * 8; i += blockDim.x) {
+        int blk = i >> 3, w = i & 7;
+        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
+        smem_qs[i] = val;
+    }
+    for (int i = threadIdx.x; i < blocks_per_row; i += blockDim.x)
+        smem_d[i] = d8[i];
+    __syncthreads();
+
+    if (row_base >= M) return;
+
+    float sum[N_ROWS];
+    #pragma unroll
+    for (int r = 0; r < N_ROWS; r++) sum[r] = 0.0f;
 
     for (int b = lane; b < blocks_per_row; b += 32) {
-        const uint8_t* bp = W_row + b * 34;
-        const float d_w = __half2float(*(const half*)bp);
+        int xi[8];
+        memcpy(xi, smem_qs + b * 8, 32);
+        float dq = smem_d[b];
 
-        int wi;
-        memcpy(&wi, bp + 2 + (0 * 4), 4);
-        int xi0;
-        memcpy(&xi0, q8_1[b].qs + 0, 4);
-        int32_t sumi = __dp4a(wi, xi0, 0);
+        #pragma unroll
+        for (int r = 0; r < N_ROWS; r++) {
+            const int row = row_base + r;
+            if (row >= M) break;
 
-        memcpy(&wi, bp + 2 + (1 * 4), 4);
-        int xi1;
-        memcpy(&xi1, q8_1[b].qs + 4, 4);
-        sumi = __dp4a(wi, xi1, sumi);
+            const uint8_t* bp = W + (size_t)row * row_bytes + b * 34;
+            half d_w_h;
+            memcpy(&d_w_h, bp, sizeof(half));
+            float d_w = __half2float(d_w_h);
+            int wi[8];
+            memcpy(wi, bp + 2, 32);
 
-        memcpy(&wi, bp + 2 + (2 * 4), 4);
-        int xi2;
-        memcpy(&xi2, q8_1[b].qs + 8, 4);
-        sumi = __dp4a(wi, xi2, sumi);
+            int32_t sumi = 0;
+            sumi = __dp4a(wi[0], xi[0], sumi);
+            sumi = __dp4a(wi[1], xi[1], sumi);
+            sumi = __dp4a(wi[2], xi[2], sumi);
+            sumi = __dp4a(wi[3], xi[3], sumi);
+            sumi = __dp4a(wi[4], xi[4], sumi);
+            sumi = __dp4a(wi[5], xi[5], sumi);
+            sumi = __dp4a(wi[6], xi[6], sumi);
+            sumi = __dp4a(wi[7], xi[7], sumi);
 
-        memcpy(&wi, bp + 2 + (3 * 4), 4);
-        int xi3;
-        memcpy(&xi3, q8_1[b].qs + 12, 4);
-        sumi = __dp4a(wi, xi3, sumi);
-
-        memcpy(&wi, bp + 2 + (4 * 4), 4);
-        int xi4;
-        memcpy(&xi4, q8_1[b].qs + 16, 4);
-        sumi = __dp4a(wi, xi4, sumi);
-
-        memcpy(&wi, bp + 2 + (5 * 4), 4);
-        int xi5;
-        memcpy(&xi5, q8_1[b].qs + 20, 4);
-        sumi = __dp4a(wi, xi5, sumi);
-
-        memcpy(&wi, bp + 2 + (6 * 4), 4);
-        int xi6;
-        memcpy(&xi6, q8_1[b].qs + 24, 4);
-        sumi = __dp4a(wi, xi6, sumi);
-
-        memcpy(&wi, bp + 2 + (7 * 4), 4);
-        int xi7;
-        memcpy(&xi7, q8_1[b].qs + 28, 4);
-        sumi = __dp4a(wi, xi7, sumi);
-
-        sum += d_w * d8[b] * (float)sumi;
+            sum[r] += d_w * dq * (float)sumi;
+        }
     }
 
-    for (int off = 16; off > 0; off >>= 1)
-        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
-
-    if (lane == 0) y[row] = sum;
+    #pragma unroll
+    for (int r = 0; r < N_ROWS; r++) {
+        for (int off = 16; off > 0; off >>= 1)
+            sum[r] += __shfl_down_sync(0xFFFFFFFF, sum[r], off);
+        if (lane == 0 && row_base + r < M) y[row_base + r] = sum[r];
+    }
 }
 
 void gemv_q8_0_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
                            float* y, int M, int K, cudaStream_t stream) {
     const int threads_per_block = 256;
     const int warps_per_block = threads_per_block / 32;
-    const int blocks = (M + warps_per_block - 1) / warps_per_block;
-    gemv_q8_0_q8_1_fp32_kernel<<<blocks, threads_per_block, 0, stream>>>(
+    const int blocks_per_row = K / 32;
+    const size_t smem_size = (size_t)blocks_per_row * 36;
+    const int rows_per_block = warps_per_block * 2;
+    const int blocks = (M + rows_per_block - 1) / rows_per_block;
+    gemv_q8_0_q8_1_fp32_kernel<2><<<blocks, threads_per_block, smem_size, stream>>>(
         static_cast<const uint8_t*>(W), q8_1, d8, y, M, K);
 }
 
@@ -1766,6 +1799,7 @@ void gemv_q8_0_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
 // using dp4a to compute the 32-element dot product in 8 dp4a instructions.
 // ---------------------------------------------------------------------------
 // Multi-row Q8_0 dp4a GEMV: each warp processes N_ROWS simultaneously.
+// Uses shared-memory Q8_1 caching to eliminate redundant L2 reads across warps.
 template<int N_ROWS, bool ADD_RESIDUAL>
 __global__ void gemv_q8_0_q8_1_kernel(const uint8_t* __restrict__ W,
                                        const block_q8_1* __restrict__ q8_1,
@@ -1778,20 +1812,33 @@ __global__ void gemv_q8_0_q8_1_kernel(const uint8_t* __restrict__ W,
     const int lane    = threadIdx.x % 32;
     const int row_base = (blockIdx.x * warps_per_block + warp_id) * N_ROWS;
 
-    if (row_base >= M) return;
-
     const int blocks_per_row = K / 32;
     const size_t row_bytes = (size_t)blocks_per_row * 34;
+
+    // Cache Q8_1 input in shared memory
+    extern __shared__ char smem_q8[];
+    int* smem_qs = (int*)smem_q8;
+    float* smem_d = (float*)(smem_q8 + blocks_per_row * 32);
+
+    for (int i = threadIdx.x; i < blocks_per_row * 8; i += blockDim.x) {
+        int blk = i >> 3, w = i & 7;
+        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
+        smem_qs[i] = val;
+    }
+    for (int i = threadIdx.x; i < blocks_per_row; i += blockDim.x)
+        smem_d[i] = d8[i];
+    __syncthreads();
+
+    if (row_base >= M) return;
 
     float sum[N_ROWS];
     #pragma unroll
     for (int r = 0; r < N_ROWS; r++) sum[r] = 0.0f;
 
     for (int b = lane; b < blocks_per_row; b += 32) {
-        // Pre-load Q8_1 input data (shared across all rows)
         int xi[8];
-        memcpy(xi, q8_1[b].qs, 32);
-        float dq = d8[b];
+        memcpy(xi, smem_qs + b * 8, 32);
+        float dq = smem_d[b];
 
         #pragma unroll
         for (int r = 0; r < N_ROWS; r++) {
@@ -1799,7 +1846,6 @@ __global__ void gemv_q8_0_q8_1_kernel(const uint8_t* __restrict__ W,
             if (row >= M) break;
 
             const uint8_t* bp = W + (size_t)row * row_bytes + b * 34;
-            // Q8_0 blocks are 34 bytes (not 4-aligned), use memcpy for safe access
             half d_w_h;
             memcpy(&d_w_h, bp, sizeof(half));
             float d_w = __half2float(d_w_h);
@@ -1840,16 +1886,18 @@ static void launch_gemv_q8_0_q8_1(const uint8_t* W, const block_q8_1* q8_1, cons
                                     int M, int K, cudaStream_t stream) {
     const int threads_per_block = 256;
     const int warps_per_block = threads_per_block / 32;
+    const int blocks_per_row = K / 32;
+    const size_t smem_size = (size_t)blocks_per_row * 36;  // qs[bpr*32] + d8[bpr*4]
 
     auto launch = [&](auto n_rows_tag) {
         constexpr int NR = decltype(n_rows_tag)::value;
         const int rows_per_block = warps_per_block * NR;
         const int blocks = (M + rows_per_block - 1) / rows_per_block;
         if (add_residual)
-            gemv_q8_0_q8_1_kernel<NR, true><<<blocks, threads_per_block, 0, stream>>>(
+            gemv_q8_0_q8_1_kernel<NR, true><<<blocks, threads_per_block, smem_size, stream>>>(
                 W, q8_1, d8, y, residual, M, K);
         else
-            gemv_q8_0_q8_1_kernel<NR, false><<<blocks, threads_per_block, 0, stream>>>(
+            gemv_q8_0_q8_1_kernel<NR, false><<<blocks, threads_per_block, smem_size, stream>>>(
                 W, q8_1, d8, y, nullptr, M, K);
     };
 
@@ -1894,11 +1942,25 @@ __global__ void gemv_qkv_fused_q6k_q8_1_kernel(
     const int row_base = (blockIdx.x * warps_per_block + warp_id) * N_ROWS;
     const int total_rows = q_rows + k_rows + v_rows;
 
-    if (row_base >= total_rows) return;
-
     const int blocks_per_row = K / 256;
     const size_t row_bytes = (size_t)blocks_per_row * 210;
     const int total_q8 = blocks_per_row * 8;
+
+    // Cache Q8_1 input in shared memory
+    extern __shared__ char smem_q8[];
+    int* smem_qs = (int*)smem_q8;
+    float* smem_d = (float*)(smem_q8 + total_q8 * 32);
+
+    for (int i = threadIdx.x; i < total_q8 * 8; i += blockDim.x) {
+        int blk = i >> 3, w = i & 7;
+        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
+        smem_qs[i] = val;
+    }
+    for (int i = threadIdx.x; i < total_q8; i += blockDim.x)
+        smem_d[i] = d8[i];
+    __syncthreads();
+
+    if (row_base >= total_rows) return;
 
     float sum[N_ROWS];
     #pragma unroll
@@ -1908,17 +1970,15 @@ __global__ void gemv_qkv_fused_q6k_q8_1_kernel(
         const int q6k_blk = q8_idx / 8;
         const int g = q8_idx % 8;
 
-        // Load Q8_1 data once (shared across all N_ROWS rows)
         int xqs_packed[8];
-        memcpy(xqs_packed, q8_1[q8_idx].qs, 32);
-        float dq = d8[q8_idx];
+        memcpy(xqs_packed, smem_qs + q8_idx * 8, 32);
+        float dq = smem_d[q8_idx];
 
         #pragma unroll
         for (int r = 0; r < N_ROWS; r++) {
             const int global_row = row_base + r;
             if (global_row >= total_rows) break;
 
-            // Determine which projection and local row
             const uint8_t* W;
             int local_row;
             if (global_row < q_rows) {
@@ -1971,10 +2031,12 @@ void gemv_qkv_fused_q6k_q8_1(const void* W_q, const void* W_k, const void* W_v,
     const int threads_per_block = 256;
     const int warps_per_block = threads_per_block / 32;
     const int total = q_rows + k_rows + v_rows;
-    // Use N_ROWS=2 when grid is large enough (>= 256 blocks)
+    const int total_q8 = (K / 256) * 8;
+    const size_t smem = (size_t)total_q8 * 36;
+
     int nr2_blocks = (total + warps_per_block * 2 - 1) / (warps_per_block * 2);
     if (nr2_blocks >= 256) {
-        gemv_qkv_fused_q6k_q8_1_kernel<2><<<nr2_blocks, threads_per_block, 0, stream>>>(
+        gemv_qkv_fused_q6k_q8_1_kernel<2><<<nr2_blocks, threads_per_block, smem, stream>>>(
             static_cast<const uint8_t*>(W_q),
             static_cast<const uint8_t*>(W_k),
             static_cast<const uint8_t*>(W_v),
@@ -1982,7 +2044,7 @@ void gemv_qkv_fused_q6k_q8_1(const void* W_q, const void* W_k, const void* W_v,
             q_rows, k_rows, v_rows, K);
     } else {
         int blocks = (total + warps_per_block - 1) / warps_per_block;
-        gemv_qkv_fused_q6k_q8_1_kernel<1><<<blocks, threads_per_block, 0, stream>>>(
+        gemv_qkv_fused_q6k_q8_1_kernel<1><<<blocks, threads_per_block, smem, stream>>>(
             static_cast<const uint8_t*>(W_q),
             static_cast<const uint8_t*>(W_k),
             static_cast<const uint8_t*>(W_v),
@@ -2007,6 +2069,23 @@ __global__ void gemv_qkv_fused_q8_0_q8_1_kernel(
     const int global_row = blockIdx.x * warps_per_block + warp_id;
     const int total_rows = q_rows + k_rows + v_rows;
 
+    const int blocks_per_row = K / 32;
+    const size_t row_bytes = (size_t)blocks_per_row * 34;
+
+    // Cache Q8_1 input in shared memory
+    extern __shared__ char smem_q8[];
+    int* smem_qs = (int*)smem_q8;
+    float* smem_d = (float*)(smem_q8 + blocks_per_row * 32);
+
+    for (int i = threadIdx.x; i < blocks_per_row * 8; i += blockDim.x) {
+        int blk = i >> 3, w = i & 7;
+        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
+        smem_qs[i] = val;
+    }
+    for (int i = threadIdx.x; i < blocks_per_row; i += blockDim.x)
+        smem_d[i] = d8[i];
+    __syncthreads();
+
     if (global_row >= total_rows) return;
 
     const uint8_t* W;
@@ -2024,9 +2103,6 @@ __global__ void gemv_qkv_fused_q8_0_q8_1_kernel(
         y = y_v;
     }
 
-    const int blocks_per_row = K / 32;
-    const size_t row_bytes = (size_t)blocks_per_row * 34;
-
     if (global_row < q_rows) W = W_q + (size_t)local_row * row_bytes;
     else if (global_row < q_rows + k_rows) W = W_k + (size_t)local_row * row_bytes;
     else W = W_v + (size_t)local_row * row_bytes;
@@ -2035,14 +2111,13 @@ __global__ void gemv_qkv_fused_q8_0_q8_1_kernel(
 
     for (int b = lane; b < blocks_per_row; b += 32) {
         const uint8_t* bp = W + b * 34;
-        // Q8_0 blocks are 34 bytes (not 4-aligned), use memcpy for safe access
         half d_w_h;
         memcpy(&d_w_h, bp, sizeof(half));
         float d_w = __half2float(d_w_h);
         int wi[8];
         memcpy(wi, bp + 2, 32);
         int xi[8];
-        memcpy(xi, q8_1[b].qs, 32);
+        memcpy(xi, smem_qs + b * 8, 32);
 
         int32_t sumi = 0;
         sumi = __dp4a(wi[0], xi[0], sumi);
@@ -2054,7 +2129,7 @@ __global__ void gemv_qkv_fused_q8_0_q8_1_kernel(
         sumi = __dp4a(wi[6], xi[6], sumi);
         sumi = __dp4a(wi[7], xi[7], sumi);
 
-        sum += d_w * d8[b] * (float)sumi;
+        sum += d_w * smem_d[b] * (float)sumi;
     }
 
     for (int off = 16; off > 0; off >>= 1)
@@ -2072,7 +2147,9 @@ void gemv_qkv_fused_q8_0_q8_1(const void* W_q, const void* W_k, const void* W_v,
     const int warps_per_block = threads_per_block / 32;
     const int total = q_rows + k_rows + v_rows;
     const int blocks = (total + warps_per_block - 1) / warps_per_block;
-    gemv_qkv_fused_q8_0_q8_1_kernel<<<blocks, threads_per_block, 0, stream>>>(
+    const int bpr = K / 32;
+    const size_t smem = (size_t)bpr * 36;
+    gemv_qkv_fused_q8_0_q8_1_kernel<<<blocks, threads_per_block, smem, stream>>>(
         static_cast<const uint8_t*>(W_q),
         static_cast<const uint8_t*>(W_k),
         static_cast<const uint8_t*>(W_v),
@@ -2117,21 +2194,37 @@ __global__ void gemv_q4_0_q8_1_kernel(const uint8_t* __restrict__ W,
     const int lane    = threadIdx.x % 32;
     const int row_base = (blockIdx.x * warps_per_block + warp_id) * N_ROWS;
 
-    if (row_base >= M) return;
-
     const int blocks_per_row = K / 32;
     const size_t row_bytes = (size_t)blocks_per_row * 18;  // 18 bytes per Q4_0 block
+
+    // Cache Q8_1 input in shared memory (including s field for Q4_0 bias correction)
+    extern __shared__ char smem_q8[];
+    int* smem_qs = (int*)smem_q8;
+    float* smem_d = (float*)(smem_q8 + blocks_per_row * 32);
+    half* smem_s  = (half*)(smem_q8 + blocks_per_row * 36);
+
+    for (int i = threadIdx.x; i < blocks_per_row * 8; i += blockDim.x) {
+        int blk = i >> 3, w = i & 7;
+        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
+        smem_qs[i] = val;
+    }
+    for (int i = threadIdx.x; i < blocks_per_row; i += blockDim.x) {
+        smem_d[i] = d8[i];
+        smem_s[i] = q8_1[i].s;
+    }
+    __syncthreads();
+
+    if (row_base >= M) return;
 
     float sum[N_ROWS];
     #pragma unroll
     for (int r = 0; r < N_ROWS; r++) sum[r] = 0.0f;
 
     for (int b = lane; b < blocks_per_row; b += 32) {
-        // Pre-load Q8_1 input data (shared across all rows)
         int xi[8];
-        memcpy(xi, q8_1[b].qs, 32);
-        float dq = d8[b];
-        float q8_sum = __half2float(q8_1[b].s);  // sum of qs * d_input
+        memcpy(xi, smem_qs + b * 8, 32);
+        float dq = smem_d[b];
+        float q8_sum = __half2float(smem_s[b]);
 
         #pragma unroll
         for (int r = 0; r < N_ROWS; r++) {
@@ -2144,7 +2237,6 @@ __global__ void gemv_q4_0_q8_1_kernel(const uint8_t* __restrict__ W,
             float d_w = __half2float(d_w_h);
             const uint8_t* qs = bp + 2;
 
-            // Unpack 16 nibble bytes into 8 uint32 dp4a operands
             int ni0 = unpack_nibbles_2(qs[0],  qs[1]);
             int ni1 = unpack_nibbles_2(qs[2],  qs[3]);
             int ni2 = unpack_nibbles_2(qs[4],  qs[5]);
@@ -2164,7 +2256,6 @@ __global__ void gemv_q4_0_q8_1_kernel(const uint8_t* __restrict__ W,
             sumi = __dp4a(ni6, xi[6], sumi);
             sumi = __dp4a(ni7, xi[7], sumi);
 
-            // Correct for unsigned nibbles: subtract 8 * d_w * sum(input_qs * d_input)
             sum[r] += d_w * (dq * (float)sumi - 8.0f * q8_sum);
         }
     }
@@ -2189,16 +2280,19 @@ static void launch_gemv_q4_0_q8_1(const uint8_t* W, const block_q8_1* q8_1, cons
                                     int M, int K, cudaStream_t stream) {
     const int threads_per_block = 256;
     const int warps_per_block = threads_per_block / 32;
+    const int blocks_per_row = K / 32;
+    // Q4_0 also caches s field: qs[bpr*32] + d8[bpr*4] + s[bpr*2]
+    const size_t smem_size = (size_t)blocks_per_row * 38;
 
     auto launch = [&](auto n_rows_tag) {
         constexpr int NR = decltype(n_rows_tag)::value;
         const int rows_per_block = warps_per_block * NR;
         const int blocks = (M + rows_per_block - 1) / rows_per_block;
         if (add_residual)
-            gemv_q4_0_q8_1_kernel<NR, true><<<blocks, threads_per_block, 0, stream>>>(
+            gemv_q4_0_q8_1_kernel<NR, true><<<blocks, threads_per_block, smem_size, stream>>>(
                 W, q8_1, d8, y, residual, M, K);
         else
-            gemv_q4_0_q8_1_kernel<NR, false><<<blocks, threads_per_block, 0, stream>>>(
+            gemv_q4_0_q8_1_kernel<NR, false><<<blocks, threads_per_block, smem_size, stream>>>(
                 W, q8_1, d8, y, nullptr, M, K);
     };
 
@@ -2237,24 +2331,38 @@ __global__ void gemv_gate_up_fused_q6k_q8_1_kernel(
     const int lane    = threadIdx.x % 32;
     const int row     = blockIdx.x * warps_per_block + warp_id;
 
+    const int blocks_per_row = K / 256;
+    const size_t row_bytes = (size_t)blocks_per_row * 210;
+    const int total_q8 = blocks_per_row * 8;
+
+    // Cache Q8_1 input in shared memory
+    extern __shared__ char smem_q8[];
+    int* smem_qs = (int*)smem_q8;
+    float* smem_d = (float*)(smem_q8 + total_q8 * 32);
+
+    for (int i = threadIdx.x; i < total_q8 * 8; i += blockDim.x) {
+        int blk = i >> 3, w = i & 7;
+        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
+        smem_qs[i] = val;
+    }
+    for (int i = threadIdx.x; i < total_q8; i += blockDim.x)
+        smem_d[i] = d8[i];
+    __syncthreads();
+
     if (row >= M) return;
 
     const bool is_up = (blockIdx.y == 1);
     const uint8_t* W = is_up ? up_weights : gate_weights;
     half* y = is_up ? y_up : y_gate;
-
-    const int blocks_per_row = K / 256;
-    const size_t row_bytes = (size_t)blocks_per_row * 210;
     const uint8_t* W_row = W + (size_t)row * row_bytes;
-    const int total_q8 = blocks_per_row * 8;
     float sum = 0.0f;
 
     for (int q8_idx = lane; q8_idx < total_q8; q8_idx += 32) {
         const int q6k_blk = q8_idx / 8;
         const int g = q8_idx % 8;
         int xqs_packed[8];
-        memcpy(xqs_packed, q8_1[q8_idx].qs, 32);
-        float dq = d8[q8_idx];
+        memcpy(xqs_packed, smem_qs + q8_idx * 8, 32);
+        float dq = smem_d[q8_idx];
 
         const uint8_t* bp = W_row + q6k_blk * 210;
         float d_w = __half2float(*(const half*)(bp + 208));
@@ -2282,21 +2390,35 @@ __global__ void gemv_gate_up_fused_q8_0_q8_1_kernel(
     const int lane    = threadIdx.x % 32;
     const int row     = blockIdx.x * warps_per_block + warp_id;
 
+    const int blocks_per_row = K / 32;
+    const size_t row_bytes = (size_t)blocks_per_row * 34;
+
+    // Cache Q8_1 input in shared memory
+    extern __shared__ char smem_q8[];
+    int* smem_qs = (int*)smem_q8;
+    float* smem_d = (float*)(smem_q8 + blocks_per_row * 32);
+
+    for (int i = threadIdx.x; i < blocks_per_row * 8; i += blockDim.x) {
+        int blk = i >> 3, w = i & 7;
+        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
+        smem_qs[i] = val;
+    }
+    for (int i = threadIdx.x; i < blocks_per_row; i += blockDim.x)
+        smem_d[i] = d8[i];
+    __syncthreads();
+
     if (row >= M) return;
 
     const bool is_up = (blockIdx.y == 1);
     const uint8_t* W = is_up ? up_weights : gate_weights;
     half* y = is_up ? y_up : y_gate;
-
-    const int blocks_per_row = K / 32;
-    const size_t row_bytes = (size_t)blocks_per_row * 34;
     const uint8_t* W_row = W + (size_t)row * row_bytes;
     float sum = 0.0f;
 
     for (int b = lane; b < blocks_per_row; b += 32) {
         int xi[8];
-        memcpy(xi, q8_1[b].qs, 32);
-        float dq = d8[b];
+        memcpy(xi, smem_qs + b * 8, 32);
+        float dq = smem_d[b];
 
         const uint8_t* bp = W_row + b * 34;
         half d_w_h;
@@ -2337,22 +2459,39 @@ __global__ void gemv_gate_up_fused_q4_0_q8_1_kernel(
     const int lane    = threadIdx.x % 32;
     const int row     = blockIdx.x * warps_per_block + warp_id;
 
+    const int blocks_per_row = K / 32;
+    const size_t row_bytes = (size_t)blocks_per_row * 18;
+
+    // Cache Q8_1 input in shared memory (including s field for Q4_0)
+    extern __shared__ char smem_q8[];
+    int* smem_qs = (int*)smem_q8;
+    float* smem_d = (float*)(smem_q8 + blocks_per_row * 32);
+    half* smem_s  = (half*)(smem_q8 + blocks_per_row * 36);
+
+    for (int i = threadIdx.x; i < blocks_per_row * 8; i += blockDim.x) {
+        int blk = i >> 3, w = i & 7;
+        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
+        smem_qs[i] = val;
+    }
+    for (int i = threadIdx.x; i < blocks_per_row; i += blockDim.x) {
+        smem_d[i] = d8[i];
+        smem_s[i] = q8_1[i].s;
+    }
+    __syncthreads();
+
     if (row >= M) return;
 
     const bool is_up = (blockIdx.y == 1);
     const uint8_t* W = is_up ? up_weights : gate_weights;
     half* y = is_up ? y_up : y_gate;
-
-    const int blocks_per_row = K / 32;
-    const size_t row_bytes = (size_t)blocks_per_row * 18;
     const uint8_t* W_row = W + (size_t)row * row_bytes;
     float sum = 0.0f;
 
     for (int b = lane; b < blocks_per_row; b += 32) {
         int xi[8];
-        memcpy(xi, q8_1[b].qs, 32);
-        float dq = d8[b];
-        float q8_sum = __half2float(q8_1[b].s);
+        memcpy(xi, smem_qs + b * 8, 32);
+        float dq = smem_d[b];
+        float q8_sum = __half2float(smem_s[b]);
 
         const uint8_t* bp = W_row + b * 18;
         half d_w_h;
@@ -2399,17 +2538,23 @@ void gemv_gate_up_fused(const void* gate_weights, const void* up_weights,
     dim3 grid(blocks, 2);  // y=0: gate, y=1: up
 
     if (qtype == GGMLQuantType::Q6_K) {
-        gemv_gate_up_fused_q6k_q8_1_kernel<<<grid, threads_per_block, 0, stream>>>(
+        const int total_q8 = (K / 256) * 8;
+        const size_t smem = (size_t)total_q8 * 36;
+        gemv_gate_up_fused_q6k_q8_1_kernel<<<grid, threads_per_block, smem, stream>>>(
             static_cast<const uint8_t*>(gate_weights),
             static_cast<const uint8_t*>(up_weights),
             q8_1, d8, y_gate, y_up, M, K);
     } else if (qtype == GGMLQuantType::Q8_0) {
-        gemv_gate_up_fused_q8_0_q8_1_kernel<<<grid, threads_per_block, 0, stream>>>(
+        const int bpr = K / 32;
+        const size_t smem = (size_t)bpr * 36;
+        gemv_gate_up_fused_q8_0_q8_1_kernel<<<grid, threads_per_block, smem, stream>>>(
             static_cast<const uint8_t*>(gate_weights),
             static_cast<const uint8_t*>(up_weights),
             q8_1, d8, y_gate, y_up, M, K);
     } else if (qtype == GGMLQuantType::Q4_0) {
-        gemv_gate_up_fused_q4_0_q8_1_kernel<<<grid, threads_per_block, 0, stream>>>(
+        const int bpr = K / 32;
+        const size_t smem = (size_t)bpr * 38;  // +2 for s field
+        gemv_gate_up_fused_q4_0_q8_1_kernel<<<grid, threads_per_block, smem, stream>>>(
             static_cast<const uint8_t*>(gate_weights),
             static_cast<const uint8_t*>(up_weights),
             q8_1, d8, y_gate, y_up, M, K);
@@ -2427,12 +2572,29 @@ __global__ void gemv_q4_0_q8_1_fp32_kernel(const uint8_t* __restrict__ W,
     const int lane    = threadIdx.x % 32;
     const int row     = blockIdx.x * warps_per_block + warp_id;
 
-    if (row >= M) return;
-
     const int blocks_per_row = K / 32;
     const size_t row_bytes = (size_t)blocks_per_row * 18;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
 
+    // Cache Q8_1 input in shared memory (including s field for Q4_0)
+    extern __shared__ char smem_q8[];
+    int* smem_qs = (int*)smem_q8;
+    float* smem_d = (float*)(smem_q8 + blocks_per_row * 32);
+    half* smem_s  = (half*)(smem_q8 + blocks_per_row * 36);
+
+    for (int i = threadIdx.x; i < blocks_per_row * 8; i += blockDim.x) {
+        int blk = i >> 3, w = i & 7;
+        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
+        smem_qs[i] = val;
+    }
+    for (int i = threadIdx.x; i < blocks_per_row; i += blockDim.x) {
+        smem_d[i] = d8[i];
+        smem_s[i] = q8_1[i].s;
+    }
+    __syncthreads();
+
+    if (row >= M) return;
+
+    const uint8_t* W_row = W + (size_t)row * row_bytes;
     float sum = 0.0f;
 
     for (int b = lane; b < blocks_per_row; b += 32) {
@@ -2441,7 +2603,7 @@ __global__ void gemv_q4_0_q8_1_fp32_kernel(const uint8_t* __restrict__ W,
         memcpy(&d_w_h, bp, sizeof(half));
         float d_w = __half2float(d_w_h);
         const uint8_t* qs = bp + 2;
-        float q8_sum = __half2float(q8_1[b].s);
+        float q8_sum = __half2float(smem_s[b]);
 
         int ni0 = unpack_nibbles_2(qs[0],  qs[1]);
         int ni1 = unpack_nibbles_2(qs[2],  qs[3]);
@@ -2452,27 +2614,20 @@ __global__ void gemv_q4_0_q8_1_fp32_kernel(const uint8_t* __restrict__ W,
         int ni6 = unpack_nibbles_2(qs[12], qs[13]);
         int ni7 = unpack_nibbles_2(qs[14], qs[15]);
 
-        int xi0, xi1, xi2, xi3, xi4, xi5, xi6, xi7;
-        memcpy(&xi0, q8_1[b].qs +  0, 4);
-        memcpy(&xi1, q8_1[b].qs +  4, 4);
-        memcpy(&xi2, q8_1[b].qs +  8, 4);
-        memcpy(&xi3, q8_1[b].qs + 12, 4);
-        memcpy(&xi4, q8_1[b].qs + 16, 4);
-        memcpy(&xi5, q8_1[b].qs + 20, 4);
-        memcpy(&xi6, q8_1[b].qs + 24, 4);
-        memcpy(&xi7, q8_1[b].qs + 28, 4);
+        int xi[8];
+        memcpy(xi, smem_qs + b * 8, 32);
 
         int32_t sumi = 0;
-        sumi = __dp4a(ni0, xi0, sumi);
-        sumi = __dp4a(ni1, xi1, sumi);
-        sumi = __dp4a(ni2, xi2, sumi);
-        sumi = __dp4a(ni3, xi3, sumi);
-        sumi = __dp4a(ni4, xi4, sumi);
-        sumi = __dp4a(ni5, xi5, sumi);
-        sumi = __dp4a(ni6, xi6, sumi);
-        sumi = __dp4a(ni7, xi7, sumi);
+        sumi = __dp4a(ni0, xi[0], sumi);
+        sumi = __dp4a(ni1, xi[1], sumi);
+        sumi = __dp4a(ni2, xi[2], sumi);
+        sumi = __dp4a(ni3, xi[3], sumi);
+        sumi = __dp4a(ni4, xi[4], sumi);
+        sumi = __dp4a(ni5, xi[5], sumi);
+        sumi = __dp4a(ni6, xi[6], sumi);
+        sumi = __dp4a(ni7, xi[7], sumi);
 
-        sum += d_w * (d8[b] * (float)sumi - 8.0f * q8_sum);
+        sum += d_w * (smem_d[b] * (float)sumi - 8.0f * q8_sum);
     }
 
     for (int off = 16; off > 0; off >>= 1)
@@ -2486,7 +2641,9 @@ void gemv_q4_0_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
     const int threads_per_block = 256;
     const int warps_per_block = threads_per_block / 32;
     const int blocks = (M + warps_per_block - 1) / warps_per_block;
-    gemv_q4_0_q8_1_fp32_kernel<<<blocks, threads_per_block, 0, stream>>>(
+    const int bpr = K / 32;
+    const size_t smem = (size_t)bpr * 38;
+    gemv_q4_0_q8_1_fp32_kernel<<<blocks, threads_per_block, smem, stream>>>(
         static_cast<const uint8_t*>(W), q8_1, d8, y, M, K);
 }
 
@@ -2507,6 +2664,26 @@ __global__ void gemv_qkv_fused_q4_0_q8_1_kernel(
     const int global_row = blockIdx.x * warps_per_block + warp_id;
     const int total_rows = q_rows + k_rows + v_rows;
 
+    const int blocks_per_row = K / 32;
+    const size_t row_bytes = (size_t)blocks_per_row * 18;
+
+    // Cache Q8_1 input in shared memory (including s field for Q4_0)
+    extern __shared__ char smem_q8[];
+    int* smem_qs = (int*)smem_q8;
+    float* smem_d = (float*)(smem_q8 + blocks_per_row * 32);
+    half* smem_s  = (half*)(smem_q8 + blocks_per_row * 36);
+
+    for (int i = threadIdx.x; i < blocks_per_row * 8; i += blockDim.x) {
+        int blk = i >> 3, w = i & 7;
+        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
+        smem_qs[i] = val;
+    }
+    for (int i = threadIdx.x; i < blocks_per_row; i += blockDim.x) {
+        smem_d[i] = d8[i];
+        smem_s[i] = q8_1[i].s;
+    }
+    __syncthreads();
+
     if (global_row >= total_rows) return;
 
     const uint8_t* W;
@@ -2524,9 +2701,6 @@ __global__ void gemv_qkv_fused_q4_0_q8_1_kernel(
         y = y_v;
     }
 
-    const int blocks_per_row = K / 32;
-    const size_t row_bytes = (size_t)blocks_per_row * 18;
-
     if (global_row < q_rows) W = W_q + (size_t)local_row * row_bytes;
     else if (global_row < q_rows + k_rows) W = W_k + (size_t)local_row * row_bytes;
     else W = W_v + (size_t)local_row * row_bytes;
@@ -2539,7 +2713,7 @@ __global__ void gemv_qkv_fused_q4_0_q8_1_kernel(
         memcpy(&d_w_h, bp, sizeof(half));
         float d_w = __half2float(d_w_h);
         const uint8_t* qs = bp + 2;
-        float q8_sum = __half2float(q8_1[b].s);
+        float q8_sum = __half2float(smem_s[b]);
 
         int ni0 = unpack_nibbles_2(qs[0],  qs[1]);
         int ni1 = unpack_nibbles_2(qs[2],  qs[3]);
@@ -2551,7 +2725,7 @@ __global__ void gemv_qkv_fused_q4_0_q8_1_kernel(
         int ni7 = unpack_nibbles_2(qs[14], qs[15]);
 
         int xi[8];
-        memcpy(xi, q8_1[b].qs, 32);
+        memcpy(xi, smem_qs + b * 8, 32);
 
         int32_t sumi = 0;
         sumi = __dp4a(ni0, xi[0], sumi);
@@ -2563,7 +2737,7 @@ __global__ void gemv_qkv_fused_q4_0_q8_1_kernel(
         sumi = __dp4a(ni6, xi[6], sumi);
         sumi = __dp4a(ni7, xi[7], sumi);
 
-        sum += d_w * (d8[b] * (float)sumi - 8.0f * q8_sum);
+        sum += d_w * (smem_d[b] * (float)sumi - 8.0f * q8_sum);
     }
 
     for (int off = 16; off > 0; off >>= 1)
@@ -2581,7 +2755,9 @@ void gemv_qkv_fused_q4_0_q8_1(const void* W_q, const void* W_k, const void* W_v,
     const int warps_per_block = threads_per_block / 32;
     const int total = q_rows + k_rows + v_rows;
     const int blocks = (total + warps_per_block - 1) / warps_per_block;
-    gemv_qkv_fused_q4_0_q8_1_kernel<<<blocks, threads_per_block, 0, stream>>>(
+    const int bpr = K / 32;
+    const size_t smem = (size_t)bpr * 38;
+    gemv_qkv_fused_q4_0_q8_1_kernel<<<blocks, threads_per_block, smem, stream>>>(
         static_cast<const uint8_t*>(W_q),
         static_cast<const uint8_t*>(W_k),
         static_cast<const uint8_t*>(W_v),

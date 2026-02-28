@@ -40,7 +40,7 @@ static constexpr int WMMA_K = 16;
 
 // ---- kernel (templated on Br) -----------------------------------------------
 
-template <int Br>
+template <int Br, int HD>
 __global__ void flash_attention_blackwell_kernel(
     const half* __restrict__ Q,
     const half* __restrict__ K,
@@ -51,11 +51,12 @@ __global__ void flash_attention_blackwell_kernel(
     int   seq_kv,
     int   n_heads,
     int   n_kv_heads,
-    int   head_dim,
     float scale,
     bool  causal,
     int   sliding_window)
 {
+    constexpr int head_dim = HD;  // compile-time head_dim for optimized div/mod
+
     // ---- index computation --------------------------------------------------
     const int tile_q     = blockIdx.x;
     const int batch_head = blockIdx.y;
@@ -405,50 +406,58 @@ void flash_attention_blackwell(
     const size_t smem_64  = compute_smem(64,  head_dim);
     const bool use_br128  = (smem_128 <= (size_t)max_smem);
 
+    // Dispatch macro: Br x HD template instantiation
+    #define LAUNCH_BW(BR, HD) do { \
+        cudaFuncSetAttribute( \
+            flash_attention_blackwell_kernel<BR, HD>, \
+            cudaFuncAttributeMaxDynamicSharedMemorySize, \
+            static_cast<int>(smem)); \
+        flash_attention_blackwell_kernel<BR, HD><<<grid, block, smem, stream>>>( \
+            reinterpret_cast<const half*>(Q.data), \
+            reinterpret_cast<const half*>(K.data), \
+            reinterpret_cast<const half*>(V.data), \
+            reinterpret_cast<half*>(O.data), \
+            batch_size, seq_q, seq_kv, \
+            n_heads, n_kv_heads, \
+            scale, causal, sliding_window); \
+    } while (0)
+
+    // Select Br and compute grid
+    auto launch = [&](int Br, size_t smem) -> bool {
+        const int num_q_tiles = (seq_q + Br - 1) / Br;
+        dim3 grid(num_q_tiles, batch_size * n_heads);
+        dim3 block(BW_WARP_SIZE, BW_NUM_WARPS);
+
+        bool launched = false;
+        if (Br == 128) {
+            switch (head_dim) {
+                case 64:  LAUNCH_BW(128, 64);  launched = true; break;
+                case 96:  LAUNCH_BW(128, 96);  launched = true; break;
+                default: break;
+            }
+        } else {
+            switch (head_dim) {
+                case 64:  LAUNCH_BW(64, 64);   launched = true; break;
+                case 96:  LAUNCH_BW(64, 96);   launched = true; break;
+                case 128: LAUNCH_BW(64, 128);  launched = true; break;
+                case 256: LAUNCH_BW(64, 256);  launched = true; break;
+                default: break;
+            }
+        }
+        return launched;
+    };
+
+    bool launched = false;
     if (use_br128) {
-        // Br=128: larger Q tile for better compute-to-memory ratio
-        const int Br = 128;
-        const int num_q_tiles = (seq_q + Br - 1) / Br;
-        dim3 grid(num_q_tiles, batch_size * n_heads);
-        dim3 block(BW_WARP_SIZE, BW_NUM_WARPS);
-
-        cudaFuncSetAttribute(
-            flash_attention_blackwell_kernel<128>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize,
-            static_cast<int>(smem_128));
-
-        flash_attention_blackwell_kernel<128><<<grid, block, smem_128, stream>>>(
-            reinterpret_cast<const half*>(Q.data),
-            reinterpret_cast<const half*>(K.data),
-            reinterpret_cast<const half*>(V.data),
-            reinterpret_cast<half*>(O.data),
-            batch_size, seq_q, seq_kv,
-            n_heads, n_kv_heads, head_dim,
-            scale, causal, sliding_window);
+        launched = launch(128, smem_128);
     } else if (smem_64 <= (size_t)max_smem) {
-        // Br=64: same tile height as tc but with 8 warps + double-buffered KV
-        const int Br = 64;
-        const int num_q_tiles = (seq_q + Br - 1) / Br;
-        dim3 grid(num_q_tiles, batch_size * n_heads);
-        dim3 block(BW_WARP_SIZE, BW_NUM_WARPS);
-
-        cudaFuncSetAttribute(
-            flash_attention_blackwell_kernel<64>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize,
-            static_cast<int>(smem_64));
-
-        flash_attention_blackwell_kernel<64><<<grid, block, smem_64, stream>>>(
-            reinterpret_cast<const half*>(Q.data),
-            reinterpret_cast<const half*>(K.data),
-            reinterpret_cast<const half*>(V.data),
-            reinterpret_cast<half*>(O.data),
-            batch_size, seq_q, seq_kv,
-            n_heads, n_kv_heads, head_dim,
-            scale, causal, sliding_window);
-    } else {
-        // Shared memory too small even for Br=64; fall back to tc path
+        launched = launch(64, smem_64);
+    }
+    if (!launched) {
+        // Unsupported head_dim or smem too small; fall back to tc path
         flash_attention_prefill_tc(Q, K, V, O, scale, causal, sliding_window, stream);
     }
+    #undef LAUNCH_BW
 }
 
 } // namespace imp

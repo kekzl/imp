@@ -2289,14 +2289,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         }
     }
 
-    // 4. Gated activation
-    switch (cfg.ffn_activation) {
-        case FFNActivation::GEGLU:  geglu(go, uo, so, stream);  break;
-        default:                    swiglu(go, uo, so, stream);  break;
-    }
-
-    // 5+6. Down projection + residual add.
-    //    For decode (n=1) with dp4a: fuse residual into GEMV output, write to hidden.
+    // 4+5+6. Gated activation + Down projection + residual add.
+    //    For decode (n=1) with dp4a: fuse activation→Q8_1→GEMV+residual.
+    //    SwiGLU case: swiglu_quantize_q8_1 fuses activation + Q8_1 in one kernel,
+    //    eliminating the intermediate FP16 buffer write and one kernel launch.
     {
         auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
         bool fused_down_residual = (!has_post_ffn_norm &&
@@ -2308,7 +2304,16 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         if (fused_down_residual) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
-            quantize_fp16_to_q8_1(static_cast<const half*>(so.data), q8, d8_buf_, K_d, stream);
+            // Fuse activation + Q8_1 quantization into a single kernel when possible.
+            // This saves 1 kernel launch per layer (activation + quantize → single kernel).
+            if (cfg.ffn_activation != FFNActivation::GEGLU) {
+                swiglu_quantize_q8_1(static_cast<const half*>(go.data),
+                                     static_cast<const half*>(uo.data),
+                                     q8, d8_buf_, K_d, stream);
+            } else {
+                geglu(go, uo, so, stream);
+                quantize_fp16_to_q8_1(static_cast<const half*>(so.data), q8, d8_buf_, K_d, stream);
+            }
             // Use h.data as residual source (memcpy was skipped)
             const half* residual_ptr = static_cast<const half*>(h.data);
             if (ly.w_down_qtype == GGMLQuantType::Q6_K) {
@@ -2324,41 +2329,48 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                           static_cast<half*>(h.data), residual_ptr,
                                           M_d, K_d, stream);
             }
-        } else if (will_fuse_down_beta1) {
-            // Fused: hidden = swiglu_out @ w_down^T + hidden (cuBLAS beta=1).
-            const Tensor& wd_fp16 = fp16_cache_.at(ly.w_down.data);
-            gemm(so, wd_fp16, h, 1.0f, 1.0f, stream);
-        } else if (will_fuse_down_dequant_beta1) {
-            // Dequant into scratch, then beta=1.0 GEMM directly into hidden (which holds residual)
-            int rows = static_cast<int>(ly.w_down.shape[0]);
-            int cols = static_cast<int>(ly.w_down.shape[1]);
-            dequant_gpu(ly.w_down.data, dequant_scratch_, ly.w_down_qtype, rows, cols, stream);
-            Tensor w_fp16(dequant_scratch_, DType::FP16, ly.w_down.ndim, ly.w_down.shape, true);
-            gemm(so, w_fp16, h, 1.0f, 1.0f, stream);
         } else {
-            gemm_dispatch(so, ly.w_down, ly.w_down_scales, ly.w_down_qtype, fo, dequant_scratch_, stream,
-                          static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_);
-            if (has_post_ffn_norm && using_fp32_accum) {
-                // Post-FFN norm → FP32 accumulation (no D2D copy needed)
-                Tensor tmp = view_tokens(norm_out_, n);
-                rmsnorm(fo, ly.post_ffn_norm, tmp, eps, stream, norm_w_off_);
-                int64_t total = static_cast<int64_t>(n) * cfg.d_model;
-                int threads = 256;
-                int blocks = static_cast<int>((total + threads - 1) / threads);
-                Tensor fp32_h = view_tokens(fp32_hidden_, n);
-                fp32_accum_add_fp16_kernel<<<blocks, threads, 0, stream>>>(
-                    static_cast<float*>(fp32_h.data),
-                    static_cast<const half*>(tmp.data), total);
-                fp32_to_fp16_rowscale_kernel<<<n, 256, 256 * sizeof(float), stream>>>(
-                    static_cast<const float*>(fp32_h.data),
-                    static_cast<half*>(h.data), n, cfg.d_model);
-            } else if (has_post_ffn_norm) {
-                // Post-FFN norm → residual add (norm directly to h, no copies)
-                rmsnorm(fo, ly.post_ffn_norm, h, eps, stream, norm_w_off_);
-                elementwise_add(h, r, stream);
+            // Non-dp4a paths: activation must produce FP16 intermediate in so.
+            switch (cfg.ffn_activation) {
+                case FFNActivation::GEGLU:  geglu(go, uo, so, stream);  break;
+                default:                    swiglu(go, uo, so, stream);  break;
+            }
+            if (will_fuse_down_beta1) {
+                // Fused: hidden = swiglu_out @ w_down^T + hidden (cuBLAS beta=1).
+                const Tensor& wd_fp16 = fp16_cache_.at(ly.w_down.data);
+                gemm(so, wd_fp16, h, 1.0f, 1.0f, stream);
+            } else if (will_fuse_down_dequant_beta1) {
+                // Dequant into scratch, then beta=1.0 GEMM directly into hidden (which holds residual)
+                int rows = static_cast<int>(ly.w_down.shape[0]);
+                int cols = static_cast<int>(ly.w_down.shape[1]);
+                dequant_gpu(ly.w_down.data, dequant_scratch_, ly.w_down_qtype, rows, cols, stream);
+                Tensor w_fp16(dequant_scratch_, DType::FP16, ly.w_down.ndim, ly.w_down.shape, true);
+                gemm(so, w_fp16, h, 1.0f, 1.0f, stream);
             } else {
-                // No post-norm: h = fo + residual (fused add-store, no copy)
-                elementwise_add_store(fo, r, h, stream);
+                gemm_dispatch(so, ly.w_down, ly.w_down_scales, ly.w_down_qtype, fo, dequant_scratch_, stream,
+                              static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_);
+                if (has_post_ffn_norm && using_fp32_accum) {
+                    // Post-FFN norm → FP32 accumulation (no D2D copy needed)
+                    Tensor tmp = view_tokens(norm_out_, n);
+                    rmsnorm(fo, ly.post_ffn_norm, tmp, eps, stream, norm_w_off_);
+                    int64_t total = static_cast<int64_t>(n) * cfg.d_model;
+                    int threads = 256;
+                    int blocks = static_cast<int>((total + threads - 1) / threads);
+                    Tensor fp32_h = view_tokens(fp32_hidden_, n);
+                    fp32_accum_add_fp16_kernel<<<blocks, threads, 0, stream>>>(
+                        static_cast<float*>(fp32_h.data),
+                        static_cast<const half*>(tmp.data), total);
+                    fp32_to_fp16_rowscale_kernel<<<n, 256, 256 * sizeof(float), stream>>>(
+                        static_cast<const float*>(fp32_h.data),
+                        static_cast<half*>(h.data), n, cfg.d_model);
+                } else if (has_post_ffn_norm) {
+                    // Post-FFN norm → residual add (norm directly to h, no copies)
+                    rmsnorm(fo, ly.post_ffn_norm, h, eps, stream, norm_w_off_);
+                    elementwise_add(h, r, stream);
+                } else {
+                    // No post-norm: h = fo + residual (fused add-store, no copy)
+                    elementwise_add_store(fo, r, h, stream);
+                }
             }
         }
     }
