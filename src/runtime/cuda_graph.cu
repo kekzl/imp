@@ -54,16 +54,28 @@ static int apply_pdl_edges(cudaGraph_t graph) {
         return false;
     };
 
-    // 4. Replace default kernel→kernel edges with PDL edges
+    // 4. Replace default kernel→kernel edges with PDL edges, but ONLY when the
+    //    source kernel has ProgrammaticStreamSerialization enabled.  Non-PDL
+    //    kernels use the default port (programmatic == default for them), so
+    //    converting their edges just adds driver bookkeeping overhead.
     cudaGraphEdgeData pdl_edge{};
     pdl_edge.from_port = cudaGraphKernelNodePortProgrammatic;
     pdl_edge.to_port = 0;
     pdl_edge.type = cudaGraphDependencyTypeProgrammatic;
 
     int converted = 0;
+    int skipped_non_pdl = 0;
     for (size_t i = 0; i < num_edges; i++) {
         if (edge_data[i].type != cudaGraphDependencyTypeDefault) continue;
         if (!is_kernel(from[i]) || !is_kernel(to[i])) continue;
+
+        // Check if the source kernel has PDL enabled
+        cudaKernelNodeParams kparams{};
+        cudaError_t kerr = cudaGraphKernelNodeGetParams(from[i], &kparams);
+        if (kerr != cudaSuccess || !pdl::is_enabled(kparams.func)) {
+            skipped_non_pdl++;
+            continue;
+        }
 
         // Remove old default edge
         err = cudaGraphRemoveDependencies(graph, &from[i], &to[i], &edge_data[i], 1);
@@ -78,6 +90,10 @@ static int apply_pdl_edges(cudaGraph_t graph) {
         }
         converted++;
     }
+
+    if (skipped_non_pdl > 0)
+        IMP_LOG_DEBUG("apply_pdl_edges: skipped %d edges (source kernel not PDL-enabled)",
+                      skipped_non_pdl);
 
     return converted;
 }
