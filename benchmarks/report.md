@@ -41,6 +41,33 @@
 | Nemotron-3-Nano-30B-A3B | Q6_K | imp (bench) | 1381.31 | 70.22 |
 | Nemotron-3-Nano-30B-A3B | Q6_K | imp (real) | 544.49 | 0.00 |
 
+## P2-P9 Optimization Impact (e2cf896 vs a9ae9b4)
+
+**Date:** 2026-02-28
+**Prompt:** "Explain the theory of relativity in simple terms." (10-19 tokens)
+**Generation:** 128 tokens, temperature=0 (greedy), CUDA graphs ON, single run (warm)
+
+| Model | Quant | Phase | Before | After | Delta |
+|-------|-------|-------|--------|-------|-------|
+| Phi-4-Mini-Instruct | Q8_0 | pp tok/s | 57.69 | 105.95 | +83.7% |
+| Phi-4-Mini-Instruct | Q8_0 | tg tok/s | 189.77 | 189.84 | +0.0% |
+| Qwen3-4B-Instruct | Q8_0 | pp tok/s | 130.85 | 165.65 | +26.6% |
+| Qwen3-4B-Instruct | Q8_0 | tg tok/s | 186.06 | 183.75 | -1.2% |
+| DeepSeek-R1-Distill-Qwen-7B | Q8_0 | pp tok/s | 107.22 | 110.60 | +3.2% |
+| DeepSeek-R1-Distill-Qwen-7B | Q8_0 | tg tok/s | 133.52 | 133.15 | -0.3% |
+
+**Optimizations applied:**
+- P2: Q4_0 dp4a GEMV kernels (no Q4_0 models available to measure)
+- P3: Down-projection residual fusion (dequant + beta=1.0 GEMM)
+- P4: Gate+up batched GEMM (cublasGemmStridedBatchedEx)
+- P5: PDL registration for RMSNorm, RoPE, SwiGLU, GeGLU
+- P6: Double-buffered FP16 shared memory in GQA paged attention
+- P7: Shortest-first request reordering in scheduler
+- P8: Async weight upload on separate stream
+- P9: Event-based prefill sync (overlaps host bookkeeping with GPU)
+
+**Analysis:** Prefill shows significant gains from P4 (gate+up batched GEMM) and P3 (fused residual), especially on smaller models where kernel launch overhead is a larger fraction. Decode is flat because CUDA graphs already eliminate launch overhead, and these Q8_0 models already had dp4a GEMV. P7 (scheduler) and P8 (async upload) benefit multi-request and init-time scenarios not captured here.
+
 ## Notes
 
 - **pp tok/s** = prompt processing throughput (prefill phase)
