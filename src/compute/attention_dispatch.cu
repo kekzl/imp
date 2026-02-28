@@ -5,11 +5,6 @@
 
 namespace imp {
 
-// Forward declaration for Blackwell kernel (only available when compiled for sm_120)
-void flash_attention_blackwell(
-    const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, cudaStream_t stream);
-
 static int cached_sm_version = -1;
 
 int get_device_sm_version() {
@@ -29,9 +24,8 @@ void attention_prefill_dispatch(
     float scale, bool causal, int sliding_window, cudaStream_t stream) {
     int sm = get_device_sm_version();
     if (sm >= 120) {
-        // Try WMMA-tc on Blackwell (verified working for dense transformers).
-        // Falls back to scalar if WMMA-tc unavailable.
-        flash_attention_prefill_tc(Q, K, V, O, scale, causal, sliding_window, stream);
+        // Optimized WMMA kernel with 128x64 tiles for Blackwell (sm_120+).
+        flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, stream);
     } else if (sm >= 90) {
         flash_attention_prefill_tc(Q, K, V, O, scale, causal, sliding_window, stream);
     } else {

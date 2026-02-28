@@ -17,8 +17,8 @@ void flash_attention_prefill(
 
 // Runtime-dispatched attention prefill.
 // Selects the best kernel based on compute capability:
-//   sm_120+ (Blackwell)  -> Hopper WMMA (until TCGEN05 is ready)
-//   sm_90+  (Hopper)     -> WMMA tensor-core attention (attention_tc.cu)
+//   sm_120+ (Blackwell)  -> Optimized WMMA 128x64 tiles (attention_blackwell.cu)
+//   sm_90+  (Hopper)     -> WMMA tensor-core attention 64x64 (attention_tc.cu)
 //   <sm_90               -> Scalar Flash Attention 2 (attention.cu)
 void attention_prefill_dispatch(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
