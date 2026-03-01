@@ -129,9 +129,17 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
     int seed = body.value("seed", -1);
     bool stream = body.value("stream", false);
     float min_p = body.value("min_p", 0.0f);
+    float typical_p = body.value("typical_p", 1.0f);
     float repetition_penalty = body.value("repetition_penalty", 1.0f);
     float frequency_penalty = body.value("frequency_penalty", 0.0f);
     float presence_penalty = body.value("presence_penalty", 0.0f);
+    float dry_multiplier = body.value("dry_multiplier", 0.0f);
+    float dry_base = body.value("dry_base", 1.75f);
+    int dry_allowed_length = body.value("dry_allowed_length", 2);
+    int dry_penalty_last_n = body.value("dry_penalty_last_n", 0);
+    int mirostat = body.value("mirostat", 0);
+    float mirostat_tau = body.value("mirostat_tau", 5.0f);
+    float mirostat_eta = body.value("mirostat_eta", 0.1f);
 
     // Convert JSON messages to ChatMessage vector
     std::vector<imp::ChatMessage> chat_msgs;
@@ -208,9 +216,17 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
     params.max_tokens = max_tokens;
     params.seed = seed;
     params.min_p = min_p;
+    params.typical_p = typical_p;
     params.repetition_penalty = repetition_penalty;
     params.frequency_penalty = frequency_penalty;
     params.presence_penalty = presence_penalty;
+    params.dry_multiplier = dry_multiplier;
+    params.dry_base = dry_base;
+    params.dry_allowed_length = dry_allowed_length;
+    params.dry_penalty_last_n = dry_penalty_last_n;
+    params.mirostat = mirostat;
+    params.mirostat_tau = mirostat_tau;
+    params.mirostat_eta = mirostat_eta;
 
     std::string comp_id = make_completion_id(state);
     int64_t created = unix_timestamp();
@@ -390,6 +406,9 @@ int main(int argc, char** argv) {
     config.gpu_layers = args.gpu_layers;
     if (args.ssm_fp16) config.ssm_state_dtype = IMP_DTYPE_FP16;
     if (args.no_cuda_graphs) config.enable_cuda_graphs = 0;
+    if (args.kv_fp8) config.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
+    if (args.kv_int8) config.kv_cache_dtype = IMP_DTYPE_INT8;
+    if (args.prefill_chunk_size > 0) config.prefill_chunk_size = args.prefill_chunk_size;
 
     err = imp_context_create(state.model, &config, &state.ctx);
     if (err != IMP_SUCCESS) {

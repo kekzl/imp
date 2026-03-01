@@ -53,7 +53,8 @@ __global__ void flash_attention_blackwell_kernel(
     int   n_kv_heads,
     float scale,
     bool  causal,
-    int   sliding_window)
+    int   sliding_window,
+    float softcap)
 {
     constexpr int head_dim = HD;  // compile-time head_dim for optimized div/mod
 
@@ -216,7 +217,7 @@ __global__ void flash_attention_blackwell_kernel(
         }
         __syncthreads();
 
-        // ---- Apply scale and causal/sliding_window mask ----
+        // ---- Apply scale, softcap, and causal/sliding_window mask ----
         {
             const int total = Br * BW_Bc;
             for (int i = tid; i < total; i += BW_BLOCK_THREADS) {
@@ -227,6 +228,7 @@ __global__ void flash_attention_blackwell_kernel(
 
                 if (gq < seq_q && gk < seq_kv) {
                     float val = SP_float[i] * scale;
+                    if (softcap > 0.0f) val = softcap * tanhf(val / softcap);
                     if (causal && gq < gk) val = -FLT_MAX;
                     if (sliding_window > 0 && (gq - gk) >= sliding_window) val = -FLT_MAX;
                     SP_float[i] = val;
@@ -386,7 +388,7 @@ static size_t compute_smem(int Br, int head_dim) {
 
 void flash_attention_blackwell(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, int sliding_window, cudaStream_t stream)
+    float scale, bool causal, int sliding_window, float softcap, cudaStream_t stream)
 {
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int seq_q      = static_cast<int>(Q.shape[1]);
@@ -419,7 +421,7 @@ void flash_attention_blackwell(
             reinterpret_cast<half*>(O.data), \
             batch_size, seq_q, seq_kv, \
             n_heads, n_kv_heads, \
-            scale, causal, sliding_window); \
+            scale, causal, sliding_window, softcap); \
     } while (0)
 
     // Select Br and compute grid
@@ -455,7 +457,7 @@ void flash_attention_blackwell(
     }
     if (!launched) {
         // Unsupported head_dim or smem too small; fall back to tc path
-        flash_attention_prefill_tc(Q, K, V, O, scale, causal, sliding_window, stream);
+        flash_attention_prefill_tc(Q, K, V, O, scale, causal, sliding_window, softcap, stream);
     }
     #undef LAUNCH_BW
 }

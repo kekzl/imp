@@ -17,16 +17,26 @@ void print_usage(const char* prog) {
         "  --top-k <n>           Top-k sampling (default: 40)\n"
         "  --seed <n>            Random seed, -1 for random (default: -1)\n"
         "  --min-p <f>           Min-p sampling threshold (default: 0.0 = disabled)\n"
+        "  --typical-p <f>       Locally typical sampling (default: 1.0 = disabled)\n"
         "  --repeat-penalty <f>  Repetition penalty (default: 1.0 = disabled)\n"
         "  --frequency-penalty <f> Frequency penalty (default: 0.0)\n"
         "  --presence-penalty <f>  Presence penalty (default: 0.0)\n"
+        "  --dry-multiplier <f>  DRY n-gram penalty scale (default: 0.0 = disabled)\n"
+        "  --dry-base <f>        DRY exponential base (default: 1.75)\n"
+        "  --dry-allowed-length <n> DRY: n-grams at or below this not penalized (default: 2)\n"
+        "  --dry-penalty-last-n <n> DRY: how far back to scan (default: 0 = all)\n"
+        "  --mirostat <n>        Mirostat sampling (0=off, 2=v2) (default: 0)\n"
+        "  --mirostat-tau <f>    Mirostat target entropy (default: 5.0)\n"
+        "  --mirostat-eta <f>    Mirostat learning rate (default: 0.1)\n"
         "  --interactive         Run in interactive chat mode\n"
         "  --device <n>          CUDA device ID (default: 0)\n"
         "  --gpu-layers <n>      Layers to keep on GPU (-1 = all) (default: -1)\n"
+        "  --kv-fp8              Use FP8 E4M3 KV cache (halves KV memory)\n"
+        "  --kv-int8             Use INT8 KV cache with dp4a attention (halves KV memory)\n"
         "  --ssm-fp16            Use FP16 for SSM h_state (saves ~50%% SSM VRAM)\n"
         "  --cuda-graphs         (default, no-op — graphs enabled by default)\n"
         "  --no-cuda-graphs      Disable CUDA Graph capture for decode\n"
-        "  --chat-template <t>   Chat template: auto, none, chatml, llama2, llama3, nemotron\n"
+        "  --chat-template <t>   Chat template: auto, none, chatml, llama2, llama3, nemotron, gemma\n"
         "  --prefill-chunk-size <n> Max tokens per prefill chunk (default: 0 = no chunking)\n"
         "  --bench               Synthetic benchmark mode (like llama-bench)\n"
         "  --bench-pp <n>        Synthetic prompt token count (default: 512)\n"
@@ -60,18 +70,38 @@ CliArgs parse_args(int argc, char** argv) {
             args.seed = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--min-p") == 0 && i + 1 < argc) {
             args.min_p = static_cast<float>(std::atof(argv[++i]));
+        } else if (std::strcmp(arg, "--typical-p") == 0 && i + 1 < argc) {
+            args.typical_p = static_cast<float>(std::atof(argv[++i]));
         } else if (std::strcmp(arg, "--repeat-penalty") == 0 && i + 1 < argc) {
             args.repetition_penalty = static_cast<float>(std::atof(argv[++i]));
         } else if (std::strcmp(arg, "--frequency-penalty") == 0 && i + 1 < argc) {
             args.frequency_penalty = static_cast<float>(std::atof(argv[++i]));
         } else if (std::strcmp(arg, "--presence-penalty") == 0 && i + 1 < argc) {
             args.presence_penalty = static_cast<float>(std::atof(argv[++i]));
+        } else if (std::strcmp(arg, "--dry-multiplier") == 0 && i + 1 < argc) {
+            args.dry_multiplier = static_cast<float>(std::atof(argv[++i]));
+        } else if (std::strcmp(arg, "--dry-base") == 0 && i + 1 < argc) {
+            args.dry_base = static_cast<float>(std::atof(argv[++i]));
+        } else if (std::strcmp(arg, "--dry-allowed-length") == 0 && i + 1 < argc) {
+            args.dry_allowed_length = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--dry-penalty-last-n") == 0 && i + 1 < argc) {
+            args.dry_penalty_last_n = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--mirostat") == 0 && i + 1 < argc) {
+            args.mirostat = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--mirostat-tau") == 0 && i + 1 < argc) {
+            args.mirostat_tau = static_cast<float>(std::atof(argv[++i]));
+        } else if (std::strcmp(arg, "--mirostat-eta") == 0 && i + 1 < argc) {
+            args.mirostat_eta = static_cast<float>(std::atof(argv[++i]));
         } else if (std::strcmp(arg, "--interactive") == 0) {
             args.interactive = true;
         } else if (std::strcmp(arg, "--device") == 0 && i + 1 < argc) {
             args.device = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--gpu-layers") == 0 && i + 1 < argc) {
             args.gpu_layers = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--kv-fp8") == 0) {
+            args.kv_fp8 = true;
+        } else if (std::strcmp(arg, "--kv-int8") == 0) {
+            args.kv_int8 = true;
         } else if (std::strcmp(arg, "--ssm-fp16") == 0) {
             args.ssm_fp16 = true;
         } else if (std::strcmp(arg, "--cuda-graphs") == 0) {

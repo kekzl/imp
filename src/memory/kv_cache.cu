@@ -1,5 +1,6 @@
 #include "memory/kv_cache.h"
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <stdexcept>
 #include <cstdio>
 #include <cstring>
@@ -47,6 +48,24 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
     // Zero-initialize the pool so fresh blocks start clean
     cudaMemset(pool_, 0, total);
 
+    // Allocate separate scale buffer for INT8 KV cache (per-head-per-token scales)
+    if (dtype == DType::INT8) {
+        scale_block_bytes_ = static_cast<size_t>(kKVBlockSize) * n_kv_heads * sizeof(half);
+        size_t scale_total = static_cast<size_t>(n_layers_) * max_blocks_ * 2 * scale_block_bytes_;
+        cudaError_t serr = cudaMalloc(&scale_pool_, scale_total);
+        if (serr != cudaSuccess) {
+            cudaFree(pool_);
+            pool_ = nullptr;
+            char msg[256];
+            std::snprintf(msg, sizeof(msg),
+                          "KVCache: cudaMalloc failed for INT8 scale pool %.2f MiB (%s)",
+                          static_cast<double>(scale_total) / (1024.0 * 1024.0),
+                          cudaGetErrorString(serr));
+            throw std::runtime_error(msg);
+        }
+        cudaMemset(scale_pool_, 0, scale_total);
+    }
+
     // Initialise per-block ref counts (0 = free) and build free list
     ref_counts_.resize(max_blocks_, 0);
     free_list_.reserve(max_blocks_);
@@ -56,6 +75,10 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
 }
 
 KVCache::~KVCache() {
+    if (scale_pool_) {
+        cudaFree(scale_pool_);
+        scale_pool_ = nullptr;
+    }
     if (pool_) {
         cudaFree(pool_);
         pool_ = nullptr;
@@ -153,6 +176,29 @@ int KVCache::head_dim() const {
 
 DType KVCache::dtype() const {
     return dtype_;
+}
+
+// ---------------------------------------------------------------------------
+// INT8 scale pointer computation
+// ---------------------------------------------------------------------------
+
+void* KVCache::k_scale_ptr(int layer, int block_id) {
+    if (!scale_pool_) return nullptr;
+    // Same offset formula as k_ptr() but using scale_block_bytes_
+    size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ +
+                     static_cast<size_t>(block_id)) * scale_block_bytes_;
+    return static_cast<char*>(scale_pool_) + offset;
+}
+
+void* KVCache::v_scale_ptr(int layer, int block_id) {
+    if (!scale_pool_) return nullptr;
+    size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ +
+                     max_blocks_ + static_cast<size_t>(block_id)) * scale_block_bytes_;
+    return static_cast<char*>(scale_pool_) + offset;
+}
+
+size_t KVCache::scale_block_bytes() const {
+    return scale_block_bytes_;
 }
 
 } // namespace imp

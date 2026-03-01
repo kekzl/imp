@@ -27,7 +27,7 @@ void attention_cublas_prefill(
     const Tensor& Q, const Tensor& K, const Tensor& V,
     Tensor& O, Tensor& S,
     int n_heads, int n_kv_heads, int head_dim,
-    float scale, bool causal,
+    float scale, bool causal, float softcap = 0.0f,
     cudaStream_t stream = nullptr);
 
 } // namespace imp

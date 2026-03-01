@@ -48,6 +48,8 @@ int main(int argc, char** argv) {
     config.max_batch_size = 1;
     config.max_seq_len = 4096;
     config.gpu_layers = args.gpu_layers;
+    if (args.kv_fp8) config.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
+    if (args.kv_int8) config.kv_cache_dtype = IMP_DTYPE_INT8;
     if (args.ssm_fp16) config.ssm_state_dtype = IMP_DTYPE_FP16;
     // CUDA graphs enabled by default in imp_config_default(); --no-cuda-graphs can disable
     if (args.no_cuda_graphs) config.enable_cuda_graphs = 0;
@@ -72,9 +74,17 @@ int main(int argc, char** argv) {
     params.max_tokens = args.max_tokens;
     params.seed = args.seed;
     params.min_p = args.min_p;
+    params.typical_p = args.typical_p;
     params.repetition_penalty = args.repetition_penalty;
     params.frequency_penalty = args.frequency_penalty;
     params.presence_penalty = args.presence_penalty;
+    params.dry_multiplier = args.dry_multiplier;
+    params.dry_base = args.dry_base;
+    params.dry_allowed_length = args.dry_allowed_length;
+    params.dry_penalty_last_n = args.dry_penalty_last_n;
+    params.mirostat = args.mirostat;
+    params.mirostat_tau = args.mirostat_tau;
+    params.mirostat_eta = args.mirostat_eta;
 
     // Determine chat template override from --chat-template flag
     if (args.chat_template == "none") {

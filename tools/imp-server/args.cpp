@@ -15,9 +15,12 @@ void print_server_usage(const char* prog) {
         "  --max-tokens <n>      Default max tokens (default: 2048)\n"
         "  --gpu-layers <n>      Layers on GPU, -1 = all (default: -1)\n"
         "  --device <n>          CUDA device ID (default: 0)\n"
-        "  --chat-template <t>   auto, none, chatml, llama2, llama3, nemotron\n"
+        "  --chat-template <t>   auto, none, chatml, llama2, llama3, nemotron, gemma\n"
         "  --no-cuda-graphs      Disable CUDA Graph capture for decode\n"
         "  --ssm-fp16            Use FP16 for SSM h_state\n"
+        "  --kv-fp8              Use FP8 E4M3 KV cache (halves KV memory)\n"
+        "  --kv-int8             Use INT8 KV cache with dp4a attention\n"
+        "  --prefill-chunk-size <n> Max tokens per prefill chunk (0 = no chunking)\n"
         "  --help                Show this help message\n",
         prog);
 }
@@ -49,6 +52,12 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.no_cuda_graphs = true;
         } else if (std::strcmp(arg, "--ssm-fp16") == 0) {
             args.ssm_fp16 = true;
+        } else if (std::strcmp(arg, "--kv-fp8") == 0) {
+            args.kv_fp8 = true;
+        } else if (std::strcmp(arg, "--kv-int8") == 0) {
+            args.kv_int8 = true;
+        } else if (std::strcmp(arg, "--prefill-chunk-size") == 0 && i + 1 < argc) {
+            args.prefill_chunk_size = std::atoi(argv[++i]);
         } else {
             fprintf(stderr, "Unknown argument: %s\n", arg);
             print_server_usage(argv[0]);

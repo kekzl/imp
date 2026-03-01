@@ -66,6 +66,7 @@ ImpConfig imp_config_default(void) {
     config.enable_pdl = 1;
     config.enable_cuda_graphs = 1;
     config.gpu_layers = -1;             // all on GPU
+    config.kv_cache_dtype = IMP_DTYPE_FP16;
     config.ssm_state_dtype = IMP_DTYPE_FP32;
     config.vram_budget_mb = 0;          // use all available
     config.prefill_chunk_size = 0;      // no chunking
@@ -83,9 +84,17 @@ ImpGenerateParams imp_generate_params_default(void) {
     params.max_tokens = 256;
     params.seed = -1;
     params.min_p = 0.0f;
+    params.typical_p = 1.0f;
     params.repetition_penalty = 1.0f;
     params.frequency_penalty = 0.0f;
     params.presence_penalty = 0.0f;
+    params.dry_multiplier = 0.0f;
+    params.dry_base = 1.75f;
+    params.dry_allowed_length = 2;
+    params.dry_penalty_last_n = 0;
+    params.mirostat = 0;
+    params.mirostat_tau = 5.0f;
+    params.mirostat_eta = 0.1f;
     params.apply_chat_template = 1;
     params.ignore_eos = 0;
     return params;
@@ -233,6 +242,7 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
         ecfg.use_cuda_graphs = (config->enable_cuda_graphs != 0);
         ecfg.use_pdl = (config->enable_pdl != 0);
         ecfg.gpu_layers = config->gpu_layers;
+        ecfg.kv_cache_dtype = map_dtype(config->kv_cache_dtype);
         ecfg.ssm_state_dtype = map_dtype(config->ssm_state_dtype);
         ecfg.vram_budget_mb = config->vram_budget_mb;
         ecfg.temperature = config->temperature;
@@ -310,9 +320,18 @@ ImpError imp_generate_streaming(ImpContext ctx, const char* prompt,
         req->top_k = params->top_k;
         req->seed = params->seed;
         req->min_p = params->min_p;
+        req->typical_p = params->typical_p;
         req->repetition_penalty = params->repetition_penalty;
         req->frequency_penalty = params->frequency_penalty;
         req->presence_penalty = params->presence_penalty;
+        req->dry_multiplier = params->dry_multiplier;
+        req->dry_base = params->dry_base;
+        req->dry_allowed_length = params->dry_allowed_length;
+        req->dry_penalty_last_n = params->dry_penalty_last_n;
+        req->mirostat = params->mirostat;
+        req->mirostat_tau = params->mirostat_tau;
+        req->mirostat_eta = params->mirostat_eta;
+        if (params->mirostat == 2) req->mirostat_mu = 2.0f * params->mirostat_tau;
         req->status = imp::RequestStatus::PENDING;
 
         ctx->engine->add_request(req);
@@ -554,9 +573,20 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params,
         req->max_tokens = params->max_tokens;
         req->ignore_eos = (params->ignore_eos != 0);
         req->min_p = params->min_p;
+        req->typical_p = params->typical_p;
         req->repetition_penalty = params->repetition_penalty;
         req->frequency_penalty = params->frequency_penalty;
         req->presence_penalty = params->presence_penalty;
+        req->dry_multiplier = params->dry_multiplier;
+        req->dry_base = params->dry_base;
+        req->dry_allowed_length = params->dry_allowed_length;
+        req->dry_penalty_last_n = params->dry_penalty_last_n;
+        req->mirostat = params->mirostat;
+        req->mirostat_tau = params->mirostat_tau;
+        req->mirostat_eta = params->mirostat_eta;
+        // Initialize mu on first decode step with mirostat enabled
+        if (params->mirostat == 2 && req->mirostat_mu == 0.0f)
+            req->mirostat_mu = 2.0f * params->mirostat_tau;
 
         // Record output size before the step
         size_t prev_output_size = req->output_tokens.size();

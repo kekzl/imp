@@ -112,7 +112,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     {
         // Add estimated KV cache + SSM state footprint
         int head_dim_est = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
-        size_t elem_sz = dtype_size(config_.compute_dtype);
+        size_t elem_sz = dtype_size(config_.kv_cache_dtype);
         // Minimum KV: enough for max_seq_len * max_batch_size
         int blocks_per_seq = (config_.max_seq_len + kKVBlockSize - 1) / kKVBlockSize;
         int n_attn = 0;
@@ -251,10 +251,16 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     } else {
         // Auto-size: allocate what's needed plus headroom, bounded by free VRAM.
         // Pre-calculate SSM footprint so we don't starve SSM state allocation.
-        size_t elem_size = dtype_size(config_.compute_dtype);
+        size_t elem_size = dtype_size(config_.kv_cache_dtype);
         size_t single_block_bytes = static_cast<size_t>(kKVBlockSize) *
                                     mcfg.n_kv_heads * head_dim * elem_size;
         size_t per_block_total = single_block_bytes * 2 * n_kv_layers;
+        // INT8 scale overhead: one half per head per token per block (K+V)
+        if (config_.kv_cache_dtype == DType::INT8) {
+            size_t scale_per_block = static_cast<size_t>(kKVBlockSize) *
+                                     mcfg.n_kv_heads * sizeof(half);
+            per_block_total += scale_per_block * 2 * n_kv_layers;
+        }
 
         // Estimate SSM state footprint for hybrid models
         size_t ssm_footprint = 0;
@@ -299,21 +305,24 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
 
     {
-        size_t elem_size = dtype_size(config_.compute_dtype);
+        DType kv_dtype = config_.kv_cache_dtype;
+        size_t elem_size = dtype_size(kv_dtype);
         size_t block_bytes = static_cast<size_t>(kKVBlockSize) *
                              mcfg.n_kv_heads * head_dim * elem_size;
         size_t total_kv = static_cast<size_t>(n_kv_layers) * max_blocks * 2 * block_bytes;
-        IMP_LOG_INFO("KV cache: %d blocks (%.0f tokens), %.2f MiB "
+        IMP_LOG_INFO("KV cache: %d blocks (%.0f tokens), %.2f MiB, dtype=%s "
                      "(layers=%d/%d, kv_heads=%d, head_dim=%d, block_size=%d)",
                      max_blocks,
                      static_cast<double>(max_blocks) * kKVBlockSize,
                      static_cast<double>(total_kv) / (1024.0 * 1024.0),
+                     kv_dtype == DType::FP8_E4M3 ? "FP8_E4M3" :
+                     kv_dtype == DType::INT8 ? "INT8" : "FP16",
                      n_kv_layers, mcfg.n_layers, mcfg.n_kv_heads, head_dim, kKVBlockSize);
     }
 
     auto kv_cache = std::make_unique<KVCache>(
         n_kv_layers, mcfg.n_kv_heads, head_dim,
-        config_.compute_dtype, max_blocks);
+        config_.kv_cache_dtype, max_blocks);
 
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
@@ -664,9 +673,20 @@ bool Engine::step() {
         state.top_k = req->top_k;
         state.seed = req->seed;
         state.min_p = req->min_p;
+        state.typical_p = req->typical_p;
         state.repetition_penalty = req->repetition_penalty;
         state.frequency_penalty = req->frequency_penalty;
         state.presence_penalty = req->presence_penalty;
+        state.dry_multiplier = req->dry_multiplier;
+        state.dry_base = req->dry_base;
+        state.dry_allowed_length = req->dry_allowed_length;
+        state.dry_penalty_last_n = req->dry_penalty_last_n;
+        if (req->dry_multiplier > 0.0f && !req->output_tokens.empty())
+            state.host_penalty_tokens = req->output_tokens.data();
+        state.mirostat = req->mirostat;
+        state.mirostat_tau = req->mirostat_tau;
+        state.mirostat_eta = req->mirostat_eta;
+        state.mirostat_mu = req->mirostat_mu;
 
         // Upload penalty token history if penalties are active
         bool needs_penalties = (req->repetition_penalty != 1.0f ||
@@ -744,6 +764,10 @@ bool Engine::step() {
                 cudaFreeAsync(d_block_tables, pf_stream);
                 cudaFreeAsync(d_context_lens, pf_stream);
             }
+
+            // Mirostat v2: write back updated mu to request
+            if (req->mirostat == 2)
+                req->mirostat_mu = state.mirostat_mu;
 
             req->output_tokens.push_back(next_token);
 
@@ -875,9 +899,21 @@ bool Engine::step() {
             state.top_k = valid_decode[0]->top_k;
             state.seed = -1;
             state.min_p = valid_decode[0]->min_p;
+            state.typical_p = valid_decode[0]->typical_p;
             state.repetition_penalty = valid_decode[0]->repetition_penalty;
             state.frequency_penalty = valid_decode[0]->frequency_penalty;
             state.presence_penalty = valid_decode[0]->presence_penalty;
+            state.dry_multiplier = valid_decode[0]->dry_multiplier;
+            state.dry_base = valid_decode[0]->dry_base;
+            state.dry_allowed_length = valid_decode[0]->dry_allowed_length;
+            state.dry_penalty_last_n = valid_decode[0]->dry_penalty_last_n;
+            if (valid_decode[0]->dry_multiplier > 0.0f &&
+                !valid_decode[0]->output_tokens.empty())
+                state.host_penalty_tokens = valid_decode[0]->output_tokens.data();
+            state.mirostat = valid_decode[0]->mirostat;
+            state.mirostat_tau = valid_decode[0]->mirostat_tau;
+            state.mirostat_eta = valid_decode[0]->mirostat_eta;
+            state.mirostat_mu = valid_decode[0]->mirostat_mu;
 
             // Upload penalty token history for decode (single-sequence only)
             {
@@ -973,6 +1009,10 @@ bool Engine::step() {
             if (!decode_batch_pool_.is_allocated()) {
                 gpu_batch.free();
             }
+
+            // Mirostat v2: write back updated mu (single-sequence only)
+            if (state.mirostat == 2 && valid_decode.size() == 1)
+                valid_decode[0]->mirostat_mu = state.mirostat_mu;
 
             // 3f. Distribute sampled tokens back to requests
             Tokenizer* tok = model_->tokenizer();

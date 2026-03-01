@@ -72,24 +72,14 @@ __global__ void swiglu_fp16_kernel(
 {
     const int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x) * 2;
     if (idx + 1 < n) {
-        // Load 2 values at once (aligned half2)
-        __half2 g2 = *reinterpret_cast<const __half2*>(gate + idx);
-        __half2 u2 = *reinterpret_cast<const __half2*>(up + idx);
+        float2 gf = __half22float2(*reinterpret_cast<const __half2*>(gate + idx));
+        float2 uf = __half22float2(*reinterpret_cast<const __half2*>(up + idx));
 
-        float g0 = __half2float(g2.x);
-        float g1 = __half2float(g2.y);
-        float u0 = __half2float(u2.x);
-        float u1 = __half2float(u2.y);
+        float o0 = gf.x / (1.0f + __expf(-gf.x)) * uf.x;
+        float o1 = gf.y / (1.0f + __expf(-gf.y)) * uf.y;
 
-        float o0 = g0 / (1.0f + __expf(-g0)) * u0;
-        float o1 = g1 / (1.0f + __expf(-g1)) * u1;
-
-        __half2 out2;
-        out2.x = __float2half(o0);
-        out2.y = __float2half(o1);
-        *reinterpret_cast<__half2*>(out + idx) = out2;
+        *reinterpret_cast<__half2*>(out + idx) = __float22half2_rn(make_float2(o0, o1));
     } else if (idx < n) {
-        // Handle last element
         float g = __half2float(gate[idx]);
         float u = __half2float(up[idx]);
         out[idx] = __float2half(g / (1.0f + __expf(-g)) * u);
@@ -111,24 +101,16 @@ __global__ void geglu_fp16_kernel(
 
     const int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x) * 2;
     if (idx + 1 < n) {
-        __half2 g2 = *reinterpret_cast<const __half2*>(gate + idx);
-        __half2 u2 = *reinterpret_cast<const __half2*>(up + idx);
+        float2 gf = __half22float2(*reinterpret_cast<const __half2*>(gate + idx));
+        float2 uf = __half22float2(*reinterpret_cast<const __half2*>(up + idx));
 
-        float g0 = __half2float(g2.x);
-        float g1 = __half2float(g2.y);
-        float u0 = __half2float(u2.x);
-        float u1 = __half2float(u2.y);
-
-        float gelu0 = g0 * 0.5f * (1.0f + tanhf(SQRT_2_PI * (g0 + COEFF * g0 * g0 * g0)));
-        float gelu1 = g1 * 0.5f * (1.0f + tanhf(SQRT_2_PI * (g1 + COEFF * g1 * g1 * g1)));
+        float gelu0 = gf.x * 0.5f * (1.0f + tanhf(SQRT_2_PI * (gf.x + COEFF * gf.x * gf.x * gf.x)));
+        float gelu1 = gf.y * 0.5f * (1.0f + tanhf(SQRT_2_PI * (gf.y + COEFF * gf.y * gf.y * gf.y)));
 
         // Clamp to FP16 range to avoid Inf (products can exceed 65504 during prefill)
-        float r0 = fminf(fmaxf(gelu0 * u0, -65504.0f), 65504.0f);
-        float r1 = fminf(fmaxf(gelu1 * u1, -65504.0f), 65504.0f);
-        __half2 out2;
-        out2.x = __float2half(r0);
-        out2.y = __float2half(r1);
-        *reinterpret_cast<__half2*>(out + idx) = out2;
+        float r0 = fminf(fmaxf(gelu0 * uf.x, -65504.0f), 65504.0f);
+        float r1 = fminf(fmaxf(gelu1 * uf.y, -65504.0f), 65504.0f);
+        *reinterpret_cast<__half2*>(out + idx) = __float22half2_rn(make_float2(r0, r1));
     } else if (idx < n) {
         float g = __half2float(gate[idx]);
         float u = __half2float(up[idx]);
@@ -221,17 +203,12 @@ __global__ void gelu_fp16_kernel(
 {
     const int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x) * 2;
     if (idx + 1 < n) {
-        __half2 v2 = *reinterpret_cast<const __half2*>(x + idx);
-        float v0 = __half2float(v2.x);
-        float v1 = __half2float(v2.y);
+        float2 vf = __half22float2(*reinterpret_cast<const __half2*>(x + idx));
 
-        float o0 = v0 * 0.5f * (1.0f + tanhf(GELU_SQRT_2_OVER_PI * (v0 + GELU_COEFF * v0 * v0 * v0)));
-        float o1 = v1 * 0.5f * (1.0f + tanhf(GELU_SQRT_2_OVER_PI * (v1 + GELU_COEFF * v1 * v1 * v1)));
+        float o0 = vf.x * 0.5f * (1.0f + tanhf(GELU_SQRT_2_OVER_PI * (vf.x + GELU_COEFF * vf.x * vf.x * vf.x)));
+        float o1 = vf.y * 0.5f * (1.0f + tanhf(GELU_SQRT_2_OVER_PI * (vf.y + GELU_COEFF * vf.y * vf.y * vf.y)));
 
-        __half2 out2;
-        out2.x = __float2half(o0);
-        out2.y = __float2half(o1);
-        *reinterpret_cast<__half2*>(out + idx) = out2;
+        *reinterpret_cast<__half2*>(out + idx) = __float22half2_rn(make_float2(o0, o1));
     } else if (idx < n) {
         float v = __half2float(x[idx]);
         out[idx] = __float2half(v * 0.5f * (1.0f + tanhf(GELU_SQRT_2_OVER_PI * (v + GELU_COEFF * v * v * v))));

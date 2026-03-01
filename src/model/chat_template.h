@@ -14,6 +14,7 @@ enum class ChatTemplateFamily {
     LLAMA2,     // [INST]...[/INST] (Llama 2, Mistral)
     LLAMA3,     // <|start_header_id|>...<|end_header_id|>...<|eot_id|>
     NEMOTRON,   // <extra_id_0>System\n...<extra_id_1>\n<extra_id_0>User\n...
+    GEMMA,      // <start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n
 };
 
 const char* chat_template_family_name(ChatTemplateFamily family);
@@ -71,6 +72,10 @@ private:
     int32_t extra_id_0_ = -1;
     int32_t extra_id_1_ = -1;
 
+    // Gemma tokens
+    int32_t start_of_turn_id_ = -1;
+    int32_t end_of_turn_id_ = -1;
+
     // Template-specific apply methods
     std::vector<int32_t> apply_chatml(const Tokenizer& tok,
                                        const std::vector<ChatMessage>& msgs) const;
@@ -80,6 +85,8 @@ private:
                                        const std::vector<ChatMessage>& msgs) const;
     std::vector<int32_t> apply_nemotron(const Tokenizer& tok,
                                          const std::vector<ChatMessage>& msgs) const;
+    std::vector<int32_t> apply_gemma(const Tokenizer& tok,
+                                      const std::vector<ChatMessage>& msgs) const;
 };
 
 } // namespace imp

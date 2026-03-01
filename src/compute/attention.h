@@ -10,10 +10,11 @@ namespace imp {
 // K,V: [batch, seq_kv, n_kv_heads, head_dim]
 // O: [batch, seq_q, n_heads, head_dim]
 // sliding_window: 0 = disabled, >0 = only attend to last N KV positions
+// softcap: 0 = disabled, >0 = apply tanh(score/cap)*cap (Gemma-2/3)
 void flash_attention_prefill(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
     float scale, bool causal = true, int sliding_window = 0,
-    cudaStream_t stream = nullptr);
+    float softcap = 0.0f, cudaStream_t stream = nullptr);
 
 // Runtime-dispatched attention prefill.
 // Selects the best kernel based on compute capability:
@@ -23,7 +24,7 @@ void flash_attention_prefill(
 void attention_prefill_dispatch(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
     float scale, bool causal = true, int sliding_window = 0,
-    cudaStream_t stream = nullptr);
+    float softcap = 0.0f, cudaStream_t stream = nullptr);
 
 // Query the compute capability of the current device.
 int get_device_sm_version();

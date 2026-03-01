@@ -21,15 +21,15 @@ int get_device_sm_version() {
 
 void attention_prefill_dispatch(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, int sliding_window, cudaStream_t stream) {
+    float scale, bool causal, int sliding_window, float softcap, cudaStream_t stream) {
     int sm = get_device_sm_version();
     if (sm >= 120) {
         // Optimized WMMA kernel with 128x64 tiles for Blackwell (sm_120+).
-        flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, stream);
+        flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap, stream);
     } else if (sm >= 90) {
-        flash_attention_prefill_tc(Q, K, V, O, scale, causal, sliding_window, stream);
+        flash_attention_prefill_tc(Q, K, V, O, scale, causal, sliding_window, softcap, stream);
     } else {
-        flash_attention_prefill(Q, K, V, O, scale, causal, sliding_window, stream);
+        flash_attention_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream);
     }
 }
 
