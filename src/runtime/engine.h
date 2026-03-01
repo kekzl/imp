@@ -120,7 +120,7 @@ private:
     // True when MoE expert weights are on host (not graph-capturable)
     bool experts_on_host_ = false;
 
-    // Lazy FP16 weight dequant (deferred from init to first prefill)
+    // FP16 weight dequant completed (set in init after pre_dequant_weights)
     bool dequant_done_ = false;
 
     // Chat template for formatting prompts

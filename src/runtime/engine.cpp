@@ -352,9 +352,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
     }
 
-    // FP16 weight dequant is deferred to the first prefill (lazy init).
-    // Decode uses raw quantized dp4a GEMV — no FP16 cache needed.
-    // This eliminates the dequant cost from init(), making time-to-first-token faster.
+    // Pre-dequantize quantized weights to FP16 for fast prefill GEMM.
+    // Done eagerly at init time so the first real-world prefill isn't penalized
+    // by ~380ms of dequant overhead (previously this was lazy on first prefill).
+    // Decode (n=1) uses raw quantized dp4a GEMV and doesn't need FP16 cache.
+    executor_->pre_dequant_weights(stream_);
+    dequant_done_ = true;
+    cudaStreamSynchronize(stream_);
 
     // --- Pre-allocate decode batch pool for stable CUDA Graph pointers ---
     {
@@ -561,13 +565,6 @@ bool Engine::step() {
     // 2. Process prefill requests (per-request, no cross-sequence batching)
     // ====================================================================
     cudaStream_t pf_stream = prefill_stream();
-
-    // Lazy FP16 dequant: trigger on first prefill to avoid init overhead.
-    // Decode-only (n=1) uses raw quantized dp4a GEMV and doesn't need FP16 cache.
-    if (!dequant_done_ && !prefill_batch.empty()) {
-        executor_->pre_dequant_weights(pf_stream);
-        dequant_done_ = true;
-    }
 
     for (auto& req : prefill_batch) {
         int total_input = static_cast<int>(req->input_tokens.size());
