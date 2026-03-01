@@ -30,6 +30,12 @@ __pycache__/
 *.key
 *.pem
 
+# Profiling
+*.nsys-rep
+*.sqlite
+*.ncu-rep
+*.qdrep
+
 # Misc
 inspect_gguf.py
 test_detail.json
