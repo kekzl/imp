@@ -50,6 +50,7 @@ __global__ void broadcast_add_bias_fp16_kernel(half* out, const half* bias,
     }
 }
 
+
 // Element-wise scale: out[i] *= scale, for FP16 data (Gemma embedding scaling)
 __global__ void scale_fp16_kernel(half* data, half scale, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -663,6 +664,7 @@ static void add_bias(Tensor& out, const Tensor& bias, cudaStream_t stream) {
         rows, cols);
 }
 
+
 // Create a view of the first n_tokens rows from a [max_tokens, cols] buffer.
 // Never modifies the source tensor.
 static Tensor slice_rows(const Tensor& buf, int n_tokens) {
@@ -1109,9 +1111,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
-    // Sampling result buffer (avoids cudaMalloc/cudaFree per token)
+    // Sampling result buffer: sized to hold the argmax result plus the
+    // multi-block partial reduction scratch (ARGMAX_SCRATCH_BYTES).
     {
-        cudaError_t err = cudaMalloc(&d_sample_result_, sizeof(int32_t));
+        cudaError_t err = cudaMalloc(&d_sample_result_, ARGMAX_SCRATCH_BYTES);
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("Failed to allocate sampling result buffer: %s",
                           cudaGetErrorString(err));
