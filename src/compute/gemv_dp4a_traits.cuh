@@ -187,7 +187,11 @@ template<> struct DequantTraits<QType::Q6_K> {
     static constexpr int kMaxNRows     = 2;   // NR=4 uses 64 regs → occupancy drop
     static constexpr bool kPreferKpar  = true; // compute-heavy dequant: K-par wins on ties
 
-    static __device__ __forceinline__ float
+    // __noinline__: Q6_K dequant is ~60 instructions per sub-block. When inlined
+    // into every NR×ADD_RESIDUAL template variant, nvcc sees the full expansion
+    // and over-allocates registers (spilling at NR≥2). The ~2 cycle call overhead
+    // is dwarfed by 10+ cycle spill savings. Measured 2-5% decode improvement.
+    static __device__ __noinline__ float
     dp4a_block(const uint8_t* bp, int sub,
                const int* xi, float dq, float /*q8_sum*/) {
         float d_w = __half2float(*(const half*)(bp + 208));
@@ -277,7 +281,9 @@ template<> struct DequantTraits<QType::Q4_K> {
     static constexpr int kMaxNRows     = 4;
     static constexpr bool kPreferKpar  = true; // complex dequant: K-par wins on ties
 
-    static __device__ __forceinline__ float
+    // __noinline__: same rationale as Q6_K — complex sub-block dequant with
+    // scale/min extraction causes register bloat when inlined into NR variants.
+    static __device__ __noinline__ float
     dp4a_block(const uint8_t* bp, int sub,
                const int* xi, float dq, float /*q8_sum*/) {
         float d_super = __half2float(*(const half*)bp);
@@ -302,7 +308,9 @@ template<> struct DequantTraits<QType::Q5_K> {
     static constexpr int kMaxNRows     = 4;
     static constexpr bool kPreferKpar  = true; // complex dequant: K-par wins on ties
 
-    static __device__ __forceinline__ float
+    // __noinline__: Q5_K has high-bit extraction + sub-block decode — same
+    // register pressure issue as Q6_K/Q4_K when inlined across NR variants.
+    static __device__ __noinline__ float
     dp4a_block(const uint8_t* bp, int sub,
                const int* xi, float dq, float /*q8_sum*/) {
         float d_super = __half2float(*(const half*)bp);
