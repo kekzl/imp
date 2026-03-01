@@ -73,13 +73,20 @@ struct InferenceState {
 // efficiency. No graph walking is done at runtime.
 class GraphExecutor {
 public:
+    // FP8 weight cache entry (public for use by static gemm_dispatch)
+    struct FP8CacheEntry {
+        Tensor weight;       // [N, K] FP8_E4M3 on device
+        float host_scale;    // absmax / 448
+        float* d_scale;      // device-side scale (1 float, for gemm_cublaslt bScale)
+    };
+
     GraphExecutor() = default;
     ~GraphExecutor();
 
     // Phase 1: Initialize model reference, compute workspace sizes, enable PDL.
     // Does NOT allocate GPU memory — call allocate_workspaces() after weight upload.
     bool init(const Model& model, DType compute_dtype = DType::FP16, bool use_pdl = false,
-              int max_batch_size = 1, int max_seq_len = 0);
+              int max_batch_size = 1, int max_seq_len = 0, bool use_fp8_prefill = false);
 
     // Phase 2: Allocate all GPU workspace buffers.
     // Call AFTER weight upload to maximize VRAM available for expert layers.
@@ -269,6 +276,17 @@ private:
     // Populated at init time; decode still uses dp4a GEMV on raw quantized weights.
     std::unordered_map<const void*, Tensor> fp16_cache_;
     size_t fp16_cache_bytes_ = 0;  // total VRAM used by FP16 cache
+
+    // FP8 E4M3 weight cache for prefill GEMM (2x compute throughput on sm_120).
+    // When use_fp8_cache_ is set, weights are cached as FP8 instead of FP16.
+    std::unordered_map<const void*, FP8CacheEntry> fp8_cache_;
+    size_t fp8_cache_bytes_ = 0;
+    bool use_fp8_cache_ = false;
+
+    // Scratch buffers for FP8 activation quantization (allocated once, reused per GEMM)
+    void* fp8_act_buf_ = nullptr;       // max_tokens * max_dim bytes
+    size_t fp8_act_buf_size_ = 0;
+    float* d_act_scale_ = nullptr;      // 1 float on device
 
     // Fused KV weight cache: concatenated [wk; wv] as [2*nkv*hd, d_model] FP16.
     // Enables strided batched GEMM for K+V in a single cuBLAS call during prefill.
