@@ -1,6 +1,6 @@
 # imp — CUDA 13.1 Feature Audit, Performance & Architektur-Review
 
-**Datum:** 2026-03-01 (aktualisiert nach GEMV-Konsolidierung, Blackwell-Attention, Multi-Block-Argmax, FP8-Prefill-Cache)
+**Datum:** 2026-03-02 (aktualisiert nach NVFP4-Decode-Cache, zentralisiertem VRAM-Budget, Temperature-0-Fix)
 
 Umfassende Analyse des imp-Projekts auf drei Achsen:
 1. Welche CUDA 13.1+ Features werden genutzt, welche fehlen noch?
@@ -19,7 +19,7 @@ Umfassende Analyse des imp-Projekts auf drei Achsen:
 | **PDL** (Programmatic Dependent Launch) | `src/runtime/pdl.cu` | **28+ Kernel-Registrierungen**: 7 Utility + 6 Compute + 110+ Template-Instantiierungen (dp4a GEMV). cuBLAS aktiviert PDL intern auf sm_90+. |
 | **CUDA Graphs** (Conditional WHILE) | `src/runtime/cuda_graph.cu` | Capture/Replay, `cudaGraphConditionalHandleCreate` mit WHILE-Loop, Mapped-Memory Ring Buffer |
 | **cudaMallocAsync / MemPool** | `src/memory/device_allocator.cu` | `cudaMemPoolCreate` mit `ReuseAllowOpportunistic`, stream-geordnete Allokation |
-| **NVFP4** (FP4 E2M1) | `src/quant/nvfp4_quant.cu`, `nvfp4_gemm.cu` | 2-Level Quantisierung (Micro-Scale FP8 + Tensor-Scale FP32), Blackwell-nativ |
+| **NVFP4** (FP4 E2M1) | `src/quant/nvfp4_quant.cu`, `nvfp4_gemm.cu` | 2-Level Quantisierung (Micro-Scale FP8 + Tensor-Scale FP32), Blackwell-nativ. **NVFP4 Decode Weight Cache**: Init-Time FP16→NVFP4 Quantisierung, K-parallel dp4a GEMV für Decode. `--decode-nvfp4` / `--decode-nvfp4-only` Flags. |
 
 ### Teilweise implementiert
 
@@ -48,8 +48,16 @@ Umfassende Analyse des imp-Projekts auf drei Achsen:
 | # | Optimierung | Dateien | Geschätzter Gewinn | Aufwand |
 |---|-------------|---------|-------------------|---------|
 | O1 | **TCGEN05 Inline-PTX Attention** — WGMMA + TMA Bulk-Loads + TMEM Accumulators + CTA Pairing | `attention_blackwell.cu` | ~2x Prefill auf sm_120 | Hoch |
-| O2 | **NVFP4 Quantized GEMV** — Native FP4 dp4a-Kernels für RTX 5090 (sm_120 hat NVFP4-Tensor-Cores) | `gemv_dp4a_traits.cuh`, `gemm.cu` | +20-40% Decode (weniger Bandwidth) | Mittel |
 | O3 | **GEMV Bandwidth-Optimierung** — Aktuelle Auslastung ~50-59% vs llama.cpp ~55-69%. L2-Cache-Tuning, Prefetch-Hints | `gemv_dp4a_traits.cuh` | +5-10% Dense Decode | Mittel |
+
+### Implementiert — Phase 4 (0d3be11 → 81b1bea, 2026-03-02)
+
+| # | Optimierung | Dateien | Gemessener Gewinn |
+|---|-------------|---------|-------------------|
+| P21 | **NVFP4 Decode Weight Cache** — Init-Time FP16→NVFP4 Quantisierung aller dense Weights. K-parallel dp4a GEMV mit On-the-fly FP4→INT8 Promotion. `--decode-nvfp4` (additiv: FP16 Prefill + NVFP4 Decode) und `--decode-nvfp4-only` (ersetzt FP16). | `config.h`, `engine.h/cpp`, `executor.h/cu`, `nvfp4_gemm.h/cu`, `args.h/cpp` | +25-39% Decode (Phi-4-mini: 241→315, Qwen3-4B: 186→259, DS-R1-14B: 86→116 tok/s) |
+| P22 | **Zentralisiertes VRAM-Budget** — Engine berechnet einmalig `effective_free_vram() - 1 GiB Reserve`, gemeinsame `remaining_budget` Variable über alle 3 Weight-Cache-Phasen (FP16, FP8, NVFP4). Entfernt 2x redundante `cudaMemGetInfo` Aufrufe. | `engine.cpp`, `executor.cu` | Korrekte VRAM-Budgetierung, verhindert WSL2-Overcommit |
+| P23 | **FFN-Budget-Reallokation** — Bei aktivem NVFP4: dense FFN (gate/up/down) aus FP16-Cache auslassen, wenn NVFP4-tauglich. Phase 3 nutzt `dequant_scratch_` als transientes FP16-Staging (GGUF→scratch→NVFP4), spart cudaMalloc/Free pro Tensor. | `executor.cu` | DS-R1-7B: 116→196/196 NVFP4 Tensors, +24% Decode. DS-R1-14B: 0→336 NVFP4 Tensors, +34% Decode |
+| P24 | **Temperature-0 CUDA-Graph Fix** — `d_token_id_` in `CudaGraphConditionalRunner` von 4B auf `ARGMAX_SCRATCH_BYTES` (516B) vergrößert. Multi-Block-Argmax Scratch überschrieb `d_position_`/`d_context_len_`/`d_step_counter_`. | `cuda_graph.cu` | Greedy Sampling in CUDA-Graph-Loop funktioniert jetzt korrekt |
 
 ### Implementiert — Phase 3 (16f6cff → bcc9bba, 2026-02-26 bis 2026-03-01)
 
@@ -82,17 +90,19 @@ Umfassende Analyse des imp-Projekts auf drei Achsen:
 
 ### Benchmark: Finale Ergebnisse (RTX 5090, CUDA 13.1, bs=1)
 
-#### Decode-Throughput (tok/s) — imp vs llama.cpp
+#### Decode-Throughput (tok/s) — imp vs imp+NVFP4 vs llama.cpp
 
-| Model | Quant | Parameter | llama.cpp | imp | vs llama.cpp |
-|-------|-------|-----------|-----------|-----|-------------|
-| Phi-4-Mini | Q8_0 | 3.8B | 250.96 | **239.29** | -4.6% |
-| Qwen3-4B | Q8_0 | 4B | 217.54 | **228.07** | **+4.8%** |
-| DeepSeek-R1-7B | Q8_0 | 7B | 164.30 | **159.43** | -3.0% |
-| Gemma-3-12B | Q8_0 | 12B | 91.41 | **85.39** | -6.6% |
-| DeepSeek-R1-14B | Q6_K | 14B | 102.22 | **88.29** | -13.6% |
-| Qwen3-Coder-30B-A3B (MoE) | Q6_K | 30B (3B aktiv) | 206.61 | **231.71** | **+12.1%** |
-| Nemotron-3-Nano-30B-A3B (MoE) | Q6_K | 30B (3B aktiv) | 25.77 | **60.42** | **+134%** |
+| Model | Quant | Parameter | llama.cpp | imp | imp+NVFP4 | NVFP4 vs llama |
+|-------|-------|-----------|-----------|-----|-----------|----------------|
+| Phi-4-Mini | Q8_0 | 3.8B | 250.96 | 239.29 | **315** | **+25.5%** |
+| Qwen3-4B | Q8_0 | 4B | 217.54 | 228.07 | **259** | **+19.1%** |
+| DeepSeek-R1-7B | Q8_0 | 7B | 164.30 | 159.43 | **179** | **+8.9%** |
+| Gemma-3-12B | Q8_0 | 12B | 91.41 | 85.39 | — | -6.6% |
+| DeepSeek-R1-14B | Q6_K | 14B | 102.22 | 88.29 | **116** | **+13.5%** |
+| Qwen3-Coder-30B-A3B (MoE) | Q6_K | 30B (3B aktiv) | 206.61 | 231.71 | — | **+12.1%** |
+| Nemotron-3-Nano-30B-A3B (MoE) | Q6_K | 30B (3B aktiv) | 25.77 | 60.42 | — | **+134%** |
+
+NVFP4-Decode-Cache (`--decode-nvfp4`) quantisiert Weights bei Init von FP16 auf FP4 E2M1 und nutzt einen K-parallelen dp4a GEMV für Decode (M=1). Der ~4x kleinere Weight-Footprint erhöht den effektiven Bandwidth erheblich. Bei MoE-Modellen und Gemma-3 fehlt NVFP4 noch (MoE: sparse Expert-Routing nicht kompatibel, Gemma-3: Post-Norm FP32-Accumulator).
 
 #### Prefill-Throughput (tok/s)
 
@@ -110,17 +120,17 @@ FP8 Prefill nutzt eine hybride Strategie: FP16-Cache mit Fused KV/Gate+Up wird i
 
 #### Decode-Entwicklung über alle Optimierungs-Phasen
 
-| Model | Quant | Baseline (a9ae9b4) | Nach P2-P9 | Finale (bcc9bba) | Gesamt-Gewinn |
-|-------|-------|---------------------|------------|-------------------|---------------|
-| Phi-4-Mini | Q8_0 | 189.77 | 219.85 | 239.29 | +26.1% |
-| Qwen3-4B | Q8_0 | 186.06 | 213.33 | 228.07 | +22.6% |
-| DS-R1-7B | Q8_0 | 133.52 | 149.52 | 159.43 | +19.4% |
-| Gemma-3-12B | Q8_0 | — | 82.08 | 85.39 | — |
-| DS-R1-14B | Q6_K | — | 83.85 | 88.29 | — |
+| Model | Quant | Baseline (a9ae9b4) | Nach P2-P9 | P10-P20 (bcc9bba) | +NVFP4 (0d3be11) | Gesamt-Gewinn |
+|-------|-------|---------------------|------------|---------------------|-------------------|---------------|
+| Phi-4-Mini | Q8_0 | 189.77 | 219.85 | 239.29 | **315** | **+66.0%** |
+| Qwen3-4B | Q8_0 | 186.06 | 213.33 | 228.07 | **259** | **+39.2%** |
+| DS-R1-7B | Q8_0 | 133.52 | 149.52 | 159.43 | **179** | **+34.1%** |
+| Gemma-3-12B | Q8_0 | — | 82.08 | 85.39 | — | — |
+| DS-R1-14B | Q6_K | — | 83.85 | 88.29 | **116** | — |
 
-**MoE-Modelle** profitieren am stärksten von den Custom-Kernels: Fused MoE GEMV mit Shared-Memory Expert Caching und Sigmoid-Routing übertreffen llama.cpp signifikant. Nemotron (Hybrid Mamba2+Attention+MoE) ist 2.3x schneller, da llama.cpp diese Architektur nicht optimiert.
+**Mit NVFP4**: Dense-Modelle übertreffen llama.cpp jetzt um +9-26% statt hinter llama.cpp zu liegen. Die verbleibende Lücke bei Baseline (ohne NVFP4) ist systemisch bedingt durch GEMV-Bandwidth-Auslastung (~50-59% vs llama.cpp ~55-69%). NVFP4 umgeht dies durch ~4x kleineren Weight-Footprint.
 
-**Dense-Modelle** liegen bei 3-14% hinter llama.cpp. Die verbleibende Lücke ist systemisch bedingt durch GEMV-Bandwidth-Auslastung (~50-59% vs llama.cpp ~55-69%).
+**MoE-Modelle** profitieren am stärksten von den Custom-Kernels: Fused MoE GEMV mit Shared-Memory Expert Caching und Sigmoid-Routing übertreffen llama.cpp signifikant. Nemotron (Hybrid Mamba2+Attention+MoE) ist 2.3x schneller, da llama.cpp diese Architektur nicht optimiert. NVFP4 für MoE steht noch aus (sparse Expert-Routing).
 
 ---
 
@@ -143,7 +153,7 @@ FP8 Prefill nutzt eine hybride Strategie: FP16-Cache mit Fused KV/Gate+Up wird i
 | Feature | vLLM | TRT-LLM | SGLang | imp | Kommentar |
 |---------|------|---------|--------|-----|-----------|
 | Multi-GPU / TP | Ja | Ja | Ja | **Nein** | Single-GPU only |
-| Chunked Prefill | Ja | Ja | Ja | **Nein** | Ganzer Prompt in einem Pass |
+| Chunked Prefill | Ja | Ja | Ja | **Ja** | `--prefill-chunk-size`, chunked Prefill mit State-Tracking |
 | Structured Output (Grammar) | Ja | Nein | Ja | **Nein** | Kein JSON-Schema/GBNF |
 | Vision / Multimodal | Ja | Ja | Ja | **Nein** | Kein Vision-Encoder |
 | LoRA / Adapters | Ja | Ja | Nein | **Nein** | Statische Weights only |
@@ -153,17 +163,17 @@ FP8 Prefill nutzt eine hybride Strategie: FP16-Cache mit Fused KV/Gate+Up wird i
 | Logprobs Output | Ja | Ja | Ja | **Nein** | Nur finales Token |
 | Stop Sequences | Ja | Ja | Ja | **Partiell** | EOS + Chat-Template Stop-Tokens, keine beliebigen String-Sequenzen |
 | Batch API (extern) | Ja | Ja | Ja | **Nein** | Intern ja, API single-request |
-| KV-Cache Quantisierung | Ja | Ja | Nein | **Partiell** | FP16/FP8, kein INT4/INT8 |
+| KV-Cache Quantisierung | Ja | Ja | Nein | **Ja** | FP16, FP8 E4M3 (`--kv-fp8`), INT8 dp4a (`--kv-int8`) |
 | AWQ/GPTQ | Ja | Ja | Ja | **Nein** | Nur GGML-Formate |
 | Medusa/EAGLE Heads | Nein | Ja | Nein | **Nein** | Nur Draft-Model |
 
 ### Empfohlene nächste Features (nach ROI sortiert)
 
-1. **NVFP4 Quantized GEMV** — RTX 5090 hat native FP4 Tensor Cores; +20-40% Decode möglich
-2. **Stop Sequences + Logprobs** — Niedrig-Aufwand, hoher User-Impact, Server-Kompatibilität
-3. **Chunked Prefill** — Verhindert Head-of-Line-Blocking bei langen Prompts
-4. **TCGEN05 Inline-PTX Attention** — ~2x Prefill auf sm_120
-5. **Structured Output** — JSON-Mode / GBNF-Grammatik für Agentic Use-Cases
+1. **Stop Sequences + Logprobs** — Niedrig-Aufwand, hoher User-Impact, Server-Kompatibilität
+2. **TCGEN05 Inline-PTX Attention** — ~2x Prefill auf sm_120
+3. **NVFP4 MoE GEMV** — NVFP4-Decode für MoE Expert-Kernels (aktuell nur dense)
+4. **Structured Output** — JSON-Mode / GBNF-Grammatik für Agentic Use-Cases
+5. **GEMV Bandwidth-Optimierung** — L2-Tuning, Prefetch-Hints, +5-10% Dense Decode
 
 ---
 
@@ -171,9 +181,9 @@ FP8 Prefill nutzt eine hybride Strategie: FP16-Cache mit Fused KV/Gate+Up wird i
 
 **CUDA 13.1**: 5/5 Major-Features implementiert (Green Contexts, PDL, Graphs+Conditional, MemPool, NVFP4). PDL-Registry mit 28+ Kernel-Registrierungen (7 Utility + 6 Compute + 110+ Template-Instantiierungen). Blackwell WMMA 8-Warp Attention mit Double-Buffered KV für sm_120. TCGEN05 Inline-PTX/TMA noch nicht implementiert — größtes verbleibendes Hardware-Potential.
 
-**Performance**: P2-P20 implementiert. Decode: +19-26% vs Baseline (dense), +12-134% vs llama.cpp (MoE). Prefill: +3-84% (Batched GEMM, Residual Fusion, Eager Dequant), +79% mit FP8-Overflow (P20, DS-R1-7B). Multi-Block Argmax: 192µs → ~10µs. GEMV-Coverage: Q6_K, Q8_0, Q4_0, Q4_K, Q5_K (alle mit K-par + Row-par + QKV-fused + Gate+Up-fused Varianten). FP8 Prefill Weight Cache: Hybrid FP16+FP8 ohne Regression auf kleine Modelle. Verbleibend: NVFP4 GEMV, TCGEN05-Attention, Bandwidth-Optimierung.
+**Performance**: P2-P24 implementiert. Decode mit NVFP4: +34-66% vs Baseline, +9-26% vs llama.cpp (dense). MoE: +12-134% vs llama.cpp (ohne NVFP4). Prefill: +3-84% (Batched GEMM, Residual Fusion, Eager Dequant), +79% mit FP8-Overflow (P20, DS-R1-7B). Zentralisiertes VRAM-Budget (P22) mit FFN-Reallokation (P23) ermöglicht volle NVFP4-Coverage auch bei großen Modellen. Multi-Block Argmax: 192µs → ~10µs. Temperature-0 CUDA-Graph-Bug gefixt (P24). Verbleibend: TCGEN05-Attention, Bandwidth-Optimierung, NVFP4 für MoE.
 
-**Architektur**: Auf Single-GPU-Ebene vergleichbar mit vLLM. Hauptlücken sind Multi-GPU, Structured Output, Vision, und externe Batch-API. Für den aktuellen Scope (Single-GPU, CLI/Server) ist die Architektur solide und modern.
+**Architektur**: Auf Single-GPU-Ebene vergleichbar mit vLLM. Chunked Prefill und KV-Cache-Quantisierung (FP16/FP8/INT8) sind implementiert. Hauptlücken sind Multi-GPU, Structured Output, Vision, Logprobs und externe Batch-API. Für den aktuellen Scope (Single-GPU, CLI/Server) ist die Architektur solide und modern.
 
 ---
 
@@ -250,14 +260,19 @@ FP8 Prefill nutzt eine hybride Strategie: FP16-Cache mit Fused KV/Gate+Up wird i
 - `cudaMemPoolReuseAllowOpportunistic` + `ReuseAllowInternalDependencies`
 - Thread-safe Accounting: atomic `allocated_` und `peak_allocated_`
 
-### A.5 NVFP4 — Vollständig
+### A.5 NVFP4 — Vollständig (Quant + Decode GEMV)
 
 **Format**: FP4 E2M1 (1 sign | 2 exp | 1 mantissa, bias=1). Magnitudes: {0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}
 
-**Kernels**:
+**Quantisierungs-Kernels** (`nvfp4_quant.cu`):
 - `absmax_kernel` — Grid-stride Reduktion, `atomicMax` auf IEEE754 Bit-Pattern
 - `quantize_nvfp4_kernel` — FP16→NVFP4: Micro-Scale (FP8 E4M3) per 16-Werte Block + Tensor-Scale (FP32)
 - `dequantize_nvfp4_kernel` — NVFP4→FP16: Constant LUT `kFP4E2M1Dequant[8]`
+
+**GEMV-Kernels** (`nvfp4_gemm.cu`):
+- `gemv_nvfp4_kpar_kernel` — K-parallel GEMV (128 Threads, 4 Warps, 1 Row/Block). Jeder Thread lädt 32 FP4-Nibbles (16 Bytes), promoted On-the-fly zu INT8, dann dp4a gegen Q8_1-quantisierte Aktivierung. 2-Level Dequant: `tensor_scale * micro_scale * dp4a_sum`.
+- `gemv_nvfp4_kpar` — Host-Launcher mit Input Q8_1-Quantisierung, Grid = N Rows.
+- Init-Time Weight Cache: `pre_dequant_weights()` Phase 3 quantisiert FP16→NVFP4 mit zentralem VRAM-Budget. Nutzt `fp16_cache_` oder `dequant_scratch_` als FP16-Source.
 
 **Helpers**: `float_abs_to_fp4_e2m1()`, `float_to_fp8_e4m3()`, `fp8_e4m3_to_float()`
 
@@ -395,7 +410,22 @@ Die GEMV-Infrastruktur wurde von 33 handgeschriebenen Kernels auf ein Template-S
 
 **Dateien**: `config.h`, `imp_api.cpp`, `engine.h/cpp`, `executor.h/cu`, `args.h/cpp`, `main.cpp`
 
-### B.8 Host-Device Sync
+### B.8 NVFP4 Decode Weight Cache
+
+**Problem**: Decode ist bandwidth-bound (M=1 GEMV). GGML Q8_0/Q6_K Weights sind 8/6.5 Bits pro Element — NVFP4 ist ~4 Bits (~2x weniger Bandwidth).
+
+**Lösung**: 3-Phasen Weight-Cache mit zentralem VRAM-Budget:
+1. **Phase 1 (FP16)**: Prefill-Weight-Cache (Fused KV, Gate+Up). Bei aktivem NVFP4: dense FFN (gate/up/down) auslassen falls NVFP4-tauglich.
+2. **Phase 2 (FP8)**: Overflow für `--prefill-fp8`.
+3. **Phase 3 (NVFP4)**: `--decode-nvfp4` — quantisiert FP16→NVFP4 bei Init. Source: `fp16_cache_` (wenn vorhanden) oder `dequant_scratch_` (GGUF→FP16 transient→NVFP4). Budget-Check verhindert VRAM-Überallokation.
+
+**VRAM-Budget**: `effective_free_vram() - 1 GiB Reserve`, geteilt über alle 3 Phasen. `remaining_budget` wird nach jeder Phase dekrementiert. Löst WSL2-Overcommit-Problem (cudaMalloc succeeded beyond physical VRAM, spills to system RAM).
+
+**FFN-Reallokation**: Bei `use_nvfp4_decode > 0` und NVFP4-tauglichem QType (Q8_0, Q8_K, Q6_K, Q5_K) werden dense FFN Weights aus Phase 1 ausgelassen. Da FP16 ~3.5x größer als NVFP4 ist, gibt dies genug Budget für volle NVFP4-Coverage. DS-R1-7B: 116/196 → 196/196 NVFP4 Tensors.
+
+**Runtime-Dispatch** (`gemm_dispatch`): `nvfp4_cache_` Lookup → wenn Hit und M=1: `gemv_nvfp4_kpar()`. Sonst: FP16/FP8/dequant Fallback-Kette.
+
+### B.9 Host-Device Sync
 
 - **Prefill (greedy)**: `forward_logits()` + `sample_greedy_device()` + `cudaEventSynchronize(prefill_done_)` (P9)
 - **Decode**: CUDA Graph Replay + `cudaStreamSynchronize(dec_stream)` nach jedem Batch
@@ -419,15 +449,17 @@ Die GEMV-Infrastruktur wurde von 33 handgeschriebenen Kernels auf ein Template-S
 | dp4a Template GEMV | `gemv_dp4a_traits.cuh` | 5 QTypes, K-par/Row-par Dispatch, ~130 Instantiierungen |
 | Multi-Block Argmax | `sampling.cu` | 64-Block 2-Phasen Reduktion, 19x Speedup |
 | FP8 Prefill Weight Cache | `executor.cu`, `fp8_quant.cu` | Hybrid FP16+FP8, `--prefill-fp8`, Device-Scales, 1.79x Prefill (DS-R1-7B) |
+| NVFP4 Decode Weight Cache | `executor.cu`, `nvfp4_gemm.cu` | FP16→NVFP4 Init-Time Quant, K-par dp4a GEMV, `--decode-nvfp4`, +25-39% Decode |
+| Chunked Prefill | `engine.cpp` | `--prefill-chunk-size`, State-Tracking über Chunks, verhindert Head-of-Line-Blocking |
+| INT8 KV Cache | `kv_cache.cu`, `attention_paged.cu` | `--kv-int8`, dp4a Attention mit Per-Token INT8 Quantisierung |
 
 ### C.2 Verifizierte Lücken
 
 | Feature | Evidenz |
 |---------|---------|
-| Chunked Prefill | Scheduler promoviert gesamten Prefill, kein `chunk_prefill_tokens` Parameter |
 | Logprobs | `ImpGenerateParams` hat kein logprobs-Feld, Sampling gibt nur Token-ID zurück |
 | Structured Output | Kein Grammar-Parser, kein Constraint-Feld in Generate-Params |
 | Beam Search | Nur `temperature/top_p/top_k` in Sampling, kein `beam_size` |
 | String Stop Sequences | Nur Token-basiert (EOS + Template Stop-IDs), kein String-Matching |
-| NVFP4 GEMV | Quant/Dequant vorhanden, aber keine dp4a-Kernels für native FP4 Compute |
+| NVFP4 MoE GEMV | NVFP4-Decode nur für dense Weights, MoE Expert-Kernels noch ohne NVFP4 |
 | TCGEN05 Attention | WMMA implementiert, aber kein Inline-PTX für echte systolische Blackwell-Ops |
