@@ -1,6 +1,7 @@
 #include "runtime/cuda_graph.h"
 #include "runtime/pdl.h"
 #include "graph/executor.h"
+#include "compute/sampling.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cstring>
@@ -348,7 +349,9 @@ bool CudaGraphConditionalRunner::setup(
     cudaError_t err;
 
     // ---- Allocate device state ----
-    err = cudaMalloc(&d_token_id_, sizeof(int32_t));
+    // Must be ARGMAX_SCRATCH_BYTES — sample_greedy_device uses multi-block
+    // argmax that writes partial reduction arrays after the result token.
+    err = cudaMalloc(&d_token_id_, ARGMAX_SCRATCH_BYTES);
     if (err != cudaSuccess) goto fail;
     err = cudaMalloc(&d_position_, sizeof(int));
     if (err != cudaSuccess) goto fail;
