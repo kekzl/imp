@@ -43,9 +43,23 @@ struct InferenceState {
     int top_k = 0;
     int seed = -1;
     float min_p = 0.0f;
+    float typical_p = 1.0f;           // Locally typical sampling (1.0 = disabled)
     float repetition_penalty = 1.0f;
     float frequency_penalty = 0.0f;
     float presence_penalty = 0.0f;
+
+    // DRY (Don't Repeat Yourself) penalty
+    float dry_multiplier = 0.0f;     // 0 = disabled
+    float dry_base = 1.75f;
+    int dry_allowed_length = 2;
+    int dry_penalty_last_n = 0;      // 0 = full history
+    const int32_t* host_penalty_tokens = nullptr;  // HOST pointer for DRY scanning
+
+    // Mirostat v2 adaptive entropy sampling
+    int mirostat = 0;             // 0=off, 2=Mirostat v2
+    float mirostat_tau = 5.0f;    // Target entropy
+    float mirostat_eta = 0.1f;    // Learning rate
+    mutable float mirostat_mu = 0.0f;  // Running variable (updated by sampling)
 
     // Token history for penalty computation (device pointer, owned by engine)
     const int32_t* penalty_tokens = nullptr;
@@ -105,7 +119,16 @@ public:
     void pre_dequant_weights(cudaStream_t stream = nullptr);
 
     // Set KV layer mapping (must be called before forward pass for hybrid models)
-    void set_kv_layer_map(std::vector<int> map) { kv_layer_map_ = std::move(map); }
+    void set_kv_layer_map(std::vector<int> map) {
+        kv_layer_map_ = std::move(map);
+        // Count KV layers and initialize per-layer FP8 scale vectors
+        int n_kv = 0;
+        for (int idx : kv_layer_map_) {
+            if (idx >= 0) n_kv = std::max(n_kv, idx + 1);
+        }
+        kv_scales_.assign(n_kv, 1.0f);
+        kv_calibrated_.assign(n_kv, false);
+    }
 
     // Set layer offload manager (optional, for weight offloading)
     void set_offload_manager(LayerOffloadManager* mgr) { offload_mgr_ = mgr; }
@@ -278,6 +301,15 @@ private:
 
     // Mapping from global layer index to KV cache layer index (for attention layers only)
     std::vector<int> kv_layer_map_;   // kv_layer_map_[global_idx] = kv_idx, or -1
+
+    // Per-KV-layer FP8 scales for online calibration.
+    // Scale = absmax / 448.0; used as inv_scale = 1/scale for write, scale for read.
+    std::vector<float> kv_scales_;       // [n_kv_layers] per-layer FP8 scale
+    std::vector<bool>  kv_calibrated_;   // [n_kv_layers] whether scale has been calibrated
+
+    // YaRN correction dimension boundaries [2], precomputed at init.
+    // yarn_corr_dims_[0] = start (full interpolation below), yarn_corr_dims_[1] = end (full extrapolation above)
+    float yarn_corr_dims_[2] = {0.0f, 0.0f};
 
     // --- Model feature flags (set during init for workspace computation) ---
     bool has_moe_ = false;

@@ -62,9 +62,17 @@ typedef struct {
     int max_tokens;
     int seed;                      // -1 = random
     float min_p;                   // min probability threshold (0 = disabled)
+    float typical_p;               // locally typical sampling (1.0 = disabled)
     float repetition_penalty;      // >1 penalizes repeats (1.0 = disabled)
     float frequency_penalty;       // subtractive per-occurrence (0 = disabled)
     float presence_penalty;        // subtractive binary (0 = disabled)
+    float dry_multiplier;          // DRY penalty scale (0 = disabled)
+    float dry_base;                // DRY exponential base (default 1.75)
+    int dry_allowed_length;        // N-gram lengths ≤ this not penalized (default 2)
+    int dry_penalty_last_n;        // How far back to scan (0 = all)
+    int mirostat;                  // 0 = off, 2 = Mirostat v2
+    float mirostat_tau;            // target entropy (default 5.0)
+    float mirostat_eta;            // learning rate (default 0.1)
     int apply_chat_template;       // 1 = yes (default), 0 = no
     int ignore_eos;                // 1 = don't stop on EOS (benchmark mode)
 } ImpGenerateParams;

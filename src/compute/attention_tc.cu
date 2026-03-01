@@ -64,7 +64,8 @@ __global__ void flash_attention_prefill_tc_kernel(
     int head_dim,
     float scale,
     bool causal,
-    int sliding_window)
+    int sliding_window,
+    float softcap)
 {
     // ---- index mapping ----
     const int tile_q     = blockIdx.x;                   // query-tile index
@@ -245,7 +246,7 @@ __global__ void flash_attention_prefill_tc_kernel(
         }
         __syncthreads();
 
-        // ---- Apply scale and causal mask to S_tile ----
+        // ---- Apply scale, softcap, and causal mask to S_tile ----
         {
             const int total = TC_Br * TC_Bc;
             for (int i = tid; i < total; i += TC_BLOCK_THREADS) {
@@ -256,6 +257,7 @@ __global__ void flash_attention_prefill_tc_kernel(
 
                 if (gq < seq_q && gk < seq_kv) {
                     float val = S_tile[i] * scale;
+                    if (softcap > 0.0f) val = softcap * tanhf(val / softcap);
                     if (causal && gq < gk) val = -FLT_MAX;
                     if (sliding_window > 0 && (gq - gk) >= sliding_window) val = -FLT_MAX;
                     S_tile[i] = val;
@@ -413,7 +415,7 @@ __global__ void flash_attention_prefill_tc_kernel(
 // ---------------------------------------------------------------------------
 void flash_attention_prefill_tc(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, int sliding_window, cudaStream_t stream)
+    float scale, bool causal, int sliding_window, float softcap, cudaStream_t stream)
 {
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int seq_q      = static_cast<int>(Q.shape[1]);
@@ -450,7 +452,7 @@ void flash_attention_prefill_tc(
         reinterpret_cast<const half*>(V.data),
         reinterpret_cast<half*>(O.data),
         batch_size, seq_q, seq_kv, n_heads, n_kv_heads, head_dim,
-        scale, causal, sliding_window);
+        scale, causal, sliding_window, softcap);
 }
 
 // ---------------------------------------------------------------------------

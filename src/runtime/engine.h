@@ -34,6 +34,9 @@ struct EngineConfig {
     int top_k = 0;
     int seed = -1;
 
+    // KV cache dtype: FP16 (default) or FP8_E4M3 for ~50% KV VRAM savings
+    DType kv_cache_dtype = DType::FP16;
+
     // SSM state dtype: FP32 (default) or FP16 for ~50% VRAM savings on h_state
     DType ssm_state_dtype = DType::FP32;
 

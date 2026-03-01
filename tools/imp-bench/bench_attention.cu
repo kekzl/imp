@@ -101,7 +101,7 @@ void bench_attention() {
 
         // Warmup
         for (int i = 0; i < warmup_iters; i++) {
-            flash_attention_prefill(Q, K, V, O, scale, true, 0, stream);
+            flash_attention_prefill(Q, K, V, O, scale, true, 0, 0.0f, stream);
         }
         cudaStreamSynchronize(stream);
 
@@ -112,7 +112,7 @@ void bench_attention() {
 
         cudaEventRecord(start, stream);
         for (int i = 0; i < timed_iters; i++) {
-            flash_attention_prefill(Q, K, V, O, scale, true, 0, stream);
+            flash_attention_prefill(Q, K, V, O, scale, true, 0, 0.0f, stream);
         }
         cudaEventRecord(stop, stream);
         cudaEventSynchronize(stop);

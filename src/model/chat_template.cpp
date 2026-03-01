@@ -12,6 +12,7 @@ const char* chat_template_family_name(ChatTemplateFamily family) {
         case ChatTemplateFamily::LLAMA2:   return "llama2";
         case ChatTemplateFamily::LLAMA3:   return "llama3";
         case ChatTemplateFamily::NEMOTRON: return "nemotron";
+        case ChatTemplateFamily::GEMMA:    return "gemma";
     }
     return "unknown";
 }
@@ -24,6 +25,8 @@ ChatTemplateFamily ChatTemplate::detect_family(const std::string& jinja2_str) {
         return ChatTemplateFamily::CHATML;
     if (jinja2_str.find("<|start_header_id|>") != std::string::npos)
         return ChatTemplateFamily::LLAMA3;
+    if (jinja2_str.find("<start_of_turn>") != std::string::npos)
+        return ChatTemplateFamily::GEMMA;
     if (jinja2_str.find("[INST]") != std::string::npos)
         return ChatTemplateFamily::LLAMA2;
     if (jinja2_str.find("<extra_id_0>") != std::string::npos)
@@ -41,6 +44,7 @@ ChatTemplateFamily ChatTemplate::default_family_for_arch(ModelArch arch) {
         case ModelArch::NEMOTRON_H_MOE: return ChatTemplateFamily::NEMOTRON;
         case ModelArch::QWEN3:          return ChatTemplateFamily::CHATML;
         case ModelArch::QWEN3_MOE:      return ChatTemplateFamily::CHATML;
+        case ModelArch::GEMMA3:         return ChatTemplateFamily::GEMMA;
         default:                        return ChatTemplateFamily::RAW;
     }
 }
@@ -52,6 +56,7 @@ ChatTemplateFamily ChatTemplate::parse_family(const std::string& name) {
     if (name == "llama2")   return ChatTemplateFamily::LLAMA2;
     if (name == "llama3")   return ChatTemplateFamily::LLAMA3;
     if (name == "nemotron") return ChatTemplateFamily::NEMOTRON;
+    if (name == "gemma")   return ChatTemplateFamily::GEMMA;
     return ChatTemplateFamily::RAW;
 }
 
@@ -119,6 +124,20 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer) {
             stop_token_ids_.push_back(extra_id_1_);
             break;
         }
+        case ChatTemplateFamily::GEMMA: {
+            start_of_turn_id_ = tokenizer.find_token("<start_of_turn>");
+            end_of_turn_id_   = tokenizer.find_token("<end_of_turn>");
+            if (start_of_turn_id_ < 0 || end_of_turn_id_ < 0) {
+                IMP_LOG_WARN("Gemma template: missing special tokens "
+                             "(start_of_turn=%d, end_of_turn=%d), falling back to raw",
+                             start_of_turn_id_, end_of_turn_id_);
+                family_ = ChatTemplateFamily::RAW;
+                return false;
+            }
+            stop_token_ids_.push_back(end_of_turn_id_);
+            stop_token_ids_.push_back(static_cast<int32_t>(tokenizer.eos_id()));
+            break;
+        }
         default:
             break;
     }
@@ -136,6 +155,7 @@ std::vector<int32_t> ChatTemplate::apply(
         case ChatTemplateFamily::LLAMA3:   return apply_llama3(tok, messages);
         case ChatTemplateFamily::LLAMA2:   return apply_llama2(tok, messages);
         case ChatTemplateFamily::NEMOTRON: return apply_nemotron(tok, messages);
+        case ChatTemplateFamily::GEMMA:    return apply_gemma(tok, messages);
         default: break;
     }
     // RAW: should not be called, but handle gracefully
@@ -280,6 +300,37 @@ std::vector<int32_t> ChatTemplate::apply_nemotron(
     tokens.push_back(extra_id_0_);
     auto asst_ids = tok.encode("Assistant\n");
     tokens.insert(tokens.end(), asst_ids.begin(), asst_ids.end());
+
+    return tokens;
+}
+
+// Gemma: <start_of_turn>user\ncontent<end_of_turn>\n<start_of_turn>model\n
+// Note: Gemma uses "model" instead of "assistant" for the AI role.
+std::vector<int32_t> ChatTemplate::apply_gemma(
+    const Tokenizer& tok,
+    const std::vector<ChatMessage>& msgs) const
+{
+    std::vector<int32_t> tokens;
+
+    if (tok.add_bos()) {
+        tokens.push_back(bos_id_);
+    }
+
+    for (const auto& msg : msgs) {
+        tokens.push_back(start_of_turn_id_);
+        // Gemma uses "model" for the assistant role
+        std::string role = (msg.role == "assistant") ? "model" : msg.role;
+        auto content_ids = tok.encode(role + "\n" + msg.content);
+        tokens.insert(tokens.end(), content_ids.begin(), content_ids.end());
+        tokens.push_back(end_of_turn_id_);
+        auto nl_ids = tok.encode("\n");
+        tokens.insert(tokens.end(), nl_ids.begin(), nl_ids.end());
+    }
+
+    // Model generation prefix
+    tokens.push_back(start_of_turn_id_);
+    auto model_ids = tok.encode("model\n");
+    tokens.insert(tokens.end(), model_ids.begin(), model_ids.end());
 
     return tokens;
 }

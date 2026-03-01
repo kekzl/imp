@@ -12,6 +12,9 @@ struct ServerArgs {
     std::string chat_template = "auto";
     bool no_cuda_graphs = false;
     bool ssm_fp16 = false;
+    bool kv_fp8 = false;
+    bool kv_int8 = false;
+    int prefill_chunk_size = 0;
 };
 
 ServerArgs parse_server_args(int argc, char** argv);

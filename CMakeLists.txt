@@ -268,6 +268,7 @@ if(IMP_BUILD_TESTS)
         tests/test_fp8_gemm.cu
         tests/test_attention_tc.cu
         tests/test_nvfp4_quant.cu
+        tests/test_fp8_kv_cache.cu
         tests/test_speculative.cpp
         tests/test_sampling.cu
         tests/test_activation.cu

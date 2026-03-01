@@ -1524,6 +1524,32 @@ void gemv_q5_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float*
                                     y, residual, true, M, K, stream);
 }
 
+void gemv_q2_k_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
+                      half* y, int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a<Q2_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
+                                    y, nullptr, false, M, K, stream);
+}
+
+void gemv_q2_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
+                                half* y, const half* residual,
+                                int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a<Q2_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
+                                    y, residual, true, M, K, stream);
+}
+
+void gemv_q3_k_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
+                      half* y, int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a<Q3_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
+                                    y, nullptr, false, M, K, stream);
+}
+
+void gemv_q3_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
+                                half* y, const half* residual,
+                                int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a<Q3_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
+                                    y, residual, true, M, K, stream);
+}
+
 // ---------------------------------------------------------------------------
 // Inline-quant wrappers: FP16 input → Q8_1 in smem → dp4a GEMV (4 functions)
 // ---------------------------------------------------------------------------
@@ -1560,6 +1586,22 @@ void gemv_q5_k_q8_1_inline_quant(const void* W, const half* x_fp16,
         residual != nullptr, M, K, stream);
 }
 
+void gemv_q2_k_q8_1_inline_quant(const void* W, const half* x_fp16,
+                                    half* y, const half* residual,
+                                    int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a_inline_quant<Q2_K_Traits>(
+        static_cast<const uint8_t*>(W), x_fp16, y, residual,
+        residual != nullptr, M, K, stream);
+}
+
+void gemv_q3_k_q8_1_inline_quant(const void* W, const half* x_fp16,
+                                    half* y, const half* residual,
+                                    int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a_inline_quant<Q3_K_Traits>(
+        static_cast<const uint8_t*>(W), x_fp16, y, residual,
+        residual != nullptr, M, K, stream);
+}
+
 // ---------------------------------------------------------------------------
 // FP32 output wrappers (5 functions)
 // ---------------------------------------------------------------------------
@@ -1591,6 +1633,18 @@ void gemv_q4_k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
 void gemv_q5_k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
                             float* y, int M, int K, cudaStream_t stream) {
     launch_gemv_dp4a_fp32<Q5_K_Traits>(static_cast<const uint8_t*>(W),
+                                         q8_1, d8, y, M, K, stream);
+}
+
+void gemv_q2_k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
+                            float* y, int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a_fp32<Q2_K_Traits>(static_cast<const uint8_t*>(W),
+                                         q8_1, d8, y, M, K, stream);
+}
+
+void gemv_q3_k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
+                            float* y, int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a_fp32<Q3_K_Traits>(static_cast<const uint8_t*>(W),
                                          q8_1, d8, y, M, K, stream);
 }
 
@@ -1653,6 +1707,28 @@ void gemv_qkv_fused_q5_k_q8_1(const void* W_q, const void* W_k, const void* W_v,
         q_rows, k_rows, v_rows, K, stream);
 }
 
+void gemv_qkv_fused_q2_k_q8_1(const void* W_q, const void* W_k, const void* W_v,
+                                const block_q8_1* q8_1, const float* d8,
+                                half* y_q, half* y_k, half* y_v,
+                                int q_rows, int k_rows, int v_rows, int K,
+                                cudaStream_t stream) {
+    launch_gemv_dp4a_qkv<Q2_K_Traits>(
+        static_cast<const uint8_t*>(W_q), static_cast<const uint8_t*>(W_k),
+        static_cast<const uint8_t*>(W_v), q8_1, d8, y_q, y_k, y_v,
+        q_rows, k_rows, v_rows, K, stream);
+}
+
+void gemv_qkv_fused_q3_k_q8_1(const void* W_q, const void* W_k, const void* W_v,
+                                const block_q8_1* q8_1, const float* d8,
+                                half* y_q, half* y_k, half* y_v,
+                                int q_rows, int k_rows, int v_rows, int K,
+                                cudaStream_t stream) {
+    launch_gemv_dp4a_qkv<Q3_K_Traits>(
+        static_cast<const uint8_t*>(W_q), static_cast<const uint8_t*>(W_k),
+        static_cast<const uint8_t*>(W_v), q8_1, d8, y_q, y_k, y_v,
+        q_rows, k_rows, v_rows, K, stream);
+}
+
 // ---------------------------------------------------------------------------
 // Gate+Up fused dispatcher (1 function, dispatches by qtype)
 // ---------------------------------------------------------------------------
@@ -1708,6 +1784,8 @@ void gemv_gate_up_fused(const void* gate_weights, const void* up_weights,
     else if (qtype == GGMLQuantType::Q4_0) { DISPATCH_GATE_UP(Q4_0_Traits); }
     else if (qtype == GGMLQuantType::Q4_K) { DISPATCH_GATE_UP(Q4_K_Traits); }
     else if (qtype == GGMLQuantType::Q5_K) { DISPATCH_GATE_UP(Q5_K_Traits); }
+    else if (qtype == GGMLQuantType::Q2_K) { DISPATCH_GATE_UP(Q2_K_Traits); }
+    else if (qtype == GGMLQuantType::Q3_K) { DISPATCH_GATE_UP(Q3_K_Traits); }
 
 #undef DISPATCH_GATE_UP
 #undef LAUNCH_GATE_UP_NR
@@ -1948,6 +2026,45 @@ void gemv_q5_k_q8_1_moe_decode(const void* packed_weights,
         q8_1_stride, d8_stride, top_k, stream);
 }
 
+void gemv_q4_0_q8_1_moe_decode(const void* packed_weights,
+                                 const int32_t* expert_indices,
+                                 const block_q8_1* q8_1, const float* d8,
+                                 half* y, int rows, int K,
+                                 size_t expert_stride_bytes,
+                                 int q8_1_stride, int d8_stride, int top_k,
+                                 cudaStream_t stream) {
+    launch_gemv_dp4a_moe_decode<Q4_0_Traits>(
+        static_cast<const uint8_t*>(packed_weights), expert_indices,
+        q8_1, d8, y, rows, K, expert_stride_bytes,
+        q8_1_stride, d8_stride, top_k, stream);
+}
+
+void gemv_q2_k_q8_1_moe_decode(const void* packed_weights,
+                                 const int32_t* expert_indices,
+                                 const block_q8_1* q8_1, const float* d8,
+                                 half* y, int rows, int K,
+                                 size_t expert_stride_bytes,
+                                 int q8_1_stride, int d8_stride, int top_k,
+                                 cudaStream_t stream) {
+    launch_gemv_dp4a_moe_decode<Q2_K_Traits>(
+        static_cast<const uint8_t*>(packed_weights), expert_indices,
+        q8_1, d8, y, rows, K, expert_stride_bytes,
+        q8_1_stride, d8_stride, top_k, stream);
+}
+
+void gemv_q3_k_q8_1_moe_decode(const void* packed_weights,
+                                 const int32_t* expert_indices,
+                                 const block_q8_1* q8_1, const float* d8,
+                                 half* y, int rows, int K,
+                                 size_t expert_stride_bytes,
+                                 int q8_1_stride, int d8_stride, int top_k,
+                                 cudaStream_t stream) {
+    launch_gemv_dp4a_moe_decode<Q3_K_Traits>(
+        static_cast<const uint8_t*>(packed_weights), expert_indices,
+        q8_1, d8, y, rows, K, expert_stride_bytes,
+        q8_1_stride, d8_stride, top_k, stream);
+}
+
 // ---------------------------------------------------------------------------
 // dp4a MoE gate+up fused wrappers (4 functions)
 // ---------------------------------------------------------------------------
@@ -2020,7 +2137,56 @@ void gemv_q5_k_q8_1_moe_gate_up_fused(
         q8_1_stride, d8_stride, top_k, stream);
 }
 
+void gemv_q4_0_q8_1_moe_gate_up_fused(
+        const void* gate_weights, const void* up_weights,
+        const int32_t* expert_indices,
+        const block_q8_1* q8_1, const float* d8,
+        half* y_gate, half* y_up,
+        int rows, int K,
+        size_t gate_stride_bytes, size_t up_stride_bytes,
+        int q8_1_stride, int d8_stride, int top_k,
+        cudaStream_t stream) {
+    launch_gemv_dp4a_moe_gate_up<Q4_0_Traits>(
+        static_cast<const uint8_t*>(gate_weights),
+        static_cast<const uint8_t*>(up_weights),
+        expert_indices, q8_1, d8, y_gate, y_up, rows, K,
+        gate_stride_bytes, up_stride_bytes,
+        q8_1_stride, d8_stride, top_k, stream);
+}
 
+void gemv_q2_k_q8_1_moe_gate_up_fused(
+        const void* gate_weights, const void* up_weights,
+        const int32_t* expert_indices,
+        const block_q8_1* q8_1, const float* d8,
+        half* y_gate, half* y_up,
+        int rows, int K,
+        size_t gate_stride_bytes, size_t up_stride_bytes,
+        int q8_1_stride, int d8_stride, int top_k,
+        cudaStream_t stream) {
+    launch_gemv_dp4a_moe_gate_up<Q2_K_Traits>(
+        static_cast<const uint8_t*>(gate_weights),
+        static_cast<const uint8_t*>(up_weights),
+        expert_indices, q8_1, d8, y_gate, y_up, rows, K,
+        gate_stride_bytes, up_stride_bytes,
+        q8_1_stride, d8_stride, top_k, stream);
+}
+
+void gemv_q3_k_q8_1_moe_gate_up_fused(
+        const void* gate_weights, const void* up_weights,
+        const int32_t* expert_indices,
+        const block_q8_1* q8_1, const float* d8,
+        half* y_gate, half* y_up,
+        int rows, int K,
+        size_t gate_stride_bytes, size_t up_stride_bytes,
+        int q8_1_stride, int d8_stride, int top_k,
+        cudaStream_t stream) {
+    launch_gemv_dp4a_moe_gate_up<Q3_K_Traits>(
+        static_cast<const uint8_t*>(gate_weights),
+        static_cast<const uint8_t*>(up_weights),
+        expert_indices, q8_1, d8, y_gate, y_up, rows, K,
+        gate_stride_bytes, up_stride_bytes,
+        q8_1_stride, d8_stride, top_k, stream);
+}
 
 // ---------------------------------------------------------------------------
 // FP8 E4M3 GEMV
@@ -2141,6 +2307,8 @@ void gemv_pdl_register() {
     REG1(Q4_0_Traits, 1); REG1(Q4_0_Traits, 2); REG1(Q4_0_Traits, 4);
     REG1(Q4_K_Traits, 1); REG1(Q4_K_Traits, 2); REG1(Q4_K_Traits, 4);
     REG1(Q5_K_Traits, 1); REG1(Q5_K_Traits, 2); REG1(Q5_K_Traits, 4);
+    REG1(Q2_K_Traits, 1); REG1(Q2_K_Traits, 2); REG1(Q2_K_Traits, 4);
+    REG1(Q3_K_Traits, 1); REG1(Q3_K_Traits, 2);
     #undef REG1
 
     // Kernel #2: FP32 output
@@ -2150,6 +2318,8 @@ void gemv_pdl_register() {
     REG2(Q4_0_Traits, 1); REG2(Q4_0_Traits, 2); REG2(Q4_0_Traits, 4);
     REG2(Q4_K_Traits, 1); REG2(Q4_K_Traits, 2); REG2(Q4_K_Traits, 4);
     REG2(Q5_K_Traits, 1); REG2(Q5_K_Traits, 2); REG2(Q5_K_Traits, 4);
+    REG2(Q2_K_Traits, 1); REG2(Q2_K_Traits, 2); REG2(Q2_K_Traits, 4);
+    REG2(Q3_K_Traits, 1); REG2(Q3_K_Traits, 2);
     #undef REG2
 
     // Kernel #3: QKV fused
@@ -2159,6 +2329,8 @@ void gemv_pdl_register() {
     REG3(Q4_0_Traits, 1); REG3(Q4_0_Traits, 2); REG3(Q4_0_Traits, 4);
     REG3(Q4_K_Traits, 1); REG3(Q4_K_Traits, 2); REG3(Q4_K_Traits, 4);
     REG3(Q5_K_Traits, 1); REG3(Q5_K_Traits, 2); REG3(Q5_K_Traits, 4);
+    REG3(Q2_K_Traits, 1); REG3(Q2_K_Traits, 2); REG3(Q2_K_Traits, 4);
+    REG3(Q3_K_Traits, 1); REG3(Q3_K_Traits, 2);
     #undef REG3
 
     // Kernel #4: gate+up fused
@@ -2168,6 +2340,8 @@ void gemv_pdl_register() {
     REG4(Q4_0_Traits, 1); REG4(Q4_0_Traits, 2); REG4(Q4_0_Traits, 4);
     REG4(Q4_K_Traits, 1); REG4(Q4_K_Traits, 2); REG4(Q4_K_Traits, 4);
     REG4(Q5_K_Traits, 1); REG4(Q5_K_Traits, 2); REG4(Q5_K_Traits, 4);
+    REG4(Q2_K_Traits, 1); REG4(Q2_K_Traits, 2); REG4(Q2_K_Traits, 4);
+    REG4(Q3_K_Traits, 1); REG4(Q3_K_Traits, 2);
     #undef REG4
 
     // Kernels #5 and #6 (MoE decode/gate+up): NOT registered with PDL.
@@ -2185,6 +2359,7 @@ void gemv_pdl_register() {
         pdl::enable_kernel(gemv_dp4a_kpar_gate_up_kernel<QT>)
     REG_KPAR(Q6_K_Traits); REG_KPAR(Q8_0_Traits);
     REG_KPAR(Q4_0_Traits); REG_KPAR(Q4_K_Traits); REG_KPAR(Q5_K_Traits);
+    REG_KPAR(Q2_K_Traits); REG_KPAR(Q3_K_Traits);
     #undef REG_KPAR
 
     // Kernel #7: inline quant
@@ -2196,6 +2371,8 @@ void gemv_pdl_register() {
     REG7(Q4_0_Traits, 1); REG7(Q4_0_Traits, 2); REG7(Q4_0_Traits, 4);
     REG7(Q4_K_Traits, 1); REG7(Q4_K_Traits, 2); REG7(Q4_K_Traits, 4);
     REG7(Q5_K_Traits, 1); REG7(Q5_K_Traits, 2); REG7(Q5_K_Traits, 4);
+    REG7(Q2_K_Traits, 1); REG7(Q2_K_Traits, 2); REG7(Q2_K_Traits, 4);
+    REG7(Q3_K_Traits, 1); REG7(Q3_K_Traits, 2);
     #undef REG7
 }
 

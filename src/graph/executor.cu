@@ -450,6 +450,97 @@ __global__ void write_kv_cache_fp8_kernel(
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// FP16 -> INT8 quantization + write to paged KV cache with per-head scales.
+// Each warp processes one KV head independently: compute absmax via warp shuffle,
+// then quantize and write int8 data + half scale.
+//
+// blockIdx.x = token_idx, blockIdx.y = 0 (K) or 1 (V).
+// blockDim.x = 256 (8 warps). Each warp loops over heads.
+// ---------------------------------------------------------------------------
+__global__ void write_kv_cache_int8_kernel(
+    const half* __restrict__ k_in,        // [n_tokens, n_kv_heads * head_dim]
+    const half* __restrict__ v_in,
+    const int* __restrict__ positions,
+    const int* __restrict__ block_tables,
+    int8_t* __restrict__ k_cache_base,
+    int8_t* __restrict__ v_cache_base,
+    half* __restrict__ k_scale_base,      // [total_blocks, kKVBlockSize, n_kv_heads]
+    half* __restrict__ v_scale_base,
+    int block_stride,                     // kKVBlockSize * n_kv_heads * head_dim (int8 elems)
+    int scale_block_stride,               // kKVBlockSize * n_kv_heads (half elems)
+    int n_kv_heads,
+    int head_dim,
+    int block_size,
+    int n_tokens,
+    int max_blocks_per_seq,
+    int n_sequences)
+{
+    const int token_idx = blockIdx.x;
+    if (token_idx >= n_tokens) return;
+
+    const int pos = positions[token_idx];
+    const int block_idx = pos / block_size;
+    const int slot_in_block = pos % block_size;
+
+    int block_id;
+    if (max_blocks_per_seq > 0 && n_sequences > 1) {
+        int seq_idx = token_idx;
+        block_id = block_tables[seq_idx * max_blocks_per_seq + block_idx];
+    } else {
+        block_id = block_tables[block_idx];
+    }
+
+    // Select K or V based on blockIdx.y
+    const half* src_base = (blockIdx.y == 0) ? k_in : v_in;
+    int8_t* cache_base = (blockIdx.y == 0) ? k_cache_base : v_cache_base;
+    half* scale_base = (blockIdx.y == 0) ? k_scale_base : v_scale_base;
+
+    const int row_elems = n_kv_heads * head_dim;
+    const half* src = src_base + static_cast<int64_t>(token_idx) * row_elems;
+    int8_t* dst = cache_base + static_cast<int64_t>(block_id) * block_stride
+                             + static_cast<int64_t>(slot_in_block) * row_elems;
+    half* scale_dst = scale_base + static_cast<int64_t>(block_id) * scale_block_stride
+                                 + static_cast<int64_t>(slot_in_block) * n_kv_heads;
+
+    const int warp_id = threadIdx.x / 32;
+    const int lane_id = threadIdx.x % 32;
+    const int num_warps = blockDim.x / 32;
+
+    // Each warp processes one head at a time, looping over heads
+    for (int h = warp_id; h < n_kv_heads; h += num_warps) {
+        const int head_offset = h * head_dim;
+
+        // Step 1: Load FP16 values and compute per-head absmax
+        float amax = 0.0f;
+        // Each lane handles head_dim/32 elements (head_dim is typically 64/96/128)
+        for (int d = lane_id; d < head_dim; d += 32) {
+            float val = __half2float(src[head_offset + d]);
+            amax = fmaxf(amax, fabsf(val));
+        }
+        // Warp-level absmax reduction
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1)
+            amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset));
+
+        // Step 2: Compute scale
+        float sc = amax / 127.0f;
+        float inv_sc = (amax > 1e-8f) ? (127.0f / amax) : 0.0f;
+
+        // Step 3: Quantize and write int8 data
+        for (int d = lane_id; d < head_dim; d += 32) {
+            float val = __half2float(src[head_offset + d]);
+            int8_t q = static_cast<int8_t>(__float2int_rn(val * inv_sc));
+            dst[head_offset + d] = q;
+        }
+
+        // Step 4: Write scale (one half per head per token)
+        if (lane_id == 0) {
+            scale_dst[h] = __float2half(sc);
+        }
+    }
+}
+
 // Fused KV cache write with RoPE on K: applies RoPE to K during write, copies V directly.
 // blockIdx.x = token index, blockIdx.y = 0 (K+RoPE) or 1 (V copy).
 // Eliminates the separate RoPE kernel launch for K in the decode path.
@@ -598,6 +689,16 @@ __global__ void scale_fp32_kernel(float* __restrict__ data, float scale, int64_t
     }
 }
 
+// Logit soft-capping: logit = softcap * tanh(logit / softcap)  (Gemma-2/3)
+__global__ void logit_softcap_fp32_kernel(float* __restrict__ data,
+                                          float softcap, float inv_softcap,
+                                          int64_t n) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        data[idx] = softcap * tanhf(data[idx] * inv_softcap);
+    }
+}
+
 // FP32 -> FP16 conversion kernel (for scatter output back to compute_dtype)
 __global__ void fp32_to_fp16_kernel(const float* __restrict__ in,
                                     half* __restrict__ out,
@@ -697,6 +798,14 @@ static void gemm_dispatch(const Tensor& input, const Tensor& weight,
         gemv_q4_0_q8_1(weight.data, q8_1_buf, d8_buf,
                         static_cast<half*>(output.data),
                         static_cast<int>(weight.shape[0]), K, stream);
+    } else if (qtype == GGMLQuantType::Q4_1 && fp16_cache != nullptr) {
+        // Prefer pre-dequantized FP16 cache (P3 optimization)
+        auto it = fp16_cache->find(weight.data);
+        if (it != fp16_cache->end()) {
+            gemm(input, it->second, output, 1.0f, 0.0f, stream);
+        } else {
+            quant_gemm_int4(input, weight, scales, output, stream);
+        }
     } else if (qtype == GGMLQuantType::Q4_1) {
         // weight is [N, K/2] packed nibbles, scales is [N, num_groups]
         quant_gemm_int4(input, weight, scales, output, stream);
@@ -734,6 +843,24 @@ static void gemm_dispatch(const Tensor& input, const Tensor& weight,
         quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
                                q8_1_buf, d8_buf, K, stream);
         gemv_q5_k_q8_1(weight.data, q8_1_buf, d8_buf,
+                         static_cast<half*>(output.data),
+                         static_cast<int>(weight.shape[0]), K, stream);
+    } else if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
+               q8_1_buf != nullptr && d8_buf != nullptr && qtype == GGMLQuantType::Q2_K) {
+        // dp4a MMVQ Q2_K
+        int K = static_cast<int>(weight.shape[1]);
+        quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
+                               q8_1_buf, d8_buf, K, stream);
+        gemv_q2_k_q8_1(weight.data, q8_1_buf, d8_buf,
+                         static_cast<half*>(output.data),
+                         static_cast<int>(weight.shape[0]), K, stream);
+    } else if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
+               q8_1_buf != nullptr && d8_buf != nullptr && qtype == GGMLQuantType::Q3_K) {
+        // dp4a MMVQ Q3_K
+        int K = static_cast<int>(weight.shape[1]);
+        quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
+                               q8_1_buf, d8_buf, K, stream);
+        gemv_q3_k_q8_1(weight.data, q8_1_buf, d8_buf,
                          static_cast<half*>(output.data),
                          static_cast<int>(weight.shape[0]), K, stream);
     } else if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
@@ -869,6 +996,17 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
     } else if (use_pdl_) {
         IMP_LOG_WARN("PDL requested but not available on this device/CUDA version");
         use_pdl_ = false;
+    }
+
+    // Precompute YaRN correction dimensions if enabled
+    if (cfg.yarn_ext_factor > 0.0f) {
+        int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
+        int n_dims = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
+        int n_ctx_orig = cfg.rope_n_ctx_orig > 0 ? cfg.rope_n_ctx_orig : cfg.max_seq_len;
+        rope_yarn_corr_dims(n_dims, n_ctx_orig, cfg.rope_theta,
+                            cfg.yarn_beta_fast, cfg.yarn_beta_slow, yarn_corr_dims_);
+        IMP_LOG_INFO("YaRN corr_dims: [%.1f, %.1f] (n_dims=%d, n_ctx_orig=%d)",
+                     yarn_corr_dims_[0], yarn_corr_dims_[1], n_dims, n_ctx_orig);
     }
 
     initialized_ = true;
@@ -1831,10 +1969,49 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
     int nblocks = n;   // one CUDA block per token
 
     bool use_fp8 = (cache->dtype() == DType::FP8_E4M3);
+    bool use_int8 = (cache->dtype() == DType::INT8);
 
-    if (use_fp8) {
-        // FP8 E4M3 quantized KV cache write path
-        float inv_scale = 1.0f;  // default; in production, scale comes from QuantConfig
+    if (use_int8) {
+        // INT8 quantized KV cache write path with per-head scales.
+        // No per-layer calibration needed — scales are computed per-head at write time.
+        Tensor kv = view_tokens(k_, n);
+        Tensor vv = view_tokens(v_, n);
+
+        int scale_block_stride = kKVBlockSize * nkv;  // half elems per scale block
+        dim3 grid_int8(n, 2);  // blockIdx.y: 0=K, 1=V
+        write_kv_cache_int8_kernel<<<grid_int8, 256, 0, stream>>>(
+            static_cast<const half*>(kv.data),
+            static_cast<const half*>(vv.data),
+            state.positions,
+            state.block_tables,
+            static_cast<int8_t*>(cache->k_ptr(kv_layer, 0)),
+            static_cast<int8_t*>(cache->v_ptr(kv_layer, 0)),
+            static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
+            static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)),
+            block_stride, scale_block_stride, nkv, hd,
+            kKVBlockSize, n,
+            state.max_blocks_per_seq, state.n_sequences);
+    } else if (use_fp8) {
+        // FP8 E4M3 quantized KV cache write path with online calibration.
+        // On first write to each KV layer, calibrate scale from K/V data.
+        float inv_scale;
+        if (!kv_calibrated_.empty() && kv_layer < static_cast<int>(kv_calibrated_.size()) &&
+            !kv_calibrated_[kv_layer]) {
+            // Calibrate from current K/V data: scale = absmax / 448.0
+            Tensor kv_cal = view_tokens(k_, n);
+            Tensor vv_cal = view_tokens(v_, n);
+            float k_scale = calibrate_fp8_scale(kv_cal, stream);
+            float v_scale = calibrate_fp8_scale(vv_cal, stream);
+            float scale = std::max(k_scale, v_scale);
+            if (scale < 1e-12f) scale = 1.0f;  // safety for all-zero
+            kv_scales_[kv_layer] = scale;
+            kv_calibrated_[kv_layer] = true;
+            inv_scale = 1.0f / scale;
+        } else if (!kv_scales_.empty() && kv_layer < static_cast<int>(kv_scales_.size())) {
+            inv_scale = 1.0f / kv_scales_[kv_layer];
+        } else {
+            inv_scale = 1.0f;
+        }
 
         // K view: [n_tokens, nkv * hd]
         Tensor kv = view_tokens(k_, n);
@@ -2019,7 +2196,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                   n == 1 && q8_1_buf_ != nullptr && d8_buf_ != nullptr &&
                                   h.dtype == DType::FP16 &&
                                   (ly.wo_qtype == GGMLQuantType::Q6_K || ly.wo_qtype == GGMLQuantType::Q8_0 ||
-                                   ly.wo_qtype == GGMLQuantType::Q4_K || ly.wo_qtype == GGMLQuantType::Q5_K));
+                                   ly.wo_qtype == GGMLQuantType::Q4_0 || ly.wo_qtype == GGMLQuantType::Q4_K ||
+                                   ly.wo_qtype == GGMLQuantType::Q5_K ||
+                                   ly.wo_qtype == GGMLQuantType::Q2_K || ly.wo_qtype == GGMLQuantType::Q3_K));
     bool will_fuse_o_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && n > 1 &&
                                fp16_cache_.count(ly.wo.data));
     if (!will_fuse_o_residual && !will_fuse_o_beta1 && !using_fp32_accum) {
@@ -2040,7 +2219,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                            ly.wq_qtype == GGMLQuantType::Q8_0 ||
                            ly.wq_qtype == GGMLQuantType::Q4_0 ||
                            ly.wq_qtype == GGMLQuantType::Q4_K ||
-                           ly.wq_qtype == GGMLQuantType::Q5_K));
+                           ly.wq_qtype == GGMLQuantType::Q5_K ||
+                           ly.wq_qtype == GGMLQuantType::Q2_K ||
+                           ly.wq_qtype == GGMLQuantType::Q3_K));
         if (fused_qkv) {
             // Fused: RMSNorm + Q8_1 quantization in one kernel (no norm_out write)
             int K = static_cast<int>(ly.wq.shape[1]);
@@ -2074,6 +2255,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                            q_rows, k_rows, v_rows, K, stream);
             } else if (ly.wq_qtype == GGMLQuantType::Q5_K) {
                 gemv_qkv_fused_q5_k_q8_1(ly.wq.data, ly.wk.data, ly.wv.data,
+                                           q8, d8_buf_,
+                                           static_cast<half*>(qv.data),
+                                           static_cast<half*>(kk.data),
+                                           static_cast<half*>(vv.data),
+                                           q_rows, k_rows, v_rows, K, stream);
+            } else if (ly.wq_qtype == GGMLQuantType::Q2_K) {
+                gemv_qkv_fused_q2_k_q8_1(ly.wq.data, ly.wk.data, ly.wv.data,
+                                           q8, d8_buf_,
+                                           static_cast<half*>(qv.data),
+                                           static_cast<half*>(kk.data),
+                                           static_cast<half*>(vv.data),
+                                           q_rows, k_rows, v_rows, K, stream);
+            } else if (ly.wq_qtype == GGMLQuantType::Q3_K) {
+                gemv_qkv_fused_q3_k_q8_1(ly.wq.data, ly.wk.data, ly.wv.data,
                                            q8, d8_buf_,
                                            static_cast<half*>(qv.data),
                                            static_cast<half*>(kk.data),
@@ -2139,7 +2334,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         bool can_fuse_rope_kv = (!state.is_prefill && n == 1 &&
                                   qv.dtype == DType::FP16 &&
                                   state.kv_cache &&
-                                  state.kv_cache->dtype() != DType::FP8_E4M3);
+                                  state.kv_cache->dtype() == DType::FP16);
         if (has_qk_norm && n == 1 && qv.dtype == DType::FP16) {
             // Fused: QK-norm + RoPE in one kernel launch (saves 2 launches)
             qknorm_rope_fused(static_cast<half*>(qv.data),
@@ -2149,7 +2344,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                nh, nkv, hd, eps,
                                state.positions,  // device pointer
                                layer_rope_theta, layer_rope_freq_scale,
-                               cfg.rope_dim, cfg.rope_neox, stream, norm_w_off_);
+                               cfg.rope_dim, cfg.rope_neox, stream, norm_w_off_,
+                               cfg.yarn_ext_factor, cfg.yarn_attn_factor,
+                               cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr);
         } else if (can_fuse_rope_kv && !has_qk_norm) {
             // Fused path: Q-only RoPE here, K-RoPE deferred to KV write
             const int effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
@@ -2176,7 +2373,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             Tensor q4r_t = qv.reshape(4, q4r);
             Tensor k4r_t = kk.reshape(4, k4r);
             rope_forward(q4r_t, k4r_t, state.positions, hd, layer_rope_theta, layer_rope_freq_scale,
-                         cfg.rope_dim, cfg.rope_neox, stream);
+                         cfg.rope_dim, cfg.rope_neox,
+                         cfg.yarn_ext_factor, cfg.yarn_attn_factor,
+                         cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, stream);
         }
     }
 
@@ -2197,7 +2396,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             Tensor s_view(attn_scores_buf_, DType::FP16, 3, s_shape, true);
 
             attention_cublas_prefill(qv, kk, vv, ao, s_view,
-                                     nh, nkv, hd, scale, /*causal=*/true, stream);
+                                     nh, nkv, hd, scale, /*causal=*/true,
+                                     cfg.attn_logit_softcap, stream);
         } else {
             // Fallback: WMMA / scalar flash attention
             int64_t q4s[4]  = {1, n, nh,  hd};
@@ -2210,7 +2410,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             Tensor o4  = ao.reshape(4, o4s);
 
             attention_prefill_dispatch(q4, k4, v4, o4, scale, /*causal=*/true,
-                                       layer_sliding_window, stream);
+                                       layer_sliding_window, cfg.attn_logit_softcap, stream);
         }
 
         // Persist K, V into cache for later decode steps
@@ -2267,20 +2467,32 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         Tensor k_c(cache->k_ptr(kv_layer, 0), cache_dtype, 4, cs, true);
         Tensor v_c(cache->v_ptr(kv_layer, 0), cache_dtype, 4, cs, true);
 
-        if (cache_dtype == DType::FP8_E4M3) {
-            // FP8 paged attention with on-the-fly dequant
-            float kv_scale = 1.0f;  // default; in production, from QuantConfig
+        if (cache_dtype == DType::INT8) {
+            // INT8 dp4a paged attention with per-head scales (Split-K enabled)
+            paged_attention_set_splitk_scratch(splitk_scratch_, splitk_scratch_size_);
+            paged_attention_decode_int8(q4, k_c, v_c, o4,
+                                        static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
+                                        static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
+                                        state.block_tables, state.context_lens,
+                                        kKVBlockSize, scale,
+                                        state.max_context_len, layer_sliding_window,
+                                        cfg.attn_logit_softcap, stream);
+        } else if (cache_dtype == DType::FP8_E4M3) {
+            // FP8 paged attention with on-the-fly dequant (Split-K enabled)
+            float kv_scale = (!kv_scales_.empty() && kv_layer < static_cast<int>(kv_scales_.size()))
+                             ? kv_scales_[kv_layer] : 1.0f;
+            paged_attention_set_splitk_scratch(splitk_scratch_, splitk_scratch_size_);
             paged_attention_decode_fp8(q4, k_c, v_c, o4,
                                         state.block_tables, state.context_lens,
                                         kKVBlockSize, scale, kv_scale,
                                         state.max_context_len, layer_sliding_window,
-                                        stream);
+                                        cfg.attn_logit_softcap, stream);
         } else {
             paged_attention_set_splitk_scratch(splitk_scratch_, splitk_scratch_size_);
             paged_attention_decode(q4, k_c, v_c, o4,
                                     state.block_tables, state.context_lens,
                                     kKVBlockSize, scale, state.max_context_len,
-                                    layer_sliding_window, stream);
+                                    layer_sliding_window, cfg.attn_logit_softcap, stream);
         }
     }
 
@@ -2305,12 +2517,24 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             gemv_q6k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
                                     d8_buf_, static_cast<half*>(h.data), residual_ptr,
                                     M_o, K_o, stream);
+        } else if (ly.wo_qtype == GGMLQuantType::Q4_0) {
+            gemv_q4_0_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
+                                      d8_buf_, static_cast<half*>(h.data), residual_ptr,
+                                      M_o, K_o, stream);
         } else if (ly.wo_qtype == GGMLQuantType::Q4_K) {
             gemv_q4_k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
                                       d8_buf_, static_cast<half*>(h.data), residual_ptr,
                                       M_o, K_o, stream);
         } else if (ly.wo_qtype == GGMLQuantType::Q5_K) {
             gemv_q5_k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
+                                      d8_buf_, static_cast<half*>(h.data), residual_ptr,
+                                      M_o, K_o, stream);
+        } else if (ly.wo_qtype == GGMLQuantType::Q2_K) {
+            gemv_q2_k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
+                                      d8_buf_, static_cast<half*>(h.data), residual_ptr,
+                                      M_o, K_o, stream);
+        } else if (ly.wo_qtype == GGMLQuantType::Q3_K) {
+            gemv_q3_k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
                                       d8_buf_, static_cast<half*>(h.data), residual_ptr,
                                       M_o, K_o, stream);
         } else {
@@ -2384,7 +2608,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                       ly.w_down_qtype == GGMLQuantType::Q8_0 ||
                                       ly.w_down_qtype == GGMLQuantType::Q4_0 ||
                                       ly.w_down_qtype == GGMLQuantType::Q4_K ||
-                                      ly.w_down_qtype == GGMLQuantType::Q5_K));
+                                      ly.w_down_qtype == GGMLQuantType::Q5_K ||
+                                      ly.w_down_qtype == GGMLQuantType::Q2_K ||
+                                      ly.w_down_qtype == GGMLQuantType::Q3_K));
     bool will_fuse_down_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual && n > 1 &&
                                   fp16_cache_.count(ly.w_down.data));
     bool will_fuse_down_dequant_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual &&
@@ -2408,7 +2634,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                 ly.w_gate_qtype == GGMLQuantType::Q8_0 ||
                                 ly.w_gate_qtype == GGMLQuantType::Q4_0 ||
                                 ly.w_gate_qtype == GGMLQuantType::Q4_K ||
-                                ly.w_gate_qtype == GGMLQuantType::Q5_K));
+                                ly.w_gate_qtype == GGMLQuantType::Q5_K ||
+                                ly.w_gate_qtype == GGMLQuantType::Q2_K ||
+                                ly.w_gate_qtype == GGMLQuantType::Q3_K));
         if (fused_ffn_norm) {
             // Fused RMSNorm + Q8_1: quantize once, use for both gate and up
             rmsnorm_quantize_q8_1(static_cast<const half*>(h.data),
@@ -2447,7 +2675,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                       ly.w_down_qtype == GGMLQuantType::Q8_0 ||
                                       ly.w_down_qtype == GGMLQuantType::Q4_0 ||
                                       ly.w_down_qtype == GGMLQuantType::Q4_K ||
-                                      ly.w_down_qtype == GGMLQuantType::Q5_K));
+                                      ly.w_down_qtype == GGMLQuantType::Q5_K ||
+                                      ly.w_down_qtype == GGMLQuantType::Q2_K ||
+                                      ly.w_down_qtype == GGMLQuantType::Q3_K));
         if (fused_down_residual) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
@@ -2480,6 +2710,14 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 gemv_q5_k_q8_1_residual(ly.w_down.data, q8, d8_buf_,
                                           static_cast<half*>(h.data), residual_ptr,
                                           M_d, K_d, stream);
+            } else if (ly.w_down_qtype == GGMLQuantType::Q2_K) {
+                gemv_q2_k_q8_1_residual(ly.w_down.data, q8, d8_buf_,
+                                          static_cast<half*>(h.data), residual_ptr,
+                                          M_d, K_d, stream);
+            } else if (ly.w_down_qtype == GGMLQuantType::Q3_K) {
+                gemv_q3_k_q8_1_residual(ly.w_down.data, q8, d8_buf_,
+                                          static_cast<half*>(h.data), residual_ptr,
+                                          M_d, K_d, stream);
             } else {
                 gemv_q8_0_q8_1_residual(ly.w_down.data, q8, d8_buf_,
                                           static_cast<half*>(h.data), residual_ptr,
@@ -2491,7 +2729,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     ly.w_down_qtype == GGMLQuantType::Q8_0 ||
                     ly.w_down_qtype == GGMLQuantType::Q4_0 ||
                     ly.w_down_qtype == GGMLQuantType::Q4_K ||
-                    ly.w_down_qtype == GGMLQuantType::Q5_K)) {
+                    ly.w_down_qtype == GGMLQuantType::Q5_K ||
+                    ly.w_down_qtype == GGMLQuantType::Q2_K ||
+                    ly.w_down_qtype == GGMLQuantType::Q3_K)) {
             // Post-norm FP32 accum decode: fused activation→Q8_1 + GEMV + fused post-norm.
             // Saves 3 kernel launches per layer vs the fallback path.
             int K_d = static_cast<int>(ly.w_down.shape[1]);
@@ -2513,8 +2753,12 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 gemv_q4_0_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
             else if (ly.w_down_qtype == GGMLQuantType::Q4_K)
                 gemv_q4_k_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
-            else
+            else if (ly.w_down_qtype == GGMLQuantType::Q5_K)
                 gemv_q5_k_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
+            else if (ly.w_down_qtype == GGMLQuantType::Q2_K)
+                gemv_q2_k_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
+            else
+                gemv_q3_k_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
                 static_cast<const half*>(fo.data),
@@ -2600,7 +2844,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         compute_dtype_ == DType::FP16 &&
         ly.expert_up_packed.on_device &&
         (up_qtype_pre == GGMLQuantType::Q6_K || up_qtype_pre == GGMLQuantType::Q8_0 ||
-         up_qtype_pre == GGMLQuantType::Q4_K || up_qtype_pre == GGMLQuantType::Q5_K) &&
+         up_qtype_pre == GGMLQuantType::Q4_0 || up_qtype_pre == GGMLQuantType::Q4_K ||
+         up_qtype_pre == GGMLQuantType::Q5_K || up_qtype_pre == GGMLQuantType::Q2_K ||
+         up_qtype_pre == GGMLQuantType::Q3_K) &&
         ly.w_up_shared.data == nullptr);  // must not have shared expert for full residual fusion
 
     if (!will_skip_residual_copy) {
@@ -2634,7 +2880,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                              compute_dtype_ == DType::FP16 &&
                              ly.expert_up_packed.on_device &&
                              (up_qtype == GGMLQuantType::Q6_K || up_qtype == GGMLQuantType::Q8_0 ||
-                              up_qtype == GGMLQuantType::Q4_K || up_qtype == GGMLQuantType::Q5_K));
+                              up_qtype == GGMLQuantType::Q4_0 || up_qtype == GGMLQuantType::Q4_K ||
+                              up_qtype == GGMLQuantType::Q5_K || up_qtype == GGMLQuantType::Q2_K ||
+                              up_qtype == GGMLQuantType::Q3_K));
 
     MoeRoutingResult routing;
 
@@ -2786,6 +3034,24 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                         expert_indices, q8, d8_buf_, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+                } else if (up_qtype == GGMLQuantType::Q4_0) {
+                    gemv_q4_0_q8_1_moe_gate_up_fused(
+                        ly.expert_gate_packed.data, ly.expert_up_packed.data,
+                        expert_indices, q8, d8_buf_, gate_buf, up_buf,
+                        eff, d, gate_stride, up_stride_bytes,
+                        /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+                } else if (up_qtype == GGMLQuantType::Q2_K) {
+                    gemv_q2_k_q8_1_moe_gate_up_fused(
+                        ly.expert_gate_packed.data, ly.expert_up_packed.data,
+                        expert_indices, q8, d8_buf_, gate_buf, up_buf,
+                        eff, d, gate_stride, up_stride_bytes,
+                        /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+                } else if (up_qtype == GGMLQuantType::Q3_K) {
+                    gemv_q3_k_q8_1_moe_gate_up_fused(
+                        ly.expert_gate_packed.data, ly.expert_up_packed.data,
+                        expert_indices, q8, d8_buf_, gate_buf, up_buf,
+                        eff, d, gate_stride, up_stride_bytes,
+                        /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
                 } else {
                     gemv_q8_0_q8_1_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
@@ -2797,10 +3063,16 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 // Non-gated: up projection only
                 auto moe_gemv_dp4a = (up_qtype == GGMLQuantType::Q6_K)
                     ? gemv_q6k_q8_1_moe_decode
+                    : (up_qtype == GGMLQuantType::Q4_0)
+                    ? gemv_q4_0_q8_1_moe_decode
                     : (up_qtype == GGMLQuantType::Q4_K)
                     ? gemv_q4_k_q8_1_moe_decode
                     : (up_qtype == GGMLQuantType::Q5_K)
-                    ? gemv_q5_k_q8_1_moe_decode : gemv_q8_0_q8_1_moe_decode;
+                    ? gemv_q5_k_q8_1_moe_decode
+                    : (up_qtype == GGMLQuantType::Q2_K)
+                    ? gemv_q2_k_q8_1_moe_decode
+                    : (up_qtype == GGMLQuantType::Q3_K)
+                    ? gemv_q3_k_q8_1_moe_decode : gemv_q8_0_q8_1_moe_decode;
                 moe_gemv_dp4a(ly.expert_up_packed.data, expert_indices,
                               q8, d8_buf_, up_buf,
                               eff, d, up_stride_bytes,
@@ -2855,10 +3127,16 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             // Down projection with dp4a GEMV
             auto moe_gemv_dp4a_down = (up_qtype == GGMLQuantType::Q6_K)
                 ? gemv_q6k_q8_1_moe_decode
+                : (up_qtype == GGMLQuantType::Q4_0)
+                ? gemv_q4_0_q8_1_moe_decode
                 : (up_qtype == GGMLQuantType::Q4_K)
                 ? gemv_q4_k_q8_1_moe_decode
                 : (up_qtype == GGMLQuantType::Q5_K)
-                ? gemv_q5_k_q8_1_moe_decode : gemv_q8_0_q8_1_moe_decode;
+                ? gemv_q5_k_q8_1_moe_decode
+                : (up_qtype == GGMLQuantType::Q2_K)
+                ? gemv_q2_k_q8_1_moe_decode
+                : (up_qtype == GGMLQuantType::Q3_K)
+                ? gemv_q3_k_q8_1_moe_decode : gemv_q8_0_q8_1_moe_decode;
             size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_qtype);
             moe_gemv_dp4a_down(ly.expert_down_packed.data, expert_indices,
                           q8, d8_buf_, down_buf,
@@ -4052,7 +4330,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     const bool use_dp4a_lm = q8_1_buf_ && compute_dtype_ == DType::FP16 &&
         (out_qtype == GGMLQuantType::Q6_K || out_qtype == GGMLQuantType::Q8_0 ||
          out_qtype == GGMLQuantType::Q4_0 || out_qtype == GGMLQuantType::Q4_K ||
-         out_qtype == GGMLQuantType::Q5_K);
+         out_qtype == GGMLQuantType::Q5_K || out_qtype == GGMLQuantType::Q2_K ||
+         out_qtype == GGMLQuantType::Q3_K);
 
     if (state.is_prefill) {
         Tensor h_last = view_tokens(hidden_, n).slice(n - 1, n);
@@ -4081,6 +4360,12 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else if (out_qtype == GGMLQuantType::Q5_K)
                 gemv_q5_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+            else if (out_qtype == GGMLQuantType::Q2_K)
+                gemv_q2_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+            else if (out_qtype == GGMLQuantType::Q3_K)
+                gemv_q3_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else
                 gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
@@ -4120,6 +4405,12 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             else if (out_qtype == GGMLQuantType::Q5_K)
                 gemv_q5_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+            else if (out_qtype == GGMLQuantType::Q2_K)
+                gemv_q2_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+            else if (out_qtype == GGMLQuantType::Q3_K)
+                gemv_q3_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else
                 gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
@@ -4131,6 +4422,16 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         }
         logits_out = lg;
         debug_top_logits(lg, stream);
+    }
+
+    // ---- Final logit soft-capping (Gemma-2/3) ----
+    if (cfg.final_logit_softcap > 0.0f) {
+        int64_t n_logits = static_cast<int64_t>(logits_out.shape[0]) * cfg.vocab_size;
+        int threads = 256;
+        int blocks = static_cast<int>((n_logits + threads - 1) / threads);
+        logit_softcap_fp32_kernel<<<blocks, threads, 0, stream>>>(
+            static_cast<float*>(logits_out.data),
+            cfg.final_logit_softcap, 1.0f / cfg.final_logit_softcap, n_logits);
     }
 
     // ---- Profile summary ----
@@ -4226,26 +4527,52 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
                         state.presence_penalty, stream);
     }
 
-    if (state.min_p > 0.0f) {
-        apply_min_p(logits_ptr, vocab_size, state.min_p, stream);
+    if (state.dry_multiplier > 0.0f && state.host_penalty_tokens != nullptr &&
+        state.n_penalty_tokens > 0) {
+        apply_dry_penalty(logits_ptr, vocab_size,
+                          state.host_penalty_tokens, state.n_penalty_tokens,
+                          state.dry_multiplier, state.dry_base,
+                          state.dry_allowed_length, state.dry_penalty_last_n,
+                          stream);
     }
 
     int32_t token;
-    if (state.temperature <= 0.0f || state.top_k == 1) {
-        token = d_sample_result_
-            ? sample_greedy(last_logits, d_sample_result_, stream)
-            : sample_greedy(last_logits, stream);
-    } else {
-        int top_k  = state.top_k > 0  ? state.top_k  : 50;
-        float top_p = state.top_p > 0.0f ? state.top_p : 1.0f;
+    if (state.mirostat == 2) {
+        // Mirostat v2: handles temperature + filtering internally, skip min_p
         unsigned int seed = state.seed >= 0
                                 ? static_cast<unsigned int>(state.seed)
                                 : 42u;
         token = d_sample_result_
-            ? sample_topk_topp(last_logits, top_k, top_p,
-                               state.temperature, seed, d_sample_result_, stream)
-            : sample_topk_topp(last_logits, top_k, top_p,
-                               state.temperature, seed, stream);
+            ? sample_mirostat_v2(last_logits, state.temperature,
+                                 state.mirostat_tau, state.mirostat_eta,
+                                 &state.mirostat_mu, seed, d_sample_result_, stream)
+            : sample_mirostat_v2(last_logits, state.temperature,
+                                 state.mirostat_tau, state.mirostat_eta,
+                                 &state.mirostat_mu, seed, stream);
+    } else {
+        if (state.min_p > 0.0f) {
+            apply_min_p(logits_ptr, vocab_size, state.min_p, stream);
+        }
+        if (state.typical_p > 0.0f && state.typical_p < 1.0f) {
+            apply_typical_p(logits_ptr, vocab_size, state.typical_p, stream);
+        }
+
+        if (state.temperature <= 0.0f || state.top_k == 1) {
+            token = d_sample_result_
+                ? sample_greedy(last_logits, d_sample_result_, stream)
+                : sample_greedy(last_logits, stream);
+        } else {
+            int top_k  = state.top_k > 0  ? state.top_k  : 50;
+            float top_p = state.top_p > 0.0f ? state.top_p : 1.0f;
+            unsigned int seed = state.seed >= 0
+                                    ? static_cast<unsigned int>(state.seed)
+                                    : 42u;
+            token = d_sample_result_
+                ? sample_topk_topp(last_logits, top_k, top_p,
+                                   state.temperature, seed, d_sample_result_, stream)
+                : sample_topk_topp(last_logits, top_k, top_p,
+                                   state.temperature, seed, stream);
+        }
     }
 
     return token;
@@ -4267,22 +4594,34 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits,
         // Single sequence or prefill: logits is [1, V] (forward_logits already sliced)
         Tensor last_logits = flatten_logits(logits.slice(0, 1));
 
-        tokens[0] = (state.temperature <= 0.0f || state.top_k == 1)
-            ? (d_sample_result_ ? sample_greedy(last_logits, d_sample_result_, stream)
-                                : sample_greedy(last_logits, stream))
-            : (d_sample_result_
-                ? sample_topk_topp(last_logits,
-                                   state.top_k > 0 ? state.top_k : 50,
-                                   state.top_p > 0.0f ? state.top_p : 1.0f,
-                                   state.temperature,
-                                   state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u,
-                                   d_sample_result_, stream)
-                : sample_topk_topp(last_logits,
-                                   state.top_k > 0 ? state.top_k : 50,
-                                   state.top_p > 0.0f ? state.top_p : 1.0f,
-                                   state.temperature,
-                                   state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u,
-                                   stream));
+        if (state.mirostat == 2) {
+            unsigned int seed = state.seed >= 0
+                                    ? static_cast<unsigned int>(state.seed) : 42u;
+            tokens[0] = d_sample_result_
+                ? sample_mirostat_v2(last_logits, state.temperature,
+                                     state.mirostat_tau, state.mirostat_eta,
+                                     &state.mirostat_mu, seed, d_sample_result_, stream)
+                : sample_mirostat_v2(last_logits, state.temperature,
+                                     state.mirostat_tau, state.mirostat_eta,
+                                     &state.mirostat_mu, seed, stream);
+        } else {
+            tokens[0] = (state.temperature <= 0.0f || state.top_k == 1)
+                ? (d_sample_result_ ? sample_greedy(last_logits, d_sample_result_, stream)
+                                    : sample_greedy(last_logits, stream))
+                : (d_sample_result_
+                    ? sample_topk_topp(last_logits,
+                                       state.top_k > 0 ? state.top_k : 50,
+                                       state.top_p > 0.0f ? state.top_p : 1.0f,
+                                       state.temperature,
+                                       state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u,
+                                       d_sample_result_, stream)
+                    : sample_topk_topp(last_logits,
+                                       state.top_k > 0 ? state.top_k : 50,
+                                       state.top_p > 0.0f ? state.top_p : 1.0f,
+                                       state.temperature,
+                                       state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u,
+                                       stream));
+        }
     } else {
         // Batched decode: n_tokens == n_sequences, each row is one sequence's logits
         for (int i = 0; i < n_seq; i++) {
@@ -4385,7 +4724,8 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
     if (q8_1_buf_ && compute_dtype_ == DType::FP16 &&
         (out_qtype == GGMLQuantType::Q6_K || out_qtype == GGMLQuantType::Q8_0 ||
          out_qtype == GGMLQuantType::Q4_0 || out_qtype == GGMLQuantType::Q4_K ||
-         out_qtype == GGMLQuantType::Q5_K)) {
+         out_qtype == GGMLQuantType::Q5_K || out_qtype == GGMLQuantType::Q2_K ||
+         out_qtype == GGMLQuantType::Q3_K)) {
         auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
         rmsnorm_quantize_q8_1(
             static_cast<const half*>(h_final.data),
@@ -4402,6 +4742,12 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         else if (out_qtype == GGMLQuantType::Q5_K)
             gemv_q5_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+        else if (out_qtype == GGMLQuantType::Q2_K)
+            gemv_q2_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+        else if (out_qtype == GGMLQuantType::Q3_K)
+            gemv_q3_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         else
             gemv_q4_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,

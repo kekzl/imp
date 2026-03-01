@@ -27,6 +27,11 @@ public:
     void* k_ptr(int layer, int block_id);
     void* v_ptr(int layer, int block_id);
 
+    // INT8 per-head scale access (nullptr if dtype != INT8)
+    void* k_scale_ptr(int layer, int block_id);
+    void* v_scale_ptr(int layer, int block_id);
+    size_t scale_block_bytes() const;
+
     // Capacity queries
     int num_free_blocks() const;
     int total_blocks() const;
@@ -49,6 +54,11 @@ private:
     std::vector<int> ref_counts_;   // per-block reference count
     std::vector<int> free_list_;
     void* pool_ = nullptr;          // single contiguous GPU allocation
+
+    // INT8 per-head scales: one half per head per token slot.
+    // Layout mirrors pool_ but with scale_block_bytes_ per block.
+    void* scale_pool_ = nullptr;
+    size_t scale_block_bytes_ = 0;  // kKVBlockSize * n_kv_heads * sizeof(half)
 };
 
 } // namespace imp

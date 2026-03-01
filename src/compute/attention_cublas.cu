@@ -134,6 +134,19 @@ __global__ void causal_softmax_inplace_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// Softcap kernel: S[i] = softcap * tanh(S[i] / softcap)
+// Applied in-place to the S matrix (FP16) between GEMM and softmax.
+// ---------------------------------------------------------------------------
+__global__ void softcap_fp16_kernel(half* S, int64_t n, float softcap) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float val = __half2float(S[idx]);
+        val = softcap * tanhf(val / softcap);
+        S[idx] = __float2half(val);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Static device pointer arrays for cublasGemmBatchedEx (GQA attention).
 // Allocated once, grown as needed. Layout: [A_ptrs..., B_ptrs..., C_ptrs...]
 // ---------------------------------------------------------------------------
@@ -165,7 +178,7 @@ void attention_cublas_prefill(
     const Tensor& Q, const Tensor& K, const Tensor& V,
     Tensor& O, Tensor& S,
     int n_heads, int n_kv_heads, int head_dim,
-    float scale, bool causal,
+    float scale, bool causal, float softcap,
     cudaStream_t stream)
 {
     int seq_len = static_cast<int>(Q.shape[0]);
@@ -215,6 +228,14 @@ void attention_cublas_prefill(
             n_heads,
             CUBLAS_COMPUTE_32F,
             kGemmAlgo);
+
+        // Softcap (if enabled)
+        if (softcap > 0.0f) {
+            int64_t total = static_cast<int64_t>(n_heads) * seq_len * seq_len;
+            int block = 256;
+            int grid_sc = static_cast<int>((total + block - 1) / block);
+            softcap_fp16_kernel<<<grid_sc, block, 0, stream>>>(S_base, total, softcap);
+        }
 
         // Softmax
         {
@@ -278,6 +299,14 @@ void attention_cublas_prefill(
             n_heads,
             CUBLAS_COMPUTE_32F,
             kGemmAlgo);
+
+        // Step 1.5: Softcap (if enabled)
+        if (softcap > 0.0f) {
+            int64_t total = static_cast<int64_t>(n_heads) * seq_len * seq_len;
+            int block = 256;
+            int grid_sc = static_cast<int>((total + block - 1) / block);
+            softcap_fp16_kernel<<<grid_sc, block, 0, stream>>>(S_base, total, softcap);
+        }
 
         // Step 2: Softmax
         {

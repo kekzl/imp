@@ -44,7 +44,8 @@ __global__ void flash_attention_prefill_kernel(
     int head_dim,
     float scale,
     bool causal,
-    int sliding_window)
+    int sliding_window,
+    float softcap)
 {
     // ---- index mapping ----
     const int tile_q     = blockIdx.x;                   // query-tile index
@@ -161,6 +162,7 @@ __global__ void flash_attention_prefill_kernel(
                              * __half2float(KV_tile[c * head_dim + d]);
                     }
                     dot *= scale;
+                    if (softcap > 0.0f) dot = softcap * tanhf(dot / softcap);
                     if (causal && gq < gk) dot = -FLT_MAX;
                     if (sliding_window > 0 && (gq - gk) >= sliding_window) dot = -FLT_MAX;
                 } else {
@@ -256,7 +258,7 @@ __global__ void flash_attention_prefill_kernel(
 // ---------------------------------------------------------------------------
 void flash_attention_prefill(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, int sliding_window, cudaStream_t stream)
+    float scale, bool causal, int sliding_window, float softcap, cudaStream_t stream)
 {
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int seq_q      = static_cast<int>(Q.shape[1]);
@@ -284,7 +286,7 @@ void flash_attention_prefill(
         reinterpret_cast<const half*>(V.data),
         reinterpret_cast<half*>(O.data),
         batch_size, seq_q, seq_kv, n_heads, n_kv_heads, head_dim,
-        scale, causal, sliding_window);
+        scale, causal, sliding_window, softcap);
 }
 
 } // namespace imp

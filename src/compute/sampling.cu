@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cfloat>
 #include <algorithm>
+#include <unordered_map>
+#include <vector>
 
 namespace imp {
 
@@ -839,6 +841,437 @@ void apply_min_p(float* logits, int vocab_size, float min_p,
     int blocks = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
     apply_min_p_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
         logits, vocab_size, threshold);
+}
+
+// ===========================================================================
+// DRY (Don't Repeat Yourself) repetition penalty
+// ===========================================================================
+
+// Sparse penalty application kernel: subtracts penalty from each listed token.
+__global__ void apply_dry_sparse_kernel(
+        float* __restrict__ logits,
+        const int32_t* __restrict__ penalty_tokens,
+        const float* __restrict__ penalty_values,
+        int n_penalties) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n_penalties) {
+        logits[penalty_tokens[idx]] -= penalty_values[idx];
+    }
+}
+
+void apply_dry_penalty(float* d_logits, int vocab_size,
+                       const int32_t* host_token_ids, int n_tokens,
+                       float multiplier, float base,
+                       int allowed_length, int penalty_last_n,
+                       cudaStream_t stream) {
+    if (multiplier <= 0.0f || n_tokens < 2) return;
+
+    int search_start = (penalty_last_n > 0)
+        ? std::max(0, n_tokens - penalty_last_n) : 0;
+
+    // CPU: scan history for suffix matches, compute max match length per token
+    std::unordered_map<int32_t, int> max_match;
+
+    for (int pos = search_start; pos < n_tokens; pos++) {
+        // Match suffix ending at (pos-1) with suffix ending at (n_tokens-1)
+        int match_len = 0;
+        int a = pos - 1;
+        int b = n_tokens - 1;
+        while (a >= search_start && b >= 0 &&
+               host_token_ids[a] == host_token_ids[b]) {
+            match_len++;
+            a--;
+            b--;
+        }
+
+        if (match_len > allowed_length) {
+            int32_t token = host_token_ids[pos];
+            if (token >= 0 && token < vocab_size) {
+                auto it = max_match.find(token);
+                if (it == max_match.end() || match_len > it->second)
+                    max_match[token] = match_len;
+            }
+        }
+    }
+
+    if (max_match.empty()) return;
+
+    // Build sparse penalty arrays
+    int n = static_cast<int>(max_match.size());
+    std::vector<int32_t> h_tokens(n);
+    std::vector<float> h_values(n);
+    int i = 0;
+    for (auto& [tok, ml] : max_match) {
+        h_tokens[i] = tok;
+        h_values[i] = multiplier * std::pow(base,
+            static_cast<float>(ml - allowed_length));
+        i++;
+    }
+
+    // Upload to GPU and apply
+    int32_t* d_tokens = nullptr;
+    float* d_values = nullptr;
+    cudaMalloc(&d_tokens, n * sizeof(int32_t));
+    cudaMalloc(&d_values, n * sizeof(float));
+    cudaMemcpyAsync(d_tokens, h_tokens.data(), n * sizeof(int32_t),
+                    cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_values, h_values.data(), n * sizeof(float),
+                    cudaMemcpyHostToDevice, stream);
+
+    int grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    apply_dry_sparse_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
+        d_logits, d_tokens, d_values, n);
+
+    cudaFreeAsync(d_tokens, stream);
+    cudaFreeAsync(d_values, stream);
+}
+
+// ===========================================================================
+// Typical-P (locally typical) filtering
+// ===========================================================================
+
+// Single-block kernel: computes entropy, deviation histogram, finds threshold,
+// and filters tokens with deviation > threshold.
+static constexpr int TYPICAL_NBUCKETS = 256;
+
+__global__ void apply_typical_p_kernel(
+        float* __restrict__ logits,
+        int vocab_size,
+        float typical_p) {
+
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    __shared__ float s_warp[NUM_WARPS];
+    __shared__ float s_max, s_sum, s_entropy, s_max_dev, s_threshold;
+    __shared__ float s_buckets[TYPICAL_NBUCKETS];
+
+    const int tid = threadIdx.x;
+    const int warp_id = tid / WARP_SIZE;
+    const int lane_id = tid % WARP_SIZE;
+
+    // --- Pass 1: max logit ---
+    float local_max = -FLT_MAX;
+    for (int i = tid; i < vocab_size; i += blockDim.x)
+        local_max = fmaxf(local_max, logits[i]);
+    #pragma unroll
+    for (int o = WARP_SIZE / 2; o > 0; o >>= 1) {
+        float other = __shfl_xor_sync(0xFFFFFFFF, local_max, o);
+        local_max = fmaxf(local_max, other);
+    }
+    if (lane_id == 0) s_warp[warp_id] = local_max;
+    __syncthreads();
+    if (tid == 0) {
+        float mx = -FLT_MAX;
+        for (int w = 0; w < NUM_WARPS; w++) mx = fmaxf(mx, s_warp[w]);
+        s_max = mx;
+    }
+    __syncthreads();
+    float gmax = s_max;
+
+    // --- Pass 2: sum_exp ---
+    float local_sum = 0.0f;
+    for (int i = tid; i < vocab_size; i += blockDim.x)
+        local_sum += expf(logits[i] - gmax);
+    #pragma unroll
+    for (int o = WARP_SIZE / 2; o > 0; o >>= 1)
+        local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, o);
+    if (lane_id == 0) s_warp[warp_id] = local_sum;
+    __syncthreads();
+    if (tid == 0) {
+        float sm = 0.0f;
+        for (int w = 0; w < NUM_WARPS; w++) sm += s_warp[w];
+        s_sum = sm;
+    }
+    __syncthreads();
+
+    float sum_exp = s_sum;
+    float log_sum_exp = gmax + logf(sum_exp);
+    float inv_log2 = 1.4426950408889634f; // 1/ln(2)
+
+    // --- Pass 3: entropy H = -sum(p_i * log2(p_i)) ---
+    float local_ent = 0.0f;
+    for (int i = tid; i < vocab_size; i += blockDim.x) {
+        float p = expf(logits[i] - gmax) / sum_exp;
+        if (p > 1e-30f) local_ent -= p * log2f(p);
+    }
+    #pragma unroll
+    for (int o = WARP_SIZE / 2; o > 0; o >>= 1)
+        local_ent += __shfl_xor_sync(0xFFFFFFFF, local_ent, o);
+    if (lane_id == 0) s_warp[warp_id] = local_ent;
+    __syncthreads();
+    if (tid == 0) {
+        float e = 0.0f;
+        for (int w = 0; w < NUM_WARPS; w++) e += s_warp[w];
+        s_entropy = e;
+    }
+    __syncthreads();
+    float H = s_entropy;
+
+    // --- Pass 4: max deviation ---
+    float local_md = 0.0f;
+    for (int i = tid; i < vocab_size; i += blockDim.x) {
+        float surprise = -(logits[i] - log_sum_exp) * inv_log2;
+        local_md = fmaxf(local_md, fabsf(surprise - H));
+    }
+    #pragma unroll
+    for (int o = WARP_SIZE / 2; o > 0; o >>= 1) {
+        float other = __shfl_xor_sync(0xFFFFFFFF, local_md, o);
+        local_md = fmaxf(local_md, other);
+    }
+    if (lane_id == 0) s_warp[warp_id] = local_md;
+    __syncthreads();
+    if (tid == 0) {
+        float md = 0.0f;
+        for (int w = 0; w < NUM_WARPS; w++) md = fmaxf(md, s_warp[w]);
+        s_max_dev = md;
+    }
+    __syncthreads();
+
+    // --- Pass 5: build deviation histogram ---
+    // Initialize buckets
+    for (int b = tid; b < TYPICAL_NBUCKETS; b += blockDim.x)
+        s_buckets[b] = 0.0f;
+    __syncthreads();
+
+    float bucket_scale = (s_max_dev > 1e-8f)
+        ? (static_cast<float>(TYPICAL_NBUCKETS) / s_max_dev) : 1.0f;
+
+    for (int i = tid; i < vocab_size; i += blockDim.x) {
+        float surprise = -(logits[i] - log_sum_exp) * inv_log2;
+        float dev = fabsf(surprise - H);
+        int bucket = min(static_cast<int>(dev * bucket_scale), TYPICAL_NBUCKETS - 1);
+        float p = expf(logits[i] - gmax) / sum_exp;
+        atomicAdd(&s_buckets[bucket], p);
+    }
+    __syncthreads();
+
+    // --- Pass 6: scan histogram to find threshold (thread 0) ---
+    if (tid == 0) {
+        float cum = 0.0f;
+        s_threshold = s_max_dev + 1.0f; // default: keep all
+        for (int b = 0; b < TYPICAL_NBUCKETS; b++) {
+            cum += s_buckets[b];
+            if (cum >= typical_p) {
+                // Threshold = upper bound of this bucket
+                s_threshold = static_cast<float>(b + 1) / bucket_scale;
+                break;
+            }
+        }
+    }
+    __syncthreads();
+
+    // --- Pass 7: filter tokens with deviation > threshold ---
+    float thr = s_threshold;
+    for (int i = tid; i < vocab_size; i += blockDim.x) {
+        float surprise = -(logits[i] - log_sum_exp) * inv_log2;
+        float dev = fabsf(surprise - H);
+        if (dev > thr) logits[i] = -FLT_MAX;
+    }
+}
+
+void apply_typical_p(float* logits, int vocab_size, float typical_p,
+                     cudaStream_t stream) {
+    if (typical_p <= 0.0f || typical_p >= 1.0f) return;
+
+    apply_typical_p_kernel<<<1, BLOCK_SIZE, 0, stream>>>(
+        logits, vocab_size, typical_p);
+}
+
+// ===========================================================================
+// Mirostat v2 sampling
+// ===========================================================================
+
+// Single-block kernel: computes log-sum-exp, filters by surprise threshold,
+// samples from filtered set, and outputs token + surprise.
+__global__ void mirostat_v2_sample_kernel(
+        const float* __restrict__ logits,
+        int vocab_size,
+        float mu,
+        unsigned int seed,
+        int32_t* __restrict__ d_result,
+        float* __restrict__ d_surprise) {
+
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    __shared__ float s_warp[NUM_WARPS];
+    __shared__ float s_max;
+    __shared__ float s_sum;
+    __shared__ float s_fsum;
+
+    const int tid = threadIdx.x;
+    const int warp_id = tid / WARP_SIZE;
+    const int lane_id = tid % WARP_SIZE;
+
+    // --- Step 1: Find max logit ---
+    float local_max = -FLT_MAX;
+    for (int i = tid; i < vocab_size; i += blockDim.x)
+        local_max = fmaxf(local_max, logits[i]);
+
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+        float other = __shfl_xor_sync(0xFFFFFFFF, local_max, offset);
+        local_max = fmaxf(local_max, other);
+    }
+    if (lane_id == 0) s_warp[warp_id] = local_max;
+    __syncthreads();
+
+    if (tid == 0) {
+        float mx = -FLT_MAX;
+        for (int w = 0; w < NUM_WARPS; w++) mx = fmaxf(mx, s_warp[w]);
+        s_max = mx;
+    }
+    __syncthreads();
+    float gmax = s_max;
+
+    // --- Step 2: Compute sum of exp(logit - max) ---
+    float local_sum = 0.0f;
+    for (int i = tid; i < vocab_size; i += blockDim.x)
+        local_sum += expf(logits[i] - gmax);
+
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
+        local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, offset);
+    if (lane_id == 0) s_warp[warp_id] = local_sum;
+    __syncthreads();
+
+    if (tid == 0) {
+        float sm = 0.0f;
+        for (int w = 0; w < NUM_WARPS; w++) sm += s_warp[w];
+        s_sum = sm;
+    }
+    __syncthreads();
+
+    // Mirostat threshold: keep tokens with surprise ≤ mu
+    // surprise_i = -log2(p_i), p_i = exp(l_i - max) / sum_exp
+    // surprise_i ≤ mu  ⟺  l_i ≥ max + log(sum_exp) - mu * ln(2)
+    float log_sum_exp = gmax + logf(s_sum);
+    float threshold = log_sum_exp - mu * 0.6931471805599453f;
+
+    // --- Step 3: Compute filtered probability sum ---
+    float local_fsum = 0.0f;
+    for (int i = tid; i < vocab_size; i += blockDim.x) {
+        if (logits[i] >= threshold)
+            local_fsum += expf(logits[i] - gmax);
+    }
+
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
+        local_fsum += __shfl_xor_sync(0xFFFFFFFF, local_fsum, offset);
+    if (lane_id == 0) s_warp[warp_id] = local_fsum;
+    __syncthreads();
+
+    if (tid == 0) {
+        float fs = 0.0f;
+        for (int w = 0; w < NUM_WARPS; w++) fs += s_warp[w];
+        // Fallback: if no tokens pass threshold, use entire distribution
+        s_fsum = (fs > 0.0f) ? fs : s_sum;
+    }
+    __syncthreads();
+
+    float fsum = s_fsum;
+    bool use_threshold = (fsum < s_sum * 0.9999f);
+
+    // --- Step 4: Sample from filtered distribution ---
+    // Thread 0 scans through vocab, accumulating filtered probabilities.
+    if (tid == 0) {
+        float inv_fsum = 1.0f / fsum;
+        unsigned int rng = seed;
+        float r = lcg_rand_float(rng);
+
+        float acc = 0.0f;
+        int chosen = 0;
+        bool found = false;
+
+        for (int i = 0; i < vocab_size; i++) {
+            if (!use_threshold || logits[i] >= threshold) {
+                float p = expf(logits[i] - gmax) * inv_fsum;
+                acc += p;
+                if (r < acc) {
+                    chosen = i;
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        // Fallback: pick highest-logit token
+        if (!found) {
+            float best = -FLT_MAX;
+            for (int i = 0; i < vocab_size; i++) {
+                if (logits[i] > best) { best = logits[i]; chosen = i; }
+            }
+        }
+
+        // Compute surprise using original (unfiltered) probability
+        float chosen_prob = expf(logits[chosen] - gmax) / s_sum;
+        float surprise = -log2f(fmaxf(chosen_prob, 1e-30f));
+
+        d_result[0] = chosen;
+        d_surprise[0] = surprise;
+    }
+}
+
+static int32_t sample_mirostat_v2_impl(
+        const Tensor& logits, float temperature,
+        float tau, float eta, float* mu,
+        unsigned int seed, int32_t* d_result, bool owns_result,
+        cudaStream_t stream) {
+
+    const int vocab_size = static_cast<int>(logits.shape[0]);
+    float* d_logits = static_cast<float*>(logits.data);
+
+    // Apply temperature
+    if (temperature > 0.0f && temperature != 1.0f) {
+        float inv_temp = 1.0f / temperature;
+        int grid = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        apply_temperature_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
+            d_logits, vocab_size, inv_temp);
+    }
+
+    // Surprise value stored right after the token result
+    float* d_surprise = reinterpret_cast<float*>(d_result + 1);
+
+    mirostat_v2_sample_kernel<<<1, BLOCK_SIZE, 0, stream>>>(
+        d_logits, vocab_size, *mu, seed, d_result, d_surprise);
+
+    // Restore temperature
+    if (temperature > 0.0f && temperature != 1.0f) {
+        int grid = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        apply_temperature_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
+            d_logits, vocab_size, temperature);
+    }
+
+    // Read results
+    int32_t h_result = 0;
+    float h_surprise = 0.0f;
+    cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaMemcpyAsync(&h_surprise, d_surprise, sizeof(float),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    if (owns_result) cudaFree(d_result);
+
+    // Update mu: mu = mu - eta * (surprise - tau)
+    *mu = *mu - eta * (h_surprise - tau);
+
+    return h_result;
+}
+
+int32_t sample_mirostat_v2(const Tensor& logits, float temperature,
+                           float tau, float eta, float* mu,
+                           unsigned int seed, cudaStream_t stream) {
+    // Allocate temp buffer: 4 bytes for token + 4 bytes for surprise
+    int32_t* d_result = nullptr;
+    cudaMalloc(&d_result, 2 * sizeof(int32_t));
+    return sample_mirostat_v2_impl(logits, temperature, tau, eta, mu,
+                                    seed, d_result, true, stream);
+}
+
+int32_t sample_mirostat_v2(const Tensor& logits, float temperature,
+                           float tau, float eta, float* mu,
+                           unsigned int seed, int32_t* d_result,
+                           cudaStream_t stream) {
+    return sample_mirostat_v2_impl(logits, temperature, tau, eta, mu,
+                                    seed, d_result, false, stream);
 }
 
 } // namespace imp

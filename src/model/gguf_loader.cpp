@@ -623,6 +623,43 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
     // RoPE frequency scaling (linear: divide frequencies by factor)
     cfg.rope_freq_scale = static_cast<float>(get_float("rope.scaling.factor", 1.0));
+    // Fallback: try legacy key
+    if (cfg.rope_freq_scale == 1.0f) {
+        float legacy_scale = static_cast<float>(get_float("rope.scale_linear", 0.0));
+        if (legacy_scale > 0.0f) cfg.rope_freq_scale = legacy_scale;
+    }
+
+    // YaRN / Dynamic NTK RoPE scaling
+    {
+        std::string rope_type_str;
+        auto it = metadata.find(arch_str + ".rope.scaling.type");
+        if (it == metadata.end()) it = metadata.find("rope.scaling.type");
+        if (it != metadata.end() && it->second.type == GGUFValueType::STRING)
+            rope_type_str = it->second.str_val;
+
+        cfg.rope_n_ctx_orig = static_cast<int>(get_uint("rope.scaling.original_context_length", 0));
+        cfg.yarn_beta_fast  = static_cast<float>(get_float("rope.scaling.yarn_beta_fast", 32.0));
+        cfg.yarn_beta_slow  = static_cast<float>(get_float("rope.scaling.yarn_beta_slow", 1.0));
+        cfg.yarn_attn_factor = static_cast<float>(get_float("rope.scaling.yarn_attn_factor", 1.0));
+        // Also try the generic attn_factor key
+        if (cfg.yarn_attn_factor == 1.0f)
+            cfg.yarn_attn_factor = static_cast<float>(get_float("rope.scaling.attn_factor", 1.0));
+
+        float yarn_ext = static_cast<float>(get_float("rope.scaling.yarn_ext_factor", -1.0));
+        if (rope_type_str == "yarn") {
+            cfg.yarn_ext_factor = (yarn_ext < 0.0f) ? 1.0f : yarn_ext;
+        } else {
+            cfg.yarn_ext_factor = (yarn_ext < 0.0f) ? 0.0f : yarn_ext;
+        }
+
+        // Compute mscale compensation (same as llama.cpp)
+        if (cfg.yarn_ext_factor != 0.0f && cfg.rope_freq_scale > 1.0f) {
+            float factor = cfg.rope_freq_scale;  // scaling factor
+            float mscale = 1.0f + 0.1f * logf(factor);
+            // Pre-compensate for the internal mscale that rope_yarn() also applies
+            cfg.yarn_attn_factor *= mscale / (1.0f + 0.1f * logf(factor));
+        }
+    }
 
     // Gemma-specific: per-layer sliding window and local RoPE (metadata-dependent)
     // Note: embed_scale, ffn_activation, norm_placement are set by apply_arch_defaults().
@@ -640,6 +677,12 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             cfg.rope_local_theta = 10000.0f;  // Gemma-3 default local theta
         }
     }
+
+    // Attention logit softcapping (Gemma-2/3: tanh(score/cap)*cap)
+    cfg.attn_logit_softcap  = static_cast<float>(get_float("attn_logit_softcapping", 0.0));
+    if (cfg.attn_logit_softcap == 0.0f)
+        cfg.attn_logit_softcap = static_cast<float>(get_float("attention.logit_softcapping", 0.0));
+    cfg.final_logit_softcap = static_cast<float>(get_float("final_logit_softcapping", 0.0));
 
     cfg.sliding_window   = static_cast<int>(get_uint("attention.sliding_window", 0));
 
@@ -704,6 +747,10 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     IMP_LOG_INFO("RoPE: theta=%.1f, rope_dim=%d, neox=%d, freq_scale=%.1f, eps=%.2e",
                  cfg.rope_theta, cfg.rope_dim, cfg.rope_neox ? 1 : 0,
                  cfg.rope_freq_scale, cfg.rms_norm_eps);
+    if (cfg.yarn_ext_factor > 0.0f)
+        IMP_LOG_INFO("YaRN: ext_factor=%.1f, attn_factor=%.3f, beta_fast=%.1f, beta_slow=%.1f, n_ctx_orig=%d",
+                     cfg.yarn_ext_factor, cfg.yarn_attn_factor,
+                     cfg.yarn_beta_fast, cfg.yarn_beta_slow, cfg.rope_n_ctx_orig);
     if (cfg.embed_scale > 0.0f)
         IMP_LOG_INFO("Embedding scale: %.2f (sqrt(d_model))", cfg.embed_scale);
 
@@ -720,6 +767,10 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     }
     if (cfg.norm_placement == NormPlacement::POST_NORM)
         IMP_LOG_INFO("Norm placement: post-norm (residual after norm)");
+    if (cfg.attn_logit_softcap > 0.0f)
+        IMP_LOG_INFO("Attention logit softcap: %.1f", cfg.attn_logit_softcap);
+    if (cfg.final_logit_softcap > 0.0f)
+        IMP_LOG_INFO("Final logit softcap: %.1f", cfg.final_logit_softcap);
 
     if (cfg.n_experts > 0) {
         IMP_LOG_INFO("MoE: %d experts, %d active, expert_d_ff=%d, shared=%d (shared_d_ff=%d), "

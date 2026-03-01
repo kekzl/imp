@@ -2,6 +2,7 @@
 
 #include "core/tensor.h"
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 
 namespace imp {
 
@@ -10,11 +11,12 @@ namespace imp {
 // block_tables: [batch, max_blocks] int32
 // context_lens: [batch] int32
 // sliding_window: 0 = disabled, >0 = only attend to last N KV positions
+// softcap: 0 = disabled, >0 = apply tanh(score/cap)*cap (Gemma-2/3)
 void paged_attention_decode(
     const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache,
     Tensor& O, const int* block_tables, const int* context_lens,
     int block_size, float scale, int max_context_len,
-    int sliding_window = 0,
+    int sliding_window = 0, float softcap = 0.0f,
     cudaStream_t stream = nullptr);
 
 // Set split-K scratch buffer for paged attention. Must be called before
@@ -33,6 +35,20 @@ void paged_attention_decode_fp8(
     Tensor& O, const int* block_tables, const int* context_lens,
     int block_size, float scale, float kv_scale,
     int max_context_len, int sliding_window = 0,
-    cudaStream_t stream = nullptr);
+    float softcap = 0.0f, cudaStream_t stream = nullptr);
+
+// INT8 dp4a Paged attention for decode: KV cache stored in INT8 with per-head scales.
+// Q: [batch, 1, n_heads, head_dim] FP16
+// K_cache/V_cache: [num_blocks, block_size, n_kv_heads, head_dim] INT8
+// K_scales/V_scales: [num_blocks, block_size, n_kv_heads] FP16 per-head scales
+// O: [batch, 1, n_heads, head_dim] FP16
+void paged_attention_decode_int8(
+    const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache,
+    Tensor& O,
+    const half* K_scales, const half* V_scales,
+    const int* block_tables, const int* context_lens,
+    int block_size, float scale,
+    int max_context_len, int sliding_window = 0,
+    float softcap = 0.0f, cudaStream_t stream = nullptr);
 
 } // namespace imp

@@ -15,7 +15,7 @@ namespace imp {
 void flash_attention_prefill_tc(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
     float scale, bool causal = true, int sliding_window = 0,
-    cudaStream_t stream = nullptr);
+    float softcap = 0.0f, cudaStream_t stream = nullptr);
 
 // Check if tensor-core attention is available on current device.
 bool tc_attention_available();
@@ -26,6 +26,6 @@ bool tc_attention_available();
 void flash_attention_blackwell(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
     float scale, bool causal = true, int sliding_window = 0,
-    cudaStream_t stream = nullptr);
+    float softcap = 0.0f, cudaStream_t stream = nullptr);
 
 } // namespace imp

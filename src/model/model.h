@@ -47,6 +47,13 @@ struct ModelConfig {
     int ssm_dt_rank = 0;        // 64
     int rope_dim = 0;           // 0 = full head_dim, 84 = partial
     bool rope_neox = true;      // true = NeoX/split (i, i+d/2), false = interleaved (2i, 2i+1)
+
+    // YaRN / Dynamic NTK RoPE scaling
+    float yarn_ext_factor = 0.0f;   // 0 = linear/none, 1.0 = YaRN blending
+    float yarn_attn_factor = 1.0f;  // mscale: attention factor (pre-compensated)
+    float yarn_beta_fast = 32.0f;   // wavelength threshold for fast-rotating dims
+    float yarn_beta_slow = 1.0f;    // wavelength threshold for slow-rotating dims
+    int   rope_n_ctx_orig = 0;      // original training context length (0 = use max_seq_len)
     int sliding_window = 0;     // 0 = disabled, >0 = window size (Qwen3, Mistral)
     int sliding_window_pattern = 0;  // Gemma-3: 6 = every 6th layer is global (no window)
     float rope_local_theta = 0.0f;   // Gemma-3: RoPE theta for local/sliding layers (10000)
@@ -59,6 +66,8 @@ struct ModelConfig {
     float expert_weights_scale = 1.0f;  // 2.5
     bool expert_weights_norm = false;
     bool moe_sigmoid_gating = false;   // Nemotron-H uses sigmoid instead of softmax
+    float attn_logit_softcap = 0.0f;   // Gemma-2/3: tanh(score/cap)*cap before softmax (0=disabled)
+    float final_logit_softcap = 0.0f;  // Gemma-2/3: tanh(logit/cap)*cap on output logits (0=disabled)
 };
 
 struct TransformerLayer {

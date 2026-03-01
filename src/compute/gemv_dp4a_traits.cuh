@@ -18,7 +18,7 @@ namespace imp {
 static constexpr int kSmemQ8Stride = 9;
 
 // Tag enum for template dispatch (separate from GGMLQuantType)
-enum class QType { Q4_0, Q8_0, Q6_K, Q4_K, Q5_K };
+enum class QType { Q4_0, Q8_0, Q6_K, Q4_K, Q5_K, Q2_K, Q3_K };
 
 // ============================================================================
 // Helper device functions (moved from gemm.cu, unchanged)
@@ -319,12 +319,166 @@ template<> struct DequantTraits<QType::Q5_K> {
     }
 };
 
+template<> struct DequantTraits<QType::Q2_K> {
+    static constexpr int kBlockBytes   = 84;
+    static constexpr int kBlockElems   = 256;
+    static constexpr int kQ8PerWeight  = 8;
+    static constexpr bool kNeedsQ8Sum  = false;  // partial sums computed inline
+    static constexpr int kSmemExtra    = 0;
+    static constexpr int kMaxNRows     = 4;
+    static constexpr bool kPreferKpar  = false;
+
+    // Q2_K layout (84 bytes / 256 elements):
+    //   scales[16]  : 4-bit packed (low=scale, high=min) per 16 elements
+    //   qs[64]      : 2-bit packed (4 elements/byte), 2 halves × 4 shifts
+    //   d(fp16)     : at offset 80
+    //   dmin(fp16)  : at offset 82
+    //
+    // Each sub (0..7) covers 32 elements. Two 16-element scale groups per sub.
+    // qs layout: same 32 bytes reused with shift 0,2,4,6 for 4 groups of 32.
+    static __device__ __forceinline__ float
+    dp4a_block(const uint8_t* bp, int sub,
+               const int* xi, float dq, float /*q8_sum*/) {
+        const uint8_t* scales = bp;
+        const uint8_t* qs     = bp + 16;
+        float d_w    = __half2float(*(const half*)(bp + 80));
+        float dmin_w = __half2float(*(const half*)(bp + 82));
+
+        int half_idx = sub / 4;
+        int shift    = (sub % 4) * 2;
+        const uint8_t* qs_base = qs + half_idx * 32;
+
+        uint8_t sc_byte0 = scales[sub * 2];
+        uint8_t sc_byte1 = scales[sub * 2 + 1];
+        float sc0 = (float)(sc_byte0 & 0xF);
+        float mn0 = (float)(sc_byte0 >> 4);
+        float sc1 = (float)(sc_byte1 & 0xF);
+        float mn1 = (float)(sc_byte1 >> 4);
+
+        const int ones = 0x01010101;
+        int32_t sumi0 = 0, sumi1 = 0;
+        int q8s0 = 0, q8s1 = 0;
+
+        #pragma unroll
+        for (int j = 0; j < 4; j++) {
+            uint32_t qb4;
+            memcpy(&qb4, qs_base + j * 4, 4);
+            uint32_t q2_4 = (qb4 >> shift) & 0x03030303u;
+            int qi; memcpy(&qi, &q2_4, 4);
+            sumi0 = __dp4a(qi, xi[j], sumi0);
+            q8s0 = __dp4a(xi[j], ones, q8s0);
+        }
+        #pragma unroll
+        for (int j = 0; j < 4; j++) {
+            uint32_t qb4;
+            memcpy(&qb4, qs_base + 16 + j * 4, 4);
+            uint32_t q2_4 = (qb4 >> shift) & 0x03030303u;
+            int qi; memcpy(&qi, &q2_4, 4);
+            sumi1 = __dp4a(qi, xi[4 + j], sumi1);
+            q8s1 = __dp4a(xi[4 + j], ones, q8s1);
+        }
+
+        return dq * (d_w * (sc0 * (float)sumi0 + sc1 * (float)sumi1)
+                    - dmin_w * (mn0 * (float)q8s0 + mn1 * (float)q8s1));
+    }
+};
+
+template<> struct DequantTraits<QType::Q3_K> {
+    static constexpr int kBlockBytes   = 110;
+    static constexpr int kBlockElems   = 256;
+    static constexpr int kQ8PerWeight  = 8;
+    static constexpr bool kNeedsQ8Sum  = false;
+    static constexpr int kSmemExtra    = 0;
+    static constexpr int kMaxNRows     = 2;   // complex dequant → cap NR to avoid reg pressure
+    static constexpr bool kPreferKpar  = true; // compute-heavy: K-par wins on ties
+
+    // Q3_K layout (110 bytes / 256 elements):
+    //   hmask[32]   : high bit (bit 2) for each of 256 elements
+    //   qs[64]      : 2-bit packed (same layout as Q2_K)
+    //   scales[12]  : packed 6-bit scales (complex GGML packing)
+    //   d(fp16)     : at offset 108
+    //
+    // q3 = q2_lowbits + (hmask_bit ? 0 : -4), range [-4..3]
+    // val = d * (scale6bit - 32) * q3
+    static __device__ __forceinline__ float
+    dp4a_block(const uint8_t* bp, int sub,
+               const int* xi, float dq, float /*q8_sum*/) {
+        const uint8_t* hmask  = bp;
+        const uint8_t* qs     = bp + 32;
+        const uint8_t* sc_raw = bp + 96;
+        float d_all = __half2float(*(const half*)(bp + 108));
+
+        int half_idx = sub / 4;
+        int shift    = (sub % 4) * 2;
+        const uint8_t* qs_base = qs + half_idx * 32;
+        const uint8_t* hm_base = hmask + sub * 4;  // 4 bytes = 32 bits
+
+        // Unpack 16 6-bit scales from 12 packed bytes
+        uint32_t aux0, aux1, aux2;
+        memcpy(&aux0, sc_raw,     4);
+        memcpy(&aux1, sc_raw + 4, 4);
+        memcpy(&aux2, sc_raw + 8, 4);
+        constexpr uint32_t kmask2 = 0x0f0f0f0fu;
+        constexpr uint32_t kmask1 = 0x03030303u;
+        uint32_t s[4];
+        s[0] = (aux0 & kmask2) | (((aux2 >> 0) & kmask1) << 4);
+        s[1] = (aux1 & kmask2) | (((aux2 >> 2) & kmask1) << 4);
+        s[2] = ((aux0 >> 4) & kmask2) | (((aux2 >> 4) & kmask1) << 4);
+        s[3] = ((aux1 >> 4) & kmask2) | (((aux2 >> 6) & kmask1) << 4);
+        const int8_t* up = reinterpret_cast<const int8_t*>(s);
+        float sc0 = (float)(up[sub * 2] - 32);
+        float sc1 = (float)(up[sub * 2 + 1] - 32);
+
+        // First 16 elements
+        int32_t sumi0 = 0;
+        #pragma unroll
+        for (int j = 0; j < 4; j++) {
+            uint32_t qb4;
+            memcpy(&qb4, qs_base + j * 4, 4);
+            uint32_t q2_4 = (qb4 >> shift) & 0x03030303u;
+            // Extract 4 hmask bits → build subtraction mask
+            uint8_t hm_byte = hm_base[j / 2];
+            int bit_base = (j & 1) * 4;
+            uint32_t hm4 = ((hm_byte >> (bit_base + 0)) & 1) |
+                           (((hm_byte >> (bit_base + 1)) & 1) << 8) |
+                           (((hm_byte >> (bit_base + 2)) & 1) << 16) |
+                           (((hm_byte >> (bit_base + 3)) & 1) << 24);
+            // q3 = q2 - 4*(1-hm): subtract 4 from each byte where hm=0
+            uint32_t sub_mask = (hm4 ^ 0x01010101u) * 4;
+            int q3i = __vsubss4(q2_4, sub_mask);
+            sumi0 = __dp4a(q3i, xi[j], sumi0);
+        }
+
+        // Last 16 elements
+        int32_t sumi1 = 0;
+        #pragma unroll
+        for (int j = 0; j < 4; j++) {
+            uint32_t qb4;
+            memcpy(&qb4, qs_base + 16 + j * 4, 4);
+            uint32_t q2_4 = (qb4 >> shift) & 0x03030303u;
+            uint8_t hm_byte = hm_base[2 + j / 2];
+            int bit_base = (j & 1) * 4;
+            uint32_t hm4 = ((hm_byte >> (bit_base + 0)) & 1) |
+                           (((hm_byte >> (bit_base + 1)) & 1) << 8) |
+                           (((hm_byte >> (bit_base + 2)) & 1) << 16) |
+                           (((hm_byte >> (bit_base + 3)) & 1) << 24);
+            uint32_t sub_mask = (hm4 ^ 0x01010101u) * 4;
+            int q3i = __vsubss4(q2_4, sub_mask);
+            sumi1 = __dp4a(q3i, xi[4 + j], sumi1);
+        }
+
+        return d_all * dq * (sc0 * (float)sumi0 + sc1 * (float)sumi1);
+    }
+};
+
 // Convenience aliases
 using Q4_0_Traits = DequantTraits<QType::Q4_0>;
 using Q8_0_Traits = DequantTraits<QType::Q8_0>;
 using Q6_K_Traits = DequantTraits<QType::Q6_K>;
 using Q4_K_Traits = DequantTraits<QType::Q4_K>;
 using Q5_K_Traits = DequantTraits<QType::Q5_K>;
+using Q2_K_Traits = DequantTraits<QType::Q2_K>;
+using Q3_K_Traits = DequantTraits<QType::Q3_K>;
 
 // ============================================================================
 // K-parallel helpers and occupancy heuristic
