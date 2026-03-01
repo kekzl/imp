@@ -5,6 +5,12 @@
 
 namespace imp {
 
+// Multi-block argmax scratch: the d_result buffer must be at least this many
+// bytes to hold the partial reduction arrays used by the multi-block kernel.
+static constexpr int ARGMAX_NBLOCKS = 64;
+static constexpr size_t ARGMAX_SCRATCH_BYTES =
+    sizeof(int32_t) + ARGMAX_NBLOCKS * (sizeof(float) + sizeof(int32_t));
+
 // Greedy: argmax over logits
 int32_t sample_greedy(const Tensor& logits, cudaStream_t stream = nullptr);
 

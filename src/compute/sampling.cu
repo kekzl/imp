@@ -30,12 +30,10 @@ void warp_argmax(float& val, int& idx) {
     }
 }
 
-// Single-block argmax kernel.  Block of 256 threads scans the full vocab.
-// Result (one int32) is written to d_result[0].
+// Single-block argmax kernel (fallback for paths without pre-allocated scratch).
 __global__ void argmax_kernel(const float* __restrict__ logits,
                               int vocab_size,
                               int32_t* __restrict__ d_result) {
-    // Each thread finds its local max across its stripe of the vocab.
     float  local_max = -FLT_MAX;
     int    local_idx = 0;
 
@@ -47,11 +45,9 @@ __global__ void argmax_kernel(const float* __restrict__ logits,
         }
     }
 
-    // Warp reduction
     warp_argmax(local_max, local_idx);
 
-    // Cross-warp reduction through shared memory
-    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;  // 8
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     __shared__ float  s_val[NUM_WARPS];
     __shared__ int    s_idx[NUM_WARPS];
 
@@ -64,12 +60,10 @@ __global__ void argmax_kernel(const float* __restrict__ logits,
     }
     __syncthreads();
 
-    // First warp reduces across all warps
     if (warp_id == 0) {
         float val = (lane_id < NUM_WARPS) ? s_val[lane_id] : -FLT_MAX;
         int   idx = (lane_id < NUM_WARPS) ? s_idx[lane_id] : 0;
 
-        // Warp reduction among the first NUM_WARPS lanes
         #pragma unroll
         for (int offset = NUM_WARPS / 2; offset > 0; offset >>= 1) {
             float other_val = __shfl_xor_sync(0xFFFFFFFF, val, offset);
@@ -83,6 +77,92 @@ __global__ void argmax_kernel(const float* __restrict__ logits,
         if (lane_id == 0) {
             d_result[0] = static_cast<int32_t>(idx);
         }
+    }
+}
+
+// Multi-block argmax: distributes work across ARGMAX_NBLOCKS blocks so all SMs
+// participate.  The single-block kernel above uses 1 SM and takes ~190 us for
+// vocab=152K; this version takes ~10 us.
+//
+// Scratch layout (passed as d_scratch, ARGMAX_SCRATCH_BYTES total):
+//   float    partial_vals [ARGMAX_NBLOCKS]
+//   int32_t  partial_idxs [ARGMAX_NBLOCKS]
+
+// Phase 1: each block scans its stripe and writes its local max to partials.
+__global__ void argmax_partial_kernel(
+        const float* __restrict__ logits, int vocab_size,
+        float* __restrict__ partial_vals, int32_t* __restrict__ partial_idxs) {
+    float  local_max = -FLT_MAX;
+    int    local_idx = 0;
+
+    int start = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+
+    for (int i = start; i < vocab_size; i += stride) {
+        float v = logits[i];
+        if (v > local_max || (v == local_max && i < local_idx)) {
+            local_max = v;
+            local_idx = i;
+        }
+    }
+
+    warp_argmax(local_max, local_idx);
+
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    __shared__ float  s_val[NUM_WARPS];
+    __shared__ int    s_idx[NUM_WARPS];
+
+    int warp_id = threadIdx.x / WARP_SIZE;
+    int lane_id = threadIdx.x % WARP_SIZE;
+
+    if (lane_id == 0) {
+        s_val[warp_id] = local_max;
+        s_idx[warp_id] = local_idx;
+    }
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float val = (lane_id < NUM_WARPS) ? s_val[lane_id] : -FLT_MAX;
+        int   idx = (lane_id < NUM_WARPS) ? s_idx[lane_id] : 0;
+
+        #pragma unroll
+        for (int offset = NUM_WARPS / 2; offset > 0; offset >>= 1) {
+            float other_val = __shfl_xor_sync(0xFFFFFFFF, val, offset);
+            int   other_idx = __shfl_xor_sync(0xFFFFFFFF, idx, offset);
+            if (other_val > val || (other_val == val && other_idx < idx)) {
+                val = other_val;
+                idx = other_idx;
+            }
+        }
+
+        if (lane_id == 0) {
+            partial_vals[blockIdx.x] = val;
+            partial_idxs[blockIdx.x] = idx;
+        }
+    }
+}
+
+// Phase 2: single block reduces ARGMAX_NBLOCKS partial results.
+__global__ void argmax_reduce_kernel(
+        const float* __restrict__ partial_vals,
+        const int32_t* __restrict__ partial_idxs,
+        int n_blocks, int32_t* __restrict__ d_result) {
+    float  local_max = -FLT_MAX;
+    int    local_idx = 0;
+
+    for (int i = threadIdx.x; i < n_blocks; i += blockDim.x) {
+        float v = partial_vals[i];
+        int   idx = partial_idxs[i];
+        if (v > local_max || (v == local_max && idx < local_idx)) {
+            local_max = v;
+            local_idx = idx;
+        }
+    }
+
+    warp_argmax(local_max, local_idx);
+
+    if (threadIdx.x == 0) {
+        d_result[0] = static_cast<int32_t>(local_idx);
     }
 }
 
@@ -109,7 +189,17 @@ int32_t sample_greedy(const Tensor& logits, int32_t* d_result,
     const int vocab_size = static_cast<int>(logits.shape[0]);
     const float* d_logits = static_cast<const float*>(logits.data);
 
-    argmax_kernel<<<1, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, d_result);
+    // Use multi-block argmax: scratch lives right after d_result.
+    // Layout: [result(4B)] [partial_vals(ARGMAX_NBLOCKS*4B)] [partial_idxs(ARGMAX_NBLOCKS*4B)]
+    auto* base = reinterpret_cast<char*>(d_result);
+    auto* partial_vals = reinterpret_cast<float*>(base + sizeof(int32_t));
+    auto* partial_idxs = reinterpret_cast<int32_t*>(base + sizeof(int32_t) +
+                                                     ARGMAX_NBLOCKS * sizeof(float));
+
+    argmax_partial_kernel<<<ARGMAX_NBLOCKS, BLOCK_SIZE, 0, stream>>>(
+        d_logits, vocab_size, partial_vals, partial_idxs);
+    argmax_reduce_kernel<<<1, WARP_SIZE, 0, stream>>>(
+        partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
 
     int32_t h_result = 0;
     cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
@@ -560,10 +650,18 @@ void sample_greedy_device(const Tensor& logits, int32_t* d_result,
     const int vocab_size = static_cast<int>(logits.shape[0]);
     const float* d_logits = static_cast<const float*>(logits.data);
 
-    argmax_kernel<<<1, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, d_result);
+    // Multi-block argmax: scratch lives right after d_result.
+    auto* base = reinterpret_cast<char*>(d_result);
+    auto* partial_vals = reinterpret_cast<float*>(base + sizeof(int32_t));
+    auto* partial_idxs = reinterpret_cast<int32_t*>(base + sizeof(int32_t) +
+                                                     ARGMAX_NBLOCKS * sizeof(float));
+
+    argmax_partial_kernel<<<ARGMAX_NBLOCKS, BLOCK_SIZE, 0, stream>>>(
+        d_logits, vocab_size, partial_vals, partial_idxs);
+    argmax_reduce_kernel<<<1, WARP_SIZE, 0, stream>>>(
+        partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
 
     // Async copy to mapped pinned memory — no sync needed.
-    // The host can poll h_mapped at its own pace.
     cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t),
                     cudaMemcpyDeviceToHost, stream);
 }
