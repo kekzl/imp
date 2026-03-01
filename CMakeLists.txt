@@ -215,6 +215,10 @@ if(IMP_BUILD_TOOLS)
         )
         target_link_libraries(imp-bench PRIVATE imp)
         target_include_directories(imp-bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        set_target_properties(imp-bench PROPERTIES
+            CUDA_SEPARABLE_COMPILATION ON
+            CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        )
     endif()
 endif()
 
@@ -276,6 +280,10 @@ if(IMP_BUILD_TESTS)
     add_executable(imp-tests ${IMP_TEST_SOURCES})
     target_link_libraries(imp-tests PRIVATE imp GTest::gtest GTest::gtest_main)
     target_include_directories(imp-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    set_target_properties(imp-tests PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    )
 
     include(GoogleTest)
     gtest_discover_tests(imp-tests)

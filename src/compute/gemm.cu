@@ -1,4 +1,6 @@
 #include "compute/gemm.h"
+#include "compute/gemv_dp4a_traits.cuh"
+#include "runtime/pdl.h"
 #include "model/model.h"
 
 #include <cublas_v2.h>
@@ -1189,6 +1191,57 @@ void swiglu_quantize_q8_1(const half* gate, const half* up,
 }
 
 // ---------------------------------------------------------------------------
+// Fused GEGLU + Q8_1 quantization kernel.
+// Computes gelu_tanh(gate) * up and quantizes the result to Q8_1 in one pass.
+// Eliminates the intermediate FP16 activation buffer write+read for GEGLU models
+// (Gemma-3).  Each block handles 32 elements (one Q8_1 block), 32 threads/block.
+// ---------------------------------------------------------------------------
+__global__ void geglu_quantize_q8_1_kernel(
+        const half* __restrict__ gate,
+        const half* __restrict__ up,
+        block_q8_1* __restrict__ q8_out,
+        float* __restrict__ d8_out,
+        int total_elements) {
+    constexpr float SQRT_2_PI = 0.7978845608028654f;
+    constexpr float COEFF = 0.044715f;
+
+    const int blk = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int idx = blk * 32 + tid;
+
+    float val = 0.0f;
+    if (idx < total_elements) {
+        float g = __half2float(gate[idx]);
+        float u = __half2float(up[idx]);
+        float gelu_g = g * 0.5f * (1.0f + tanhf(SQRT_2_PI * (g + COEFF * g * g * g)));
+        val = gelu_g * u;
+    }
+
+    float amax = fabsf(val);
+    for (int off = 16; off > 0; off >>= 1)
+        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, off));
+
+    float d = amax / 127.0f;
+    float id = (d != 0.0f) ? (1.0f / d) : 0.0f;
+    int8_t q = static_cast<int8_t>(__float2int_rn(val * id));
+
+    q8_out[blk].qs[tid] = q;
+    if (tid == 0) {
+        q8_out[blk].d = __float2half(d);
+        d8_out[blk] = d;
+    }
+}
+
+void geglu_quantize_q8_1(const half* gate, const half* up,
+                           block_q8_1* q8_out, float* d8_out,
+                           int total_elements, cudaStream_t stream) {
+    int n_blocks = total_elements / 32;
+    if (n_blocks <= 0) return;
+    geglu_quantize_q8_1_kernel<<<n_blocks, 32, 0, stream>>>(
+        gate, up, q8_out, d8_out, total_elements);
+}
+
+// ---------------------------------------------------------------------------
 // Fused relu² + Q8_1 quantization kernel.
 //
 // Reads FP16 input, applies relu²(x) = max(0, x)², quantizes to Q8_1.
@@ -1395,747 +1448,165 @@ void gemv_gate_fp32(const half* W, const half* x, float* y,
     gemv_gate_fp32_kernel<<<blocks, threads_per_block, 0, stream>>>(W, x, y, M, K);
 }
 
-// ---------------------------------------------------------------------------
-// dp4a Q6_K × Q8_1 GEMV kernel
-//
-// Q6_K block = 210 bytes for 256 elements: ql[128] + qh[64] + scales[16] + d[2].
-// Each warp computes one output row.
-// Inner loop: for each Q6_K block (256 elems), dequant 8 groups of 32 ints,
-// pack into int8x4, dp4a with pre-quantized Q8_1 input.
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// Q6_K × Q8_1 dp4a inner loop: processes one group (32 elements = 1 Q8_1 block)
-// from a Q6_K block using dp4a. Returns the accumulated weighted sum.
-//
-// Q6_K memory layout per 256-element block:
-//   ql[128]: lower 4 bits (8 groups of 32 elements, packed as nybbles)
-//   qh[64]:  upper 2 bits (8 groups of 32 elements, packed 4 per byte)
-//   sc[16]:  8-bit sub-block scales (16 sub-blocks of 16 elements)
-//   d[2]:    FP16 block scale
-//
-// Group g (0-7) maps to elements [g*32, g*32+31]:
-//   ql offset: (g/4)*64 + (g%2)*32, use high nybble if (g%4) >= 2
-//   qh offset: (g<4)?0:32, shift by (g%4)*2
-// ---------------------------------------------------------------------------
-__device__ __forceinline__ float q6k_q8_1_dp4a_group(
-        const uint8_t* __restrict__ ql,
-        const uint8_t* __restrict__ qh,
-        const int8_t* __restrict__ sc,
-        float d_w,
-        const int8_t* __restrict__ xqs,
-        float d_x,
-        int g) {
-    const int ql_base = (g / 4) * 64 + (g % 2) * 32;
-    const int is_high = ((g % 4) >= 2);
-    const int qh_base = (g < 4) ? 0 : 32;
-    const int qh_shift = (g % 4) * 2;
 
-    float group_sum = 0.0f;
 
-    // 2 sub-blocks of 16 elements each
-    for (int sb = 0; sb < 2; sb++) {
-        const int8_t sc_val = sc[2 * g + sb];
-        const int sub_off = sb * 16;
-        int32_t sumi = 0;
-
-        // 4 dp4a operations per sub-block (16 elements / 4)
-        #pragma unroll
-        for (int d4 = 0; d4 < 4; d4++) {
-            const int k = sub_off + d4 * 4;
-
-            // Load 4 ql bytes and extract low/high nybbles
-            uint32_t ql4;
-            memcpy(&ql4, ql + ql_base + k, 4);
-            const uint32_t lo4 = is_high ? ((ql4 >> 4) & 0x0F0F0F0FU)
-                                         : (ql4 & 0x0F0F0F0FU);
-
-            // Load 4 qh bytes and extract 2-bit fields
-            uint32_t qh4;
-            memcpy(&qh4, qh + qh_base + k, 4);
-            const uint32_t hi4 = ((qh4 >> qh_shift) & 0x03030303U) << 4;
-
-            // Pack 4 Q6_K values as int8 and subtract bias (32) per byte
-            const int vi = __vsubss4(lo4 | hi4, 0x20202020U);
-
-            // Load 4 Q8_1 values as packed int32
-            int xi;
-            memcpy(&xi, xqs + k, 4);
-
-            sumi = __dp4a(vi, xi, sumi);
-        }
-
-        group_sum += d_w * d_x * (float)sc_val * (float)sumi;
-    }
-
-    return group_sum;
-}
+// ===========================================================================
+// dp4a GEMV template instantiations (consolidated from 33 hand-written kernels)
+// See gemv_dp4a_traits.cuh for DequantTraits<QType> and 6 template kernels.
+// ===========================================================================
 
 // ---------------------------------------------------------------------------
-// Multi-row Q6_K dp4a GEMV: each warp processes N_ROWS output rows
-// simultaneously, loading Q8_1 input once and reusing across all rows.
-// This increases work per thread by N_ROWS×, improving memory latency hiding.
+// Basic + Residual wrappers (10 functions → 5 types × 2 variants)
 // ---------------------------------------------------------------------------
-__device__ __forceinline__ float q6k_dp4a_group_preloaded(
-        const uint8_t* __restrict__ ql,
-        const uint8_t* __restrict__ qh,
-        const int8_t* __restrict__ sc,
-        float d_w,
-        const int* __restrict__ xqs_packed,  // [8] pre-loaded int32 from Q8_1
-        float d_x,
-        int g) {
-    const int ql_base = (g / 4) * 64 + (g % 2) * 32;
-    const int is_high = ((g % 4) >= 2);
-    const int qh_base = (g < 4) ? 0 : 32;
-    const int qh_shift = (g % 4) * 2;
-
-    float group_sum = 0.0f;
-
-    #pragma unroll
-    for (int sb = 0; sb < 2; sb++) {
-        const int8_t sc_val = sc[2 * g + sb];
-        const int sub_off = sb * 16;
-        int32_t sumi = 0;
-
-        #pragma unroll
-        for (int d4 = 0; d4 < 4; d4++) {
-            const int k = sub_off + d4 * 4;
-
-            uint32_t ql4;
-            memcpy(&ql4, ql + ql_base + k, 4);
-            const uint32_t lo4 = is_high ? ((ql4 >> 4) & 0x0F0F0F0FU)
-                                         : (ql4 & 0x0F0F0F0FU);
-            uint32_t qh4;
-            memcpy(&qh4, qh + qh_base + k, 4);
-            const uint32_t hi4 = ((qh4 >> qh_shift) & 0x03030303U) << 4;
-            const int vi = __vsubss4(lo4 | hi4, 0x20202020U);
-            sumi = __dp4a(vi, xqs_packed[sb * 4 + d4], sumi);
-        }
-        group_sum += d_w * d_x * (float)sc_val * (float)sumi;
-    }
-    return group_sum;
-}
-
-template<int N_ROWS, bool ADD_RESIDUAL>
-__global__ void gemv_q6k_q8_1_kernel(const uint8_t* __restrict__ W,
-                                      const block_q8_1* __restrict__ q8_1,
-                                      const float* __restrict__ d8,
-                                      half* y,
-                                      const half* residual,
-                                      int M, int K) {
-    const int warps_per_block = blockDim.x / 32;
-    const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row_base = (blockIdx.x * warps_per_block + warp_id) * N_ROWS;
-
-    const int blocks_per_row = K / 256;
-    const size_t row_bytes = (size_t)blocks_per_row * 210;
-    const int total_q8 = blocks_per_row * 8;
-
-    // Cache Q8_1 input in shared memory — eliminates 7/8 redundant L2 reads
-    // across the 8 warps in this block. Layout: qs[total_q8*8] int32 + d8[total_q8] float.
-    extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + total_q8 * 32);
-
-    for (int i = threadIdx.x; i < total_q8 * 8; i += blockDim.x) {
-        int blk = i >> 3, w = i & 7;
-        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
-        smem_qs[i] = val;
-    }
-    for (int i = threadIdx.x; i < total_q8; i += blockDim.x)
-        smem_d[i] = d8[i];
-    __syncthreads();
-
-    if (row_base >= M) return;
-
-    float sum[N_ROWS];
-    #pragma unroll
-    for (int r = 0; r < N_ROWS; r++) sum[r] = 0.0f;
-
-    for (int q8_idx = lane; q8_idx < total_q8; q8_idx += 32) {
-        const int q6k_blk = q8_idx / 8;
-        const int g = q8_idx % 8;
-
-        // Read Q8_1 data from shared memory (loaded once per block above)
-        int xqs_packed[8];
-        memcpy(xqs_packed, smem_qs + q8_idx * 8, 32);
-        float dq = smem_d[q8_idx];
-
-        #pragma unroll
-        for (int r = 0; r < N_ROWS; r++) {
-            const int row = row_base + r;
-            if (row >= M) break;
-            const uint8_t* bp = W + (size_t)row * row_bytes + q6k_blk * 210;
-            float d_w = __half2float(*(const half*)(bp + 208));
-            sum[r] += q6k_dp4a_group_preloaded(
-                bp, bp + 128, (const int8_t*)(bp + 192),
-                d_w, xqs_packed, dq, g);
-        }
-    }
-
-    #pragma unroll
-    for (int r = 0; r < N_ROWS; r++) {
-        for (int off = 16; off > 0; off >>= 1)
-            sum[r] += __shfl_down_sync(0xFFFFFFFF, sum[r], off);
-        if (lane == 0) {
-            const int row = row_base + r;
-            if (row < M) {
-                float s = sum[r];
-                if constexpr (ADD_RESIDUAL) s += __half2float(residual[row]);
-                y[row] = __float2half(s);
-            }
-        }
-    }
-}
-
-// Choose N_ROWS to balance work-per-warp vs grid occupancy.
-// More rows = better latency hiding but fewer blocks for parallelism.
-static void launch_gemv_q6k_q8_1(const uint8_t* W, const block_q8_1* q8_1, const float* d8,
-                                   half* y, const half* residual, bool add_residual,
-                                   int M, int K, cudaStream_t stream) {
-    const int threads_per_block = 256;
-    const int warps_per_block = threads_per_block / 32;
-    const int total_q8 = (K / 256) * 8;
-    const size_t smem_size = (size_t)total_q8 * 36;  // qs[total_q8*32] + d8[total_q8*4]
-
-    auto launch = [&](auto n_rows_tag) {
-        constexpr int NR = decltype(n_rows_tag)::value;
-        const int rows_per_block = warps_per_block * NR;
-        const int blocks = (M + rows_per_block - 1) / rows_per_block;
-        if (add_residual)
-            gemv_q6k_q8_1_kernel<NR, true><<<blocks, threads_per_block, smem_size, stream>>>(
-                W, q8_1, d8, y, residual, M, K);
-        else
-            gemv_q6k_q8_1_kernel<NR, false><<<blocks, threads_per_block, smem_size, stream>>>(
-                W, q8_1, d8, y, nullptr, M, K);
-    };
-
-    int nr2_blocks = (M + warps_per_block * 2 - 1) / (warps_per_block * 2);
-    if (nr2_blocks >= 256) launch(std::integral_constant<int, 2>{});
-    else                   launch(std::integral_constant<int, 1>{});
-}
 
 void gemv_q6k_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
                     half* y, int M, int K, cudaStream_t stream) {
-    launch_gemv_q6k_q8_1(static_cast<const uint8_t*>(W), q8_1, d8,
-                           y, nullptr, false, M, K, stream);
+    launch_gemv_dp4a<Q6_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
+                                    y, nullptr, false, M, K, stream);
 }
 
 void gemv_q6k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
                               half* y, const half* residual,
                               int M, int K, cudaStream_t stream) {
-    launch_gemv_q6k_q8_1(static_cast<const uint8_t*>(W), q8_1, d8,
-                           y, residual, true, M, K, stream);
-}
-
-// FP32-output Q6_K dp4a GEMV — for LM head (logits must be FP32 for sampling precision).
-// Uses multi-row (N_ROWS=2) for large vocab to improve latency hiding.
-template<int N_ROWS>
-__global__ void gemv_q6k_q8_1_fp32_kernel(const uint8_t* __restrict__ W,
-                                           const block_q8_1* __restrict__ q8_1,
-                                           const float* __restrict__ d8,
-                                           float* __restrict__ y,
-                                           int M, int K) {
-    const int warps_per_block = blockDim.x / 32;
-    const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row_base = (blockIdx.x * warps_per_block + warp_id) * N_ROWS;
-
-    const int blocks_per_row = K / 256;
-    const size_t row_bytes = (size_t)blocks_per_row * 210;
-    const int total_q8 = blocks_per_row * 8;
-
-    // Cache Q8_1 input in shared memory
-    extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + total_q8 * 32);
-
-    for (int i = threadIdx.x; i < total_q8 * 8; i += blockDim.x) {
-        int blk = i >> 3, w = i & 7;
-        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
-        smem_qs[i] = val;
-    }
-    for (int i = threadIdx.x; i < total_q8; i += blockDim.x)
-        smem_d[i] = d8[i];
-    __syncthreads();
-
-    if (row_base >= M) return;
-
-    float sum[N_ROWS];
-    #pragma unroll
-    for (int r = 0; r < N_ROWS; r++) sum[r] = 0.0f;
-
-    for (int q8_idx = lane; q8_idx < total_q8; q8_idx += 32) {
-        const int q6k_blk = q8_idx / 8;
-        const int g = q8_idx % 8;
-        int xqs_packed[8];
-        memcpy(xqs_packed, smem_qs + q8_idx * 8, 32);
-        float dq = smem_d[q8_idx];
-
-        #pragma unroll
-        for (int r = 0; r < N_ROWS; r++) {
-            const int row = row_base + r;
-            if (row >= M) break;
-            const uint8_t* bp = W + (size_t)row * row_bytes + q6k_blk * 210;
-            float d_w = __half2float(*(const half*)(bp + 208));
-            sum[r] += q6k_dp4a_group_preloaded(
-                bp, bp + 128, (const int8_t*)(bp + 192), d_w, xqs_packed, dq, g);
-        }
-    }
-
-    #pragma unroll
-    for (int r = 0; r < N_ROWS; r++) {
-        for (int off = 16; off > 0; off >>= 1)
-            sum[r] += __shfl_down_sync(0xFFFFFFFF, sum[r], off);
-        if (lane == 0 && row_base + r < M) y[row_base + r] = sum[r];
-    }
-}
-
-void gemv_q6k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
-                          float* y, int M, int K, cudaStream_t stream) {
-    const int threads_per_block = 256;
-    const int warps_per_block = threads_per_block / 32;
-    const int total_q8 = (K / 256) * 8;
-    const size_t smem_size = (size_t)total_q8 * 36;
-    const int rows_per_block = warps_per_block * 2;
-    const int blocks = (M + rows_per_block - 1) / rows_per_block;
-    gemv_q6k_q8_1_fp32_kernel<2><<<blocks, threads_per_block, smem_size, stream>>>(
-        static_cast<const uint8_t*>(W), q8_1, d8, y, M, K);
-}
-
-// FP32-output Q8_0 dp4a GEMV — for LM head.
-// Uses shared-memory Q8_1 caching + multi-row (N_ROWS=2).
-template<int N_ROWS>
-__global__ void gemv_q8_0_q8_1_fp32_kernel(const uint8_t* __restrict__ W,
-                                            const block_q8_1* __restrict__ q8_1,
-                                            const float* __restrict__ d8,
-                                            float* __restrict__ y,
-                                            int M, int K) {
-    const int warps_per_block = blockDim.x / 32;
-    const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row_base = (blockIdx.x * warps_per_block + warp_id) * N_ROWS;
-
-    const int blocks_per_row = K / 32;
-    const size_t row_bytes = (size_t)blocks_per_row * 34;
-
-    // Cache Q8_1 input in shared memory
-    extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + blocks_per_row * 32);
-
-    for (int i = threadIdx.x; i < blocks_per_row * 8; i += blockDim.x) {
-        int blk = i >> 3, w = i & 7;
-        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
-        smem_qs[i] = val;
-    }
-    for (int i = threadIdx.x; i < blocks_per_row; i += blockDim.x)
-        smem_d[i] = d8[i];
-    __syncthreads();
-
-    if (row_base >= M) return;
-
-    float sum[N_ROWS];
-    #pragma unroll
-    for (int r = 0; r < N_ROWS; r++) sum[r] = 0.0f;
-
-    for (int b = lane; b < blocks_per_row; b += 32) {
-        int xi[8];
-        memcpy(xi, smem_qs + b * 8, 32);
-        float dq = smem_d[b];
-
-        #pragma unroll
-        for (int r = 0; r < N_ROWS; r++) {
-            const int row = row_base + r;
-            if (row >= M) break;
-
-            const uint8_t* bp = W + (size_t)row * row_bytes + b * 34;
-            half d_w_h;
-            memcpy(&d_w_h, bp, sizeof(half));
-            float d_w = __half2float(d_w_h);
-            int wi[8];
-            memcpy(wi, bp + 2, 32);
-
-            int32_t sumi = 0;
-            sumi = __dp4a(wi[0], xi[0], sumi);
-            sumi = __dp4a(wi[1], xi[1], sumi);
-            sumi = __dp4a(wi[2], xi[2], sumi);
-            sumi = __dp4a(wi[3], xi[3], sumi);
-            sumi = __dp4a(wi[4], xi[4], sumi);
-            sumi = __dp4a(wi[5], xi[5], sumi);
-            sumi = __dp4a(wi[6], xi[6], sumi);
-            sumi = __dp4a(wi[7], xi[7], sumi);
-
-            sum[r] += d_w * dq * (float)sumi;
-        }
-    }
-
-    #pragma unroll
-    for (int r = 0; r < N_ROWS; r++) {
-        for (int off = 16; off > 0; off >>= 1)
-            sum[r] += __shfl_down_sync(0xFFFFFFFF, sum[r], off);
-        if (lane == 0 && row_base + r < M) y[row_base + r] = sum[r];
-    }
-}
-
-void gemv_q8_0_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
-                           float* y, int M, int K, cudaStream_t stream) {
-    const int threads_per_block = 256;
-    const int warps_per_block = threads_per_block / 32;
-    const int blocks_per_row = K / 32;
-    const size_t smem_size = (size_t)blocks_per_row * 36;
-    const int rows_per_block = warps_per_block * 2;
-    const int blocks = (M + rows_per_block - 1) / rows_per_block;
-    gemv_q8_0_q8_1_fp32_kernel<2><<<blocks, threads_per_block, smem_size, stream>>>(
-        static_cast<const uint8_t*>(W), q8_1, d8, y, M, K);
-}
-
-// ---------------------------------------------------------------------------
-// dp4a Q8_0 × Q8_1 GEMV kernel
-//
-// Q8_0 block = 34 bytes for 32 elements: d[2] + qs[32].
-// Both weight and input are INT8, so dp4a is a natural fit.
-// Each warp handles one row. Each thread processes one Q8_0 block per iteration,
-// using dp4a to compute the 32-element dot product in 8 dp4a instructions.
-// ---------------------------------------------------------------------------
-// Multi-row Q8_0 dp4a GEMV: each warp processes N_ROWS simultaneously.
-// Uses shared-memory Q8_1 caching to eliminate redundant L2 reads across warps.
-template<int N_ROWS, bool ADD_RESIDUAL>
-__global__ void gemv_q8_0_q8_1_kernel(const uint8_t* __restrict__ W,
-                                       const block_q8_1* __restrict__ q8_1,
-                                       const float* __restrict__ d8,
-                                       half* y,
-                                       const half* residual,
-                                       int M, int K) {
-    const int warps_per_block = blockDim.x / 32;
-    const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row_base = (blockIdx.x * warps_per_block + warp_id) * N_ROWS;
-
-    const int blocks_per_row = K / 32;
-    const size_t row_bytes = (size_t)blocks_per_row * 34;
-
-    // Cache Q8_1 input in shared memory
-    extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + blocks_per_row * 32);
-
-    for (int i = threadIdx.x; i < blocks_per_row * 8; i += blockDim.x) {
-        int blk = i >> 3, w = i & 7;
-        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
-        smem_qs[i] = val;
-    }
-    for (int i = threadIdx.x; i < blocks_per_row; i += blockDim.x)
-        smem_d[i] = d8[i];
-    __syncthreads();
-
-    if (row_base >= M) return;
-
-    float sum[N_ROWS];
-    #pragma unroll
-    for (int r = 0; r < N_ROWS; r++) sum[r] = 0.0f;
-
-    for (int b = lane; b < blocks_per_row; b += 32) {
-        int xi[8];
-        memcpy(xi, smem_qs + b * 8, 32);
-        float dq = smem_d[b];
-
-        #pragma unroll
-        for (int r = 0; r < N_ROWS; r++) {
-            const int row = row_base + r;
-            if (row >= M) break;
-
-            const uint8_t* bp = W + (size_t)row * row_bytes + b * 34;
-            half d_w_h;
-            memcpy(&d_w_h, bp, sizeof(half));
-            float d_w = __half2float(d_w_h);
-            int wi[8];
-            memcpy(wi, bp + 2, 32);
-
-            int32_t sumi = 0;
-            sumi = __dp4a(wi[0], xi[0], sumi);
-            sumi = __dp4a(wi[1], xi[1], sumi);
-            sumi = __dp4a(wi[2], xi[2], sumi);
-            sumi = __dp4a(wi[3], xi[3], sumi);
-            sumi = __dp4a(wi[4], xi[4], sumi);
-            sumi = __dp4a(wi[5], xi[5], sumi);
-            sumi = __dp4a(wi[6], xi[6], sumi);
-            sumi = __dp4a(wi[7], xi[7], sumi);
-
-            sum[r] += d_w * dq * (float)sumi;
-        }
-    }
-
-    #pragma unroll
-    for (int r = 0; r < N_ROWS; r++) {
-        for (int off = 16; off > 0; off >>= 1)
-            sum[r] += __shfl_down_sync(0xFFFFFFFF, sum[r], off);
-        if (lane == 0) {
-            const int row = row_base + r;
-            if (row < M) {
-                float s = sum[r];
-                if constexpr (ADD_RESIDUAL) s += __half2float(residual[row]);
-                y[row] = __float2half(s);
-            }
-        }
-    }
-}
-
-static void launch_gemv_q8_0_q8_1(const uint8_t* W, const block_q8_1* q8_1, const float* d8,
-                                    half* y, const half* residual, bool add_residual,
-                                    int M, int K, cudaStream_t stream) {
-    const int threads_per_block = 256;
-    const int warps_per_block = threads_per_block / 32;
-    const int blocks_per_row = K / 32;
-    const size_t smem_size = (size_t)blocks_per_row * 36;  // qs[bpr*32] + d8[bpr*4]
-
-    auto launch = [&](auto n_rows_tag) {
-        constexpr int NR = decltype(n_rows_tag)::value;
-        const int rows_per_block = warps_per_block * NR;
-        const int blocks = (M + rows_per_block - 1) / rows_per_block;
-        if (add_residual)
-            gemv_q8_0_q8_1_kernel<NR, true><<<blocks, threads_per_block, smem_size, stream>>>(
-                W, q8_1, d8, y, residual, M, K);
-        else
-            gemv_q8_0_q8_1_kernel<NR, false><<<blocks, threads_per_block, smem_size, stream>>>(
-                W, q8_1, d8, y, nullptr, M, K);
-    };
-
-    if (M >= 1024) launch(std::integral_constant<int, 2>{});
-    else           launch(std::integral_constant<int, 1>{});
+    launch_gemv_dp4a<Q6_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
+                                    y, residual, true, M, K, stream);
 }
 
 void gemv_q8_0_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
                      half* y, int M, int K, cudaStream_t stream) {
-    launch_gemv_q8_0_q8_1(static_cast<const uint8_t*>(W), q8_1, d8,
-                            y, nullptr, false, M, K, stream);
+    launch_gemv_dp4a<Q8_0_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
+                                    y, nullptr, false, M, K, stream);
 }
 
 void gemv_q8_0_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
                                half* y, const half* residual,
                                int M, int K, cudaStream_t stream) {
-    launch_gemv_q8_0_q8_1(static_cast<const uint8_t*>(W), q8_1, d8,
-                            y, residual, true, M, K, stream);
+    launch_gemv_dp4a<Q8_0_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
+                                    y, residual, true, M, K, stream);
+}
+
+void gemv_q4_0_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
+                     half* y, int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a<Q4_0_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
+                                    y, nullptr, false, M, K, stream);
+}
+
+void gemv_q4_0_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
+                               half* y, const half* residual,
+                               int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a<Q4_0_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
+                                    y, residual, true, M, K, stream);
+}
+
+void gemv_q4_k_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
+                      half* y, int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a<Q4_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
+                                    y, nullptr, false, M, K, stream);
+}
+
+void gemv_q4_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
+                                half* y, const half* residual,
+                                int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a<Q4_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
+                                    y, residual, true, M, K, stream);
+}
+
+void gemv_q5_k_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
+                      half* y, int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a<Q5_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
+                                    y, nullptr, false, M, K, stream);
+}
+
+void gemv_q5_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
+                                half* y, const half* residual,
+                                int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a<Q5_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
+                                    y, residual, true, M, K, stream);
 }
 
 // ---------------------------------------------------------------------------
-// Fused QKV GEMV: single kernel computes Q, K, V projections.
-// Grid: ceil((q_rows + k_rows + v_rows) / warps_per_block) blocks.
-// Each warp determines which projection it belongs to based on its global row.
-// The pre-quantized Q8_1 input is shared — read once, used for all 3 projections.
+// Inline-quant wrappers: FP16 input → Q8_1 in smem → dp4a GEMV (4 functions)
 // ---------------------------------------------------------------------------
 
-template<int N_ROWS>
-__global__ void gemv_qkv_fused_q6k_q8_1_kernel(
-        const uint8_t* __restrict__ W_q,
-        const uint8_t* __restrict__ W_k,
-        const uint8_t* __restrict__ W_v,
-        const block_q8_1* __restrict__ q8_1,
-        const float* __restrict__ d8,
-        half* __restrict__ y_q,
-        half* __restrict__ y_k,
-        half* __restrict__ y_v,
-        int q_rows, int k_rows, int v_rows, int K) {
-    const int warps_per_block = blockDim.x / 32;
-    const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row_base = (blockIdx.x * warps_per_block + warp_id) * N_ROWS;
-    const int total_rows = q_rows + k_rows + v_rows;
-
-    const int blocks_per_row = K / 256;
-    const size_t row_bytes = (size_t)blocks_per_row * 210;
-    const int total_q8 = blocks_per_row * 8;
-
-    // Cache Q8_1 input in shared memory
-    extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + total_q8 * 32);
-
-    for (int i = threadIdx.x; i < total_q8 * 8; i += blockDim.x) {
-        int blk = i >> 3, w = i & 7;
-        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
-        smem_qs[i] = val;
-    }
-    for (int i = threadIdx.x; i < total_q8; i += blockDim.x)
-        smem_d[i] = d8[i];
-    __syncthreads();
-
-    if (row_base >= total_rows) return;
-
-    float sum[N_ROWS];
-    #pragma unroll
-    for (int r = 0; r < N_ROWS; r++) sum[r] = 0.0f;
-
-    for (int q8_idx = lane; q8_idx < total_q8; q8_idx += 32) {
-        const int q6k_blk = q8_idx / 8;
-        const int g = q8_idx % 8;
-
-        int xqs_packed[8];
-        memcpy(xqs_packed, smem_qs + q8_idx * 8, 32);
-        float dq = smem_d[q8_idx];
-
-        #pragma unroll
-        for (int r = 0; r < N_ROWS; r++) {
-            const int global_row = row_base + r;
-            if (global_row >= total_rows) break;
-
-            const uint8_t* W;
-            int local_row;
-            if (global_row < q_rows) {
-                local_row = global_row;
-                W = W_q;
-            } else if (global_row < q_rows + k_rows) {
-                local_row = global_row - q_rows;
-                W = W_k;
-            } else {
-                local_row = global_row - q_rows - k_rows;
-                W = W_v;
-            }
-
-            const uint8_t* bp = W + (size_t)local_row * row_bytes + q6k_blk * 210;
-            float d_w = __half2float(*(const half*)(bp + 208));
-            sum[r] += q6k_dp4a_group_preloaded(
-                bp, bp + 128, (const int8_t*)(bp + 192), d_w, xqs_packed, dq, g);
-        }
-    }
-
-    #pragma unroll
-    for (int r = 0; r < N_ROWS; r++) {
-        for (int off = 16; off > 0; off >>= 1)
-            sum[r] += __shfl_down_sync(0xFFFFFFFF, sum[r], off);
-        if (lane == 0) {
-            const int global_row = row_base + r;
-            if (global_row >= total_rows) break;
-            half* y;
-            int local_row;
-            if (global_row < q_rows) {
-                local_row = global_row;
-                y = y_q;
-            } else if (global_row < q_rows + k_rows) {
-                local_row = global_row - q_rows;
-                y = y_k;
-            } else {
-                local_row = global_row - q_rows - k_rows;
-                y = y_v;
-            }
-            y[local_row] = __float2half(sum[r]);
-        }
-    }
+void gemv_q6k_q8_1_inline_quant(const void* W, const half* x_fp16,
+                                  half* y, const half* residual,
+                                  int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a_inline_quant<Q6_K_Traits>(
+        static_cast<const uint8_t*>(W), x_fp16, y, residual,
+        residual != nullptr, M, K, stream);
 }
+
+void gemv_q8_0_q8_1_inline_quant(const void* W, const half* x_fp16,
+                                   half* y, const half* residual,
+                                   int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a_inline_quant<Q8_0_Traits>(
+        static_cast<const uint8_t*>(W), x_fp16, y, residual,
+        residual != nullptr, M, K, stream);
+}
+
+void gemv_q4_k_q8_1_inline_quant(const void* W, const half* x_fp16,
+                                    half* y, const half* residual,
+                                    int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a_inline_quant<Q4_K_Traits>(
+        static_cast<const uint8_t*>(W), x_fp16, y, residual,
+        residual != nullptr, M, K, stream);
+}
+
+void gemv_q5_k_q8_1_inline_quant(const void* W, const half* x_fp16,
+                                    half* y, const half* residual,
+                                    int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a_inline_quant<Q5_K_Traits>(
+        static_cast<const uint8_t*>(W), x_fp16, y, residual,
+        residual != nullptr, M, K, stream);
+}
+
+// ---------------------------------------------------------------------------
+// FP32 output wrappers (5 functions)
+// ---------------------------------------------------------------------------
+
+void gemv_q6k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
+                          float* y, int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a_fp32<Q6_K_Traits>(static_cast<const uint8_t*>(W),
+                                         q8_1, d8, y, M, K, stream);
+}
+
+void gemv_q8_0_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
+                           float* y, int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a_fp32<Q8_0_Traits>(static_cast<const uint8_t*>(W),
+                                         q8_1, d8, y, M, K, stream);
+}
+
+void gemv_q4_0_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
+                           float* y, int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a_fp32<Q4_0_Traits>(static_cast<const uint8_t*>(W),
+                                         q8_1, d8, y, M, K, stream);
+}
+
+void gemv_q4_k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
+                            float* y, int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a_fp32<Q4_K_Traits>(static_cast<const uint8_t*>(W),
+                                         q8_1, d8, y, M, K, stream);
+}
+
+void gemv_q5_k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
+                            float* y, int M, int K, cudaStream_t stream) {
+    launch_gemv_dp4a_fp32<Q5_K_Traits>(static_cast<const uint8_t*>(W),
+                                         q8_1, d8, y, M, K, stream);
+}
+
+// ---------------------------------------------------------------------------
+// QKV fused wrappers (5 functions)
+// ---------------------------------------------------------------------------
 
 void gemv_qkv_fused_q6k_q8_1(const void* W_q, const void* W_k, const void* W_v,
                                const block_q8_1* q8_1, const float* d8,
                                half* y_q, half* y_k, half* y_v,
                                int q_rows, int k_rows, int v_rows, int K,
                                cudaStream_t stream) {
-    const int threads_per_block = 256;
-    const int warps_per_block = threads_per_block / 32;
-    const int total = q_rows + k_rows + v_rows;
-    const int total_q8 = (K / 256) * 8;
-    const size_t smem = (size_t)total_q8 * 36;
-
-    int nr2_blocks = (total + warps_per_block * 2 - 1) / (warps_per_block * 2);
-    if (nr2_blocks >= 256) {
-        gemv_qkv_fused_q6k_q8_1_kernel<2><<<nr2_blocks, threads_per_block, smem, stream>>>(
-            static_cast<const uint8_t*>(W_q),
-            static_cast<const uint8_t*>(W_k),
-            static_cast<const uint8_t*>(W_v),
-            q8_1, d8, y_q, y_k, y_v,
-            q_rows, k_rows, v_rows, K);
-    } else {
-        int blocks = (total + warps_per_block - 1) / warps_per_block;
-        gemv_qkv_fused_q6k_q8_1_kernel<1><<<blocks, threads_per_block, smem, stream>>>(
-            static_cast<const uint8_t*>(W_q),
-            static_cast<const uint8_t*>(W_k),
-            static_cast<const uint8_t*>(W_v),
-            q8_1, d8, y_q, y_k, y_v,
-            q_rows, k_rows, v_rows, K);
-    }
-}
-
-__global__ void gemv_qkv_fused_q8_0_q8_1_kernel(
-        const uint8_t* __restrict__ W_q,
-        const uint8_t* __restrict__ W_k,
-        const uint8_t* __restrict__ W_v,
-        const block_q8_1* __restrict__ q8_1,
-        const float* __restrict__ d8,
-        half* __restrict__ y_q,
-        half* __restrict__ y_k,
-        half* __restrict__ y_v,
-        int q_rows, int k_rows, int v_rows, int K) {
-    const int warps_per_block = blockDim.x / 32;
-    const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int global_row = blockIdx.x * warps_per_block + warp_id;
-    const int total_rows = q_rows + k_rows + v_rows;
-
-    const int blocks_per_row = K / 32;
-    const size_t row_bytes = (size_t)blocks_per_row * 34;
-
-    // Cache Q8_1 input in shared memory
-    extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + blocks_per_row * 32);
-
-    for (int i = threadIdx.x; i < blocks_per_row * 8; i += blockDim.x) {
-        int blk = i >> 3, w = i & 7;
-        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
-        smem_qs[i] = val;
-    }
-    for (int i = threadIdx.x; i < blocks_per_row; i += blockDim.x)
-        smem_d[i] = d8[i];
-    __syncthreads();
-
-    if (global_row >= total_rows) return;
-
-    const uint8_t* W;
-    half* y;
-    int local_row;
-
-    if (global_row < q_rows) {
-        local_row = global_row;
-        y = y_q;
-    } else if (global_row < q_rows + k_rows) {
-        local_row = global_row - q_rows;
-        y = y_k;
-    } else {
-        local_row = global_row - q_rows - k_rows;
-        y = y_v;
-    }
-
-    if (global_row < q_rows) W = W_q + (size_t)local_row * row_bytes;
-    else if (global_row < q_rows + k_rows) W = W_k + (size_t)local_row * row_bytes;
-    else W = W_v + (size_t)local_row * row_bytes;
-
-    float sum = 0.0f;
-
-    for (int b = lane; b < blocks_per_row; b += 32) {
-        const uint8_t* bp = W + b * 34;
-        half d_w_h;
-        memcpy(&d_w_h, bp, sizeof(half));
-        float d_w = __half2float(d_w_h);
-        int wi[8];
-        memcpy(wi, bp + 2, 32);
-        int xi[8];
-        memcpy(xi, smem_qs + b * 8, 32);
-
-        int32_t sumi = 0;
-        sumi = __dp4a(wi[0], xi[0], sumi);
-        sumi = __dp4a(wi[1], xi[1], sumi);
-        sumi = __dp4a(wi[2], xi[2], sumi);
-        sumi = __dp4a(wi[3], xi[3], sumi);
-        sumi = __dp4a(wi[4], xi[4], sumi);
-        sumi = __dp4a(wi[5], xi[5], sumi);
-        sumi = __dp4a(wi[6], xi[6], sumi);
-        sumi = __dp4a(wi[7], xi[7], sumi);
-
-        sum += d_w * smem_d[b] * (float)sumi;
-    }
-
-    for (int off = 16; off > 0; off >>= 1)
-        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
-
-    if (lane == 0) y[local_row] = __float2half(sum);
+    launch_gemv_dp4a_qkv<Q6_K_Traits>(
+        static_cast<const uint8_t*>(W_q), static_cast<const uint8_t*>(W_k),
+        static_cast<const uint8_t*>(W_v), q8_1, d8, y_q, y_k, y_v,
+        q_rows, k_rows, v_rows, K, stream);
 }
 
 void gemv_qkv_fused_q8_0_q8_1(const void* W_q, const void* W_k, const void* W_v,
@@ -2143,389 +1614,48 @@ void gemv_qkv_fused_q8_0_q8_1(const void* W_q, const void* W_k, const void* W_v,
                                 half* y_q, half* y_k, half* y_v,
                                 int q_rows, int k_rows, int v_rows, int K,
                                 cudaStream_t stream) {
-    const int threads_per_block = 256;
-    const int warps_per_block = threads_per_block / 32;
-    const int total = q_rows + k_rows + v_rows;
-    const int blocks = (total + warps_per_block - 1) / warps_per_block;
-    const int bpr = K / 32;
-    const size_t smem = (size_t)bpr * 36;
-    gemv_qkv_fused_q8_0_q8_1_kernel<<<blocks, threads_per_block, smem, stream>>>(
-        static_cast<const uint8_t*>(W_q),
-        static_cast<const uint8_t*>(W_k),
-        static_cast<const uint8_t*>(W_v),
-        q8_1, d8, y_q, y_k, y_v,
-        q_rows, k_rows, v_rows, K);
+    launch_gemv_dp4a_qkv<Q8_0_Traits>(
+        static_cast<const uint8_t*>(W_q), static_cast<const uint8_t*>(W_k),
+        static_cast<const uint8_t*>(W_v), q8_1, d8, y_q, y_k, y_v,
+        q_rows, k_rows, v_rows, K, stream);
+}
+
+void gemv_qkv_fused_q4_0_q8_1(const void* W_q, const void* W_k, const void* W_v,
+                                const block_q8_1* q8_1, const float* d8,
+                                half* y_q, half* y_k, half* y_v,
+                                int q_rows, int k_rows, int v_rows, int K,
+                                cudaStream_t stream) {
+    launch_gemv_dp4a_qkv<Q4_0_Traits>(
+        static_cast<const uint8_t*>(W_q), static_cast<const uint8_t*>(W_k),
+        static_cast<const uint8_t*>(W_v), q8_1, d8, y_q, y_k, y_v,
+        q_rows, k_rows, v_rows, K, stream);
+}
+
+void gemv_qkv_fused_q4_k_q8_1(const void* W_q, const void* W_k, const void* W_v,
+                                const block_q8_1* q8_1, const float* d8,
+                                half* y_q, half* y_k, half* y_v,
+                                int q_rows, int k_rows, int v_rows, int K,
+                                cudaStream_t stream) {
+    launch_gemv_dp4a_qkv<Q4_K_Traits>(
+        static_cast<const uint8_t*>(W_q), static_cast<const uint8_t*>(W_k),
+        static_cast<const uint8_t*>(W_v), q8_1, d8, y_q, y_k, y_v,
+        q_rows, k_rows, v_rows, K, stream);
+}
+
+void gemv_qkv_fused_q5_k_q8_1(const void* W_q, const void* W_k, const void* W_v,
+                                const block_q8_1* q8_1, const float* d8,
+                                half* y_q, half* y_k, half* y_v,
+                                int q_rows, int k_rows, int v_rows, int K,
+                                cudaStream_t stream) {
+    launch_gemv_dp4a_qkv<Q5_K_Traits>(
+        static_cast<const uint8_t*>(W_q), static_cast<const uint8_t*>(W_k),
+        static_cast<const uint8_t*>(W_v), q8_1, d8, y_q, y_k, y_v,
+        q_rows, k_rows, v_rows, K, stream);
 }
 
 // ---------------------------------------------------------------------------
-// dp4a Q4_0 × Q8_1 GEMV kernels
-//
-// Q4_0 block = 18 bytes for 32 elements: d[2] (FP16 scale) + qs[16] (packed nibbles).
-// Each byte holds two 4-bit unsigned values (low nibble first, range [0,15]).
-// Actual weight = d * (nibble - 8).
-//
-// dp4a approach:
-//   Unpack 2 bytes → 4 unsigned int8 nibbles → 1 dp4a operand.
-//   16 nibble bytes → 8 dp4a operands (matching 32 elements).
-//   Correction: subtract 8 * d_w * q8_sum per block (for unsigned→signed offset).
+// Gate+Up fused dispatcher (1 function, dispatches by qtype)
 // ---------------------------------------------------------------------------
-
-// Helper: unpack 2 packed nibble bytes into an int32 with 4 nibble values.
-// byte0 = (n0 | n1<<4), byte1 = (n2 | n3<<4)
-// Returns int32 with 4 bytes = {n0, n1, n2, n3} (each 0-15, fits in signed int8).
-// Returns int (not unsigned int) to match __dp4a(int, int, int) overload.
-__device__ __forceinline__ int unpack_nibbles_2(uint8_t b0, uint8_t b1) {
-    int r;
-    int8_t vals[4] = { static_cast<int8_t>(b0 & 0xF), static_cast<int8_t>(b0 >> 4),
-                       static_cast<int8_t>(b1 & 0xF), static_cast<int8_t>(b1 >> 4) };
-    memcpy(&r, vals, 4);
-    return r;
-}
-
-template<int N_ROWS, bool ADD_RESIDUAL>
-__global__ void gemv_q4_0_q8_1_kernel(const uint8_t* __restrict__ W,
-                                       const block_q8_1* __restrict__ q8_1,
-                                       const float* __restrict__ d8,
-                                       half* y,
-                                       const half* residual,
-                                       int M, int K) {
-    const int warps_per_block = blockDim.x / 32;
-    const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row_base = (blockIdx.x * warps_per_block + warp_id) * N_ROWS;
-
-    const int blocks_per_row = K / 32;
-    const size_t row_bytes = (size_t)blocks_per_row * 18;  // 18 bytes per Q4_0 block
-
-    // Cache Q8_1 input in shared memory (including s field for Q4_0 bias correction)
-    extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + blocks_per_row * 32);
-    half* smem_s  = (half*)(smem_q8 + blocks_per_row * 36);
-
-    for (int i = threadIdx.x; i < blocks_per_row * 8; i += blockDim.x) {
-        int blk = i >> 3, w = i & 7;
-        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
-        smem_qs[i] = val;
-    }
-    for (int i = threadIdx.x; i < blocks_per_row; i += blockDim.x) {
-        smem_d[i] = d8[i];
-        smem_s[i] = q8_1[i].s;
-    }
-    __syncthreads();
-
-    if (row_base >= M) return;
-
-    float sum[N_ROWS];
-    #pragma unroll
-    for (int r = 0; r < N_ROWS; r++) sum[r] = 0.0f;
-
-    for (int b = lane; b < blocks_per_row; b += 32) {
-        int xi[8];
-        memcpy(xi, smem_qs + b * 8, 32);
-        float dq = smem_d[b];
-        float q8_sum = __half2float(smem_s[b]);
-
-        #pragma unroll
-        for (int r = 0; r < N_ROWS; r++) {
-            const int row = row_base + r;
-            if (row >= M) break;
-
-            const uint8_t* bp = W + (size_t)row * row_bytes + b * 18;
-            half d_w_h;
-            memcpy(&d_w_h, bp, sizeof(half));
-            float d_w = __half2float(d_w_h);
-            const uint8_t* qs = bp + 2;
-
-            int ni0 = unpack_nibbles_2(qs[0],  qs[1]);
-            int ni1 = unpack_nibbles_2(qs[2],  qs[3]);
-            int ni2 = unpack_nibbles_2(qs[4],  qs[5]);
-            int ni3 = unpack_nibbles_2(qs[6],  qs[7]);
-            int ni4 = unpack_nibbles_2(qs[8],  qs[9]);
-            int ni5 = unpack_nibbles_2(qs[10], qs[11]);
-            int ni6 = unpack_nibbles_2(qs[12], qs[13]);
-            int ni7 = unpack_nibbles_2(qs[14], qs[15]);
-
-            int32_t sumi = 0;
-            sumi = __dp4a(ni0, xi[0], sumi);
-            sumi = __dp4a(ni1, xi[1], sumi);
-            sumi = __dp4a(ni2, xi[2], sumi);
-            sumi = __dp4a(ni3, xi[3], sumi);
-            sumi = __dp4a(ni4, xi[4], sumi);
-            sumi = __dp4a(ni5, xi[5], sumi);
-            sumi = __dp4a(ni6, xi[6], sumi);
-            sumi = __dp4a(ni7, xi[7], sumi);
-
-            sum[r] += d_w * (dq * (float)sumi - 8.0f * q8_sum);
-        }
-    }
-
-    #pragma unroll
-    for (int r = 0; r < N_ROWS; r++) {
-        for (int off = 16; off > 0; off >>= 1)
-            sum[r] += __shfl_down_sync(0xFFFFFFFF, sum[r], off);
-        if (lane == 0) {
-            const int row = row_base + r;
-            if (row < M) {
-                float s = sum[r];
-                if constexpr (ADD_RESIDUAL) s += __half2float(residual[row]);
-                y[row] = __float2half(s);
-            }
-        }
-    }
-}
-
-static void launch_gemv_q4_0_q8_1(const uint8_t* W, const block_q8_1* q8_1, const float* d8,
-                                    half* y, const half* residual, bool add_residual,
-                                    int M, int K, cudaStream_t stream) {
-    const int threads_per_block = 256;
-    const int warps_per_block = threads_per_block / 32;
-    const int blocks_per_row = K / 32;
-    // Q4_0 also caches s field: qs[bpr*32] + d8[bpr*4] + s[bpr*2]
-    const size_t smem_size = (size_t)blocks_per_row * 38;
-
-    auto launch = [&](auto n_rows_tag) {
-        constexpr int NR = decltype(n_rows_tag)::value;
-        const int rows_per_block = warps_per_block * NR;
-        const int blocks = (M + rows_per_block - 1) / rows_per_block;
-        if (add_residual)
-            gemv_q4_0_q8_1_kernel<NR, true><<<blocks, threads_per_block, smem_size, stream>>>(
-                W, q8_1, d8, y, residual, M, K);
-        else
-            gemv_q4_0_q8_1_kernel<NR, false><<<blocks, threads_per_block, smem_size, stream>>>(
-                W, q8_1, d8, y, nullptr, M, K);
-    };
-
-    if (M >= 1024) launch(std::integral_constant<int, 2>{});
-    else           launch(std::integral_constant<int, 1>{});
-}
-
-void gemv_q4_0_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
-                     half* y, int M, int K, cudaStream_t stream) {
-    launch_gemv_q4_0_q8_1(static_cast<const uint8_t*>(W), q8_1, d8,
-                            y, nullptr, false, M, K, stream);
-}
-
-void gemv_q4_0_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
-                               half* y, const half* residual,
-                               int M, int K, cudaStream_t stream) {
-    launch_gemv_q4_0_q8_1(static_cast<const uint8_t*>(W), q8_1, d8,
-                            y, residual, true, M, K, stream);
-}
-
-// ---------------------------------------------------------------------------
-// Fused gate+up dense GEMV: both projections in a single kernel launch.
-// blockIdx.y selects gate (0) or up (1). Reads Q8_1 input once for both.
-// ---------------------------------------------------------------------------
-
-__global__ void gemv_gate_up_fused_q6k_q8_1_kernel(
-        const uint8_t* __restrict__ gate_weights,
-        const uint8_t* __restrict__ up_weights,
-        const block_q8_1* __restrict__ q8_1,
-        const float* __restrict__ d8,
-        half* __restrict__ y_gate,
-        half* __restrict__ y_up,
-        int M, int K) {
-    const int warps_per_block = blockDim.x / 32;
-    const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row     = blockIdx.x * warps_per_block + warp_id;
-
-    const int blocks_per_row = K / 256;
-    const size_t row_bytes = (size_t)blocks_per_row * 210;
-    const int total_q8 = blocks_per_row * 8;
-
-    // Cache Q8_1 input in shared memory
-    extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + total_q8 * 32);
-
-    for (int i = threadIdx.x; i < total_q8 * 8; i += blockDim.x) {
-        int blk = i >> 3, w = i & 7;
-        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
-        smem_qs[i] = val;
-    }
-    for (int i = threadIdx.x; i < total_q8; i += blockDim.x)
-        smem_d[i] = d8[i];
-    __syncthreads();
-
-    if (row >= M) return;
-
-    const bool is_up = (blockIdx.y == 1);
-    const uint8_t* W = is_up ? up_weights : gate_weights;
-    half* y = is_up ? y_up : y_gate;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
-    float sum = 0.0f;
-
-    for (int q8_idx = lane; q8_idx < total_q8; q8_idx += 32) {
-        const int q6k_blk = q8_idx / 8;
-        const int g = q8_idx % 8;
-        int xqs_packed[8];
-        memcpy(xqs_packed, smem_qs + q8_idx * 8, 32);
-        float dq = smem_d[q8_idx];
-
-        const uint8_t* bp = W_row + q6k_blk * 210;
-        float d_w = __half2float(*(const half*)(bp + 208));
-        sum += q6k_dp4a_group_preloaded(
-            bp, bp + 128, (const int8_t*)(bp + 192),
-            d_w, xqs_packed, dq, g);
-    }
-
-    for (int off = 16; off > 0; off >>= 1)
-        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
-
-    if (lane == 0) y[row] = __float2half(sum);
-}
-
-__global__ void gemv_gate_up_fused_q8_0_q8_1_kernel(
-        const uint8_t* __restrict__ gate_weights,
-        const uint8_t* __restrict__ up_weights,
-        const block_q8_1* __restrict__ q8_1,
-        const float* __restrict__ d8,
-        half* __restrict__ y_gate,
-        half* __restrict__ y_up,
-        int M, int K) {
-    const int warps_per_block = blockDim.x / 32;
-    const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row     = blockIdx.x * warps_per_block + warp_id;
-
-    const int blocks_per_row = K / 32;
-    const size_t row_bytes = (size_t)blocks_per_row * 34;
-
-    // Cache Q8_1 input in shared memory
-    extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + blocks_per_row * 32);
-
-    for (int i = threadIdx.x; i < blocks_per_row * 8; i += blockDim.x) {
-        int blk = i >> 3, w = i & 7;
-        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
-        smem_qs[i] = val;
-    }
-    for (int i = threadIdx.x; i < blocks_per_row; i += blockDim.x)
-        smem_d[i] = d8[i];
-    __syncthreads();
-
-    if (row >= M) return;
-
-    const bool is_up = (blockIdx.y == 1);
-    const uint8_t* W = is_up ? up_weights : gate_weights;
-    half* y = is_up ? y_up : y_gate;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
-    float sum = 0.0f;
-
-    for (int b = lane; b < blocks_per_row; b += 32) {
-        int xi[8];
-        memcpy(xi, smem_qs + b * 8, 32);
-        float dq = smem_d[b];
-
-        const uint8_t* bp = W_row + b * 34;
-        half d_w_h;
-        memcpy(&d_w_h, bp, sizeof(half));
-        float d_w = __half2float(d_w_h);
-        int wi[8];
-        memcpy(wi, bp + 2, 32);
-
-        int32_t sumi = 0;
-        sumi = __dp4a(wi[0], xi[0], sumi);
-        sumi = __dp4a(wi[1], xi[1], sumi);
-        sumi = __dp4a(wi[2], xi[2], sumi);
-        sumi = __dp4a(wi[3], xi[3], sumi);
-        sumi = __dp4a(wi[4], xi[4], sumi);
-        sumi = __dp4a(wi[5], xi[5], sumi);
-        sumi = __dp4a(wi[6], xi[6], sumi);
-        sumi = __dp4a(wi[7], xi[7], sumi);
-
-        sum += d_w * dq * (float)sumi;
-    }
-
-    for (int off = 16; off > 0; off >>= 1)
-        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
-
-    if (lane == 0) y[row] = __float2half(sum);
-}
-
-__global__ void gemv_gate_up_fused_q4_0_q8_1_kernel(
-        const uint8_t* __restrict__ gate_weights,
-        const uint8_t* __restrict__ up_weights,
-        const block_q8_1* __restrict__ q8_1,
-        const float* __restrict__ d8,
-        half* __restrict__ y_gate,
-        half* __restrict__ y_up,
-        int M, int K) {
-    const int warps_per_block = blockDim.x / 32;
-    const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row     = blockIdx.x * warps_per_block + warp_id;
-
-    const int blocks_per_row = K / 32;
-    const size_t row_bytes = (size_t)blocks_per_row * 18;
-
-    // Cache Q8_1 input in shared memory (including s field for Q4_0)
-    extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + blocks_per_row * 32);
-    half* smem_s  = (half*)(smem_q8 + blocks_per_row * 36);
-
-    for (int i = threadIdx.x; i < blocks_per_row * 8; i += blockDim.x) {
-        int blk = i >> 3, w = i & 7;
-        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
-        smem_qs[i] = val;
-    }
-    for (int i = threadIdx.x; i < blocks_per_row; i += blockDim.x) {
-        smem_d[i] = d8[i];
-        smem_s[i] = q8_1[i].s;
-    }
-    __syncthreads();
-
-    if (row >= M) return;
-
-    const bool is_up = (blockIdx.y == 1);
-    const uint8_t* W = is_up ? up_weights : gate_weights;
-    half* y = is_up ? y_up : y_gate;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
-    float sum = 0.0f;
-
-    for (int b = lane; b < blocks_per_row; b += 32) {
-        int xi[8];
-        memcpy(xi, smem_qs + b * 8, 32);
-        float dq = smem_d[b];
-        float q8_sum = __half2float(smem_s[b]);
-
-        const uint8_t* bp = W_row + b * 18;
-        half d_w_h;
-        memcpy(&d_w_h, bp, sizeof(half));
-        float d_w = __half2float(d_w_h);
-        const uint8_t* qs = bp + 2;
-
-        int ni0 = unpack_nibbles_2(qs[0],  qs[1]);
-        int ni1 = unpack_nibbles_2(qs[2],  qs[3]);
-        int ni2 = unpack_nibbles_2(qs[4],  qs[5]);
-        int ni3 = unpack_nibbles_2(qs[6],  qs[7]);
-        int ni4 = unpack_nibbles_2(qs[8],  qs[9]);
-        int ni5 = unpack_nibbles_2(qs[10], qs[11]);
-        int ni6 = unpack_nibbles_2(qs[12], qs[13]);
-        int ni7 = unpack_nibbles_2(qs[14], qs[15]);
-
-        int32_t sumi = 0;
-        sumi = __dp4a(ni0, xi[0], sumi);
-        sumi = __dp4a(ni1, xi[1], sumi);
-        sumi = __dp4a(ni2, xi[2], sumi);
-        sumi = __dp4a(ni3, xi[3], sumi);
-        sumi = __dp4a(ni4, xi[4], sumi);
-        sumi = __dp4a(ni5, xi[5], sumi);
-        sumi = __dp4a(ni6, xi[6], sumi);
-        sumi = __dp4a(ni7, xi[7], sumi);
-
-        sum += d_w * (dq * (float)sumi - 8.0f * q8_sum);
-    }
-
-    for (int off = 16; off > 0; off >>= 1)
-        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
-
-    if (lane == 0) y[row] = __float2half(sum);
-}
 
 void gemv_gate_up_fused(const void* gate_weights, const void* up_weights,
                          const block_q8_1* q8_1, const float* d8,
@@ -2534,388 +1664,61 @@ void gemv_gate_up_fused(const void* gate_weights, const void* up_weights,
                          cudaStream_t stream) {
     const int threads_per_block = 256;
     const int warps_per_block = threads_per_block / 32;
-    const int blocks = (M + warps_per_block - 1) / warps_per_block;
-    dim3 grid(blocks, 2);  // y=0: gate, y=1: up
 
-    if (qtype == GGMLQuantType::Q6_K) {
-        const int total_q8 = (K / 256) * 8;
-        const size_t smem = (size_t)total_q8 * 36;
-        gemv_gate_up_fused_q6k_q8_1_kernel<<<grid, threads_per_block, smem, stream>>>(
-            static_cast<const uint8_t*>(gate_weights),
-            static_cast<const uint8_t*>(up_weights),
-            q8_1, d8, y_gate, y_up, M, K);
-    } else if (qtype == GGMLQuantType::Q8_0) {
-        const int bpr = K / 32;
-        const size_t smem = (size_t)bpr * 36;
-        gemv_gate_up_fused_q8_0_q8_1_kernel<<<grid, threads_per_block, smem, stream>>>(
-            static_cast<const uint8_t*>(gate_weights),
-            static_cast<const uint8_t*>(up_weights),
-            q8_1, d8, y_gate, y_up, M, K);
-    } else if (qtype == GGMLQuantType::Q4_0) {
-        const int bpr = K / 32;
-        const size_t smem = (size_t)bpr * 38;  // +2 for s field
-        gemv_gate_up_fused_q4_0_q8_1_kernel<<<grid, threads_per_block, smem, stream>>>(
-            static_cast<const uint8_t*>(gate_weights),
-            static_cast<const uint8_t*>(up_weights),
-            q8_1, d8, y_gate, y_up, M, K);
-    }
+    const auto* gw = static_cast<const uint8_t*>(gate_weights);
+    const auto* uw = static_cast<const uint8_t*>(up_weights);
+
+    // Unified dispatch: K-par check (quant-type-aware) + row-par NR selection.
+    // K-par check compares against NR=1 (max occupancy baseline), with tie-breaking
+    // determined by QT::kPreferKpar (complex dequant types prefer K-par on ties).
+
+#define LAUNCH_KPAR_GU(QT) \
+        pdl::launch(gemv_dp4a_kpar_gate_up_kernel<QT>, \
+            dim3(M, 2), dim3(128), size_t(0), stream, \
+            gw, uw, q8_1, d8, y_gate, y_up, M, K)
+
+#define LAUNCH_GATE_UP_NR(QT, NR) do { \
+        const int rows_per_block = warps_per_block * NR; \
+        const int blocks = (M + rows_per_block - 1) / rows_per_block; \
+        dim3 grid(blocks, 2); \
+        const int total_q8 = (K / QT::kBlockElems) * QT::kQ8PerWeight; \
+        const size_t smem = (size_t)total_q8 * (40 + QT::kSmemExtra); \
+        pdl::launch(gemv_dp4a_gate_up_kernel<QT, NR>, \
+            grid, dim3(threads_per_block), smem, stream, \
+            gw, uw, q8_1, d8, y_gate, y_up, M, K); \
+    } while(0)
+
+#define DISPATCH_GATE_UP(QT) do { \
+        int nr1 = (M + warps_per_block - 1) / warps_per_block; \
+        if (kpar_is_better<QT::kPreferKpar>(M, nr1)) { LAUNCH_KPAR_GU(QT); break; } \
+        constexpr int MAX_NR = QT::kMaxNRows; \
+        if constexpr (MAX_NR >= 4) { \
+            int nr4_blocks = (M + warps_per_block * 4 - 1) / (warps_per_block * 4); \
+            if (nr4_blocks >= 128) { LAUNCH_GATE_UP_NR(QT, 4); break; } \
+        } \
+        if constexpr (MAX_NR >= 2) { \
+            int nr2_blocks = (M + warps_per_block * 2 - 1) / (warps_per_block * 2); \
+            if (nr2_blocks >= 64) { LAUNCH_GATE_UP_NR(QT, 2); break; } \
+        } \
+        LAUNCH_GATE_UP_NR(QT, 1); \
+    } while(0)
+
+    if      (qtype == GGMLQuantType::Q6_K) { DISPATCH_GATE_UP(Q6_K_Traits); }
+    else if (qtype == GGMLQuantType::Q8_0) { DISPATCH_GATE_UP(Q8_0_Traits); }
+    else if (qtype == GGMLQuantType::Q4_0) { DISPATCH_GATE_UP(Q4_0_Traits); }
+    else if (qtype == GGMLQuantType::Q4_K) { DISPATCH_GATE_UP(Q4_K_Traits); }
+    else if (qtype == GGMLQuantType::Q5_K) { DISPATCH_GATE_UP(Q5_K_Traits); }
+
+#undef DISPATCH_GATE_UP
+#undef LAUNCH_GATE_UP_NR
+#undef LAUNCH_KPAR_GU
 }
 
-// Q4_0 × Q8_1 with FP32 output (for LM head)
-__global__ void gemv_q4_0_q8_1_fp32_kernel(const uint8_t* __restrict__ W,
-                                            const block_q8_1* __restrict__ q8_1,
-                                            const float* __restrict__ d8,
-                                            float* __restrict__ y,
-                                            int M, int K) {
-    const int warps_per_block = blockDim.x / 32;
-    const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row     = blockIdx.x * warps_per_block + warp_id;
-
-    const int blocks_per_row = K / 32;
-    const size_t row_bytes = (size_t)blocks_per_row * 18;
-
-    // Cache Q8_1 input in shared memory (including s field for Q4_0)
-    extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + blocks_per_row * 32);
-    half* smem_s  = (half*)(smem_q8 + blocks_per_row * 36);
-
-    for (int i = threadIdx.x; i < blocks_per_row * 8; i += blockDim.x) {
-        int blk = i >> 3, w = i & 7;
-        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
-        smem_qs[i] = val;
-    }
-    for (int i = threadIdx.x; i < blocks_per_row; i += blockDim.x) {
-        smem_d[i] = d8[i];
-        smem_s[i] = q8_1[i].s;
-    }
-    __syncthreads();
-
-    if (row >= M) return;
-
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
-    float sum = 0.0f;
-
-    for (int b = lane; b < blocks_per_row; b += 32) {
-        const uint8_t* bp = W_row + b * 18;
-        half d_w_h;
-        memcpy(&d_w_h, bp, sizeof(half));
-        float d_w = __half2float(d_w_h);
-        const uint8_t* qs = bp + 2;
-        float q8_sum = __half2float(smem_s[b]);
-
-        int ni0 = unpack_nibbles_2(qs[0],  qs[1]);
-        int ni1 = unpack_nibbles_2(qs[2],  qs[3]);
-        int ni2 = unpack_nibbles_2(qs[4],  qs[5]);
-        int ni3 = unpack_nibbles_2(qs[6],  qs[7]);
-        int ni4 = unpack_nibbles_2(qs[8],  qs[9]);
-        int ni5 = unpack_nibbles_2(qs[10], qs[11]);
-        int ni6 = unpack_nibbles_2(qs[12], qs[13]);
-        int ni7 = unpack_nibbles_2(qs[14], qs[15]);
-
-        int xi[8];
-        memcpy(xi, smem_qs + b * 8, 32);
-
-        int32_t sumi = 0;
-        sumi = __dp4a(ni0, xi[0], sumi);
-        sumi = __dp4a(ni1, xi[1], sumi);
-        sumi = __dp4a(ni2, xi[2], sumi);
-        sumi = __dp4a(ni3, xi[3], sumi);
-        sumi = __dp4a(ni4, xi[4], sumi);
-        sumi = __dp4a(ni5, xi[5], sumi);
-        sumi = __dp4a(ni6, xi[6], sumi);
-        sumi = __dp4a(ni7, xi[7], sumi);
-
-        sum += d_w * (smem_d[b] * (float)sumi - 8.0f * q8_sum);
-    }
-
-    for (int off = 16; off > 0; off >>= 1)
-        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
-
-    if (lane == 0) y[row] = sum;
-}
-
-void gemv_q4_0_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
-                           float* y, int M, int K, cudaStream_t stream) {
-    const int threads_per_block = 256;
-    const int warps_per_block = threads_per_block / 32;
-    const int blocks = (M + warps_per_block - 1) / warps_per_block;
-    const int bpr = K / 32;
-    const size_t smem = (size_t)bpr * 38;
-    gemv_q4_0_q8_1_fp32_kernel<<<blocks, threads_per_block, smem, stream>>>(
-        static_cast<const uint8_t*>(W), q8_1, d8, y, M, K);
-}
-
-// Q4_0 fused QKV GEMV
-__global__ void gemv_qkv_fused_q4_0_q8_1_kernel(
-        const uint8_t* __restrict__ W_q,
-        const uint8_t* __restrict__ W_k,
-        const uint8_t* __restrict__ W_v,
-        const block_q8_1* __restrict__ q8_1,
-        const float* __restrict__ d8,
-        half* __restrict__ y_q,
-        half* __restrict__ y_k,
-        half* __restrict__ y_v,
-        int q_rows, int k_rows, int v_rows, int K) {
-    const int warps_per_block = blockDim.x / 32;
-    const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int global_row = blockIdx.x * warps_per_block + warp_id;
-    const int total_rows = q_rows + k_rows + v_rows;
-
-    const int blocks_per_row = K / 32;
-    const size_t row_bytes = (size_t)blocks_per_row * 18;
-
-    // Cache Q8_1 input in shared memory (including s field for Q4_0)
-    extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + blocks_per_row * 32);
-    half* smem_s  = (half*)(smem_q8 + blocks_per_row * 36);
-
-    for (int i = threadIdx.x; i < blocks_per_row * 8; i += blockDim.x) {
-        int blk = i >> 3, w = i & 7;
-        int val; memcpy(&val, q8_1[blk].qs + w * 4, 4);
-        smem_qs[i] = val;
-    }
-    for (int i = threadIdx.x; i < blocks_per_row; i += blockDim.x) {
-        smem_d[i] = d8[i];
-        smem_s[i] = q8_1[i].s;
-    }
-    __syncthreads();
-
-    if (global_row >= total_rows) return;
-
-    const uint8_t* W;
-    half* y;
-    int local_row;
-
-    if (global_row < q_rows) {
-        local_row = global_row;
-        y = y_q;
-    } else if (global_row < q_rows + k_rows) {
-        local_row = global_row - q_rows;
-        y = y_k;
-    } else {
-        local_row = global_row - q_rows - k_rows;
-        y = y_v;
-    }
-
-    if (global_row < q_rows) W = W_q + (size_t)local_row * row_bytes;
-    else if (global_row < q_rows + k_rows) W = W_k + (size_t)local_row * row_bytes;
-    else W = W_v + (size_t)local_row * row_bytes;
-
-    float sum = 0.0f;
-
-    for (int b = lane; b < blocks_per_row; b += 32) {
-        const uint8_t* bp = W + b * 18;
-        half d_w_h;
-        memcpy(&d_w_h, bp, sizeof(half));
-        float d_w = __half2float(d_w_h);
-        const uint8_t* qs = bp + 2;
-        float q8_sum = __half2float(smem_s[b]);
-
-        int ni0 = unpack_nibbles_2(qs[0],  qs[1]);
-        int ni1 = unpack_nibbles_2(qs[2],  qs[3]);
-        int ni2 = unpack_nibbles_2(qs[4],  qs[5]);
-        int ni3 = unpack_nibbles_2(qs[6],  qs[7]);
-        int ni4 = unpack_nibbles_2(qs[8],  qs[9]);
-        int ni5 = unpack_nibbles_2(qs[10], qs[11]);
-        int ni6 = unpack_nibbles_2(qs[12], qs[13]);
-        int ni7 = unpack_nibbles_2(qs[14], qs[15]);
-
-        int xi[8];
-        memcpy(xi, smem_qs + b * 8, 32);
-
-        int32_t sumi = 0;
-        sumi = __dp4a(ni0, xi[0], sumi);
-        sumi = __dp4a(ni1, xi[1], sumi);
-        sumi = __dp4a(ni2, xi[2], sumi);
-        sumi = __dp4a(ni3, xi[3], sumi);
-        sumi = __dp4a(ni4, xi[4], sumi);
-        sumi = __dp4a(ni5, xi[5], sumi);
-        sumi = __dp4a(ni6, xi[6], sumi);
-        sumi = __dp4a(ni7, xi[7], sumi);
-
-        sum += d_w * (smem_d[b] * (float)sumi - 8.0f * q8_sum);
-    }
-
-    for (int off = 16; off > 0; off >>= 1)
-        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
-
-    if (lane == 0) y[local_row] = __float2half(sum);
-}
-
-void gemv_qkv_fused_q4_0_q8_1(const void* W_q, const void* W_k, const void* W_v,
-                                const block_q8_1* q8_1, const float* d8,
-                                half* y_q, half* y_k, half* y_v,
-                                int q_rows, int k_rows, int v_rows, int K,
-                                cudaStream_t stream) {
-    const int threads_per_block = 256;
-    const int warps_per_block = threads_per_block / 32;
-    const int total = q_rows + k_rows + v_rows;
-    const int blocks = (total + warps_per_block - 1) / warps_per_block;
-    const int bpr = K / 32;
-    const size_t smem = (size_t)bpr * 38;
-    gemv_qkv_fused_q4_0_q8_1_kernel<<<blocks, threads_per_block, smem, stream>>>(
-        static_cast<const uint8_t*>(W_q),
-        static_cast<const uint8_t*>(W_k),
-        static_cast<const uint8_t*>(W_v),
-        q8_1, d8, y_q, y_k, y_v,
-        q_rows, k_rows, v_rows, K);
-}
 
 // ---------------------------------------------------------------------------
-// dp4a MoE decode GEMV variants (Q6_K × Q8_1 and Q8_0 × Q8_1)
+// Fused gate+up MoE GEMV (scalar FP16 variants — NOT dp4a, kept as-is)
 // ---------------------------------------------------------------------------
 
-__global__ void gemv_q6k_q8_1_moe_decode_kernel(
-        const uint8_t* __restrict__ packed_weights,
-        const int32_t* __restrict__ expert_indices,
-        const block_q8_1* __restrict__ q8_1,
-        const float* __restrict__ d8,
-        half* __restrict__ y,
-        int rows, int K,
-        size_t expert_stride_bytes,
-        int q8_1_stride,
-        int d8_stride,
-        int blocks_per_expert) {
-    const int warps_per_block = blockDim.x / 32;
-    const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-
-    const int expert_slot = blockIdx.x / blocks_per_expert;
-    const int local_block = blockIdx.x % blocks_per_expert;
-    const int row = local_block * warps_per_block + warp_id;
-
-    if (row >= rows) return;
-
-    const int expert_id = expert_indices[expert_slot];
-    const uint8_t* W = packed_weights + (size_t)expert_id * expert_stride_bytes;
-
-    const int blocks_per_row = K / 256;
-    const size_t row_bytes = (size_t)blocks_per_row * 210;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
-
-    const block_q8_1* x_q8 = q8_1 + expert_slot * q8_1_stride;
-    const float* x_d8 = d8 + expert_slot * d8_stride;
-    const int total_q8 = blocks_per_row * 8;
-    float sum = 0.0f;
-
-    for (int q8_idx = lane; q8_idx < total_q8; q8_idx += 32) {
-        const int q6k_blk = q8_idx / 8;
-        const int g = q8_idx % 8;
-        int xqs_packed[8];
-        memcpy(xqs_packed, x_q8[q8_idx].qs, 32);
-        float dq = x_d8[q8_idx];
-
-        const uint8_t* bp = W_row + q6k_blk * 210;
-        float d_w = __half2float(*(const half*)(bp + 208));
-        sum += q6k_dp4a_group_preloaded(
-            bp, bp + 128, (const int8_t*)(bp + 192), d_w, xqs_packed, dq, g);
-    }
-
-    for (int off = 16; off > 0; off >>= 1)
-        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
-
-    if (lane == 0) y[expert_slot * rows + row] = __float2half(sum);
-}
-
-void gemv_q6k_q8_1_moe_decode(const void* packed_weights,
-                                const int32_t* expert_indices,
-                                const block_q8_1* q8_1, const float* d8,
-                                half* y, int rows, int K,
-                                size_t expert_stride_bytes,
-                                int q8_1_stride, int d8_stride, int top_k,
-                                cudaStream_t stream) {
-    const int threads_per_block = 256;
-    const int warps_per_block = threads_per_block / 32;
-    const int blocks_per_expert = (rows + warps_per_block - 1) / warps_per_block;
-    const int total_blocks = top_k * blocks_per_expert;
-    gemv_q6k_q8_1_moe_decode_kernel<<<total_blocks, threads_per_block, 0, stream>>>(
-        static_cast<const uint8_t*>(packed_weights),
-        expert_indices, q8_1, d8, y, rows, K,
-        expert_stride_bytes, q8_1_stride, d8_stride, blocks_per_expert);
-}
-
-__global__ void gemv_q8_0_q8_1_moe_decode_kernel(
-        const uint8_t* __restrict__ packed_weights,
-        const int32_t* __restrict__ expert_indices,
-        const block_q8_1* __restrict__ q8_1,
-        const float* __restrict__ d8,
-        half* __restrict__ y,
-        int rows, int K,
-        size_t expert_stride_bytes,
-        int q8_1_stride,
-        int d8_stride,
-        int blocks_per_expert) {
-    const int warps_per_block = blockDim.x / 32;
-    const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-
-    const int expert_slot = blockIdx.x / blocks_per_expert;
-    const int local_block = blockIdx.x % blocks_per_expert;
-    const int row = local_block * warps_per_block + warp_id;
-
-    if (row >= rows) return;
-
-    const int expert_id = expert_indices[expert_slot];
-    const uint8_t* W = packed_weights + (size_t)expert_id * expert_stride_bytes;
-
-    const int blocks_per_row = K / 32;
-    const size_t row_bytes = (size_t)blocks_per_row * 34;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
-
-    const block_q8_1* x_q8 = q8_1 + expert_slot * q8_1_stride;
-    const float* x_d8 = d8 + expert_slot * d8_stride;
-    float sum = 0.0f;
-
-    for (int b = lane; b < blocks_per_row; b += 32) {
-        const uint8_t* bp = W_row + b * 34;
-        // Q8_0 blocks are 34 bytes (not 4-aligned), use memcpy for safe access
-        half d_w_h;
-        memcpy(&d_w_h, bp, sizeof(half));
-        float d_w = __half2float(d_w_h);
-        int wi[8];
-        memcpy(wi, bp + 2, 32);
-        int xi[8];
-        memcpy(xi, x_q8[b].qs, 32);
-
-        int32_t sumi = 0;
-        sumi = __dp4a(wi[0], xi[0], sumi);
-        sumi = __dp4a(wi[1], xi[1], sumi);
-        sumi = __dp4a(wi[2], xi[2], sumi);
-        sumi = __dp4a(wi[3], xi[3], sumi);
-        sumi = __dp4a(wi[4], xi[4], sumi);
-        sumi = __dp4a(wi[5], xi[5], sumi);
-        sumi = __dp4a(wi[6], xi[6], sumi);
-        sumi = __dp4a(wi[7], xi[7], sumi);
-
-        sum += d_w * x_d8[b] * (float)sumi;
-    }
-
-    for (int off = 16; off > 0; off >>= 1)
-        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
-
-    if (lane == 0) y[expert_slot * rows + row] = __float2half(sum);
-}
-
-void gemv_q8_0_q8_1_moe_decode(const void* packed_weights,
-                                 const int32_t* expert_indices,
-                                 const block_q8_1* q8_1, const float* d8,
-                                 half* y, int rows, int K,
-                                 size_t expert_stride_bytes,
-                                 int q8_1_stride, int d8_stride, int top_k,
-                                 cudaStream_t stream) {
-    const int threads_per_block = 256;
-    const int warps_per_block = threads_per_block / 32;
-    const int blocks_per_expert = (rows + warps_per_block - 1) / warps_per_block;
-    const int total_blocks = top_k * blocks_per_expert;
-    gemv_q8_0_q8_1_moe_decode_kernel<<<total_blocks, threads_per_block, 0, stream>>>(
-        static_cast<const uint8_t*>(packed_weights),
-        expert_indices, q8_1, d8, y, rows, K,
-        expert_stride_bytes, q8_1_stride, d8_stride, blocks_per_expert);
-}
 
 // ---------------------------------------------------------------------------
 // Fused gate+up MoE GEMV: computes both gate and up projections in a single
@@ -3089,67 +1892,65 @@ void gemv_q8_0_moe_gate_up_fused(
         gate_stride_bytes, up_stride_bytes, x_stride, blocks_per_expert);
 }
 
-// dp4a Q8_1 variants of fused gate+up
+// ---------------------------------------------------------------------------
+// dp4a MoE decode wrappers (4 functions)
+// ---------------------------------------------------------------------------
 
-__global__ void gemv_q6k_q8_1_moe_gate_up_fused_kernel(
-        const uint8_t* __restrict__ gate_weights,
-        const uint8_t* __restrict__ up_weights,
-        const int32_t* __restrict__ expert_indices,
-        const block_q8_1* __restrict__ q8_1,
-        const float* __restrict__ d8,
-        half* __restrict__ y_gate,
-        half* __restrict__ y_up,
-        int rows, int K,
-        size_t gate_stride_bytes,
-        size_t up_stride_bytes,
-        int q8_1_stride,
-        int d8_stride,
-        int blocks_per_expert) {
-    const int warps_per_block = blockDim.x / 32;
-    const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-
-    const int expert_slot = blockIdx.x / blocks_per_expert;
-    const int local_block = blockIdx.x % blocks_per_expert;
-    const int row = local_block * warps_per_block + warp_id;
-
-    if (row >= rows) return;
-
-    const bool is_up = (blockIdx.y == 1);
-    const uint8_t* packed = is_up ? up_weights : gate_weights;
-    size_t stride = is_up ? up_stride_bytes : gate_stride_bytes;
-    half* y = is_up ? y_up : y_gate;
-
-    const int expert_id = expert_indices[expert_slot];
-    const uint8_t* W = packed + (size_t)expert_id * stride;
-
-    const int blocks_per_row = K / 256;
-    const size_t row_bytes = (size_t)blocks_per_row * 210;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
-
-    const block_q8_1* x_q8 = q8_1 + expert_slot * q8_1_stride;
-    const float* x_d8 = d8 + expert_slot * d8_stride;
-    const int total_q8 = blocks_per_row * 8;
-    float sum = 0.0f;
-
-    for (int q8_idx = lane; q8_idx < total_q8; q8_idx += 32) {
-        const int q6k_blk = q8_idx / 8;
-        const int g = q8_idx % 8;
-        int xqs_packed[8];
-        memcpy(xqs_packed, x_q8[q8_idx].qs, 32);
-        float dq = x_d8[q8_idx];
-
-        const uint8_t* bp = W_row + q6k_blk * 210;
-        float d_w = __half2float(*(const half*)(bp + 208));
-        sum += q6k_dp4a_group_preloaded(
-            bp, bp + 128, (const int8_t*)(bp + 192), d_w, xqs_packed, dq, g);
-    }
-
-    for (int off = 16; off > 0; off >>= 1)
-        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
-
-    if (lane == 0) y[expert_slot * rows + row] = __float2half(sum);
+void gemv_q6k_q8_1_moe_decode(const void* packed_weights,
+                                const int32_t* expert_indices,
+                                const block_q8_1* q8_1, const float* d8,
+                                half* y, int rows, int K,
+                                size_t expert_stride_bytes,
+                                int q8_1_stride, int d8_stride, int top_k,
+                                cudaStream_t stream) {
+    launch_gemv_dp4a_moe_decode<Q6_K_Traits>(
+        static_cast<const uint8_t*>(packed_weights), expert_indices,
+        q8_1, d8, y, rows, K, expert_stride_bytes,
+        q8_1_stride, d8_stride, top_k, stream);
 }
+
+void gemv_q8_0_q8_1_moe_decode(const void* packed_weights,
+                                 const int32_t* expert_indices,
+                                 const block_q8_1* q8_1, const float* d8,
+                                 half* y, int rows, int K,
+                                 size_t expert_stride_bytes,
+                                 int q8_1_stride, int d8_stride, int top_k,
+                                 cudaStream_t stream) {
+    launch_gemv_dp4a_moe_decode<Q8_0_Traits>(
+        static_cast<const uint8_t*>(packed_weights), expert_indices,
+        q8_1, d8, y, rows, K, expert_stride_bytes,
+        q8_1_stride, d8_stride, top_k, stream);
+}
+
+void gemv_q4_k_q8_1_moe_decode(const void* packed_weights,
+                                 const int32_t* expert_indices,
+                                 const block_q8_1* q8_1, const float* d8,
+                                 half* y, int rows, int K,
+                                 size_t expert_stride_bytes,
+                                 int q8_1_stride, int d8_stride, int top_k,
+                                 cudaStream_t stream) {
+    launch_gemv_dp4a_moe_decode<Q4_K_Traits>(
+        static_cast<const uint8_t*>(packed_weights), expert_indices,
+        q8_1, d8, y, rows, K, expert_stride_bytes,
+        q8_1_stride, d8_stride, top_k, stream);
+}
+
+void gemv_q5_k_q8_1_moe_decode(const void* packed_weights,
+                                 const int32_t* expert_indices,
+                                 const block_q8_1* q8_1, const float* d8,
+                                 half* y, int rows, int K,
+                                 size_t expert_stride_bytes,
+                                 int q8_1_stride, int d8_stride, int top_k,
+                                 cudaStream_t stream) {
+    launch_gemv_dp4a_moe_decode<Q5_K_Traits>(
+        static_cast<const uint8_t*>(packed_weights), expert_indices,
+        q8_1, d8, y, rows, K, expert_stride_bytes,
+        q8_1_stride, d8_stride, top_k, stream);
+}
+
+// ---------------------------------------------------------------------------
+// dp4a MoE gate+up fused wrappers (4 functions)
+// ---------------------------------------------------------------------------
 
 void gemv_q6k_q8_1_moe_gate_up_fused(
         const void* gate_weights, const void* up_weights,
@@ -3160,86 +1961,12 @@ void gemv_q6k_q8_1_moe_gate_up_fused(
         size_t gate_stride_bytes, size_t up_stride_bytes,
         int q8_1_stride, int d8_stride, int top_k,
         cudaStream_t stream) {
-    const int threads_per_block = 256;
-    const int warps_per_block = threads_per_block / 32;
-    const int blocks_per_expert = (rows + warps_per_block - 1) / warps_per_block;
-    dim3 grid(top_k * blocks_per_expert, 2);
-    gemv_q6k_q8_1_moe_gate_up_fused_kernel<<<grid, threads_per_block, 0, stream>>>(
+    launch_gemv_dp4a_moe_gate_up<Q6_K_Traits>(
         static_cast<const uint8_t*>(gate_weights),
         static_cast<const uint8_t*>(up_weights),
         expert_indices, q8_1, d8, y_gate, y_up, rows, K,
         gate_stride_bytes, up_stride_bytes,
-        q8_1_stride, d8_stride, blocks_per_expert);
-}
-
-__global__ void gemv_q8_0_q8_1_moe_gate_up_fused_kernel(
-        const uint8_t* __restrict__ gate_weights,
-        const uint8_t* __restrict__ up_weights,
-        const int32_t* __restrict__ expert_indices,
-        const block_q8_1* __restrict__ q8_1,
-        const float* __restrict__ d8,
-        half* __restrict__ y_gate,
-        half* __restrict__ y_up,
-        int rows, int K,
-        size_t gate_stride_bytes,
-        size_t up_stride_bytes,
-        int q8_1_stride,
-        int d8_stride,
-        int blocks_per_expert) {
-    const int warps_per_block = blockDim.x / 32;
-    const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-
-    const int expert_slot = blockIdx.x / blocks_per_expert;
-    const int local_block = blockIdx.x % blocks_per_expert;
-    const int row = local_block * warps_per_block + warp_id;
-
-    if (row >= rows) return;
-
-    const bool is_up = (blockIdx.y == 1);
-    const uint8_t* packed = is_up ? up_weights : gate_weights;
-    size_t stride = is_up ? up_stride_bytes : gate_stride_bytes;
-    half* y = is_up ? y_up : y_gate;
-
-    const int expert_id = expert_indices[expert_slot];
-    const uint8_t* W = packed + (size_t)expert_id * stride;
-
-    const int blocks_per_row = K / 32;
-    const size_t row_bytes = (size_t)blocks_per_row * 34;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
-
-    const block_q8_1* x_q8 = q8_1 + expert_slot * q8_1_stride;
-    const float* x_d8 = d8 + expert_slot * d8_stride;
-    float sum = 0.0f;
-
-    for (int b = lane; b < blocks_per_row; b += 32) {
-        const uint8_t* bp = W_row + b * 34;
-        // Q8_0 blocks are 34 bytes (not 4-aligned), use memcpy for safe access
-        half d_w_h;
-        memcpy(&d_w_h, bp, sizeof(half));
-        float d_w = __half2float(d_w_h);
-        int wi[8];
-        memcpy(wi, bp + 2, 32);
-        int xi[8];
-        memcpy(xi, x_q8[b].qs, 32);
-
-        int32_t sumi = 0;
-        sumi = __dp4a(wi[0], xi[0], sumi);
-        sumi = __dp4a(wi[1], xi[1], sumi);
-        sumi = __dp4a(wi[2], xi[2], sumi);
-        sumi = __dp4a(wi[3], xi[3], sumi);
-        sumi = __dp4a(wi[4], xi[4], sumi);
-        sumi = __dp4a(wi[5], xi[5], sumi);
-        sumi = __dp4a(wi[6], xi[6], sumi);
-        sumi = __dp4a(wi[7], xi[7], sumi);
-
-        sum += d_w * x_d8[b] * (float)sumi;
-    }
-
-    for (int off = 16; off > 0; off >>= 1)
-        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
-
-    if (lane == 0) y[expert_slot * rows + row] = __float2half(sum);
+        q8_1_stride, d8_stride, top_k, stream);
 }
 
 void gemv_q8_0_q8_1_moe_gate_up_fused(
@@ -3251,17 +1978,49 @@ void gemv_q8_0_q8_1_moe_gate_up_fused(
         size_t gate_stride_bytes, size_t up_stride_bytes,
         int q8_1_stride, int d8_stride, int top_k,
         cudaStream_t stream) {
-    const int threads_per_block = 256;
-    const int warps_per_block = threads_per_block / 32;
-    const int blocks_per_expert = (rows + warps_per_block - 1) / warps_per_block;
-    dim3 grid(top_k * blocks_per_expert, 2);
-    gemv_q8_0_q8_1_moe_gate_up_fused_kernel<<<grid, threads_per_block, 0, stream>>>(
+    launch_gemv_dp4a_moe_gate_up<Q8_0_Traits>(
         static_cast<const uint8_t*>(gate_weights),
         static_cast<const uint8_t*>(up_weights),
         expert_indices, q8_1, d8, y_gate, y_up, rows, K,
         gate_stride_bytes, up_stride_bytes,
-        q8_1_stride, d8_stride, blocks_per_expert);
+        q8_1_stride, d8_stride, top_k, stream);
 }
+
+void gemv_q4_k_q8_1_moe_gate_up_fused(
+        const void* gate_weights, const void* up_weights,
+        const int32_t* expert_indices,
+        const block_q8_1* q8_1, const float* d8,
+        half* y_gate, half* y_up,
+        int rows, int K,
+        size_t gate_stride_bytes, size_t up_stride_bytes,
+        int q8_1_stride, int d8_stride, int top_k,
+        cudaStream_t stream) {
+    launch_gemv_dp4a_moe_gate_up<Q4_K_Traits>(
+        static_cast<const uint8_t*>(gate_weights),
+        static_cast<const uint8_t*>(up_weights),
+        expert_indices, q8_1, d8, y_gate, y_up, rows, K,
+        gate_stride_bytes, up_stride_bytes,
+        q8_1_stride, d8_stride, top_k, stream);
+}
+
+void gemv_q5_k_q8_1_moe_gate_up_fused(
+        const void* gate_weights, const void* up_weights,
+        const int32_t* expert_indices,
+        const block_q8_1* q8_1, const float* d8,
+        half* y_gate, half* y_up,
+        int rows, int K,
+        size_t gate_stride_bytes, size_t up_stride_bytes,
+        int q8_1_stride, int d8_stride, int top_k,
+        cudaStream_t stream) {
+    launch_gemv_dp4a_moe_gate_up<Q5_K_Traits>(
+        static_cast<const uint8_t*>(gate_weights),
+        static_cast<const uint8_t*>(up_weights),
+        expert_indices, q8_1, d8, y_gate, y_up, rows, K,
+        gate_stride_bytes, up_stride_bytes,
+        q8_1_stride, d8_stride, top_k, stream);
+}
+
+
 
 // ---------------------------------------------------------------------------
 // FP8 E4M3 GEMV
@@ -3366,6 +2125,78 @@ void gemm_pair_batched(const Tensor& input, const Tensor& weight_fused,
         fprintf(stderr, "imp::gemm_pair_batched: cublasGemmStridedBatchedEx failed (status %d)\n",
                 (int)st);
     }
+}
+
+// ---------------------------------------------------------------------------
+// PDL registration for all dp4a GEMV kernel template instantiations.
+// Called from GraphExecutor::init() when PDL is enabled.
+// ---------------------------------------------------------------------------
+void gemv_pdl_register() {
+    // Kernel #1: basic + residual
+    #define REG1(QT, NR) \
+        pdl::enable_kernel(gemv_dp4a_kernel<QT, NR, true>); \
+        pdl::enable_kernel(gemv_dp4a_kernel<QT, NR, false>)
+    REG1(Q6_K_Traits, 1); REG1(Q6_K_Traits, 2);
+    REG1(Q8_0_Traits, 1); REG1(Q8_0_Traits, 2); REG1(Q8_0_Traits, 4);
+    REG1(Q4_0_Traits, 1); REG1(Q4_0_Traits, 2); REG1(Q4_0_Traits, 4);
+    REG1(Q4_K_Traits, 1); REG1(Q4_K_Traits, 2); REG1(Q4_K_Traits, 4);
+    REG1(Q5_K_Traits, 1); REG1(Q5_K_Traits, 2); REG1(Q5_K_Traits, 4);
+    #undef REG1
+
+    // Kernel #2: FP32 output
+    #define REG2(QT, NR) pdl::enable_kernel(gemv_dp4a_fp32_kernel<QT, NR>)
+    REG2(Q6_K_Traits, 1); REG2(Q6_K_Traits, 2);
+    REG2(Q8_0_Traits, 1); REG2(Q8_0_Traits, 2); REG2(Q8_0_Traits, 4);
+    REG2(Q4_0_Traits, 1); REG2(Q4_0_Traits, 2); REG2(Q4_0_Traits, 4);
+    REG2(Q4_K_Traits, 1); REG2(Q4_K_Traits, 2); REG2(Q4_K_Traits, 4);
+    REG2(Q5_K_Traits, 1); REG2(Q5_K_Traits, 2); REG2(Q5_K_Traits, 4);
+    #undef REG2
+
+    // Kernel #3: QKV fused
+    #define REG3(QT, NR) pdl::enable_kernel(gemv_dp4a_qkv_kernel<QT, NR>)
+    REG3(Q6_K_Traits, 1); REG3(Q6_K_Traits, 2);
+    REG3(Q8_0_Traits, 1); REG3(Q8_0_Traits, 2); REG3(Q8_0_Traits, 4);
+    REG3(Q4_0_Traits, 1); REG3(Q4_0_Traits, 2); REG3(Q4_0_Traits, 4);
+    REG3(Q4_K_Traits, 1); REG3(Q4_K_Traits, 2); REG3(Q4_K_Traits, 4);
+    REG3(Q5_K_Traits, 1); REG3(Q5_K_Traits, 2); REG3(Q5_K_Traits, 4);
+    #undef REG3
+
+    // Kernel #4: gate+up fused
+    #define REG4(QT, NR) pdl::enable_kernel(gemv_dp4a_gate_up_kernel<QT, NR>)
+    REG4(Q6_K_Traits, 1); REG4(Q6_K_Traits, 2);
+    REG4(Q8_0_Traits, 1); REG4(Q8_0_Traits, 2); REG4(Q8_0_Traits, 4);
+    REG4(Q4_0_Traits, 1); REG4(Q4_0_Traits, 2); REG4(Q4_0_Traits, 4);
+    REG4(Q4_K_Traits, 1); REG4(Q4_K_Traits, 2); REG4(Q4_K_Traits, 4);
+    REG4(Q5_K_Traits, 1); REG4(Q5_K_Traits, 2); REG4(Q5_K_Traits, 4);
+    #undef REG4
+
+    // Kernels #5 and #6 (MoE decode/gate+up): NOT registered with PDL.
+    // MoE kernels are small (top_k=2, few blocks per expert) and launched
+    // frequently (23 MoE layers × 3 kernels = 69 per decode step on Nemotron).
+    // cudaLaunchKernelEx overhead outweighs PDL tail/head overlap benefit
+    // for these tiny kernels.
+
+    // K-parallel kernels (all types)
+    #define REG_KPAR(QT) \
+        pdl::enable_kernel(gemv_dp4a_kpar_kernel<QT, true>); \
+        pdl::enable_kernel(gemv_dp4a_kpar_kernel<QT, false>); \
+        pdl::enable_kernel(gemv_dp4a_kpar_fp32_kernel<QT>); \
+        pdl::enable_kernel(gemv_dp4a_kpar_qkv_kernel<QT>); \
+        pdl::enable_kernel(gemv_dp4a_kpar_gate_up_kernel<QT>)
+    REG_KPAR(Q6_K_Traits); REG_KPAR(Q8_0_Traits);
+    REG_KPAR(Q4_0_Traits); REG_KPAR(Q4_K_Traits); REG_KPAR(Q5_K_Traits);
+    #undef REG_KPAR
+
+    // Kernel #7: inline quant
+    #define REG7(QT, NR) \
+        pdl::enable_kernel(gemv_dp4a_inline_quant_kernel<QT, NR, true>); \
+        pdl::enable_kernel(gemv_dp4a_inline_quant_kernel<QT, NR, false>)
+    REG7(Q6_K_Traits, 1); REG7(Q6_K_Traits, 2);
+    REG7(Q8_0_Traits, 1); REG7(Q8_0_Traits, 2); REG7(Q8_0_Traits, 4);
+    REG7(Q4_0_Traits, 1); REG7(Q4_0_Traits, 2); REG7(Q4_0_Traits, 4);
+    REG7(Q4_K_Traits, 1); REG7(Q4_K_Traits, 2); REG7(Q4_K_Traits, 4);
+    REG7(Q5_K_Traits, 1); REG7(Q5_K_Traits, 2); REG7(Q5_K_Traits, 4);
+    #undef REG7
 }
 
 } // namespace imp

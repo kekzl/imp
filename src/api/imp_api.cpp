@@ -68,6 +68,7 @@ ImpConfig imp_config_default(void) {
     config.gpu_layers = -1;             // all on GPU
     config.ssm_state_dtype = IMP_DTYPE_FP32;
     config.vram_budget_mb = 0;          // use all available
+    config.prefill_chunk_size = 0;      // no chunking
     config.num_cpu_threads = 0;         // auto
     return config;
 }
@@ -81,6 +82,10 @@ ImpGenerateParams imp_generate_params_default(void) {
     params.top_k = 0;
     params.max_tokens = 256;
     params.seed = -1;
+    params.min_p = 0.0f;
+    params.repetition_penalty = 1.0f;
+    params.frequency_penalty = 0.0f;
+    params.presence_penalty = 0.0f;
     params.apply_chat_template = 1;
     params.ignore_eos = 0;
     return params;
@@ -233,6 +238,7 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
         ecfg.temperature = config->temperature;
         ecfg.top_p = config->top_p;
         ecfg.top_k = config->top_k;
+        ecfg.prefill_chunk_size = config->prefill_chunk_size;
 
         // Create and initialize the engine
         auto engine = std::make_unique<imp::Engine>();
@@ -303,6 +309,10 @@ ImpError imp_generate_streaming(ImpContext ctx, const char* prompt,
         req->top_p = params->top_p;
         req->top_k = params->top_k;
         req->seed = params->seed;
+        req->min_p = params->min_p;
+        req->repetition_penalty = params->repetition_penalty;
+        req->frequency_penalty = params->frequency_penalty;
+        req->presence_penalty = params->presence_penalty;
         req->status = imp::RequestStatus::PENDING;
 
         ctx->engine->add_request(req);
@@ -368,7 +378,11 @@ ImpError imp_generate(ImpContext ctx, const char* prompt,
             params->top_p,
             params->top_k,
             params->seed,
-            params->apply_chat_template != 0
+            params->apply_chat_template != 0,
+            params->min_p,
+            params->repetition_penalty,
+            params->frequency_penalty,
+            params->presence_penalty
         );
 
         // Copy result to output buffer
@@ -489,8 +503,10 @@ ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
         // Store as the active request for subsequent decode_step calls
         ctx->active_request = req;
 
-        // Run one step -- this will process the prefill
-        ctx->engine->step();
+        // Run steps until prefill completes (may take multiple steps with chunked prefill)
+        do {
+            ctx->engine->step();
+        } while (req->status == imp::RequestStatus::PREFILLING);
 
         // Verify the request was prefilled
         if (req->status == imp::RequestStatus::CANCELLED) {
@@ -537,6 +553,10 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params,
         req->seed = params->seed;
         req->max_tokens = params->max_tokens;
         req->ignore_eos = (params->ignore_eos != 0);
+        req->min_p = params->min_p;
+        req->repetition_penalty = params->repetition_penalty;
+        req->frequency_penalty = params->frequency_penalty;
+        req->presence_penalty = params->presence_penalty;
 
         // Record output size before the step
         size_t prev_output_size = req->output_tokens.size();

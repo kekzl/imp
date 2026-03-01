@@ -128,6 +128,10 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
     int max_tokens = body.value("max_tokens", state.default_max_tokens);
     int seed = body.value("seed", -1);
     bool stream = body.value("stream", false);
+    float min_p = body.value("min_p", 0.0f);
+    float repetition_penalty = body.value("repetition_penalty", 1.0f);
+    float frequency_penalty = body.value("frequency_penalty", 0.0f);
+    float presence_penalty = body.value("presence_penalty", 0.0f);
 
     // Convert JSON messages to ChatMessage vector
     std::vector<imp::ChatMessage> chat_msgs;
@@ -203,6 +207,10 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
     params.top_k = top_k;
     params.max_tokens = max_tokens;
     params.seed = seed;
+    params.min_p = min_p;
+    params.repetition_penalty = repetition_penalty;
+    params.frequency_penalty = frequency_penalty;
+    params.presence_penalty = presence_penalty;
 
     std::string comp_id = make_completion_id(state);
     int64_t created = unix_timestamp();

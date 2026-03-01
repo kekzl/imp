@@ -43,6 +43,9 @@ struct EngineConfig {
     // Layer offloading: number of layers to keep on GPU (-1 = all on GPU, 0 = all offloaded)
     int gpu_layers = -1;
 
+    // Chunked prefill
+    int prefill_chunk_size = 0;  // 0 = no chunking
+
     // Speculative decoding
     bool enable_speculative = false;
     std::string draft_model_path;
@@ -63,7 +66,11 @@ public:
     std::string generate(const std::string& prompt, int max_tokens,
                          float temperature = 1.0f, float top_p = 1.0f,
                          int top_k = 0, int seed = -1,
-                         bool apply_chat_template = true);
+                         bool apply_chat_template = true,
+                         float min_p = 0.0f,
+                         float repetition_penalty = 1.0f,
+                         float frequency_penalty = 0.0f,
+                         float presence_penalty = 0.0f);
 
     void add_request(std::shared_ptr<Request> req);
 
@@ -113,6 +120,9 @@ private:
     // True when MoE expert weights are on host (not graph-capturable)
     bool experts_on_host_ = false;
 
+    // Lazy FP16 weight dequant (deferred from init to first prefill)
+    bool dequant_done_ = false;
+
     // Chat template for formatting prompts
     ChatTemplate chat_template_;
 
@@ -120,6 +130,10 @@ private:
     std::shared_ptr<Model> draft_model_;
     std::unique_ptr<KVCacheManager> draft_kv_manager_;
     std::unique_ptr<SpeculativeDecoder> spec_decoder_;
+
+    // Device buffer for penalty token history (reused across steps)
+    int32_t* d_penalty_tokens_ = nullptr;
+    size_t d_penalty_tokens_capacity_ = 0;  // current allocation capacity in tokens
 
     // Pinned host buffer for graph-captured greedy sampling results.
     // When sampling is included in the CUDA graph, the argmax kernel writes

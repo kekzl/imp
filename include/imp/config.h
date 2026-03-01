@@ -48,6 +48,9 @@ typedef struct {
     // VRAM budget
     size_t vram_budget_mb;         // Max GPU memory to use (MiB), 0 = use all available
 
+    // Chunked prefill
+    int prefill_chunk_size;        // Max tokens per prefill chunk (0 = no chunking)
+
     // Threading
     int num_cpu_threads;           // 0 = auto (hardware_concurrency)
 } ImpConfig;

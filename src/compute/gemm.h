@@ -75,6 +75,12 @@ void swiglu_quantize_q8_1(const half* gate, const half* up,
                             block_q8_1* q8_out, float* d8_out,
                             int total_elements, cudaStream_t stream = nullptr);
 
+// Fused GEGLU + Q8_1 quantization: computes gelu_tanh(gate) * up and quantizes
+// directly to Q8_1 format, eliminating the intermediate FP16 buffer for Gemma-3.
+void geglu_quantize_q8_1(const half* gate, const half* up,
+                           block_q8_1* q8_out, float* d8_out,
+                           int total_elements, cudaStream_t stream = nullptr);
+
 // Fused relu² + Q8_1 quantization: applies relu²(x) = max(0,x)² and quantizes
 // directly to Q8_1 format. Used by non-gated MoE experts (Nemotron).
 // input: [total_elements] FP16, q8_out: [total_elements/32] Q8_1 blocks.
@@ -101,6 +107,10 @@ void gemv_q8_0_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
                      half* y, int M, int K, cudaStream_t stream = nullptr);
 void gemv_q4_0_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
                      half* y, int M, int K, cudaStream_t stream = nullptr);
+void gemv_q4_k_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
+                      half* y, int M, int K, cudaStream_t stream = nullptr);
+void gemv_q5_k_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
+                      half* y, int M, int K, cudaStream_t stream = nullptr);
 
 // Residual-fused variants: y[i] = dot(W[i], x) + residual[i]
 void gemv_q6k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
@@ -112,6 +122,12 @@ void gemv_q8_0_q8_1_residual(const void* W, const block_q8_1* q8_1, const float*
 void gemv_q4_0_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
                                half* y, const half* residual,
                                int M, int K, cudaStream_t stream = nullptr);
+void gemv_q4_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
+                                half* y, const half* residual,
+                                int M, int K, cudaStream_t stream = nullptr);
+void gemv_q5_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
+                                half* y, const half* residual,
+                                int M, int K, cudaStream_t stream = nullptr);
 
 // ---------------------------------------------------------------------------
 // Fused gate+up dense GEMV: both projections in a single kernel launch.
@@ -139,6 +155,16 @@ void gemv_qkv_fused_q8_0_q8_1(const void* W_q, const void* W_k, const void* W_v,
                                 int q_rows, int k_rows, int v_rows, int K,
                                 cudaStream_t stream = nullptr);
 void gemv_qkv_fused_q4_0_q8_1(const void* W_q, const void* W_k, const void* W_v,
+                                const block_q8_1* q8_1, const float* d8,
+                                half* y_q, half* y_k, half* y_v,
+                                int q_rows, int k_rows, int v_rows, int K,
+                                cudaStream_t stream = nullptr);
+void gemv_qkv_fused_q4_k_q8_1(const void* W_q, const void* W_k, const void* W_v,
+                                const block_q8_1* q8_1, const float* d8,
+                                half* y_q, half* y_k, half* y_v,
+                                int q_rows, int k_rows, int v_rows, int K,
+                                cudaStream_t stream = nullptr);
+void gemv_qkv_fused_q5_k_q8_1(const void* W_q, const void* W_k, const void* W_v,
                                 const block_q8_1* q8_1, const float* d8,
                                 half* y_q, half* y_k, half* y_v,
                                 int q_rows, int k_rows, int v_rows, int K,
@@ -190,6 +216,18 @@ void gemv_q8_0_q8_1_moe_decode(const void* packed_weights, const int32_t* expert
                                  size_t expert_stride_bytes,
                                  int q8_1_stride, int d8_stride, int top_k,
                                  cudaStream_t stream = nullptr);
+void gemv_q4_k_q8_1_moe_decode(const void* packed_weights, const int32_t* expert_indices,
+                                 const block_q8_1* q8_1, const float* d8,
+                                 half* y, int rows, int K,
+                                 size_t expert_stride_bytes,
+                                 int q8_1_stride, int d8_stride, int top_k,
+                                 cudaStream_t stream = nullptr);
+void gemv_q5_k_q8_1_moe_decode(const void* packed_weights, const int32_t* expert_indices,
+                                 const block_q8_1* q8_1, const float* d8,
+                                 half* y, int rows, int K,
+                                 size_t expert_stride_bytes,
+                                 int q8_1_stride, int d8_stride, int top_k,
+                                 cudaStream_t stream = nullptr);
 
 // Fused gate+up MoE GEMV: both projections in a single kernel launch.
 // Uses blockIdx.y to select gate(0) or up(1). Saves one launch per MoE layer.
@@ -227,6 +265,44 @@ void gemv_q8_0_q8_1_moe_gate_up_fused(
         size_t gate_stride_bytes, size_t up_stride_bytes,
         int q8_1_stride, int d8_stride, int top_k,
         cudaStream_t stream = nullptr);
+void gemv_q4_k_q8_1_moe_gate_up_fused(
+        const void* gate_weights, const void* up_weights,
+        const int32_t* expert_indices,
+        const block_q8_1* q8_1, const float* d8,
+        half* y_gate, half* y_up,
+        int rows, int K,
+        size_t gate_stride_bytes, size_t up_stride_bytes,
+        int q8_1_stride, int d8_stride, int top_k,
+        cudaStream_t stream = nullptr);
+void gemv_q5_k_q8_1_moe_gate_up_fused(
+        const void* gate_weights, const void* up_weights,
+        const int32_t* expert_indices,
+        const block_q8_1* q8_1, const float* d8,
+        half* y_gate, half* y_up,
+        int rows, int K,
+        size_t gate_stride_bytes, size_t up_stride_bytes,
+        int q8_1_stride, int d8_stride, int top_k,
+        cudaStream_t stream = nullptr);
+
+// Inline-quant dp4a GEMV: takes FP16 input, quantizes to Q8_1 in shared memory,
+// then runs dp4a GEMV — eliminates the separate quantize_fp16_to_q8_1 kernel.
+// y[i] = dot(W[i], quant(x_fp16)) [+ residual[i] if residual != nullptr]
+void gemv_q6k_q8_1_inline_quant(const void* W, const half* x_fp16,
+                                  half* y, const half* residual,
+                                  int M, int K, cudaStream_t stream = nullptr);
+void gemv_q8_0_q8_1_inline_quant(const void* W, const half* x_fp16,
+                                   half* y, const half* residual,
+                                   int M, int K, cudaStream_t stream = nullptr);
+void gemv_q4_k_q8_1_inline_quant(const void* W, const half* x_fp16,
+                                    half* y, const half* residual,
+                                    int M, int K, cudaStream_t stream = nullptr);
+void gemv_q5_k_q8_1_inline_quant(const void* W, const half* x_fp16,
+                                    half* y, const half* residual,
+                                    int M, int K, cudaStream_t stream = nullptr);
+
+// Register all dp4a GEMV kernel template instantiations with PDL.
+// Called from GraphExecutor::init() when PDL is enabled.
+void gemv_pdl_register();
 
 // dp4a-accelerated GEMV with FP32 output: W_quant @ x_q8_1 → y[M] float.
 // Designed for the LM head projection where FP32 logits are needed for sampling.
@@ -236,5 +312,9 @@ void gemv_q8_0_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
                            float* y, int M, int K, cudaStream_t stream = nullptr);
 void gemv_q4_0_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
                            float* y, int M, int K, cudaStream_t stream = nullptr);
+void gemv_q4_k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
+                            float* y, int M, int K, cudaStream_t stream = nullptr);
+void gemv_q5_k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
+                            float* y, int M, int K, cudaStream_t stream = nullptr);
 
 } // namespace imp
