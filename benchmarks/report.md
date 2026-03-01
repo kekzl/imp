@@ -1,6 +1,6 @@
 # imp vs llama.cpp Benchmark Report
 
-**Date:** 2026-02-28 19:12 UTC
+**Date:** 2026-03-01 20:23 UTC
 **GPU:** NVIDIA GeForce RTX 5090 (32607 MiB)
 **Driver:** 591.86 | **CUDA:** 13.1
 **Build:** sm_120 native, -O3 -Xptxas -O3 --use_fast_math, CUDA graphs ON, PDL ON
@@ -19,27 +19,27 @@
 
 | Model | Quant | Engine | pp tok/s | tg tok/s |
 |-------|-------|--------|----------|----------|
-| Phi-4-Mini-Instruct | Q8_0 | llama.cpp | 26629.93 | 250.96 |
-| Phi-4-Mini-Instruct | Q8_0 | imp (bench) | 20610.21 | 231.26 |
-| Phi-4-Mini-Instruct | Q8_0 | imp (real) | 1225.22 | 234.83 |
-| Qwen3-4B-Instruct | Q8_0 | llama.cpp | 20667.27 | 217.54 |
-| Qwen3-4B-Instruct | Q8_0 | imp (bench) | 19048.58 | 221.89 |
-| Qwen3-4B-Instruct | Q8_0 | imp (real) | 1325.45 | 227.18 |
-| DeepSeek-R1-Distill-Qwen-7B | Q8_0 | llama.cpp | 15368.91 | 164.30 |
-| DeepSeek-R1-Distill-Qwen-7B | Q8_0 | imp (bench) | 13379.97 | 147.59 |
-| DeepSeek-R1-Distill-Qwen-7B | Q8_0 | imp (real) | 973.70 | 149.65 |
-| Gemma-3-12B-IT | Q8_0 | llama.cpp | 9033.08 | 91.41 |
-| Gemma-3-12B-IT | Q8_0 | imp (bench) | 6485.03 | 83.01 |
-| Gemma-3-12B-IT | Q8_0 | imp (real) | 606.88 | 82.44 |
-| DeepSeek-R1-Distill-Qwen-14B | Q6_K | llama.cpp | 6242.44 | 102.22 |
-| DeepSeek-R1-Distill-Qwen-14B | Q6_K | imp (bench) | 5738.41 | 86.81 |
-| DeepSeek-R1-Distill-Qwen-14B | Q6_K | imp (real) | 1209.82 | 86.15 |
-| Qwen3-Coder-30B-A3B-Instruct | Q6_K | llama.cpp | 6113.22 | 206.61 |
-| Qwen3-Coder-30B-A3B-Instruct | Q6_K | imp (bench) | 1387.13 | 221.74 |
-| Qwen3-Coder-30B-A3B-Instruct | Q6_K | imp (real) | 856.02 | 217.76 |
-| Nemotron-3-Nano-30B-A3B | Q6_K | llama.cpp | 226.67 | 25.77 |
-| Nemotron-3-Nano-30B-A3B | Q6_K | imp (bench) | 1250.85 | 58.74 |
-| Nemotron-3-Nano-30B-A3B | Q6_K | imp (real) | 629.77 | 57.13 |
+| Phi-4-Mini-Instruct | Q8_0 | llama.cpp | 24051.46 | 245.77 |
+| Phi-4-Mini-Instruct | Q8_0 | imp (bench) | 20556.42 | 240.92 |
+| Phi-4-Mini-Instruct | Q8_0 | imp (real) | 1444.49 | 241.11 |
+| Qwen3-4B-Instruct | Q8_0 | llama.cpp | 19071.95 | 213.75 |
+| Qwen3-4B-Instruct | Q8_0 | imp (bench) | 19329.58 | 229.49 |
+| Qwen3-4B-Instruct | Q8_0 | imp (real) | 1911.35 | 230.96 |
+| DeepSeek-R1-Distill-Qwen-7B | Q8_0 | llama.cpp | 13349.77 | 159.74 |
+| DeepSeek-R1-Distill-Qwen-7B | Q8_0 | imp (bench) | 13269.87 | 158.52 |
+| DeepSeek-R1-Distill-Qwen-7B | Q8_0 | imp (real) | 1719.99 | 93.41 |
+| Gemma-3-12B-IT | Q8_0 | llama.cpp | 8844.30 | 89.33 |
+| Gemma-3-12B-IT | Q8_0 | imp (bench) | 6335.06 | 84.70 |
+| Gemma-3-12B-IT | Q8_0 | imp (real) | 864.90 | 83.92 |
+| DeepSeek-R1-Distill-Qwen-14B | Q6_K | llama.cpp | 6054.22 | 100.96 |
+| DeepSeek-R1-Distill-Qwen-14B | Q6_K | imp (bench) | 5675.26 | 88.02 |
+| DeepSeek-R1-Distill-Qwen-14B | Q6_K | imp (real) | 1914.72 | 87.19 |
+| Qwen3-Coder-30B-A3B-Instruct | Q6_K | llama.cpp | 5882.70 | 203.41 |
+| Qwen3-Coder-30B-A3B-Instruct | Q6_K | imp (bench) | 4449.81 | 234.62 |
+| Qwen3-Coder-30B-A3B-Instruct | Q6_K | imp (real) | 1754.45 | 229.22 |
+| Nemotron-3-Nano-30B-A3B | Q6_K | llama.cpp | 2748.83 | 159.30 |
+| Nemotron-3-Nano-30B-A3B | Q6_K | imp (bench) | 1251.27 | 62.87 |
+| Nemotron-3-Nano-30B-A3B | Q6_K | imp (real) | 744.94 | 61.24 |
 
 ## Notes
 

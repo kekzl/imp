@@ -92,7 +92,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // VRAM available for expert layers during upload.
     executor_ = std::make_unique<GraphExecutor>();
     if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl,
-                         config_.max_batch_size, config_.max_seq_len)) {
+                         config_.max_batch_size, config_.max_seq_len,
+                         config_.use_fp8_prefill)) {
         return false;
     }
 
@@ -368,6 +369,10 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     executor_->pre_dequant_weights(stream_);
     dequant_done_ = true;
     cudaStreamSynchronize(stream_);
+
+    if (config_.use_fp8_prefill) {
+        IMP_LOG_INFO("Weight cache: FP8 E4M3 (2x prefill throughput on sm_120)");
+    }
 
     // --- Pre-allocate decode batch pool for stable CUDA Graph pointers ---
     {

@@ -31,6 +31,7 @@ struct CliArgs {
     bool no_cuda_graphs = false;  // Disable CUDA Graph capture for decode
     std::string chat_template = "auto";  // auto, none, chatml, llama2, llama3, nemotron, gemma
     int prefill_chunk_size = 0;  // --prefill-chunk-size: 0 = no chunking
+    bool prefill_fp8 = false;  // --prefill-fp8: use FP8 E4M3 weight cache for prefill
     bool bench = false;        // --bench: synthetic benchmark mode
     int bench_pp = 512;        // --bench-pp: synthetic prompt token count
     int bench_reps = 3;        // --bench-reps: repetitions to average

@@ -54,6 +54,7 @@ int main(int argc, char** argv) {
     // CUDA graphs enabled by default in imp_config_default(); --no-cuda-graphs can disable
     if (args.no_cuda_graphs) config.enable_cuda_graphs = 0;
     config.prefill_chunk_size = args.prefill_chunk_size;
+    if (args.prefill_fp8) config.use_fp8_prefill = 1;
 
     ImpContext ctx = nullptr;
     err = imp_context_create(model, &config, &ctx);

@@ -788,7 +788,10 @@ static void gemm_dispatch(const Tensor& input, const Tensor& weight,
                            cudaStream_t stream,
                            block_q8_1* q8_1_buf = nullptr,
                            float* d8_buf = nullptr,
-                           const std::unordered_map<const void*, Tensor>* fp16_cache = nullptr) {
+                           const std::unordered_map<const void*, Tensor>* fp16_cache = nullptr,
+                           const std::unordered_map<const void*, GraphExecutor::FP8CacheEntry>* fp8_cache = nullptr,
+                           void* fp8_act_buf = nullptr,
+                           float* d_act_scale = nullptr) {
     if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
                q8_1_buf != nullptr && d8_buf != nullptr && qtype == GGMLQuantType::Q4_0) {
         // dp4a MMVQ Q4_0: quantize input to Q8_1, then dp4a dot product
@@ -875,6 +878,23 @@ static void gemm_dispatch(const Tensor& input, const Tensor& weight,
         gemv_q8_0(weight.data, static_cast<const half*>(input.data),
                   static_cast<half*>(output.data),
                   static_cast<int>(weight.shape[0]), static_cast<int>(weight.shape[1]), stream);
+    } else if (fp8_cache != nullptr && input.shape[0] > 1 && fp8_act_buf != nullptr && d_act_scale != nullptr) {
+        // FP8 cache: quantize activation → FP8, then FP8×FP8 cuBLASLt GEMM (2x throughput on sm_120)
+        auto it = fp8_cache->find(weight.data);
+        if (it != fp8_cache->end()) {
+            Tensor fp8_act(fp8_act_buf, DType::FP8_E4M3, input.ndim, input.shape, true);
+            quantize_fp16_to_fp8_e4m3(input, fp8_act, d_act_scale, stream);
+            gemm_cublaslt(fp8_act, it->second.weight, output, 1.0f, 0.0f,
+                          d_act_scale, it->second.d_scale, stream);
+        } else if (dequant_scratch != nullptr && dequant_gpu_supported(qtype)) {
+            int rows = static_cast<int>(weight.shape[0]);
+            int cols = static_cast<int>(weight.shape[1]);
+            dequant_gpu(weight.data, dequant_scratch, qtype, rows, cols, stream);
+            Tensor w_fp16(dequant_scratch, DType::FP16, weight.ndim, weight.shape, true);
+            gemm(input, w_fp16, output, 1.0f, 0.0f, stream);
+        } else {
+            gemm(input, weight, output, 1.0f, 0.0f, stream);
+        }
     } else if (fp16_cache != nullptr && dequant_gpu_supported(qtype)) {
         // Pre-dequantized FP16 cache: zero per-GEMM dequant overhead
         auto it = fp16_cache->find(weight.data);
@@ -912,7 +932,7 @@ GraphExecutor::~GraphExecutor() {
 }
 
 bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
-                         int max_batch_size, int max_seq_len) {
+                         int max_batch_size, int max_seq_len, bool use_fp8_prefill) {
     if (initialized_) {
         free_buffers();
     }
@@ -921,6 +941,7 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
     compute_dtype_ = compute_dtype;
     norm_w_off_ = model.config().norm_weight_offset;
     use_pdl_ = use_pdl;
+    use_fp8_cache_ = use_fp8_prefill;
 
     const auto& cfg = model.config();
 
@@ -1493,6 +1514,37 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             }
         }
     }
+
+    // FP8 activation scratch buffers (for FP8 prefill weight cache)
+    if (use_fp8_cache_) {
+        int max_dim = cfg.d_model;
+        if (cfg.d_ff > 0) max_dim = std::max(max_dim, cfg.d_ff);
+        max_dim = std::max(max_dim, cfg.n_heads * (cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads)));
+        // SSM dimensions
+        if (cfg.ssm_inner_size > 0) {
+            int conv_ch = cfg.ssm_inner_size + 2 * cfg.ssm_group_count * cfg.ssm_state_size;
+            int ssm_in_dim = cfg.ssm_inner_size + conv_ch + cfg.ssm_dt_rank;
+            max_dim = std::max(max_dim, ssm_in_dim);
+            max_dim = std::max(max_dim, cfg.ssm_inner_size);
+        }
+        fp8_act_buf_size_ = static_cast<size_t>(max_tokens_) * max_dim;
+        cudaError_t err = cudaMalloc(&fp8_act_buf_, fp8_act_buf_size_);
+        if (err != cudaSuccess) {
+            IMP_LOG_WARN("Failed to allocate FP8 activation buffer (%zu bytes): %s",
+                         fp8_act_buf_size_, cudaGetErrorString(err));
+            fp8_act_buf_ = nullptr;
+            fp8_act_buf_size_ = 0;
+        }
+        err = cudaMalloc(reinterpret_cast<void**>(&d_act_scale_), sizeof(float));
+        if (err != cudaSuccess) {
+            IMP_LOG_WARN("Failed to allocate FP8 act scale: %s", cudaGetErrorString(err));
+            d_act_scale_ = nullptr;
+        }
+        if (fp8_act_buf_ && d_act_scale_) {
+            IMP_LOG_INFO("FP8 activation scratch: %.2f MiB (max_tokens=%d, max_dim=%d)",
+                         fp8_act_buf_size_ / (1024.0 * 1024.0), max_tokens_, max_dim);
+        }
+    }
 }
 
 void GraphExecutor::release_moe_batch_buf() {
@@ -1525,6 +1577,23 @@ void GraphExecutor::free_buffers() {
     }
     fp16_cache_.clear();
     fp16_cache_bytes_ = 0;
+
+    // Free FP8 weight cache
+    for (auto& [ptr, entry] : fp8_cache_) {
+        if (entry.weight.data) cudaFree(entry.weight.data);
+        if (entry.d_scale) cudaFree(entry.d_scale);
+    }
+    fp8_cache_.clear();
+    fp8_cache_bytes_ = 0;
+    if (fp8_act_buf_) {
+        cudaFree(fp8_act_buf_);
+        fp8_act_buf_ = nullptr;
+        fp8_act_buf_size_ = 0;
+    }
+    if (d_act_scale_) {
+        cudaFree(d_act_scale_);
+        d_act_scale_ = nullptr;
+    }
 
     moe_routing_buffers_.free();
     if (moe_dequant_buf_) {
@@ -1610,7 +1679,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
     if (!initialized_ || !model_) return;
 
     const auto& cfg = model_->config();
-    size_t total_fp16_bytes = 0;
+    size_t total_cache_bytes = 0;
     int cached_count = 0;
     bool budget_exhausted = false;
 
@@ -1623,147 +1692,261 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
     size_t vram_budget = (free_vram > kVramReserveMiB * 1024ULL * 1024)
                          ? (free_vram - kVramReserveMiB * 1024ULL * 1024) : 0;
 
-    auto cache_weight = [&](const Tensor& w, GGMLQuantType qtype) {
-        if (!w.data || !dequant_gpu_supported(qtype)) return;
-        if (fp16_cache_.count(w.data)) return;  // already cached
-        if (budget_exhausted) return;
+    {
+        // --- Phase 1: FP16 weight cache + fused KV + fused gate+up (always) ---
+        auto cache_weight = [&](const Tensor& w, GGMLQuantType qtype) {
+            if (!w.data || !dequant_gpu_supported(qtype)) return;
+            if (fp16_cache_.count(w.data)) return;  // already cached
+            if (budget_exhausted) return;
 
-        int rows = static_cast<int>(w.shape[0]);
-        int cols = static_cast<int>(w.shape[1]);
-        size_t fp16_bytes = static_cast<size_t>(rows) * cols * sizeof(half);
+            int rows = static_cast<int>(w.shape[0]);
+            int cols = static_cast<int>(w.shape[1]);
+            size_t fp16_bytes = static_cast<size_t>(rows) * cols * sizeof(half);
 
-        if (total_fp16_bytes + fp16_bytes > vram_budget) {
-            budget_exhausted = true;
-            IMP_LOG_INFO("FP16 cache: VRAM budget reached after %d tensors (%.1f / %.1f MiB), "
-                         "remaining weights will use on-the-fly dequant",
-                         cached_count, total_fp16_bytes / (1024.0 * 1024.0),
-                         vram_budget / (1024.0 * 1024.0));
-            return;
+            if (total_cache_bytes + fp16_bytes > vram_budget) {
+                budget_exhausted = true;
+                IMP_LOG_INFO("FP16 cache: VRAM budget reached after %d tensors (%.1f / %.1f MiB), "
+                             "remaining weights will use on-the-fly dequant",
+                             cached_count, total_cache_bytes / (1024.0 * 1024.0),
+                             vram_budget / (1024.0 * 1024.0));
+                return;
+            }
+
+            void* fp16_buf = nullptr;
+            cudaError_t err = cudaMalloc(&fp16_buf, fp16_bytes);
+            if (err != cudaSuccess) {
+                IMP_LOG_DEBUG("Cleared FP16 cache alloc error: %s", cudaGetErrorString(cudaGetLastError()));
+                budget_exhausted = true;
+                IMP_LOG_WARN("FP16 cache: cudaMalloc failed after %d tensors (%.1f MiB)",
+                             cached_count, total_cache_bytes / (1024.0 * 1024.0));
+                return;
+            }
+
+            dequant_gpu(w.data, fp16_buf, qtype, rows, cols, stream);
+
+            Tensor fp16_tensor(fp16_buf, DType::FP16, w.ndim, w.shape, true);
+            fp16_cache_[w.data] = fp16_tensor;
+            total_cache_bytes += fp16_bytes;
+            cached_count++;
+        };
+
+        // Priority order: attention weights first (critical for cuBLAS prefill),
+        // then SSM, shared experts, and dense FFN.  This ensures hybrid models
+        // like Nemotron (23 SSM + 6 attention layers) cache all attention weights
+        // before SSM weights exhaust the VRAM budget.
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            cache_weight(L.wq, L.wq_qtype);
+            cache_weight(L.wk, L.wk_qtype);
+            cache_weight(L.wv, L.wv_qtype);
+            cache_weight(L.wo, L.wo_qtype);
+        }
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            cache_weight(L.ssm_in, L.ssm_in_qtype);
+            cache_weight(L.ssm_out, L.ssm_out_qtype);
+            cache_weight(L.w_gate_shared, L.w_gate_shared_qtype);
+            cache_weight(L.w_up_shared, L.w_up_shared_qtype);
+            cache_weight(L.w_down_shared, L.w_down_shared_qtype);
+            cache_weight(L.w_gate, L.w_gate_qtype);
+            cache_weight(L.w_up, L.w_up_qtype);
+            cache_weight(L.w_down, L.w_down_qtype);
         }
 
-        void* fp16_buf = nullptr;
-        cudaError_t err = cudaMalloc(&fp16_buf, fp16_bytes);
-        if (err != cudaSuccess) {
-            IMP_LOG_DEBUG("Cleared FP16 cache alloc error: %s", cudaGetErrorString(cudaGetLastError()));
-            budget_exhausted = true;
-            IMP_LOG_WARN("FP16 cache: cudaMalloc failed after %d tensors (%.1f MiB)",
-                         cached_count, total_fp16_bytes / (1024.0 * 1024.0));
-            return;
+        // Create fused KV weights for strided batched prefill GEMM.
+        // Each entry concatenates [wk; wv] as [2*nkv*hd, d_model] FP16 for one layer.
+        int fused_kv_count = 0;
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            if (!L.wk.data || !L.wv.data) continue;
+            auto wk_it = fp16_cache_.find(L.wk.data);
+            auto wv_it = fp16_cache_.find(L.wv.data);
+            if (wk_it == fp16_cache_.end() || wv_it == fp16_cache_.end()) continue;
+
+            int k_rows = static_cast<int>(L.wk.shape[0]);  // nkv * hd
+            int K = static_cast<int>(L.wk.shape[1]);        // d_model
+            size_t one_sz = static_cast<size_t>(k_rows) * K * sizeof(half);
+
+            // Respect VRAM budget — on WSL2/WDDM, cudaMalloc silently spills to
+            // shared (system) memory beyond physical VRAM, causing massive slowdowns.
+            if (total_cache_bytes + 2 * one_sz > vram_budget) break;
+
+            void* fused_buf = nullptr;
+            cudaError_t err = cudaMalloc(&fused_buf, 2 * one_sz);
+            if (err != cudaSuccess) {
+                IMP_LOG_DEBUG("Cleared fused KV alloc error: %s", cudaGetErrorString(cudaGetLastError()));
+                break;
+            }
+
+            cudaMemcpyAsync(fused_buf, wk_it->second.data, one_sz,
+                             cudaMemcpyDeviceToDevice, stream);
+            cudaMemcpyAsync(static_cast<char*>(fused_buf) + one_sz,
+                             wv_it->second.data, one_sz,
+                             cudaMemcpyDeviceToDevice, stream);
+
+            int64_t shape[2] = {2 * k_rows, static_cast<int64_t>(K)};
+            fused_kv_cache_[i] = Tensor(fused_buf, DType::FP16, 2, shape, true);
+            total_cache_bytes += 2 * one_sz;
+            fused_kv_count++;
         }
 
-        dequant_gpu(w.data, fp16_buf, qtype, rows, cols, stream);
+        // Create fused gate+up weights for strided batched prefill GEMM.
+        // Each entry concatenates [w_gate; w_up] as [2*d_ff, d_model] FP16 for one layer.
+        int fused_gu_count = 0;
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            if (!L.w_gate.data || !L.w_up.data) continue;
+            // Both must be the same shape (d_ff x d_model)
+            if (L.w_gate.shape[0] != L.w_up.shape[0] ||
+                L.w_gate.shape[1] != L.w_up.shape[1]) continue;
+            auto wg_it = fp16_cache_.find(L.w_gate.data);
+            auto wu_it = fp16_cache_.find(L.w_up.data);
+            if (wg_it == fp16_cache_.end() || wu_it == fp16_cache_.end()) continue;
 
-        Tensor fp16_tensor(fp16_buf, DType::FP16, w.ndim, w.shape, true);
-        fp16_cache_[w.data] = fp16_tensor;
-        total_fp16_bytes += fp16_bytes;
-        cached_count++;
-    };
+            int g_rows = static_cast<int>(L.w_gate.shape[0]);  // d_ff
+            int K = static_cast<int>(L.w_gate.shape[1]);        // d_model
+            size_t one_sz = static_cast<size_t>(g_rows) * K * sizeof(half);
 
-    // Priority order: attention weights first (critical for cuBLAS prefill),
-    // then SSM, shared experts, and dense FFN.  This ensures hybrid models
-    // like Nemotron (23 SSM + 6 attention layers) cache all attention weights
-    // before SSM weights exhaust the VRAM budget.
-    for (int i = 0; i < cfg.n_layers; i++) {
-        const auto& L = model_->layer(i);
-        cache_weight(L.wq, L.wq_qtype);
-        cache_weight(L.wk, L.wk_qtype);
-        cache_weight(L.wv, L.wv_qtype);
-        cache_weight(L.wo, L.wo_qtype);
-    }
-    for (int i = 0; i < cfg.n_layers; i++) {
-        const auto& L = model_->layer(i);
-        cache_weight(L.ssm_in, L.ssm_in_qtype);
-        cache_weight(L.ssm_out, L.ssm_out_qtype);
-        cache_weight(L.w_gate_shared, L.w_gate_shared_qtype);
-        cache_weight(L.w_up_shared, L.w_up_shared_qtype);
-        cache_weight(L.w_down_shared, L.w_down_shared_qtype);
-        cache_weight(L.w_gate, L.w_gate_qtype);
-        cache_weight(L.w_up, L.w_up_qtype);
-        cache_weight(L.w_down, L.w_down_qtype);
-    }
+            // Respect VRAM budget (see fused KV comment above)
+            if (total_cache_bytes + 2 * one_sz > vram_budget) break;
 
-    // Create fused KV weights for strided batched prefill GEMM.
-    // Each entry concatenates [wk; wv] as [2*nkv*hd, d_model] FP16 for one layer.
-    int fused_kv_count = 0;
-    for (int i = 0; i < cfg.n_layers; i++) {
-        const auto& L = model_->layer(i);
-        if (!L.wk.data || !L.wv.data) continue;
-        auto wk_it = fp16_cache_.find(L.wk.data);
-        auto wv_it = fp16_cache_.find(L.wv.data);
-        if (wk_it == fp16_cache_.end() || wv_it == fp16_cache_.end()) continue;
+            void* fused_buf = nullptr;
+            cudaError_t err = cudaMalloc(&fused_buf, 2 * one_sz);
+            if (err != cudaSuccess) {
+                IMP_LOG_DEBUG("Cleared fused gate+up alloc error: %s", cudaGetErrorString(cudaGetLastError()));
+                break;
+            }
 
-        int k_rows = static_cast<int>(L.wk.shape[0]);  // nkv * hd
-        int K = static_cast<int>(L.wk.shape[1]);        // d_model
-        size_t one_sz = static_cast<size_t>(k_rows) * K * sizeof(half);
+            cudaMemcpyAsync(fused_buf, wg_it->second.data, one_sz,
+                             cudaMemcpyDeviceToDevice, stream);
+            cudaMemcpyAsync(static_cast<char*>(fused_buf) + one_sz,
+                             wu_it->second.data, one_sz,
+                             cudaMemcpyDeviceToDevice, stream);
 
-        // Respect VRAM budget — on WSL2/WDDM, cudaMalloc silently spills to
-        // shared (system) memory beyond physical VRAM, causing massive slowdowns.
-        if (total_fp16_bytes + 2 * one_sz > vram_budget) break;
-
-        void* fused_buf = nullptr;
-        cudaError_t err = cudaMalloc(&fused_buf, 2 * one_sz);
-        if (err != cudaSuccess) {
-            IMP_LOG_DEBUG("Cleared fused KV alloc error: %s", cudaGetErrorString(cudaGetLastError()));
-            break;
+            int64_t shape[2] = {2 * g_rows, static_cast<int64_t>(K)};
+            fused_gate_up_cache_[i] = Tensor(fused_buf, DType::FP16, 2, shape, true);
+            total_cache_bytes += 2 * one_sz;
+            fused_gu_count++;
         }
 
-        cudaMemcpyAsync(fused_buf, wk_it->second.data, one_sz,
-                         cudaMemcpyDeviceToDevice, stream);
-        cudaMemcpyAsync(static_cast<char*>(fused_buf) + one_sz,
-                         wv_it->second.data, one_sz,
-                         cudaMemcpyDeviceToDevice, stream);
-
-        int64_t shape[2] = {2 * k_rows, static_cast<int64_t>(K)};
-        fused_kv_cache_[i] = Tensor(fused_buf, DType::FP16, 2, shape, true);
-        total_fp16_bytes += 2 * one_sz;
-        fused_kv_count++;
+        if (cached_count > 0) {
+            cudaStreamSynchronize(stream);
+            fp16_cache_bytes_ = total_cache_bytes;
+            IMP_LOG_INFO("FP16 weight cache: %d tensors, %.2f MiB (incl. %d fused KV, %d fused gate+up)",
+                         cached_count, total_cache_bytes / (1024.0 * 1024.0),
+                         fused_kv_count, fused_gu_count);
+        }
     }
 
-    // Create fused gate+up weights for strided batched prefill GEMM.
-    // Each entry concatenates [w_gate; w_up] as [2*d_ff, d_model] FP16 for one layer.
-    int fused_gu_count = 0;
-    for (int i = 0; i < cfg.n_layers; i++) {
-        const auto& L = model_->layer(i);
-        if (!L.w_gate.data || !L.w_up.data) continue;
-        // Both must be the same shape (d_ff x d_model)
-        if (L.w_gate.shape[0] != L.w_up.shape[0] ||
-            L.w_gate.shape[1] != L.w_up.shape[1]) continue;
-        auto wg_it = fp16_cache_.find(L.w_gate.data);
-        auto wu_it = fp16_cache_.find(L.w_up.data);
-        if (wg_it == fp16_cache_.end() || wu_it == fp16_cache_.end()) continue;
+    // --- Phase 2: FP8 overflow cache for remaining uncached weights ---
+    // Weights already in fp16_cache_ keep their fused KV/gate+up optimizations.
+    // FP8 is only used for weights that didn't fit in the FP16 budget (50% smaller).
+    if (use_fp8_cache_) {
+        cudaMemGetInfo(&free_vram, &total_vram);
+        size_t fp8_budget = (free_vram > kVramReserveMiB * 1024ULL * 1024)
+                             ? (free_vram - kVramReserveMiB * 1024ULL * 1024) : 0;
+        size_t fp8_total = 0;
+        int fp8_count = 0;
+        bool fp8_exhausted = false;
 
-        int g_rows = static_cast<int>(L.w_gate.shape[0]);  // d_ff
-        int K = static_cast<int>(L.w_gate.shape[1]);        // d_model
-        size_t one_sz = static_cast<size_t>(g_rows) * K * sizeof(half);
+        auto cache_weight_fp8 = [&](const Tensor& w, GGMLQuantType qtype) {
+            if (!w.data || !dequant_gpu_supported(qtype)) return;
+            if (fp16_cache_.count(w.data)) return;  // already in FP16 cache
+            if (fp8_cache_.count(w.data)) return;   // already in FP8 cache
+            if (fp8_exhausted) return;
 
-        // Respect VRAM budget (see fused KV comment above)
-        if (total_fp16_bytes + 2 * one_sz > vram_budget) break;
+            int rows = static_cast<int>(w.shape[0]);
+            int cols = static_cast<int>(w.shape[1]);
+            size_t n_elems = static_cast<size_t>(rows) * cols;
+            size_t fp8_bytes = n_elems;  // 1 byte per element
+            size_t fp16_bytes = n_elems * sizeof(half);
 
-        void* fused_buf = nullptr;
-        cudaError_t err = cudaMalloc(&fused_buf, 2 * one_sz);
-        if (err != cudaSuccess) {
-            IMP_LOG_DEBUG("Cleared fused gate+up alloc error: %s", cudaGetErrorString(cudaGetLastError()));
-            break;
+            if (fp8_total + fp8_bytes + sizeof(float) > fp8_budget) {
+                fp8_exhausted = true;
+                IMP_LOG_INFO("FP8 overflow: budget reached after %d tensors (%.1f / %.1f MiB)",
+                             fp8_count, fp8_total / (1024.0 * 1024.0),
+                             fp8_budget / (1024.0 * 1024.0));
+                return;
+            }
+
+            // Dequant to FP16 temporary
+            void* fp16_tmp = nullptr;
+            cudaError_t err = cudaMalloc(&fp16_tmp, fp16_bytes);
+            if (err != cudaSuccess) {
+                cudaGetLastError();
+                fp8_exhausted = true;
+                return;
+            }
+            dequant_gpu(w.data, fp16_tmp, qtype, rows, cols, stream);
+
+            // Calibrate FP8 scale
+            Tensor fp16_tensor(fp16_tmp, DType::FP16, w.ndim, w.shape, true);
+            float scale = calibrate_fp8_scale(fp16_tensor, stream);
+            if (scale == 0.0f) scale = 1.0f;
+
+            // Quantize FP16 → FP8
+            void* fp8_buf = nullptr;
+            err = cudaMalloc(&fp8_buf, fp8_bytes);
+            if (err != cudaSuccess) {
+                cudaGetLastError();
+                cudaFree(fp16_tmp);
+                fp8_exhausted = true;
+                return;
+            }
+            quantize_fp16_to_fp8_e4m3_scaled(fp16_tmp, fp8_buf,
+                                              static_cast<int>(n_elems), scale, stream);
+            cudaFree(fp16_tmp);
+
+            // Device-side scale pointer
+            float* d_scale = nullptr;
+            err = cudaMalloc(reinterpret_cast<void**>(&d_scale), sizeof(float));
+            if (err != cudaSuccess) {
+                cudaGetLastError();
+                cudaFree(fp8_buf);
+                fp8_exhausted = true;
+                return;
+            }
+            cudaMemcpyAsync(d_scale, &scale, sizeof(float), cudaMemcpyHostToDevice, stream);
+
+            Tensor fp8_t(fp8_buf, DType::FP8_E4M3, w.ndim, w.shape, true);
+            fp8_cache_[w.data] = {fp8_t, scale, d_scale};
+            fp8_total += fp8_bytes + sizeof(float);
+            fp8_count++;
+        };
+
+        // Same priority order — attention first, then SSM/FFN
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            cache_weight_fp8(L.wq, L.wq_qtype);
+            cache_weight_fp8(L.wk, L.wk_qtype);
+            cache_weight_fp8(L.wv, L.wv_qtype);
+            cache_weight_fp8(L.wo, L.wo_qtype);
+        }
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            cache_weight_fp8(L.ssm_in, L.ssm_in_qtype);
+            cache_weight_fp8(L.ssm_out, L.ssm_out_qtype);
+            cache_weight_fp8(L.w_gate_shared, L.w_gate_shared_qtype);
+            cache_weight_fp8(L.w_up_shared, L.w_up_shared_qtype);
+            cache_weight_fp8(L.w_down_shared, L.w_down_shared_qtype);
+            cache_weight_fp8(L.w_gate, L.w_gate_qtype);
+            cache_weight_fp8(L.w_up, L.w_up_qtype);
+            cache_weight_fp8(L.w_down, L.w_down_qtype);
         }
 
-        cudaMemcpyAsync(fused_buf, wg_it->second.data, one_sz,
-                         cudaMemcpyDeviceToDevice, stream);
-        cudaMemcpyAsync(static_cast<char*>(fused_buf) + one_sz,
-                         wu_it->second.data, one_sz,
-                         cudaMemcpyDeviceToDevice, stream);
-
-        int64_t shape[2] = {2 * g_rows, static_cast<int64_t>(K)};
-        fused_gate_up_cache_[i] = Tensor(fused_buf, DType::FP16, 2, shape, true);
-        total_fp16_bytes += 2 * one_sz;
-        fused_gu_count++;
-    }
-
-    if (cached_count > 0) {
-        cudaStreamSynchronize(stream);
-        fp16_cache_bytes_ = total_fp16_bytes;
-        IMP_LOG_INFO("FP16 weight cache: %d tensors, %.2f MiB (incl. %d fused KV, %d fused gate+up)",
-                     cached_count, total_fp16_bytes / (1024.0 * 1024.0),
-                     fused_kv_count, fused_gu_count);
+        if (fp8_count > 0) {
+            cudaStreamSynchronize(stream);
+            fp8_cache_bytes_ = fp8_total;
+            size_t fp16_equivalent = 0;
+            for (auto& [ptr, entry] : fp8_cache_) {
+                fp16_equivalent += entry.weight.numel() * sizeof(half);
+            }
+            IMP_LOG_INFO("FP8 overflow cache: %d tensors, %.2f MiB (%.2f MiB saved vs FP16)",
+                         fp8_count, fp8_total / (1024.0 * 1024.0),
+                         (fp16_equivalent - fp8_total) / (1024.0 * 1024.0));
+        } else {
+            IMP_LOG_INFO("FP8 prefill: all weights fit in FP16 cache, no FP8 overflow needed");
+        }
     }
 }
 
@@ -2200,7 +2383,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                    ly.wo_qtype == GGMLQuantType::Q5_K ||
                                    ly.wo_qtype == GGMLQuantType::Q2_K || ly.wo_qtype == GGMLQuantType::Q3_K));
     bool will_fuse_o_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && n > 1 &&
-                               fp16_cache_.count(ly.wo.data));
+                               (fp16_cache_.count(ly.wo.data) || fp8_cache_.count(ly.wo.data)));
     if (!will_fuse_o_residual && !will_fuse_o_beta1 && !using_fp32_accum) {
         cudaMemcpyAsync(r.data, h.data, h.nbytes(),
                         cudaMemcpyDeviceToDevice, stream);
@@ -2286,18 +2469,35 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             // Separate RMSNorm + dispatch
             rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
 
-            // Try fused K+V path: single strided batched GEMM for both projections
-            auto fused_kv_it = fused_kv_cache_.find(layer);
-            if (n > 1 && fused_kv_it != fused_kv_cache_.end()) {
-                // Q: still separate (different output dim with GQA)
-                gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, qv,
-                              dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
-                // K+V: one batched cuBLAS call
-                gemm_kv_batched(no, fused_kv_it->second, kk, vv, stream);
+            // FP8 prefill path: quantize norm_out→FP8 once, 3 separate FP8 GEMMs
+            auto fp8_wq = fp8_cache_.find(ly.wq.data);
+            auto fp8_wk = fp8_cache_.find(ly.wk.data);
+            auto fp8_wv = fp8_cache_.find(ly.wv.data);
+            if (n > 1 && fp8_wq != fp8_cache_.end() &&
+                fp8_wk != fp8_cache_.end() && fp8_wv != fp8_cache_.end() &&
+                fp8_act_buf_ != nullptr && d_act_scale_ != nullptr) {
+                Tensor fp8_no(fp8_act_buf_, DType::FP8_E4M3, no.ndim, no.shape, true);
+                quantize_fp16_to_fp8_e4m3(no, fp8_no, d_act_scale_, stream);
+                gemm_cublaslt(fp8_no, fp8_wq->second.weight, qv, 1.0f, 0.0f,
+                              d_act_scale_, fp8_wq->second.d_scale, stream);
+                gemm_cublaslt(fp8_no, fp8_wk->second.weight, kk, 1.0f, 0.0f,
+                              d_act_scale_, fp8_wk->second.d_scale, stream);
+                gemm_cublaslt(fp8_no, fp8_wv->second.weight, vv, 1.0f, 0.0f,
+                              d_act_scale_, fp8_wv->second.d_scale, stream);
             } else {
-                gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, qv, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
-                gemm_dispatch(no, ly.wk, ly.wk_scales, ly.wk_qtype, kk, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
-                gemm_dispatch(no, ly.wv, ly.wv_scales, ly.wv_qtype, vv, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                // Try fused K+V path: single strided batched GEMM for both projections
+                auto fused_kv_it = fused_kv_cache_.find(layer);
+                if (n > 1 && fused_kv_it != fused_kv_cache_.end()) {
+                    // Q: still separate (different output dim with GQA)
+                    gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, qv,
+                                  dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                    // K+V: one batched cuBLAS call
+                    gemm_kv_batched(no, fused_kv_it->second, kk, vv, stream);
+                } else {
+                    gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, qv, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                    gemm_dispatch(no, ly.wk, ly.wk_scales, ly.wk_qtype, kk, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                    gemm_dispatch(no, ly.wv, ly.wv_scales, ly.wv_qtype, vv, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                }
             }
         }
 
@@ -2542,6 +2742,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                       d8_buf_, static_cast<half*>(h.data), residual_ptr,
                                       M_o, K_o, stream);
         }
+    } else if (will_fuse_o_beta1 && fp8_cache_.count(ly.wo.data) &&
+               fp8_act_buf_ != nullptr && d_act_scale_ != nullptr) {
+        // FP8 beta=1: hidden = fp8(attn_out) @ fp8(wo)^T + hidden
+        auto& e = fp8_cache_.at(ly.wo.data);
+        Tensor fp8_ao(fp8_act_buf_, DType::FP8_E4M3, ao.ndim, ao.shape, true);
+        quantize_fp16_to_fp8_e4m3(ao, fp8_ao, d_act_scale_, stream);
+        gemm_cublaslt(fp8_ao, e.weight, h, 1.0f, 1.0f, d_act_scale_, e.d_scale, stream);
     } else if (will_fuse_o_beta1) {
         // Fused: hidden = attn_out @ wo^T + hidden (cuBLAS beta=1).
         // Safe: hidden is only READ (never written) between attn_norm and here.
@@ -2550,7 +2757,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     } else {
         // Fallback: separate O-projection + optional post-norm + residual add
         gemm_dispatch(ao, ly.wo, ly.wo_scales, ly.wo_qtype, po, dequant_scratch_, stream,
-                      static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_);
+                      static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
+                      use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_);
         if (has_post_attn_norm && using_fp32_accum) {
             // Fused: RMSNorm + FP32 accum add + FP32→FP16 in one kernel.
             // Saves 2 kernel launches + 2 DRAM round-trips per layer.
@@ -2612,7 +2820,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                       ly.w_down_qtype == GGMLQuantType::Q2_K ||
                                       ly.w_down_qtype == GGMLQuantType::Q3_K));
     bool will_fuse_down_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual && n > 1 &&
-                                  fp16_cache_.count(ly.w_down.data));
+                                  (fp16_cache_.count(ly.w_down.data) || fp8_cache_.count(ly.w_down.data)));
     bool will_fuse_down_dequant_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual &&
                                           !will_fuse_down_beta1 && n > 1 &&
                                           dequant_scratch_ != nullptr &&
@@ -2651,13 +2859,27 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                 ffn_rows, d, ly.w_gate_qtype, stream);
         } else {
             rmsnorm(h, ffn_norm_w, no, eps, stream, norm_w_off_);
-            auto fused_gu_it = fused_gate_up_cache_.find(layer);
-            if (n > 1 && fused_gu_it != fused_gate_up_cache_.end()) {
-                // Batched gate+up: single cuBLAS call for both projections
-                gemm_pair_batched(no, fused_gu_it->second, go, uo, stream);
+
+            // FP8 prefill path: quantize norm_out→FP8 once, 2 separate FP8 GEMMs
+            auto fp8_wg = fp8_cache_.find(ly.w_gate.data);
+            auto fp8_wu = fp8_cache_.find(ly.w_up.data);
+            if (n > 1 && fp8_wg != fp8_cache_.end() && fp8_wu != fp8_cache_.end() &&
+                fp8_act_buf_ != nullptr && d_act_scale_ != nullptr) {
+                Tensor fp8_no(fp8_act_buf_, DType::FP8_E4M3, no.ndim, no.shape, true);
+                quantize_fp16_to_fp8_e4m3(no, fp8_no, d_act_scale_, stream);
+                gemm_cublaslt(fp8_no, fp8_wg->second.weight, go, 1.0f, 0.0f,
+                              d_act_scale_, fp8_wg->second.d_scale, stream);
+                gemm_cublaslt(fp8_no, fp8_wu->second.weight, uo, 1.0f, 0.0f,
+                              d_act_scale_, fp8_wu->second.d_scale, stream);
             } else {
-                gemm_dispatch(no, ly.w_gate, ly.w_gate_scales, ly.w_gate_qtype, go, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
-                gemm_dispatch(no, ly.w_up,   ly.w_up_scales,   ly.w_up_qtype,   uo, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                auto fused_gu_it = fused_gate_up_cache_.find(layer);
+                if (n > 1 && fused_gu_it != fused_gate_up_cache_.end()) {
+                    // Batched gate+up: single cuBLAS call for both projections
+                    gemm_pair_batched(no, fused_gu_it->second, go, uo, stream);
+                } else {
+                    gemm_dispatch(no, ly.w_gate, ly.w_gate_scales, ly.w_gate_qtype, go, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                    gemm_dispatch(no, ly.w_up,   ly.w_up_scales,   ly.w_up_qtype,   uo, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                }
             }
         }
     }
@@ -2772,7 +2994,14 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 case FFNActivation::GEGLU:  geglu(go, uo, so, stream);  break;
                 default:                    swiglu(go, uo, so, stream);  break;
             }
-            if (will_fuse_down_beta1) {
+            if (will_fuse_down_beta1 && fp8_cache_.count(ly.w_down.data) &&
+                fp8_act_buf_ != nullptr && d_act_scale_ != nullptr) {
+                // FP8 beta=1: hidden = fp8(swiglu_out) @ fp8(w_down)^T + hidden
+                auto& e = fp8_cache_.at(ly.w_down.data);
+                Tensor fp8_so(fp8_act_buf_, DType::FP8_E4M3, so.ndim, so.shape, true);
+                quantize_fp16_to_fp8_e4m3(so, fp8_so, d_act_scale_, stream);
+                gemm_cublaslt(fp8_so, e.weight, h, 1.0f, 1.0f, d_act_scale_, e.d_scale, stream);
+            } else if (will_fuse_down_beta1) {
                 // Fused: hidden = swiglu_out @ w_down^T + hidden (cuBLAS beta=1).
                 const Tensor& wd_fp16 = fp16_cache_.at(ly.w_down.data);
                 gemm(so, wd_fp16, h, 1.0f, 1.0f, stream);
@@ -2785,7 +3014,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 gemm(so, w_fp16, h, 1.0f, 1.0f, stream);
             } else {
                 gemm_dispatch(so, ly.w_down, ly.w_down_scales, ly.w_down_qtype, fo, dequant_scratch_, stream,
-                              static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_);
+                              static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
+                              use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_);
                 if (has_post_ffn_norm && using_fp32_accum) {
                     // Post-FFN norm → FP32 accumulation (no D2D copy needed)
                     Tensor fp32_h = view_tokens(fp32_hidden_, n);
@@ -3904,13 +4134,15 @@ moe_after_experts:
         {
             auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
             gemm_dispatch(no, ly.w_up_shared, Tensor(), ly.w_up_shared_qtype,
-                          sh_up, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                          sh_up, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
+                          use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_);
 
             if (shared_gated) {
                 // Gated: gate + SwiGLU
                 Tensor sh_gate(moe_expert_gate_.data, compute_dtype_, 2, sh_shape, true);
                 gemm_dispatch(no, ly.w_gate_shared, Tensor(), ly.w_gate_shared_qtype,
-                              sh_gate, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                              sh_gate, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
+                              use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_);
                 swiglu(sh_gate, sh_up, sh_swiglu, stream);
             } else {
                 // Non-gated: relu^2(up) in-place [Nemotron-H uses squared ReLU]
@@ -3920,7 +4152,8 @@ moe_after_experts:
             // Down projection (reads from sh_up for non-gated since relu² was in-place)
             Tensor& sh_act = shared_gated ? sh_swiglu : sh_up;
             gemm_dispatch(sh_act, ly.w_down_shared, Tensor(), ly.w_down_shared_qtype,
-                          sh_down, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                          sh_down, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
+                          use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_);
         }
 
         // Add shared expert output to hidden (which already has routed expert output)
@@ -3977,7 +4210,8 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
     //    ssm_in_dim = inner(z) + conv_channels(xBC) + n_heads(dt)
     Tensor proj = view_tokens(ssm_proj_buf_, n);
     gemm_dispatch(no, ly.ssm_in, Tensor(), ly.ssm_in_qtype, proj, dequant_scratch_, stream,
-                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_);
+                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
+                  use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_);
 
     // 3. Split projection output [n, total_dim] into z, xBC, dt by column slices.
     //    proj layout: each row has [z(inner) | xBC(conv_channels) | dt(n_heads)].
@@ -4158,7 +4392,8 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
     // 10. ssm_out projection: [n, inner] @ ssm_out^T -> [n, d_model]
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
     gemm_dispatch(y_buf, ly.ssm_out, Tensor(), ly.ssm_out_qtype, out_buf, dequant_scratch_, stream,
-                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_);
+                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
+                  use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_);
 
     // 11. Residual add: hidden = output + residual
     elementwise_add(out_buf, r, stream);

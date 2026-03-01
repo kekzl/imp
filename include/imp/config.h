@@ -54,6 +54,9 @@ typedef struct {
     // Chunked prefill
     int prefill_chunk_size;        // Max tokens per prefill chunk (0 = no chunking)
 
+    // Prefill weight cache precision
+    int use_fp8_prefill;           // 0 = FP16 weight cache (default), 1 = FP8 E4M3 prefill cache
+
     // Threading
     int num_cpu_threads;           // 0 = auto (hardware_concurrency)
 } ImpConfig;

@@ -1,6 +1,6 @@
 # imp — CUDA 13.1 Feature Audit, Performance & Architektur-Review
 
-**Datum:** 2026-03-01 (aktualisiert nach GEMV-Konsolidierung, Blackwell-Attention, Multi-Block-Argmax)
+**Datum:** 2026-03-01 (aktualisiert nach GEMV-Konsolidierung, Blackwell-Attention, Multi-Block-Argmax, FP8-Prefill-Cache)
 
 Umfassende Analyse des imp-Projekts auf drei Achsen:
 1. Welche CUDA 13.1+ Features werden genutzt, welche fehlen noch?
@@ -26,6 +26,7 @@ Umfassende Analyse des imp-Projekts auf drei Achsen:
 | Feature | Dateien | Status |
 |---------|---------|--------|
 | **Blackwell WMMA Attention** | `src/compute/attention_blackwell.cu` | 8-Warp WMMA mit Double-Buffered KV, Adaptive Br (128/64), sm_120-optimiert. **Kein Inline-PTX** (WGMMA/TCGEN05), kein TMA — nutzt WMMA Intrinsics. |
+| **FP8 Prefill Weight Cache** | `src/graph/executor.cu`, `src/quant/fp8_quant.cu` | Hybrid FP16+FP8: FP16-Cache zuerst (inkl. Fused KV/Gate+Up), FP8 E4M3 für Overflow-Weights. `--prefill-fp8` Flag. Per-Tensor Device-Scales, cuBLASLt FP8×FP8→FP16 GEMM. |
 | **CUTLASS 3.x** | `src/compute/gemm_cutlass.cu` | Nutzt CUTLASS 2.x (`cp.async`, kein TMA), kein Upgrade auf 3.x Hopper/Blackwell Primitives |
 
 ### Nicht implementiert (Potential vorhanden)
@@ -64,6 +65,7 @@ Umfassende Analyse des imp-Projekts auf drei Achsen:
 | P17 | **Inline O-Projection Quantization** — Separate Q8_1-Quant + K-par GEMV mit Residual (48 Warps/SM statt 8) | `gemv_dp4a_traits.cuh`, `executor.cu` | +2-3% Decode |
 | P18 | **Eager FP16 Dequant bei Init** — `pre_dequant_weights()` verschoben von lazy erstem Prefill nach `Engine::init()` | `engine.cpp` | ~16x Real-World Prefill (380ms Overhead eliminiert) |
 | P19 | **Multi-Block Argmax** — 64-Block 2-Phasen-Reduktion statt Single-Block. 84 SMs parallel statt 1. | `sampling.cu`, `sampling.h` | 192µs → ~10µs pro Greedy-Sample |
+| P20 | **FP8 Prefill Weight Cache** — Hybrid FP16+FP8 E4M3: FP16-Cache mit Fused KV/Gate+Up zuerst, dann FP8-Overflow für restliche Weights. `--prefill-fp8` Flag. Device-side Scales, amortisierte Activation-Quantisierung (4 pro Layer). | `config.h`, `engine.h/cpp`, `executor.h/cu`, `args.h/cpp` | 1.79x Prefill (DS-R1-7B), 0% Regression auf kleine Modelle, 50% weniger VRAM für Overflow-Weights |
 
 ### Implementiert — Phase 2 (e2cf896, 2026-02-28)
 
@@ -94,15 +96,17 @@ Umfassende Analyse des imp-Projekts auf drei Achsen:
 
 #### Prefill-Throughput (tok/s)
 
-| Model | Quant | pp (tok/s) |
-|-------|-------|-----------|
-| Phi-4-Mini | Q8_0 | 19,460 |
-| Qwen3-4B | Q8_0 | 19,557 |
-| DeepSeek-R1-7B | Q8_0 | 13,491 |
-| Gemma-3-12B | Q8_0 | 4,026 |
-| DeepSeek-R1-14B | Q6_K | 5,713 |
-| Qwen3-Coder-30B-A3B (MoE) | Q6_K | 4,551 |
-| Nemotron-3-Nano-30B-A3B (MoE) | Q6_K | 1,247 |
+| Model | Quant | pp FP16 | pp FP8 (`--prefill-fp8`) | Speedup |
+|-------|-------|---------|--------------------------|---------|
+| Phi-4-Mini | Q8_0 | 15,575 | 16,055 | 1.03x |
+| Qwen3-4B | Q8_0 | 15,189 | — (all FP16) | 1.00x |
+| DeepSeek-R1-7B | Q8_0 | 7,382 | 13,196 | **1.79x** |
+| Gemma-3-12B | Q8_0 | 6,386 | — (all FP16) | 1.00x |
+| DeepSeek-R1-14B | Q6_K | 5,587 | — (all FP16) | 1.00x |
+| Qwen3-Coder-30B-A3B (MoE) | Q6_K | 4,446 | — (all FP16) | 1.00x |
+| Nemotron-3-Nano-30B-A3B (MoE) | Q6_K | 1,153 | 1,160 | 1.01x |
+
+FP8 Prefill nutzt eine hybride Strategie: FP16-Cache mit Fused KV/Gate+Up wird immer zuerst gebaut. Nur Weights die nicht in den FP16-VRAM-Budget passen, werden als FP8 E4M3 gecacht (50% kleiner). Bei kleinen Modellen passt alles in FP16 → kein FP8-Overhead, keine Regression. Bei großen Modellen (DS-R1-7B: 19.4 GiB FP16-Cache) profitieren die Overflow-Weights von FP8-Tensor-Cores (419 TFLOPS auf sm_120).
 
 #### Decode-Entwicklung über alle Optimierungs-Phasen
 
@@ -167,7 +171,7 @@ Umfassende Analyse des imp-Projekts auf drei Achsen:
 
 **CUDA 13.1**: 5/5 Major-Features implementiert (Green Contexts, PDL, Graphs+Conditional, MemPool, NVFP4). PDL-Registry mit 28+ Kernel-Registrierungen (7 Utility + 6 Compute + 110+ Template-Instantiierungen). Blackwell WMMA 8-Warp Attention mit Double-Buffered KV für sm_120. TCGEN05 Inline-PTX/TMA noch nicht implementiert — größtes verbleibendes Hardware-Potential.
 
-**Performance**: P2-P19 implementiert. Decode: +19-26% vs Baseline (dense), +12-134% vs llama.cpp (MoE). Prefill: +3-84% (Batched GEMM, Residual Fusion, Eager Dequant). Multi-Block Argmax: 192µs → ~10µs. GEMV-Coverage: Q6_K, Q8_0, Q4_0, Q4_K, Q5_K (alle mit K-par + Row-par + QKV-fused + Gate+Up-fused Varianten). Verbleibend: NVFP4 GEMV, TCGEN05-Attention, Bandwidth-Optimierung.
+**Performance**: P2-P20 implementiert. Decode: +19-26% vs Baseline (dense), +12-134% vs llama.cpp (MoE). Prefill: +3-84% (Batched GEMM, Residual Fusion, Eager Dequant), +79% mit FP8-Overflow (P20, DS-R1-7B). Multi-Block Argmax: 192µs → ~10µs. GEMV-Coverage: Q6_K, Q8_0, Q4_0, Q4_K, Q5_K (alle mit K-par + Row-par + QKV-fused + Gate+Up-fused Varianten). FP8 Prefill Weight Cache: Hybrid FP16+FP8 ohne Regression auf kleine Modelle. Verbleibend: NVFP4 GEMV, TCGEN05-Attention, Bandwidth-Optimierung.
 
 **Architektur**: Auf Single-GPU-Ebene vergleichbar mit vLLM. Hauptlücken sind Multi-GPU, Structured Output, Vision, und externe Batch-API. Für den aktuellen Scope (Single-GPU, CLI/Server) ist die Architektur solide und modern.
 
@@ -375,7 +379,23 @@ Die GEMV-Infrastruktur wurde von 33 handgeschriebenen Kernels auf ein Template-S
 
 `Engine::init()` ruft `pre_dequant_weights()` sofort nach KV-Cache-Allokation auf. Vorher: lazy beim ersten Prefill (~380ms Overhead für Phi-4-Mini Q8_0 mit 224 Tensoren / 9.6 GiB). Jetzt: Init-Zeit etwas länger, aber erster Real-World-Prefill sofort schnell (~19,460 tok/s statt ~1,225 tok/s).
 
-### B.7 Host-Device Sync
+### B.7 FP8 Prefill Weight Cache
+
+**Problem**: Prefill ist compute-bound (großes M). FP16-Tensor-Cores liefern 209 TFLOPS, FP8-Tensor-Cores 419 TFLOPS auf RTX 5090 (sm_120). Naive FP8-Umstellung verursacht aber Regression auf kleine Modelle (0.64-0.71x), weil Fused Batched GEMMs (KV, Gate+Up) verloren gehen.
+
+**Lösung**: Hybrid FP16+FP8 in `pre_dequant_weights()`:
+1. **Phase 1 (immer)**: FP16-Cache mit Fused KV (`gemm_kv_batched`) und Fused Gate+Up (`gemm_pair_batched`). Identisch mit Default-Verhalten.
+2. **Phase 2 (nur `--prefill-fp8`)**: Re-Query VRAM, FP8 E4M3 für Weights die nicht in FP16 passten. GGUF→FP16(tmp)→`calibrate_fp8_scale`→`quantize_fp16_to_fp8_e4m3_scaled`→FP16 tmp freigeben.
+
+**Runtime-Dispatch** (`run_attention`, `run_ffn`, `gemm_dispatch`):
+- FP8-Cache prüfen → wenn Hit: `quantize_fp16_to_fp8_e4m3(activation)` + `gemm_cublaslt(FP8×FP8→FP16, aScale, bScale)`
+- Sonst: Fused KV/Gate+Up → FP16-Cache → On-the-fly Dequant (bestehende Fallback-Kette)
+
+**Key Design**: Device-side Scale Pointers (kein Host-Sync), amortisierte Activation-Quantisierung (4× pro Layer statt 7×), kein Weight in beiden Caches gleichzeitig.
+
+**Dateien**: `config.h`, `imp_api.cpp`, `engine.h/cpp`, `executor.h/cu`, `args.h/cpp`, `main.cpp`
+
+### B.8 Host-Device Sync
 
 - **Prefill (greedy)**: `forward_logits()` + `sample_greedy_device()` + `cudaEventSynchronize(prefill_done_)` (P9)
 - **Decode**: CUDA Graph Replay + `cudaStreamSynchronize(dec_stream)` nach jedem Batch
@@ -398,6 +418,7 @@ Die GEMV-Infrastruktur wurde von 33 handgeschriebenen Kernels auf ein Template-S
 | HTTP Server | `tools/imp-server/main.cpp` | `/v1/chat/completions`, SSE Streaming, CORS, Chat-Template Stop-Tokens |
 | dp4a Template GEMV | `gemv_dp4a_traits.cuh` | 5 QTypes, K-par/Row-par Dispatch, ~130 Instantiierungen |
 | Multi-Block Argmax | `sampling.cu` | 64-Block 2-Phasen Reduktion, 19x Speedup |
+| FP8 Prefill Weight Cache | `executor.cu`, `fp8_quant.cu` | Hybrid FP16+FP8, `--prefill-fp8`, Device-Scales, 1.79x Prefill (DS-R1-7B) |
 
 ### C.2 Verifizierte Lücken
 
