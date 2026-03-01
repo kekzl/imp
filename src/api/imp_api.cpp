@@ -71,6 +71,7 @@ ImpConfig imp_config_default(void) {
     config.vram_budget_mb = 0;          // use all available
     config.prefill_chunk_size = 0;      // no chunking
     config.use_fp8_prefill = 0;         // FP16 weight cache by default
+    config.use_nvfp4_decode = 0;        // off by default
     config.num_cpu_threads = 0;         // auto
     return config;
 }
@@ -251,6 +252,7 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
         ecfg.top_k = config->top_k;
         ecfg.prefill_chunk_size = config->prefill_chunk_size;
         ecfg.use_fp8_prefill = (config->use_fp8_prefill != 0);
+        ecfg.use_nvfp4_decode = config->use_nvfp4_decode;
 
         // Create and initialize the engine
         auto engine = std::make_unique<imp::Engine>();

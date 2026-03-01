@@ -55,6 +55,7 @@ int main(int argc, char** argv) {
     if (args.no_cuda_graphs) config.enable_cuda_graphs = 0;
     config.prefill_chunk_size = args.prefill_chunk_size;
     if (args.prefill_fp8) config.use_fp8_prefill = 1;
+    config.use_nvfp4_decode = args.decode_nvfp4;
 
     ImpContext ctx = nullptr;
     err = imp_context_create(model, &config, &ctx);

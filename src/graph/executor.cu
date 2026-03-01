@@ -19,6 +19,7 @@
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
+#include "quant/nvfp4_gemm.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "runtime/pdl.h"
@@ -791,7 +792,21 @@ static void gemm_dispatch(const Tensor& input, const Tensor& weight,
                            const std::unordered_map<const void*, Tensor>* fp16_cache = nullptr,
                            const std::unordered_map<const void*, GraphExecutor::FP8CacheEntry>* fp8_cache = nullptr,
                            void* fp8_act_buf = nullptr,
-                           float* d_act_scale = nullptr) {
+                           float* d_act_scale = nullptr,
+                           const std::unordered_map<const void*, NvFP4QuantResult>* nvfp4_cache = nullptr) {
+    // NVFP4 decode path: use NVFP4 GEMV for M=1.
+    // For M>1 (prefill), skip — fp16_cache or dequant_scratch handles it.
+    if (nvfp4_cache != nullptr && input.shape[0] == 1 && input.dtype == DType::FP16) {
+        auto it = nvfp4_cache->find(weight.data);
+        if (it != nvfp4_cache->end()) {
+            gemv_nvfp4_kpar(it->second,
+                            reinterpret_cast<const half*>(input.data),
+                            reinterpret_cast<half*>(output.data),
+                            static_cast<int>(it->second.N),
+                            static_cast<int>(it->second.K), stream);
+            return;
+        }
+    }
     if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
                q8_1_buf != nullptr && d8_buf != nullptr && qtype == GGMLQuantType::Q4_0) {
         // dp4a MMVQ Q4_0: quantize input to Q8_1, then dp4a dot product
@@ -932,7 +947,8 @@ GraphExecutor::~GraphExecutor() {
 }
 
 bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
-                         int max_batch_size, int max_seq_len, bool use_fp8_prefill) {
+                         int max_batch_size, int max_seq_len, bool use_fp8_prefill,
+                         int use_nvfp4_decode) {
     if (initialized_) {
         free_buffers();
     }
@@ -942,6 +958,7 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
     norm_w_off_ = model.config().norm_weight_offset;
     use_pdl_ = use_pdl;
     use_fp8_cache_ = use_fp8_prefill;
+    use_nvfp4_decode_ = use_nvfp4_decode;
 
     const auto& cfg = model.config();
 
@@ -1578,6 +1595,13 @@ void GraphExecutor::free_buffers() {
     fp16_cache_.clear();
     fp16_cache_bytes_ = 0;
 
+    // Free NVFP4 decode weight cache
+    for (auto& [ptr, result] : nvfp4_cache_) {
+        free_nvfp4_result(result);
+    }
+    nvfp4_cache_.clear();
+    nvfp4_cache_bytes_ = 0;
+
     // Free FP8 weight cache
     for (auto& [ptr, entry] : fp8_cache_) {
         if (entry.weight.data) cudaFree(entry.weight.data);
@@ -1675,7 +1699,7 @@ void GraphExecutor::free_buffers() {
 // Pre-dequantize quantized weights to FP16 on GPU
 // ---------------------------------------------------------------------------
 
-void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
+void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget) {
     if (!initialized_ || !model_) return;
 
     const auto& cfg = model_->config();
@@ -1683,14 +1707,19 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
     int cached_count = 0;
     bool budget_exhausted = false;
 
-    // Query free VRAM and set a budget. Reserve enough for KV cache + runtime.
-    // On WSL2/WDDM, cudaMalloc succeeds beyond physical VRAM via overcommit,
-    // which exhausts virtual address space and causes OOM for later allocations.
-    size_t free_vram = 0, total_vram = 0;
-    cudaMemGetInfo(&free_vram, &total_vram);
-    constexpr size_t kVramReserveMiB = 1024;  // Reserve headroom for CUDA graph instantiation + runtime + driver
-    size_t vram_budget = (free_vram > kVramReserveMiB * 1024ULL * 1024)
-                         ? (free_vram - kVramReserveMiB * 1024ULL * 1024) : 0;
+    // Shared budget across all phases (FP16, FP8 overflow, NVFP4 decode).
+    // Computed by Engine from effective_free_vram() minus a runtime reserve.
+    size_t remaining_budget = cache_budget;
+
+    // Helper: does this qtype benefit from NVFP4 conversion? (> 4.5 bits/elem)
+    auto nvfp4_beneficial = [](GGMLQuantType qt) -> bool {
+        switch (qt) {
+            case GGMLQuantType::Q8_0: case GGMLQuantType::Q8_K:
+            case GGMLQuantType::Q6_K: case GGMLQuantType::Q5_K:
+                return true;
+            default: return false;
+        }
+    };
 
     {
         // --- Phase 1: FP16 weight cache + fused KV + fused gate+up (always) ---
@@ -1703,12 +1732,12 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
             int cols = static_cast<int>(w.shape[1]);
             size_t fp16_bytes = static_cast<size_t>(rows) * cols * sizeof(half);
 
-            if (total_cache_bytes + fp16_bytes > vram_budget) {
+            if (total_cache_bytes + fp16_bytes > remaining_budget) {
                 budget_exhausted = true;
                 IMP_LOG_INFO("FP16 cache: VRAM budget reached after %d tensors (%.1f / %.1f MiB), "
                              "remaining weights will use on-the-fly dequant",
                              cached_count, total_cache_bytes / (1024.0 * 1024.0),
-                             vram_budget / (1024.0 * 1024.0));
+                             remaining_budget / (1024.0 * 1024.0));
                 return;
             }
 
@@ -1748,9 +1777,16 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
             cache_weight(L.w_gate_shared, L.w_gate_shared_qtype);
             cache_weight(L.w_up_shared, L.w_up_shared_qtype);
             cache_weight(L.w_down_shared, L.w_down_shared_qtype);
-            cache_weight(L.w_gate, L.w_gate_qtype);
-            cache_weight(L.w_up, L.w_up_qtype);
-            cache_weight(L.w_down, L.w_down_qtype);
+            // When NVFP4 decode is active, skip dense FFN FP16 cache for eligible
+            // weights.  Decode benefits more from NVFP4 (~47% BW reduction) than
+            // prefill loses from on-the-fly dequant.  NVFP4 is also ~3.5x smaller
+            // per tensor, so skipping FFN FP16 frees massive VRAM for full NVFP4.
+            if (use_nvfp4_decode_ == 0 || !nvfp4_beneficial(L.w_gate_qtype))
+                cache_weight(L.w_gate, L.w_gate_qtype);
+            if (use_nvfp4_decode_ == 0 || !nvfp4_beneficial(L.w_up_qtype))
+                cache_weight(L.w_up, L.w_up_qtype);
+            if (use_nvfp4_decode_ == 0 || !nvfp4_beneficial(L.w_down_qtype))
+                cache_weight(L.w_down, L.w_down_qtype);
         }
 
         // Create fused KV weights for strided batched prefill GEMM.
@@ -1769,7 +1805,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
 
             // Respect VRAM budget — on WSL2/WDDM, cudaMalloc silently spills to
             // shared (system) memory beyond physical VRAM, causing massive slowdowns.
-            if (total_cache_bytes + 2 * one_sz > vram_budget) break;
+            if (total_cache_bytes + 2 * one_sz > remaining_budget) break;
 
             void* fused_buf = nullptr;
             cudaError_t err = cudaMalloc(&fused_buf, 2 * one_sz);
@@ -1808,7 +1844,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
             size_t one_sz = static_cast<size_t>(g_rows) * K * sizeof(half);
 
             // Respect VRAM budget (see fused KV comment above)
-            if (total_cache_bytes + 2 * one_sz > vram_budget) break;
+            if (total_cache_bytes + 2 * one_sz > remaining_budget) break;
 
             void* fused_buf = nullptr;
             cudaError_t err = cudaMalloc(&fused_buf, 2 * one_sz);
@@ -1838,13 +1874,14 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
         }
     }
 
+    // Deduct Phase 1 allocation from shared budget
+    remaining_budget = (remaining_budget > total_cache_bytes)
+                       ? (remaining_budget - total_cache_bytes) : 0;
+
     // --- Phase 2: FP8 overflow cache for remaining uncached weights ---
     // Weights already in fp16_cache_ keep their fused KV/gate+up optimizations.
     // FP8 is only used for weights that didn't fit in the FP16 budget (50% smaller).
     if (use_fp8_cache_) {
-        cudaMemGetInfo(&free_vram, &total_vram);
-        size_t fp8_budget = (free_vram > kVramReserveMiB * 1024ULL * 1024)
-                             ? (free_vram - kVramReserveMiB * 1024ULL * 1024) : 0;
         size_t fp8_total = 0;
         int fp8_count = 0;
         bool fp8_exhausted = false;
@@ -1861,11 +1898,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
             size_t fp8_bytes = n_elems;  // 1 byte per element
             size_t fp16_bytes = n_elems * sizeof(half);
 
-            if (fp8_total + fp8_bytes + sizeof(float) > fp8_budget) {
+            if (fp8_total + fp8_bytes + sizeof(float) > remaining_budget) {
                 fp8_exhausted = true;
                 IMP_LOG_INFO("FP8 overflow: budget reached after %d tensors (%.1f / %.1f MiB)",
                              fp8_count, fp8_total / (1024.0 * 1024.0),
-                             fp8_budget / (1024.0 * 1024.0));
+                             remaining_budget / (1024.0 * 1024.0));
                 return;
             }
 
@@ -1946,6 +1983,137 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream) {
                          (fp16_equivalent - fp8_total) / (1024.0 * 1024.0));
         } else {
             IMP_LOG_INFO("FP8 prefill: all weights fit in FP16 cache, no FP8 overflow needed");
+        }
+    }
+
+    // Deduct Phase 2 allocation from shared budget
+    remaining_budget = (remaining_budget > fp8_cache_bytes_)
+                       ? (remaining_budget - fp8_cache_bytes_) : 0;
+
+    // --- Phase 3: NVFP4 decode weight cache ---
+    // Converts eligible weights (> 4.5 bits/elem) to NVFP4 format for faster
+    // decode GEMV.  Weights in fp16_cache_ are quantized directly (zero-copy);
+    // weights NOT in fp16_cache_ (e.g. dense FFN skipped in Phase 1) are
+    // dequantized via dequant_scratch_ as a transient FP16 staging buffer.
+    // Mode 2 additionally frees all FP16 cache at the end.
+    if (use_nvfp4_decode_ > 0) {
+        size_t nvfp4_total = 0;
+        int nvfp4_count = 0;
+        int nvfp4_from_scratch = 0;
+        bool nvfp4_budget_exhausted = false;
+        const char* mode_str = (use_nvfp4_decode_ == 1) ? "additive" : "only";
+
+        auto cache_weight_nvfp4 = [&](const Tensor& w, GGMLQuantType qtype) {
+            if (!w.data) return;
+            if (!nvfp4_beneficial(qtype)) return;
+            if (nvfp4_cache_.count(w.data)) return;
+            if (nvfp4_budget_exhausted) return;
+
+            int rows = static_cast<int>(w.shape[0]);
+            int cols = static_cast<int>(w.shape[1]);
+            // K must be multiple of 16 for NVFP4 micro-blocks
+            if (cols % 16 != 0) return;
+
+            // NVFP4 size: packed data + micro-scales + tensor scale
+            size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 +
+                                 static_cast<size_t>(rows) * cols / 16 + 4;
+
+            if (nvfp4_total + nvfp4_bytes > remaining_budget) {
+                nvfp4_budget_exhausted = true;
+                IMP_LOG_INFO("NVFP4 cache: VRAM budget reached after %d tensors "
+                             "(%.1f / %.1f MiB), remaining weights use dp4a",
+                             nvfp4_count, nvfp4_total / (1024.0 * 1024.0),
+                             remaining_budget / (1024.0 * 1024.0));
+                return;
+            }
+
+            // Source FP16 data: prefer existing FP16 cache (zero-copy),
+            // otherwise dequant via scratch buffer (GGUF → dequant_scratch_).
+            auto fp16_it = fp16_cache_.find(w.data);
+            const Tensor* fp16_src = nullptr;
+            Tensor scratch_view;
+
+            if (fp16_it != fp16_cache_.end()) {
+                fp16_src = &fp16_it->second;
+            } else {
+                // Not in FP16 cache — dequant from GGUF into scratch buffer
+                if (!dequant_gpu_supported(qtype) || !dequant_scratch_) return;
+                dequant_gpu(w.data, dequant_scratch_, qtype, rows, cols, stream);
+                scratch_view = Tensor(dequant_scratch_, DType::FP16, w.ndim, w.shape, false);
+                fp16_src = &scratch_view;
+                nvfp4_from_scratch++;
+            }
+
+            NvFP4QuantResult result;
+            quantize_fp16_to_nvfp4(*fp16_src, result, stream);
+
+            // If we used scratch, must sync before it's reused by next tensor
+            if (fp16_it == fp16_cache_.end()) {
+                cudaStreamSynchronize(stream);
+            }
+
+            nvfp4_cache_[w.data] = result;
+            nvfp4_total += nvfp4_bytes;
+            nvfp4_count++;
+        };
+
+        // Cache attention + FFN weights (same priority as FP16 cache)
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            cache_weight_nvfp4(L.wq, L.wq_qtype);
+            cache_weight_nvfp4(L.wk, L.wk_qtype);
+            cache_weight_nvfp4(L.wv, L.wv_qtype);
+            cache_weight_nvfp4(L.wo, L.wo_qtype);
+        }
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            cache_weight_nvfp4(L.ssm_in, L.ssm_in_qtype);
+            cache_weight_nvfp4(L.ssm_out, L.ssm_out_qtype);
+            cache_weight_nvfp4(L.w_gate_shared, L.w_gate_shared_qtype);
+            cache_weight_nvfp4(L.w_up_shared, L.w_up_shared_qtype);
+            cache_weight_nvfp4(L.w_down_shared, L.w_down_shared_qtype);
+            cache_weight_nvfp4(L.w_gate, L.w_gate_qtype);
+            cache_weight_nvfp4(L.w_up, L.w_up_qtype);
+            cache_weight_nvfp4(L.w_down, L.w_down_qtype);
+        }
+
+        if (nvfp4_count > 0) {
+            cudaStreamSynchronize(stream);
+            nvfp4_cache_bytes_ = nvfp4_total;
+            if (nvfp4_from_scratch > 0) {
+                IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB (%d from FP16 cache, %d via dequant scratch, mode: %s)",
+                             nvfp4_count, nvfp4_total / (1024.0 * 1024.0),
+                             nvfp4_count - nvfp4_from_scratch, nvfp4_from_scratch, mode_str);
+            } else {
+                IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB (mode: %s)",
+                             nvfp4_count, nvfp4_total / (1024.0 * 1024.0), mode_str);
+            }
+        } else {
+            IMP_LOG_INFO("NVFP4 decode: no eligible weights found (all ≤ 4.5 bits/elem)");
+        }
+
+        // In "only" mode (2), release FP16 cache to save VRAM — prefill uses
+        // on-the-fly dequant from GGUF via dequant_scratch_.
+        if (use_nvfp4_decode_ == 2 && !fp16_cache_.empty()) {
+            for (auto& [ptr, tensor] : fp16_cache_) {
+                cudaFree(tensor.data);
+            }
+            size_t freed = fp16_cache_bytes_;
+            fp16_cache_.clear();
+            fp16_cache_bytes_ = 0;
+
+            // Also free fused KV and gate+up caches
+            for (auto& [idx, tensor] : fused_kv_cache_) {
+                if (tensor.data) cudaFree(tensor.data);
+            }
+            fused_kv_cache_.clear();
+            for (auto& [idx, tensor] : fused_gate_up_cache_) {
+                if (tensor.data) cudaFree(tensor.data);
+            }
+            fused_gate_up_cache_.clear();
+
+            IMP_LOG_INFO("NVFP4 only mode: freed FP16 cache (%.2f MiB) — prefill uses on-the-fly dequant",
+                         freed / (1024.0 * 1024.0));
         }
     }
 }
@@ -2375,16 +2543,19 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     //    For FP32 accumulator path: residual is kept in fp32_hidden_, skip FP16 copy.
     const bool has_post_attn_norm = (ly.post_attn_norm.data != nullptr);
     const bool using_fp32_accum = (fp32_accum_buf_ != nullptr && has_post_attn_norm);
-    bool will_fuse_o_residual = (!has_post_attn_norm &&
+    bool will_fuse_o_nvfp4 = (!has_post_attn_norm && n == 1 && h.dtype == DType::FP16 &&
+                               nvfp4_cache_.count(ly.wo.data));
+    bool will_fuse_o_residual = (!has_post_attn_norm && !will_fuse_o_nvfp4 &&
                                   n == 1 && q8_1_buf_ != nullptr && d8_buf_ != nullptr &&
                                   h.dtype == DType::FP16 &&
                                   (ly.wo_qtype == GGMLQuantType::Q6_K || ly.wo_qtype == GGMLQuantType::Q8_0 ||
                                    ly.wo_qtype == GGMLQuantType::Q4_0 || ly.wo_qtype == GGMLQuantType::Q4_K ||
                                    ly.wo_qtype == GGMLQuantType::Q5_K ||
                                    ly.wo_qtype == GGMLQuantType::Q2_K || ly.wo_qtype == GGMLQuantType::Q3_K));
-    bool will_fuse_o_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && n > 1 &&
+    bool will_fuse_o_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 &&
+                               n > 1 &&
                                (fp16_cache_.count(ly.wo.data) || fp8_cache_.count(ly.wo.data)));
-    if (!will_fuse_o_residual && !will_fuse_o_beta1 && !using_fp32_accum) {
+    if (!will_fuse_o_residual && !will_fuse_o_beta1 && !will_fuse_o_nvfp4 && !using_fp32_accum) {
         cudaMemcpyAsync(r.data, h.data, h.nbytes(),
                         cudaMemcpyDeviceToDevice, stream);
     }
@@ -2395,6 +2566,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     //    Otherwise falls back to separate RMSNorm + 3 dp4a/cuBLAS dispatches.
     {
         auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
+        // NVFP4 decode path: uses FP16 input (no Q8_1 quantization needed)
+        auto nvfp4_wq = nvfp4_cache_.find(ly.wq.data);
+        auto nvfp4_wk = nvfp4_cache_.find(ly.wk.data);
+        auto nvfp4_wv = nvfp4_cache_.find(ly.wv.data);
+        bool nvfp4_qkv = (n == 1 && nvfp4_wq != nvfp4_cache_.end() &&
+                          nvfp4_wk != nvfp4_cache_.end() && nvfp4_wv != nvfp4_cache_.end());
         bool fused_qkv = (n == 1 && q8 != nullptr && d8_buf_ != nullptr &&
                           no.dtype == DType::FP16 &&
                           ly.wq_qtype == ly.wk_qtype && ly.wk_qtype == ly.wv_qtype &&
@@ -2405,7 +2582,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                            ly.wq_qtype == GGMLQuantType::Q5_K ||
                            ly.wq_qtype == GGMLQuantType::Q2_K ||
                            ly.wq_qtype == GGMLQuantType::Q3_K));
-        if (fused_qkv) {
+        if (nvfp4_qkv) {
+            // NVFP4 fused QKV: RMSNorm to FP16, then NVFP4 GEMV (no Q8_1 needed)
+            rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
+            int q_rows = static_cast<int>(ly.wq.shape[0]);
+            int k_rows = static_cast<int>(ly.wk.shape[0]);
+            int v_rows = static_cast<int>(ly.wv.shape[0]);
+            int K = static_cast<int>(ly.wq.shape[1]);
+            gemv_nvfp4_qkv_fused(nvfp4_wq->second, nvfp4_wk->second, nvfp4_wv->second,
+                                  static_cast<const half*>(no.data),
+                                  static_cast<half*>(qv.data),
+                                  static_cast<half*>(kk.data),
+                                  static_cast<half*>(vv.data),
+                                  q_rows, k_rows, v_rows, K, stream);
+        } else if (fused_qkv) {
             // Fused: RMSNorm + Q8_1 quantization in one kernel (no norm_out write)
             int K = static_cast<int>(ly.wq.shape[1]);
             rmsnorm_quantize_q8_1(static_cast<const half*>(h.data),
@@ -2494,9 +2684,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                     // K+V: one batched cuBLAS call
                     gemm_kv_batched(no, fused_kv_it->second, kk, vv, stream);
                 } else {
-                    gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, qv, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
-                    gemm_dispatch(no, ly.wk, ly.wk_scales, ly.wk_qtype, kk, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
-                    gemm_dispatch(no, ly.wv, ly.wv_scales, ly.wv_qtype, vv, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                    const auto* nv4p = nvfp4_cache_.empty() ? nullptr : &nvfp4_cache_;
+                    gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, qv, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
+                                  nullptr, nullptr, nullptr, nv4p);
+                    gemm_dispatch(no, ly.wk, ly.wk_scales, ly.wk_qtype, kk, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
+                                  nullptr, nullptr, nullptr, nv4p);
+                    gemm_dispatch(no, ly.wv, ly.wv_scales, ly.wv_qtype, vv, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
+                                  nullptr, nullptr, nullptr, nv4p);
                 }
             }
         }
@@ -2703,7 +2897,17 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     //    initial h→r memcpy and use h.data itself as the residual source.
     //    This is safe because h.data is only READ (never written) between the
     //    start of run_attention and this point.
-    if (will_fuse_o_residual) {
+    if (will_fuse_o_nvfp4) {
+        // NVFP4 Wo + residual: attn_out (FP16) @ wo_nvfp4^T + residual → hidden
+        auto& wo_nvfp4 = nvfp4_cache_.at(ly.wo.data);
+        int M_o = static_cast<int>(ly.wo.shape[0]);
+        int K_o = static_cast<int>(ly.wo.shape[1]);
+        gemv_nvfp4_residual(wo_nvfp4,
+                             static_cast<const half*>(ao.data),
+                             static_cast<half*>(h.data),
+                             static_cast<const half*>(h.data),
+                             M_o, K_o, stream);
+    } else if (will_fuse_o_residual) {
         int K_o = static_cast<int>(ly.wo.shape[1]);
         int M_o = static_cast<int>(ly.wo.shape[0]);
         // Separate quant + K-parallel GEMV: higher warp occupancy than inline_quant.
@@ -2758,7 +2962,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // Fallback: separate O-projection + optional post-norm + residual add
         gemm_dispatch(ao, ly.wo, ly.wo_scales, ly.wo_qtype, po, dequant_scratch_, stream,
                       static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                      use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_);
+                      use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
+                      nvfp4_cache_.empty() ? nullptr : &nvfp4_cache_);
         if (has_post_attn_norm && using_fp32_accum) {
             // Fused: RMSNorm + FP32 accum add + FP32→FP16 in one kernel.
             // Saves 2 kernel launches + 2 DRAM round-trips per layer.
@@ -2809,7 +3014,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     const Tensor& ffn_norm_w = (ly.ffn_norm.data != nullptr) ? ly.ffn_norm : ly.attn_norm;
     const bool has_post_ffn_norm = (ly.post_ffn_norm.data != nullptr);
     const bool using_fp32_accum = (fp32_accum_buf_ != nullptr && has_post_ffn_norm);
-    bool will_fuse_down_residual = (!has_post_ffn_norm &&
+    bool will_fuse_down_nvfp4 = (!has_post_ffn_norm && n == 1 && h.dtype == DType::FP16 &&
+                                  nvfp4_cache_.count(ly.w_down.data));
+    bool will_fuse_down_residual = (!has_post_ffn_norm && !will_fuse_down_nvfp4 &&
                                      n == 1 && q8_1_buf_ != nullptr && d8_buf_ != nullptr &&
                                      h.dtype == DType::FP16 &&
                                      (ly.w_down_qtype == GGMLQuantType::Q6_K ||
@@ -2819,14 +3026,16 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                       ly.w_down_qtype == GGMLQuantType::Q5_K ||
                                       ly.w_down_qtype == GGMLQuantType::Q2_K ||
                                       ly.w_down_qtype == GGMLQuantType::Q3_K));
-    bool will_fuse_down_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual && n > 1 &&
+    bool will_fuse_down_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual &&
+                                  !will_fuse_down_nvfp4 && n > 1 &&
                                   (fp16_cache_.count(ly.w_down.data) || fp8_cache_.count(ly.w_down.data)));
     bool will_fuse_down_dequant_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual &&
+                                          !will_fuse_down_nvfp4 &&
                                           !will_fuse_down_beta1 && n > 1 &&
                                           dequant_scratch_ != nullptr &&
                                           dequant_gpu_supported(ly.w_down_qtype));
     if (!will_fuse_down_residual && !will_fuse_down_beta1 &&
-        !will_fuse_down_dequant_beta1 && !using_fp32_accum) {
+        !will_fuse_down_dequant_beta1 && !will_fuse_down_nvfp4 && !using_fp32_accum) {
         cudaMemcpyAsync(r.data, h.data, h.nbytes(),
                         cudaMemcpyDeviceToDevice, stream);
     }
@@ -2836,6 +3045,11 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     {
         auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
         int d = static_cast<int>(h.shape[1]);
+        // NVFP4 gate+up decode path
+        auto nvfp4_wg = nvfp4_cache_.find(ly.w_gate.data);
+        auto nvfp4_wu = nvfp4_cache_.find(ly.w_up.data);
+        bool nvfp4_ffn = (n == 1 && nvfp4_wg != nvfp4_cache_.end() &&
+                          nvfp4_wu != nvfp4_cache_.end());
         bool fused_ffn_norm = (n == 1 && q8 != nullptr && d8_buf_ != nullptr &&
                                h.dtype == DType::FP16 &&
                                (ly.w_gate_qtype == GGMLQuantType::Q6_K ||
@@ -2845,7 +3059,16 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                 ly.w_gate_qtype == GGMLQuantType::Q5_K ||
                                 ly.w_gate_qtype == GGMLQuantType::Q2_K ||
                                 ly.w_gate_qtype == GGMLQuantType::Q3_K));
-        if (fused_ffn_norm) {
+        if (nvfp4_ffn) {
+            // NVFP4 gate+up: RMSNorm to FP16, then NVFP4 fused GEMV
+            rmsnorm(h, ffn_norm_w, no, eps, stream, norm_w_off_);
+            int ffn_rows = static_cast<int>(ly.w_gate.shape[0]);
+            gemv_nvfp4_gate_up_fused(nvfp4_wg->second, nvfp4_wu->second,
+                                      static_cast<const half*>(no.data),
+                                      static_cast<half*>(go.data),
+                                      static_cast<half*>(uo.data),
+                                      ffn_rows, d, stream);
+        } else if (fused_ffn_norm) {
             // Fused RMSNorm + Q8_1: quantize once, use for both gate and up
             rmsnorm_quantize_q8_1(static_cast<const half*>(h.data),
                                     static_cast<const half*>(ffn_norm_w.data),
@@ -2877,8 +3100,11 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     // Batched gate+up: single cuBLAS call for both projections
                     gemm_pair_batched(no, fused_gu_it->second, go, uo, stream);
                 } else {
-                    gemm_dispatch(no, ly.w_gate, ly.w_gate_scales, ly.w_gate_qtype, go, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
-                    gemm_dispatch(no, ly.w_up,   ly.w_up_scales,   ly.w_up_qtype,   uo, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_);
+                    const auto* nv4p = nvfp4_cache_.empty() ? nullptr : &nvfp4_cache_;
+                    gemm_dispatch(no, ly.w_gate, ly.w_gate_scales, ly.w_gate_qtype, go, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
+                                  nullptr, nullptr, nullptr, nv4p);
+                    gemm_dispatch(no, ly.w_up,   ly.w_up_scales,   ly.w_up_qtype,   uo, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
+                                  nullptr, nullptr, nullptr, nv4p);
                 }
             }
         }
@@ -2900,7 +3126,22 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                       ly.w_down_qtype == GGMLQuantType::Q5_K ||
                                       ly.w_down_qtype == GGMLQuantType::Q2_K ||
                                       ly.w_down_qtype == GGMLQuantType::Q3_K));
-        if (fused_down_residual) {
+        if (will_fuse_down_nvfp4) {
+            // NVFP4 down + residual: SwiGLU/GeGLU to FP16, then NVFP4 GEMV + residual
+            int K_d = static_cast<int>(ly.w_down.shape[1]);
+            int M_d = static_cast<int>(ly.w_down.shape[0]);
+            if (cfg.ffn_activation != FFNActivation::GEGLU) {
+                swiglu(go, uo, so, stream);
+            } else {
+                geglu(go, uo, so, stream);
+            }
+            auto& wd_nvfp4 = nvfp4_cache_.at(ly.w_down.data);
+            gemv_nvfp4_residual(wd_nvfp4,
+                                 static_cast<const half*>(so.data),
+                                 static_cast<half*>(h.data),
+                                 static_cast<const half*>(h.data),
+                                 M_d, K_d, stream);
+        } else if (fused_down_residual) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
             // Fuse activation + Q8_1 quantization into a single kernel when possible.
@@ -3015,7 +3256,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             } else {
                 gemm_dispatch(so, ly.w_down, ly.w_down_scales, ly.w_down_qtype, fo, dequant_scratch_, stream,
                               static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                              use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_);
+                              use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
+                              nvfp4_cache_.empty() ? nullptr : &nvfp4_cache_);
                 if (has_post_ffn_norm && using_fp32_accum) {
                     // Post-FFN norm → FP32 accumulation (no D2D copy needed)
                     Tensor fp32_h = view_tokens(fp32_hidden_, n);
@@ -4133,16 +4375,19 @@ moe_after_experts:
         // Up projection (dp4a MMVQ for decode)
         {
             auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
+            const auto* nvfp4_ptr = nvfp4_cache_.empty() ? nullptr : &nvfp4_cache_;
             gemm_dispatch(no, ly.w_up_shared, Tensor(), ly.w_up_shared_qtype,
                           sh_up, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                          use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_);
+                          use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
+                          nvfp4_ptr);
 
             if (shared_gated) {
                 // Gated: gate + SwiGLU
                 Tensor sh_gate(moe_expert_gate_.data, compute_dtype_, 2, sh_shape, true);
                 gemm_dispatch(no, ly.w_gate_shared, Tensor(), ly.w_gate_shared_qtype,
                               sh_gate, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                              use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_);
+                              use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
+                              nvfp4_ptr);
                 swiglu(sh_gate, sh_up, sh_swiglu, stream);
             } else {
                 // Non-gated: relu^2(up) in-place [Nemotron-H uses squared ReLU]
@@ -4153,7 +4398,8 @@ moe_after_experts:
             Tensor& sh_act = shared_gated ? sh_swiglu : sh_up;
             gemm_dispatch(sh_act, ly.w_down_shared, Tensor(), ly.w_down_shared_qtype,
                           sh_down, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                          use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_);
+                          use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
+                          nvfp4_ptr);
         }
 
         // Add shared expert output to hidden (which already has routed expert output)
@@ -4209,9 +4455,11 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
     // 2. ssm_in projection: [n, d_model] @ ssm_in^T -> [n, ssm_in_dim]
     //    ssm_in_dim = inner(z) + conv_channels(xBC) + n_heads(dt)
     Tensor proj = view_tokens(ssm_proj_buf_, n);
+    const auto* nvfp4_ssm_ptr = nvfp4_cache_.empty() ? nullptr : &nvfp4_cache_;
     gemm_dispatch(no, ly.ssm_in, Tensor(), ly.ssm_in_qtype, proj, dequant_scratch_, stream,
                   static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                  use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_);
+                  use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
+                  nvfp4_ssm_ptr);
 
     // 3. Split projection output [n, total_dim] into z, xBC, dt by column slices.
     //    proj layout: each row has [z(inner) | xBC(conv_channels) | dt(n_heads)].
@@ -4393,7 +4641,8 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
     gemm_dispatch(y_buf, ly.ssm_out, Tensor(), ly.ssm_out_qtype, out_buf, dequant_scratch_, stream,
                   static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                  use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_);
+                  use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
+                  nvfp4_ssm_ptr);
 
     // 11. Residual add: hidden = output + residual
     elementwise_add(out_buf, r, stream);

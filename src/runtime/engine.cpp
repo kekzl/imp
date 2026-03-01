@@ -93,7 +93,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     executor_ = std::make_unique<GraphExecutor>();
     if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl,
                          config_.max_batch_size, config_.max_seq_len,
-                         config_.use_fp8_prefill)) {
+                         config_.use_fp8_prefill, config_.use_nvfp4_decode)) {
         return false;
     }
 
@@ -366,7 +366,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // Done eagerly at init time so the first real-world prefill isn't penalized
     // by ~380ms of dequant overhead (previously this was lazy on first prefill).
     // Decode (n=1) uses raw quantized dp4a GEMV and doesn't need FP16 cache.
-    executor_->pre_dequant_weights(stream_);
+    // Compute weight cache budget: free VRAM minus runtime reserve.
+    // All fixed allocations (weights, KV, SSM, workspace) are done by now.
+    size_t cache_budget = effective_free_vram();
+    constexpr size_t kCacheReserveMiB = 1024;  // CUDA graphs + cuBLAS + driver
+    cache_budget = (cache_budget > kCacheReserveMiB * 1024ULL * 1024)
+                   ? (cache_budget - kCacheReserveMiB * 1024ULL * 1024) : 0;
+    executor_->pre_dequant_weights(stream_, cache_budget);
     dequant_done_ = true;
     cudaStreamSynchronize(stream_);
 

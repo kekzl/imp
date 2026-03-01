@@ -52,6 +52,9 @@ struct EngineConfig {
     // FP8 prefill weight cache: uses FP8 E4M3 instead of FP16 for ~2x prefill throughput
     bool use_fp8_prefill = false;
 
+    // NVFP4 decode weight cache: 0=off, 1=additive (FP16+NVFP4), 2=NVFP4 only
+    int use_nvfp4_decode = 0;
+
     // Speculative decoding
     bool enable_speculative = false;
     std::string draft_model_path;

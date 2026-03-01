@@ -5,6 +5,7 @@
 #include "memory/ssm_state.h"
 #include "memory/layer_offload.h"
 #include "compute/moe_routing.h"
+#include "quant/nvfp4_quant.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <vector>
@@ -86,7 +87,8 @@ public:
     // Phase 1: Initialize model reference, compute workspace sizes, enable PDL.
     // Does NOT allocate GPU memory — call allocate_workspaces() after weight upload.
     bool init(const Model& model, DType compute_dtype = DType::FP16, bool use_pdl = false,
-              int max_batch_size = 1, int max_seq_len = 0, bool use_fp8_prefill = false);
+              int max_batch_size = 1, int max_seq_len = 0, bool use_fp8_prefill = false,
+              int use_nvfp4_decode = 0);
 
     // Phase 2: Allocate all GPU workspace buffers.
     // Call AFTER weight upload to maximize VRAM available for expert layers.
@@ -123,7 +125,8 @@ public:
 
     // Pre-dequantize quantized weights to FP16 on GPU for fast prefill GEMM.
     // Must be called AFTER model weights are uploaded to GPU.
-    void pre_dequant_weights(cudaStream_t stream = nullptr);
+    // cache_budget: max bytes available for weight caches (0 = unlimited).
+    void pre_dequant_weights(cudaStream_t stream = nullptr, size_t cache_budget = 0);
 
     // Set KV layer mapping (must be called before forward pass for hybrid models)
     void set_kv_layer_map(std::vector<int> map) {
@@ -287,6 +290,13 @@ private:
     void* fp8_act_buf_ = nullptr;       // max_tokens * max_dim bytes
     size_t fp8_act_buf_size_ = 0;
     float* d_act_scale_ = nullptr;      // 1 float on device
+
+    // NVFP4 decode weight cache: quantized from FP16 cache at init.
+    // Provides 31-47% bandwidth reduction vs raw Q8_0/Q6_K during decode GEMV.
+    // Mode: 0=off, 1=additive (FP16 + NVFP4), 2=only (NVFP4 replaces FP16)
+    std::unordered_map<const void*, NvFP4QuantResult> nvfp4_cache_;
+    size_t nvfp4_cache_bytes_ = 0;
+    int use_nvfp4_decode_ = 0;
 
     // Fused KV weight cache: concatenated [wk; wv] as [2*nkv*hd, d_model] FP16.
     // Enables strided batched GEMM for K+V in a single cuBLAS call during prefill.
