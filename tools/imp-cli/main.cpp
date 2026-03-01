@@ -34,6 +34,8 @@ int main(int argc, char** argv) {
     printf("IMP Inference Engine %s\n", imp_version());
     printf("Loading model: %s\n", args.model_path.c_str());
 
+    auto t_init_start = std::chrono::high_resolution_clock::now();
+
     ImpModel model = nullptr;
     ImpError err = imp_model_load(args.model_path.c_str(), IMP_FORMAT_GGUF, &model);
     if (err != IMP_SUCCESS) {
@@ -49,6 +51,7 @@ int main(int argc, char** argv) {
     if (args.ssm_fp16) config.ssm_state_dtype = IMP_DTYPE_FP16;
     // CUDA graphs enabled by default in imp_config_default(); --no-cuda-graphs can disable
     if (args.no_cuda_graphs) config.enable_cuda_graphs = 0;
+    config.prefill_chunk_size = args.prefill_chunk_size;
 
     ImpContext ctx = nullptr;
     err = imp_context_create(model, &config, &ctx);
@@ -58,12 +61,20 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    auto t_init_end = std::chrono::high_resolution_clock::now();
+    double init_ms = std::chrono::duration<double, std::milli>(t_init_end - t_init_start).count();
+    fprintf(stderr, "Init: %.2f ms (model load + engine setup)\n", init_ms);
+
     ImpGenerateParams params = imp_generate_params_default();
     params.temperature = args.temperature;
     params.top_p = args.top_p;
     params.top_k = args.top_k;
     params.max_tokens = args.max_tokens;
     params.seed = args.seed;
+    params.min_p = args.min_p;
+    params.repetition_penalty = args.repetition_penalty;
+    params.frequency_penalty = args.frequency_penalty;
+    params.presence_penalty = args.presence_penalty;
 
     // Determine chat template override from --chat-template flag
     if (args.chat_template == "none") {

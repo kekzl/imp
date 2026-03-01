@@ -9,7 +9,7 @@ set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g -DNDEBUG")
 # CUDA flags
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --extended-lambda")
 set(CMAKE_CUDA_FLAGS_DEBUG "-G -g -O0")
-set(CMAKE_CUDA_FLAGS_RELEASE "-O3 --use_fast_math -Xptxas -O3 -DNDEBUG")
+set(CMAKE_CUDA_FLAGS_RELEASE "-O3 --use_fast_math --extra-device-vectorization -Xptxas -O3 -DNDEBUG")
 set(CMAKE_CUDA_FLAGS_RELWITHDEBINFO "-O2 -g -lineinfo -DNDEBUG")
 
 # Suppress noisy CUDA warnings

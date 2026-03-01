@@ -605,4 +605,142 @@ void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p,
                     cudaMemcpyDeviceToHost, stream);
 }
 
+// ===========================================================================
+// Repetition / frequency / presence penalties
+// ===========================================================================
+
+// Kernel: for each token in history, adjust its logit.
+// Uses atomics to handle tokens appearing multiple times.
+// Strategy: first count occurrences, then apply penalties.
+// For simplicity with small history, we iterate the history per thread.
+__global__ void apply_penalties_kernel(
+        float* __restrict__ logits,
+        const int32_t* __restrict__ token_ids,
+        int n_tokens,
+        int vocab_size,
+        float repetition_penalty,
+        float frequency_penalty,
+        float presence_penalty) {
+    // Each thread handles one vocab entry
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= vocab_size) return;
+
+    // Count occurrences of this token in history
+    int count = 0;
+    for (int i = 0; i < n_tokens; i++) {
+        if (token_ids[i] == idx) count++;
+    }
+    if (count == 0) return;
+
+    float logit = logits[idx];
+
+    // Repetition penalty (multiplicative): divide positive, multiply negative
+    if (repetition_penalty != 1.0f) {
+        if (logit > 0.0f)
+            logit /= repetition_penalty;
+        else
+            logit *= repetition_penalty;
+    }
+
+    // Frequency penalty (subtractive per-occurrence)
+    logit -= frequency_penalty * static_cast<float>(count);
+
+    // Presence penalty (subtractive binary)
+    logit -= presence_penalty;
+
+    logits[idx] = logit;
+}
+
+void apply_penalties(float* logits, int vocab_size,
+                     const int32_t* token_ids, int n_tokens,
+                     float repetition_penalty,
+                     float frequency_penalty,
+                     float presence_penalty,
+                     cudaStream_t stream) {
+    if (n_tokens == 0) return;
+    if (repetition_penalty == 1.0f && frequency_penalty == 0.0f && presence_penalty == 0.0f)
+        return;
+
+    int blocks = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    apply_penalties_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
+        logits, token_ids, n_tokens, vocab_size,
+        repetition_penalty, frequency_penalty, presence_penalty);
+}
+
+// ===========================================================================
+// min_p filtering
+// ===========================================================================
+
+// Two-pass approach:
+// Pass 1: find max logit (for softmax stability)
+// Pass 2: set logits where exp(logit - max) < min_p to -inf
+// This works because min_p threshold on probabilities = min_p * max_prob,
+// and max_prob = exp(max_logit - max_logit) / sum = 1/sum, so the threshold
+// in logit space is: logit < max_logit + log(min_p).
+
+__global__ void find_max_logit_kernel(
+        const float* __restrict__ logits,
+        int vocab_size,
+        float* __restrict__ d_max) {
+    __shared__ float s_max[BLOCK_SIZE / WARP_SIZE];
+    float local_max = -FLT_MAX;
+    for (int i = threadIdx.x; i < vocab_size; i += blockDim.x) {
+        float v = logits[i];
+        if (v > local_max) local_max = v;
+    }
+    // Warp reduction
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+        float other = __shfl_xor_sync(0xFFFFFFFF, local_max, offset);
+        if (other > local_max) local_max = other;
+    }
+    int warp_id = threadIdx.x / WARP_SIZE;
+    int lane_id = threadIdx.x % WARP_SIZE;
+    if (lane_id == 0) s_max[warp_id] = local_max;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float mx = -FLT_MAX;
+        for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; w++) {
+            if (s_max[w] > mx) mx = s_max[w];
+        }
+        d_max[0] = mx;
+    }
+}
+
+__global__ void apply_min_p_kernel(
+        float* __restrict__ logits,
+        int vocab_size,
+        float threshold_logit) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= vocab_size) return;
+    if (logits[idx] < threshold_logit)
+        logits[idx] = -FLT_MAX;
+}
+
+void apply_min_p(float* logits, int vocab_size, float min_p,
+                 cudaStream_t stream) {
+    if (min_p <= 0.0f) return;
+
+    // Allocate temp buffer for max value
+    float* d_max = nullptr;
+    cudaMalloc(&d_max, sizeof(float));
+
+    find_max_logit_kernel<<<1, BLOCK_SIZE, 0, stream>>>(
+        logits, vocab_size, d_max);
+
+    // Read max back to compute threshold
+    float h_max = 0.0f;
+    cudaMemcpyAsync(&h_max, d_max, sizeof(float),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+    cudaFree(d_max);
+
+    // threshold = max_logit + log(min_p)
+    // Tokens with logit < threshold get -inf
+    float threshold = h_max + logf(min_p);
+
+    int blocks = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    apply_min_p_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
+        logits, vocab_size, threshold);
+}
+
 } // namespace imp

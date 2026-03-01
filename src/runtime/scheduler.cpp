@@ -60,7 +60,16 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
         active_.push_back(r);
     }
 
-    // 3. All active decoding requests go to the decode batch
+    // 3. Re-schedule incomplete PREFILLING requests (chunked prefill)
+    for (auto& req : active_) {
+        if (req->status == RequestStatus::PREFILLING &&
+            req->prefill_offset > 0 &&
+            req->prefill_offset < static_cast<int>(req->input_tokens.size())) {
+            prefill_batch.push_back(req);
+        }
+    }
+
+    // 4. All active decoding requests go to the decode batch
     for (auto& req : active_) {
         if (req->status == RequestStatus::DECODING) {
             decode_batch.push_back(req);

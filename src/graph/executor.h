@@ -42,6 +42,14 @@ struct InferenceState {
     float top_p = 1.0f;
     int top_k = 0;
     int seed = -1;
+    float min_p = 0.0f;
+    float repetition_penalty = 1.0f;
+    float frequency_penalty = 0.0f;
+    float presence_penalty = 0.0f;
+
+    // Token history for penalty computation (device pointer, owned by engine)
+    const int32_t* penalty_tokens = nullptr;
+    int n_penalty_tokens = 0;
 };
 
 // Imperative executor for the transformer forward pass.

@@ -61,6 +61,10 @@ typedef struct {
     int top_k;
     int max_tokens;
     int seed;                      // -1 = random
+    float min_p;                   // min probability threshold (0 = disabled)
+    float repetition_penalty;      // >1 penalizes repeats (1.0 = disabled)
+    float frequency_penalty;       // subtractive per-occurrence (0 = disabled)
+    float presence_penalty;        // subtractive binary (0 = disabled)
     int apply_chat_template;       // 1 = yes (default), 0 = no
     int ignore_eos;                // 1 = don't stop on EOS (benchmark mode)
 } ImpGenerateParams;

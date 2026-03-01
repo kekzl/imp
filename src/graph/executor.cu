@@ -141,6 +141,102 @@ __global__ void fp32_to_fp16_rowscale_kernel(const float* __restrict__ in,
         row_out[c] = __float2half(row_in[c] * inv_scale);
 }
 
+// Fused RMSNorm + FP32 accumulator add + FP32→FP16 row-scale conversion.
+// Replaces 3 separate kernels in the post-norm FP32 accumulator path:
+//   rmsnorm(input, weight, tmp) → fp32_accum_add(accum, tmp) → fp32_to_fp16_rowscale(accum, out)
+// Saves 2 kernel launches + 2 DRAM round-trips per invocation.
+// Uses same register-cached, warp-level reduction pattern as rmsnorm_quantize_q8_1.
+// Launch: <<<n_rows, 256>>>
+__global__ void rmsnorm_fp32_accum_to_fp16_kernel(
+        const half* __restrict__ input,     // [n, d_model] pre-norm data (e.g. GEMV output)
+        const half* __restrict__ norm_w,    // [d_model] RMSNorm weights
+        float* __restrict__ fp32_accum,     // [n, d_model] FP32 accumulator (read-modify-write)
+        half* __restrict__ output,          // [n, d_model] FP16 output for next layer
+        int d_model,
+        float eps,
+        float weight_offset) {
+    __shared__ float warp_reduce[8];
+    __shared__ float s_inv_rms;
+    __shared__ float s_row_max;
+
+    const int lane = threadIdx.x & 31;
+    const int warp_id = threadIdx.x >> 5;
+    const int n_warps = blockDim.x >> 5;
+    const int row = blockIdx.x;
+    const int n_blocks = d_model >> 5;  // d_model / 32
+
+    const half* x_row = input + static_cast<int64_t>(row) * d_model;
+    float* accum_row = fp32_accum + static_cast<int64_t>(row) * d_model;
+    half* out_row = output + static_cast<int64_t>(row) * d_model;
+
+    // Phase 1: Load input, cache in registers, compute sum of squares.
+    float x_cache[32];
+    float sum_sq = 0.0f;
+    int n_cached = 0;
+
+    for (int b = warp_id; b < n_blocks; b += n_warps) {
+        float v = __half2float(x_row[b * 32 + lane]);
+        x_cache[n_cached++] = v;
+        sum_sq += v * v;
+    }
+
+    // Warp reduce sum_sq
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        sum_sq += __shfl_xor_sync(0xFFFFFFFF, sum_sq, off);
+    if (lane == 0) warp_reduce[warp_id] = sum_sq;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float total = (lane < n_warps) ? warp_reduce[lane] : 0.0f;
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1)
+            total += __shfl_xor_sync(0xFFFFFFFF, total, off);
+        if (lane == 0)
+            s_inv_rms = rsqrtf(total / static_cast<float>(d_model) + eps);
+    }
+    __syncthreads();
+    float inv_rms = s_inv_rms;
+
+    // Phase 2: Normalize, add to FP32 accumulator, find max_abs of accumulated row.
+    float local_max = 0.0f;
+    int cache_idx = 0;
+    for (int b = warp_id; b < n_blocks; b += n_warps) {
+        int idx = b * 32 + lane;
+        float normed = x_cache[cache_idx] * inv_rms *
+                        (__half2float(norm_w[idx]) + weight_offset);
+        float acc_val = accum_row[idx] + normed;
+        accum_row[idx] = acc_val;
+        x_cache[cache_idx] = acc_val;  // reuse cache for Phase 3
+        local_max = fmaxf(local_max, fabsf(acc_val));
+        cache_idx++;
+    }
+
+    // Warp reduce max_abs
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        local_max = fmaxf(local_max, __shfl_xor_sync(0xFFFFFFFF, local_max, off));
+    if (lane == 0) warp_reduce[warp_id] = local_max;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float m = (lane < n_warps) ? warp_reduce[lane] : 0.0f;
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1)
+            m = fmaxf(m, __shfl_xor_sync(0xFFFFFFFF, m, off));
+        if (lane == 0)
+            s_row_max = m;
+    }
+    __syncthreads();
+    float inv_scale = (s_row_max > 65000.0f) ? (65000.0f / s_row_max) : 1.0f;
+
+    // Phase 3: Scale accumulated FP32 → FP16.
+    cache_idx = 0;
+    for (int b = warp_id; b < n_blocks; b += n_warps) {
+        out_row[b * 32 + lane] = __float2half(x_cache[cache_idx++] * inv_scale);
+    }
+}
+
 // Convert FP16 → FP32: out[i] = __half2float(in[i])
 __global__ void fp16_to_fp32_kernel(const half* in, float* out, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -621,6 +717,24 @@ static void gemm_dispatch(const Tensor& input, const Tensor& weight,
                         static_cast<half*>(output.data),
                         static_cast<int>(weight.shape[0]), K, stream);
     } else if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
+               q8_1_buf != nullptr && d8_buf != nullptr && qtype == GGMLQuantType::Q4_K) {
+        // dp4a MMVQ Q4_K
+        int K = static_cast<int>(weight.shape[1]);
+        quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
+                               q8_1_buf, d8_buf, K, stream);
+        gemv_q4_k_q8_1(weight.data, q8_1_buf, d8_buf,
+                         static_cast<half*>(output.data),
+                         static_cast<int>(weight.shape[0]), K, stream);
+    } else if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
+               q8_1_buf != nullptr && d8_buf != nullptr && qtype == GGMLQuantType::Q5_K) {
+        // dp4a MMVQ Q5_K
+        int K = static_cast<int>(weight.shape[1]);
+        quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
+                               q8_1_buf, d8_buf, K, stream);
+        gemv_q5_k_q8_1(weight.data, q8_1_buf, d8_buf,
+                         static_cast<half*>(output.data),
+                         static_cast<int>(weight.shape[0]), K, stream);
+    } else if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
                dequant_scratch != nullptr && qtype == GGMLQuantType::Q6_K) {
         // Fallback: Fused Q6_K GEMV (FP16 dequant path)
         gemv_q6k(weight.data, static_cast<const half*>(input.data),
@@ -748,7 +862,8 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
         layernorm_pdl_register();
         rope_pdl_register();
         activation_pdl_register();
-        IMP_LOG_INFO("PDL enabled on executor + compute kernels");
+        gemv_pdl_register();
+        IMP_LOG_INFO("PDL enabled on executor + compute + GEMV kernels");
     } else if (use_pdl_) {
         IMP_LOG_WARN("PDL requested but not available on this device/CUDA version");
         use_pdl_ = false;
@@ -1900,7 +2015,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     bool will_fuse_o_residual = (!has_post_attn_norm &&
                                   n == 1 && q8_1_buf_ != nullptr && d8_buf_ != nullptr &&
                                   h.dtype == DType::FP16 &&
-                                  (ly.wo_qtype == GGMLQuantType::Q6_K || ly.wo_qtype == GGMLQuantType::Q8_0));
+                                  (ly.wo_qtype == GGMLQuantType::Q6_K || ly.wo_qtype == GGMLQuantType::Q8_0 ||
+                                   ly.wo_qtype == GGMLQuantType::Q4_K || ly.wo_qtype == GGMLQuantType::Q5_K));
     bool will_fuse_o_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && n > 1 &&
                                fp16_cache_.count(ly.wo.data));
     if (!will_fuse_o_residual && !will_fuse_o_beta1 && !using_fp32_accum) {
@@ -1919,7 +2035,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                           ly.wq_qtype == ly.wk_qtype && ly.wk_qtype == ly.wv_qtype &&
                           (ly.wq_qtype == GGMLQuantType::Q6_K ||
                            ly.wq_qtype == GGMLQuantType::Q8_0 ||
-                           ly.wq_qtype == GGMLQuantType::Q4_0));
+                           ly.wq_qtype == GGMLQuantType::Q4_0 ||
+                           ly.wq_qtype == GGMLQuantType::Q4_K ||
+                           ly.wq_qtype == GGMLQuantType::Q5_K));
         if (fused_qkv) {
             // Fused: RMSNorm + Q8_1 quantization in one kernel (no norm_out write)
             int K = static_cast<int>(ly.wq.shape[1]);
@@ -1939,6 +2057,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                           q_rows, k_rows, v_rows, K, stream);
             } else if (ly.wq_qtype == GGMLQuantType::Q4_0) {
                 gemv_qkv_fused_q4_0_q8_1(ly.wq.data, ly.wk.data, ly.wv.data,
+                                           q8, d8_buf_,
+                                           static_cast<half*>(qv.data),
+                                           static_cast<half*>(kk.data),
+                                           static_cast<half*>(vv.data),
+                                           q_rows, k_rows, v_rows, K, stream);
+            } else if (ly.wq_qtype == GGMLQuantType::Q4_K) {
+                gemv_qkv_fused_q4_k_q8_1(ly.wq.data, ly.wk.data, ly.wv.data,
+                                           q8, d8_buf_,
+                                           static_cast<half*>(qv.data),
+                                           static_cast<half*>(kk.data),
+                                           static_cast<half*>(vv.data),
+                                           q_rows, k_rows, v_rows, K, stream);
+            } else if (ly.wq_qtype == GGMLQuantType::Q5_K) {
+                gemv_qkv_fused_q5_k_q8_1(ly.wq.data, ly.wk.data, ly.wv.data,
                                            q8, d8_buf_,
                                            static_cast<half*>(qv.data),
                                            static_cast<half*>(kk.data),
@@ -2157,20 +2289,30 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     //    This is safe because h.data is only READ (never written) between the
     //    start of run_attention and this point.
     if (will_fuse_o_residual) {
-        auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
         int K_o = static_cast<int>(ly.wo.shape[1]);
         int M_o = static_cast<int>(ly.wo.shape[0]);
-        quantize_fp16_to_q8_1(static_cast<const half*>(ao.data), q8, d8_buf_, K_o, stream);
-        // Use h.data as both residual source and output destination.
-        // Safe: each warp reads residual[row] before writing y[row].
+        // Separate quant + K-parallel GEMV: higher warp occupancy than inline_quant.
+        // quantize_fp16_to_q8_1 is a lightweight kernel (~2 us for d_model=3072).
+        // The K-parallel GEMV achieves 48 warps/SM vs inline_quant's ~8 warps/SM.
+        const half* attn_fp16 = static_cast<const half*>(ao.data);
         const half* residual_ptr = static_cast<const half*>(h.data);
+        quantize_fp16_to_q8_1(attn_fp16, static_cast<block_q8_1*>(q8_1_buf_),
+                               d8_buf_, K_o, stream);
         if (ly.wo_qtype == GGMLQuantType::Q6_K) {
-            gemv_q6k_q8_1_residual(ly.wo.data, q8, d8_buf_,
-                                    static_cast<half*>(h.data), residual_ptr,
+            gemv_q6k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
+                                    d8_buf_, static_cast<half*>(h.data), residual_ptr,
                                     M_o, K_o, stream);
+        } else if (ly.wo_qtype == GGMLQuantType::Q4_K) {
+            gemv_q4_k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
+                                      d8_buf_, static_cast<half*>(h.data), residual_ptr,
+                                      M_o, K_o, stream);
+        } else if (ly.wo_qtype == GGMLQuantType::Q5_K) {
+            gemv_q5_k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
+                                      d8_buf_, static_cast<half*>(h.data), residual_ptr,
+                                      M_o, K_o, stream);
         } else {
-            gemv_q8_0_q8_1_residual(ly.wo.data, q8, d8_buf_,
-                                      static_cast<half*>(h.data), residual_ptr,
+            gemv_q8_0_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
+                                      d8_buf_, static_cast<half*>(h.data), residual_ptr,
                                       M_o, K_o, stream);
         }
     } else if (will_fuse_o_beta1) {
@@ -2183,19 +2325,15 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         gemm_dispatch(ao, ly.wo, ly.wo_scales, ly.wo_qtype, po, dequant_scratch_, stream,
                       static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_);
         if (has_post_attn_norm && using_fp32_accum) {
-            // Post-attn norm → FP32 accumulation (no D2D copy needed)
-            Tensor tmp = view_tokens(norm_out_, n);
-            rmsnorm(po, ly.post_attn_norm, tmp, eps, stream, norm_w_off_);
-            int64_t total = static_cast<int64_t>(n) * cfg.d_model;
-            int threads = 256;
-            int blocks = static_cast<int>((total + threads - 1) / threads);
+            // Fused: RMSNorm + FP32 accum add + FP32→FP16 in one kernel.
+            // Saves 2 kernel launches + 2 DRAM round-trips per layer.
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
-            fp32_accum_add_fp16_kernel<<<blocks, threads, 0, stream>>>(
+            rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
+                static_cast<const half*>(po.data),
+                static_cast<const half*>(ly.post_attn_norm.data),
                 static_cast<float*>(fp32_h.data),
-                static_cast<const half*>(tmp.data), total);
-            fp32_to_fp16_rowscale_kernel<<<n, 256, 256 * sizeof(float), stream>>>(
-                static_cast<const float*>(fp32_h.data),
-                static_cast<half*>(h.data), n, cfg.d_model);
+                static_cast<half*>(h.data),
+                cfg.d_model, eps, norm_w_off_);
         } else if (has_post_attn_norm) {
             // Post-attn norm → residual add (norm directly to h, no copies)
             rmsnorm(po, ly.post_attn_norm, h, eps, stream, norm_w_off_);
@@ -2241,7 +2379,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                      h.dtype == DType::FP16 &&
                                      (ly.w_down_qtype == GGMLQuantType::Q6_K ||
                                       ly.w_down_qtype == GGMLQuantType::Q8_0 ||
-                                      ly.w_down_qtype == GGMLQuantType::Q4_0));
+                                      ly.w_down_qtype == GGMLQuantType::Q4_0 ||
+                                      ly.w_down_qtype == GGMLQuantType::Q4_K ||
+                                      ly.w_down_qtype == GGMLQuantType::Q5_K));
     bool will_fuse_down_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual && n > 1 &&
                                   fp16_cache_.count(ly.w_down.data));
     bool will_fuse_down_dequant_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual &&
@@ -2263,7 +2403,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                h.dtype == DType::FP16 &&
                                (ly.w_gate_qtype == GGMLQuantType::Q6_K ||
                                 ly.w_gate_qtype == GGMLQuantType::Q8_0 ||
-                                ly.w_gate_qtype == GGMLQuantType::Q4_0));
+                                ly.w_gate_qtype == GGMLQuantType::Q4_0 ||
+                                ly.w_gate_qtype == GGMLQuantType::Q4_K ||
+                                ly.w_gate_qtype == GGMLQuantType::Q5_K));
         if (fused_ffn_norm) {
             // Fused RMSNorm + Q8_1: quantize once, use for both gate and up
             rmsnorm_quantize_q8_1(static_cast<const half*>(h.data),
@@ -2300,7 +2442,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                      so.dtype == DType::FP16 &&
                                      (ly.w_down_qtype == GGMLQuantType::Q6_K ||
                                       ly.w_down_qtype == GGMLQuantType::Q8_0 ||
-                                      ly.w_down_qtype == GGMLQuantType::Q4_0));
+                                      ly.w_down_qtype == GGMLQuantType::Q4_0 ||
+                                      ly.w_down_qtype == GGMLQuantType::Q4_K ||
+                                      ly.w_down_qtype == GGMLQuantType::Q5_K));
         if (fused_down_residual) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
@@ -2311,8 +2455,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                      static_cast<const half*>(uo.data),
                                      q8, d8_buf_, K_d, stream);
             } else {
-                geglu(go, uo, so, stream);
-                quantize_fp16_to_q8_1(static_cast<const half*>(so.data), q8, d8_buf_, K_d, stream);
+                geglu_quantize_q8_1(static_cast<const half*>(go.data),
+                                     static_cast<const half*>(uo.data),
+                                     q8, d8_buf_, K_d, stream);
             }
             // Use h.data as residual source (memcpy was skipped)
             const half* residual_ptr = static_cast<const half*>(h.data);
@@ -2324,11 +2469,56 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 gemv_q4_0_q8_1_residual(ly.w_down.data, q8, d8_buf_,
                                           static_cast<half*>(h.data), residual_ptr,
                                           M_d, K_d, stream);
+            } else if (ly.w_down_qtype == GGMLQuantType::Q4_K) {
+                gemv_q4_k_q8_1_residual(ly.w_down.data, q8, d8_buf_,
+                                          static_cast<half*>(h.data), residual_ptr,
+                                          M_d, K_d, stream);
+            } else if (ly.w_down_qtype == GGMLQuantType::Q5_K) {
+                gemv_q5_k_q8_1_residual(ly.w_down.data, q8, d8_buf_,
+                                          static_cast<half*>(h.data), residual_ptr,
+                                          M_d, K_d, stream);
             } else {
                 gemv_q8_0_q8_1_residual(ly.w_down.data, q8, d8_buf_,
                                           static_cast<half*>(h.data), residual_ptr,
                                           M_d, K_d, stream);
             }
+        } else if (has_post_ffn_norm && using_fp32_accum && n == 1 &&
+                   q8 != nullptr && d8_buf_ != nullptr &&
+                   (ly.w_down_qtype == GGMLQuantType::Q6_K ||
+                    ly.w_down_qtype == GGMLQuantType::Q8_0 ||
+                    ly.w_down_qtype == GGMLQuantType::Q4_0 ||
+                    ly.w_down_qtype == GGMLQuantType::Q4_K ||
+                    ly.w_down_qtype == GGMLQuantType::Q5_K)) {
+            // Post-norm FP32 accum decode: fused activation→Q8_1 + GEMV + fused post-norm.
+            // Saves 3 kernel launches per layer vs the fallback path.
+            int K_d = static_cast<int>(ly.w_down.shape[1]);
+            int M_d = static_cast<int>(ly.w_down.shape[0]);
+            if (cfg.ffn_activation != FFNActivation::GEGLU)
+                swiglu_quantize_q8_1(static_cast<const half*>(go.data),
+                                     static_cast<const half*>(uo.data),
+                                     q8, d8_buf_, K_d, stream);
+            else
+                geglu_quantize_q8_1(static_cast<const half*>(go.data),
+                                    static_cast<const half*>(uo.data),
+                                    q8, d8_buf_, K_d, stream);
+            half* fo_ptr = static_cast<half*>(fo.data);
+            if (ly.w_down_qtype == GGMLQuantType::Q6_K)
+                gemv_q6k_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
+            else if (ly.w_down_qtype == GGMLQuantType::Q8_0)
+                gemv_q8_0_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
+            else if (ly.w_down_qtype == GGMLQuantType::Q4_0)
+                gemv_q4_0_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
+            else if (ly.w_down_qtype == GGMLQuantType::Q4_K)
+                gemv_q4_k_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
+            else
+                gemv_q5_k_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
+            Tensor fp32_h = view_tokens(fp32_hidden_, n);
+            rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
+                static_cast<const half*>(fo.data),
+                static_cast<const half*>(ly.post_ffn_norm.data),
+                static_cast<float*>(fp32_h.data),
+                static_cast<half*>(h.data),
+                cfg.d_model, eps, norm_w_off_);
         } else {
             // Non-dp4a paths: activation must produce FP16 intermediate in so.
             switch (cfg.ffn_activation) {
@@ -2351,18 +2541,13 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                               static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_);
                 if (has_post_ffn_norm && using_fp32_accum) {
                     // Post-FFN norm → FP32 accumulation (no D2D copy needed)
-                    Tensor tmp = view_tokens(norm_out_, n);
-                    rmsnorm(fo, ly.post_ffn_norm, tmp, eps, stream, norm_w_off_);
-                    int64_t total = static_cast<int64_t>(n) * cfg.d_model;
-                    int threads = 256;
-                    int blocks = static_cast<int>((total + threads - 1) / threads);
                     Tensor fp32_h = view_tokens(fp32_hidden_, n);
-                    fp32_accum_add_fp16_kernel<<<blocks, threads, 0, stream>>>(
+                    rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
+                        static_cast<const half*>(fo.data),
+                        static_cast<const half*>(ly.post_ffn_norm.data),
                         static_cast<float*>(fp32_h.data),
-                        static_cast<const half*>(tmp.data), total);
-                    fp32_to_fp16_rowscale_kernel<<<n, 256, 256 * sizeof(float), stream>>>(
-                        static_cast<const float*>(fp32_h.data),
-                        static_cast<half*>(h.data), n, cfg.d_model);
+                        static_cast<half*>(h.data),
+                        cfg.d_model, eps, norm_w_off_);
                 } else if (has_post_ffn_norm) {
                     // Post-FFN norm → residual add (norm directly to h, no copies)
                     rmsnorm(fo, ly.post_ffn_norm, h, eps, stream, norm_w_off_);
@@ -2411,7 +2596,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         ly.expert_up_packed.data != nullptr && moe_dequant_buf_ != nullptr &&
         compute_dtype_ == DType::FP16 &&
         ly.expert_up_packed.on_device &&
-        (up_qtype_pre == GGMLQuantType::Q6_K || up_qtype_pre == GGMLQuantType::Q8_0) &&
+        (up_qtype_pre == GGMLQuantType::Q6_K || up_qtype_pre == GGMLQuantType::Q8_0 ||
+         up_qtype_pre == GGMLQuantType::Q4_K || up_qtype_pre == GGMLQuantType::Q5_K) &&
         ly.w_up_shared.data == nullptr);  // must not have shared expert for full residual fusion
 
     if (!will_skip_residual_copy) {
@@ -2444,7 +2630,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                              ly.expert_up_packed.data != nullptr && moe_dequant_buf_ != nullptr &&
                              compute_dtype_ == DType::FP16 &&
                              ly.expert_up_packed.on_device &&
-                             (up_qtype == GGMLQuantType::Q6_K || up_qtype == GGMLQuantType::Q8_0));
+                             (up_qtype == GGMLQuantType::Q6_K || up_qtype == GGMLQuantType::Q8_0 ||
+                              up_qtype == GGMLQuantType::Q4_K || up_qtype == GGMLQuantType::Q5_K));
 
     MoeRoutingResult routing;
 
@@ -2584,6 +2771,18 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                         expert_indices, q8, d8_buf_, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+                } else if (up_qtype == GGMLQuantType::Q4_K) {
+                    gemv_q4_k_q8_1_moe_gate_up_fused(
+                        ly.expert_gate_packed.data, ly.expert_up_packed.data,
+                        expert_indices, q8, d8_buf_, gate_buf, up_buf,
+                        eff, d, gate_stride, up_stride_bytes,
+                        /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
+                } else if (up_qtype == GGMLQuantType::Q5_K) {
+                    gemv_q5_k_q8_1_moe_gate_up_fused(
+                        ly.expert_gate_packed.data, ly.expert_up_packed.data,
+                        expert_indices, q8, d8_buf_, gate_buf, up_buf,
+                        eff, d, gate_stride, up_stride_bytes,
+                        /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
                 } else {
                     gemv_q8_0_q8_1_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
@@ -2594,7 +2793,11 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             } else {
                 // Non-gated: up projection only
                 auto moe_gemv_dp4a = (up_qtype == GGMLQuantType::Q6_K)
-                    ? gemv_q6k_q8_1_moe_decode : gemv_q8_0_q8_1_moe_decode;
+                    ? gemv_q6k_q8_1_moe_decode
+                    : (up_qtype == GGMLQuantType::Q4_K)
+                    ? gemv_q4_k_q8_1_moe_decode
+                    : (up_qtype == GGMLQuantType::Q5_K)
+                    ? gemv_q5_k_q8_1_moe_decode : gemv_q8_0_q8_1_moe_decode;
                 moe_gemv_dp4a(ly.expert_up_packed.data, expert_indices,
                               q8, d8_buf_, up_buf,
                               eff, d, up_stride_bytes,
@@ -2647,10 +2850,14 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             }
 
             // Down projection with dp4a GEMV
-            auto moe_gemv_dp4a = (up_qtype == GGMLQuantType::Q6_K)
-                ? gemv_q6k_q8_1_moe_decode : gemv_q8_0_q8_1_moe_decode;
+            auto moe_gemv_dp4a_down = (up_qtype == GGMLQuantType::Q6_K)
+                ? gemv_q6k_q8_1_moe_decode
+                : (up_qtype == GGMLQuantType::Q4_K)
+                ? gemv_q4_k_q8_1_moe_decode
+                : (up_qtype == GGMLQuantType::Q5_K)
+                ? gemv_q5_k_q8_1_moe_decode : gemv_q8_0_q8_1_moe_decode;
             size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_qtype);
-            moe_gemv_dp4a(ly.expert_down_packed.data, expert_indices,
+            moe_gemv_dp4a_down(ly.expert_down_packed.data, expert_indices,
                           q8, d8_buf_, down_buf,
                           d, eff, down_stride,
                           /*q8_1_stride=*/eff_q8_blocks, /*d8_stride=*/eff_q8_blocks,
@@ -2706,13 +2913,118 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     }
 
     // =========================================================================
-    // FP8 TENSOR CORE PREFILL PATH: Q6_K → FP8 dequant + cuBLAS FP8 GEMM.
-    // 1.7x less DRAM traffic than FP16 path + 2x tensor core throughput.
-    // Dequants Q6_K weights to FP8 E4M3 (half the FP16 size), quantizes
-    // FP16 activations to FP8, then runs FP8×FP8→FP16 grouped GEMM.
+    // FUSED Q6_K PREFILL PATH: reads Q6_K weights directly, multiplies with
+    // FP16 activations. Only processes active experts (not all n_experts).
+    // Preferred for high expert counts (>16) where dequanting ALL experts to
+    // FP8 wastes bandwidth on inactive experts. ~5x less DRAM vs dequant-all.
     // =========================================================================
     {
-    bool can_fp8_batch = (moe_batch_dequant_buf_ != nullptr &&
+    // Fused Q6_K kernel reads weights directly (no dequant step) but uses scalar
+    // FP32 math (~14 TFLOP/s). For large prefills, the FP8/FP16 tensor-core batch
+    // paths are faster despite dequanting ALL experts, because tensor cores provide
+    // ~30x higher throughput. Crossover: ~1400 expanded tokens (model-dependent).
+    bool can_fused_q6k = (ne > 16 &&
+                          expanded <= ne * 12 &&
+                          ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
+                          ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
+                          up_qtype == GGMLQuantType::Q6_K &&
+                          ly.expert_down_qtype == GGMLQuantType::Q6_K &&
+                          compute_dtype_ == DType::FP16);
+    if (can_fused_q6k && !non_gated_experts)
+        can_fused_q6k = (ly.expert_gate_packed.data &&
+                         ly.expert_gate_packed.on_device &&
+                         ly.expert_gate_qtype == GGMLQuantType::Q6_K);
+
+    if (can_fused_q6k) {
+        if (layer == 0) IMP_LOG_INFO("MoE prefill: fused Q6_K path (n=%d, expanded=%d)", n, expanded);
+        const int32_t* d_offsets = static_cast<const int32_t*>(routing.expert_offsets.data);
+        char* gathered_base     = static_cast<char*>(moe_gathered_.data);
+        char* expert_gate_base  = static_cast<char*>(moe_expert_gate_.data);
+        char* expert_up_base    = static_cast<char*>(moe_expert_up_.data);
+        char* expert_swiglu_base= static_cast<char*>(moe_expert_swiglu_.data);
+        char* expert_down_base  = static_cast<char*>(moe_expert_down_.data);
+
+        auto expert_stride_fn = [](const Tensor& packed, GGMLQuantType qtype) -> size_t {
+            int64_t rows = packed.shape[1];
+            int64_t cols = packed.shape[2];
+            return static_cast<size_t>(rows) * ggml_quant_row_bytes(qtype, cols);
+        };
+
+        // Gate projection (gated models only)
+        if (!non_gated_experts)
+            gemm_q6k_fused_moe_prefill(ly.expert_gate_packed.data,
+                                        gathered_base, expert_gate_base, d_offsets,
+                                        eff, d,
+                                        expert_stride_fn(ly.expert_gate_packed, ly.expert_gate_qtype),
+                                        ne, stream);
+
+        // Up projection
+        gemm_q6k_fused_moe_prefill(ly.expert_up_packed.data,
+                                    gathered_base, expert_up_base, d_offsets,
+                                    eff, d,
+                                    expert_stride_fn(ly.expert_up_packed, up_qtype),
+                                    ne, stream);
+
+        // Activation (FP16)
+        {
+            int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
+            if (non_gated_experts) {
+                Tensor up_t(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                relu_sqr_inplace(up_t, stream);
+            } else {
+                Tensor g(moe_expert_gate_.data, compute_dtype_, 2, act_shape, true);
+                Tensor u(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                Tensor a(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                swiglu(g, u, a, stream);
+            }
+        }
+
+        // Down projection
+        char* fused_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
+        gemm_q6k_fused_moe_prefill(ly.expert_down_packed.data,
+                                    fused_down_act, expert_down_base, d_offsets,
+                                    d, eff,
+                                    expert_stride_fn(ly.expert_down_packed, ly.expert_down_qtype),
+                                    ne, stream);
+
+        // Falls through to scatter (step 7)
+    } else {
+    // =========================================================================
+    // FP16 BATCH or FP8 BATCH PREFILL PATH
+    // Pre-check: FP16 batch + device-grouped GEMM is preferred (no D2H sync,
+    // simpler pipeline). FP8 batch is only used as fallback when FP16 batch
+    // isn't available.
+    // =========================================================================
+    {
+    // FP16 batch check: can we dequant all experts to FP16 and use device-grouped GEMM?
+    size_t fp16_per_expert = static_cast<size_t>(std::max(
+        ly.expert_up_packed.shape[1] * ly.expert_up_packed.shape[2],
+        ly.expert_down_packed.shape[1] * ly.expert_down_packed.shape[2])) * sizeof(half);
+    bool can_fp16_batch_nosync = (
+        moe_batch_dequant_buf_ != nullptr &&
+        moe_batch_dequant_buf_size_ >= static_cast<size_t>(ne) * fp16_per_expert &&
+        d_moe_weight_ptrs_ && d_moe_weight_ptrs_count_ >= ne &&
+        ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
+        ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
+        dequant_gpu_supported(up_qtype) &&
+        dequant_gpu_supported(ly.expert_down_qtype));
+    if (can_fp16_batch_nosync && !non_gated_experts)
+        can_fp16_batch_nosync = (ly.expert_gate_packed.data &&
+                                  ly.expert_gate_packed.on_device &&
+                                  dequant_gpu_supported(ly.expert_gate_qtype));
+
+    // FP8 batch check: fallback when FP16 batch isn't available
+    size_t up_fp8_sz   = static_cast<size_t>(ne) * ly.expert_up_packed.shape[1]
+                       * ly.expert_up_packed.shape[2];
+    size_t down_fp8_sz = static_cast<size_t>(ne) * ly.expert_down_packed.shape[1]
+                       * ly.expert_down_packed.shape[2];
+    size_t max_act_cols = std::max(static_cast<size_t>(ly.expert_up_packed.shape[2]),
+                                   static_cast<size_t>(ly.expert_down_packed.shape[2]));
+    size_t fp8_buf_needed = std::max(up_fp8_sz, down_fp8_sz)
+                          + static_cast<size_t>(expanded) * max_act_cols;
+    bool can_fp8_batch = (!can_fp16_batch_nosync &&
+                          moe_batch_dequant_buf_ != nullptr &&
+                          moe_batch_dequant_buf_size_ >= fp8_buf_needed &&
                           ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
                           ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
                           up_qtype == GGMLQuantType::Q6_K &&
@@ -2724,7 +3036,83 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                          ly.expert_gate_packed.on_device &&
                          ly.expert_gate_qtype == GGMLQuantType::Q6_K);
 
-    if (can_fp8_batch) {
+    if (can_fp16_batch_nosync) {
+        // =================================================================
+        // FP16 BATCH DEQUANT + cublasGemmGroupedBatchedEx
+        // Dequants all experts Q6_K→FP16 into batch buffer, then runs
+        // a single cublasGemmGroupedBatchedEx per projection. One D2H
+        // sync per layer for offsets (unavoidable for grouped GEMM API).
+        // =================================================================
+        if (layer == 0) IMP_LOG_INFO("MoE prefill: FP16 batch + grouped GEMM path (n=%d, expanded=%d)",
+                                      n, expanded);
+
+        // One D2H sync per layer for expert offsets
+        std::vector<int32_t> h_offsets(ne + 1);
+        cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
+                        static_cast<size_t>(ne + 1) * sizeof(int32_t),
+                        cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+
+        char* buf = static_cast<char*>(moe_batch_dequant_buf_);
+        char* gathered_base     = static_cast<char*>(moe_gathered_.data);
+        char* expert_gate_base  = static_cast<char*>(moe_expert_gate_.data);
+        char* expert_up_base    = static_cast<char*>(moe_expert_up_.data);
+        char* expert_swiglu_base= static_cast<char*>(moe_expert_swiglu_.data);
+        char* expert_down_base  = static_cast<char*>(moe_expert_down_.data);
+
+        auto batch_dequant_gemm = [&](const Tensor& packed, GGMLQuantType qtype,
+                                       const char* a_base, char* c_base,
+                                       int K_dim, int N_dim) {
+            int64_t rows = packed.shape[1];
+            int64_t cols = packed.shape[2];
+            size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
+
+            dequant_gpu(static_cast<const uint8_t*>(packed.data), buf, qtype,
+                        ne * static_cast<int>(rows), static_cast<int>(cols), stream);
+
+            std::vector<const void*> b_ptrs(ne);
+            for (int e = 0; e < ne; ++e)
+                b_ptrs[e] = buf + static_cast<size_t>(e) * expert_fp16_sz;
+
+            gemm_moe_batched(a_base, c_base,
+                             h_offsets.data(), b_ptrs.data(),
+                             K_dim, N_dim, DType::FP16, ne, stream,
+                             d_moe_work_ptrs_);
+        };
+
+        // Gate projection
+        if (!non_gated_experts)
+            batch_dequant_gemm(ly.expert_gate_packed, ly.expert_gate_qtype,
+                                gathered_base, expert_gate_base, d, eff);
+
+        // Up projection
+        batch_dequant_gemm(ly.expert_up_packed, up_qtype,
+                            gathered_base, expert_up_base, d, eff);
+
+        // Activation
+        {
+            int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
+            if (non_gated_experts) {
+                Tensor up_t(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                relu_sqr_inplace(up_t, stream);
+            } else {
+                Tensor g(moe_expert_gate_.data, compute_dtype_, 2, act_shape, true);
+                Tensor u(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                Tensor a(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                swiglu(g, u, a, stream);
+            }
+        }
+
+        // Down projection
+        char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
+        batch_dequant_gemm(ly.expert_down_packed, ly.expert_down_qtype,
+                            down_act, expert_down_base, eff, d);
+
+        // Falls through to scatter (step 7)
+
+    } else if (can_fp8_batch) {
+        if (layer == 0) IMP_LOG_INFO("MoE prefill: FP8 batch path (n=%d, expanded=%d, buf=%.1f MiB, need=%.1f MiB)",
+                                      n, expanded, moe_batch_dequant_buf_size_ / (1024.0*1024.0), fp8_buf_needed / (1024.0*1024.0));
         // Expert offsets: device-grouped path uses d_offsets directly on GPU.
         // Host offsets + sync are deferred to the legacy fallback path only.
         char* buf = static_cast<char*>(moe_batch_dequant_buf_);
@@ -2766,36 +3154,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                                   expanded * K_dim, 1.0f, stream);
             }
 
-            // 3. Build per-expert FP8 weight pointers and dispatch GEMM
+            // 3. Build per-expert FP8 weight pointers and dispatch GEMM via
+            //    cublasGemmGroupedBatchedEx (single call for all experts).
             size_t expert_fp8_sz = static_cast<size_t>(rows) * cols;
-
-#if IMP_CUDA_13_1
-            // Device-grouped path: upload weight pointers to device, avoid host sync for GEMM.
-            // Uses device-side FP8 scales — no D2H copy needed.
-            if (d_moe_weight_ptrs_ && d_moe_weight_ptrs_count_ >= ne) {
-                // Build host weight pointers, upload to device
-                std::vector<const void*> weight_ptrs(ne);
-                for (int e = 0; e < ne; ++e)
-                    weight_ptrs[e] = fp8_weights + static_cast<size_t>(e) * expert_fp8_sz;
-                cudaMemcpyAsync(d_moe_weight_ptrs_,
-                                weight_ptrs.data(),
-                                static_cast<size_t>(ne) * sizeof(void*),
-                                cudaMemcpyHostToDevice, stream);
-
-                // Upper bound on tokens per expert: at most n tokens can be
-                // assigned to any single expert. Avoids D2H sync of offsets.
-                int max_tpe = std::max(n, 1);
-
-                gemm_moe_device_grouped(fp8_acts, c_base_fp16,
-                                         d_offsets,
-                                         reinterpret_cast<const void* const*>(d_moe_weight_ptrs_),
-                                         K_dim, N_dim, DType::FP8_E4M3,
-                                         ne, max_tpe, stream,
-                                         d_moe_fp8_scales_ ? d_moe_fp8_scales_ : nullptr);
-                return;
-            }
-#endif
-            // 4. Fallback: host-pointer batched GEMM path — needs host offsets + scales
             std::vector<int32_t> h_offsets(ne + 1);
             cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
                             static_cast<size_t>(ne + 1) * sizeof(int32_t),
@@ -2856,10 +3217,11 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         // Falls through to existing scatter (step 7)
 
     } else {
-    // 6b. Per-expert FFN via grouped GEMM (non-fused paths)
-    //
-    //    Read expert_offsets from device to host to determine per-expert token
-    //    counts. This is a small transfer (n_experts+1 ints).
+    // =========================================================================
+    // LEGACY FALLBACK: D2H sync + per-expert or batched GEMM
+    // =========================================================================
+    if (layer == 0) IMP_LOG_INFO("MoE prefill: legacy FP16 fallback path (n=%d, expanded=%d)",
+                                  n, expanded);
     {
     std::vector<int32_t> h_offsets(ne + 1);
     cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
@@ -3040,40 +3402,14 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             for (int e = 0; e < ne; ++e)
                 b_ptrs[e] = buf + static_cast<size_t>(e) * expert_fp16_sz;
 
-#if IMP_CUDA_13_1
-            // Device-grouped path: upload FP16 weight pointers, use device-side offsets
-            if (d_moe_weight_ptrs_ && d_moe_weight_ptrs_count_ >= ne) {
-                const int32_t* d_offsets_nd = static_cast<const int32_t*>(routing.expert_offsets.data);
-                cudaMemcpyAsync(d_moe_weight_ptrs_,
-                                b_ptrs.data(),
-                                static_cast<size_t>(ne) * sizeof(void*),
-                                cudaMemcpyHostToDevice, stream);
-                int max_tpe = 0;
-                for (int e = 0; e < ne; e++) {
-                    int cnt = h_offsets[e + 1] - h_offsets[e];
-                    if (cnt > max_tpe) max_tpe = cnt;
-                }
-                if (max_tpe == 0) max_tpe = 1;
-                gemm_moe_device_grouped(a_base, c_base,
-                                         d_offsets_nd,
-                                         reinterpret_cast<const void* const*>(d_moe_weight_ptrs_),
-                                         K_dim, N_dim, DType::FP16,
-                                         ne, max_tpe, stream);
-            } else
-#endif
-            {
-#ifdef IMP_USE_CUTLASS
-                gemm_moe_cutlass(a_base, c_base,
-                                 h_offsets.data(), b_ptrs.data(),
-                                 K_dim, N_dim, DType::FP16, ne, stream,
-                                 d_moe_work_ptrs_);
-#else
-                gemm_moe_batched(a_base, c_base,
-                                 h_offsets.data(), b_ptrs.data(),
-                                 K_dim, N_dim, DType::FP16, ne, stream,
-                                 d_moe_work_ptrs_);
-#endif
-            }
+            // Use cublasGemmGroupedBatchedEx — single call for all experts.
+            // We already have h_offsets from D2H sync, so no need for
+            // gemm_moe_device_grouped (which does its own D2H sync + 128
+            // individual cublasLtMatmul calls).
+            gemm_moe_batched(a_base, c_base,
+                             h_offsets.data(), b_ptrs.data(),
+                             K_dim, N_dim, DType::FP16, ne, stream,
+                             d_moe_work_ptrs_);
         };
 
         // Determine which path to use:
@@ -3229,8 +3565,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             }
         }
     }
-    } // non-fused path scope (else branch of can_fp8_batch)
-    } // FP8 prefill scope
+    } // legacy inner scope
+    } // else of can_fp16/fp8_batch/legacy
+    } // FP8/FP16 prefill scope
+    } // else branch of can_fused_q6k + fused Q6_K scope
 
     // 7. Scatter: weighted scatter-add expert outputs back to token positions.
     //    Output is FP32 (atomicAdd on floats). Must zero-init before atomic adds.
@@ -3710,7 +4048,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     const auto out_qtype = model_->out_proj_qtype_;
     const bool use_dp4a_lm = q8_1_buf_ && compute_dtype_ == DType::FP16 &&
         (out_qtype == GGMLQuantType::Q6_K || out_qtype == GGMLQuantType::Q8_0 ||
-         out_qtype == GGMLQuantType::Q4_0);
+         out_qtype == GGMLQuantType::Q4_0 || out_qtype == GGMLQuantType::Q4_K ||
+         out_qtype == GGMLQuantType::Q5_K);
 
     if (state.is_prefill) {
         Tensor h_last = view_tokens(hidden_, n).slice(n - 1, n);
@@ -3733,6 +4072,12 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else if (out_qtype == GGMLQuantType::Q4_0)
                 gemv_q4_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+            else if (out_qtype == GGMLQuantType::Q4_K)
+                gemv_q4_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+            else if (out_qtype == GGMLQuantType::Q5_K)
+                gemv_q5_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else
                 gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
@@ -3765,6 +4110,12 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else if (out_qtype == GGMLQuantType::Q4_0)
                 gemv_q4_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+            else if (out_qtype == GGMLQuantType::Q4_K)
+                gemv_q4_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+            else if (out_qtype == GGMLQuantType::Q5_K)
+                gemv_q5_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else
                 gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
@@ -3859,6 +4210,22 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
     Tensor last_logits = logits.slice(0, 1);
     int64_t vocab_shape[1] = {last_logits.shape[1]};
     last_logits = last_logits.reshape(1, vocab_shape);
+
+    // Apply penalties before sampling (modifies logits in-place)
+    float* logits_ptr = static_cast<float*>(last_logits.data);
+    int vocab_size = static_cast<int>(last_logits.shape[0]);
+
+    if (state.penalty_tokens != nullptr && state.n_penalty_tokens > 0) {
+        apply_penalties(logits_ptr, vocab_size,
+                        state.penalty_tokens, state.n_penalty_tokens,
+                        state.repetition_penalty,
+                        state.frequency_penalty,
+                        state.presence_penalty, stream);
+    }
+
+    if (state.min_p > 0.0f) {
+        apply_min_p(logits_ptr, vocab_size, state.min_p, stream);
+    }
 
     int32_t token;
     if (state.temperature <= 0.0f || state.top_k == 1) {
@@ -4014,7 +4381,8 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
     const auto out_qtype = model_->out_proj_qtype_;
     if (q8_1_buf_ && compute_dtype_ == DType::FP16 &&
         (out_qtype == GGMLQuantType::Q6_K || out_qtype == GGMLQuantType::Q8_0 ||
-         out_qtype == GGMLQuantType::Q4_0)) {
+         out_qtype == GGMLQuantType::Q4_0 || out_qtype == GGMLQuantType::Q4_K ||
+         out_qtype == GGMLQuantType::Q5_K)) {
         auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
         rmsnorm_quantize_q8_1(
             static_cast<const half*>(h_final.data),
@@ -4025,6 +4393,12 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         else if (out_qtype == GGMLQuantType::Q8_0)
             gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+        else if (out_qtype == GGMLQuantType::Q4_K)
+            gemv_q4_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+        else if (out_qtype == GGMLQuantType::Q5_K)
+            gemv_q5_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         else
             gemv_q4_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,

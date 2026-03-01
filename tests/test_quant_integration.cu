@@ -1090,5 +1090,742 @@ TEST(QuantIntegrationTest, QuantGemmInt4LargerMatrix) {
     cudaFree(d_C);
 }
 
+// ===========================================================================
+// Helpers for Q4_K and Q5_K block construction
+// ===========================================================================
+
+// Build a synthetic Q4_K block (144 bytes = 256 elements).
+// Layout: d[2] + dmin[2] + scales[12] + qs[128]
+// Uses uniform scale/min across sub-blocks, constant quant value.
+static std::vector<uint8_t> make_q4_k_block(float d_scale, float d_min,
+                                             uint8_t sub_scale, uint8_t sub_min,
+                                             uint8_t q4_val) {
+    std::vector<uint8_t> block(144, 0);
+
+    // d[2]: fp16 super-block scale
+    uint16_t d_bits = float_to_fp16(d_scale);
+    std::memcpy(block.data(), &d_bits, 2);
+
+    // dmin[2]: fp16 super-block min
+    uint16_t dmin_bits = float_to_fp16(d_min);
+    std::memcpy(block.data() + 2, &dmin_bits, 2);
+
+    // scales[12]: packed 6-bit scales and mins for 8 sub-blocks
+    // Sub-blocks 0-3: sc[sub] low 6 bits = sub_scale, sc[sub+4] low 6 bits = sub_min
+    // Sub-blocks 4-7: more complex packing with top bits
+    // For simplicity, use values < 16 so they fit in 4 bits for the upper packing.
+    uint8_t sc_clamped = sub_scale & 63;  // 6-bit scale
+    uint8_t mn_clamped = sub_min & 63;    // 6-bit min
+    uint8_t* sc = block.data() + 4;
+    // Sub-blocks 0-3: scale in sc[0..3] low 6 bits, min in sc[4..7] low 6 bits
+    for (int s = 0; s < 4; ++s) {
+        sc[s] = sc_clamped;       // low 6 = scale, top 2 = 0
+        sc[s + 4] = mn_clamped;   // low 6 = min,   top 2 = 0
+    }
+    // Sub-blocks 4-7: sc[8..11] packs remaining scales
+    // sc_val  = (sc[sub+4] & 0xF) | ((sc[sub-4] >> 6) << 4) → low 4 of sc[8+s-4]
+    // Since we set top 2 of sc[0..3] = 0, the upper nibble comes from that.
+    // For uniform values, just set low nibble = scale, high nibble = min.
+    for (int s = 0; s < 4; ++s) {
+        sc[8 + s] = static_cast<uint8_t>((mn_clamped & 0xF) << 4 | (sc_clamped & 0xF));
+    }
+
+    // qs[128]: 4-bit quantized values packed as nibble pairs
+    // Q4_K layout: 4 chunks of 64 elements each in 32 bytes
+    // First 32 elements in low nibbles, next 32 in high nibbles of same 32 bytes
+    uint8_t* qs = block.data() + 16;
+    uint8_t q4_clamped = q4_val & 0xF;
+    uint8_t byte_val = static_cast<uint8_t>((q4_clamped << 4) | q4_clamped);
+    std::memset(qs, byte_val, 128);
+
+    return block;
+}
+
+// Build a synthetic Q5_K block (176 bytes = 256 elements).
+// Layout: d[2] + dmin[2] + scales[12] + qh[32] + qs[128]
+static std::vector<uint8_t> make_q5_k_block(float d_scale, float d_min,
+                                             uint8_t sub_scale, uint8_t sub_min,
+                                             uint8_t q4_val, bool high_bit) {
+    std::vector<uint8_t> block(176, 0);
+
+    // d[2]
+    uint16_t d_bits = float_to_fp16(d_scale);
+    std::memcpy(block.data(), &d_bits, 2);
+
+    // dmin[2]
+    uint16_t dmin_bits = float_to_fp16(d_min);
+    std::memcpy(block.data() + 2, &dmin_bits, 2);
+
+    // scales[12]: same packing as Q4_K
+    uint8_t sc_clamped = sub_scale & 63;
+    uint8_t mn_clamped = sub_min & 63;
+    uint8_t* sc = block.data() + 4;
+    for (int s = 0; s < 4; ++s) {
+        sc[s] = sc_clamped;
+        sc[s + 4] = mn_clamped;
+    }
+    for (int s = 0; s < 4; ++s) {
+        sc[8 + s] = static_cast<uint8_t>((mn_clamped & 0xF) << 4 | (sc_clamped & 0xF));
+    }
+
+    // qh[32]: high bits (5th bit) for 256 elements
+    uint8_t* qh = block.data() + 16;
+    if (high_bit) {
+        std::memset(qh, 0xFF, 32);  // all 5th bits set
+    } else {
+        std::memset(qh, 0x00, 32);  // all 5th bits clear
+    }
+
+    // qs[128]: low 4 bits (same layout as Q4_K)
+    uint8_t* qs = block.data() + 48;
+    uint8_t q4_clamped = q4_val & 0xF;
+    uint8_t byte_val = static_cast<uint8_t>((q4_clamped << 4) | q4_clamped);
+    std::memset(qs, byte_val, 128);
+
+    return block;
+}
+
+// Build a Model with synthetic Q4_K weights for testing.
+// d_model and d_ff must be multiples of 256 (Q4_K block size).
+static std::unique_ptr<Model> make_q4_k_test_model(
+    int d_model, int d_ff, int n_heads, int n_kv_heads, int n_layers,
+    int vocab_size, float d_scale = 0.01f, float d_min = 0.001f,
+    uint8_t sub_scale = 2, uint8_t sub_min = 1, uint8_t q4_val = 5)
+{
+    auto model = std::make_unique<Model>();
+    auto& cfg = model->config_;
+    cfg.arch = ModelArch::LLAMA;
+    cfg.n_layers = n_layers;
+    cfg.n_heads = n_heads;
+    cfg.n_kv_heads = n_kv_heads;
+    cfg.d_model = d_model;
+    cfg.d_ff = d_ff;
+    cfg.vocab_size = vocab_size;
+    cfg.max_seq_len = 128;
+    cfg.rope_theta = 10000.0f;
+    cfg.rms_norm_eps = 1e-5f;
+
+    int head_dim = d_model / n_heads;
+
+    auto make_q4_k_weight = [&](int rows, int cols) -> std::pair<void*, Tensor> {
+        int blocks_per_row = cols / 256;
+        size_t total_blocks = static_cast<size_t>(rows) * blocks_per_row;
+        size_t total_bytes = total_blocks * 144;
+        auto* buf = new uint8_t[total_bytes];
+        for (size_t i = 0; i < total_blocks; ++i) {
+            auto blk = make_q4_k_block(d_scale, d_min, sub_scale, sub_min, q4_val);
+            std::memcpy(buf + i * 144, blk.data(), 144);
+        }
+        int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
+        Tensor t(buf, DType::INT4, 2, shape, false);
+        return {buf, t};
+    };
+
+    auto make_fp16_weight = [](int rows, int cols) -> std::pair<void*, Tensor> {
+        size_t n = static_cast<size_t>(rows) * cols;
+        auto* buf = new uint16_t[n];
+        for (size_t i = 0; i < n; ++i) buf[i] = float_to_fp16(0.01f);
+        int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
+        Tensor t(buf, DType::FP16, 2, shape, false);
+        return {buf, t};
+    };
+
+    auto make_norm_weight = [](int dim) -> std::pair<void*, Tensor> {
+        auto* buf = new uint16_t[dim];
+        uint16_t one = float_to_fp16(1.0f);
+        for (int i = 0; i < dim; ++i) buf[i] = one;
+        int64_t shape[4] = {static_cast<int64_t>(dim), 0, 0, 0};
+        Tensor t(buf, DType::FP16, 1, shape, false);
+        return {buf, t};
+    };
+
+    // Token embedding [vocab_size, d_model] in FP16
+    auto [tok_emb_buf, tok_emb] = make_fp16_weight(vocab_size, d_model);
+    model->tok_emb_ = tok_emb;
+    model->tok_emb_qtype_ = GGMLQuantType::F16;
+
+    // Output norm [d_model]
+    auto [out_norm_buf, out_norm] = make_norm_weight(d_model);
+    model->out_norm_ = out_norm;
+    model->out_norm_qtype_ = GGMLQuantType::F16;
+
+    // Output projection [vocab_size, d_model] in FP16
+    auto [out_proj_buf, out_proj] = make_fp16_weight(vocab_size, d_model);
+    model->out_proj_ = out_proj;
+    model->out_proj_qtype_ = GGMLQuantType::F16;
+
+    model->layers_.resize(n_layers);
+    for (int l = 0; l < n_layers; ++l) {
+        auto& ly = model->layers_[l];
+
+        auto [wq_buf, wq] = make_q4_k_weight(n_heads * head_dim, d_model);
+        ly.wq = wq; ly.wq_qtype = GGMLQuantType::Q4_K;
+
+        auto [wk_buf, wk] = make_q4_k_weight(n_kv_heads * head_dim, d_model);
+        ly.wk = wk; ly.wk_qtype = GGMLQuantType::Q4_K;
+
+        auto [wv_buf, wv] = make_q4_k_weight(n_kv_heads * head_dim, d_model);
+        ly.wv = wv; ly.wv_qtype = GGMLQuantType::Q4_K;
+
+        auto [wo_buf, wo] = make_q4_k_weight(d_model, n_heads * head_dim);
+        ly.wo = wo; ly.wo_qtype = GGMLQuantType::Q4_K;
+
+        auto [wg_buf, wg] = make_q4_k_weight(d_ff, d_model);
+        ly.w_gate = wg; ly.w_gate_qtype = GGMLQuantType::Q4_K;
+
+        auto [wu_buf, wu] = make_q4_k_weight(d_ff, d_model);
+        ly.w_up = wu; ly.w_up_qtype = GGMLQuantType::Q4_K;
+
+        auto [wd_buf, wd] = make_q4_k_weight(d_model, d_ff);
+        ly.w_down = wd; ly.w_down_qtype = GGMLQuantType::Q4_K;
+
+        auto [an_buf, an] = make_norm_weight(d_model);
+        ly.attn_norm = an;
+        auto [fn_buf, fn] = make_norm_weight(d_model);
+        ly.ffn_norm = fn;
+    }
+
+    return model;
+}
+
+// Build a Model with synthetic Q5_K weights for testing.
+static std::unique_ptr<Model> make_q5_k_test_model(
+    int d_model, int d_ff, int n_heads, int n_kv_heads, int n_layers,
+    int vocab_size, float d_scale = 0.01f, float d_min = 0.001f,
+    uint8_t sub_scale = 2, uint8_t sub_min = 1,
+    uint8_t q4_val = 5, bool high_bit = false)
+{
+    auto model = std::make_unique<Model>();
+    auto& cfg = model->config_;
+    cfg.arch = ModelArch::LLAMA;
+    cfg.n_layers = n_layers;
+    cfg.n_heads = n_heads;
+    cfg.n_kv_heads = n_kv_heads;
+    cfg.d_model = d_model;
+    cfg.d_ff = d_ff;
+    cfg.vocab_size = vocab_size;
+    cfg.max_seq_len = 128;
+    cfg.rope_theta = 10000.0f;
+    cfg.rms_norm_eps = 1e-5f;
+
+    int head_dim = d_model / n_heads;
+
+    auto make_q5_k_weight = [&](int rows, int cols) -> std::pair<void*, Tensor> {
+        int blocks_per_row = cols / 256;
+        size_t total_blocks = static_cast<size_t>(rows) * blocks_per_row;
+        size_t total_bytes = total_blocks * 176;
+        auto* buf = new uint8_t[total_bytes];
+        for (size_t i = 0; i < total_blocks; ++i) {
+            auto blk = make_q5_k_block(d_scale, d_min, sub_scale, sub_min, q4_val, high_bit);
+            std::memcpy(buf + i * 176, blk.data(), 176);
+        }
+        int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
+        Tensor t(buf, DType::INT4, 2, shape, false);
+        return {buf, t};
+    };
+
+    auto make_fp16_weight = [](int rows, int cols) -> std::pair<void*, Tensor> {
+        size_t n = static_cast<size_t>(rows) * cols;
+        auto* buf = new uint16_t[n];
+        for (size_t i = 0; i < n; ++i) buf[i] = float_to_fp16(0.01f);
+        int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
+        Tensor t(buf, DType::FP16, 2, shape, false);
+        return {buf, t};
+    };
+
+    auto make_norm_weight = [](int dim) -> std::pair<void*, Tensor> {
+        auto* buf = new uint16_t[dim];
+        uint16_t one = float_to_fp16(1.0f);
+        for (int i = 0; i < dim; ++i) buf[i] = one;
+        int64_t shape[4] = {static_cast<int64_t>(dim), 0, 0, 0};
+        Tensor t(buf, DType::FP16, 1, shape, false);
+        return {buf, t};
+    };
+
+    auto [tok_emb_buf, tok_emb] = make_fp16_weight(vocab_size, d_model);
+    model->tok_emb_ = tok_emb;
+    model->tok_emb_qtype_ = GGMLQuantType::F16;
+
+    auto [out_norm_buf, out_norm] = make_norm_weight(d_model);
+    model->out_norm_ = out_norm;
+    model->out_norm_qtype_ = GGMLQuantType::F16;
+
+    auto [out_proj_buf, out_proj] = make_fp16_weight(vocab_size, d_model);
+    model->out_proj_ = out_proj;
+    model->out_proj_qtype_ = GGMLQuantType::F16;
+
+    model->layers_.resize(n_layers);
+    for (int l = 0; l < n_layers; ++l) {
+        auto& ly = model->layers_[l];
+
+        auto [wq_buf, wq] = make_q5_k_weight(n_heads * head_dim, d_model);
+        ly.wq = wq; ly.wq_qtype = GGMLQuantType::Q5_K;
+
+        auto [wk_buf, wk] = make_q5_k_weight(n_kv_heads * head_dim, d_model);
+        ly.wk = wk; ly.wk_qtype = GGMLQuantType::Q5_K;
+
+        auto [wv_buf, wv] = make_q5_k_weight(n_kv_heads * head_dim, d_model);
+        ly.wv = wv; ly.wv_qtype = GGMLQuantType::Q5_K;
+
+        auto [wo_buf, wo] = make_q5_k_weight(d_model, n_heads * head_dim);
+        ly.wo = wo; ly.wo_qtype = GGMLQuantType::Q5_K;
+
+        auto [wg_buf, wg] = make_q5_k_weight(d_ff, d_model);
+        ly.w_gate = wg; ly.w_gate_qtype = GGMLQuantType::Q5_K;
+
+        auto [wu_buf, wu] = make_q5_k_weight(d_ff, d_model);
+        ly.w_up = wu; ly.w_up_qtype = GGMLQuantType::Q5_K;
+
+        auto [wd_buf, wd] = make_q5_k_weight(d_model, d_ff);
+        ly.w_down = wd; ly.w_down_qtype = GGMLQuantType::Q5_K;
+
+        auto [an_buf, an] = make_norm_weight(d_model);
+        ly.attn_norm = an;
+        auto [fn_buf, fn] = make_norm_weight(d_model);
+        ly.ffn_norm = fn;
+    }
+
+    return model;
+}
+
+// ===========================================================================
+// Test 13: Q4_K weight upload keeps raw quantized bytes on GPU
+// ===========================================================================
+TEST(QuantIntegrationTest, Q4_KWeightUpload) {
+    SKIP_IF_NO_CUDA();
+
+    auto model = make_q4_k_test_model(
+        /*d_model=*/256, /*d_ff=*/256, /*n_heads=*/4, /*n_kv_heads=*/4,
+        /*n_layers=*/1, /*vocab_size=*/32);
+    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+
+    const auto& ly = model->layer(0);
+    EXPECT_TRUE(ly.wq.on_device);
+    EXPECT_EQ(ly.wq.ndim, 2);
+    EXPECT_EQ(ly.wq.shape[0], 256);  // n_heads * head_dim
+    EXPECT_EQ(ly.wq.shape[1], 256);  // d_model
+
+    // Verify raw bytes are on GPU (read back first block of row 0)
+    std::vector<uint8_t> h_raw(144);
+    cudaMemcpy(h_raw.data(), ly.wq.data, 144, cudaMemcpyDeviceToHost);
+
+    // Check d (first 2 bytes = fp16 of 0.01)
+    uint16_t d_bits;
+    std::memcpy(&d_bits, h_raw.data(), 2);
+    float d_val = fp16_to_float(d_bits);
+    EXPECT_NEAR(d_val, 0.01f, 0.001f);
+
+    // Check dmin (bytes 2-3)
+    uint16_t dmin_bits;
+    std::memcpy(&dmin_bits, h_raw.data() + 2, 2);
+    float dmin_val = fp16_to_float(dmin_bits);
+    EXPECT_NEAR(dmin_val, 0.001f, 0.001f);
+}
+
+// ===========================================================================
+// Test 14: Q4_K forward pass through executor (dp4a GEMV + dequant paths)
+// ===========================================================================
+TEST(QuantIntegrationTest, Q4_KForwardPass) {
+    SKIP_IF_NO_CUDA();
+
+    auto model = make_q4_k_test_model(
+        /*d_model=*/256, /*d_ff=*/256, /*n_heads=*/4, /*n_kv_heads=*/4,
+        /*n_layers=*/1, /*vocab_size=*/32);
+    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+
+    GraphExecutor executor;
+    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
+
+    std::vector<int32_t> h_tokens = {0, 1, 2};
+    std::vector<int> h_positions = {0, 1, 2};
+    int n_tokens = 3;
+
+    int32_t* d_tokens = nullptr;
+    int* d_positions = nullptr;
+    cudaMalloc(&d_tokens, n_tokens * sizeof(int32_t));
+    cudaMalloc(&d_positions, n_tokens * sizeof(int));
+    cudaMemcpy(d_tokens, h_tokens.data(), n_tokens * sizeof(int32_t),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_positions, h_positions.data(), n_tokens * sizeof(int),
+               cudaMemcpyHostToDevice);
+
+    InferenceState state;
+    state.token_ids = d_tokens;
+    state.positions = d_positions;
+    state.n_tokens = n_tokens;
+    state.is_prefill = true;
+    state.temperature = 0.0f;
+
+    int32_t token = executor.forward(state, nullptr);
+    EXPECT_GE(token, 0);
+    EXPECT_LT(token, 32);
+
+    // Verify logits are not NaN/Inf
+    Tensor logits;
+    executor.forward_logits(state, logits, nullptr);
+    cudaDeviceSynchronize();
+
+    ASSERT_NE(logits.data, nullptr);
+    EXPECT_EQ(logits.shape[0], 1);
+    EXPECT_EQ(logits.shape[1], 32);
+
+    std::vector<float> h_logits(32);
+    cudaMemcpy(h_logits.data(), logits.data, 32 * sizeof(float),
+               cudaMemcpyDeviceToHost);
+
+    for (int i = 0; i < 32; ++i) {
+        EXPECT_FALSE(std::isnan(h_logits[i])) << "Q4_K logit NaN at " << i;
+        EXPECT_FALSE(std::isinf(h_logits[i])) << "Q4_K logit Inf at " << i;
+    }
+
+    cudaFree(d_tokens);
+    cudaFree(d_positions);
+}
+
+// ===========================================================================
+// Test 15: Q4_K deterministic greedy decode
+// ===========================================================================
+TEST(QuantIntegrationTest, Q4_KDeterministic) {
+    SKIP_IF_NO_CUDA();
+
+    auto model = make_q4_k_test_model(
+        /*d_model=*/256, /*d_ff=*/256, /*n_heads=*/4, /*n_kv_heads=*/4,
+        /*n_layers=*/1, /*vocab_size=*/32);
+    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+
+    GraphExecutor executor;
+    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
+
+    std::vector<int32_t> h_tokens = {3, 7};
+    std::vector<int> h_positions = {0, 1};
+
+    int32_t* d_tokens = nullptr;
+    int* d_positions = nullptr;
+    cudaMalloc(&d_tokens, 2 * sizeof(int32_t));
+    cudaMalloc(&d_positions, 2 * sizeof(int));
+    cudaMemcpy(d_tokens, h_tokens.data(), 2 * sizeof(int32_t),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_positions, h_positions.data(), 2 * sizeof(int),
+               cudaMemcpyHostToDevice);
+
+    InferenceState state;
+    state.token_ids = d_tokens;
+    state.positions = d_positions;
+    state.n_tokens = 2;
+    state.is_prefill = true;
+    state.temperature = 0.0f;
+
+    int32_t token1 = executor.forward(state, nullptr);
+    int32_t token2 = executor.forward(state, nullptr);
+    EXPECT_EQ(token1, token2) << "Q4_K greedy should be deterministic";
+
+    cudaFree(d_tokens);
+    cudaFree(d_positions);
+}
+
+// ===========================================================================
+// Test 16: Q4_K multi-layer forward pass
+// ===========================================================================
+TEST(QuantIntegrationTest, Q4_KMultiLayer) {
+    SKIP_IF_NO_CUDA();
+
+    auto model = make_q4_k_test_model(
+        /*d_model=*/256, /*d_ff=*/256, /*n_heads=*/4, /*n_kv_heads=*/4,
+        /*n_layers=*/4, /*vocab_size=*/32);
+    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+
+    GraphExecutor executor;
+    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
+
+    std::vector<int32_t> h_tokens = {1, 2, 3};
+    std::vector<int> h_positions = {0, 1, 2};
+
+    int32_t* d_tokens = nullptr;
+    int* d_positions = nullptr;
+    cudaMalloc(&d_tokens, 3 * sizeof(int32_t));
+    cudaMalloc(&d_positions, 3 * sizeof(int));
+    cudaMemcpy(d_tokens, h_tokens.data(), 3 * sizeof(int32_t),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_positions, h_positions.data(), 3 * sizeof(int),
+               cudaMemcpyHostToDevice);
+
+    InferenceState state;
+    state.token_ids = d_tokens;
+    state.positions = d_positions;
+    state.n_tokens = 3;
+    state.is_prefill = true;
+    state.temperature = 0.0f;
+
+    int32_t token = executor.forward(state, nullptr);
+    EXPECT_GE(token, 0);
+    EXPECT_LT(token, 32);
+
+    cudaFree(d_tokens);
+    cudaFree(d_positions);
+}
+
+// ===========================================================================
+// Test 17: Q5_K weight upload keeps raw quantized bytes on GPU
+// ===========================================================================
+TEST(QuantIntegrationTest, Q5_KWeightUpload) {
+    SKIP_IF_NO_CUDA();
+
+    auto model = make_q5_k_test_model(
+        /*d_model=*/256, /*d_ff=*/256, /*n_heads=*/4, /*n_kv_heads=*/4,
+        /*n_layers=*/1, /*vocab_size=*/32);
+    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+
+    const auto& ly = model->layer(0);
+    EXPECT_TRUE(ly.wq.on_device);
+    EXPECT_EQ(ly.wq.ndim, 2);
+    EXPECT_EQ(ly.wq.shape[0], 256);
+    EXPECT_EQ(ly.wq.shape[1], 256);
+
+    // Verify raw bytes on GPU (read back first block)
+    std::vector<uint8_t> h_raw(176);
+    cudaMemcpy(h_raw.data(), ly.wq.data, 176, cudaMemcpyDeviceToHost);
+
+    uint16_t d_bits;
+    std::memcpy(&d_bits, h_raw.data(), 2);
+    float d_val = fp16_to_float(d_bits);
+    EXPECT_NEAR(d_val, 0.01f, 0.001f);
+}
+
+// ===========================================================================
+// Test 18: Q5_K forward pass through executor
+// ===========================================================================
+TEST(QuantIntegrationTest, Q5_KForwardPass) {
+    SKIP_IF_NO_CUDA();
+
+    auto model = make_q5_k_test_model(
+        /*d_model=*/256, /*d_ff=*/256, /*n_heads=*/4, /*n_kv_heads=*/4,
+        /*n_layers=*/1, /*vocab_size=*/32);
+    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+
+    GraphExecutor executor;
+    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
+
+    std::vector<int32_t> h_tokens = {0, 1, 2};
+    std::vector<int> h_positions = {0, 1, 2};
+    int n_tokens = 3;
+
+    int32_t* d_tokens = nullptr;
+    int* d_positions = nullptr;
+    cudaMalloc(&d_tokens, n_tokens * sizeof(int32_t));
+    cudaMalloc(&d_positions, n_tokens * sizeof(int));
+    cudaMemcpy(d_tokens, h_tokens.data(), n_tokens * sizeof(int32_t),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_positions, h_positions.data(), n_tokens * sizeof(int),
+               cudaMemcpyHostToDevice);
+
+    InferenceState state;
+    state.token_ids = d_tokens;
+    state.positions = d_positions;
+    state.n_tokens = n_tokens;
+    state.is_prefill = true;
+    state.temperature = 0.0f;
+
+    int32_t token = executor.forward(state, nullptr);
+    EXPECT_GE(token, 0);
+    EXPECT_LT(token, 32);
+
+    // Verify logits are not NaN/Inf
+    Tensor logits;
+    executor.forward_logits(state, logits, nullptr);
+    cudaDeviceSynchronize();
+
+    ASSERT_NE(logits.data, nullptr);
+    EXPECT_EQ(logits.shape[0], 1);
+    EXPECT_EQ(logits.shape[1], 32);
+
+    std::vector<float> h_logits(32);
+    cudaMemcpy(h_logits.data(), logits.data, 32 * sizeof(float),
+               cudaMemcpyDeviceToHost);
+
+    for (int i = 0; i < 32; ++i) {
+        EXPECT_FALSE(std::isnan(h_logits[i])) << "Q5_K logit NaN at " << i;
+        EXPECT_FALSE(std::isinf(h_logits[i])) << "Q5_K logit Inf at " << i;
+    }
+
+    cudaFree(d_tokens);
+    cudaFree(d_positions);
+}
+
+// ===========================================================================
+// Test 19: Q5_K multi-layer forward pass
+// ===========================================================================
+TEST(QuantIntegrationTest, Q5_KMultiLayer) {
+    SKIP_IF_NO_CUDA();
+
+    auto model = make_q5_k_test_model(
+        /*d_model=*/256, /*d_ff=*/256, /*n_heads=*/4, /*n_kv_heads=*/4,
+        /*n_layers=*/4, /*vocab_size=*/32);
+    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+
+    GraphExecutor executor;
+    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    gemm_init();
+    ASSERT_TRUE(executor.allocate_workspaces(false));
+
+    std::vector<int32_t> h_tokens = {1, 2, 3};
+    std::vector<int> h_positions = {0, 1, 2};
+
+    int32_t* d_tokens = nullptr;
+    int* d_positions = nullptr;
+    cudaMalloc(&d_tokens, 3 * sizeof(int32_t));
+    cudaMalloc(&d_positions, 3 * sizeof(int));
+    cudaMemcpy(d_tokens, h_tokens.data(), 3 * sizeof(int32_t),
+               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_positions, h_positions.data(), 3 * sizeof(int),
+               cudaMemcpyHostToDevice);
+
+    InferenceState state;
+    state.token_ids = d_tokens;
+    state.positions = d_positions;
+    state.n_tokens = 3;
+    state.is_prefill = true;
+    state.temperature = 0.0f;
+
+    int32_t token = executor.forward(state, nullptr);
+    EXPECT_GE(token, 0);
+    EXPECT_LT(token, 32);
+
+    cudaFree(d_tokens);
+    cudaFree(d_positions);
+}
+
+// ===========================================================================
+// Test 20: Q4_K GPU dequant correctness (dp4a reference check)
+// ===========================================================================
+TEST(QuantIntegrationTest, Q4_KDequantCorrectness) {
+    SKIP_IF_NO_CUDA();
+
+    // Create a single Q4_K block with known values and verify GPU dequant
+    const int rows = 1;
+    const int cols = 256;
+    const float d_scale = 0.5f;
+    const float d_min = 0.1f;
+    const uint8_t sub_sc = 3;
+    const uint8_t sub_mn = 2;
+    const uint8_t q4_val = 7;
+
+    auto blk = make_q4_k_block(d_scale, d_min, sub_sc, sub_mn, q4_val);
+
+    // Upload raw block to GPU
+    void* d_raw = nullptr;
+    cudaMalloc(&d_raw, 144);
+    cudaMemcpy(d_raw, blk.data(), 144, cudaMemcpyHostToDevice);
+
+    // Dequant on GPU
+    void* d_fp16 = nullptr;
+    cudaMalloc(&d_fp16, cols * sizeof(uint16_t));
+    dequant_gpu(d_raw, d_fp16, GGMLQuantType::Q4_K, rows, cols, nullptr);
+    cudaDeviceSynchronize();
+
+    // Read back
+    std::vector<uint16_t> h_fp16(cols);
+    cudaMemcpy(h_fp16.data(), d_fp16, cols * sizeof(uint16_t),
+               cudaMemcpyDeviceToHost);
+
+    // Compute CPU reference for sub-blocks 0-3 (simple packing)
+    // val = d * sc_val * q4 - dmin * min_val
+    // For sub-blocks 0-3: sc_val = sub_sc, min_val = sub_mn
+    float expected_03 = d_scale * static_cast<float>(sub_sc) * static_cast<float>(q4_val)
+                       - d_min * static_cast<float>(sub_mn);
+
+    // Check first 128 elements (sub-blocks 0-3)
+    for (int i = 0; i < 128; ++i) {
+        float got = fp16_to_float(h_fp16[i]);
+        EXPECT_NEAR(got, expected_03, 0.05f)
+            << "Q4_K dequant mismatch at element " << i;
+    }
+
+    cudaFree(d_raw);
+    cudaFree(d_fp16);
+}
+
+// ===========================================================================
+// Test 21: Q5_K GPU dequant correctness
+// ===========================================================================
+TEST(QuantIntegrationTest, Q5_KDequantCorrectness) {
+    SKIP_IF_NO_CUDA();
+
+    const int rows = 1;
+    const int cols = 256;
+    const float d_scale = 0.5f;
+    const float d_min = 0.1f;
+    const uint8_t sub_sc = 3;
+    const uint8_t sub_mn = 2;
+    const uint8_t q4_val = 7;
+
+    // Test with high_bit=false: q5 = q4_val (5th bit is 0)
+    auto blk0 = make_q5_k_block(d_scale, d_min, sub_sc, sub_mn, q4_val, false);
+    void* d_raw0 = nullptr;
+    cudaMalloc(&d_raw0, 176);
+    cudaMemcpy(d_raw0, blk0.data(), 176, cudaMemcpyHostToDevice);
+
+    void* d_fp16_0 = nullptr;
+    cudaMalloc(&d_fp16_0, cols * sizeof(uint16_t));
+    dequant_gpu(d_raw0, d_fp16_0, GGMLQuantType::Q5_K, rows, cols, nullptr);
+    cudaDeviceSynchronize();
+
+    std::vector<uint16_t> h_fp16_0(cols);
+    cudaMemcpy(h_fp16_0.data(), d_fp16_0, cols * sizeof(uint16_t),
+               cudaMemcpyDeviceToHost);
+
+    // q5 = q4_val | (0 << 4) = q4_val
+    float expected_no_high = d_scale * static_cast<float>(sub_sc) * static_cast<float>(q4_val)
+                            - d_min * static_cast<float>(sub_mn);
+
+    for (int i = 0; i < 128; ++i) {
+        float got = fp16_to_float(h_fp16_0[i]);
+        EXPECT_NEAR(got, expected_no_high, 0.05f)
+            << "Q5_K dequant (no high) mismatch at " << i;
+    }
+
+    // Test with high_bit=true: q5 = q4_val | 16
+    auto blk1 = make_q5_k_block(d_scale, d_min, sub_sc, sub_mn, q4_val, true);
+    void* d_raw1 = nullptr;
+    cudaMalloc(&d_raw1, 176);
+    cudaMemcpy(d_raw1, blk1.data(), 176, cudaMemcpyHostToDevice);
+
+    void* d_fp16_1 = nullptr;
+    cudaMalloc(&d_fp16_1, cols * sizeof(uint16_t));
+    dequant_gpu(d_raw1, d_fp16_1, GGMLQuantType::Q5_K, rows, cols, nullptr);
+    cudaDeviceSynchronize();
+
+    std::vector<uint16_t> h_fp16_1(cols);
+    cudaMemcpy(h_fp16_1.data(), d_fp16_1, cols * sizeof(uint16_t),
+               cudaMemcpyDeviceToHost);
+
+    // q5 = q4_val | 16 = q4_val + 16
+    int q5_val = static_cast<int>(q4_val) | 16;
+    float expected_high = d_scale * static_cast<float>(sub_sc) * static_cast<float>(q5_val)
+                         - d_min * static_cast<float>(sub_mn);
+
+    for (int i = 0; i < 128; ++i) {
+        float got = fp16_to_float(h_fp16_1[i]);
+        EXPECT_NEAR(got, expected_high, 0.1f)
+            << "Q5_K dequant (high bit) mismatch at " << i;
+    }
+
+    // Verify high bit actually makes a difference
+    float diff = expected_high - expected_no_high;
+    EXPECT_GT(std::abs(diff), 0.1f) << "High bit should change dequant value";
+
+    cudaFree(d_raw0);
+    cudaFree(d_fp16_0);
+    cudaFree(d_raw1);
+    cudaFree(d_fp16_1);
+}
+
 } // namespace
 } // namespace imp

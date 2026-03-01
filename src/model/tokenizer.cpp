@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstdio>
 #include <climits>
+#include <queue>
 
 namespace imp {
 
@@ -252,34 +253,84 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text) const {
         i += len;
     }
 
-    // BPE merge loop: iteratively merge the pair with highest score
-    while (symbols.size() >= 2) {
-        float best_score = -1e30f;
-        int best_pos = -1;
-
-        for (int i = 0; i < static_cast<int>(symbols.size()) - 1; i++) {
-            std::string merged = symbols[i] + symbols[i + 1];
-            auto it = token_to_id_.find(merged);
-            if (it != token_to_id_.end()) {
-                float score = scores_[it->second];
-                if (score > best_score) {
-                    best_score = score;
-                    best_pos = i;
-                }
-            }
-        }
-
-        if (best_pos < 0) break;
-
-        symbols[best_pos] = symbols[best_pos] + symbols[best_pos + 1];
-        symbols.erase(symbols.begin() + best_pos + 1);
+    // BPE merge loop using priority queue: O(n log n) instead of O(n²).
+    // Linked list of symbols with prev/next pointers; deleted nodes are skipped.
+    int n = static_cast<int>(symbols.size());
+    std::vector<int> prev(n), next(n);
+    std::vector<bool> deleted(n, false);
+    for (int i = 0; i < n; i++) {
+        prev[i] = i - 1;
+        next[i] = i + 1;
     }
 
-    // Convert symbols to token IDs
-    std::vector<int32_t> ids;
-    ids.reserve(symbols.size());
+    // Max-heap: highest score first, then lowest position for tie-breaking
+    struct MergeCand {
+        float score;
+        int pos;       // left symbol index
+        int seq;       // sequence number at insertion (for invalidation)
+    };
+    auto cmp = [](const MergeCand& a, const MergeCand& b) {
+        if (a.score != b.score) return a.score < b.score;
+        return a.pos > b.pos;
+    };
+    std::priority_queue<MergeCand, std::vector<MergeCand>, decltype(cmp)> pq(cmp);
 
-    for (const auto& sym : symbols) {
+    // Sequence counters per position: incremented on merge to invalidate stale entries
+    std::vector<int> seq(n, 0);
+
+    // Seed the queue with all valid adjacent pairs
+    for (int i = 0; i < n - 1; i++) {
+        std::string merged = symbols[i] + symbols[next[i]];
+        auto it = token_to_id_.find(merged);
+        if (it != token_to_id_.end()) {
+            pq.push({scores_[it->second], i, seq[i]});
+        }
+    }
+
+    while (!pq.empty()) {
+        auto [score, pos, s] = pq.top();
+        pq.pop();
+
+        // Validate: symbol still exists and hasn't been modified since insertion
+        if (deleted[pos] || seq[pos] != s) continue;
+        int right = next[pos];
+        if (right >= n || deleted[right]) continue;
+
+        // Merge: symbols[pos] absorbs symbols[right]
+        symbols[pos] = symbols[pos] + symbols[right];
+        deleted[right] = true;
+        seq[pos]++;  // invalidate stale entries for this position
+
+        // Update linked list
+        next[pos] = next[right];
+        if (next[right] < n) prev[next[right]] = pos;
+
+        // Try new pair with left neighbor
+        if (prev[pos] >= 0) {
+            int lp = prev[pos];
+            std::string m = symbols[lp] + symbols[pos];
+            auto it = token_to_id_.find(m);
+            if (it != token_to_id_.end()) {
+                pq.push({scores_[it->second], lp, seq[lp]});
+            }
+        }
+        // Try new pair with right neighbor
+        if (next[pos] < n) {
+            std::string m = symbols[pos] + symbols[next[pos]];
+            auto it = token_to_id_.find(m);
+            if (it != token_to_id_.end()) {
+                pq.push({scores_[it->second], pos, seq[pos]});
+            }
+        }
+    }
+
+    // Collect non-deleted symbols → token IDs
+    std::vector<int32_t> ids;
+    ids.reserve(n);
+
+    for (int i = 0; i < n; i++) {
+        if (deleted[i]) continue;
+        const auto& sym = symbols[i];
         auto it = token_to_id_.find(sym);
         if (it != token_to_id_.end()) {
             ids.push_back(it->second);
@@ -318,28 +369,73 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
             symbols.push_back(byte_to_gpt2(byte));
         }
 
-        // 3. BPE merge loop: merge pair with lowest rank (highest priority)
-        while (symbols.size() >= 2) {
-            int best_rank = INT_MAX;
-            int best_pos = -1;
+        // 3. BPE merge loop using priority queue: O(n log n)
+        int ns = static_cast<int>(symbols.size());
+        std::vector<int> sprev(ns), snext(ns);
+        std::vector<bool> sdel(ns, false);
+        for (int i = 0; i < ns; i++) {
+            sprev[i] = i - 1;
+            snext[i] = i + 1;
+        }
 
-            for (int i = 0; i < static_cast<int>(symbols.size()) - 1; i++) {
-                std::string key = symbols[i] + " " + symbols[i + 1];
+        // Min-heap: lowest rank first, then lowest position
+        struct GPT2Merge {
+            int rank;
+            int pos;
+            int seq;
+        };
+        auto gcmp = [](const GPT2Merge& a, const GPT2Merge& b) {
+            if (a.rank != b.rank) return a.rank > b.rank;
+            return a.pos > b.pos;
+        };
+        std::priority_queue<GPT2Merge, std::vector<GPT2Merge>, decltype(gcmp)> gpq(gcmp);
+
+        std::vector<int> sseq(ns, 0);
+
+        for (int i = 0; i < ns - 1; i++) {
+            std::string key = symbols[i] + " " + symbols[snext[i]];
+            auto it = merge_ranks_.find(key);
+            if (it != merge_ranks_.end()) {
+                gpq.push({it->second, i, sseq[i]});
+            }
+        }
+
+        while (!gpq.empty()) {
+            auto [rank, pos, s] = gpq.top();
+            gpq.pop();
+
+            if (sdel[pos] || sseq[pos] != s) continue;
+            int right = snext[pos];
+            if (right >= ns || sdel[right]) continue;
+
+            symbols[pos] = symbols[pos] + symbols[right];
+            sdel[right] = true;
+            sseq[pos]++;
+
+            snext[pos] = snext[right];
+            if (snext[right] < ns) sprev[snext[right]] = pos;
+
+            if (sprev[pos] >= 0) {
+                int lp = sprev[pos];
+                std::string key = symbols[lp] + " " + symbols[pos];
                 auto it = merge_ranks_.find(key);
-                if (it != merge_ranks_.end() && it->second < best_rank) {
-                    best_rank = it->second;
-                    best_pos = i;
+                if (it != merge_ranks_.end()) {
+                    gpq.push({it->second, lp, sseq[lp]});
                 }
             }
-
-            if (best_pos < 0) break;
-
-            symbols[best_pos] = symbols[best_pos] + symbols[best_pos + 1];
-            symbols.erase(symbols.begin() + best_pos + 1);
+            if (snext[pos] < ns) {
+                std::string key = symbols[pos] + " " + symbols[snext[pos]];
+                auto it = merge_ranks_.find(key);
+                if (it != merge_ranks_.end()) {
+                    gpq.push({it->second, pos, sseq[pos]});
+                }
+            }
         }
 
         // 4. Look up token IDs
-        for (const auto& sym : symbols) {
+        for (int i = 0; i < ns; i++) {
+            if (sdel[i]) continue;
+            const auto& sym = symbols[i];
             auto it = token_to_id_.find(sym);
             if (it != token_to_id_.end()) {
                 all_ids.push_back(it->second);
