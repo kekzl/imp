@@ -12,147 +12,354 @@
 namespace imp {
 
 // ---------------------------------------------------------------------------
-// NVFP4 GEMV kernel: y[M] = A_nvfp4[M, K] @ x[K]
+// Optimized K-parallel NVFP4 GEMV kernels (v2)
 //
-// Each warp (32 threads) handles one output row of A.  Threads cooperatively
-// load chunks of the packed FP4 row, dequantize via two-level scaling, and
-// accumulate the dot product with x.  Final reduction via warp shuffle.
+// Architecture: 128 threads (4 warps), 1 row per block, M blocks.
+// Each iteration processes one micro-block (uint2 = 8 packed bytes = 16 FP4).
 //
-// Memory layout:
-//   A packed_data:   [M, K/2]  (2 FP4 values per byte)
-//   A micro_scales:  [M, K/16] (FP8 E4M3)
-//   x:               [K]       (FP16)
-//   y:               [M]       (FP16)
+// Key optimizations vs v1:
+//   1. Signed 16-entry LUT in shared memory (branchless, no cmem serial)
+//   2. uint2 loads = 1 micro-block boundary (1 scale per load, no waste)
+//   3. Deferred scale: accumulate LUT*activation, scale once per block
+//   4. half2 vectorized activation loads (halves load instruction count)
+//   5. Bitwise FP8->FP32 decode (no exp2f SFU call)
 // ---------------------------------------------------------------------------
 
 static constexpr int kMicroBlockSize = 16;
+static constexpr int kKparWarps = 4;
+static constexpr int kKparThreads = kKparWarps * 32;  // 128
 
-// FP4 E2M1 dequant table (same as in nvfp4_quant.cu).
-__constant__ float kFP4E2M1DequantGemm[8] = {
-    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f
-};
-
-// FP8 E4M3 -> float (duplicated here to keep compilation units independent).
-__device__ __forceinline__ float fp8_e4m3_to_float_gemm(uint8_t bits)
+// Fast FP8 E4M3 -> FP32 via bit manipulation (no exp2f).
+__device__ __forceinline__ float fp8_e4m3_to_float_fast(uint8_t bits)
 {
     uint32_t sign = (bits >> 7) & 1;
     uint32_t exp  = (bits >> 3) & 0x0F;
     uint32_t man  = bits & 0x07;
 
-    float abs_val;
     if (exp == 0) {
-        abs_val = (float)man * (1.0f / 512.0f);
-    } else {
-        abs_val = (float)(8 + man) * exp2f((float)(exp) - 10.0f);
+        // Denorm: value = man * 2^(-9)
+        float val = (float)man * (1.0f / 512.0f);
+        return sign ? -val : val;
     }
-    return sign ? -abs_val : abs_val;
+    // Normal: FP8 bias=7, FP32 bias=127 -> exp offset=120.
+    uint32_t fp32 = (sign << 31) | ((exp + 120u) << 23) | (man << 20);
+    return __uint_as_float(fp32);
 }
 
-// ---------------------------------------------------------------------------
-// Dequantize a single packed byte into two FP32 values.
-// ---------------------------------------------------------------------------
-__device__ __forceinline__ void dequant_byte(uint8_t packed, float scale,
-                                              float& val0, float& val1)
+// Process one micro-block (8 packed bytes = 16 FP4 values).
+// Returns unscaled dot product: sum(LUT[nibble] * activation).
+// Caller multiplies by combined_scale once.
+__device__ __forceinline__ float dot_micro_block(
+    const uint8_t* __restrict__ pb,
+    const half*    __restrict__ x,
+    int            elem_base,
+    const float*   s_lut)
 {
-    // Low nibble = even element.
-    uint8_t fp4_lo = packed & 0x0F;
-    uint8_t sign_lo = (fp4_lo >> 3) & 1;
-    uint8_t code_lo = fp4_lo & 0x07;
-    val0 = kFP4E2M1DequantGemm[code_lo] * scale;
-    if (sign_lo) val0 = -val0;
+    float acc = 0.0f;
+    #pragma unroll
+    for (int b = 0; b < 8; b++) {
+        const half2 xh = *reinterpret_cast<const half2*>(x + elem_base + b * 2);
+        const float2 xf = __half22float2(xh);
+        acc = __fmaf_rn(s_lut[pb[b] & 0x0F], xf.x, acc);
+        acc = __fmaf_rn(s_lut[pb[b] >> 4],   xf.y, acc);
+    }
+    return acc;
+}
 
-    // High nibble = odd element.
-    uint8_t fp4_hi = (packed >> 4) & 0x0F;
-    uint8_t sign_hi = (fp4_hi >> 3) & 1;
-    uint8_t code_hi = fp4_hi & 0x07;
-    val1 = kFP4E2M1DequantGemm[code_hi] * scale;
-    if (sign_hi) val1 = -val1;
+// Core GEMV loop: accumulates dot(row, x) for one row.
+__device__ __forceinline__ float gemv_nvfp4_row(
+    const uint8_t* __restrict__ row_packed,
+    const uint8_t* __restrict__ row_ms,
+    float          tensor_scale,
+    const half*    __restrict__ x,
+    int            n_mb,
+    int            tid,
+    const float*   s_lut)
+{
+    float acc = 0.0f;
+    for (int mi = tid; mi < n_mb; mi += kKparThreads) {
+        int byte_off = mi * 8;
+        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
+        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
+        float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
+        float local_dot = dot_micro_block(pb, x, byte_off * 2, s_lut);
+        acc = __fmaf_rn(local_dot, cs, acc);
+    }
+    return acc;
+}
+
+// K-parallel reduction: warp shuffle + cross-warp shared memory.
+__device__ __forceinline__ float reduce_kpar(float acc, int tid, float* warp_sums)
+{
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+
+    int warp_id = tid / 32;
+    if ((tid & 31) == 0) warp_sums[warp_id] = acc;
+    __syncthreads();
+
+    if (tid == 0) {
+        float total = warp_sums[0];
+        #pragma unroll
+        for (int w = 1; w < kKparWarps; w++)
+            total += warp_sums[w];
+        return total;
+    }
+    return 0.0f;
+}
+
+// Shared memory layout: 16 floats for signed FP4 LUT + 4 floats for warp sums.
+// Total: 80 bytes per block.
+struct SmemKpar {
+    float lut[16];
+    float warp_sums[kKparWarps];
+};
+
+__device__ __forceinline__ void init_lut(float* s_lut, int tid)
+{
+    if (tid < 16) {
+        constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+        s_lut[tid] = (tid < 8) ? kMag[tid] : -kMag[tid & 7];
+    }
 }
 
 // ---------------------------------------------------------------------------
-// GEMV kernel.
-// Grid:  (ceil(M / warps_per_block),)
-// Block: (32 * warps_per_block,)     i.e., warps_per_block warps
-//
-// Each warp handles one row.  Within the row, each thread iterates over
-// K/32 pairs of FP4 values (since 32 threads * 1 byte each = 32 nibbles =
-// 16 packed bytes per iteration, covering 32 FP4 values).
-//
-// Actually, we iterate at micro-block granularity: each micro-block is 16
-// values = 8 packed bytes.  With 32 threads per warp, we assign groups of
-// threads to micro-blocks.  Strategy: each thread loads one byte (2 values)
-// per iteration, so 32 threads cover 32 bytes = 64 FP4 values = 4 micro-
-// blocks per iteration.
+// Basic GEMV: y[row] = A_nvfp4[row,:] @ x
 // ---------------------------------------------------------------------------
-
-static constexpr int kWarpsPerBlock = 8;
-static constexpr int kWarpSize = 32;
-
-__global__ void gemv_nvfp4_kernel(
-    const uint8_t* __restrict__ packed_data,    // [M, K/2]
-    const uint8_t* __restrict__ micro_scales,   // [M, K/16]
+__global__ void __launch_bounds__(kKparThreads, 12)
+gemv_nvfp4_kpar_kernel(
+    const uint8_t* __restrict__ packed_data,
+    const uint8_t* __restrict__ micro_scales,
     float                       tensor_scale,
-    const half*    __restrict__ x,              // [K]
-    half*          __restrict__ y,              // [M]
-    int64_t M, int64_t K)
+    const half*    __restrict__ x,
+    half*          __restrict__ y,
+    int M, int K)
 {
-    const int warp_id_in_block = threadIdx.x / kWarpSize;
-    const int lane = threadIdx.x % kWarpSize;
-
-    // Global row index for this warp.
-    const int64_t row = (int64_t)blockIdx.x * kWarpsPerBlock + warp_id_in_block;
+    const int row = blockIdx.x;
     if (row >= M) return;
 
-    const int64_t K_half = K / 2;              // packed bytes per row
-    const int64_t num_mb = K / kMicroBlockSize; // micro-blocks per row
+    const int tid = threadIdx.x;
+    const int K_half = K / 2;
+    const int n_mb = K / kMicroBlockSize;
 
-    const uint8_t* row_packed = packed_data + row * K_half;
-    const uint8_t* row_ms     = micro_scales + row * num_mb;
+    __shared__ SmemKpar smem;
+    init_lut(smem.lut, tid);
+    __syncthreads();
 
-    float acc = 0.0f;
+    float acc = gemv_nvfp4_row(
+        packed_data + (int64_t)row * K_half,
+        micro_scales + (int64_t)row * n_mb,
+        tensor_scale, x, n_mb, tid, smem.lut);
 
-    // Each thread processes elements at stride of 32 (warp width) in units
-    // of 2 values (1 packed byte).  So thread 'lane' processes byte indices
-    // lane, lane+32, lane+64, ... within the row.
-    for (int64_t byte_idx = lane; byte_idx < K_half; byte_idx += kWarpSize) {
-        // The two FP4 values correspond to element indices 2*byte_idx and
-        // 2*byte_idx+1.
-        int64_t elem_idx = byte_idx * 2;
-
-        // Determine which micro-block these elements belong to.
-        int64_t mb = elem_idx / kMicroBlockSize;
-
-        // Load micro-scale and compute combined scale.
-        float ms = fp8_e4m3_to_float_gemm(row_ms[mb]);
-        float combined_scale = tensor_scale * ms;
-
-        // Dequantize the packed byte.
-        uint8_t packed = row_packed[byte_idx];
-        float v0, v1;
-        dequant_byte(packed, combined_scale, v0, v1);
-
-        // Load corresponding x values.
-        float x0 = __half2float(x[elem_idx]);
-        float x1 = __half2float(x[elem_idx + 1]);
-
-        // Accumulate dot product.
-        acc += v0 * x0 + v1 * x1;
-    }
-
-    // Warp-level reduction via shuffle.
-    #pragma unroll
-    for (int offset = kWarpSize / 2; offset > 0; offset >>= 1) {
-        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
-    }
-
-    // Lane 0 writes the result.
-    if (lane == 0) {
-        y[row] = __float2half(acc);
-    }
+    float total = reduce_kpar(acc, tid, smem.warp_sums);
+    if (tid == 0) y[row] = __float2half(total);
 }
 
 // ---------------------------------------------------------------------------
-// Host launcher for GEMV.
+// GEMV with residual: y[row] = A_nvfp4[row,:] @ x + residual[row]
+// ---------------------------------------------------------------------------
+__global__ void __launch_bounds__(kKparThreads, 12)
+gemv_nvfp4_residual_kernel(
+    const uint8_t* __restrict__ packed_data,
+    const uint8_t* __restrict__ micro_scales,
+    float                       tensor_scale,
+    const half*    __restrict__ x,
+    half*          __restrict__ y,
+    const half*    __restrict__ residual,
+    int M, int K)
+{
+    const int row = blockIdx.x;
+    if (row >= M) return;
+
+    const int tid = threadIdx.x;
+    const int K_half = K / 2;
+    const int n_mb = K / kMicroBlockSize;
+
+    __shared__ SmemKpar smem;
+    init_lut(smem.lut, tid);
+    __syncthreads();
+
+    float acc = gemv_nvfp4_row(
+        packed_data + (int64_t)row * K_half,
+        micro_scales + (int64_t)row * n_mb,
+        tensor_scale, x, n_mb, tid, smem.lut);
+
+    float total = reduce_kpar(acc, tid, smem.warp_sums);
+    if (tid == 0) y[row] = __float2half(total + __half2float(residual[row]));
+}
+
+// ---------------------------------------------------------------------------
+// Fused QKV: 3 weight matrices, shared input, separate outputs
+// Grid: (q_rows + k_rows + v_rows) blocks.
+// ---------------------------------------------------------------------------
+__global__ void __launch_bounds__(kKparThreads, 12)
+gemv_nvfp4_qkv_fused_kernel(
+    const uint8_t* __restrict__ packed_q,
+    const uint8_t* __restrict__ ms_q,
+    float ts_q,
+    const uint8_t* __restrict__ packed_k,
+    const uint8_t* __restrict__ ms_k,
+    float ts_k,
+    const uint8_t* __restrict__ packed_v,
+    const uint8_t* __restrict__ ms_v,
+    float ts_v,
+    const half*    __restrict__ x,
+    half*          __restrict__ yq,
+    half*          __restrict__ yk,
+    half*          __restrict__ yv,
+    int q_rows, int k_rows, int v_rows, int K)
+{
+    const int bid = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int K_half = K / 2;
+    const int n_mb = K / kMicroBlockSize;
+
+    __shared__ SmemKpar smem;
+    init_lut(smem.lut, tid);
+    __syncthreads();
+
+    const uint8_t* row_packed;
+    const uint8_t* row_ms;
+    float ts;
+    half* out;
+    int local_row;
+
+    if (bid < q_rows) {
+        local_row = bid;
+        row_packed = packed_q + (int64_t)local_row * K_half;
+        row_ms     = ms_q + (int64_t)local_row * n_mb;
+        ts = ts_q;
+        out = yq;
+    } else if (bid < q_rows + k_rows) {
+        local_row = bid - q_rows;
+        row_packed = packed_k + (int64_t)local_row * K_half;
+        row_ms     = ms_k + (int64_t)local_row * n_mb;
+        ts = ts_k;
+        out = yk;
+    } else {
+        local_row = bid - q_rows - k_rows;
+        row_packed = packed_v + (int64_t)local_row * K_half;
+        row_ms     = ms_v + (int64_t)local_row * n_mb;
+        ts = ts_v;
+        out = yv;
+    }
+
+    float acc = gemv_nvfp4_row(row_packed, row_ms, ts, x, n_mb, tid, smem.lut);
+    float total = reduce_kpar(acc, tid, smem.warp_sums);
+    if (tid == 0) out[local_row] = __float2half(total);
+}
+
+// ---------------------------------------------------------------------------
+// Fused Gate+Up: 2 weight matrices, shared input, separate outputs
+// Grid: 2 * rows blocks. First half = gate, second half = up.
+// ---------------------------------------------------------------------------
+__global__ void __launch_bounds__(kKparThreads, 12)
+gemv_nvfp4_gate_up_fused_kernel(
+    const uint8_t* __restrict__ packed_g,
+    const uint8_t* __restrict__ ms_g,
+    float ts_g,
+    const uint8_t* __restrict__ packed_u,
+    const uint8_t* __restrict__ ms_u,
+    float ts_u,
+    const half*    __restrict__ x,
+    half*          __restrict__ yg,
+    half*          __restrict__ yu,
+    int rows, int K)
+{
+    const int bid = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int K_half = K / 2;
+    const int n_mb = K / kMicroBlockSize;
+
+    __shared__ SmemKpar smem;
+    init_lut(smem.lut, tid);
+    __syncthreads();
+
+    const uint8_t* row_packed;
+    const uint8_t* row_ms;
+    float ts;
+    half* out;
+    int local_row;
+
+    if (bid < rows) {
+        local_row = bid;
+        row_packed = packed_g + (int64_t)local_row * K_half;
+        row_ms     = ms_g + (int64_t)local_row * n_mb;
+        ts = ts_g;
+        out = yg;
+    } else {
+        local_row = bid - rows;
+        row_packed = packed_u + (int64_t)local_row * K_half;
+        row_ms     = ms_u + (int64_t)local_row * n_mb;
+        ts = ts_u;
+        out = yu;
+    }
+
+    float acc = gemv_nvfp4_row(row_packed, row_ms, ts, x, n_mb, tid, smem.lut);
+    float total = reduce_kpar(acc, tid, smem.warp_sums);
+    if (tid == 0) out[local_row] = __float2half(total);
+}
+
+// ---------------------------------------------------------------------------
+// Host launchers
+// ---------------------------------------------------------------------------
+
+void gemv_nvfp4_kpar(const NvFP4QuantResult& A, const half* x, half* y,
+                     int M, int K, cudaStream_t stream)
+{
+    gemv_nvfp4_kpar_kernel<<<M, kKparThreads, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(A.packed_data),
+        reinterpret_cast<const uint8_t*>(A.micro_scales),
+        A.tensor_scale, x, y, M, K);
+}
+
+void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk,
+                           const NvFP4QuantResult& wv, const half* x,
+                           half* yq, half* yk, half* yv,
+                           int q_rows, int k_rows, int v_rows, int K,
+                           cudaStream_t stream)
+{
+    int total_rows = q_rows + k_rows + v_rows;
+    gemv_nvfp4_qkv_fused_kernel<<<total_rows, kKparThreads, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(wq.packed_data),
+        reinterpret_cast<const uint8_t*>(wq.micro_scales),
+        wq.tensor_scale,
+        reinterpret_cast<const uint8_t*>(wk.packed_data),
+        reinterpret_cast<const uint8_t*>(wk.micro_scales),
+        wk.tensor_scale,
+        reinterpret_cast<const uint8_t*>(wv.packed_data),
+        reinterpret_cast<const uint8_t*>(wv.micro_scales),
+        wv.tensor_scale,
+        x, yq, yk, yv, q_rows, k_rows, v_rows, K);
+}
+
+void gemv_nvfp4_gate_up_fused(const NvFP4QuantResult& wg, const NvFP4QuantResult& wu,
+                               const half* x, half* yg, half* yu,
+                               int rows, int K, cudaStream_t stream)
+{
+    int total_blocks = 2 * rows;
+    gemv_nvfp4_gate_up_fused_kernel<<<total_blocks, kKparThreads, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(wg.packed_data),
+        reinterpret_cast<const uint8_t*>(wg.micro_scales),
+        wg.tensor_scale,
+        reinterpret_cast<const uint8_t*>(wu.packed_data),
+        reinterpret_cast<const uint8_t*>(wu.micro_scales),
+        wu.tensor_scale,
+        x, yg, yu, rows, K);
+}
+
+void gemv_nvfp4_residual(const NvFP4QuantResult& A, const half* x, half* y,
+                          const half* residual, int M, int K, cudaStream_t stream)
+{
+    gemv_nvfp4_residual_kernel<<<M, kKparThreads, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(A.packed_data),
+        reinterpret_cast<const uint8_t*>(A.micro_scales),
+        A.tensor_scale, x, y, residual, M, K);
+}
+
+// ---------------------------------------------------------------------------
+// Tensor-based launcher (existing API, delegates to K-parallel kernel)
 // ---------------------------------------------------------------------------
 void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y,
                 cudaStream_t stream)
@@ -163,31 +370,13 @@ void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y,
     assert(x.dtype == DType::FP16 && "x must be FP16");
     assert(y.dtype == DType::FP16 && "y must be FP16");
 
-    int64_t M = A.N;   // number of output rows
-    int64_t K = A.K;
+    int M = static_cast<int>(A.N);
+    int K = static_cast<int>(A.K);
 
-    // Validate x dimension.
-    int64_t x_len = x.numel();
-    assert(x_len == K && "x length must match A.K");
-
-    // Validate y dimension.
-    int64_t y_len = y.numel();
-    assert(y_len == M && "y length must match A.N (number of rows)");
-
-    int threads_per_block = kWarpsPerBlock * kWarpSize;  // 8 * 32 = 256
-    int num_blocks = (int)((M + kWarpsPerBlock - 1) / kWarpsPerBlock);
-
-    gemv_nvfp4_kernel<<<num_blocks, threads_per_block, 0, stream>>>(
-        reinterpret_cast<const uint8_t*>(A.packed_data),
-        reinterpret_cast<const uint8_t*>(A.micro_scales),
-        A.tensor_scale,
-        reinterpret_cast<const half*>(x.data),
-        reinterpret_cast<half*>(y.data),
-        M, K
-    );
-
-    IMP_LOG_DEBUG("gemv_nvfp4: M=%lld K=%lld blocks=%d threads=%d",
-                  (long long)M, (long long)K, num_blocks, threads_per_block);
+    gemv_nvfp4_kpar(A,
+                    reinterpret_cast<const half*>(x.data),
+                    reinterpret_cast<half*>(y.data),
+                    M, K, stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -197,16 +386,9 @@ void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y,
 //   input (Tensor):       activation     [M, K] in FP16
 //   C (Tensor):           output         [M, N] in FP16
 //
-// Strategy:
-//   1. Dequantize A from NVFP4 to FP16 into a temporary buffer.
-//   2. Call the existing cuBLAS gemm() which computes C = input @ A_fp16^T.
-//
-// This avoids the per-call cudaMalloc by using a persistent scratch buffer
-// (grown as needed, never shrunk).  For SM100+ with CUDA 13.1, a native
-// cuBLASLt NVFP4 path can be added in the future.
+// Strategy: dequantize A to FP16, then call cuBLAS gemm.
 // ---------------------------------------------------------------------------
 
-// Persistent dequant scratch buffer (process-lifetime, grown as needed).
 static void* s_nvfp4_dequant_buf = nullptr;
 static size_t s_nvfp4_dequant_buf_size = 0;
 
@@ -222,7 +404,6 @@ static void* ensure_dequant_buffer(size_t needed) {
         return nullptr;
     }
     s_nvfp4_dequant_buf_size = needed;
-    IMP_LOG_DEBUG("gemm_nvfp4: allocated dequant scratch buffer: %zu bytes", needed);
     return s_nvfp4_dequant_buf;
 }
 
@@ -235,27 +416,24 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C,
     assert(B.ndim == 2 && "B (input) must be 2D [M, K]");
     assert(C.ndim == 2 && "C (output) must be 2D [M, N]");
 
-    const int64_t N = A.N;   // weight out_features
-    const int64_t K = A.K;   // weight in_features
-    const int64_t M = B.shape[0];  // sequence length / batch tokens
+    const int64_t N = A.N;
+    const int64_t K = A.K;
+    const int64_t M = B.shape[0];
 
     assert(B.shape[1] == K && "input columns must match weight in_features");
     assert(C.shape[0] == M && C.shape[1] == N && "output shape must be [M, N]");
 
-    // For M == 1, prefer the custom GEMV kernel (bandwidth-optimized).
     if (M == 1) {
         gemv_nvfp4(A, B, C, stream);
         return;
     }
 
-    // Dequantize weight A [N, K] from NVFP4 to FP16 into scratch buffer.
     size_t A_fp16_bytes = (size_t)(N * K) * sizeof(half);
     void* dequant_buf = ensure_dequant_buffer(A_fp16_bytes);
     if (!dequant_buf) return;
 
     dequantize_nvfp4_to_fp16(A, dequant_buf, stream);
 
-    // Wrap as Tensor [N, K] and call standard cuBLAS GEMM: C = B @ A_fp16^T.
     int64_t A_shape[2] = {N, K};
     Tensor A_fp16(dequant_buf, DType::FP16, 2, A_shape, /*on_device=*/true);
 

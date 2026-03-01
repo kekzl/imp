@@ -3,6 +3,7 @@
 #include "core/tensor.h"
 #include "quant/nvfp4_quant.h"
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 
 namespace imp {
 
@@ -17,5 +18,31 @@ void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y,
 // Falls back to dequant + standard GEMM if cuBLASLt NVFP4 is unavailable.
 void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C,
                 cudaStream_t stream = nullptr);
+
+// ---------------------------------------------------------------------------
+// K-parallel NVFP4 GEMV host launchers for decode (M=1) dispatch.
+// These take raw NvFP4QuantResult + FP16 pointers — no Tensor overhead.
+// Architecture: 128 threads (4 warps), 1 row/block, M blocks.
+// ---------------------------------------------------------------------------
+
+// Basic GEMV: y[M] = A_nvfp4[M,K] @ x[K]
+void gemv_nvfp4_kpar(const NvFP4QuantResult& A, const half* x, half* y,
+                     int M, int K, cudaStream_t stream);
+
+// Fused QKV: 3 weight matrices, shared input, separate outputs
+void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk,
+                           const NvFP4QuantResult& wv, const half* x,
+                           half* yq, half* yk, half* yv,
+                           int q_rows, int k_rows, int v_rows, int K,
+                           cudaStream_t stream);
+
+// Fused Gate+Up: 2 weight matrices, shared input, separate outputs
+void gemv_nvfp4_gate_up_fused(const NvFP4QuantResult& wg, const NvFP4QuantResult& wu,
+                               const half* x, half* yg, half* yu,
+                               int rows, int K, cudaStream_t stream);
+
+// GEMV with residual add: y[M] = A_nvfp4[M,K] @ x[K] + residual[M]
+void gemv_nvfp4_residual(const NvFP4QuantResult& A, const half* x, half* y,
+                          const half* residual, int M, int K, cudaStream_t stream);
 
 } // namespace imp

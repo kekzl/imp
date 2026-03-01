@@ -39,6 +39,8 @@ void print_usage(const char* prog) {
         "  --chat-template <t>   Chat template: auto, none, chatml, llama2, llama3, nemotron, gemma\n"
         "  --prefill-chunk-size <n> Max tokens per prefill chunk (default: 0 = no chunking)\n"
         "  --prefill-fp8         Use FP8 E4M3 weight cache for ~2x prefill throughput\n"
+        "  --decode-nvfp4        NVFP4 decode cache (additive: FP16 prefill + NVFP4 decode)\n"
+        "  --decode-nvfp4-only   NVFP4 decode cache (replacement: saves VRAM, slower prefill)\n"
         "  --bench               Synthetic benchmark mode (like llama-bench)\n"
         "  --bench-pp <n>        Synthetic prompt token count (default: 512)\n"
         "  --bench-reps <n>      Repetitions to average (default: 3)\n"
@@ -115,6 +117,10 @@ CliArgs parse_args(int argc, char** argv) {
             args.prefill_chunk_size = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--prefill-fp8") == 0) {
             args.prefill_fp8 = true;
+        } else if (std::strcmp(arg, "--decode-nvfp4") == 0) {
+            args.decode_nvfp4 = 1;
+        } else if (std::strcmp(arg, "--decode-nvfp4-only") == 0) {
+            args.decode_nvfp4 = 2;
         } else if (std::strcmp(arg, "--bench") == 0) {
             args.bench = true;
         } else if (std::strcmp(arg, "--bench-pp") == 0 && i + 1 < argc) {

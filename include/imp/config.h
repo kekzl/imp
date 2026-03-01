@@ -57,6 +57,9 @@ typedef struct {
     // Prefill weight cache precision
     int use_fp8_prefill;           // 0 = FP16 weight cache (default), 1 = FP8 E4M3 prefill cache
 
+    // NVFP4 decode weight cache
+    int use_nvfp4_decode;          // 0 = off, 1 = additive (FP16+NVFP4), 2 = NVFP4 only (replaces FP16)
+
     // Threading
     int num_cpu_threads;           // 0 = auto (hardware_concurrency)
 } ImpConfig;
