@@ -52,7 +52,7 @@ option(IMP_USE_CUTLASS "Use CUTLASS for MoE GEMM (requires sm_90+)" ON)
 if(IMP_USE_CUTLASS)
     FetchContent_Declare(cutlass
         GIT_REPOSITORY https://github.com/NVIDIA/cutlass.git
-        GIT_TAG v3.7.0
+        GIT_TAG v4.4.1
         GIT_SHALLOW TRUE
         EXCLUDE_FROM_ALL
     )
@@ -127,6 +127,7 @@ set(IMP_COMPUTE_SOURCES
 
 if(IMP_USE_CUTLASS)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass.cu)
+    list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_cutlass_fmha.cu)
 endif()
 
 set(IMP_RUNTIME_SOURCES
@@ -184,6 +185,7 @@ if(IMP_USE_CUTLASS)
     target_include_directories(imp PRIVATE
         ${cutlass_SOURCE_DIR}/include
         ${cutlass_SOURCE_DIR}/tools/util/include
+        ${cutlass_SOURCE_DIR}/examples/88_hopper_fmha
     )
     target_compile_definitions(imp PRIVATE IMP_USE_CUTLASS=1)
 endif()

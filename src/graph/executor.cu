@@ -8,6 +8,7 @@
 #include "compute/gemm_q6k.h"
 #ifdef IMP_USE_CUTLASS
 #include "compute/gemm_cutlass.h"
+#include "compute/attention_cutlass_fmha.h"
 #endif
 #include "compute/activation.h"
 #include "compute/attention.h"
@@ -1097,6 +1098,12 @@ size_t GraphExecutor::workspace_estimate() const {
     // Auxiliary: dequant scratch, MoE dequant/staging, sampling, split-K, etc.
     size_t auxiliary = 64ULL << 20;  // conservative 64 MiB for misc buffers
 
+#ifdef IMP_USE_CUTLASS
+    // CUTLASS FMHA workspace (LSE buffer + kernel cooperative workspace)
+    int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
+    auxiliary += cutlass_fmha_workspace_estimate(1, max_tokens_, cfg.n_heads, hd);
+#endif
+
     return persistent + shared + fp32_accum + auxiliary;
 }
 
@@ -1410,6 +1417,21 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (VRAM-constrained, using WMMA/TCGEN05 fallback)");
     }
 
+#ifdef IMP_USE_CUTLASS
+    // CUTLASS FMHA workspace: pre-allocate LSE + kernel workspace at max dimensions.
+    // This ensures the allocations are tracked in the VRAM budget instead of happening
+    // lazily (which would cause untracked VRAM growth and potential shared memory swapping).
+    {
+        int fmha_nh = cfg.n_heads;
+        int fmha_hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / fmha_nh);
+        size_t fmha_bytes = cutlass_fmha_init_workspace(1, max_tokens_, fmha_nh, fmha_hd);
+        if (fmha_bytes > 0) {
+            IMP_LOG_INFO("CUTLASS FMHA workspace: %.2f MiB (LSE + kernel)",
+                         fmha_bytes / (1024.0 * 1024.0));
+        }
+    }
+#endif
+
     // MoE dequant and staging buffers
     if (has_moe_) {
         int d   = cfg.d_model;
@@ -1677,6 +1699,9 @@ void GraphExecutor::free_buffers() {
         attn_scores_buf_ = nullptr;
         attn_scores_buf_size_ = 0;
     }
+#ifdef IMP_USE_CUTLASS
+    cutlass_fmha_free_workspace();
+#endif
     if (shared_workspace_) {
         cudaFree(shared_workspace_);
         shared_workspace_ = nullptr;
