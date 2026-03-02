@@ -180,7 +180,7 @@ FP8 Prefill nutzt eine hybride Strategie: FP16-Cache mit Fused KV/Gate+Up wird i
 | Multi-GPU / TP | Ja | Ja | Ja | **Nein** | Single-GPU only |
 | Chunked Prefill | Ja | Ja | Ja | **Ja** | `--prefill-chunk-size`, chunked Prefill mit State-Tracking |
 | Structured Output (Grammar) | Ja | Nein | Ja | **Partiell** | JSON Mode (`response_format: {"type": "json_object"}`), kein JSON-Schema/GBNF |
-| Vision / Multimodal | Ja | Ja | Ja | **Nein** | Kein Vision-Encoder |
+| Vision / Multimodal | Ja | Ja | Ja | **Ja** | Gemma-3 SigLIP (single-image, 896×896, mmproj.gguf) |
 | LoRA / Adapters | Ja | Ja | Nein | **Nein** | Statische Weights only |
 | Beam Search | Ja | Ja | Ja | **Nein** | Nur Greedy/Sampling |
 | Request Preemption | Ja | Nein | Ja | **Nein** | Kein Pause/Resume |
@@ -197,6 +197,7 @@ FP8 Prefill nutzt eine hybride Strategie: FP16-Cache mit Fused KV/Gate+Up wird i
 1. **JSON Schema / GBNF Grammar** — Erweiterung von JSON Mode zu Schema-Validierung und GBNF-Grammatik
 2. **GEMV Bandwidth-Optimierung** — L2-Tuning, Prefetch-Hints, +5-10% Dense Decode
 3. **NVFP4 cuBLASLt Prefill** — RTX 5090 native NVFP4 TensorCore Support für Prefill-Throughput
+4. **Multi-Image Vision / Pan-and-Scan** — Erweiterung der Gemma-3 SigLIP-Unterstützung auf mehrere Bilder und variable Auflösung
 
 ---
 
@@ -206,7 +207,7 @@ FP8 Prefill nutzt eine hybride Strategie: FP16-Cache mit Fused KV/Gate+Up wird i
 
 **Performance**: P2-P29 implementiert. CUTLASS Hopper FMHA (P25) für Prefill-Attention auf sm_90+ (WGMMA + TMA). Decode mit NVFP4: +34-66% vs Baseline, +9-26% vs llama.cpp (dense). MoE: +12-134% vs llama.cpp (ohne NVFP4). Prefill: +3-84% (Batched GEMM, Residual Fusion, Eager Dequant), +79% mit FP8-Overflow (P20, DS-R1-7B). Zentralisiertes VRAM-Budget (P22) mit FFN-Reallokation (P23) ermöglicht volle NVFP4-Coverage auch bei großen Modellen. Multi-Block Argmax: 192µs → ~10µs. Temperature-0 CUDA-Graph-Bug gefixt (P24). Decode-Attention: cp.async Pipelining, vektorisierte Fallback-Kernels, dynamische Split-K SM-Heuristik (P26-P29). TCGEN05/WGMMA für Decode-Attention als unpraktisch eingestuft (M=1 erfordert min. M=64 für WGMMA Tiles). Verbleibend: Bandwidth-Optimierung, NVFP4 für MoE, NVFP4 cuBLASLt Prefill.
 
-**Architektur**: Auf Single-GPU-Ebene vergleichbar mit vLLM. Chunked Prefill, KV-Cache-Quantisierung (FP16/FP8/INT8), Logprobs, Stop Sequences und JSON Mode sind implementiert. Hauptlücken sind Multi-GPU, JSON Schema/GBNF Grammar, Vision und externe Batch-API. Für den aktuellen Scope (Single-GPU, CLI/Server) ist die Architektur solide und modern.
+**Architektur**: Auf Single-GPU-Ebene vergleichbar mit vLLM. Chunked Prefill, KV-Cache-Quantisierung (FP16/FP8/INT8), Logprobs, Stop Sequences, JSON Mode und Vision (Gemma-3 SigLIP) sind implementiert. Hauptlücken sind Multi-GPU, JSON Schema/GBNF Grammar, Multi-Image Vision und externe Batch-API. Für den aktuellen Scope (Single-GPU, CLI/Server) ist die Architektur solide und modern.
 
 ---
 
@@ -478,7 +479,7 @@ Die GEMV-Infrastruktur wurde von 33 handgeschriebenen Kernels auf ein Template-S
 | Speculative Decoding | `speculative.cpp` | `draft_tokens()` K Iterationen, `verify()` Pseudo-Prefill, stochastische Akzeptanz, KV-Rollback |
 | Hybrid (Nemotron) | `model_arch.h`, `ssm.cu`, `ssm_state.cu` | `NEMOTRON_H_MOE`, Per-Layer SSM/Attention/MoE Dispatch, 52 Layers |
 | VRAM Expert Upload | `weight_upload.cu` | 2-Pass: (1) Non-Expert Upload, (2) Greedy Layer-Budget für Experts |
-| HTTP Server | `tools/imp-server/main.cpp` | `/v1/chat/completions`, SSE Streaming, CORS, Stop Sequences, Logprobs, JSON Mode |
+| HTTP Server | `tools/imp-server/main.cpp` | `/v1/chat/completions`, SSE Streaming, CORS, Stop Sequences, Logprobs, JSON Mode, Vision (base64 images) |
 | Stop Sequences | `tools/imp-server/main.cpp`, `tools/imp-cli/main.cpp` | Bis zu 4 String-Sequenzen (`stop` Parameter), Streaming-safe mit Buffered Output, `finish_reason: "stop"` |
 | Logprobs | `sampling.cu`, `executor.cu`, `engine.cpp`, `request.h` | CPU-side Log-Softmax + Top-N Min-Heap, D2H Logits via Pinned Buffer, OpenAI-kompatibles Format (`logprobs` + `top_logprobs` 0-20) |
 | JSON Mode | `json_constrain.h/cu`, `executor.cu`, `engine.cpp` | Stack-basierte JSON-FSM, Token-Klassifikation via Bitfield-Kategorien, GPU Logit-Masking Kernel, `response_format: {"type": "json_object"}` |
@@ -488,6 +489,7 @@ Die GEMV-Infrastruktur wurde von 33 handgeschriebenen Kernels auf ein Template-S
 | NVFP4 Decode Weight Cache | `executor.cu`, `nvfp4_gemm.cu` | FP16→NVFP4 Init-Time Quant, K-par dp4a GEMV, `--decode-nvfp4`, +25-39% Decode |
 | Chunked Prefill | `engine.cpp` | `--prefill-chunk-size`, State-Tracking über Chunks, verhindert Head-of-Line-Blocking |
 | INT8 KV Cache | `kv_cache.cu`, `attention_paged.cu` | `--kv-int8`, dp4a Attention mit Per-Token INT8 Quantisierung |
+| Vision (Gemma-3 SigLIP) | `src/vision/vision_encoder.cu`, `vision_loader.cpp`, `image_processor.cpp` | 27-Layer SigLIP ViT (896×896, 256 Tokens), mmproj.gguf Loader, stb_image Preprocessing, cuBLAS Batched Attention, `--mmproj`/`--image` CLI, OpenAI multimodal API |
 
 ### C.2 Verifizierte Lücken
 

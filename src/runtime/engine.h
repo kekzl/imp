@@ -8,6 +8,8 @@
 #include "runtime/green_ctx.h"
 #include "runtime/cuda_graph.h"
 #include "runtime/speculative.h"
+#include "vision/vision_model.h"
+#include "vision/vision_encoder.h"
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/ssm_state.h"
@@ -53,13 +55,16 @@ struct EngineConfig {
     // FP8 prefill weight cache: uses FP8 E4M3 instead of FP16 for ~2x prefill throughput
     bool use_fp8_prefill = false;
 
-    // NVFP4 decode weight cache: 0=off, 1=additive (FP16+NVFP4), 2=NVFP4 only
-    int use_nvfp4_decode = 0;
+    // NVFP4 decode weight cache: -1=auto, 0=off, 1=additive (FP16+NVFP4), 2=NVFP4 only
+    int use_nvfp4_decode = -1;
 
     // Speculative decoding
     bool enable_speculative = false;
     std::string draft_model_path;
     int spec_k = 4;
+
+    // Vision (multimodal)
+    std::string mmproj_path;  // path to mmproj GGUF, empty = text-only
 };
 
 class Engine {
@@ -90,6 +95,13 @@ public:
 
     // Reset SSM state for a sequence (call on context_reset for hybrid models)
     void reset_ssm_state(int seq_id);
+
+    // Vision: set image for next generation. Returns false if no mmproj loaded.
+    bool set_image(const std::string& path);
+    bool set_image_from_memory(const uint8_t* data, size_t len);
+    void clear_image();
+    bool has_vision() const { return vision_encoder_ != nullptr; }
+    bool has_vision_input() const { return has_vision_input_; }
 
     // Accessors for C API
     Scheduler* scheduler() { return scheduler_.get(); }
@@ -135,6 +147,15 @@ private:
 
     // Chat template for formatting prompts
     ChatTemplate chat_template_;
+
+    // Vision encoder (multimodal)
+    std::unique_ptr<VisionModel> vision_model_;
+    std::unique_ptr<VisionEncoder> vision_encoder_;
+    half* d_vision_embeddings_ = nullptr;  // [num_image_tokens, d_model] on device
+    bool has_vision_input_ = false;        // true when an image is set for next generation
+    int32_t vision_soft_token_id_ = -1;    // <image_soft_token> token ID
+    int32_t vision_boi_id_ = -1;           // <start_of_image>
+    int32_t vision_eoi_id_ = -1;           // <end_of_image>
 
     // Speculative decoding
     std::shared_ptr<Model> draft_model_;

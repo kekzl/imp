@@ -21,6 +21,10 @@ void print_server_usage(const char* prog) {
         "  --kv-fp8              Use FP8 E4M3 KV cache (halves KV memory)\n"
         "  --kv-int8             Use INT8 KV cache with dp4a attention\n"
         "  --prefill-chunk-size <n> Max tokens per prefill chunk (0 = no chunking)\n"
+        "  --decode-nvfp4        NVFP4 decode cache (additive: FP16 prefill + NVFP4 decode)\n"
+        "  --decode-nvfp4-only   NVFP4 decode cache (replacement: saves VRAM, slower prefill)\n"
+        "  --no-nvfp4            Disable NVFP4 decode cache (override auto-detection)\n"
+        "  --mmproj <path>       Path to vision encoder GGUF (mmproj) for multimodal\n"
         "  --help                Show this help message\n",
         prog);
 }
@@ -58,6 +62,14 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.kv_int8 = true;
         } else if (std::strcmp(arg, "--prefill-chunk-size") == 0 && i + 1 < argc) {
             args.prefill_chunk_size = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--decode-nvfp4") == 0) {
+            args.decode_nvfp4 = 1;
+        } else if (std::strcmp(arg, "--decode-nvfp4-only") == 0) {
+            args.decode_nvfp4 = 2;
+        } else if (std::strcmp(arg, "--no-nvfp4") == 0) {
+            args.decode_nvfp4 = 0;
+        } else if (std::strcmp(arg, "--mmproj") == 0 && i + 1 < argc) {
+            args.mmproj_path = argv[++i];
         } else {
             fprintf(stderr, "Unknown argument: %s\n", arg);
             print_server_usage(argv[0]);

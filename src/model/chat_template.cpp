@@ -136,6 +136,15 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer) {
             }
             stop_token_ids_.push_back(end_of_turn_id_);
             stop_token_ids_.push_back(static_cast<int32_t>(tokenizer.eos_id()));
+
+            // Vision tokens (optional — only present in Gemma-3 multimodal)
+            boi_id_ = tokenizer.find_token("<start_of_image>");
+            eoi_id_ = tokenizer.find_token("<end_of_image>");
+            img_soft_token_id_ = tokenizer.find_token("<image_soft_token>");
+            // Fall back to well-known Gemma-3 IDs
+            if (boi_id_ < 0) boi_id_ = 255999;
+            if (eoi_id_ < 0) eoi_id_ = 256000;
+            if (img_soft_token_id_ < 0) img_soft_token_id_ = 262144;
             break;
         }
         default:
@@ -322,6 +331,63 @@ std::vector<int32_t> ChatTemplate::apply_gemma(
         std::string role = (msg.role == "assistant") ? "model" : msg.role;
         auto content_ids = tok.encode(role + "\n" + msg.content);
         tokens.insert(tokens.end(), content_ids.begin(), content_ids.end());
+        tokens.push_back(end_of_turn_id_);
+        auto nl_ids = tok.encode("\n");
+        tokens.insert(tokens.end(), nl_ids.begin(), nl_ids.end());
+    }
+
+    // Model generation prefix
+    tokens.push_back(start_of_turn_id_);
+    auto model_ids = tok.encode("model\n");
+    tokens.insert(tokens.end(), model_ids.begin(), model_ids.end());
+
+    return tokens;
+}
+
+std::vector<int32_t> ChatTemplate::apply_with_image(
+    const Tokenizer& tok,
+    const std::vector<ChatMessage>& messages,
+    int n_image_tokens) const
+{
+    // Currently only Gemma family supports vision tokens.
+    // For other families, fall back to text-only apply.
+    if (family_ != ChatTemplateFamily::GEMMA ||
+        boi_id_ < 0 || eoi_id_ < 0 || img_soft_token_id_ < 0) {
+        return apply(tok, messages);
+    }
+
+    // Gemma vision format:
+    // <bos><start_of_turn>user\n<boi><img_soft>*N<eoi>\n{text}<end_of_turn>\n<start_of_turn>model\n
+    std::vector<int32_t> tokens;
+
+    if (tok.add_bos()) {
+        tokens.push_back(bos_id_);
+    }
+
+    for (size_t mi = 0; mi < messages.size(); mi++) {
+        const auto& msg = messages[mi];
+        tokens.push_back(start_of_turn_id_);
+
+        std::string role = (msg.role == "assistant") ? "model" : msg.role;
+
+        if (mi == 0 && msg.role == "user") {
+            // First user message: inject image tokens before text
+            auto role_ids = tok.encode(role + "\n");
+            tokens.insert(tokens.end(), role_ids.begin(), role_ids.end());
+
+            // Image token block: <boi> <img_soft>*N <eoi> \n
+            tokens.push_back(boi_id_);
+            for (int i = 0; i < n_image_tokens; i++)
+                tokens.push_back(img_soft_token_id_);
+            tokens.push_back(eoi_id_);
+
+            auto text_ids = tok.encode("\n" + msg.content);
+            tokens.insert(tokens.end(), text_ids.begin(), text_ids.end());
+        } else {
+            auto content_ids = tok.encode(role + "\n" + msg.content);
+            tokens.insert(tokens.end(), content_ids.begin(), content_ids.end());
+        }
+
         tokens.push_back(end_of_turn_id_);
         auto nl_ids = tok.encode("\n");
         tokens.insert(tokens.end(), nl_ids.begin(), nl_ids.end());

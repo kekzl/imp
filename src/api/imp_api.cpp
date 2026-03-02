@@ -71,8 +71,9 @@ ImpConfig imp_config_default(void) {
     config.vram_budget_mb = 0;          // use all available
     config.prefill_chunk_size = 0;      // no chunking
     config.use_fp8_prefill = 0;         // FP16 weight cache by default
-    config.use_nvfp4_decode = 0;        // off by default
+    config.use_nvfp4_decode = -1;       // auto (sm_120→mode2, sm_90→mode1)
     config.num_cpu_threads = 0;         // auto
+    config.mmproj_path = NULL;          // no vision model
     return config;
 }
 
@@ -256,6 +257,8 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
         ecfg.prefill_chunk_size = config->prefill_chunk_size;
         ecfg.use_fp8_prefill = (config->use_fp8_prefill != 0);
         ecfg.use_nvfp4_decode = config->use_nvfp4_decode;
+        if (config->mmproj_path)
+            ecfg.mmproj_path = config->mmproj_path;
 
         // Create and initialize the engine
         auto engine = std::make_unique<imp::Engine>();
@@ -305,12 +308,18 @@ ImpError imp_generate_streaming(ImpContext ctx, const char* prompt,
         auto* tok = ctx->model_handle->model->tokenizer();
         if (!tok) return IMP_ERROR_INVALID_MODEL;
 
-        // Tokenize the prompt (reuse the engine's chat template logic via prefill path)
+        // Tokenize the prompt, injecting image tokens if a vision image is set.
         std::vector<int32_t> tokens;
         const auto& tmpl = ctx->engine->chat_template();
+        bool has_img = ctx->engine->has_vision() &&
+                       ctx->engine->has_vision_input();
         if (params->apply_chat_template && !tmpl.is_raw()) {
             std::vector<imp::ChatMessage> messages = {{"user", prompt}};
-            tokens = tmpl.apply(*tok, messages);
+            if (has_img) {
+                tokens = tmpl.apply_with_image(*tok, messages, 256);
+            } else {
+                tokens = tmpl.apply(*tok, messages);
+            }
         } else {
             tokens = tok->encode(prompt);
             if (tok->add_bos() && (tokens.empty() || tokens[0] != tok->bos_id())) {
@@ -685,6 +694,58 @@ ImpError imp_set_draft_model(ImpContext ctx, const char* draft_model_path,
         IMP_LOG_ERROR("imp_set_draft_model: %s", e.what());
         return IMP_ERROR_INTERNAL;
     } catch (...) {
+        return IMP_ERROR_INTERNAL;
+    }
+}
+
+// --- Vision (Multimodal) ---
+
+ImpError imp_set_image(ImpContext ctx, const char* image_path) {
+    if (!ctx) return IMP_ERROR_INVALID_ARG;
+    if (!ctx->engine) return IMP_ERROR_INTERNAL;
+
+    if (!image_path) {
+        ctx->engine->clear_image();
+        return IMP_SUCCESS;
+    }
+
+    if (!ctx->engine->has_vision()) {
+        IMP_LOG_ERROR("imp_set_image: no vision model loaded (mmproj_path not set)");
+        return IMP_ERROR_UNSUPPORTED;
+    }
+
+    try {
+        if (!ctx->engine->set_image(image_path)) {
+            return IMP_ERROR_INTERNAL;
+        }
+        return IMP_SUCCESS;
+    } catch (const std::exception& e) {
+        IMP_LOG_ERROR("imp_set_image: %s", e.what());
+        return IMP_ERROR_INTERNAL;
+    }
+}
+
+ImpError imp_set_image_from_memory(ImpContext ctx, const uint8_t* data, size_t len) {
+    if (!ctx) return IMP_ERROR_INVALID_ARG;
+    if (!ctx->engine) return IMP_ERROR_INTERNAL;
+
+    if (!data || len == 0) {
+        ctx->engine->clear_image();
+        return IMP_SUCCESS;
+    }
+
+    if (!ctx->engine->has_vision()) {
+        IMP_LOG_ERROR("imp_set_image_from_memory: no vision model loaded");
+        return IMP_ERROR_UNSUPPORTED;
+    }
+
+    try {
+        if (!ctx->engine->set_image_from_memory(data, len)) {
+            return IMP_ERROR_INTERNAL;
+        }
+        return IMP_SUCCESS;
+    } catch (const std::exception& e) {
+        IMP_LOG_ERROR("imp_set_image_from_memory: %s", e.what());
         return IMP_ERROR_INTERNAL;
     }
 }

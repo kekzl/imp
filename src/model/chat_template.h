@@ -44,6 +44,12 @@ public:
     std::vector<int32_t> apply(const Tokenizer& tok,
                                const std::vector<ChatMessage>& messages) const;
 
+    // Build token ID vector with image tokens inserted before the first user message.
+    // Produces: <boi> <img_soft_token>*n_image_tokens <eoi> \n {text}
+    std::vector<int32_t> apply_with_image(const Tokenizer& tok,
+                                           const std::vector<ChatMessage>& messages,
+                                           int n_image_tokens) const;
+
     const std::vector<int32_t>& stop_token_ids() const { return stop_token_ids_; }
     ChatTemplateFamily family() const { return family_; }
     bool is_raw() const { return family_ == ChatTemplateFamily::RAW; }
@@ -75,6 +81,11 @@ private:
     // Gemma tokens
     int32_t start_of_turn_id_ = -1;
     int32_t end_of_turn_id_ = -1;
+
+    // Vision tokens (Gemma-3)
+    int32_t boi_id_ = -1;           // <start_of_image>
+    int32_t eoi_id_ = -1;           // <end_of_image>
+    int32_t img_soft_token_id_ = -1; // <image_soft_token>
 
     // Template-specific apply methods
     std::vector<int32_t> apply_chatml(const Tokenizer& tok,

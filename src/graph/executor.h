@@ -7,8 +7,10 @@
 #include "compute/moe_routing.h"
 #include "compute/json_constrain.h"
 #include "quant/nvfp4_quant.h"
+#include "compute/gemm_cutlass_sm120.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <vector>
 #include <unordered_map>
 
@@ -73,6 +75,11 @@ struct InferenceState {
 
     // JSON mode: when non-null, apply logit mask before sampling
     JsonConstrainer* json_constrainer = nullptr;
+
+    // Vision: when non-null, replace vision_token_id positions with vision embeddings
+    const half* vision_embeddings = nullptr;  // [n_vision_tokens, d_model] FP16 on device
+    int vision_token_id = -1;                 // <image_soft_token> ID
+    int n_vision_tokens = 0;                  // 256
 };
 
 // Imperative executor for the transformer forward pass.
@@ -316,6 +323,20 @@ private:
     // Keyed by packed expert tensor data pointer (expert_gate_packed.data etc.)
     std::unordered_map<const void*, NvFP4MoEQuantResult> nvfp4_moe_cache_;
     size_t nvfp4_moe_cache_bytes_ = 0;
+
+    // CUTLASS sm_120 block-scaled NVFP4 weight cache for native FP4 prefill GEMM.
+    // Keyed by original weight data pointer (same as nvfp4_cache_).
+    // Populated after NVFP4 quantization if sm_120 is available.
+    std::unordered_map<const void*, CutlassNvFP4Weight> cutlass_nvfp4_cache_;
+    size_t cutlass_nvfp4_cache_bytes_ = 0;
+
+    // Pre-allocated activation buffers for CUTLASS NVFP4 prefill.
+    void* cutlass_act_data_ = nullptr;     // [max_tokens, max_K/2] packed FP4
+    void* cutlass_act_sf_ = nullptr;       // SfAtom scale factors
+    size_t cutlass_act_data_size_ = 0;
+    size_t cutlass_act_sf_size_ = 0;
+    void* cutlass_workspace_ = nullptr;    // CUTLASS GEMM workspace
+    size_t cutlass_workspace_size_ = 0;
 
     // Fused KV weight cache: concatenated [wk; wv] as [2*nkv*hd, d_model] FP16.
     // Enables strided batched GEMM for K+V in a single cuBLAS call during prefill.

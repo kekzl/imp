@@ -58,10 +58,13 @@ typedef struct {
     int use_fp8_prefill;           // 0 = FP16 weight cache (default), 1 = FP8 E4M3 prefill cache
 
     // NVFP4 decode weight cache
-    int use_nvfp4_decode;          // 0 = off, 1 = additive (FP16+NVFP4), 2 = NVFP4 only (replaces FP16)
+    int use_nvfp4_decode;          // -1 = auto (sm_120→mode2, sm_90→mode1), 0 = off, 1 = additive, 2 = NVFP4 only
 
     // Threading
     int num_cpu_threads;           // 0 = auto (hardware_concurrency)
+
+    // Vision (multimodal)
+    const char* mmproj_path;       // Path to mmproj GGUF file (NULL = text-only)
 } ImpConfig;
 
 // Returns a config with sensible defaults
