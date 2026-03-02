@@ -33,8 +33,8 @@ Umfassende Analyse des imp-Projekts auf drei Achsen:
 
 | Feature | Nutzen | Priorität |
 |---------|--------|-----------|
-| **TCGEN05 Inline-PTX** (WGMMA + TMA + TMEM) | Echte systolische Blackwell-Attention (Prefill nutzt CUTLASS FMHA, Decode noch WMMA) | Mittel |
-| **TMA** (Tensor Memory Accelerator) | Bulk-Loads für Decode-Attention und GEMM (Prefill nutzt TMA via CUTLASS) | Niedrig |
+| **TCGEN05 Inline-PTX** (WGMMA + TMA + TMEM) | Prefill: bereits via CUTLASS FMHA. Decode: WGMMA erfordert M≥64, Decode hat M=1 — nicht anwendbar. Verbleibender Nutzen nur für Custom-Prefill-Kernels ohne CUTLASS. | Niedrig |
+| **TMA** (Tensor Memory Accelerator) | Prefill: bereits via CUTLASS FMHA. Decode: cp.async reicht für M=1 Vektor-Loads (Phase 7). TMA-Bulk-Loads lohnen sich erst bei größeren Tiles. | Niedrig |
 | **Stream-Attribute** (`cudaStreamSetAttribute`) | Priorität für Prefill- vs Decode-Streams | Niedrig |
 | **Conditional IF Nodes** in CUDA Graphs | Komplexere GPU-autonome Control-Flow (Early-Exit, Branch) | Niedrig |
 | **Multi-GPU** (P2P, IPC, NCCL) | Tensor/Pipeline-Parallelismus | N/A (1 GPU) |
