@@ -2089,7 +2089,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
             nvfp4_count++;
         };
 
-        // Cache attention + FFN weights (same priority as FP16 cache)
+        // Dense attention + FFN first: every tensor benefits every decode step.
+        // MoE experts second: each tensor only benefits 1 of N layers.
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
             cache_weight_nvfp4(L.wq, L.wq_qtype);
@@ -2109,15 +2110,57 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
             cache_weight_nvfp4(L.w_down, L.w_down_qtype);
         }
 
-        // Cache MoE expert weights (all experts in one contiguous allocation per tensor)
+        if (nvfp4_count > 0) {
+            cudaStreamSynchronize(stream);
+            nvfp4_cache_bytes_ = nvfp4_total;
+            if (nvfp4_from_scratch > 0) {
+                IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB (%d from FP16 cache, %d via dequant scratch, mode: %s)",
+                             nvfp4_count, nvfp4_total / (1024.0 * 1024.0),
+                             nvfp4_count - nvfp4_from_scratch, nvfp4_from_scratch, mode_str);
+            } else {
+                IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB (mode: %s)",
+                             nvfp4_count, nvfp4_total / (1024.0 * 1024.0), mode_str);
+            }
+        }
+
+        // In "only" mode (2), release FP16 cache to save VRAM — prefill uses
+        // on-the-fly dequant from GGUF via dequant_scratch_.
+        if (use_nvfp4_decode_ == 2 && !fp16_cache_.empty()) {
+            for (auto& [ptr, tensor] : fp16_cache_) {
+                cudaFree(tensor.data);
+            }
+            size_t freed = fp16_cache_bytes_;
+            fp16_cache_.clear();
+            fp16_cache_bytes_ = 0;
+
+            // Also free fused KV and gate+up caches
+            for (auto& [idx, tensor] : fused_kv_cache_) {
+                if (tensor.data) cudaFree(tensor.data);
+            }
+            fused_kv_cache_.clear();
+            for (auto& [idx, tensor] : fused_gate_up_cache_) {
+                if (tensor.data) cudaFree(tensor.data);
+            }
+            fused_gate_up_cache_.clear();
+
+            // Reclaim freed VRAM for MoE expert caching
+            remaining_budget += freed;
+            IMP_LOG_INFO("NVFP4 only mode: freed FP16 cache (%.2f MiB) — prefill uses on-the-fly dequant",
+                         freed / (1024.0 * 1024.0));
+        }
+
+        // Cache MoE expert weights — done after FP16 free so mode 2 has full budget
         int nvfp4_moe_count = 0;
         size_t nvfp4_moe_total = 0;
+        size_t moe_budget = (remaining_budget > nvfp4_total)
+                            ? (remaining_budget - nvfp4_total) : 0;
+        bool moe_budget_exhausted = false;
 
         auto cache_moe_expert_nvfp4 = [&](const Tensor& packed, GGMLQuantType qtype) {
             if (!packed.data) return;
             if (!nvfp4_beneficial(qtype)) return;
             if (nvfp4_moe_cache_.count(packed.data)) return;
-            if (nvfp4_budget_exhausted) return;
+            if (moe_budget_exhausted) return;
             if (!packed.on_device) return;
             if (packed.ndim < 3) return;
 
@@ -2127,16 +2170,16 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
             if (cols % 16 != 0) return;
             if (!dequant_gpu_supported(qtype) || !dequant_scratch_) return;
 
-            // NVFP4 size: packed + micro-scales + tensor scales array
             size_t nvfp4_bytes = static_cast<size_t>(ne) * rows * cols / 2 +
                                  static_cast<size_t>(ne) * rows * cols / 16 +
                                  static_cast<size_t>(ne) * sizeof(float);
 
-            if (nvfp4_total + nvfp4_moe_total + nvfp4_bytes > remaining_budget) {
-                nvfp4_budget_exhausted = true;
+            if (nvfp4_moe_total + nvfp4_bytes > moe_budget) {
+                moe_budget_exhausted = true;
                 IMP_LOG_INFO("NVFP4 MoE cache: VRAM budget reached after %d MoE tensors "
-                             "(%.1f MiB)", nvfp4_moe_count,
-                             nvfp4_moe_total / (1024.0 * 1024.0));
+                             "(%.1f / %.1f MiB)", nvfp4_moe_count,
+                             nvfp4_moe_total / (1024.0 * 1024.0),
+                             moe_budget / (1024.0 * 1024.0));
                 return;
             }
 
@@ -2161,45 +2204,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
             nvfp4_moe_cache_bytes_ = nvfp4_moe_total;
             IMP_LOG_INFO("NVFP4 MoE cache: %d tensors, %.2f MiB",
                          nvfp4_moe_count, nvfp4_moe_total / (1024.0 * 1024.0));
-        }
-
-        if (nvfp4_count > 0) {
-            cudaStreamSynchronize(stream);
-            nvfp4_cache_bytes_ = nvfp4_total;
-            if (nvfp4_from_scratch > 0) {
-                IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB (%d from FP16 cache, %d via dequant scratch, mode: %s)",
-                             nvfp4_count, nvfp4_total / (1024.0 * 1024.0),
-                             nvfp4_count - nvfp4_from_scratch, nvfp4_from_scratch, mode_str);
-            } else {
-                IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB (mode: %s)",
-                             nvfp4_count, nvfp4_total / (1024.0 * 1024.0), mode_str);
-            }
-        } else if (nvfp4_moe_count == 0) {
+        } else if (nvfp4_count == 0) {
             IMP_LOG_INFO("NVFP4 decode: no eligible weights found (all ≤ 4.5 bits/elem)");
-        }
-
-        // In "only" mode (2), release FP16 cache to save VRAM — prefill uses
-        // on-the-fly dequant from GGUF via dequant_scratch_.
-        if (use_nvfp4_decode_ == 2 && !fp16_cache_.empty()) {
-            for (auto& [ptr, tensor] : fp16_cache_) {
-                cudaFree(tensor.data);
-            }
-            size_t freed = fp16_cache_bytes_;
-            fp16_cache_.clear();
-            fp16_cache_bytes_ = 0;
-
-            // Also free fused KV and gate+up caches
-            for (auto& [idx, tensor] : fused_kv_cache_) {
-                if (tensor.data) cudaFree(tensor.data);
-            }
-            fused_kv_cache_.clear();
-            for (auto& [idx, tensor] : fused_gate_up_cache_) {
-                if (tensor.data) cudaFree(tensor.data);
-            }
-            fused_gate_up_cache_.clear();
-
-            IMP_LOG_INFO("NVFP4 only mode: freed FP16 cache (%.2f MiB) — prefill uses on-the-fly dequant",
-                         freed / (1024.0 * 1024.0));
         }
     }
 }
