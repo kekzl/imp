@@ -1,6 +1,6 @@
 # imp — CUDA 13.1 Feature Audit, Performance & Architektur-Review
 
-**Datum:** 2026-03-02 (aktualisiert nach NVFP4-Decode-Cache, zentralisiertem VRAM-Budget, Temperature-0-Fix)
+**Datum:** 2026-03-02 (aktualisiert nach CUTLASS FMHA, NVFP4-Decode-Cache, zentralisiertem VRAM-Budget, Temperature-0-Fix)
 
 Umfassende Analyse des imp-Projekts auf drei Achsen:
 1. Welche CUDA 13.1+ Features werden genutzt, welche fehlen noch?
@@ -27,14 +27,14 @@ Umfassende Analyse des imp-Projekts auf drei Achsen:
 |---------|---------|--------|
 | **Blackwell WMMA Attention** | `src/compute/attention_blackwell.cu` | 8-Warp WMMA mit Double-Buffered KV, Adaptive Br (128/64), sm_120-optimiert. **Kein Inline-PTX** (WGMMA/TCGEN05), kein TMA — nutzt WMMA Intrinsics. |
 | **FP8 Prefill Weight Cache** | `src/graph/executor.cu`, `src/quant/fp8_quant.cu` | Hybrid FP16+FP8: FP16-Cache zuerst (inkl. Fused KV/Gate+Up), FP8 E4M3 für Overflow-Weights. `--prefill-fp8` Flag. Per-Tensor Device-Scales, cuBLASLt FP8×FP8→FP16 GEMM. |
-| **CUTLASS 3.x** | `src/compute/gemm_cutlass.cu` | Nutzt CUTLASS 2.x (`cp.async`, kein TMA), kein Upgrade auf 3.x Hopper/Blackwell Primitives |
+| **CUTLASS 4.4.1 FMHA** | `src/compute/gemm_cutlass.cu`, `attention_cutlass_fmha.cu` | MoE GEMM: CUTLASS 2.x API (cp.async). **Prefill Attention**: CUTLASS Hopper FMHA (WGMMA + TMA, Example 88) auf sm_90+, Fallback auf WMMA wenn deaktiviert (`IMP_NO_CUTLASS_FMHA=1`). |
 
 ### Nicht implementiert (Potential vorhanden)
 
 | Feature | Nutzen | Priorität |
 |---------|--------|-----------|
-| **TCGEN05 Inline-PTX** (WGMMA + TMA + TMEM) | Echte systolische Blackwell-Attention, ~2x vs WMMA | Hoch |
-| **TMA** (Tensor Memory Accelerator) | Bulk-Loads für Attention und GEMM | Mittel |
+| **TCGEN05 Inline-PTX** (WGMMA + TMA + TMEM) | Echte systolische Blackwell-Attention (Prefill nutzt CUTLASS FMHA, Decode noch WMMA) | Mittel |
+| **TMA** (Tensor Memory Accelerator) | Bulk-Loads für Decode-Attention und GEMM (Prefill nutzt TMA via CUTLASS) | Niedrig |
 | **Stream-Attribute** (`cudaStreamSetAttribute`) | Priorität für Prefill- vs Decode-Streams | Niedrig |
 | **Conditional IF Nodes** in CUDA Graphs | Komplexere GPU-autonome Control-Flow (Early-Exit, Branch) | Niedrig |
 | **Multi-GPU** (P2P, IPC, NCCL) | Tensor/Pipeline-Parallelismus | N/A (1 GPU) |
@@ -47,8 +47,14 @@ Umfassende Analyse des imp-Projekts auf drei Achsen:
 
 | # | Optimierung | Dateien | Geschätzter Gewinn | Aufwand |
 |---|-------------|---------|-------------------|---------|
-| O1 | **TCGEN05 Inline-PTX Attention** — WGMMA + TMA Bulk-Loads + TMEM Accumulators + CTA Pairing | `attention_blackwell.cu` | ~2x Prefill auf sm_120 | Hoch |
+| O1 | **TCGEN05 Inline-PTX Decode Attention** — WGMMA + TMA für Paged Attention Decode (Prefill nutzt CUTLASS FMHA) | `attention_blackwell.cu` | ~2x Decode-Attention auf sm_120 | Mittel |
 | O3 | **GEMV Bandwidth-Optimierung** — Aktuelle Auslastung ~50-59% vs llama.cpp ~55-69%. L2-Cache-Tuning, Prefetch-Hints | `gemv_dp4a_traits.cuh` | +5-10% Dense Decode | Mittel |
+
+### Implementiert — Phase 5 (2ebb2c4, 2026-03-02)
+
+| # | Optimierung | Dateien | Gemessener Gewinn |
+|---|-------------|---------|-------------------|
+| P25 | **CUTLASS Hopper FMHA** — WGMMA + TMA Prefill-Attention auf sm_90+ via CUTLASS v4.4.1 Example 88. Causal, GQA, HD=64/128. VRAM-Budget-integrierte Workspace-Allokation (LSE + Kernel). Fallback auf WMMA via `IMP_NO_CUTLASS_FMHA=1`. | `attention_cutlass_fmha.cu/h`, `attention_dispatch.cu`, `executor.cu`, `CMakeLists.txt` | ~1.0x auf sm_120 (WMMA 8-Warp bereits stark), erwartet >1.5x auf sm_90 (Hopper) |
 
 ### Implementiert — Phase 4 (0d3be11 → 81b1bea, 2026-03-02)
 
@@ -170,8 +176,8 @@ FP8 Prefill nutzt eine hybride Strategie: FP16-Cache mit Fused KV/Gate+Up wird i
 ### Empfohlene nächste Features (nach ROI sortiert)
 
 1. **Stop Sequences + Logprobs** — Niedrig-Aufwand, hoher User-Impact, Server-Kompatibilität
-2. **TCGEN05 Inline-PTX Attention** — ~2x Prefill auf sm_120
-3. **NVFP4 MoE GEMV** — NVFP4-Decode für MoE Expert-Kernels (aktuell nur dense)
+2. **NVFP4 MoE GEMV** — NVFP4-Decode für MoE Expert-Kernels (aktuell nur dense)
+3. **TCGEN05 Decode Attention** — WGMMA für Paged Attention Decode (Prefill bereits via CUTLASS FMHA)
 4. **Structured Output** — JSON-Mode / GBNF-Grammatik für Agentic Use-Cases
 5. **GEMV Bandwidth-Optimierung** — L2-Tuning, Prefetch-Hints, +5-10% Dense Decode
 
@@ -181,7 +187,7 @@ FP8 Prefill nutzt eine hybride Strategie: FP16-Cache mit Fused KV/Gate+Up wird i
 
 **CUDA 13.1**: 5/5 Major-Features implementiert (Green Contexts, PDL, Graphs+Conditional, MemPool, NVFP4). PDL-Registry mit 28+ Kernel-Registrierungen (7 Utility + 6 Compute + 110+ Template-Instantiierungen). Blackwell WMMA 8-Warp Attention mit Double-Buffered KV für sm_120. TCGEN05 Inline-PTX/TMA noch nicht implementiert — größtes verbleibendes Hardware-Potential.
 
-**Performance**: P2-P24 implementiert. Decode mit NVFP4: +34-66% vs Baseline, +9-26% vs llama.cpp (dense). MoE: +12-134% vs llama.cpp (ohne NVFP4). Prefill: +3-84% (Batched GEMM, Residual Fusion, Eager Dequant), +79% mit FP8-Overflow (P20, DS-R1-7B). Zentralisiertes VRAM-Budget (P22) mit FFN-Reallokation (P23) ermöglicht volle NVFP4-Coverage auch bei großen Modellen. Multi-Block Argmax: 192µs → ~10µs. Temperature-0 CUDA-Graph-Bug gefixt (P24). Verbleibend: TCGEN05-Attention, Bandwidth-Optimierung, NVFP4 für MoE.
+**Performance**: P2-P25 implementiert. CUTLASS Hopper FMHA (P25) für Prefill-Attention auf sm_90+ (WGMMA + TMA). Decode mit NVFP4: +34-66% vs Baseline, +9-26% vs llama.cpp (dense). MoE: +12-134% vs llama.cpp (ohne NVFP4). Prefill: +3-84% (Batched GEMM, Residual Fusion, Eager Dequant), +79% mit FP8-Overflow (P20, DS-R1-7B). Zentralisiertes VRAM-Budget (P22) mit FFN-Reallokation (P23) ermöglicht volle NVFP4-Coverage auch bei großen Modellen. Multi-Block Argmax: 192µs → ~10µs. Temperature-0 CUDA-Graph-Bug gefixt (P24). Verbleibend: TCGEN05-Decode-Attention, Bandwidth-Optimierung, NVFP4 für MoE.
 
 **Architektur**: Auf Single-GPU-Ebene vergleichbar mit vLLM. Chunked Prefill und KV-Cache-Quantisierung (FP16/FP8/INT8) sind implementiert. Hauptlücken sind Multi-GPU, Structured Output, Vision, Logprobs und externe Batch-API. Für den aktuellen Scope (Single-GPU, CLI/Server) ist die Architektur solide und modern.
 
@@ -297,11 +303,21 @@ FP8 Prefill nutzt eine hybride Strategie: FP16-Cache mit Fused KV/Gate+Up wird i
 - Kein TMEM — Output-Akkumulator in Shared Memory statt TMEM
 - Kein CTA Pairing für Load/Compute Overlap
 
-### A.7 CUTLASS — v2.x Vollständig
+### A.7 CUTLASS — v4.4.1 (MoE GEMM + Hopper FMHA)
 
-**Konfiguration**: `Sm80` Target (kompatibel mit SM90/120), Tile 128×128×32, Warp 64×64×32, MMA 16×8×16, 4-Stage `cp.async` Pipeline
+**MoE GEMM** (CUTLASS 2.x API):
+- `Sm80` Target (kompatibel mit SM90/120), Tile 128×128×32, Warp 64×64×32, MMA 16×8×16, 4-Stage `cp.async` Pipeline
+- Grouped GEMM für MoE Expert-parallel via `gemm_moe_cutlass()`. Device-only Scheduling, ~3µs Launch-Overhead (vs ~27µs cuBLAS).
 
-**Einsatz**: Grouped GEMM für MoE Expert-parallel via `gemm_moe_cutlass()`. Device-only Scheduling, ~3µs Launch-Overhead (vs ~27µs cuBLAS).
+**Hopper FMHA** (CUTLASS v4.4.1 Example 88, `attention_cutlass_fmha.cu`):
+- WGMMA (asynchronous warpgroup MMA) + TMA (Tensor Memory Accelerator)
+- `KernelTmaWarpSpecializedCooperative` Scheduler
+- FP16 Input, FP32 Accumulator, CausalFusion / DefaultFusion
+- Tile-Konfigurationen: HD=128 → Shape<128, 128, 128>, HD=64 → Shape<128, 64, 64>
+- GQA via stride tricks: B_eff = batch × n_kv_heads, H_eff = groups
+- VRAM-integrierte Workspace-Allokation: LSE-Buffer + Kernel-Workspace (pre-allokiert in `allocate_auxiliary_buffers()`)
+- Dispatch: `attention_dispatch.cu` versucht CUTLASS FMHA zuerst (sm_90+, kein Softcap/Sliding Window), Fallback auf WMMA
+- Deaktivierbar via `IMP_NO_CUTLASS_FMHA=1` Env-Variable
 
 ---
 
@@ -462,4 +478,4 @@ Die GEMV-Infrastruktur wurde von 33 handgeschriebenen Kernels auf ein Template-S
 | Beam Search | Nur `temperature/top_p/top_k` in Sampling, kein `beam_size` |
 | String Stop Sequences | Nur Token-basiert (EOS + Template Stop-IDs), kein String-Matching |
 | NVFP4 MoE GEMV | NVFP4-Decode nur für dense Weights, MoE Expert-Kernels noch ohne NVFP4 |
-| TCGEN05 Attention | WMMA implementiert, aber kein Inline-PTX für echte systolische Blackwell-Ops |
+| TCGEN05 Decode Attention | Prefill nutzt CUTLASS FMHA (WGMMA+TMA), Decode noch WMMA (kein TCGEN05 Inline-PTX) |
