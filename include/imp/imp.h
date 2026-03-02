@@ -4,6 +4,9 @@
 #include "imp/config.h"
 #include "imp/error.h"
 
+#include <stdint.h>
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -137,6 +140,16 @@ ImpError imp_decode_step(
 
 // Reset context state (clear KV cache etc.)
 ImpError imp_context_reset(ImpContext ctx);
+
+// --- Vision (Multimodal) ---
+
+// Set an image for the next generation. Must be called after imp_context_create
+// and before imp_generate/imp_generate_streaming. Only valid when mmproj was
+// loaded during context creation. Pass NULL to clear the image.
+ImpError imp_set_image(ImpContext ctx, const char* image_path);
+
+// Set image from raw memory (e.g. decoded base64). Pass NULL/0 to clear.
+ImpError imp_set_image_from_memory(ImpContext ctx, const uint8_t* data, size_t len);
 
 // --- Speculative Decoding ---
 

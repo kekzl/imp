@@ -56,6 +56,8 @@ int main(int argc, char** argv) {
     config.prefill_chunk_size = args.prefill_chunk_size;
     if (args.prefill_fp8) config.use_fp8_prefill = 1;
     config.use_nvfp4_decode = args.decode_nvfp4;
+    if (!args.mmproj_path.empty())
+        config.mmproj_path = args.mmproj_path.c_str();
 
     ImpContext ctx = nullptr;
     err = imp_context_create(model, &config, &ctx);
@@ -199,6 +201,9 @@ int main(int argc, char** argv) {
         }
 
         printf("Interactive mode. Type 'quit' to exit.\n");
+        if (ctx->engine->has_vision()) {
+            printf("Vision enabled. Use '/image <path>' to load an image.\n");
+        }
 
         std::vector<imp::ChatMessage> history;
         char line[4096];
@@ -215,10 +220,27 @@ int main(int argc, char** argv) {
             std::string input(line);
             if (input.empty() || input == "quit" || input == "exit") break;
 
+            // Handle /image command
+            if (input.rfind("/image ", 0) == 0) {
+                std::string img_path = input.substr(7);
+                err = imp_set_image(ctx, img_path.c_str());
+                if (err != IMP_SUCCESS) {
+                    fprintf(stderr, "Error loading image: %s\n", imp_error_string(err));
+                } else {
+                    printf("Image loaded: %s\n", img_path.c_str());
+                }
+                continue;
+            }
+
             if (have_template) {
                 // Multi-turn: append user message and apply full template
                 history.push_back({"user", input});
-                std::vector<int32_t> tokens = chat_tpl.apply(*tok, history);
+                std::vector<int32_t> tokens;
+                if (ctx->engine->has_vision_input()) {
+                    tokens = chat_tpl.apply_with_image(*tok, history, 256);
+                } else {
+                    tokens = chat_tpl.apply(*tok, history);
+                }
 
                 // Reset context for fresh KV cache
                 imp_context_reset(ctx);
@@ -288,6 +310,18 @@ int main(int argc, char** argv) {
         if (args.prompt.empty()) {
             fprintf(stderr, "No prompt provided. Use --prompt or --interactive\n");
         } else {
+            // Load image if specified
+            if (!args.image_path.empty()) {
+                err = imp_set_image(ctx, args.image_path.c_str());
+                if (err != IMP_SUCCESS) {
+                    fprintf(stderr, "Error loading image: %s\n", imp_error_string(err));
+                    imp_context_free(ctx);
+                    imp_model_free(model);
+                    return 1;
+                }
+                fprintf(stderr, "Image loaded: %s\n", args.image_path.c_str());
+            }
+
             imp::Tokenizer* tok = model->model->tokenizer();
             const imp::ChatTemplate& engine_tpl = ctx->engine->chat_template();
 
@@ -306,9 +340,12 @@ int main(int argc, char** argv) {
                 have_template = true;
             }
 
-            // Tokenize prompt
+            // Tokenize prompt (with image tokens if vision is active)
             std::vector<int32_t> tokens;
-            if (have_template) {
+            if (have_template && ctx->engine->has_vision_input()) {
+                std::vector<imp::ChatMessage> msgs = {{"user", args.prompt}};
+                tokens = chat_tpl.apply_with_image(*tok, msgs, 256);
+            } else if (have_template) {
                 std::vector<imp::ChatMessage> msgs = {{"user", args.prompt}};
                 tokens = chat_tpl.apply(*tok, msgs);
             } else {

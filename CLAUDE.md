@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**imp** is a high-performance LLM inference engine written in C++20 and CUDA. It targets NVIDIA Hopper (sm_90a) and Blackwell (sm_100, sm_120) GPUs, leveraging CUDA 13.1+ features such as Green Contexts, Programmatic Dependent Launch (PDL), and CUDA Graphs. The engine supports GGUF and SafeTensors model formats, multiple quantization schemes (FP8, INT8, INT4, NVFP4), and architectures including LLaMA, Mistral, Mixtral, and DeepSeek.
+**imp** is a high-performance LLM inference engine written in C++20 and CUDA. It targets NVIDIA Hopper (sm_90a) and Blackwell (sm_100, sm_120) GPUs, leveraging CUDA 13.1+ features such as Green Contexts, Programmatic Dependent Launch (PDL), and CUDA Graphs. The engine supports GGUF and SafeTensors model formats, multiple quantization schemes (FP8, INT8, INT4, NVFP4), and architectures including LLaMA, Mistral, Mixtral, DeepSeek, Qwen3, Gemma-3 (text + vision), and Nemotron-H. Vision support uses a SigLIP encoder for Gemma-3 multimodal via separate mmproj.gguf files.
 
 ## Repository Structure
 
@@ -23,11 +23,14 @@ imp/
 │   ├── graph/            # Compute graph DAG (Op, Graph, GraphExecutor)
 │   ├── runtime/          # Engine, Scheduler, Request, Batch, Green Contexts,
 │   │                     #   CUDA Graphs, PDL, Speculative Decoding
+│   ├── vision/           # SigLIP vision encoder, mmproj GGUF loader, image preprocessing
 │   └── api/              # C API implementation (imp_api.cpp)
 ├── tools/
 │   ├── imp-cli/          # CLI tool: interactive and single-prompt inference
+│   ├── imp-server/       # OpenAI-compatible HTTP server (SSE streaming)
 │   └── imp-bench/        # Benchmark tool: GEMM, attention, end-to-end
-├── tests/                # Google Test suite (17 test files)
+├── third_party/stb/      # stb_image headers (image loading for vision)
+├── tests/                # Google Test suite (22 test files)
 ├── cmake/                # Custom CMake modules (CompilerFlags, FindCUDAToolkit131)
 ├── CMakeLists.txt        # Build configuration
 └── .gitignore
@@ -63,6 +66,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 | `IMP_BUILD_TESTS` | ON | Build the Google Test suite |
 | `IMP_BUILD_TOOLS` | ON | Build imp-cli and imp-bench |
 | `IMP_BUILD_BENCH` | ON | Build benchmark tool |
+| `IMP_BUILD_SERVER` | ON | Build imp-server (OpenAI-compatible HTTP server) |
 | `CMAKE_CUDA_ARCHITECTURES` | `90a;100;120` | Target GPU architectures |
 
 ### Dependencies
@@ -70,6 +74,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 - **CUDA Toolkit 13.1+** (required) — cudart, cuda_driver, cublas, cublasLt
 - **CUTLASS v4.4.1** (fetched via FetchContent) — Hopper FMHA (Example 88), MoE Grouped GEMM
 - **Google Test v1.14.0** (fetched via FetchContent when tests enabled)
+- **stb_image / stb_image_resize2** (vendored in `third_party/stb/`) — image loading for vision
 - **pthread** (linked privately)
 
 ### Hardware Constraints
@@ -128,7 +133,7 @@ Interactive and single-shot LLM inference.
 ./build/imp-cli --model path/to/model.gguf --interactive
 ```
 
-Options: `--model`, `--prompt`, `--max-tokens`, `--temperature`, `--top-p`, `--top-k`, `--seed`, `--interactive`, `--device`.
+Options: `--model`, `--prompt`, `--max-tokens`, `--temperature`, `--top-p`, `--top-k`, `--seed`, `--interactive`, `--device`, `--mmproj`, `--image`.
 
 ### imp-bench
 
@@ -158,7 +163,7 @@ Benchmarks for GEMM, attention, and end-to-end inference.
 - Headers (`.h`) and implementations (`.cpp` / `.cu`) are co-located in `src/` subdirectories
 - Public headers live in `include/imp/` and use `#pragma once`
 - CUDA files use `.cu` extension; pure C++ uses `.cpp`
-- Each `src/` subdirectory corresponds to a logical module (core, compute, memory, model, quant, graph, runtime, api)
+- Each `src/` subdirectory corresponds to a logical module (core, compute, memory, model, quant, graph, runtime, vision, api)
 
 ### Error Handling
 - C API returns `ImpError` codes (negative values indicate errors, 0 = success)
@@ -213,7 +218,13 @@ Runtime dispatch based on GPU compute capability:
 - Mistral (GQA variant)
 - Mixtral (Mixture-of-Experts)
 - DeepSeek (MoE)
+- Qwen3 / Qwen3-MoE
+- Gemma-3 (text + vision via SigLIP encoder)
+- Nemotron-H (Mamba2 + Attention + MoE hybrid)
 - Generic fallback
+
+### Vision (Multimodal)
+Gemma-3 vision uses a frozen 400M-parameter SigLIP ViT that produces 256 image tokens per image, projected into the LLM's embedding space. The vision encoder weights ship as a separate `mmproj.gguf` file. The pipeline: load image → resize 896x896 → normalize → extract 14x14 patches → 27 SigLIP transformer layers → 4x4 avg pool → RMSNorm + linear projection → replace `<image_soft_token>` embeddings before LLM prefill.
 
 ### Speculative Decoding
 Draft model generates K candidate tokens, target model verifies in a single pass. Uses stochastic acceptance for non-greedy sampling. KV cache manager supports rollback for rejected tokens.

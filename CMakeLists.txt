@@ -17,13 +17,13 @@ message(STATUS "CUDA ${CUDAToolkit_VERSION} detected")
 add_compile_definitions(IMP_CUDA_13_1=1)
 
 # --- CUDA Architecture ---
-# sm_90a = Hopper, sm_100 = Blackwell B200, sm_120 = Blackwell B300/RTX 5090
+# sm_90a = Hopper, sm_100 = Blackwell B200, sm_120a = Blackwell B300/RTX 5090
 option(IMP_NATIVE_SM120 "Build exclusively for sm_120 (RTX 5090) — enables native Blackwell SASS" OFF)
 if(IMP_NATIVE_SM120)
-    set(CMAKE_CUDA_ARCHITECTURES "120")
-    message(STATUS "CUDA architectures: 120 (native RTX 5090 build)")
+    set(CMAKE_CUDA_ARCHITECTURES "120a")
+    message(STATUS "CUDA architectures: 120a (native RTX 5090 build)")
 elseif(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES "90a;100;120")
+    set(CMAKE_CUDA_ARCHITECTURES "90a;100;120a")
     message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 else()
     message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
@@ -128,6 +128,7 @@ set(IMP_COMPUTE_SOURCES
 
 if(IMP_USE_CUTLASS)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass.cu)
+    list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_cutlass_fmha.cu)
 endif()
 
@@ -148,6 +149,13 @@ set(IMP_GRAPH_SOURCES
     src/graph/executor.cu
 )
 
+set(IMP_VISION_SOURCES
+    src/vision/vision_model.cpp
+    src/vision/vision_loader.cpp
+    src/vision/image_processor.cpp
+    src/vision/vision_encoder.cu
+)
+
 set(IMP_API_SOURCES
     src/api/imp_api.cpp
 )
@@ -161,6 +169,7 @@ add_library(imp STATIC
     ${IMP_COMPUTE_SOURCES}
     ${IMP_RUNTIME_SOURCES}
     ${IMP_GRAPH_SOURCES}
+    ${IMP_VISION_SOURCES}
     ${IMP_API_SOURCES}
 )
 
@@ -170,6 +179,7 @@ target_include_directories(imp
         $<INSTALL_INTERFACE:include>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb
 )
 
 target_link_libraries(imp

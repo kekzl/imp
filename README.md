@@ -58,12 +58,14 @@ The entire codebase (~30,000 lines of C++/CUDA) was written through conversation
 - **Quantization**: Q4_0, Q4_K, Q5_K, Q6_K, Q8_0 (GGML-compatible), FP8 E4M3, NVFP4 (FP4 E2M1)
 - **Runtime**: continuous batching scheduler, CUDA Graph capture/replay, Programmatic Dependent Launch (PDL), Green Context SM partitioning, speculative decoding with stochastic acceptance
 - **Model support**: GGUF parser, BPE/SPM tokenizer, chat template engine, Mamba2 SSM kernels for hybrid architectures
-- **Infrastructure**: C API, OpenAI-compatible HTTP server with SSE streaming, Google Test suite (219 tests)
+- **Vision**: SigLIP encoder for Gemma-3 multimodal (27-layer ViT, 4x4 avg pooling, RMSNorm + linear projection)
+- **Infrastructure**: C API, OpenAI-compatible HTTP server with SSE streaming, Google Test suite (226 tests)
 
 ## Features
 
 - **Model formats:** GGUF and SafeTensors
-- **Architectures:** LLaMA, Mistral, Mixtral, DeepSeek, Qwen3, Qwen3-MoE, Gemma-3, Nemotron-H (Mamba2 + Attention + MoE)
+- **Architectures:** LLaMA, Mistral, Mixtral, DeepSeek, Qwen3, Qwen3-MoE, Gemma-3 (text + vision), Nemotron-H (Mamba2 + Attention + MoE)
+- **Vision:** Gemma-3 SigLIP encoder (896x896, 256 image tokens) via separate mmproj.gguf
 - **Quantization:** Q4_0, Q4_K_M, Q5_K, Q6_K, Q8_0, FP8 E4M3, NVFP4, INT8
 - **Attention dispatch:** scalar Flash Attention 2 (any GPU) &rarr; WMMA (sm_90+) &rarr; WMMA 8-warp (sm_120+); prefill uses CUTLASS Hopper FMHA (WGMMA + TMA) on sm_90+
 - **KV cache:** paged block allocation (block size 16), LRU eviction, prefix caching, FP16/FP8 storage
@@ -108,6 +110,10 @@ Build options:
 # Interactive chat
 ./build/imp-cli --model path/to/model.gguf --interactive
 
+# Vision (Gemma-3 with image)
+./build/imp-cli --model gemma-3-4b-it.gguf --mmproj mmproj.gguf \
+  --image photo.jpg --prompt "Describe this image"
+
 # Benchmark
 ./build/imp-cli --model path/to/model.gguf --bench --bench-pp 512 --bench-reps 3
 ```
@@ -127,7 +133,9 @@ Full CLI options:
 --gpu-layers <n>        Layers on GPU, -1 = all (default: -1)
 --ssm-fp16              FP16 SSM state (saves ~50% SSM VRAM)
 --no-cuda-graphs        Disable CUDA Graph capture for decode
---chat-template <t>     auto, none, chatml, llama2, llama3, nemotron
+--chat-template <t>     auto, none, chatml, llama2, llama3, nemotron, gemma
+--mmproj <path>         Vision encoder GGUF (mmproj) for multimodal
+--image <path>          Input image for vision (requires --mmproj)
 --bench                 Synthetic benchmark mode
 --bench-pp <n>          Prompt token count for benchmark (default: 512)
 --bench-reps <n>        Benchmark repetitions (default: 3)
@@ -161,7 +169,7 @@ imp_context_free(ctx);
 imp_model_free(model);
 ```
 
-The C API also supports token-level control via `imp_prefill` / `imp_decode_step` for custom generation loops, and `imp_set_draft_model` for speculative decoding.
+The C API also supports token-level control via `imp_prefill` / `imp_decode_step` for custom generation loops, `imp_set_draft_model` for speculative decoding, and `imp_set_image` / `imp_set_image_from_memory` for vision inputs.
 
 ### Server (OpenAI-compatible API)
 
@@ -170,6 +178,9 @@ imp includes an OpenAI-compatible HTTP server for drop-in use with the OpenAI Py
 ```bash
 # Start the server
 ./build/imp-server --model path/to/model.gguf
+
+# Start with vision support
+./build/imp-server --model gemma-3-4b-it.gguf --mmproj mmproj.gguf
 
 # Health check
 curl http://localhost:8080/health
@@ -197,6 +208,22 @@ for chunk in client.chat.completions.create(
     print(chunk.choices[0].delta.content or "", end="", flush=True)
 ```
 
+Vision via the OpenAI SDK (with `--mmproj`):
+
+```python
+import base64
+with open("photo.jpg", "rb") as f:
+    b64 = base64.b64encode(f.read()).decode()
+resp = client.chat.completions.create(
+    model="imp", max_tokens=256,
+    messages=[{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+        {"type": "text", "text": "What's in this image?"}
+    ]}]
+)
+print(resp.choices[0].message.content)
+```
+
 Server options:
 
 ```
@@ -206,7 +233,8 @@ Server options:
 --max-tokens <n>        Default max tokens (default: 2048)
 --gpu-layers <n>        Layers on GPU, -1 = all (default: -1)
 --device <n>            CUDA device ID (default: 0)
---chat-template <t>     auto, none, chatml, llama2, llama3, nemotron
+--chat-template <t>     auto, none, chatml, llama2, llama3, nemotron, gemma
+--mmproj <path>         Vision encoder GGUF (mmproj) for multimodal
 --no-cuda-graphs        Disable CUDA Graph capture for decode
 ```
 
@@ -225,12 +253,14 @@ imp/
 │   ├── graph/            GraphExecutor (hardcoded transformer forward pass)
 │   ├── runtime/          Engine, Scheduler, Batch, CUDA Graphs, PDL,
 │   │                       Green Contexts, Speculative Decoding
+│   ├── vision/           SigLIP vision encoder, image preprocessing, mmproj loader
 │   └── api/              C API implementation
 ├── tools/
 │   ├── imp-cli/          CLI tool (interactive + single-prompt + benchmark)
 │   ├── imp-server/       OpenAI-compatible HTTP server (SSE streaming)
 │   └── imp-bench/        Standalone benchmarks (GEMM, attention, end-to-end)
-├── tests/                Google Test suite (17 test files, 219 tests)
+├── third_party/stb/      stb_image headers (image loading for vision)
+├── tests/                Google Test suite (22 test files, 226 tests)
 ├── benchmarks/           Performance reports
 └── docs/                 Technical documentation
 ```

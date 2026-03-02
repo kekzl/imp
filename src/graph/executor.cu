@@ -8,6 +8,7 @@
 #include "compute/gemm_q6k.h"
 #ifdef IMP_USE_CUTLASS
 #include "compute/gemm_cutlass.h"
+#include "compute/gemm_cutlass_sm120.h"
 #include "compute/attention_cutlass_fmha.h"
 #endif
 #include "compute/activation.h"
@@ -794,17 +795,42 @@ static void gemm_dispatch(const Tensor& input, const Tensor& weight,
                            const std::unordered_map<const void*, GraphExecutor::FP8CacheEntry>* fp8_cache = nullptr,
                            void* fp8_act_buf = nullptr,
                            float* d_act_scale = nullptr,
-                           const std::unordered_map<const void*, NvFP4QuantResult>* nvfp4_cache = nullptr) {
-    // NVFP4 decode path: use NVFP4 GEMV for M=1.
-    // For M>1 (prefill), skip — fp16_cache or dequant_scratch handles it.
-    if (nvfp4_cache != nullptr && input.shape[0] == 1 && input.dtype == DType::FP16) {
+                           const std::unordered_map<const void*, NvFP4QuantResult>* nvfp4_cache = nullptr,
+                           const std::unordered_map<const void*, CutlassNvFP4Weight>* cutlass_nvfp4_cache = nullptr,
+                           void* cutlass_act_data = nullptr,
+                           void* cutlass_act_sf = nullptr,
+                           void* cutlass_workspace = nullptr,
+                           size_t cutlass_workspace_size = 0) {
+    // NVFP4 cache path: GEMV for M=1 (decode), CUTLASS/dequant for M>1 (prefill).
+    if (nvfp4_cache != nullptr && input.dtype == DType::FP16) {
         auto it = nvfp4_cache->find(weight.data);
         if (it != nvfp4_cache->end()) {
-            gemv_nvfp4_kpar(it->second,
-                            reinterpret_cast<const half*>(input.data),
-                            reinterpret_cast<half*>(output.data),
-                            static_cast<int>(it->second.N),
-                            static_cast<int>(it->second.K), stream);
+            if (input.shape[0] == 1) {
+                gemv_nvfp4_kpar(it->second,
+                                reinterpret_cast<const half*>(input.data),
+                                reinterpret_cast<half*>(output.data),
+                                static_cast<int>(it->second.N),
+                                static_cast<int>(it->second.K), stream);
+            } else if (cutlass_nvfp4_cache != nullptr && cutlass_act_data != nullptr) {
+                // CUTLASS sm_120 native FP4 GEMM
+                auto ct_it = cutlass_nvfp4_cache->find(weight.data);
+                if (ct_it != cutlass_nvfp4_cache->end()) {
+                    int M = static_cast<int>(input.shape[0]);
+                    int K = static_cast<int>(input.shape[1]);
+                    int N = static_cast<int>(it->second.N);
+                    quantize_fp16_to_nvfp4_cutlass(input.data, cutlass_act_data,
+                                                    cutlass_act_sf, M, K, stream);
+                    bool ok = gemm_nvfp4_cutlass_sm120(
+                        cutlass_act_data, cutlass_act_sf,
+                        ct_it->second,
+                        output.data, M, N, K,
+                        cutlass_workspace, cutlass_workspace_size, stream);
+                    if (ok) return;
+                }
+            }
+            if (input.shape[0] > 1) {
+                gemm_nvfp4(it->second, input, output, stream);
+            }
             return;
         }
     }
@@ -1584,6 +1610,55 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                          fp8_act_buf_size_ / (1024.0 * 1024.0), max_tokens_, max_dim);
         }
     }
+
+    // CUTLASS sm_120 NVFP4 activation buffers: pre-allocate for max prefill dimensions.
+    // Only needed when NVFP4 decode is active and sm_120 is available.
+    if (use_nvfp4_decode_ > 0 && cutlass_sm120_nvfp4_available()) {
+        int max_k = 0;
+        int max_n = 0;
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo,
+                                   &L.w_gate, &L.w_up, &L.w_down,
+                                   &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared,
+                                   &L.ssm_in, &L.ssm_out}) {
+                if (w->data && w->ndim >= 2) {
+                    max_n = std::max(max_n, static_cast<int>(w->shape[0]));
+                    max_k = std::max(max_k, static_cast<int>(w->shape[1]));
+                }
+            }
+        }
+        if (max_k > 0) {
+            // Activation packed data: [max_tokens, max_K/2]
+            cutlass_act_data_size_ = static_cast<size_t>(max_tokens_) * max_k / 2;
+            // SfAtom scale factors for activation
+            cutlass_act_sf_size_ = cutlass_nvfp4_sf_size(max_tokens_, max_k);
+            // CUTLASS GEMM workspace
+            cutlass_workspace_size_ = gemm_nvfp4_cutlass_sm120_workspace(max_tokens_, max_n, max_k);
+
+            cudaError_t err1 = cudaMalloc(&cutlass_act_data_, cutlass_act_data_size_);
+            cudaError_t err2 = cudaMalloc(&cutlass_act_sf_, cutlass_act_sf_size_);
+            cudaError_t err3 = (cutlass_workspace_size_ > 0)
+                               ? cudaMalloc(&cutlass_workspace_, cutlass_workspace_size_)
+                               : cudaSuccess;
+            if (err1 != cudaSuccess || err2 != cudaSuccess || err3 != cudaSuccess) {
+                IMP_LOG_WARN("Failed to allocate CUTLASS NVFP4 activation buffers, native FP4 prefill disabled");
+                if (cutlass_act_data_) { cudaFree(cutlass_act_data_); cutlass_act_data_ = nullptr; }
+                if (cutlass_act_sf_) { cudaFree(cutlass_act_sf_); cutlass_act_sf_ = nullptr; }
+                if (cutlass_workspace_) { cudaFree(cutlass_workspace_); cutlass_workspace_ = nullptr; }
+                cutlass_act_data_size_ = 0;
+                cutlass_act_sf_size_ = 0;
+                cutlass_workspace_size_ = 0;
+                cudaGetLastError();  // clear sticky error
+            } else {
+                IMP_LOG_INFO("CUTLASS NVFP4 activation scratch: %.2f MiB (data=%.2f, sf=%.2f, ws=%.2f)",
+                             (cutlass_act_data_size_ + cutlass_act_sf_size_ + cutlass_workspace_size_) / (1024.0 * 1024.0),
+                             cutlass_act_data_size_ / (1024.0 * 1024.0),
+                             cutlass_act_sf_size_ / (1024.0 * 1024.0),
+                             cutlass_workspace_size_ / (1024.0 * 1024.0));
+            }
+        }
+    }
 }
 
 void GraphExecutor::release_moe_batch_buf() {
@@ -1630,6 +1705,30 @@ void GraphExecutor::free_buffers() {
     }
     nvfp4_moe_cache_.clear();
     nvfp4_moe_cache_bytes_ = 0;
+
+    // Free CUTLASS sm_120 NVFP4 weight cache
+    for (auto& [ptr, cw] : cutlass_nvfp4_cache_) {
+        free_cutlass_nvfp4_weight(cw);
+    }
+    cutlass_nvfp4_cache_.clear();
+    cutlass_nvfp4_cache_bytes_ = 0;
+
+    // Free CUTLASS NVFP4 activation buffers
+    if (cutlass_act_data_) {
+        cudaFree(cutlass_act_data_);
+        cutlass_act_data_ = nullptr;
+        cutlass_act_data_size_ = 0;
+    }
+    if (cutlass_act_sf_) {
+        cudaFree(cutlass_act_sf_);
+        cutlass_act_sf_ = nullptr;
+        cutlass_act_sf_size_ = 0;
+    }
+    if (cutlass_workspace_) {
+        cudaFree(cutlass_workspace_);
+        cutlass_workspace_ = nullptr;
+        cutlass_workspace_size_ = 0;
+    }
 
     // Free FP8 weight cache
     for (auto& [ptr, entry] : fp8_cache_) {
@@ -2152,6 +2251,47 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
             remaining_budget += freed;
             IMP_LOG_INFO("NVFP4 only mode: freed FP16 cache (%.2f MiB) — prefill uses on-the-fly dequant",
                          freed / (1024.0 * 1024.0));
+        }
+
+        // --- Phase 3b: Convert NVFP4 weights to CUTLASS sm_120 block-scaled format ---
+        // Must be AFTER FP16 free to avoid peak VRAM exceeding physical memory.
+        // The CUTLASS cache is a full copy (repacked data + SfAtom scales), so it
+        // approximately doubles the NVFP4 cache VRAM.  Budget-aware: stop if VRAM runs out.
+        if (nvfp4_count > 0 && cutlass_sm120_nvfp4_available()) {
+            size_t ct_budget = (remaining_budget > nvfp4_total)
+                               ? (remaining_budget - nvfp4_total) : 0;
+            int ct_count = 0;
+            size_t ct_total = 0;
+            bool ct_exhausted = false;
+            for (auto& [ptr, nvfp4] : nvfp4_cache_) {
+                if (ct_exhausted) break;
+                // Estimate CUTLASS allocation (only scale factors — data is borrowed)
+                size_t est = cutlass_nvfp4_sf_size(static_cast<int>(nvfp4.N),
+                                                    static_cast<int>(nvfp4.K));
+                if (ct_total + est > ct_budget) {
+                    ct_exhausted = true;
+                    IMP_LOG_INFO("CUTLASS NVFP4 cache: VRAM budget reached after %d tensors "
+                                 "(%.1f / %.1f MiB)",
+                                 ct_count, ct_total / (1024.0 * 1024.0),
+                                 ct_budget / (1024.0 * 1024.0));
+                    break;
+                }
+                CutlassNvFP4Weight cw;
+                convert_nvfp4_to_cutlass(nvfp4, cw, stream);
+                if (cw.data) {
+                    cutlass_nvfp4_cache_[ptr] = cw;
+                    ct_total += cw.sf_bytes;
+                    ct_count++;
+                }
+            }
+            if (ct_count > 0) {
+                cudaStreamSynchronize(stream);
+                cutlass_nvfp4_cache_bytes_ = ct_total;
+                remaining_budget = (remaining_budget > ct_total + nvfp4_total)
+                                   ? (remaining_budget - ct_total - nvfp4_total) : 0;
+                IMP_LOG_INFO("CUTLASS sm_120 NVFP4 weight cache: %d tensors, %.2f MiB",
+                             ct_count, ct_total / (1024.0 * 1024.0));
+            }
         }
 
         // Cache MoE expert weights — done after FP16 free so mode 2 has full budget
@@ -2782,12 +2922,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                     gemm_kv_batched(no, fused_kv_it->second, kk, vv, stream);
                 } else {
                     const auto* nv4p = nvfp4_cache_.empty() ? nullptr : &nvfp4_cache_;
+                    const auto* ct4p = cutlass_nvfp4_cache_.empty() ? nullptr : &cutlass_nvfp4_cache_;
                     gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, qv, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                                  nullptr, nullptr, nullptr, nv4p);
+                                  nullptr, nullptr, nullptr, nv4p, ct4p, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_);
                     gemm_dispatch(no, ly.wk, ly.wk_scales, ly.wk_qtype, kk, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                                  nullptr, nullptr, nullptr, nv4p);
+                                  nullptr, nullptr, nullptr, nv4p, ct4p, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_);
                     gemm_dispatch(no, ly.wv, ly.wv_scales, ly.wv_qtype, vv, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                                  nullptr, nullptr, nullptr, nv4p);
+                                  nullptr, nullptr, nullptr, nv4p, ct4p, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_);
                 }
             }
         }
@@ -3060,7 +3201,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         gemm_dispatch(ao, ly.wo, ly.wo_scales, ly.wo_qtype, po, dequant_scratch_, stream,
                       static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
                       use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                      nvfp4_cache_.empty() ? nullptr : &nvfp4_cache_);
+                      nvfp4_cache_.empty() ? nullptr : &nvfp4_cache_,
+                      cutlass_nvfp4_cache_.empty() ? nullptr : &cutlass_nvfp4_cache_,
+                      cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_);
         if (has_post_attn_norm && using_fp32_accum) {
             // Fused: RMSNorm + FP32 accum add + FP32→FP16 in one kernel.
             // Saves 2 kernel launches + 2 DRAM round-trips per layer.
@@ -3198,10 +3341,11 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     gemm_pair_batched(no, fused_gu_it->second, go, uo, stream);
                 } else {
                     const auto* nv4p = nvfp4_cache_.empty() ? nullptr : &nvfp4_cache_;
+                    const auto* ct4p = cutlass_nvfp4_cache_.empty() ? nullptr : &cutlass_nvfp4_cache_;
                     gemm_dispatch(no, ly.w_gate, ly.w_gate_scales, ly.w_gate_qtype, go, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                                  nullptr, nullptr, nullptr, nv4p);
+                                  nullptr, nullptr, nullptr, nv4p, ct4p, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_);
                     gemm_dispatch(no, ly.w_up,   ly.w_up_scales,   ly.w_up_qtype,   uo, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                                  nullptr, nullptr, nullptr, nv4p);
+                                  nullptr, nullptr, nullptr, nv4p, ct4p, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_);
                 }
             }
         }
@@ -3354,7 +3498,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 gemm_dispatch(so, ly.w_down, ly.w_down_scales, ly.w_down_qtype, fo, dequant_scratch_, stream,
                               static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
                               use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                              nvfp4_cache_.empty() ? nullptr : &nvfp4_cache_);
+                              nvfp4_cache_.empty() ? nullptr : &nvfp4_cache_,
+                              cutlass_nvfp4_cache_.empty() ? nullptr : &cutlass_nvfp4_cache_,
+                              cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_);
                 if (has_post_ffn_norm && using_fp32_accum) {
                     // Post-FFN norm → FP32 accumulation (no D2D copy needed)
                     Tensor fp32_h = view_tokens(fp32_hidden_, n);
@@ -4533,10 +4679,11 @@ moe_after_experts:
         {
             auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
             const auto* nvfp4_ptr = nvfp4_cache_.empty() ? nullptr : &nvfp4_cache_;
+            const auto* ct4_ptr = cutlass_nvfp4_cache_.empty() ? nullptr : &cutlass_nvfp4_cache_;
             gemm_dispatch(no, ly.w_up_shared, Tensor(), ly.w_up_shared_qtype,
                           sh_up, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
                           use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                          nvfp4_ptr);
+                          nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_);
 
             if (shared_gated) {
                 // Gated: gate + SwiGLU
@@ -4544,7 +4691,7 @@ moe_after_experts:
                 gemm_dispatch(no, ly.w_gate_shared, Tensor(), ly.w_gate_shared_qtype,
                               sh_gate, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
                               use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                              nvfp4_ptr);
+                              nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_);
                 swiglu(sh_gate, sh_up, sh_swiglu, stream);
             } else {
                 // Non-gated: relu^2(up) in-place [Nemotron-H uses squared ReLU]
@@ -4556,7 +4703,7 @@ moe_after_experts:
             gemm_dispatch(sh_act, ly.w_down_shared, Tensor(), ly.w_down_shared_qtype,
                           sh_down, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
                           use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                          nvfp4_ptr);
+                          nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_);
         }
 
         // Add shared expert output to hidden (which already has routed expert output)
@@ -4613,10 +4760,11 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
     //    ssm_in_dim = inner(z) + conv_channels(xBC) + n_heads(dt)
     Tensor proj = view_tokens(ssm_proj_buf_, n);
     const auto* nvfp4_ssm_ptr = nvfp4_cache_.empty() ? nullptr : &nvfp4_cache_;
+    const auto* ct4_ssm_ptr = cutlass_nvfp4_cache_.empty() ? nullptr : &cutlass_nvfp4_cache_;
     gemm_dispatch(no, ly.ssm_in, Tensor(), ly.ssm_in_qtype, proj, dequant_scratch_, stream,
                   static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
                   use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                  nvfp4_ssm_ptr);
+                  nvfp4_ssm_ptr, ct4_ssm_ptr, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_);
 
     // 3. Split projection output [n, total_dim] into z, xBC, dt by column slices.
     //    proj layout: each row has [z(inner) | xBC(conv_channels) | dt(n_heads)].
@@ -4799,7 +4947,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
     gemm_dispatch(y_buf, ly.ssm_out, Tensor(), ly.ssm_out_qtype, out_buf, dequant_scratch_, stream,
                   static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
                   use_fp8_cache_ ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                  nvfp4_ssm_ptr);
+                  nvfp4_ssm_ptr, ct4_ssm_ptr, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_);
 
     // 11. Residual add: hidden = output + residual
     elementwise_add(out_buf, r, stream);
@@ -4887,6 +5035,18 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         int blocks = static_cast<int>((total / 2 + threads - 1) / threads);
         scale_fp16_kernel<<<blocks, threads, 0, stream>>>(
             static_cast<half*>(h.data), __float2half(cfg.embed_scale), total);
+    }
+
+    // Replace vision token positions with vision embeddings (multimodal)
+    if (state.vision_embeddings && state.vision_token_id >= 0 && state.n_vision_tokens > 0) {
+        // Declared in vision/vision_encoder.cu
+        extern void launch_replace_vision_embeddings(
+            half* hidden, const int32_t* token_ids, const half* vision_emb,
+            int vision_token_id, int n_tokens, int d_model, int n_vision_tokens,
+            cudaStream_t stream);
+        launch_replace_vision_embeddings(
+            static_cast<half*>(h.data), state.token_ids, state.vision_embeddings,
+            state.vision_token_id, n, cfg.d_model, state.n_vision_tokens, stream);
     }
 
     debug_tensor_stats("after_embedding", h, stream);

@@ -18,6 +18,34 @@
 
 using json = nlohmann::json;
 
+// Simple base64 decoder for image data URIs
+static int b64_val(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+static std::vector<uint8_t> base64_decode(const std::string& encoded) {
+    std::vector<uint8_t> out;
+    out.reserve(encoded.size() * 3 / 4);
+    uint32_t accum = 0;
+    int bits = 0;
+    for (unsigned char c : encoded) {
+        int val = b64_val(c);
+        if (val < 0) continue;
+        accum = (accum << 6) | static_cast<uint32_t>(val);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<uint8_t>((accum >> bits) & 0xFF));
+        }
+    }
+    return out;
+}
+
 // Access internal engine from opaque context handle (same as imp-cli)
 struct ImpModel_T {
     std::shared_ptr<imp::Model> model;
@@ -175,12 +203,33 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
         if (fmt_type == "json_object") json_mode = true;
     }
 
-    // Convert JSON messages to ChatMessage vector
+    // Convert JSON messages to ChatMessage vector, extracting image data if present
     std::vector<imp::ChatMessage> chat_msgs;
+    std::vector<uint8_t> image_data;  // decoded image bytes (if any)
     for (const auto& msg : messages) {
         std::string role = msg.value("role", "user");
-        std::string content = msg.value("content", "");
-        chat_msgs.push_back({role, content});
+        if (msg.contains("content") && msg["content"].is_array()) {
+            // OpenAI multimodal format: content is array of parts
+            std::string text_parts;
+            for (const auto& part : msg["content"]) {
+                std::string type = part.value("type", "");
+                if (type == "text") {
+                    if (!text_parts.empty()) text_parts += "\n";
+                    text_parts += part.value("text", "");
+                } else if (type == "image_url" && part.contains("image_url")) {
+                    std::string url = part["image_url"].value("url", "");
+                    // Handle data URI: data:image/...;base64,...
+                    auto comma = url.find(',');
+                    if (url.rfind("data:", 0) == 0 && comma != std::string::npos) {
+                        image_data = base64_decode(url.substr(comma + 1));
+                    }
+                }
+            }
+            chat_msgs.push_back({role, text_parts});
+        } else {
+            std::string content = msg.value("content", "");
+            chat_msgs.push_back({role, content});
+        }
     }
 
     // Try to acquire inference lock — return 503 if busy
@@ -193,9 +242,23 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
         return;
     }
 
-    // Tokenize with chat template
+    // Handle vision: clear previous, encode new image if present
+    state.ctx->engine->clear_image();
+    if (!image_data.empty() && state.ctx->engine->has_vision()) {
+        if (!state.ctx->engine->set_image_from_memory(image_data.data(), image_data.size())) {
+            res.status = 400;
+            json error = {{"error", {{"message", "Failed to process image"},
+                                      {"type", "invalid_request_error"}}}};
+            res.set_content(error.dump(), "application/json");
+            return;
+        }
+    }
+
+    // Tokenize with chat template (with image tokens if vision is active)
     std::vector<int32_t> tokens;
-    if (state.have_template) {
+    if (state.have_template && state.ctx->engine->has_vision_input()) {
+        tokens = state.chat_tpl.apply_with_image(*state.tok, chat_msgs, 256);
+    } else if (state.have_template) {
         tokens = state.chat_tpl.apply(*state.tok, chat_msgs);
     } else {
         // Concatenate all message content as raw text
@@ -576,6 +639,9 @@ int main(int argc, char** argv) {
     if (args.kv_fp8) config.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
     if (args.kv_int8) config.kv_cache_dtype = IMP_DTYPE_INT8;
     if (args.prefill_chunk_size > 0) config.prefill_chunk_size = args.prefill_chunk_size;
+    config.use_nvfp4_decode = args.decode_nvfp4;
+    if (!args.mmproj_path.empty())
+        config.mmproj_path = args.mmproj_path.c_str();
 
     err = imp_context_create(state.model, &config, &state.ctx);
     if (err != IMP_SUCCESS) {

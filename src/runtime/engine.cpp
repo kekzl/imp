@@ -6,6 +6,9 @@
 #include "model/chat_template.h"
 #include "compute/gemm.h"
 #include "compute/sampling.h"
+#include "compute/attention.h"
+#include "vision/vision_loader.h"
+#include "vision/image_processor.h"
 #include "core/logging.h"
 
 #include <cstring>
@@ -27,6 +30,10 @@ Engine::~Engine() {
     if (d_penalty_tokens_) {
         cudaFree(d_penalty_tokens_);
         d_penalty_tokens_ = nullptr;
+    }
+    if (d_vision_embeddings_) {
+        cudaFree(d_vision_embeddings_);
+        d_vision_embeddings_ = nullptr;
     }
     if (h_sample_pinned_) {
         cudaFreeHost(h_sample_pinned_);
@@ -78,6 +85,18 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     model_ = std::move(model);
     config_ = config;
+
+    // Resolve NVFP4 decode auto mode based on GPU compute capability
+    if (config_.use_nvfp4_decode < 0) {
+        int sm = get_device_sm_version();
+        if (sm >= 120)
+            config_.use_nvfp4_decode = 2;
+        else if (sm >= 90)
+            config_.use_nvfp4_decode = 1;
+        else
+            config_.use_nvfp4_decode = 0;
+        IMP_LOG_INFO("NVFP4 decode: auto → mode %d (sm_%d)", config_.use_nvfp4_decode, sm);
+    }
 
     const auto& mcfg = model_->config();
 
@@ -432,6 +451,58 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
     }
 
+    // --- Initialize vision encoder if mmproj path provided ---
+    if (!config_.mmproj_path.empty()) {
+        vision_model_ = load_vision_gguf(config_.mmproj_path);
+        if (!vision_model_) {
+            IMP_LOG_ERROR("Failed to load vision model: %s", config_.mmproj_path.c_str());
+            return false;
+        }
+
+        int lm_d = vision_model_->lm_d_model > 0 ? vision_model_->lm_d_model : mcfg.d_model;
+        vision_encoder_ = std::make_unique<VisionEncoder>();
+        if (!vision_encoder_->init(*vision_model_, lm_d, stream_)) {
+            IMP_LOG_ERROR("Failed to init vision encoder");
+            vision_encoder_.reset();
+            vision_model_.reset();
+            return false;
+        }
+
+        // Allocate device buffer for vision embeddings
+        int n_img_tokens = vision_model_->config.num_image_tokens;
+        size_t emb_bytes = static_cast<size_t>(n_img_tokens) * lm_d * sizeof(half);
+        if (cudaMalloc(&d_vision_embeddings_, emb_bytes) != cudaSuccess) {
+            IMP_LOG_ERROR("Failed to allocate vision embedding buffer (%zu bytes)", emb_bytes);
+            vision_encoder_.reset();
+            vision_model_.reset();
+            return false;
+        }
+
+        // Resolve vision special token IDs
+        Tokenizer* tok = model_->tokenizer();
+        if (tok) {
+            // Try well-known IDs first, fall back to vocab search
+            vision_soft_token_id_ = tok->find_token("<image_soft_token>");
+            if (vision_soft_token_id_ < 0) {
+                // Gemma-3: <image_soft_token> is token 262144
+                if (mcfg.vocab_size > 262144) {
+                    vision_soft_token_id_ = 262144;
+                }
+            }
+            vision_boi_id_ = tok->find_token("<start_of_image>");
+            if (vision_boi_id_ < 0 && mcfg.vocab_size > 255999)
+                vision_boi_id_ = 255999;
+            vision_eoi_id_ = tok->find_token("<end_of_image>");
+            if (vision_eoi_id_ < 0 && mcfg.vocab_size > 256000)
+                vision_eoi_id_ = 256000;
+            IMP_LOG_INFO("Vision tokens: soft=%d, boi=%d, eoi=%d",
+                         vision_soft_token_id_, vision_boi_id_, vision_eoi_id_);
+        }
+
+        IMP_LOG_INFO("Vision encoder ready: %d image tokens -> %d-dim embeddings",
+                     n_img_tokens, lm_d);
+    }
+
     // Allocate pinned host buffer for graph-captured sampling and prefill event sync
     if (!h_sample_pinned_) {
         cudaError_t err = cudaHostAlloc(&h_sample_pinned_, sizeof(int32_t), cudaHostAllocDefault);
@@ -510,6 +581,72 @@ bool Engine::set_draft_model(const std::string& path, int spec_k) {
     config_.spec_k = spec_k;
     config_.enable_speculative = true;
     return init_speculative();
+}
+
+bool Engine::set_image(const std::string& path) {
+    if (!vision_encoder_) {
+        IMP_LOG_ERROR("set_image: no vision model loaded (missing --mmproj)");
+        return false;
+    }
+
+    ImageData img;
+    if (!load_and_preprocess_image(path, vision_model_->config.image_size,
+                                    vision_model_->config.image_mean,
+                                    vision_model_->config.image_std, img)) {
+        return false;
+    }
+
+    // Upload pixels to GPU
+    int n_pixels = 3 * img.width * img.height;
+    half* d_pixels = nullptr;
+    cudaMalloc(&d_pixels, n_pixels * sizeof(half));
+    cudaMemcpy(d_pixels, img.pixels.data(), n_pixels * sizeof(half), cudaMemcpyHostToDevice);
+
+    // Encode
+    bool ok = vision_encoder_->encode(d_pixels, d_vision_embeddings_, stream_);
+    cudaFree(d_pixels);
+    cudaStreamSynchronize(stream_);
+
+    if (ok) {
+        has_vision_input_ = true;
+        IMP_LOG_INFO("Vision: encoded image -> %d tokens", vision_model_->config.num_image_tokens);
+    }
+    return ok;
+}
+
+bool Engine::set_image_from_memory(const uint8_t* data, size_t len) {
+    if (!vision_encoder_) {
+        IMP_LOG_ERROR("set_image_from_memory: no vision model loaded");
+        return false;
+    }
+
+    ImageData img;
+    if (!load_and_preprocess_image_from_memory(data, len,
+                                                vision_model_->config.image_size,
+                                                vision_model_->config.image_mean,
+                                                vision_model_->config.image_std, img)) {
+        return false;
+    }
+
+    int n_pixels = 3 * img.width * img.height;
+    half* d_pixels = nullptr;
+    cudaMalloc(&d_pixels, n_pixels * sizeof(half));
+    cudaMemcpy(d_pixels, img.pixels.data(), n_pixels * sizeof(half), cudaMemcpyHostToDevice);
+
+    bool ok = vision_encoder_->encode(d_pixels, d_vision_embeddings_, stream_);
+    cudaFree(d_pixels);
+    cudaStreamSynchronize(stream_);
+
+    if (ok) {
+        has_vision_input_ = true;
+        IMP_LOG_INFO("Vision: encoded image from memory -> %d tokens",
+                     vision_model_->config.num_image_tokens);
+    }
+    return ok;
+}
+
+void Engine::clear_image() {
+    has_vision_input_ = false;
 }
 
 bool Engine::step() {
@@ -741,6 +878,13 @@ bool Engine::step() {
             if (offset == 0) {
                 ssm_state_->reset_sequence(state.ssm_seq_id, pf_stream);
             }
+        }
+
+        // Vision embeddings: set on first chunk only (image tokens are at the start)
+        if (has_vision_input_ && vision_encoder_ && offset == 0) {
+            state.vision_embeddings = d_vision_embeddings_;
+            state.vision_token_id = vision_soft_token_id_;
+            state.n_vision_tokens = vision_model_->config.num_image_tokens;
         }
 
         if (!is_last_chunk) {
@@ -1237,12 +1381,18 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     std::vector<int32_t> tokens;
 
     if (apply_chat_template && !chat_template_.is_raw()) {
-        // Apply detected chat template
+        // Apply detected chat template (with image tokens if vision active)
         std::vector<ChatMessage> messages = {{"user", prompt}};
-        tokens = chat_template_.apply(*tok, messages);
-        IMP_LOG_INFO("Applied %s chat template (%zu tokens)",
+        if (has_vision_input_ && vision_encoder_) {
+            tokens = chat_template_.apply_with_image(*tok, messages,
+                                                      vision_model_->config.num_image_tokens);
+        } else {
+            tokens = chat_template_.apply(*tok, messages);
+        }
+        IMP_LOG_INFO("Applied %s chat template (%zu tokens%s)",
                      chat_template_family_name(chat_template_.family()),
-                     tokens.size());
+                     tokens.size(),
+                     has_vision_input_ ? ", with image" : "");
     } else {
         // Raw encoding
         tokens = tok->encode(prompt);
@@ -1318,6 +1468,9 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     if (req->output_tokens.empty()) {
         return "";
     }
+
+    // Clear vision state after generation completes
+    has_vision_input_ = false;
 
     std::string result = tok->decode(req->output_tokens);
     return result;

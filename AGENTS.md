@@ -18,7 +18,7 @@ imp was built entirely by [Claude Code](https://claude.ai/claude-code) (Claude O
 
 6. **MoE and hybrid architectures.** Mixture-of-Experts (Mixtral, DeepSeek, Qwen3-MoE) and hybrid Mamba2+Attention+MoE (Nemotron) were added iteratively. Custom fused MoE kernels with shared-memory expert caching outperform llama.cpp by 12-134% on these architectures.
 
-7. **Testing throughout.** 219 Google Tests cover tensor ops, GGUF parsing, KV cache, attention kernels, RoPE, LayerNorm, MoE routing, quantization, and end-to-end generation. Tests were written alongside the code, not after.
+7. **Testing throughout.** 226 Google Tests cover tensor ops, GGUF parsing, KV cache, attention kernels, RoPE, LayerNorm, MoE routing, quantization, and end-to-end generation. Tests were written alongside the code, not after.
 
 ### Hard-Won Lessons
 
@@ -41,7 +41,7 @@ This project welcomes contributions from AI coding agents. If you're an AI agent
 2. **Build and test before committing.** Every change must:
    ```bash
    cmake --build build -j$(nproc)   # Clean compile, zero warnings
-   ./build/imp-tests                  # 219/219 tests pass
+   ./build/imp-tests                  # 226/226 tests pass
    ```
    If you add new functionality, add tests for it in `tests/`.
 
@@ -64,7 +64,7 @@ This project welcomes contributions from AI coding agents. If you're an AI agent
 
 7. **CUDA compatibility.** All kernels must compile for sm_90a, sm_100, and sm_120. Use `#if __CUDA_ARCH__` guards for architecture-specific code. Test on actual hardware — the CUDA simulator doesn't catch shared memory sizing issues.
 
-8. **No external dependencies.** The project is self-contained (CUDA Toolkit + standard library only). Don't add third-party libraries without a very strong reason.
+8. **Minimal external dependencies.** The project is nearly self-contained (CUDA Toolkit + standard library + vendored stb_image for vision). Don't add third-party libraries without a very strong reason.
 
 9. **Memory safety.** Check CUDA errors. Use `cudaGetLastError()` after kernel launches. Don't leak GPU memory. Pre-allocate buffers and reuse them — `cudaMalloc` in a hot loop is a bug.
 
@@ -77,6 +77,7 @@ This project welcomes contributions from AI coding agents. If you're an AI agent
 | NVFP4 quantized GEMV | Hard | High | RTX 5090 has native FP4 — could significantly improve decode throughput |
 | Batched decode (bs>1) | Medium | High | Current optimizations target bs=1; multi-request batching needs work |
 | More model architectures | Medium | Medium | Phi-3, Command-R, Falcon — mostly weight mapping + config parsing |
+| Multi-image / Pan-and-Scan vision | Medium | Medium | Single-image Gemma-3 SigLIP implemented; multi-image and variable resolution would extend coverage |
 | FP8 KV cache quantization | Medium | Medium | Infrastructure exists but needs end-to-end integration |
 | Prefill chunking | Medium | Medium | `prefill_chunk_size` config exists but implementation is incomplete |
 | Additional quantization formats | Medium | Low | IQ4_XS, Q3_K, Q2_K from GGML |
