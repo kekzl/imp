@@ -75,6 +75,9 @@ typedef struct {
     float mirostat_eta;            // learning rate (default 0.1)
     int apply_chat_template;       // 1 = yes (default), 0 = no
     int ignore_eos;                // 1 = don't stop on EOS (benchmark mode)
+    int logprobs;                  // 1 = return logprobs, 0 = off
+    int top_logprobs;              // 0-20, number of top alternatives
+    int json_mode;                 // 1 = constrain output to valid JSON
 } ImpGenerateParams;
 
 ImpGenerateParams imp_generate_params_default(void);

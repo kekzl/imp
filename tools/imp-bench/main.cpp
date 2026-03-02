@@ -5,6 +5,7 @@
 namespace imp {
 void bench_gemm();
 void bench_attention();
+void bench_paged_attention();
 void bench_e2e();
 } // namespace imp
 
@@ -12,7 +13,8 @@ static void print_usage(const char* prog) {
     printf("Usage: %s [benchmark] [--help]\n\n", prog);
     printf("Available benchmarks:\n");
     printf("  gemm        GEMM micro-benchmark\n");
-    printf("  attention   Flash Attention benchmark\n");
+    printf("  attention   Flash Attention prefill benchmark\n");
+    printf("  decode-attn Paged Attention decode benchmark\n");
     printf("  e2e         End-to-end tok/s benchmark\n");
     printf("  all         Run all benchmarks (default)\n");
     printf("\nOptions:\n");
@@ -26,12 +28,14 @@ int main(int argc, char** argv) {
     // Parse arguments
     bool run_gemm = false;
     bool run_attention = false;
+    bool run_decode_attn = false;
     bool run_e2e = false;
 
     if (argc <= 1) {
         // No arguments: run all benchmarks
         run_gemm = true;
         run_attention = true;
+        run_decode_attn = true;
         run_e2e = true;
     } else {
         const char* arg = argv[1];
@@ -42,11 +46,14 @@ int main(int argc, char** argv) {
             run_gemm = true;
         } else if (strcmp(arg, "attention") == 0) {
             run_attention = true;
+        } else if (strcmp(arg, "decode-attn") == 0) {
+            run_decode_attn = true;
         } else if (strcmp(arg, "e2e") == 0) {
             run_e2e = true;
         } else if (strcmp(arg, "all") == 0) {
             run_gemm = true;
             run_attention = true;
+            run_decode_attn = true;
             run_e2e = true;
         } else {
             printf("Unknown benchmark: '%s'\n\n", arg);
@@ -65,6 +72,10 @@ int main(int argc, char** argv) {
     }
     if (run_attention) {
         imp::bench_attention();
+        ++benchmarks_run;
+    }
+    if (run_decode_attn) {
+        imp::bench_paged_attention();
         ++benchmarks_run;
     }
     if (run_e2e) {

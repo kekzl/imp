@@ -2,6 +2,9 @@
 
 #include "core/tensor.h"
 #include <cuda_runtime.h>
+#include <vector>
+#include <utility>
+#include <cstdint>
 
 namespace imp {
 
@@ -91,5 +94,18 @@ int32_t sample_mirostat_v2(const Tensor& logits, float temperature,
                            float tau, float eta, float* mu,
                            unsigned int seed, int32_t* d_result,
                            cudaStream_t stream = nullptr);
+
+// ---------------------------------------------------------------------------
+// CPU-side logprob computation: log-softmax on host logits, extract sampled
+// token logprob + top-N alternatives. Called after D2H copy of logits.
+// ---------------------------------------------------------------------------
+struct LogprobResult {
+    float sampled_logprob;                          // logprob of the sampled token
+    std::vector<std::pair<int32_t, float>> top;     // (token_id, logprob) sorted desc
+};
+
+void compute_logprobs_cpu(const float* logits, int vocab_size,
+                          int32_t sampled_token, int top_n,
+                          LogprobResult* out);
 
 } // namespace imp

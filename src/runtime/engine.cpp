@@ -699,6 +699,22 @@ bool Engine::step() {
         state.mirostat_eta = req->mirostat_eta;
         state.mirostat_mu = req->mirostat_mu;
 
+        // JSON mode: lazily init constrainer and set on state
+        if (req->json_mode) {
+            if (!json_constrainer_) {
+                json_constrainer_ = std::make_unique<JsonConstrainer>();
+                Tokenizer* jtok = model_->tokenizer();
+                if (!json_constrainer_->init(*jtok)) {
+                    IMP_LOG_ERROR("Failed to initialize JSON constrainer");
+                    json_constrainer_.reset();
+                }
+            }
+            if (json_constrainer_) {
+                json_constrainer_->reset();
+                state.json_constrainer = json_constrainer_.get();
+            }
+        }
+
         // Upload penalty token history if penalties are active
         bool needs_penalties = (req->repetition_penalty != 1.0f ||
                                 req->frequency_penalty != 0.0f ||
@@ -746,7 +762,10 @@ bool Engine::step() {
             int32_t next_token;
             bool use_event_sync = (h_sample_pinned_ != nullptr &&
                                    executor_->d_sample_result() != nullptr &&
-                                   (state.temperature <= 0.0f || state.top_k == 1));
+                                   (state.temperature <= 0.0f || state.top_k == 1) &&
+                                   !req->logprobs);  // disable event sync for logprobs
+
+            Tensor prefill_logits_out;  // retained for logprobs extraction
 
             if (use_event_sync) {
                 Tensor logits_out;
@@ -767,6 +786,16 @@ bool Engine::step() {
 
                 cudaEventSynchronize(prefill_done_);
                 next_token = *h_sample_pinned_;
+            } else if (req->logprobs) {
+                // forward_logits + sample separately to retain logits access
+                executor_->forward_logits(state, prefill_logits_out, pf_stream);
+                auto sampled = executor_->sample_from_logits(prefill_logits_out, state, pf_stream);
+                next_token = sampled[0];
+
+                cudaFreeAsync(d_token_ids, pf_stream);
+                cudaFreeAsync(d_positions, pf_stream);
+                cudaFreeAsync(d_block_tables, pf_stream);
+                cudaFreeAsync(d_context_lens, pf_stream);
             } else {
                 next_token = executor_->forward(state, pf_stream);
 
@@ -779,6 +808,34 @@ bool Engine::step() {
             // Mirostat v2: write back updated mu to request
             if (req->mirostat == 2)
                 req->mirostat_mu = state.mirostat_mu;
+
+            // Extract logprobs for first token if requested
+            if (req->logprobs && prefill_logits_out.data != nullptr) {
+                int vocab_size = static_cast<int>(prefill_logits_out.shape[prefill_logits_out.ndim - 1]);
+                executor_->ensure_logits_pinned(vocab_size);
+
+                // Get last row (for prefill, forward_logits returns last token's logits)
+                const float* d_logits = static_cast<const float*>(prefill_logits_out.data);
+
+                cudaMemcpyAsync(executor_->h_logits_pinned(), d_logits,
+                                vocab_size * sizeof(float),
+                                cudaMemcpyDeviceToHost, pf_stream);
+                cudaStreamSynchronize(pf_stream);
+
+                LogprobResult lp_result;
+                compute_logprobs_cpu(executor_->h_logits_pinned(), vocab_size,
+                                     next_token, req->top_logprobs, &lp_result);
+
+                Tokenizer* ptok = model_->tokenizer();
+                TokenLogprobInfo info;
+                info.logprob = lp_result.sampled_logprob;
+                info.text = ptok->decode_token(next_token);
+                info.top.reserve(lp_result.top.size());
+                for (const auto& [tid, tlp] : lp_result.top) {
+                    info.top.push_back({tid, tlp, ptok->decode_token(tid)});
+                }
+                req->output_logprobs.push_back(std::move(info));
+            }
 
             req->output_tokens.push_back(next_token);
 
@@ -796,10 +853,16 @@ bool Engine::step() {
                 }
             }
 
+            // Update JSON constrainer FSM with the first token
+            if (req->json_mode && json_constrainer_) {
+                json_constrainer_->update(next_token);
+            }
+
             if (is_stop ||
                 static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
                 req->status = RequestStatus::FINISHED;
                 kv_manager_->free_sequence(req->id);
+                if (req->json_mode && json_constrainer_) json_constrainer_->reset();
             } else {
                 req->status = RequestStatus::DECODING;
             }
@@ -953,8 +1016,34 @@ bool Engine::step() {
                 state.ssm_seq_id = valid_decode[0]->id % ssm_state_->max_sequences();
             }
 
+            // Check if any request needs logprobs or json_mode
+            bool needs_logprobs = false;
+            bool needs_json_mode = false;
+            for (const auto& r : valid_decode) {
+                if (r->logprobs) needs_logprobs = true;
+                if (r->json_mode) needs_json_mode = true;
+            }
+
+            // Lazily initialize JSON constrainer on first json_mode request
+            if (needs_json_mode && !json_constrainer_) {
+                json_constrainer_ = std::make_unique<JsonConstrainer>();
+                Tokenizer* jtok = model_->tokenizer();
+                if (!json_constrainer_->init(*jtok)) {
+                    IMP_LOG_ERROR("Failed to initialize JSON constrainer");
+                    json_constrainer_.reset();
+                    needs_json_mode = false;
+                }
+            }
+
+            // Set JSON constrainer on InferenceState (single-sequence only)
+            if (needs_json_mode && json_constrainer_ &&
+                valid_decode.size() == 1 && valid_decode[0]->json_mode) {
+                state.json_constrainer = json_constrainer_.get();
+            }
+
             // 3e. Execute batched forward pass (with CUDA Graph when enabled)
             std::vector<int32_t> tokens;
+            Tensor decode_logits_out;  // needed when logprobs are requested
 
             static const bool profiling = (std::getenv("IMP_PROFILE") != nullptr);
             if (config_.use_cuda_graphs && !profiling &&
@@ -971,10 +1060,12 @@ bool Engine::step() {
                 // Check if we can include greedy sampling in the graph.
                 // This captures argmax + D2H memcpy inside the graph, eliminating
                 // separate kernel launch + sync overhead per step.
+                // Disable when logprobs or json_mode are active.
                 bool greedy_single = (state.temperature <= 0.0f || state.top_k == 1) &&
                                      gpu_batch.n_sequences == 1 &&
                                      h_sample_pinned_ != nullptr &&
-                                     executor_->d_sample_result() != nullptr;
+                                     executor_->d_sample_result() != nullptr &&
+                                     !needs_logprobs && !needs_json_mode;
 
                 // Invalidate graph if sampling mode changed
                 if (greedy_single != graph_includes_sampling_) {
@@ -1011,9 +1102,16 @@ bool Engine::step() {
                         logits_out = executor_->get_logits_view(gpu_batch.n_sequences);
                     }
                     tokens = executor_->sample_from_logits(logits_out, state, dec_stream);
+                    if (needs_logprobs) decode_logits_out = logits_out;
                 }
             } else {
-                tokens = executor_->forward_batch(state, dec_stream);
+                if (needs_logprobs) {
+                    // Use forward_logits + sample_from_logits to retain logits access
+                    executor_->forward_logits(state, decode_logits_out, dec_stream);
+                    tokens = executor_->sample_from_logits(decode_logits_out, state, dec_stream);
+                } else {
+                    tokens = executor_->forward_batch(state, dec_stream);
+                }
             }
 
             // Only free if not using pool (pool memory is reused)
@@ -1025,8 +1123,45 @@ bool Engine::step() {
             if (state.mirostat == 2 && valid_decode.size() == 1)
                 valid_decode[0]->mirostat_mu = state.mirostat_mu;
 
-            // 3f. Distribute sampled tokens back to requests
             Tokenizer* tok = model_->tokenizer();
+
+            // 3f. Extract logprobs (D2H copy + CPU computation) before distributing tokens
+            if (needs_logprobs && decode_logits_out.data != nullptr) {
+                int vocab_size = static_cast<int>(decode_logits_out.shape[decode_logits_out.ndim - 1]);
+                executor_->ensure_logits_pinned(vocab_size);
+
+                for (int i = 0; i < static_cast<int>(valid_decode.size()); i++) {
+                    auto& req = valid_decode[i];
+                    if (!req->logprobs) continue;
+
+                    // Get pointer to this sequence's logits row
+                    const float* d_logits = static_cast<const float*>(decode_logits_out.data)
+                        + static_cast<size_t>(i) * vocab_size;
+
+                    // D2H copy
+                    cudaMemcpyAsync(executor_->h_logits_pinned(), d_logits,
+                                    vocab_size * sizeof(float),
+                                    cudaMemcpyDeviceToHost, dec_stream);
+                    cudaStreamSynchronize(dec_stream);
+
+                    // CPU logprobs computation
+                    LogprobResult lp_result;
+                    compute_logprobs_cpu(executor_->h_logits_pinned(), vocab_size,
+                                         tokens[i], req->top_logprobs, &lp_result);
+
+                    // Store in request
+                    TokenLogprobInfo info;
+                    info.logprob = lp_result.sampled_logprob;
+                    info.text = tok->decode_token(tokens[i]);
+                    info.top.reserve(lp_result.top.size());
+                    for (const auto& [tid, tlp] : lp_result.top) {
+                        info.top.push_back({tid, tlp, tok->decode_token(tid)});
+                    }
+                    req->output_logprobs.push_back(std::move(info));
+                }
+            }
+
+            // Distribute sampled tokens back to requests
             for (int i = 0; i < static_cast<int>(valid_decode.size()); i++) {
                 auto& req = valid_decode[i];
                 int32_t next_token = tokens[i];
@@ -1051,6 +1186,15 @@ bool Engine::step() {
                     static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
                     req->status = RequestStatus::FINISHED;
                     kv_manager_->free_sequence(req->id);
+                    // Reset JSON constrainer when request finishes
+                    if (req->json_mode && json_constrainer_) {
+                        json_constrainer_->reset();
+                    }
+                }
+
+                // Update JSON constrainer FSM with the sampled token
+                if (req->json_mode && json_constrainer_) {
+                    json_constrainer_->update(next_token);
                 }
 
                 kv_manager_->touch(req->id);
@@ -1062,7 +1206,8 @@ bool Engine::step() {
             // poll from the ring buffer at full GPU speed.
             if (decode_graph_runner_.is_ready() && valid_decode.size() == 1 &&
                 !offload_mgr_ && !ssm_state_ && !config_.enable_speculative &&
-                config_.use_cuda_graphs && !async_graph_runner_.is_setup()) {
+                config_.use_cuda_graphs && !async_graph_runner_.is_setup() &&
+                !needs_logprobs && !needs_json_mode) {
                 auto& dreq = valid_decode[0];
                 if (dreq->status == RequestStatus::DECODING &&
                     !dreq->output_tokens.empty() && !dreq->ignore_eos) {

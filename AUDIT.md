@@ -1,6 +1,6 @@
 # imp — CUDA 13.1 Feature Audit, Performance & Architektur-Review
 
-**Datum:** 2026-03-02 (aktualisiert nach CUTLASS FMHA, NVFP4-Decode-Cache, zentralisiertem VRAM-Budget, Temperature-0-Fix)
+**Datum:** 2026-03-02 (aktualisiert nach Stop Sequences, Logprobs, JSON Mode, CUTLASS FMHA, NVFP4-Decode-Cache, Decode-Attention-Optimierungen)
 
 Umfassende Analyse des imp-Projekts auf drei Achsen:
 1. Welche CUDA 13.1+ Features werden genutzt, welche fehlen noch?
@@ -47,8 +47,27 @@ Umfassende Analyse des imp-Projekts auf drei Achsen:
 
 | # | Optimierung | Dateien | Geschätzter Gewinn | Aufwand |
 |---|-------------|---------|-------------------|---------|
-| O1 | **TCGEN05 Inline-PTX Decode Attention** — WGMMA + TMA für Paged Attention Decode (Prefill nutzt CUTLASS FMHA) | `attention_blackwell.cu` | ~2x Decode-Attention auf sm_120 | Mittel |
+| O1 | **TCGEN05 Inline-PTX Decode Attention** — WGMMA + TMA für Paged Attention Decode. **Hinweis**: WGMMA erfordert M≥64, Decode hat M=1 — nicht direkt anwendbar auf Decode-Vektoren. Nutzen primär für Prefill (bereits via CUTLASS FMHA). Decode-Attention wurde stattdessen über cp.async Pipelining + Vektorisierung optimiert (Phase 7). | `attention_blackwell.cu` | ~15-30% Decode-Attention Kernel (nicht ~2x — M=1 inkompatibel mit WGMMA) | Niedrig |
 | O3 | **GEMV Bandwidth-Optimierung** — Aktuelle Auslastung ~50-59% vs llama.cpp ~55-69%. L2-Cache-Tuning, Prefetch-Hints | `gemv_dp4a_traits.cuh` | +5-10% Dense Decode | Mittel |
+
+### Implementiert — Phase 6: Server-Features (2026-03-02)
+
+| # | Feature | Dateien | Details |
+|---|---------|---------|---------|
+| F1 | **Stop Sequences** — `stop` Parameter (String oder Array, max 4). Text-Level Matching mit Buffered Streaming Output (Partial-Match-Sicherheit). CLI: `--stop` Flag. | `imp-server/main.cpp`, `imp-cli/main.cpp`, `imp-cli/args.h/cpp` | `finish_reason: "stop"` bei Match, kein Engine-Eingriff nötig |
+| F2 | **Logprobs** — Per-Token Log-Softmax + Top-N Alternativen (0-20). CPU-Side Berechnung via D2H Logits-Copy in Pinned Buffer (~0.3ms für 152K Vocab). OpenAI-kompatibles Response-Format. | `sampling.h/cu`, `executor.h/cu`, `engine.cpp`, `request.h`, `imp.h`, `imp_api.cpp`, `imp-server/main.cpp` | CUDA-Graphs deaktiviert wenn Logprobs aktiv (D2H Copy außerhalb Graph) |
+| F3 | **JSON Mode** — Stack-basierte JSON-FSM mit Token-Klassifikation via Bitfield-Kategorien. GPU Logit-Masking Kernel setzt ungültige Tokens auf -FLT_MAX. Lazy Init beim ersten `json_mode` Request. | `json_constrain.h/cu`, `executor.cu`, `engine.h/cpp`, `request.h`, `imp.h`, `imp_api.cpp`, `imp-server/main.cpp` | `response_format: {"type": "json_object"}`, CUDA-Graphs deaktiviert wenn aktiv |
+
+### Implementiert — Phase 7: Decode-Attention-Optimierungen (2026-03-02)
+
+| # | Optimierung | Dateien | Details |
+|---|-------------|---------|---------|
+| P26 | **Dynamic Split-K SM Heuristic** — Hardcoded `target_blocks=340` (nur RTX 5090 korrekt) ersetzt durch `2 * kpar_n_sms()` (gecachte SM-Count-Abfrage). Split-K Aktivierungsschwelle von `< 128` auf `< 2 * num_sms` angehoben. | `attention_paged.cu` | Portabilität: korrekte Occupancy auf allen GPU-Größen |
+| P27 | **Templated + Vectorized Fallback Kernels** — MHA, FP8 und INT8 Decode-Kernels auf `HEAD_DIM` Template-Parameter umgestellt. Contiguous Lane-Mapping (`lane_offset = lane_id * ELEMS`) + half2/uint32_t vektorisierte Loads statt strided Scalar-Loads. Generic Fallback für nicht-standard head_dim (Tests). | `attention_paged.cu` | Compile-Time Unrolling, Coalesced Memory Access |
+| P28 | **cp.async Pipelined Split-K** — Neue `paged_attention_splitk_pipeline_kernel` (FP16) und `paged_attention_splitk_fp8_pipeline_kernel` (FP8). Per-Warp smem mit Double-Buffered K + V-Buffer. `cp.async.ca` überlappt V[t]+K[t+1] Loads mit K[t] Dot-Product. Dispatch auf sm_90+, Fallback auf Standard-Split-K. | `attention_paged.cu` | Memory/Compute Overlap: ~50ns statt ~196ns pro Token (ideal) |
+| P29 | **Paged Attention Decode Benchmark** — `bench_paged_attention()` in imp-bench: 4 Head-Konfigurationen (MHA-32h, GQA-32/8, GQA-32/4, GQA-28/4) × 6 Context-Längen (64–32K). Reports Latency, Bandwidth, Kernel-Path. | `bench_attention.cu`, `main.cpp` | Messbare Decode-Attention Baseline + Regressions-Erkennung |
+
+**cp.async für GQA/Cluster** (Step 4 des Plans) wurde evaluiert und **nicht implementiert**: GQA/Cluster-Kernels nutzen strided Global→Smem Copies (Slot-Stride über KV-Heads), was inkompatibel mit cp.async (kontiguöse Quell-Adressen) ist. Double-Buffered Tile-Loads bieten bereits Compute/Memory Overlap.
 
 ### Implementiert — Phase 5 (2ebb2c4, 2026-03-02)
 
@@ -160,14 +179,14 @@ FP8 Prefill nutzt eine hybride Strategie: FP16-Cache mit Fused KV/Gate+Up wird i
 |---------|------|---------|--------|-----|-----------|
 | Multi-GPU / TP | Ja | Ja | Ja | **Nein** | Single-GPU only |
 | Chunked Prefill | Ja | Ja | Ja | **Ja** | `--prefill-chunk-size`, chunked Prefill mit State-Tracking |
-| Structured Output (Grammar) | Ja | Nein | Ja | **Nein** | Kein JSON-Schema/GBNF |
+| Structured Output (Grammar) | Ja | Nein | Ja | **Partiell** | JSON Mode (`response_format: {"type": "json_object"}`), kein JSON-Schema/GBNF |
 | Vision / Multimodal | Ja | Ja | Ja | **Nein** | Kein Vision-Encoder |
 | LoRA / Adapters | Ja | Ja | Nein | **Nein** | Statische Weights only |
 | Beam Search | Ja | Ja | Ja | **Nein** | Nur Greedy/Sampling |
 | Request Preemption | Ja | Nein | Ja | **Nein** | Kein Pause/Resume |
 | Priority Scheduling | Ja | Nein | Ja | **Partiell** | Shortest-first Reordering (P7), kein Priority-Feld |
-| Logprobs Output | Ja | Ja | Ja | **Nein** | Nur finales Token |
-| Stop Sequences | Ja | Ja | Ja | **Partiell** | EOS + Chat-Template Stop-Tokens, keine beliebigen String-Sequenzen |
+| Logprobs Output | Ja | Ja | Ja | **Ja** | Per-Token Log-Softmax + Top-N Alternativen, OpenAI-kompatibles Format |
+| Stop Sequences | Ja | Ja | Ja | **Ja** | Bis zu 4 String-Sequenzen, Streaming-safe mit Buffered Output |
 | Batch API (extern) | Ja | Ja | Ja | **Nein** | Intern ja, API single-request |
 | KV-Cache Quantisierung | Ja | Ja | Nein | **Ja** | FP16, FP8 E4M3 (`--kv-fp8`), INT8 dp4a (`--kv-int8`) |
 | AWQ/GPTQ | Ja | Ja | Ja | **Nein** | Nur GGML-Formate |
@@ -175,11 +194,9 @@ FP8 Prefill nutzt eine hybride Strategie: FP16-Cache mit Fused KV/Gate+Up wird i
 
 ### Empfohlene nächste Features (nach ROI sortiert)
 
-1. **Stop Sequences + Logprobs** — Niedrig-Aufwand, hoher User-Impact, Server-Kompatibilität
-2. **NVFP4 MoE GEMV** — NVFP4-Decode für MoE Expert-Kernels (aktuell nur dense)
-3. **TCGEN05 Decode Attention** — WGMMA für Paged Attention Decode (Prefill bereits via CUTLASS FMHA)
-4. **Structured Output** — JSON-Mode / GBNF-Grammatik für Agentic Use-Cases
-5. **GEMV Bandwidth-Optimierung** — L2-Tuning, Prefetch-Hints, +5-10% Dense Decode
+1. **JSON Schema / GBNF Grammar** — Erweiterung von JSON Mode zu Schema-Validierung und GBNF-Grammatik
+2. **GEMV Bandwidth-Optimierung** — L2-Tuning, Prefetch-Hints, +5-10% Dense Decode
+3. **NVFP4 cuBLASLt Prefill** — RTX 5090 native NVFP4 TensorCore Support für Prefill-Throughput
 
 ---
 
@@ -187,9 +204,9 @@ FP8 Prefill nutzt eine hybride Strategie: FP16-Cache mit Fused KV/Gate+Up wird i
 
 **CUDA 13.1**: 5/5 Major-Features implementiert (Green Contexts, PDL, Graphs+Conditional, MemPool, NVFP4). PDL-Registry mit 28+ Kernel-Registrierungen (7 Utility + 6 Compute + 110+ Template-Instantiierungen). Blackwell WMMA 8-Warp Attention mit Double-Buffered KV für sm_120. TCGEN05 Inline-PTX/TMA noch nicht implementiert — größtes verbleibendes Hardware-Potential.
 
-**Performance**: P2-P25 implementiert. CUTLASS Hopper FMHA (P25) für Prefill-Attention auf sm_90+ (WGMMA + TMA). Decode mit NVFP4: +34-66% vs Baseline, +9-26% vs llama.cpp (dense). MoE: +12-134% vs llama.cpp (ohne NVFP4). Prefill: +3-84% (Batched GEMM, Residual Fusion, Eager Dequant), +79% mit FP8-Overflow (P20, DS-R1-7B). Zentralisiertes VRAM-Budget (P22) mit FFN-Reallokation (P23) ermöglicht volle NVFP4-Coverage auch bei großen Modellen. Multi-Block Argmax: 192µs → ~10µs. Temperature-0 CUDA-Graph-Bug gefixt (P24). Verbleibend: TCGEN05-Decode-Attention, Bandwidth-Optimierung, NVFP4 für MoE.
+**Performance**: P2-P29 implementiert. CUTLASS Hopper FMHA (P25) für Prefill-Attention auf sm_90+ (WGMMA + TMA). Decode mit NVFP4: +34-66% vs Baseline, +9-26% vs llama.cpp (dense). MoE: +12-134% vs llama.cpp (ohne NVFP4). Prefill: +3-84% (Batched GEMM, Residual Fusion, Eager Dequant), +79% mit FP8-Overflow (P20, DS-R1-7B). Zentralisiertes VRAM-Budget (P22) mit FFN-Reallokation (P23) ermöglicht volle NVFP4-Coverage auch bei großen Modellen. Multi-Block Argmax: 192µs → ~10µs. Temperature-0 CUDA-Graph-Bug gefixt (P24). Decode-Attention: cp.async Pipelining, vektorisierte Fallback-Kernels, dynamische Split-K SM-Heuristik (P26-P29). TCGEN05/WGMMA für Decode-Attention als unpraktisch eingestuft (M=1 erfordert min. M=64 für WGMMA Tiles). Verbleibend: Bandwidth-Optimierung, NVFP4 für MoE, NVFP4 cuBLASLt Prefill.
 
-**Architektur**: Auf Single-GPU-Ebene vergleichbar mit vLLM. Chunked Prefill und KV-Cache-Quantisierung (FP16/FP8/INT8) sind implementiert. Hauptlücken sind Multi-GPU, Structured Output, Vision, Logprobs und externe Batch-API. Für den aktuellen Scope (Single-GPU, CLI/Server) ist die Architektur solide und modern.
+**Architektur**: Auf Single-GPU-Ebene vergleichbar mit vLLM. Chunked Prefill, KV-Cache-Quantisierung (FP16/FP8/INT8), Logprobs, Stop Sequences und JSON Mode sind implementiert. Hauptlücken sind Multi-GPU, JSON Schema/GBNF Grammar, Vision und externe Batch-API. Für den aktuellen Scope (Single-GPU, CLI/Server) ist die Architektur solide und modern.
 
 ---
 
@@ -461,7 +478,10 @@ Die GEMV-Infrastruktur wurde von 33 handgeschriebenen Kernels auf ein Template-S
 | Speculative Decoding | `speculative.cpp` | `draft_tokens()` K Iterationen, `verify()` Pseudo-Prefill, stochastische Akzeptanz, KV-Rollback |
 | Hybrid (Nemotron) | `model_arch.h`, `ssm.cu`, `ssm_state.cu` | `NEMOTRON_H_MOE`, Per-Layer SSM/Attention/MoE Dispatch, 52 Layers |
 | VRAM Expert Upload | `weight_upload.cu` | 2-Pass: (1) Non-Expert Upload, (2) Greedy Layer-Budget für Experts |
-| HTTP Server | `tools/imp-server/main.cpp` | `/v1/chat/completions`, SSE Streaming, CORS, Chat-Template Stop-Tokens |
+| HTTP Server | `tools/imp-server/main.cpp` | `/v1/chat/completions`, SSE Streaming, CORS, Stop Sequences, Logprobs, JSON Mode |
+| Stop Sequences | `tools/imp-server/main.cpp`, `tools/imp-cli/main.cpp` | Bis zu 4 String-Sequenzen (`stop` Parameter), Streaming-safe mit Buffered Output, `finish_reason: "stop"` |
+| Logprobs | `sampling.cu`, `executor.cu`, `engine.cpp`, `request.h` | CPU-side Log-Softmax + Top-N Min-Heap, D2H Logits via Pinned Buffer, OpenAI-kompatibles Format (`logprobs` + `top_logprobs` 0-20) |
+| JSON Mode | `json_constrain.h/cu`, `executor.cu`, `engine.cpp` | Stack-basierte JSON-FSM, Token-Klassifikation via Bitfield-Kategorien, GPU Logit-Masking Kernel, `response_format: {"type": "json_object"}` |
 | dp4a Template GEMV | `gemv_dp4a_traits.cuh` | 5 QTypes, K-par/Row-par Dispatch, ~130 Instantiierungen |
 | Multi-Block Argmax | `sampling.cu` | 64-Block 2-Phasen Reduktion, 19x Speedup |
 | FP8 Prefill Weight Cache | `executor.cu`, `fp8_quant.cu` | Hybrid FP16+FP8, `--prefill-fp8`, Device-Scales, 1.79x Prefill (DS-R1-7B) |
@@ -473,9 +493,6 @@ Die GEMV-Infrastruktur wurde von 33 handgeschriebenen Kernels auf ein Template-S
 
 | Feature | Evidenz |
 |---------|---------|
-| Logprobs | `ImpGenerateParams` hat kein logprobs-Feld, Sampling gibt nur Token-ID zurück |
-| Structured Output | Kein Grammar-Parser, kein Constraint-Feld in Generate-Params |
 | Beam Search | Nur `temperature/top_p/top_k` in Sampling, kein `beam_size` |
-| String Stop Sequences | Nur Token-basiert (EOS + Template Stop-IDs), kein String-Matching |
-| NVFP4 MoE GEMV | NVFP4-Decode nur für dense Weights, MoE Expert-Kernels noch ohne NVFP4 |
-| TCGEN05 Decode Attention | Prefill nutzt CUTLASS FMHA (WGMMA+TMA), Decode noch WMMA (kein TCGEN05 Inline-PTX) |
+| JSON Schema / GBNF | JSON Mode (syntaktische Validität) implementiert, aber kein Schema-Constraining oder GBNF-Grammatik |
+| TCGEN05 Decode Attention | Prefill nutzt CUTLASS FMHA (WGMMA+TMA). Decode nutzt WMMA + cp.async Pipelining (Phase 7). WGMMA (min. M=64) ist inkompatibel mit M=1 Decode — kein weiterer Gewinn durch TCGEN05 auf Decode-Pfad. |

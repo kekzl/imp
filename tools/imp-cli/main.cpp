@@ -234,6 +234,7 @@ int main(int argc, char** argv) {
                 // Decode token by token
                 std::vector<int32_t> output_ids;
                 std::string response;
+                std::string interactive_text;
                 for (int step = 0; step < params.max_tokens; step++) {
                     int32_t token = 0;
                     err = imp_decode_step(ctx, &params, &token);
@@ -251,6 +252,19 @@ int main(int argc, char** argv) {
                     std::string piece = tok->decode_token(token);
                     printf("%s", piece.c_str());
                     fflush(stdout);
+
+                    // Check text-level stop sequences
+                    if (!args.stop_sequences.empty()) {
+                        interactive_text += piece;
+                        bool text_stop = false;
+                        for (const auto& stop : args.stop_sequences) {
+                            if (interactive_text.find(stop) != std::string::npos) {
+                                text_stop = true;
+                                break;
+                            }
+                        }
+                        if (text_stop) break;
+                    }
                 }
                 printf("\n");
 
@@ -317,9 +331,14 @@ int main(int argc, char** argv) {
                 return 1;
             }
 
+            // Compute max stop length for buffering
+            size_t max_stop_len = 0;
+            for (const auto& s : args.stop_sequences) max_stop_len = std::max(max_stop_len, s.size());
+
             // Decode with timing
             auto t_decode_start = std::chrono::high_resolution_clock::now();
             std::vector<int32_t> output_ids;
+            std::string output_text;
             for (int step = 0; step < params.max_tokens; step++) {
                 int32_t token = 0;
                 err = imp_decode_step(ctx, &params, &token);
@@ -339,6 +358,19 @@ int main(int argc, char** argv) {
                 if (step < 10) fprintf(stderr, "[tok=%d '%s'] ", token, piece.c_str());
                 printf("%s", piece.c_str());
                 fflush(stdout);
+
+                // Check text-level stop sequences
+                if (!args.stop_sequences.empty()) {
+                    output_text += piece;
+                    bool stop_found = false;
+                    for (const auto& stop : args.stop_sequences) {
+                        if (output_text.find(stop) != std::string::npos) {
+                            stop_found = true;
+                            break;
+                        }
+                    }
+                    if (stop_found) break;
+                }
             }
             auto t_decode_end = std::chrono::high_resolution_clock::now();
             printf("\n");

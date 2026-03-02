@@ -6,6 +6,19 @@
 
 namespace imp {
 
+// Per-token log probability information (for logprobs output)
+struct TokenLogprob {
+    int32_t token;
+    float logprob;
+    std::string text;
+};
+
+struct TokenLogprobInfo {
+    float logprob;                       // logprob of the sampled token
+    std::string text;                    // decoded text of the sampled token
+    std::vector<TokenLogprob> top;       // top_logprobs alternatives
+};
+
 enum class RequestStatus {
     PENDING,
     PREFILLING,
@@ -43,6 +56,14 @@ struct Request {
     float mirostat_mu = 0.0f;         // Running variable (persists across tokens, init = 2*tau)
     bool ignore_eos = false;   // Don't stop on EOS (benchmark mode)
     int prefill_offset = 0;    // Chunked prefill: tokens processed so far
+
+    // Logprobs
+    bool logprobs = false;                          // Return logprobs for sampled tokens
+    int top_logprobs = 0;                           // 0-20, number of top alternatives
+    std::vector<TokenLogprobInfo> output_logprobs;  // parallel to output_tokens
+
+    // JSON mode
+    bool json_mode = false;                         // Constrain output to valid JSON
 
     int context_len() const {
         return static_cast<int>(input_tokens.size() + output_tokens.size());

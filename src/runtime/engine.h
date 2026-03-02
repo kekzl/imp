@@ -13,6 +13,7 @@
 #include "memory/ssm_state.h"
 #include "memory/layer_offload.h"
 #include "graph/executor.h"
+#include "compute/json_constrain.h"
 #include <memory>
 #include <string>
 #include <cuda_runtime.h>
@@ -143,6 +144,9 @@ private:
     // Device buffer for penalty token history (reused across steps)
     int32_t* d_penalty_tokens_ = nullptr;
     size_t d_penalty_tokens_capacity_ = 0;  // current allocation capacity in tokens
+
+    // JSON constrainer (lazily initialized on first json_mode request)
+    std::unique_ptr<JsonConstrainer> json_constrainer_;
 
     // Pinned host buffer for graph-captured greedy sampling results.
     // When sampling is included in the CUDA graph, the argmax kernel writes
