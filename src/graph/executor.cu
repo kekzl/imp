@@ -1624,6 +1624,13 @@ void GraphExecutor::free_buffers() {
     nvfp4_cache_.clear();
     nvfp4_cache_bytes_ = 0;
 
+    // Free NVFP4 MoE expert weight cache
+    for (auto& [ptr, result] : nvfp4_moe_cache_) {
+        free_nvfp4_moe_result(result);
+    }
+    nvfp4_moe_cache_.clear();
+    nvfp4_moe_cache_bytes_ = 0;
+
     // Free FP8 weight cache
     for (auto& [ptr, entry] : fp8_cache_) {
         if (entry.weight.data) cudaFree(entry.weight.data);
@@ -2102,6 +2109,60 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
             cache_weight_nvfp4(L.w_down, L.w_down_qtype);
         }
 
+        // Cache MoE expert weights (all experts in one contiguous allocation per tensor)
+        int nvfp4_moe_count = 0;
+        size_t nvfp4_moe_total = 0;
+
+        auto cache_moe_expert_nvfp4 = [&](const Tensor& packed, GGMLQuantType qtype) {
+            if (!packed.data) return;
+            if (!nvfp4_beneficial(qtype)) return;
+            if (nvfp4_moe_cache_.count(packed.data)) return;
+            if (nvfp4_budget_exhausted) return;
+            if (!packed.on_device) return;
+            if (packed.ndim < 3) return;
+
+            int ne = static_cast<int>(packed.shape[0]);
+            int rows = static_cast<int>(packed.shape[1]);
+            int cols = static_cast<int>(packed.shape[2]);
+            if (cols % 16 != 0) return;
+            if (!dequant_gpu_supported(qtype) || !dequant_scratch_) return;
+
+            // NVFP4 size: packed + micro-scales + tensor scales array
+            size_t nvfp4_bytes = static_cast<size_t>(ne) * rows * cols / 2 +
+                                 static_cast<size_t>(ne) * rows * cols / 16 +
+                                 static_cast<size_t>(ne) * sizeof(float);
+
+            if (nvfp4_total + nvfp4_moe_total + nvfp4_bytes > remaining_budget) {
+                nvfp4_budget_exhausted = true;
+                IMP_LOG_INFO("NVFP4 MoE cache: VRAM budget reached after %d MoE tensors "
+                             "(%.1f MiB)", nvfp4_moe_count,
+                             nvfp4_moe_total / (1024.0 * 1024.0));
+                return;
+            }
+
+            NvFP4MoEQuantResult result;
+            quantize_packed_experts_to_nvfp4(
+                packed.data, qtype, ne, rows, cols,
+                dequant_scratch_, result, stream);
+
+            nvfp4_moe_cache_[packed.data] = result;
+            nvfp4_moe_total += nvfp4_bytes;
+            nvfp4_moe_count++;
+        };
+
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            cache_moe_expert_nvfp4(L.expert_gate_packed, L.expert_gate_qtype);
+            cache_moe_expert_nvfp4(L.expert_up_packed,   L.expert_up_qtype);
+            cache_moe_expert_nvfp4(L.expert_down_packed,  L.expert_down_qtype);
+        }
+
+        if (nvfp4_moe_count > 0) {
+            nvfp4_moe_cache_bytes_ = nvfp4_moe_total;
+            IMP_LOG_INFO("NVFP4 MoE cache: %d tensors, %.2f MiB",
+                         nvfp4_moe_count, nvfp4_moe_total / (1024.0 * 1024.0));
+        }
+
         if (nvfp4_count > 0) {
             cudaStreamSynchronize(stream);
             nvfp4_cache_bytes_ = nvfp4_total;
@@ -2113,7 +2174,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
                 IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB (mode: %s)",
                              nvfp4_count, nvfp4_total / (1024.0 * 1024.0), mode_str);
             }
-        } else {
+        } else if (nvfp4_moe_count == 0) {
             IMP_LOG_INFO("NVFP4 decode: no eligible weights found (all ≤ 4.5 bits/elem)");
         }
 
@@ -3496,6 +3557,66 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         half* up_buf   = static_cast<half*>(moe_expert_up_.data);     // [top_k, eff]
         half* act_buf  = static_cast<half*>(moe_expert_swiglu_.data); // [top_k, eff]
         half* down_buf = static_cast<half*>(moe_expert_down_.data);   // [top_k, d]
+
+        // --- NVFP4 MoE path: takes FP16 input directly, no Q8_1 needed ---
+        auto nvfp4_up_it = nvfp4_moe_cache_.find(ly.expert_up_packed.data);
+        auto nvfp4_down_it = nvfp4_moe_cache_.find(ly.expert_down_packed.data);
+        bool use_nvfp4_moe = (nvfp4_up_it != nvfp4_moe_cache_.end() &&
+                              nvfp4_down_it != nvfp4_moe_cache_.end());
+        if (use_nvfp4_moe && !non_gated_experts) {
+            auto nvfp4_gate_it = nvfp4_moe_cache_.find(ly.expert_gate_packed.data);
+            use_nvfp4_moe = (nvfp4_gate_it != nvfp4_moe_cache_.end());
+        }
+
+        if (use_nvfp4_moe) {
+            // Gate+Up projection: NVFP4 MoE GEMV with FP16 input (norm_ptr)
+            if (!non_gated_experts) {
+                gemv_nvfp4_moe_gate_up_fused(
+                    nvfp4_moe_cache_.at(ly.expert_gate_packed.data),
+                    nvfp4_moe_cache_.at(ly.expert_up_packed.data),
+                    expert_indices, norm_ptr,
+                    gate_buf, up_buf, eff, d, top_k, stream);
+            } else {
+                gemv_nvfp4_moe_decode(
+                    nvfp4_moe_cache_.at(ly.expert_up_packed.data),
+                    expert_indices, norm_ptr, up_buf,
+                    eff, d, /*x_stride=*/0, top_k, stream);
+            }
+
+            // Activation (SwiGLU or relu²)
+            {
+                int64_t act_shape[2] = {static_cast<int64_t>(top_k),
+                                         static_cast<int64_t>(eff)};
+                if (!non_gated_experts) {
+                    Tensor gate_t(gate_buf, compute_dtype_, 2, act_shape, true);
+                    Tensor up_t(up_buf, compute_dtype_, 2, act_shape, true);
+                    Tensor act_t(act_buf, compute_dtype_, 2, act_shape, true);
+                    swiglu(gate_t, up_t, act_t, stream);
+                } else {
+                    Tensor up_t(up_buf, compute_dtype_, 2, act_shape, true);
+                    relu_sqr_inplace(up_t, stream);
+                }
+            }
+
+            // Down projection: NVFP4 MoE GEMV with per-expert input
+            half* down_input = non_gated_experts ? up_buf : act_buf;
+            gemv_nvfp4_moe_decode(
+                nvfp4_moe_cache_.at(ly.expert_down_packed.data),
+                expert_indices, down_input, down_buf,
+                d, eff, /*x_stride=*/eff, top_k, stream);
+
+            // Weighted sum + residual
+            {
+                bool has_shared_expert = (ly.w_up_shared.data != nullptr);
+                const void* res_ptr = has_shared_expert ? nullptr :
+                    (will_skip_residual_copy ? h.data : r.data);
+                moe_weighted_sum_residual(down_buf, expert_weights, res_ptr,
+                                          h.data, d, top_k, stream);
+                if (!has_shared_expert) residual_fused = true;
+            }
+
+            goto moe_after_experts;
+        }
 
         // Use dp4a MMVQ path when Q8_1 buffers are available
         bool use_dp4a = (q8_1_buf_ != nullptr && d8_buf_ != nullptr);

@@ -1,4 +1,5 @@
 #include "quant/nvfp4_quant.h"
+#include "quant/dequant_gpu.h"
 #include "core/tensor.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
@@ -467,6 +468,123 @@ void free_nvfp4_result(NvFP4QuantResult& result)
     result.tensor_scale = 1.0f;
     result.N = 0;
     result.K = 0;
+}
+
+// ---------------------------------------------------------------------------
+// MoE per-expert quantization
+// ---------------------------------------------------------------------------
+
+void quantize_packed_experts_to_nvfp4(
+    const void* packed_ggml_data, GGMLQuantType qtype,
+    int n_experts, int eff, int K,
+    void* dequant_scratch,
+    NvFP4MoEQuantResult& result,
+    cudaStream_t stream)
+{
+    assert(packed_ggml_data && "packed expert data must not be null");
+    assert(dequant_scratch && "dequant scratch buffer required");
+    assert(K % kMicroBlockSize == 0 && "K must be multiple of 16");
+
+    // Compute per-expert sizes
+    size_t expert_packed_bytes = static_cast<size_t>(eff) * (K / 2);
+    size_t expert_ms_bytes = static_cast<size_t>(eff) * (K / kMicroBlockSize);
+    size_t total_packed = static_cast<size_t>(n_experts) * expert_packed_bytes;
+    size_t total_ms = static_cast<size_t>(n_experts) * expert_ms_bytes;
+
+    // Allocate contiguous output buffers
+    uint8_t* d_packed = nullptr;
+    uint8_t* d_micro_scales = nullptr;
+    float* d_tensor_scales = nullptr;
+    cudaMalloc(&d_packed, total_packed);
+    cudaMalloc(&d_micro_scales, total_ms);
+    cudaMalloc(&d_tensor_scales, n_experts * sizeof(float));
+
+    // Compute expert stride in source GGML data
+    size_t src_expert_stride = static_cast<size_t>(eff) * ggml_quant_row_bytes(qtype, K);
+
+    // Temporary device buffer for absmax reduction
+    float* d_global_max = nullptr;
+    cudaMalloc(&d_global_max, sizeof(float));
+
+    int64_t n_elements = static_cast<int64_t>(eff) * K;
+    int64_t total_micro_blocks = static_cast<int64_t>(eff) * (K / kMicroBlockSize);
+    int quant_blocks = static_cast<int>((total_micro_blocks + kBlockSize - 1) / kBlockSize);
+
+    for (int e = 0; e < n_experts; e++) {
+        const uint8_t* src = static_cast<const uint8_t*>(packed_ggml_data) + e * src_expert_stride;
+        half* scratch = static_cast<half*>(dequant_scratch);
+
+        // Step 1: Dequant this expert slice to FP16 scratch
+        dequant_gpu(src, scratch, qtype, eff, K, stream);
+
+        // Step 2: Calibrate tensor_scale = absmax / 6.0
+        cudaMemsetAsync(d_global_max, 0, sizeof(float), stream);
+        int absmax_blocks = static_cast<int>((n_elements + kBlockSize - 1) / kBlockSize);
+        if (absmax_blocks > 2048) absmax_blocks = 2048;
+        absmax_kernel<<<absmax_blocks, kBlockSize, 0, stream>>>(
+            scratch, n_elements, d_global_max);
+
+        float h_absmax = 0.0f;
+        cudaMemcpyAsync(&h_absmax, d_global_max, sizeof(float),
+                        cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+
+        float ts = (h_absmax == 0.0f) ? 1.0f : (h_absmax / kFP4E2M1Max);
+
+        // Copy tensor_scale to device array
+        cudaMemcpyAsync(d_tensor_scales + e, &ts, sizeof(float),
+                        cudaMemcpyHostToDevice, stream);
+
+        // Step 3: Quantize FP16 scratch -> NVFP4 at expert offset
+        quantize_nvfp4_kernel<<<quant_blocks, kBlockSize, 0, stream>>>(
+            scratch,
+            d_packed + e * expert_packed_bytes,
+            d_micro_scales + e * expert_ms_bytes,
+            ts,
+            static_cast<int64_t>(eff), static_cast<int64_t>(K));
+
+        // Must sync before scratch is reused by next expert
+        cudaStreamSynchronize(stream);
+    }
+
+    cudaFree(d_global_max);
+
+    // Fill result
+    result.packed_data = d_packed;
+    result.micro_scales = d_micro_scales;
+    result.tensor_scales = d_tensor_scales;
+    result.n_experts = n_experts;
+    result.N = eff;
+    result.K = K;
+    result.expert_stride_packed = expert_packed_bytes;
+    result.expert_stride_ms = expert_ms_bytes;
+
+    IMP_LOG_DEBUG("quantize_packed_experts_to_nvfp4: %d experts, eff=%d K=%d, "
+                  "packed=%.2f MiB, ms=%.2f MiB",
+                  n_experts, eff, K,
+                  total_packed / (1024.0 * 1024.0),
+                  total_ms / (1024.0 * 1024.0));
+}
+
+void free_nvfp4_moe_result(NvFP4MoEQuantResult& result)
+{
+    if (result.packed_data) {
+        cudaFree(result.packed_data);
+        result.packed_data = nullptr;
+    }
+    if (result.micro_scales) {
+        cudaFree(result.micro_scales);
+        result.micro_scales = nullptr;
+    }
+    if (result.tensor_scales) {
+        cudaFree(result.tensor_scales);
+        result.tensor_scales = nullptr;
+    }
+    result.n_experts = 0;
+    result.N = 0;
+    result.K = 0;
+    result.expert_stride_packed = 0;
+    result.expert_stride_ms = 0;
 }
 
 } // namespace imp

@@ -359,6 +359,150 @@ void gemv_nvfp4_residual(const NvFP4QuantResult& A, const half* x, half* y,
 }
 
 // ---------------------------------------------------------------------------
+// MoE NVFP4 GEMV: per-expert decode projections.
+// Grid: top_k * rows blocks, 128 threads.  Each block computes one row of
+// one expert's output.  FP16 input (no Q8_1 pre-quantization).
+// ---------------------------------------------------------------------------
+__global__ void __launch_bounds__(kKparThreads, 12)
+gemv_nvfp4_moe_decode_kernel(
+    const uint8_t* __restrict__ packed_data,
+    const uint8_t* __restrict__ micro_scales,
+    const float*   __restrict__ tensor_scales,
+    const int32_t* __restrict__ expert_indices,
+    const half*    __restrict__ x,
+    half*          __restrict__ y,
+    int rows, int K,
+    size_t expert_stride_packed,
+    size_t expert_stride_ms,
+    int x_stride,
+    int blocks_per_expert)
+{
+    const int expert_slot = blockIdx.x / blocks_per_expert;
+    const int row = blockIdx.x % blocks_per_expert;
+    if (row >= rows) return;
+
+    const int tid = threadIdx.x;
+    const int n_mb = K / kMicroBlockSize;
+    const int expert_id = expert_indices[expert_slot];
+
+    const uint8_t* W = packed_data + (size_t)expert_id * expert_stride_packed;
+    const uint8_t* MS = micro_scales + (size_t)expert_id * expert_stride_ms;
+    float ts = tensor_scales[expert_id];
+    const half* xi = x + (size_t)expert_slot * x_stride;
+
+    __shared__ SmemKpar smem;
+    init_lut(smem.lut, tid);
+    __syncthreads();
+
+    float acc = gemv_nvfp4_row(
+        W + (size_t)row * (K / 2),
+        MS + (size_t)row * n_mb,
+        ts, xi, n_mb, tid, smem.lut);
+
+    float total = reduce_kpar(acc, tid, smem.warp_sums);
+    if (tid == 0) y[(size_t)expert_slot * rows + row] = __float2half(total);
+}
+
+// ---------------------------------------------------------------------------
+// Fused gate+up MoE NVFP4 GEMV.
+// Grid: dim3(top_k * rows, 2).  blockIdx.y=0 → gate, blockIdx.y=1 → up.
+// ---------------------------------------------------------------------------
+__global__ void __launch_bounds__(kKparThreads, 12)
+gemv_nvfp4_moe_gate_up_fused_kernel(
+    const uint8_t* __restrict__ gate_packed,
+    const uint8_t* __restrict__ gate_ms,
+    const float*   __restrict__ gate_ts,
+    const uint8_t* __restrict__ up_packed,
+    const uint8_t* __restrict__ up_ms,
+    const float*   __restrict__ up_ts,
+    const int32_t* __restrict__ expert_indices,
+    const half*    __restrict__ x,
+    half*          __restrict__ y_gate,
+    half*          __restrict__ y_up,
+    int rows, int K,
+    size_t expert_stride_packed,
+    size_t expert_stride_ms,
+    int blocks_per_expert)
+{
+    const int expert_slot = blockIdx.x / blocks_per_expert;
+    const int row = blockIdx.x % blocks_per_expert;
+    if (row >= rows) return;
+
+    const int tid = threadIdx.x;
+    const int n_mb = K / kMicroBlockSize;
+    const int expert_id = expert_indices[expert_slot];
+    const bool is_up = (blockIdx.y == 1);
+
+    const uint8_t* W = is_up
+        ? (up_packed + (size_t)expert_id * expert_stride_packed)
+        : (gate_packed + (size_t)expert_id * expert_stride_packed);
+    const uint8_t* MS = is_up
+        ? (up_ms + (size_t)expert_id * expert_stride_ms)
+        : (gate_ms + (size_t)expert_id * expert_stride_ms);
+    float ts = is_up ? up_ts[expert_id] : gate_ts[expert_id];
+    half* out = is_up ? y_up : y_gate;
+
+    // x_stride = 0 (shared input for gate+up)
+    const half* xi = x;
+
+    __shared__ SmemKpar smem;
+    init_lut(smem.lut, tid);
+    __syncthreads();
+
+    float acc = gemv_nvfp4_row(
+        W + (size_t)row * (K / 2),
+        MS + (size_t)row * n_mb,
+        ts, xi, n_mb, tid, smem.lut);
+
+    float total = reduce_kpar(acc, tid, smem.warp_sums);
+    if (tid == 0) out[(size_t)expert_slot * rows + row] = __float2half(total);
+}
+
+// ---------------------------------------------------------------------------
+// MoE NVFP4 host launchers
+// ---------------------------------------------------------------------------
+
+void gemv_nvfp4_moe_decode(const NvFP4MoEQuantResult& w,
+                            const int32_t* expert_indices, const half* x, half* y,
+                            int rows, int K, int x_stride, int top_k,
+                            cudaStream_t stream)
+{
+    int total_blocks = top_k * rows;
+    gemv_nvfp4_moe_decode_kernel<<<total_blocks, kKparThreads, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(w.packed_data),
+        reinterpret_cast<const uint8_t*>(w.micro_scales),
+        w.tensor_scales,
+        expert_indices, x, y,
+        rows, K,
+        w.expert_stride_packed,
+        w.expert_stride_ms,
+        x_stride, rows);
+}
+
+void gemv_nvfp4_moe_gate_up_fused(const NvFP4MoEQuantResult& gate,
+                                    const NvFP4MoEQuantResult& up,
+                                    const int32_t* expert_indices, const half* x,
+                                    half* y_gate, half* y_up,
+                                    int rows, int K, int top_k,
+                                    cudaStream_t stream)
+{
+    dim3 grid(top_k * rows, 2);
+    gemv_nvfp4_moe_gate_up_fused_kernel<<<grid, kKparThreads, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(gate.packed_data),
+        reinterpret_cast<const uint8_t*>(gate.micro_scales),
+        gate.tensor_scales,
+        reinterpret_cast<const uint8_t*>(up.packed_data),
+        reinterpret_cast<const uint8_t*>(up.micro_scales),
+        up.tensor_scales,
+        expert_indices, x,
+        y_gate, y_up,
+        rows, K,
+        gate.expert_stride_packed,
+        gate.expert_stride_ms,
+        rows);
+}
+
+// ---------------------------------------------------------------------------
 // Tensor-based launcher (existing API, delegates to K-parallel kernel)
 // ---------------------------------------------------------------------------
 void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y,

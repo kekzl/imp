@@ -298,6 +298,11 @@ private:
     size_t nvfp4_cache_bytes_ = 0;
     int use_nvfp4_decode_ = 0;
 
+    // NVFP4 MoE expert weight cache: per-expert NVFP4 quantization.
+    // Keyed by packed expert tensor data pointer (expert_gate_packed.data etc.)
+    std::unordered_map<const void*, NvFP4MoEQuantResult> nvfp4_moe_cache_;
+    size_t nvfp4_moe_cache_bytes_ = 0;
+
     // Fused KV weight cache: concatenated [wk; wv] as [2*nkv*hd, d_model] FP16.
     // Enables strided batched GEMM for K+V in a single cuBLAS call during prefill.
     // Key = layer index. Only populated for layers where both wk/wv are FP16-cached.
