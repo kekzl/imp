@@ -65,10 +65,10 @@ The entire codebase (~30,000 lines of C++/CUDA) was written through conversation
 - **Model formats:** GGUF and SafeTensors
 - **Architectures:** LLaMA, Mistral, Mixtral, DeepSeek, Qwen3, Qwen3-MoE, Gemma-3, Nemotron-H (Mamba2 + Attention + MoE)
 - **Quantization:** Q4_0, Q4_K_M, Q5_K, Q6_K, Q8_0, FP8 E4M3, NVFP4, INT8
-- **Attention dispatch:** scalar Flash Attention 2 (any GPU) &rarr; WMMA (sm_90+) &rarr; TCGEN05 (sm_120+)
+- **Attention dispatch:** scalar Flash Attention 2 (any GPU) &rarr; WMMA (sm_90+) &rarr; WMMA 8-warp (sm_120+); prefill uses CUTLASS Hopper FMHA (WGMMA + TMA) on sm_90+
 - **KV cache:** paged block allocation (block size 16), LRU eviction, prefix caching, FP16/FP8 storage
 - **Decode optimizations:** CUDA Graphs, PDL, fused RMSNorm+Q8_1 quantize, fused QKV GEMV, dp4a-accelerated GEMV, multi-block argmax
-- **Prefill optimizations:** FP16 weight cache with VRAM budgeting, batched K/V GEMM, cuBLAS batched attention, fused O-projection+residual
+- **Prefill optimizations:** CUTLASS Hopper FMHA (WGMMA + TMA), FP16 weight cache with VRAM budgeting, batched K/V GEMM, cuBLAS batched attention, fused O-projection+residual
 - **Continuous batching:** scheduler with prefill/decode separation
 - **Speculative decoding:** draft model + target verification with stochastic acceptance
 - **Green Contexts:** SM partitioning for concurrent prefill/decode workloads
@@ -267,11 +267,12 @@ Runtime dispatch based on GPU compute capability:
 
 | GPU | Kernel | Path |
 |-----|--------|------|
-| sm_120+ (Blackwell) | TCGEN05 systolic attention | `attention_blackwell.cu` |
+| sm_90+ (prefill) | CUTLASS Hopper FMHA (WGMMA + TMA) | `attention_cutlass_fmha.cu` |
+| sm_120+ (Blackwell) | WMMA 8-warp attention | `attention_blackwell.cu` |
 | sm_90+ (Hopper) | WMMA tensor-core attention | `attention_tc.cu` |
 | Any | Scalar Flash Attention 2 | `attention.cu` |
 
-Prefill also supports a cuBLAS batched-GEMM attention path (`attention_cublas.cu`) for small-to-medium sequences.
+CUTLASS FMHA uses WGMMA + TMA for highest prefill throughput on sm_90+. Falls back to WMMA for unsupported configurations (softcap, sliding window) or when disabled via `IMP_NO_CUTLASS_FMHA=1`. Prefill also supports a cuBLAS batched-GEMM attention path (`attention_cublas.cu`) for small-to-medium sequences.
 
 ### Decode Kernel Fusion
 

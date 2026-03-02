@@ -68,10 +68,9 @@ cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 ### Dependencies
 
 - **CUDA Toolkit 13.1+** (required) — cudart, cuda_driver, cublas, cublasLt
+- **CUTLASS v4.4.1** (fetched via FetchContent) — Hopper FMHA (Example 88), MoE Grouped GEMM
 - **Google Test v1.14.0** (fetched via FetchContent when tests enabled)
 - **pthread** (linked privately)
-
-No other external dependencies. The project is self-contained.
 
 ### Hardware Constraints
 
@@ -193,8 +192,9 @@ Benchmarks for GEMM, attention, and end-to-end inference.
 
 ### Attention Dispatch
 Runtime dispatch based on GPU compute capability:
-- **sm_120+ (Blackwell)**: TCGEN05 systolic attention (`attention_blackwell.cu`)
-- **sm_90+ (Hopper)**: WMMA tensor-core attention (`attention_tc.cu`)
+- **Prefill (sm_90+)**: CUTLASS Hopper FMHA (`attention_cutlass_fmha.cu`) — WGMMA + TMA, falls back to WMMA if unsupported config (softcap, sliding window) or disabled via `IMP_NO_CUTLASS_FMHA=1`
+- **Decode / Fallback sm_120+ (Blackwell)**: WMMA 8-warp attention (`attention_blackwell.cu`)
+- **Decode / Fallback sm_90+ (Hopper)**: WMMA tensor-core attention (`attention_tc.cu`)
 - **< sm_90**: Scalar Flash Attention 2 (`attention.cu`)
 
 ### Quantization Support
