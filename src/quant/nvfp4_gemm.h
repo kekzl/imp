@@ -45,4 +45,24 @@ void gemv_nvfp4_gate_up_fused(const NvFP4QuantResult& wg, const NvFP4QuantResult
 void gemv_nvfp4_residual(const NvFP4QuantResult& A, const half* x, half* y,
                           const half* residual, int M, int K, cudaStream_t stream);
 
+// ---------------------------------------------------------------------------
+// MoE NVFP4 GEMV: per-expert decode projections.
+// FP16 input (no Q8_1 pre-quantization needed).
+// ---------------------------------------------------------------------------
+
+// MoE decode GEMV: y[expert_slot, rows] = W[expert_id, :, :] @ x[expert_slot, :]
+// x_stride: 0 = shared input across experts, K = per-expert input.
+void gemv_nvfp4_moe_decode(const NvFP4MoEQuantResult& w,
+                            const int32_t* expert_indices, const half* x, half* y,
+                            int rows, int K, int x_stride, int top_k,
+                            cudaStream_t stream);
+
+// Fused gate+up MoE GEMV: two weight matrices, shared input, separate outputs.
+void gemv_nvfp4_moe_gate_up_fused(const NvFP4MoEQuantResult& gate,
+                                    const NvFP4MoEQuantResult& up,
+                                    const int32_t* expert_indices, const half* x,
+                                    half* y_gate, half* y_up,
+                                    int rows, int K, int top_k,
+                                    cudaStream_t stream);
+
 } // namespace imp
