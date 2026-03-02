@@ -5,6 +5,7 @@
 #include "memory/ssm_state.h"
 #include "memory/layer_offload.h"
 #include "compute/moe_routing.h"
+#include "compute/json_constrain.h"
 #include "quant/nvfp4_quant.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
@@ -65,6 +66,13 @@ struct InferenceState {
     // Token history for penalty computation (device pointer, owned by engine)
     const int32_t* penalty_tokens = nullptr;
     int n_penalty_tokens = 0;
+
+    // Logprobs: when true, forward() copies logits to h_logits_pinned_ for CPU extraction
+    bool logprobs = false;
+    int top_logprobs = 0;
+
+    // JSON mode: when non-null, apply logit mask before sampling
+    JsonConstrainer* json_constrainer = nullptr;
 };
 
 // Imperative executor for the transformer forward pass.
@@ -157,6 +165,12 @@ public:
 
     // Pre-allocated device buffer for sampling output (stable address for CUDA graph).
     int32_t* d_sample_result() const { return d_sample_result_; }
+
+    // Pinned host buffer for logprobs extraction.
+    float* h_logits_pinned() const { return h_logits_pinned_; }
+
+    // Ensure pinned logits buffer is allocated for the given vocab size.
+    void ensure_logits_pinned(int vocab_size);
 
 private:
     const Model* model_ = nullptr;
@@ -315,6 +329,10 @@ private:
 
     // Pre-allocated sampling result buffers (avoids cudaMalloc/cudaFree per token).
     int32_t* d_sample_result_ = nullptr;  // device buffer for argmax/sample kernel output
+
+    // Pinned host buffer for logprobs extraction (D2H copy of logits)
+    float* h_logits_pinned_ = nullptr;  // [vocab_size] pinned host memory
+    int h_logits_pinned_size_ = 0;      // vocab_size used for allocation
 
     // MMVQ (dp4a) scratch buffers for quantized input vector.
     // Allocated once during init, reused each layer for decode GEMV.

@@ -1274,4 +1274,72 @@ int32_t sample_mirostat_v2(const Tensor& logits, float temperature,
                                     seed, d_result, false, stream);
 }
 
+// ============================================================================
+// CPU-side logprob computation
+// ============================================================================
+
+void compute_logprobs_cpu(const float* logits, int vocab_size,
+                          int32_t sampled_token, int top_n,
+                          LogprobResult* out) {
+    // 1. Find max for numerical stability
+    float max_val = -FLT_MAX;
+    for (int i = 0; i < vocab_size; i++) {
+        if (logits[i] > max_val) max_val = logits[i];
+    }
+
+    // 2. Compute log-sum-exp
+    double sum_exp = 0.0;
+    for (int i = 0; i < vocab_size; i++) {
+        sum_exp += std::exp(static_cast<double>(logits[i]) - static_cast<double>(max_val));
+    }
+    float log_sum_exp = static_cast<float>(std::log(sum_exp)) + max_val;
+
+    // 3. Extract sampled token's logprob
+    out->sampled_logprob = logits[sampled_token] - log_sum_exp;
+
+    // 4. Top-N via partial sort with min-heap
+    out->top.clear();
+    if (top_n <= 0) return;
+
+    // Use a simple approach: collect all (logprob, token) and partial sort
+    // For vocab ~150K and top_n <= 20, this is fast enough (~0.3ms)
+    struct Entry {
+        float logprob;
+        int32_t token;
+        bool operator<(const Entry& o) const { return logprob > o.logprob; }  // max-heap order
+    };
+
+    // Min-heap of size top_n to track the top-N largest
+    std::vector<Entry> heap;
+    heap.reserve(top_n + 1);
+
+    for (int i = 0; i < vocab_size; i++) {
+        float lp = logits[i] - log_sum_exp;
+        if (static_cast<int>(heap.size()) < top_n) {
+            heap.push_back({lp, i});
+            std::push_heap(heap.begin(), heap.end(), [](const Entry& a, const Entry& b) {
+                return a.logprob > b.logprob;  // min-heap: smallest logprob at top
+            });
+        } else if (lp > heap[0].logprob) {
+            std::pop_heap(heap.begin(), heap.end(), [](const Entry& a, const Entry& b) {
+                return a.logprob > b.logprob;
+            });
+            heap.back() = {lp, i};
+            std::push_heap(heap.begin(), heap.end(), [](const Entry& a, const Entry& b) {
+                return a.logprob > b.logprob;
+            });
+        }
+    }
+
+    // Sort descending by logprob
+    std::sort(heap.begin(), heap.end(), [](const Entry& a, const Entry& b) {
+        return a.logprob > b.logprob;
+    });
+
+    out->top.reserve(heap.size());
+    for (const auto& e : heap) {
+        out->top.push_back({e.token, e.logprob});
+    }
+}
+
 } // namespace imp

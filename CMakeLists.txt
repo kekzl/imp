@@ -120,6 +120,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/embedding.cu
     src/compute/sampling.cu
     src/compute/softmax.cu
+    src/compute/json_constrain.cu
     src/compute/moe_routing.cu
     src/compute/reduce.cu
     src/compute/ssm.cu

@@ -1687,6 +1687,11 @@ void GraphExecutor::free_buffers() {
         cudaFree(d_sample_result_);
         d_sample_result_ = nullptr;
     }
+    if (h_logits_pinned_) {
+        cudaFreeHost(h_logits_pinned_);
+        h_logits_pinned_ = nullptr;
+        h_logits_pinned_size_ = 0;
+    }
     if (q8_1_buf_) {
         cudaFree(q8_1_buf_);
         q8_1_buf_ = nullptr;
@@ -5126,6 +5131,13 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     }
 }
 
+void GraphExecutor::ensure_logits_pinned(int vocab_size) {
+    if (h_logits_pinned_ && h_logits_pinned_size_ >= vocab_size) return;
+    if (h_logits_pinned_) cudaFreeHost(h_logits_pinned_);
+    cudaHostAlloc(&h_logits_pinned_, vocab_size * sizeof(float), cudaHostAllocDefault);
+    h_logits_pinned_size_ = vocab_size;
+}
+
 int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream) {
     Tensor logits;
     forward_logits(state, logits, stream);
@@ -5170,6 +5182,11 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
                           state.dry_multiplier, state.dry_base,
                           state.dry_allowed_length, state.dry_penalty_last_n,
                           stream);
+    }
+
+    // JSON mode: apply logit mask to constrain output to valid JSON
+    if (state.json_constrainer) {
+        state.json_constrainer->apply_mask(logits_ptr, vocab_size, stream);
     }
 
     int32_t token;

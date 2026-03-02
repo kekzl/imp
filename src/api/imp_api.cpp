@@ -99,6 +99,9 @@ ImpGenerateParams imp_generate_params_default(void) {
     params.mirostat_eta = 0.1f;
     params.apply_chat_template = 1;
     params.ignore_eos = 0;
+    params.logprobs = 0;
+    params.top_logprobs = 0;
+    params.json_mode = 0;
     return params;
 }
 
@@ -588,6 +591,9 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params,
         req->mirostat = params->mirostat;
         req->mirostat_tau = params->mirostat_tau;
         req->mirostat_eta = params->mirostat_eta;
+        req->logprobs = (params->logprobs != 0);
+        req->top_logprobs = std::max(0, std::min(20, params->top_logprobs));
+        req->json_mode = (params->json_mode != 0);
         // Initialize mu on first decode step with mirostat enabled
         if (params->mirostat == 2 && req->mirostat_mu == 0.0f)
             req->mirostat_mu = 2.0f * params->mirostat_tau;

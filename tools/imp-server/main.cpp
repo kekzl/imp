@@ -64,12 +64,16 @@ static int64_t unix_timestamp() {
 static std::string sse_chunk(const std::string& id, int64_t created,
                              const std::string& model,
                              const json& delta,
-                             const char* finish_reason) {
+                             const char* finish_reason,
+                             const json& logprobs = nullptr) {
     json choice = {
         {"index", 0},
         {"delta", delta},
         {"finish_reason", finish_reason ? json(finish_reason) : json(nullptr)}
     };
+    if (!logprobs.is_null()) {
+        choice["logprobs"] = logprobs;
+    }
     json obj = {
         {"id", id},
         {"object", "chat.completion.chunk"},
@@ -140,6 +144,36 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
     int mirostat = body.value("mirostat", 0);
     float mirostat_tau = body.value("mirostat_tau", 5.0f);
     float mirostat_eta = body.value("mirostat_eta", 0.1f);
+
+    // Parse stop sequences (string or array of up to 4 strings)
+    std::vector<std::string> stop_sequences;
+    if (body.contains("stop") && !body["stop"].is_null()) {
+        if (body["stop"].is_string()) {
+            stop_sequences.push_back(body["stop"].get<std::string>());
+        } else if (body["stop"].is_array()) {
+            for (const auto& s : body["stop"]) {
+                if (s.is_string()) {
+                    stop_sequences.push_back(s.get<std::string>());
+                    if (stop_sequences.size() >= 4) break;
+                }
+            }
+        }
+    }
+    size_t max_stop_len = 0;
+    for (const auto& s : stop_sequences) max_stop_len = std::max(max_stop_len, s.size());
+
+    // Parse logprobs parameters
+    bool req_logprobs = body.value("logprobs", false);
+    int top_logprobs = body.value("top_logprobs", 0);
+    if (top_logprobs < 0) top_logprobs = 0;
+    if (top_logprobs > 20) top_logprobs = 20;
+
+    // Parse response_format for JSON mode
+    bool json_mode = false;
+    if (body.contains("response_format") && body["response_format"].is_object()) {
+        std::string fmt_type = body["response_format"].value("type", "text");
+        if (fmt_type == "json_object") json_mode = true;
+    }
 
     // Convert JSON messages to ChatMessage vector
     std::vector<imp::ChatMessage> chat_msgs;
@@ -227,6 +261,9 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
     params.mirostat = mirostat;
     params.mirostat_tau = mirostat_tau;
     params.mirostat_eta = mirostat_eta;
+    params.logprobs = req_logprobs ? 1 : 0;
+    params.top_logprobs = top_logprobs;
+    params.json_mode = json_mode ? 1 : 0;
 
     std::string comp_id = make_completion_id(state);
     int64_t created = unix_timestamp();
@@ -238,8 +275,12 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
 
         res.set_chunked_content_provider(
             "text/event-stream",
-            [&state, params, comp_id, created, max_tokens, n_prompt_tokens, t_start](
+            [&state, params, comp_id, created, max_tokens, n_prompt_tokens, t_start,
+             stop_sequences, max_stop_len, req_logprobs](
                 size_t /*offset*/, httplib::DataSink& sink) -> bool {
+
+                // Save active request ref for logprobs access
+                auto active_req = state.ctx->active_request;
 
                 // Send initial chunk with role
                 json role_delta = {{"role", "assistant"}};
@@ -249,6 +290,22 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
 
                 int n_output_tokens = 0;
                 const char* finish = nullptr;
+
+                // Buffered output for stop sequence matching in streaming mode.
+                // We hold back text until we're sure it doesn't contain a stop match.
+                std::string pending_text;
+                bool text_stop_matched = false;
+
+                // Helper: flush confirmed text up to a byte position
+                auto flush_text = [&](size_t up_to) {
+                    if (up_to == 0) return true;
+                    std::string to_send = pending_text.substr(0, up_to);
+                    pending_text = pending_text.substr(up_to);
+                    json content_delta = {{"content", to_send}};
+                    std::string sse = sse_chunk(comp_id, created, state.model_name,
+                                                content_delta, nullptr);
+                    return sink.write(sse.data(), sse.size());
+                };
 
                 for (int step = 0; step < max_tokens; step++) {
                     int32_t token = 0;
@@ -277,12 +334,72 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                     n_output_tokens++;
                     std::string piece = state.tok->decode_token(token);
 
-                    json content_delta = {{"content", piece}};
-                    std::string chunk = sse_chunk(comp_id, created, state.model_name,
-                                                  content_delta, nullptr);
-                    if (!sink.write(chunk.data(), chunk.size())) {
-                        return false;  // Client disconnected
+                    if (stop_sequences.empty()) {
+                        // No stop sequences: stream directly
+                        json content_delta = {{"content", piece}};
+                        // Build per-token logprobs if requested
+                        json lp_chunk = nullptr;
+                        if (req_logprobs && active_req) {
+                            size_t lp_idx = n_output_tokens - 1;
+                            if (lp_idx < active_req->output_logprobs.size()) {
+                                const auto& lp = active_req->output_logprobs[lp_idx];
+                                json top_arr = json::array();
+                                for (const auto& t : lp.top) {
+                                    top_arr.push_back({
+                                        {"token", t.text},
+                                        {"logprob", t.logprob},
+                                        {"bytes", nullptr}
+                                    });
+                                }
+                                lp_chunk = {{"content", json::array({
+                                    {{"token", lp.text},
+                                     {"logprob", lp.logprob},
+                                     {"bytes", nullptr},
+                                     {"top_logprobs", top_arr}}
+                                })}};
+                            }
+                        }
+                        std::string chunk = sse_chunk(comp_id, created, state.model_name,
+                                                      content_delta, nullptr, lp_chunk);
+                        if (!sink.write(chunk.data(), chunk.size())) {
+                            return false;
+                        }
+                    } else {
+                        // Buffer text and check for stop matches
+                        pending_text += piece;
+
+                        // Check for complete stop match
+                        bool stop_found = false;
+                        for (const auto& stop : stop_sequences) {
+                            auto pos = pending_text.find(stop);
+                            if (pos != std::string::npos) {
+                                // Flush text before the stop string
+                                if (!flush_text(pos)) return false;
+                                stop_found = true;
+                                break;
+                            }
+                        }
+                        if (stop_found) {
+                            text_stop_matched = true;
+                            finish = "stop";
+                            break;
+                        }
+
+                        // Flush text that can't be part of a partial stop match.
+                        // Keep only the last (max_stop_len - 1) chars as potential prefix.
+                        if (pending_text.size() > max_stop_len) {
+                            size_t safe = pending_text.size() - max_stop_len + 1;
+                            if (!flush_text(safe)) return false;
+                        }
                     }
+                }
+
+                // Flush any remaining buffered text (skip if text-level stop was matched)
+                if (!pending_text.empty() && !text_stop_matched) {
+                    json content_delta = {{"content", pending_text}};
+                    std::string sse = sse_chunk(comp_id, created, state.model_name,
+                                                content_delta, nullptr);
+                    sink.write(sse.data(), sse.size());
                 }
 
                 if (!finish) finish = "length";
@@ -309,8 +426,11 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
         );
     } else {
         // Non-streaming: decode all tokens, return complete response
+        // Save request reference for logprobs access (active_request gets cleared on finish)
+        auto active_req = state.ctx->active_request;
         std::vector<int32_t> output_ids;
         const char* finish = nullptr;
+        std::string output_text;  // accumulated output for stop matching
 
         for (int step = 0; step < max_tokens; step++) {
             int32_t token = 0;
@@ -336,12 +456,31 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
             }
 
             output_ids.push_back(token);
+
+            // Check text-level stop sequences
+            if (!stop_sequences.empty()) {
+                output_text += state.tok->decode_token(token);
+                bool stop_found = false;
+                for (const auto& stop : stop_sequences) {
+                    auto pos = output_text.find(stop);
+                    if (pos != std::string::npos) {
+                        output_text = output_text.substr(0, pos);
+                        stop_found = true;
+                        break;
+                    }
+                }
+                if (stop_found) {
+                    finish = "stop";
+                    break;
+                }
+            }
         }
 
         if (!finish) finish = "length";
 
         int n_output_tokens = static_cast<int>(output_ids.size());
-        std::string content = state.tok->decode(output_ids);
+        std::string content = !stop_sequences.empty()
+            ? output_text : state.tok->decode(output_ids);
 
         // Log request
         auto t_end = std::chrono::high_resolution_clock::now();
@@ -349,18 +488,46 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
         fprintf(stderr, "[%s] %d prompt + %d completion tokens, %.1f ms\n",
                 comp_id.c_str(), n_prompt_tokens, n_output_tokens, ms);
 
+        // Build logprobs object if requested
+        json logprobs_obj = nullptr;
+        if (req_logprobs && active_req) {
+            const auto& lp_data = active_req->output_logprobs;
+            json content_logprobs = json::array();
+            for (size_t idx = 0; idx < lp_data.size() && idx < output_ids.size(); idx++) {
+                const auto& lp = lp_data[idx];
+                json top_arr = json::array();
+                for (const auto& t : lp.top) {
+                    top_arr.push_back({
+                        {"token", t.text},
+                        {"logprob", t.logprob},
+                        {"bytes", nullptr}
+                    });
+                }
+                content_logprobs.push_back({
+                    {"token", lp.text},
+                    {"logprob", lp.logprob},
+                    {"bytes", nullptr},
+                    {"top_logprobs", top_arr}
+                });
+            }
+            logprobs_obj = {{"content", content_logprobs}};
+        }
+
+        json choice = {
+            {"index", 0},
+            {"message", {{"role", "assistant"}, {"content", content}}},
+            {"finish_reason", finish}
+        };
+        if (!logprobs_obj.is_null()) {
+            choice["logprobs"] = logprobs_obj;
+        }
+
         json response = {
             {"id", comp_id},
             {"object", "chat.completion"},
             {"created", created},
             {"model", state.model_name},
-            {"choices", json::array({
-                {
-                    {"index", 0},
-                    {"message", {{"role", "assistant"}, {"content", content}}},
-                    {"finish_reason", finish}
-                }
-            })},
+            {"choices", json::array({choice})},
             {"usage", {
                 {"prompt_tokens", n_prompt_tokens},
                 {"completion_tokens", n_output_tokens},
