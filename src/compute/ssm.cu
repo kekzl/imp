@@ -196,24 +196,33 @@ void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in,
 }
 
 // ---------------------------------------------------------------------------
-// Mamba2 SSM scan — fused multi-token kernel
+// Mamba2 SSM scan — optimized fused multi-token kernel
 // ---------------------------------------------------------------------------
 //
-// One block per head. Threads iterate over head_dim_ssm.
-// The token loop runs INSIDE the kernel to avoid per-token launch overhead.
-// For prefill (n_tokens >> 1), this reduces kernel launches from n_tokens to 1.
+// One block per head. Threads organized as (d_tid, s_tid) to parallelize
+// both head_dim_ssm and state_size dimensions.
+//
+// Key optimizations over v1:
+// 1. Transposed h_state layout: [n_heads, state_size, head_dim_ssm]
+//    Adjacent d-threads access adjacent memory → coalesced reads/writes.
+// 2. State-dimension parallelism: s_tiles threads per d-value reduce the
+//    inner loop from state_size to state_size/s_tiles iterations.
+// 3. Optional fused gating: when z is non-null, computes y * SiLU(z)
+//    inline, eliminating 2 kernel launches (silu_inplace + elementwise_mul).
 //
 // Mamba2 scan equations (discrete-time):
 //   dt_h = softplus(dt_raw[h] + dt_bias[h])
 //   a_bar = exp(dt_h * A_log[h])
 //   For each d in [0, head_dim_ssm):
 //     For each s in [0, state_size):
-//       h_state[h,d,s] = a_bar * h_state[h,d,s] + dt_h * x[h*hd+d] * B[g*S+s]
-//     y[h*hd+d] = sum_s(h_state[h,d,s] * C[g*S+s]) + D[h] * x[h*hd+d]
+//       h_state[h,s,d] = a_bar * h_state[h,s,d] + dt_h * x[h*hd+d] * B[g*S+s]
+//     y[h*hd+d] = sum_s(h_state[h,s,d] * C[g*S+s]) + D[h] * x[h*hd+d]
+//   If z provided: y[h*hd+d] *= SiLU(z[h*hd+d])
 //
-// Template parameter H_FP16: when true, h_state is stored as FP16 (loaded/stored
-// via __half2float/__float2half) but all computation remains in FP32.
-template <bool H_FP16>
+// Template parameters:
+//   H_FP16: h_state stored as FP16 (all compute in FP32)
+//   FUSE_GATE: fuse y * SiLU(z) into output
+template <bool H_FP16, bool FUSE_GATE>
 __global__ void ssm_scan_kernel(
     const half* __restrict__ x,          // [n_tokens, inner_size]
     const half* __restrict__ B_in,       // [n_tokens, n_groups * state_size]
@@ -222,9 +231,11 @@ __global__ void ssm_scan_kernel(
     const float* __restrict__ A_log,     // [n_heads]
     const float* __restrict__ D_skip,    // [n_heads]
     const float* __restrict__ dt_bias,   // [n_heads]
-    void* __restrict__ h_state,          // [n_heads, head_dim_ssm, state_size]
+    void* __restrict__ h_state,          // [n_heads, state_size, head_dim_ssm] (transposed)
     half* __restrict__ y,                // [n_tokens, inner_size]
-    int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups)
+    const half* __restrict__ z,          // [n_tokens, inner_size] (gate, only if FUSE_GATE)
+    int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
+    int s_tiles)
 {
     int h = blockIdx.x;
     if (h >= n_heads) return;
@@ -237,41 +248,85 @@ __global__ void ssm_scan_kernel(
     int inner_size = n_heads * head_dim_ssm;
     int BC_size = n_groups * state_size;
 
-    int64_t h_offset = static_cast<int64_t>(h) * head_dim_ssm * state_size;
+    // Thread indexing: d_tid selects head dimension, s_tid selects state chunk
+    int d_tid = threadIdx.x % head_dim_ssm;
+    int s_tid = threadIdx.x / head_dim_ssm;
+    int s_chunk = (state_size + s_tiles - 1) / s_tiles;
+    int s_start = s_tid * s_chunk;
+    int s_end = s_start + s_chunk;
+    if (s_end > state_size) s_end = state_size;
+
+    // h_state transposed layout: [n_heads, state_size, head_dim_ssm]
+    // For coalesced access: h_state[h, s, d] = base[h * S * hd + s * hd + d]
+    int64_t h_base = static_cast<int64_t>(h) * state_size * head_dim_ssm;
+
+    // Shared memory for y_acc reduction across s-tiles: [head_dim_ssm * s_tiles]
+    extern __shared__ float smem[];
 
     for (int t = 0; t < n_tokens; t++) {
         const half* B_g = B_in + t * BC_size + g * state_size;
         const half* C_g = C_in + t * BC_size + g * state_size;
 
-        // Compute dt for this token
+        // Compute dt for this token (shared across all threads in this head)
         float dt_val = __half2float(dt_raw[t * n_heads + h]) + dt_b;
         dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
         float a_bar = expf(dt_val * a_log_h);
 
-        for (int d = threadIdx.x; d < head_dim_ssm; d += blockDim.x) {
-            float x_val = __half2float(x[t * inner_size + h * head_dim_ssm + d]);
-            int64_t state_off = h_offset + d * state_size;
+        float x_val = __half2float(x[t * inner_size + h * head_dim_ssm + d_tid]);
 
-            float y_acc = 0.0f;
-            for (int s = 0; s < state_size; s++) {
-                float b_s = __half2float(B_g[s]);
-                float c_s = __half2float(C_g[s]);
-                float h_old;
-                if constexpr (H_FP16) {
-                    h_old = __half2float(static_cast<half*>(h_state)[state_off + s]);
-                } else {
-                    h_old = static_cast<float*>(h_state)[state_off + s];
+        float y_partial = 0.0f;
+        for (int s = s_start; s < s_end; s++) {
+            float b_s = __half2float(B_g[s]);
+            float c_s = __half2float(C_g[s]);
+            // Transposed access: adjacent d-threads read adjacent memory (coalesced)
+            int64_t idx = h_base + static_cast<int64_t>(s) * head_dim_ssm + d_tid;
+            float h_old;
+            if constexpr (H_FP16) {
+                h_old = __half2float(static_cast<half*>(h_state)[idx]);
+            } else {
+                h_old = static_cast<float*>(h_state)[idx];
+            }
+            float h_new = a_bar * h_old + dt_val * x_val * b_s;
+            if constexpr (H_FP16) {
+                static_cast<half*>(h_state)[idx] = __float2half(h_new);
+            } else {
+                static_cast<float*>(h_state)[idx] = h_new;
+            }
+            y_partial += h_new * c_s;
+        }
+
+        if (s_tiles > 1) {
+            // Reduce y_partial across s-tiles for this d
+            smem[d_tid * s_tiles + s_tid] = y_partial;
+            __syncthreads();
+
+            for (int stride = s_tiles / 2; stride > 0; stride >>= 1) {
+                if (s_tid < stride) {
+                    smem[d_tid * s_tiles + s_tid] += smem[d_tid * s_tiles + s_tid + stride];
                 }
-                float h_new = a_bar * h_old + dt_val * x_val * b_s;
-                if constexpr (H_FP16) {
-                    static_cast<half*>(h_state)[state_off + s] = __float2half(h_new);
-                } else {
-                    static_cast<float*>(h_state)[state_off + s] = h_new;
-                }
-                y_acc += h_new * c_s;
+                __syncthreads();
             }
 
-            y[t * inner_size + h * head_dim_ssm + d] = __float2half(y_acc + d_val * x_val);
+            if (s_tid == 0) {
+                float y_val = smem[d_tid * s_tiles] + d_val * x_val;
+                if constexpr (FUSE_GATE) {
+                    float z_val = __half2float(z[t * inner_size + h * head_dim_ssm + d_tid]);
+                    z_val = z_val / (1.0f + expf(-z_val));
+                    y_val *= z_val;
+                }
+                y[t * inner_size + h * head_dim_ssm + d_tid] = __float2half(y_val);
+            }
+            // Barrier before next token iteration (all threads must finish writing smem)
+            if (n_tokens > 1) __syncthreads();
+        } else {
+            // s_tiles == 1: no reduction needed
+            float y_val = y_partial + d_val * x_val;
+            if constexpr (FUSE_GATE) {
+                float z_val = __half2float(z[t * inner_size + h * head_dim_ssm + d_tid]);
+                z_val = z_val / (1.0f + expf(-z_val));
+                y_val *= z_val;
+            }
+            y[t * inner_size + h * head_dim_ssm + d_tid] = __float2half(y_val);
         }
     }
 }
@@ -279,25 +334,42 @@ __global__ void ssm_scan_kernel(
 static void ssm_scan_launch(const half* x, const half* B, const half* C,
                              const half* dt, const float* A_log, const float* D,
                              const float* dt_bias, void* h_state, half* y,
+                             const half* z,
                              int n_tokens, int n_heads, int head_dim_ssm,
                              int state_size, int n_groups, DType h_dtype,
                              cudaStream_t stream) {
-    int threads = std::min(head_dim_ssm, 256);
-    if (h_dtype == DType::FP16) {
-        ssm_scan_kernel<true><<<n_heads, threads, 0, stream>>>(
-            x, B, C, dt, A_log, D, dt_bias, h_state, y,
-            n_tokens, n_heads, head_dim_ssm, state_size, n_groups);
+    // Pick s_tiles to maximize thread count per block (power of 2, up to 1024 threads)
+    int hd = std::max(head_dim_ssm, 1);
+    int max_s_tiles = std::min(state_size, 1024 / hd);
+    int s_tiles = 1;
+    while (s_tiles * 2 <= max_s_tiles) s_tiles *= 2;
+
+    int threads = hd * s_tiles;
+    size_t smem_bytes = (s_tiles > 1) ? static_cast<size_t>(hd) * s_tiles * sizeof(float) : 0;
+
+    bool fp16 = (h_dtype == DType::FP16);
+    bool fused = (z != nullptr);
+
+    #define SSM_SCAN_LAUNCH(H_FP16_V, FUSE_V) \
+        ssm_scan_kernel<H_FP16_V, FUSE_V><<<n_heads, threads, smem_bytes, stream>>>( \
+            x, B, C, dt, A_log, D, dt_bias, h_state, y, z, \
+            n_tokens, n_heads, head_dim_ssm, state_size, n_groups, s_tiles)
+
+    if (fp16) {
+        if (fused) SSM_SCAN_LAUNCH(true, true);
+        else       SSM_SCAN_LAUNCH(true, false);
     } else {
-        ssm_scan_kernel<false><<<n_heads, threads, 0, stream>>>(
-            x, B, C, dt, A_log, D, dt_bias, h_state, y,
-            n_tokens, n_heads, head_dim_ssm, state_size, n_groups);
+        if (fused) SSM_SCAN_LAUNCH(false, true);
+        else       SSM_SCAN_LAUNCH(false, false);
     }
+    #undef SSM_SCAN_LAUNCH
 }
 
 void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C,
                      const Tensor& dt, const Tensor& A_log, const Tensor& D,
                      const Tensor& dt_bias, void* h_state,
-                     Tensor& y, int n_heads, int head_dim_ssm,
+                     Tensor& y, const void* z,
+                     int n_heads, int head_dim_ssm,
                      int state_size, int n_groups,
                      DType h_dtype,
                      cudaStream_t stream) {
@@ -309,6 +381,7 @@ void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C,
                     static_cast<const float*>(D.data),
                     static_cast<const float*>(dt_bias.data),
                     h_state, static_cast<half*>(y.data),
+                    static_cast<const half*>(z),
                     1, n_heads, head_dim_ssm, state_size, n_groups,
                     h_dtype, stream);
 }
@@ -316,7 +389,8 @@ void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C,
 void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C,
                       const Tensor& dt, const Tensor& A_log, const Tensor& D,
                       const Tensor& dt_bias, void* h_state,
-                      Tensor& y, int n_tokens, int n_heads, int head_dim_ssm,
+                      Tensor& y, const void* z,
+                      int n_tokens, int n_heads, int head_dim_ssm,
                       int state_size, int n_groups,
                       DType h_dtype,
                       cudaStream_t stream) {
@@ -328,6 +402,7 @@ void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C,
                     static_cast<const float*>(D.data),
                     static_cast<const float*>(dt_bias.data),
                     h_state, static_cast<half*>(y.data),
+                    static_cast<const half*>(z),
                     n_tokens, n_heads, head_dim_ssm, state_size, n_groups,
                     h_dtype, stream);
 }
