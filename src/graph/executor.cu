@@ -820,11 +820,13 @@ static void gemm_dispatch(const Tensor& input, const Tensor& weight,
                     int N = static_cast<int>(it->second.N);
                     quantize_fp16_to_nvfp4_cutlass(input.data, cutlass_act_data,
                                                     cutlass_act_sf, M, K, stream);
+
                     bool ok = gemm_nvfp4_cutlass_sm120(
                         cutlass_act_data, cutlass_act_sf,
                         ct_it->second,
                         output.data, M, N, K,
-                        cutlass_workspace, cutlass_workspace_size, stream);
+                        cutlass_workspace, cutlass_workspace_size,
+                        stream);
                     if (ok) return;
                 }
             }
