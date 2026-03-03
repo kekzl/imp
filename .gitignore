@@ -36,6 +36,9 @@ __pycache__/
 *.ncu-rep
 *.qdrep
 
+# Benchmark results
+benchmarks/results/
+
 # Misc
 inspect_gguf.py
 test_detail.json

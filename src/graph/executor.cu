@@ -1403,9 +1403,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     }
 
     // cuBLAS attention S-matrix workspace: [n_heads, attn_seq, attn_seq] FP16
-    // Only useful for prefill; budget-capped to avoid eating VRAM needed for KV cache.
-    // For prefills longer than attn_seq, falls back to WMMA attention.
-    // When VRAM is tight (experts on host), skip entirely to preserve VRAM for FP16 cache.
+    // Used for prefill at medium sequence lengths (faster than WMMA flash attention
+    // due to higher TC utilization in cuBLAS GEMM). Falls back to flash attention
+    // for long sequences or when VRAM-constrained.
     if (!skip_batch_dequant) {
         int nh = cfg.n_heads;
         constexpr size_t kMaxAttnScoresMiB = 256;  // cap at 256 MiB
@@ -3016,12 +3016,14 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     float scale = 1.0f / std::sqrt(static_cast<float>(hd));
 
     if (state.is_prefill) {
-        // cuBLAS batched-GEMM attention for prefill (when S-matrix workspace is available).
-        // Use cuBLAS when sliding window doesn't actually restrict attention (n <= window).
         bool sliding_active = (layer_sliding_window > 0 && n > layer_sliding_window);
+
+        // cuBLAS QK^T materialization: faster than WMMA flash attention for medium
+        // prefill lengths (pp<=~1024) because cuBLAS GEMM kernels achieve higher TC
+        // utilization. Falls back to flash attention for long sequences, sliding
+        // window, or when the S-matrix buffer wasn't allocated (VRAM-constrained).
         if (attn_scores_buf_ && n <= static_cast<int>(attn_scores_.shape[1]) &&
             !sliding_active) {
-            // S workspace view: [n_heads, n, n]
             int64_t s_shape[3] = {static_cast<int64_t>(nh),
                                   static_cast<int64_t>(n),
                                   static_cast<int64_t>(n)};
@@ -3031,7 +3033,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                      nh, nkv, hd, scale, /*causal=*/true,
                                      cfg.attn_logit_softcap, stream);
         } else {
-            // Fallback: WMMA / scalar flash attention
+            // Flash attention: tiled O(n) memory, handles softcap + sliding window.
+            // Dispatch chain: CUTLASS FMHA → Blackwell WMMA → Hopper WMMA → scalar.
             int64_t q4s[4]  = {1, n, nh,  hd};
             int64_t kv4s[4] = {1, n, nkv, hd};
             int64_t o4s[4]  = {1, n, nh,  hd};
@@ -4879,7 +4882,8 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
 
             ssm_scan_decode(x_t, B_t, C_t, dt_t,
                             ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st,
-                            y_t, n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
+                            y_t, static_cast<const half*>(z_buf.data),
+                            n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
         } else {
             // Prefill: de-interleave x, B, C from xBC_out [n, conv_channels]
             // into contiguous buffers, then single fused kernel launch.
@@ -4931,13 +4935,12 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
 
             ssm_scan_prefill(x_all, B_all, C_all, dt_all,
                              ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st,
-                             y_all, n, n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
+                             y_all, static_cast<const half*>(z_buf.data),
+                             n, n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
         }
     }
 
-    // 8. Gating: y = y * SiLU(z)  [BEFORE GroupRMSNorm, per llama.cpp reference]
-    silu_inplace(z_buf, stream);
-    elementwise_mul(y_buf, z_buf, y_buf, stream);
+    // 8. Gating: y = y * SiLU(z) — fused into ssm_scan kernel above.
 
     // 9. Group RMSNorm on y  [AFTER gating, per llama.cpp reference]
     group_rmsnorm(y_buf, ly.ssm_norm_w, y_buf, n_groups, eps, stream);
