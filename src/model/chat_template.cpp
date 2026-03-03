@@ -11,8 +11,9 @@ const char* chat_template_family_name(ChatTemplateFamily family) {
         case ChatTemplateFamily::CHATML:   return "chatml";
         case ChatTemplateFamily::LLAMA2:   return "llama2";
         case ChatTemplateFamily::LLAMA3:   return "llama3";
-        case ChatTemplateFamily::NEMOTRON: return "nemotron";
-        case ChatTemplateFamily::GEMMA:    return "gemma";
+        case ChatTemplateFamily::NEMOTRON:    return "nemotron";
+        case ChatTemplateFamily::GEMMA:       return "gemma";
+        case ChatTemplateFamily::DEEPSEEK_R1: return "deepseek_r1";
     }
     return "unknown";
 }
@@ -31,6 +32,9 @@ ChatTemplateFamily ChatTemplate::detect_family(const std::string& jinja2_str) {
         return ChatTemplateFamily::LLAMA2;
     if (jinja2_str.find("<extra_id_0>") != std::string::npos)
         return ChatTemplateFamily::NEMOTRON;
+    // DeepSeek R1: fullwidth vertical bars ｜ (U+FF5C = \xef\xbd\x9c)
+    if (jinja2_str.find("\xef\xbd\x9c" "User" "\xef\xbd\x9c") != std::string::npos)
+        return ChatTemplateFamily::DEEPSEEK_R1;
 
     return ChatTemplateFamily::RAW;
 }
@@ -40,7 +44,7 @@ ChatTemplateFamily ChatTemplate::default_family_for_arch(ModelArch arch) {
         case ModelArch::LLAMA:          return ChatTemplateFamily::LLAMA3;
         case ModelArch::MISTRAL:        return ChatTemplateFamily::LLAMA2;
         case ModelArch::MIXTRAL:        return ChatTemplateFamily::LLAMA2;
-        case ModelArch::DEEPSEEK:       return ChatTemplateFamily::CHATML;
+        case ModelArch::DEEPSEEK:       return ChatTemplateFamily::DEEPSEEK_R1;
         case ModelArch::NEMOTRON_H_MOE: return ChatTemplateFamily::NEMOTRON;
         case ModelArch::QWEN3:          return ChatTemplateFamily::CHATML;
         case ModelArch::QWEN3_MOE:      return ChatTemplateFamily::CHATML;
@@ -57,6 +61,7 @@ ChatTemplateFamily ChatTemplate::parse_family(const std::string& name) {
     if (name == "llama3")   return ChatTemplateFamily::LLAMA3;
     if (name == "nemotron") return ChatTemplateFamily::NEMOTRON;
     if (name == "gemma")   return ChatTemplateFamily::GEMMA;
+    if (name == "deepseek_r1" || name == "deepseek-r1") return ChatTemplateFamily::DEEPSEEK_R1;
     return ChatTemplateFamily::RAW;
 }
 
@@ -147,6 +152,20 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer) {
             if (img_soft_token_id_ < 0) img_soft_token_id_ = 262144;
             break;
         }
+        case ChatTemplateFamily::DEEPSEEK_R1: {
+            ds_user_id_      = tokenizer.find_token("<\xef\xbd\x9c" "User\xef\xbd\x9c>");
+            ds_assistant_id_ = tokenizer.find_token("<\xef\xbd\x9c" "Assistant\xef\xbd\x9c>");
+            ds_eos_id_       = tokenizer.find_token("<\xef\xbd\x9c" "end\xe2\x96\x81" "of\xe2\x96\x81" "sentence\xef\xbd\x9c>");
+            if (ds_user_id_ < 0 || ds_assistant_id_ < 0 || ds_eos_id_ < 0) {
+                IMP_LOG_WARN("DeepSeek R1 template: missing tokens "
+                             "(user=%d, asst=%d, eos=%d), falling back to raw",
+                             ds_user_id_, ds_assistant_id_, ds_eos_id_);
+                family_ = ChatTemplateFamily::RAW;
+                return false;
+            }
+            stop_token_ids_.push_back(ds_eos_id_);
+            break;
+        }
         default:
             break;
     }
@@ -163,8 +182,9 @@ std::vector<int32_t> ChatTemplate::apply(
         case ChatTemplateFamily::CHATML:   return apply_chatml(tok, messages);
         case ChatTemplateFamily::LLAMA3:   return apply_llama3(tok, messages);
         case ChatTemplateFamily::LLAMA2:   return apply_llama2(tok, messages);
-        case ChatTemplateFamily::NEMOTRON: return apply_nemotron(tok, messages);
-        case ChatTemplateFamily::GEMMA:    return apply_gemma(tok, messages);
+        case ChatTemplateFamily::NEMOTRON:    return apply_nemotron(tok, messages);
+        case ChatTemplateFamily::GEMMA:       return apply_gemma(tok, messages);
+        case ChatTemplateFamily::DEEPSEEK_R1: return apply_deepseek_r1(tok, messages);
         default: break;
     }
     // RAW: should not be called, but handle gracefully
@@ -340,6 +360,50 @@ std::vector<int32_t> ChatTemplate::apply_gemma(
     tokens.push_back(start_of_turn_id_);
     auto model_ids = tok.encode("model\n");
     tokens.insert(tokens.end(), model_ids.begin(), model_ids.end());
+
+    // Debug: print template token IDs
+    if (getenv("IMP_DEBUG_TEMPLATE")) {
+        fprintf(stderr, "[DEBUG_TPL] %zu tokens:", tokens.size());
+        for (size_t i = 0; i < tokens.size(); i++)
+            fprintf(stderr, " %d", tokens[i]);
+        fprintf(stderr, "\n");
+    }
+
+    return tokens;
+}
+
+// DeepSeek R1: {bos}{system}<｜User｜>{content}<｜Assistant｜>{response}<｜end▁of▁sentence｜>
+std::vector<int32_t> ChatTemplate::apply_deepseek_r1(
+    const Tokenizer& tok,
+    const std::vector<ChatMessage>& msgs) const
+{
+    std::vector<int32_t> tokens;
+    tokens.push_back(bos_id_);
+
+    // System message (if any) goes right after BOS as plain text
+    for (const auto& msg : msgs) {
+        if (msg.role == "system") {
+            auto sys_ids = tok.encode(msg.content);
+            tokens.insert(tokens.end(), sys_ids.begin(), sys_ids.end());
+        }
+    }
+
+    // User/assistant turns
+    for (const auto& msg : msgs) {
+        if (msg.role == "user") {
+            tokens.push_back(ds_user_id_);
+            auto content_ids = tok.encode(msg.content);
+            tokens.insert(tokens.end(), content_ids.begin(), content_ids.end());
+        } else if (msg.role == "assistant") {
+            tokens.push_back(ds_assistant_id_);
+            auto content_ids = tok.encode(msg.content);
+            tokens.insert(tokens.end(), content_ids.begin(), content_ids.end());
+            tokens.push_back(ds_eos_id_);
+        }
+    }
+
+    // Assistant generation prefix
+    tokens.push_back(ds_assistant_id_);
 
     return tokens;
 }

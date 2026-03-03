@@ -36,7 +36,7 @@ void print_usage(const char* prog) {
         "  --ssm-fp16            Use FP16 for SSM h_state (saves ~50%% SSM VRAM)\n"
         "  --cuda-graphs         (default, no-op — graphs enabled by default)\n"
         "  --no-cuda-graphs      Disable CUDA Graph capture for decode\n"
-        "  --chat-template <t>   Chat template: auto, none, chatml, llama2, llama3, nemotron, gemma\n"
+        "  --chat-template <t>   Chat template: auto, none, chatml, llama2, llama3, nemotron, gemma, deepseek_r1\n"
         "  --prefill-chunk-size <n> Max tokens per prefill chunk (default: 0 = no chunking)\n"
         "  --prefill-fp8         Use FP8 E4M3 weight cache for ~2x prefill throughput\n"
         "  --decode-nvfp4        NVFP4 decode cache (additive: FP16 prefill + NVFP4 decode)\n"
@@ -67,6 +67,7 @@ CliArgs parse_args(int argc, char** argv) {
             args.prompt = argv[++i];
         } else if (std::strcmp(arg, "--max-tokens") == 0 && i + 1 < argc) {
             args.max_tokens = std::atoi(argv[++i]);
+            args.max_tokens_set = true;
         } else if (std::strcmp(arg, "--temperature") == 0 && i + 1 < argc) {
             args.temperature = static_cast<float>(std::atof(argv[++i]));
         } else if (std::strcmp(arg, "--top-p") == 0 && i + 1 < argc) {

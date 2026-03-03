@@ -7,6 +7,7 @@ struct CliArgs {
     std::string model_path;
     std::string prompt;
     int max_tokens = 256;
+    bool max_tokens_set = false;  // true if --max-tokens was explicitly given
     float temperature = 0.7f;
     float top_p = 0.9f;
     int top_k = 40;

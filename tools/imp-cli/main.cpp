@@ -170,6 +170,16 @@ int main(int argc, char** argv) {
         fprintf(stderr, "tg %5d tokens  avg %8.2f ms  (%7.2f tok/s)  [%d reps]\n",
                 tg_tokens, tg_avg_ms, tg_toks, args.bench_reps);
     } else if (args.interactive) {
+        // Interactive/agentic defaults to 16384 max tokens (needs headroom for
+        // long reasoning chains, code generation, and multi-step tool use)
+        if (!args.max_tokens_set) {
+            params.max_tokens = 16384;
+        }
+        // Prevent repetition degeneration with long output budgets
+        if (params.repetition_penalty <= 1.0f && params.frequency_penalty == 0.0f) {
+            params.frequency_penalty = 0.3f;
+        }
+
         // Multi-turn interactive mode using token-level API with chat template
         imp::Tokenizer* tok = model->model->tokenizer();
         const imp::ChatTemplate& engine_tpl = ctx->engine->chat_template();
@@ -253,10 +263,44 @@ int main(int argc, char** argv) {
                     continue;
                 }
 
-                // Decode token by token
+                // Capture the first token produced during prefill
+                // (engine->step() generates it as part of the prefill pass)
                 std::vector<int32_t> output_ids;
                 std::string response;
                 std::string interactive_text;
+                // Think-block styling: buffer output to suppress <think></think>
+                // tags and render thinking content in dim grey.
+                std::string print_buf;       // pending text not yet flushed
+
+                // Capture the first token produced during prefill
+                // (engine->step() generates it as part of the prefill pass)
+                if (ctx->active_request &&
+                    !ctx->active_request->output_tokens.empty()) {
+                    int32_t first_tok = ctx->active_request->output_tokens.back();
+                    output_ids.push_back(first_tok);
+                    std::string piece = tok->decode_token(first_tok);
+                    interactive_text += piece;
+                    print_buf += piece;
+                }
+
+                // Decode token by token
+                bool in_think = false;
+                static const char* kThinkOn  = "\033[2;90m";  // dim + bright black
+                static const char* kThinkOff = "\033[0m";
+
+                // Flush confirmed text from print_buf up to a safe point
+                auto flush_buf = [&]() {
+                    if (print_buf.empty()) return;
+                    // Don't flush text that could be a partial tag
+                    // Max partial: "</think>" (8 chars) or "<think>" (7 chars)
+                    const size_t hold = 8;
+                    if (print_buf.size() <= hold) return;
+                    size_t safe = print_buf.size() - hold;
+                    printf("%.*s", (int)safe, print_buf.c_str());
+                    fflush(stdout);
+                    print_buf.erase(0, safe);
+                };
+
                 for (int step = 0; step < params.max_tokens; step++) {
                     int32_t token = 0;
                     err = imp_decode_step(ctx, &params, &token);
@@ -272,12 +316,48 @@ int main(int argc, char** argv) {
 
                     output_ids.push_back(token);
                     std::string piece = tok->decode_token(token);
-                    printf("%s", piece.c_str());
-                    fflush(stdout);
+                    interactive_text += piece;
+                    print_buf += piece;
+
+                    // Scan for tag transitions in the buffer
+                    while (true) {
+                        if (!in_think) {
+                            auto pos = print_buf.find("<think>");
+                            if (pos != std::string::npos) {
+                                // Flush text before the tag normally
+                                if (pos > 0) {
+                                    printf("%.*s", (int)pos, print_buf.c_str());
+                                }
+                                // Switch to think style, consume the tag
+                                printf("%s", kThinkOn);
+                                fflush(stdout);
+                                print_buf.erase(0, pos + 7);
+                                in_think = true;
+                                continue;
+                            }
+                        } else {
+                            auto pos = print_buf.find("</think>");
+                            if (pos != std::string::npos) {
+                                // Flush thinking text before closing tag
+                                if (pos > 0) {
+                                    printf("%.*s", (int)pos, print_buf.c_str());
+                                }
+                                // Reset style, consume the tag
+                                printf("%s", kThinkOff);
+                                fflush(stdout);
+                                print_buf.erase(0, pos + 8);
+                                in_think = false;
+                                continue;
+                            }
+                        }
+                        break;
+                    }
+
+                    // Flush safe portion of buffer (keeping potential partial tags)
+                    flush_buf();
 
                     // Check text-level stop sequences
                     if (!args.stop_sequences.empty()) {
-                        interactive_text += piece;
                         bool text_stop = false;
                         for (const auto& stop : args.stop_sequences) {
                             if (interactive_text.find(stop) != std::string::npos) {
@@ -288,6 +368,11 @@ int main(int argc, char** argv) {
                         if (text_stop) break;
                     }
                 }
+                // Flush remaining buffer
+                if (!print_buf.empty()) {
+                    printf("%s", print_buf.c_str());
+                }
+                if (in_think) printf("%s", kThinkOff);
                 printf("\n");
 
                 response = tok->decode(output_ids);
@@ -372,10 +457,31 @@ int main(int argc, char** argv) {
             size_t max_stop_len = 0;
             for (const auto& s : args.stop_sequences) max_stop_len = std::max(max_stop_len, s.size());
 
-            // Decode with timing
+            // Capture the first token produced during prefill
             auto t_decode_start = std::chrono::high_resolution_clock::now();
             std::vector<int32_t> output_ids;
             std::string output_text;
+            if (ctx->active_request &&
+                !ctx->active_request->output_tokens.empty()) {
+                int32_t first_tok = ctx->active_request->output_tokens.back();
+                // Check stop conditions on first token
+                bool first_is_stop = (first_tok == tok->eos_id());
+                if (!first_is_stop && have_template) {
+                    for (int32_t stop_id : chat_tpl.stop_token_ids()) {
+                        if (first_tok == stop_id) { first_is_stop = true; break; }
+                    }
+                }
+                if (!first_is_stop) {
+                    output_ids.push_back(first_tok);
+                    std::string piece = tok->decode_token(first_tok);
+                    fprintf(stderr, "[tok=%d '%s'] ", first_tok, piece.c_str());
+                    printf("%s", piece.c_str());
+                    fflush(stdout);
+                    if (!args.stop_sequences.empty()) output_text += piece;
+                }
+            }
+
+            // Decode remaining tokens
             for (int step = 0; step < params.max_tokens; step++) {
                 int32_t token = 0;
                 err = imp_decode_step(ctx, &params, &token);
