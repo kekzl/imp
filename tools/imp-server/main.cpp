@@ -68,6 +68,8 @@ struct ServerState {
     int default_max_tokens = 2048;
     int max_seq_len = 0;
     std::atomic<int> next_id{0};
+    ServerArgs default_args;
+    bool model_loaded() const { return ctx != nullptr; }
 };
 
 // Graceful shutdown
@@ -112,26 +114,43 @@ static std::string sse_chunk(const std::string& id, int64_t created,
     return "data: " + obj.dump() + "\n\n";
 }
 
-static void handle_health(const httplib::Request& /*req*/, httplib::Response& res) {
-    res.set_content(R"({"status":"ok"})", "application/json");
+static void handle_health(const httplib::Request& /*req*/, httplib::Response& res,
+                          ServerState& state) {
+    json body = {
+        {"status", "ok"},
+        {"model_loaded", state.model_loaded()}
+    };
+    res.set_content(body.dump(), "application/json");
 }
 
 static void handle_models(const httplib::Request& /*req*/, httplib::Response& res,
                           ServerState& state) {
-    json model_obj = {
-        {"id", state.model_name},
-        {"object", "model"},
-        {"owned_by", "imp"}
-    };
+    json data = json::array();
+    if (state.model_loaded()) {
+        data.push_back({
+            {"id", state.model_name},
+            {"object", "model"},
+            {"owned_by", "imp"}
+        });
+    }
     json body = {
         {"object", "list"},
-        {"data", json::array({model_obj})}
+        {"data", data}
     };
     res.set_content(body.dump(), "application/json");
 }
 
 static void handle_chat_completions(const httplib::Request& req, httplib::Response& res,
                                     ServerState& state) {
+    // Check if a model is loaded
+    if (!state.model_loaded()) {
+        res.status = 503;
+        json err = {{"error", {{"message", "No model loaded. Use POST /v1/models to load one."},
+                                {"type", "server_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
     // Parse request body
     json body;
     try {
@@ -602,62 +621,76 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
     }
 }
 
-int main(int argc, char** argv) {
-    ServerArgs args = parse_server_args(argc, argv);
-
-    if (args.model_path.empty()) {
-        print_server_usage(argv[0]);
-        return 1;
-    }
-
-    printf("IMP Server %s\n", imp_version());
-    printf("Loading model: %s\n", args.model_path.c_str());
-
-    ServerState state;
-    state.default_max_tokens = args.max_tokens;
-
-    // Extract model name from path
-    std::string path = args.model_path;
-    size_t slash = path.find_last_of('/');
-    state.model_name = (slash != std::string::npos) ? path.substr(slash + 1) : path;
-
-    // Load model
-    ImpError err = imp_model_load(args.model_path.c_str(), IMP_FORMAT_GGUF, &state.model);
-    if (err != IMP_SUCCESS) {
-        fprintf(stderr, "Error loading model: %s\n", imp_error_string(err));
-        return 1;
-    }
-
-    // Create context
+// Build ImpConfig from default args + optional JSON overrides
+static ImpConfig build_config(const ServerArgs& args, const json& overrides = json::object()) {
     ImpConfig config = imp_config_default();
     config.device_id = args.device;
     config.max_batch_size = 1;
-    config.max_seq_len = 4096;
+    config.max_seq_len = overrides.value("max_seq_len", 4096);
     config.gpu_layers = args.gpu_layers;
     if (args.ssm_fp16) config.ssm_state_dtype = IMP_DTYPE_FP16;
     if (args.no_cuda_graphs) config.enable_cuda_graphs = 0;
-    if (args.kv_fp8) config.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
-    if (args.kv_int8) config.kv_cache_dtype = IMP_DTYPE_INT8;
-    if (args.prefill_chunk_size > 0) config.prefill_chunk_size = args.prefill_chunk_size;
-    config.use_nvfp4_decode = args.decode_nvfp4;
+
+    // KV cache dtype: check overrides first, then startup args
+    bool kv_fp8 = overrides.value("kv_fp8", args.kv_fp8);
+    bool kv_int8 = overrides.value("kv_int8", args.kv_int8);
+    if (kv_fp8) config.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
+    if (kv_int8) config.kv_cache_dtype = IMP_DTYPE_INT8;
+
+    int chunk = overrides.value("prefill_chunk_size", args.prefill_chunk_size);
+    if (chunk > 0) config.prefill_chunk_size = chunk;
+
+    config.use_nvfp4_decode = overrides.value("decode_nvfp4", args.decode_nvfp4);
+
     if (!args.mmproj_path.empty())
         config.mmproj_path = args.mmproj_path.c_str();
 
+    return config;
+}
+
+// Load a model into ServerState. Caller must hold state.mtx.
+// Returns error message on failure, empty string on success.
+static std::string load_model_into_state(ServerState& state, const std::string& path,
+                                         const json& config_overrides = json::object()) {
+    // Free existing model/context
+    if (state.ctx) { imp_context_free(state.ctx); state.ctx = nullptr; }
+    if (state.model) { imp_model_free(state.model); state.model = nullptr; }
+    state.tok = nullptr;
+    state.have_template = false;
+    state.model_name.clear();
+
+    // Load model
+    ImpError err = imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &state.model);
+    if (err != IMP_SUCCESS) {
+        std::string msg = std::string("Failed to load model: ") + imp_error_string(err);
+        state.model = nullptr;
+        return msg;
+    }
+
+    // Create context
+    ImpConfig config = build_config(state.default_args, config_overrides);
     err = imp_context_create(state.model, &config, &state.ctx);
     if (err != IMP_SUCCESS) {
-        fprintf(stderr, "Error creating context: %s\n", imp_error_string(err));
+        std::string msg = std::string("Failed to create context: ") + imp_error_string(err);
         imp_model_free(state.model);
-        return 1;
+        state.model = nullptr;
+        return msg;
     }
+
+    // Extract model name from path
+    size_t slash = path.find_last_of('/');
+    state.model_name = (slash != std::string::npos) ? path.substr(slash + 1) : path;
 
     // Set up tokenizer and chat template
     state.tok = state.model->model->tokenizer();
     const imp::ChatTemplate& engine_tpl = state.ctx->engine->chat_template();
 
-    if (args.chat_template == "none") {
+    std::string chat_tpl_name = config_overrides.value("chat_template",
+                                                        state.default_args.chat_template);
+    if (chat_tpl_name == "none") {
         // No template
-    } else if (args.chat_template != "auto") {
-        auto family = imp::ChatTemplate::parse_family(args.chat_template);
+    } else if (chat_tpl_name != "auto") {
+        auto family = imp::ChatTemplate::parse_family(chat_tpl_name);
         if (family != imp::ChatTemplateFamily::RAW) {
             state.have_template = state.chat_tpl.init(family, *state.tok);
         }
@@ -679,13 +712,103 @@ int main(int argc, char** argv) {
         printf("No chat template (raw mode)\n");
     }
 
+    return "";
+}
+
+static void handle_load_model(const httplib::Request& req, httplib::Response& res,
+                              ServerState& state) {
+    json body;
+    try {
+        body = json::parse(req.body);
+    } catch (const json::parse_error& e) {
+        res.status = 400;
+        json err = {{"error", {{"message", std::string("Invalid JSON: ") + e.what()},
+                                {"type", "invalid_request_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
+    std::string path = body.value("path", "");
+    if (path.empty()) {
+        res.status = 400;
+        json err = {{"error", {{"message", "\"path\" is required"},
+                                {"type", "invalid_request_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
+    json config_overrides = body.value("config", json::object());
+
+    // Block inference during model swap
+    std::lock_guard<std::mutex> lock(state.mtx);
+
+    printf("Loading model: %s\n", path.c_str());
+    fflush(stdout);
+
+    std::string error = load_model_into_state(state, path, config_overrides);
+    if (!error.empty()) {
+        res.status = 500;
+        json err = {{"error", {{"message", error}, {"type", "server_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
+    printf("Model loaded: %s\n", state.model_name.c_str());
+    fflush(stdout);
+
+    json response = {
+        {"status", "loaded"},
+        {"model", state.model_name}
+    };
+    res.set_content(response.dump(), "application/json");
+}
+
+static void handle_unload_model(const httplib::Request& /*req*/, httplib::Response& res,
+                                ServerState& state) {
+    std::lock_guard<std::mutex> lock(state.mtx);
+
+    if (state.ctx) { imp_context_free(state.ctx); state.ctx = nullptr; }
+    if (state.model) { imp_model_free(state.model); state.model = nullptr; }
+    state.tok = nullptr;
+    state.have_template = false;
+    state.model_name.clear();
+    state.max_seq_len = 0;
+
+    printf("Model unloaded\n");
+    fflush(stdout);
+
+    json response = {{"status", "unloaded"}};
+    res.set_content(response.dump(), "application/json");
+}
+
+int main(int argc, char** argv) {
+    ServerArgs args = parse_server_args(argc, argv);
+
+    printf("IMP Server %s\n", imp_version());
+
+    ServerState state;
+    state.default_max_tokens = args.max_tokens;
+    state.default_args = args;
+
+    // Load model at startup if provided
+    if (!args.model_path.empty()) {
+        printf("Loading model: %s\n", args.model_path.c_str());
+        std::string error = load_model_into_state(state, args.model_path);
+        if (!error.empty()) {
+            fprintf(stderr, "%s\n", error.c_str());
+            return 1;
+        }
+    } else {
+        printf("No model specified — server will wait for POST /v1/models\n");
+    }
+
     // Set up HTTP server
     httplib::Server svr;
 
     // CORS headers on every response
     svr.set_pre_routing_handler([](const httplib::Request&, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
-        res.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
         res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
         return httplib::Server::HandlerResponse::Unhandled;
     });
@@ -695,10 +818,20 @@ int main(int argc, char** argv) {
         res.status = 204;
     });
 
-    svr.Get("/health", handle_health);
+    svr.Get("/health", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_health(req, res, state);
+    });
 
     svr.Get("/v1/models", [&state](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res, state);
+    });
+
+    svr.Post("/v1/models", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_load_model(req, res, state);
+    });
+
+    svr.Delete("/v1/models", [&state](const httplib::Request& req, httplib::Response& res) {
+        handle_unload_model(req, res, state);
     });
 
     svr.Post("/v1/chat/completions",
@@ -713,9 +846,11 @@ int main(int argc, char** argv) {
 
     printf("Server listening on http://%s:%d\n", args.host.c_str(), args.port);
     printf("Endpoints:\n");
-    printf("  GET  /health\n");
-    printf("  GET  /v1/models\n");
-    printf("  POST /v1/chat/completions\n");
+    printf("  GET    /health\n");
+    printf("  GET    /v1/models\n");
+    printf("  POST   /v1/models          Load/swap model\n");
+    printf("  DELETE /v1/models          Unload model\n");
+    printf("  POST   /v1/chat/completions\n");
     fflush(stdout);
 
     if (!svr.listen(args.host, args.port)) {

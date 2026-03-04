@@ -9,7 +9,7 @@ void print_server_usage(const char* prog) {
         "Usage: %s [options]\n"
         "\n"
         "Options:\n"
-        "  --model <path>        Path to model file (required)\n"
+        "  --model <path>        Path to model file (optional; load later via API)\n"
         "  --host <addr>         Listen address (default: 127.0.0.1)\n"
         "  --port <n>            Listen port (default: 8080)\n"
         "  --max-tokens <n>      Default max tokens (default: 2048)\n"
