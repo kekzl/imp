@@ -32,6 +32,10 @@ public:
     void set_add_bos(bool add) { add_bos_ = add; }
     bool add_bos() const { return add_bos_; }
 
+    // Control SentencePiece leading-space prefix (▁)
+    void set_add_space_prefix(bool add) { add_space_prefix_ = add; }
+    bool add_space_prefix() const { return add_space_prefix_; }
+
     // Chat template string from GGUF metadata (Jinja2 format, used for detection)
     void set_chat_template_str(const std::string& tpl) { chat_template_str_ = tpl; }
     const std::string& chat_template_str() const { return chat_template_str_; }
@@ -75,6 +79,7 @@ private:
 
     std::string type_ = "spm";  // "spm" or "gpt2"
     bool add_bos_ = true;
+    bool add_space_prefix_ = true;  // SentencePiece ▁ prefix (false for Gemma)
     std::string chat_template_str_;  // Raw Jinja2 template from GGUF
 
     // GPT2 BPE merge ranks: "token1 token2" -> rank (lower = higher priority)

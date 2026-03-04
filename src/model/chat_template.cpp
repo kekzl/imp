@@ -14,6 +14,7 @@ const char* chat_template_family_name(ChatTemplateFamily family) {
         case ChatTemplateFamily::NEMOTRON:    return "nemotron";
         case ChatTemplateFamily::GEMMA:       return "gemma";
         case ChatTemplateFamily::DEEPSEEK_R1: return "deepseek_r1";
+        case ChatTemplateFamily::PHI:          return "phi";
     }
     return "unknown";
 }
@@ -35,6 +36,9 @@ ChatTemplateFamily ChatTemplate::detect_family(const std::string& jinja2_str) {
     // DeepSeek R1: fullwidth vertical bars ｜ (U+FF5C = \xef\xbd\x9c)
     if (jinja2_str.find("\xef\xbd\x9c" "User" "\xef\xbd\x9c") != std::string::npos)
         return ChatTemplateFamily::DEEPSEEK_R1;
+    // Phi: <|end|> is literal in the Jinja2 template (role tags are dynamic)
+    if (jinja2_str.find("<|end|>") != std::string::npos)
+        return ChatTemplateFamily::PHI;
 
     return ChatTemplateFamily::RAW;
 }
@@ -62,6 +66,7 @@ ChatTemplateFamily ChatTemplate::parse_family(const std::string& name) {
     if (name == "nemotron") return ChatTemplateFamily::NEMOTRON;
     if (name == "gemma")   return ChatTemplateFamily::GEMMA;
     if (name == "deepseek_r1" || name == "deepseek-r1") return ChatTemplateFamily::DEEPSEEK_R1;
+    if (name == "phi") return ChatTemplateFamily::PHI;
     return ChatTemplateFamily::RAW;
 }
 
@@ -166,6 +171,20 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer) {
             stop_token_ids_.push_back(ds_eos_id_);
             break;
         }
+        case ChatTemplateFamily::PHI: {
+            phi_user_id_      = tokenizer.find_token("<|user|>");
+            phi_assistant_id_ = tokenizer.find_token("<|assistant|>");
+            phi_end_id_       = tokenizer.find_token("<|end|>");
+            if (phi_user_id_ < 0 || phi_assistant_id_ < 0 || phi_end_id_ < 0) {
+                IMP_LOG_WARN("Phi template: missing tokens "
+                             "(user=%d, asst=%d, end=%d), falling back to raw",
+                             phi_user_id_, phi_assistant_id_, phi_end_id_);
+                family_ = ChatTemplateFamily::RAW;
+                return false;
+            }
+            stop_token_ids_.push_back(phi_end_id_);
+            break;
+        }
         default:
             break;
     }
@@ -185,6 +204,7 @@ std::vector<int32_t> ChatTemplate::apply(
         case ChatTemplateFamily::NEMOTRON:    return apply_nemotron(tok, messages);
         case ChatTemplateFamily::GEMMA:       return apply_gemma(tok, messages);
         case ChatTemplateFamily::DEEPSEEK_R1: return apply_deepseek_r1(tok, messages);
+        case ChatTemplateFamily::PHI:          return apply_phi(tok, messages);
         default: break;
     }
     // RAW: should not be called, but handle gracefully
@@ -404,6 +424,63 @@ std::vector<int32_t> ChatTemplate::apply_deepseek_r1(
 
     // Assistant generation prefix
     tokens.push_back(ds_assistant_id_);
+
+    return tokens;
+}
+
+// Phi: <|user|>\ncontent<|end|>\n<|assistant|>\ncontent<|end|>\n ... <|assistant|>\n
+std::vector<int32_t> ChatTemplate::apply_phi(
+    const Tokenizer& tok,
+    const std::vector<ChatMessage>& msgs) const
+{
+    std::vector<int32_t> tokens;
+
+    if (tok.add_bos()) {
+        tokens.push_back(bos_id_);
+    }
+
+    for (const auto& msg : msgs) {
+        if (msg.role == "user") {
+            tokens.push_back(phi_user_id_);
+        } else if (msg.role == "assistant") {
+            tokens.push_back(phi_assistant_id_);
+        } else if (msg.role == "system") {
+            tokens.push_back(phi_user_id_);
+        }
+        // Newline after role token, then content
+        auto content_ids = tok.encode("\n" + msg.content);
+        tokens.insert(tokens.end(), content_ids.begin(), content_ids.end());
+        tokens.push_back(phi_end_id_);
+        // Newline after <|end|>
+        auto nl_ids = tok.encode("\n");
+        tokens.insert(tokens.end(), nl_ids.begin(), nl_ids.end());
+    }
+
+    // Assistant generation prefix with trailing newline
+    tokens.push_back(phi_assistant_id_);
+    auto nl_ids = tok.encode("\n");
+    tokens.insert(tokens.end(), nl_ids.begin(), nl_ids.end());
+
+    // Debug: print template token IDs
+    if (getenv("IMP_DEBUG_TEMPLATE")) {
+        fprintf(stderr, "[DEBUG_TPL] phi %zu tokens:", tokens.size());
+        for (size_t i = 0; i < tokens.size(); i++)
+            fprintf(stderr, " %d", tokens[i]);
+        fprintf(stderr, "\n");
+        // Also decode back to text for verification
+        fprintf(stderr, "[DEBUG_TPL] decoded: ");
+        for (size_t i = 0; i < tokens.size(); i++) {
+            std::string piece = tok.decode_token(tokens[i]);
+            // Escape control chars for readability
+            for (char c : piece) {
+                if (c == '\n') fprintf(stderr, "\\n");
+                else if (c == '\r') fprintf(stderr, "\\r");
+                else fputc(c, stderr);
+            }
+            fprintf(stderr, "|");
+        }
+        fprintf(stderr, "\n");
+    }
 
     return tokens;
 }

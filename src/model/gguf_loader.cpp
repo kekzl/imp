@@ -652,6 +652,24 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             cfg.yarn_ext_factor = (yarn_ext < 0.0f) ? 0.0f : yarn_ext;
         }
 
+        // LongRoPE per-dimension frequency scaling (Phi-4)
+        if (rope_type_str == "longrope") {
+            auto sf = metadata.find(arch_str + ".rope.scaling.short_factor");
+            if (sf == metadata.end()) sf = metadata.find("rope.scaling.short_factor");
+            if (sf != metadata.end()) cfg.rope_short_factor = sf->second.float_array;
+
+            auto lf = metadata.find(arch_str + ".rope.scaling.long_factor");
+            if (lf == metadata.end()) lf = metadata.find("rope.scaling.long_factor");
+            if (lf != metadata.end()) cfg.rope_long_factor = lf->second.float_array;
+
+            cfg.rope_scaling_orig_max_pos = static_cast<int>(
+                get_uint("rope.scaling.original_max_position_embeddings", 0));
+
+            IMP_LOG_INFO("LongRoPE: short_factor[%zu], long_factor[%zu], orig_max_pos=%d",
+                         cfg.rope_short_factor.size(), cfg.rope_long_factor.size(),
+                         cfg.rope_scaling_orig_max_pos);
+        }
+
         // Compute mscale compensation (same as llama.cpp)
         if (cfg.yarn_ext_factor != 0.0f && cfg.rope_freq_scale > 1.0f) {
             float factor = cfg.rope_freq_scale;  // scaling factor
@@ -963,6 +981,12 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     auto it_add_bos = metadata.find("tokenizer.ggml.add_bos_token");
     if (it_add_bos != metadata.end()) {
         tokenizer->set_add_bos(val_uint(it_add_bos->second) != 0);
+    }
+
+    // add_space_prefix flag (Gemma: false, LLaMA: true/default)
+    auto it_add_sp = metadata.find("tokenizer.ggml.add_space_prefix");
+    if (it_add_sp != metadata.end()) {
+        tokenizer->set_add_space_prefix(val_uint(it_add_sp->second) != 0);
     }
 
     auto it_tokens = metadata.find("tokenizer.ggml.tokens");

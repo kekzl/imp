@@ -58,7 +58,8 @@ __global__ void rope_forward_fp32_kernel(
     float ext_factor,
     float attn_factor,
     float corr_dim_0,
-    float corr_dim_1)
+    float corr_dim_1,
+    const float* __restrict__ longrope_inv_freqs)
 {
     const int token_idx = blockIdx.x;
     const int head_idx  = blockIdx.y;
@@ -69,7 +70,12 @@ __global__ void rope_forward_fp32_kernel(
     const int pos = positions[token_idx];
 
     float cos_val, sin_val;
-    if (ext_factor != 0.0f) {
+    if (longrope_inv_freqs) {
+        float freq = longrope_inv_freqs[pair_idx];
+        float angle = static_cast<float>(pos) * freq;
+        cos_val = __cosf(angle);
+        sin_val = __sinf(angle);
+    } else if (ext_factor != 0.0f) {
         // YaRN mode: per-dimension frequency blending
         float theta_extrap = static_cast<float>(pos) / powf(theta, (2.0f * pair_idx) / static_cast<float>(head_dim));
         rope_yarn(theta_extrap, inv_scaling, corr_dim_0, corr_dim_1,
@@ -124,7 +130,8 @@ __global__ void rope_forward_fp16_kernel(
     float ext_factor,
     float attn_factor,
     float corr_dim_0,
-    float corr_dim_1)
+    float corr_dim_1,
+    const float* __restrict__ longrope_inv_freqs)
 {
     const int token_idx = blockIdx.x;
     const int head_idx  = blockIdx.y;
@@ -135,7 +142,12 @@ __global__ void rope_forward_fp16_kernel(
     const int pos = positions[token_idx];
 
     float cos_val, sin_val;
-    if (ext_factor != 0.0f) {
+    if (longrope_inv_freqs) {
+        float freq = longrope_inv_freqs[pair_idx];
+        float angle = static_cast<float>(pos) * freq;
+        cos_val = __cosf(angle);
+        sin_val = __sinf(angle);
+    } else if (ext_factor != 0.0f) {
         float theta_extrap = static_cast<float>(pos) / powf(theta, (2.0f * pair_idx) / static_cast<float>(head_dim));
         rope_yarn(theta_extrap, inv_scaling, corr_dim_0, corr_dim_1,
                   2 * pair_idx, ext_factor, attn_factor, cos_val, sin_val);
@@ -178,7 +190,8 @@ void rope_forward(Tensor& Q, Tensor& K,
                   int rope_dim, bool neox,
                   float ext_factor, float attn_factor,
                   const float* corr_dims,
-                  cudaStream_t stream)
+                  cudaStream_t stream,
+                  const float* longrope_inv_freqs)
 {
     const int batch     = static_cast<int>(Q.shape[0]);
     const int seq_len   = static_cast<int>(Q.shape[1]);
@@ -211,7 +224,8 @@ void rope_forward(Tensor& Q, Tensor& K,
                 positions,
                 batch, seq_len, n_heads, n_kv_heads, head_dim,
                 theta, inv_scaling, pairs, neox,
-                ext_factor, attn_factor, cd0, cd1);
+                ext_factor, attn_factor, cd0, cd1,
+                longrope_inv_freqs);
             break;
         case DType::FP16:
             pdl::launch(rope_forward_fp16_kernel, grid, block, 0, stream,
@@ -220,7 +234,8 @@ void rope_forward(Tensor& Q, Tensor& K,
                 positions,
                 batch, seq_len, n_heads, n_kv_heads, head_dim,
                 theta, inv_scaling, pairs, neox,
-                ext_factor, attn_factor, cd0, cd1);
+                ext_factor, attn_factor, cd0, cd1,
+                longrope_inv_freqs);
             break;
         default:
             break;
@@ -270,7 +285,8 @@ __global__ void qknorm_rope_fused_fp16_kernel(
     float ext_factor,
     float attn_factor,
     float corr_dim_0,
-    float corr_dim_1)
+    float corr_dim_1,
+    const float* __restrict__ longrope_inv_freqs)
 {
     const int head_idx = blockIdx.x;
     const int pos = positions[0];
@@ -306,7 +322,12 @@ __global__ void qknorm_rope_fused_fp16_kernel(
 
         for (int pair = threadIdx.x; pair < rope_pairs; pair += blockDim.x) {
             float cos_val, sin_val;
-            if (ext_factor != 0.0f) {
+            if (longrope_inv_freqs) {
+                float freq = longrope_inv_freqs[pair];
+                float angle = (float)pos * freq;
+                cos_val = __cosf(angle);
+                sin_val = __sinf(angle);
+            } else if (ext_factor != 0.0f) {
                 float theta_extrap = (float)pos / powf(theta, (2.0f * pair) / (float)head_dim);
                 rope_yarn(theta_extrap, inv_scaling, corr_dim_0, corr_dim_1,
                           2 * pair, ext_factor, attn_factor, cos_val, sin_val);
@@ -360,7 +381,12 @@ __global__ void qknorm_rope_fused_fp16_kernel(
 
         for (int pair = threadIdx.x; pair < rope_pairs; pair += blockDim.x) {
             float cos_val, sin_val;
-            if (ext_factor != 0.0f) {
+            if (longrope_inv_freqs) {
+                float freq = longrope_inv_freqs[pair];
+                float angle = (float)pos * freq;
+                cos_val = __cosf(angle);
+                sin_val = __sinf(angle);
+            } else if (ext_factor != 0.0f) {
                 float theta_extrap = (float)pos / powf(theta, (2.0f * pair) / (float)head_dim);
                 rope_yarn(theta_extrap, inv_scaling, corr_dim_0, corr_dim_1,
                           2 * pair, ext_factor, attn_factor, cos_val, sin_val);
@@ -395,7 +421,8 @@ void qknorm_rope_fused(half* Q, half* K,
                         cudaStream_t stream,
                         float weight_offset,
                         float ext_factor, float attn_factor,
-                        const float* corr_dims) {
+                        const float* corr_dims,
+                        const float* longrope_inv_freqs) {
     const int max_heads = (n_heads > n_kv_heads) ? n_heads : n_kv_heads;
     if (max_heads == 0 || head_dim == 0) return;
 
@@ -420,7 +447,8 @@ void qknorm_rope_fused(half* Q, half* K,
         positions,
         n_heads, n_kv_heads, head_dim, eps,
         theta, inv_scaling, rope_pairs, neox, weight_offset,
-        ext_factor, attn_factor, cd0, cd1);
+        ext_factor, attn_factor, cd0, cd1,
+        longrope_inv_freqs);
 }
 
 // --------------------------------------------------------------------------

@@ -54,6 +54,11 @@ struct ModelConfig {
     float yarn_beta_fast = 32.0f;   // wavelength threshold for fast-rotating dims
     float yarn_beta_slow = 1.0f;    // wavelength threshold for slow-rotating dims
     int   rope_n_ctx_orig = 0;      // original training context length (0 = use max_seq_len)
+
+    // LongRoPE per-dimension frequency scaling (Phi-4)
+    std::vector<float> rope_short_factor;   // [rope_pairs] short-context factors
+    std::vector<float> rope_long_factor;    // [rope_pairs] long-context factors
+    int rope_scaling_orig_max_pos = 0;      // threshold: short if seqlen <= this, else long
     int sliding_window = 0;     // 0 = disabled, >0 = window size (Qwen3, Mistral)
     int sliding_window_pattern = 0;  // Gemma-3: 6 = every 6th layer is global (no window)
     float rope_local_theta = 0.0f;   // Gemma-3: RoPE theta for local/sliding layers (10000)

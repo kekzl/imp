@@ -22,7 +22,8 @@ void rope_forward(Tensor& Q, Tensor& K,
                   int rope_dim = 0, bool neox = false,
                   float ext_factor = 0.0f, float attn_factor = 1.0f,
                   const float* corr_dims = nullptr,
-                  cudaStream_t stream = nullptr);
+                  cudaStream_t stream = nullptr,
+                  const float* longrope_inv_freqs = nullptr);
 
 // Fused QK-norm + RoPE for decode (n=1, FP16).
 // Applies per-head RMSNorm on Q and K, then RoPE, in a single kernel launch.
@@ -38,7 +39,8 @@ void qknorm_rope_fused(half* Q, half* K,
                         cudaStream_t stream = nullptr,
                         float weight_offset = 0.0f,
                         float ext_factor = 0.0f, float attn_factor = 1.0f,
-                        const float* corr_dims = nullptr);
+                        const float* corr_dims = nullptr,
+                        const float* longrope_inv_freqs = nullptr);
 
 // Precompute YaRN correction dimension boundaries.
 // dims[0] = start (below: full NTK interpolation)
