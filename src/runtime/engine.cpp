@@ -672,6 +672,7 @@ bool Engine::step() {
             token = async_pending_tokens_[async_pending_cursor_++];
         }
 
+        bool generation_done = false;
         if (token >= 0) {
             req->output_tokens.push_back(token);
 
@@ -684,14 +685,16 @@ bool Engine::step() {
                     if (token == stop_id) { is_stop = true; break; }
                 }
             }
-            bool finished = is_stop ||
+            generation_done = is_stop ||
                 static_cast<int>(req->output_tokens.size()) >= req->max_tokens;
-            if (!finished) return true;
+            if (!generation_done) return true;  // more graph tokens to deliver
         }
 
-        // Token was stop/max_tokens OR graph ran out of tokens → finish
-        req->status = RequestStatus::FINISHED;
-        kv_manager_->free_sequence(req->id);
+        // Save request before clearing async state (req is a reference to
+        // async_graph_req_ which we're about to null).
+        auto saved_req = async_graph_req_;
+
+        // Clean up async graph state
         async_graph_runner_.cleanup();
         if (async_d_block_tables_) {
             cudaFree(async_d_block_tables_);
@@ -700,7 +703,17 @@ bool Engine::step() {
         async_graph_req_ = nullptr;
         async_pending_tokens_.clear();
         async_pending_cursor_ = 0;
-        return scheduler_->has_pending() || scheduler_->active_count() > 0;
+
+        if (generation_done) {
+            // Stop/max_tokens reached — request is truly finished
+            saved_req->status = RequestStatus::FINISHED;
+            kv_manager_->free_sequence(saved_req->id);
+            return scheduler_->has_pending() || scheduler_->active_count() > 0;
+        }
+
+        // Graph exhausted its pre-allocated tokens but generation isn't done.
+        // Fall through to regular per-step decode below.
+        IMP_LOG_DEBUG("AsyncGraphLoop: graph tokens exhausted, continuing with step decode");
     }
 
     // Clean up stale async graph state
@@ -1443,16 +1456,32 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
         config_.use_cuda_graphs && !offload_mgr_ && !ssm_state_ &&
         !config_.enable_speculative && !req->ignore_eos) {
         int32_t first_token = req->output_tokens.back();
+        Tokenizer* gtok = model_->tokenizer();
         auto graph_tokens = try_graph_loop_decode(req, first_token, decode_stream());
         if (!graph_tokens.empty()) {
-            // Graph loop produced tokens — append to request
+            // Check if the graph completed naturally (last token is EOS/stop)
+            int32_t last = graph_tokens.back();
+            bool hit_stop = (gtok && last == gtok->eos_id());
+            if (!hit_stop) {
+                for (int32_t stop_id : chat_template_.stop_token_ids()) {
+                    if (last == stop_id) { hit_stop = true; break; }
+                }
+            }
+            if (hit_stop) graph_tokens.pop_back();  // strip stop token
+
             for (int32_t t : graph_tokens) {
                 req->output_tokens.push_back(t);
             }
-            req->status = RequestStatus::FINISHED;
-            kv_manager_->free_sequence(req->id);
+
+            bool done = hit_stop ||
+                static_cast<int>(req->output_tokens.size()) >= req->max_tokens;
+            if (done) {
+                req->status = RequestStatus::FINISHED;
+                kv_manager_->free_sequence(req->id);
+            }
+            // else: graph was capped, fall through to step() loop
         }
-        // If graph_tokens is empty, fall through to step() loop
+        // If graph_tokens is empty, also fall through to step() loop
     }
 
     // ---- Step 3: Fallback — per-step decode ----
@@ -1516,23 +1545,31 @@ std::vector<int32_t> Engine::try_graph_loop_decode(
     IMP_LOG_DEBUG("try_graph_loop_decode: first_token=%d ctx_len=%d position=%d remaining=%d",
                   first_token, ctx_len, position, remaining);
 
-    // Pre-allocate KV blocks for the full generation
-    int final_ctx = ctx_len + remaining;
-    int blocks_needed = (final_ctx + kKVBlockSize - 1) / kKVBlockSize;
-    const auto& current_bt = kv_manager_->block_table(req->id);
-    int blocks_have = static_cast<int>(current_bt.size());
+    // Pre-allocate KV blocks for the full generation — allocate as many as
+    // possible and cap max_steps if the cache is too small for the full run.
+    // NOTE: no LRU eviction here — evict_lru() could evict the *current*
+    // sequence in single-sequence chat mode, destroying its block table.
+    {
+        int final_ctx = ctx_len + remaining;
+        int blocks_needed = (final_ctx + kKVBlockSize - 1) / kKVBlockSize;
+        int blocks_have = static_cast<int>(kv_manager_->block_table(req->id).size());
 
-    for (int b = blocks_have; b < blocks_needed; b++) {
-        int new_block = kv_manager_->append_block(req->id);
-        if (new_block < 0) {
-            // Try eviction
-            int evicted = kv_manager_->evict_lru();
-            if (evicted >= 0) new_block = kv_manager_->append_block(req->id);
-            if (new_block < 0) {
-                IMP_LOG_WARN("ConditionalGraph: failed to pre-allocate KV blocks, "
-                             "falling back to step() loop");
-                return {};
-            }
+        for (int b = blocks_have; b < blocks_needed; b++) {
+            int new_block = kv_manager_->append_block(req->id);
+            if (new_block < 0) break;  // pool exhausted, use what we have
+        }
+
+        int blocks_got = static_cast<int>(kv_manager_->block_table(req->id).size());
+        int max_ctx = blocks_got * kKVBlockSize;
+        int capped = max_ctx - ctx_len;
+        if (capped <= 0) {
+            IMP_LOG_WARN("ConditionalGraph: no KV capacity for new tokens, "
+                         "falling back to step() loop");
+            return {};
+        }
+        if (capped < remaining) {
+            IMP_LOG_INFO("ConditionalGraph: capping to %d tokens (KV capacity)", capped);
+            remaining = capped;
         }
     }
 
@@ -1592,17 +1629,8 @@ std::vector<int32_t> Engine::try_graph_loop_decode(
 
     cudaFreeAsync(d_block_tables, stream);
 
-    // Filter out EOS/stop tokens from the result
-    if (!tokens.empty()) {
-        int32_t last = tokens.back();
-        bool last_is_stop = (last == tok->eos_id());
-        for (int32_t stop_id : chat_template_.stop_token_ids()) {
-            if (last == stop_id) { last_is_stop = true; break; }
-        }
-        if (last_is_stop) {
-            tokens.pop_back();  // don't include stop token in output
-        }
-    }
+    // NOTE: EOS/stop tokens are NOT stripped here — the caller checks
+    // the last token to distinguish "generation done" from "graph capped".
 
     IMP_LOG_INFO("ConditionalGraph: generated %zu tokens in graph loop",
                  tokens.size());
@@ -1644,21 +1672,30 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
     IMP_LOG_DEBUG("try_launch_async: first_token=%d ctx_len=%d position=%d remaining=%d",
                   first_token, ctx_len, position, remaining);
 
-    // Pre-allocate KV blocks for the full generation
-    int final_ctx = ctx_len + remaining;
-    int blocks_needed = (final_ctx + kKVBlockSize - 1) / kKVBlockSize;
-    const auto& current_bt = kv_manager_->block_table(req->id);
-    int blocks_have = static_cast<int>(current_bt.size());
+    // Pre-allocate KV blocks for the full generation — allocate as many as
+    // possible and cap max_steps if the cache is too small for the full run.
+    // NOTE: no LRU eviction here — evict_lru() could evict the *current*
+    // sequence in single-sequence chat mode, destroying its block table.
+    {
+        int final_ctx = ctx_len + remaining;
+        int blocks_needed = (final_ctx + kKVBlockSize - 1) / kKVBlockSize;
+        int blocks_have = static_cast<int>(kv_manager_->block_table(req->id).size());
 
-    for (int b = blocks_have; b < blocks_needed; b++) {
-        int new_block = kv_manager_->append_block(req->id);
-        if (new_block < 0) {
-            int evicted = kv_manager_->evict_lru();
-            if (evicted >= 0) new_block = kv_manager_->append_block(req->id);
-            if (new_block < 0) {
-                IMP_LOG_WARN("AsyncGraphLoop: failed to pre-allocate KV blocks");
-                return false;
-            }
+        for (int b = blocks_have; b < blocks_needed; b++) {
+            int new_block = kv_manager_->append_block(req->id);
+            if (new_block < 0) break;  // pool exhausted, use what we have
+        }
+
+        int blocks_got = static_cast<int>(kv_manager_->block_table(req->id).size());
+        int max_ctx = blocks_got * kKVBlockSize;
+        int capped = max_ctx - ctx_len;
+        if (capped <= 0) {
+            IMP_LOG_WARN("AsyncGraphLoop: no KV capacity for new tokens");
+            return false;
+        }
+        if (capped < remaining) {
+            IMP_LOG_INFO("AsyncGraphLoop: capping to %d tokens (KV capacity)", capped);
+            remaining = capped;
         }
     }
 
