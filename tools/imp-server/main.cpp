@@ -92,6 +92,7 @@ struct ServerState {
     ServerArgs default_args;
     std::string models_dir;  // directory to scan for available .gguf files
     std::string api_key;     // if non-empty, require Bearer token auth
+    bool is_think_model = false;  // model has <think> token (DeepSeek R1 etc.)
     bool model_loaded() const { return ctx != nullptr; }
 };
 
@@ -135,6 +136,36 @@ static std::string sse_chunk(const std::string& id, int64_t created,
         {"choices", json::array({choice})}
     };
     return "data: " + obj.dump() + "\n\n";
+}
+
+// Strip leading <think>...</think> block from model output (DeepSeek R1 etc.)
+// Handles both cases:
+//   1. <think>...reasoning...</think> — full block at start
+//   2. ...reasoning...</think> — opening tag was a special token skipped by decode()
+static void strip_think_block(std::string& text) {
+    auto first = text.find_first_not_of("\n\r\t ");
+    if (first == std::string::npos) return;
+
+    // Case 1: explicit <think> tag at start
+    if (text.compare(first, 7, "<think>") == 0) {
+        auto end_pos = text.find("</think>", first + 7);
+        if (end_pos == std::string::npos) {
+            text.clear();
+            return;
+        }
+        std::string after = text.substr(end_pos + 8);
+        auto start = after.find_first_not_of("\n\r\t ");
+        text = (start != std::string::npos) ? after.substr(start) : "";
+        return;
+    }
+
+    // Case 2: </think> present without opening tag (special token skipped by decode)
+    auto end_pos = text.find("</think>");
+    if (end_pos != std::string::npos) {
+        std::string after = text.substr(end_pos + 8);
+        auto start = after.find_first_not_of("\n\r\t ");
+        text = (start != std::string::npos) ? after.substr(start) : "";
+    }
 }
 
 static void handle_health(const httplib::Request& /*req*/, httplib::Response& res,
@@ -472,6 +503,14 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                 std::string pending_text;
                 bool text_stop_matched = false;
 
+                // Filter <think>...</think> blocks (DeepSeek R1 etc.)
+                // If the model has <think> in its vocab, buffer until </think>.
+                bool think_filter = state.is_think_model;
+                bool think_confirmed = state.is_think_model;
+                std::string think_buf;
+                int think_tokens = 0;
+                const int kThinkScanLimit = 8;  // tokens before giving up (non-think models)
+
                 // Helper: flush confirmed text up to a byte position
                 auto flush_text = [&](size_t up_to) {
                     if (up_to == 0) return true;
@@ -509,6 +548,41 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
 
                     n_output_tokens++;
                     std::string piece = state.tok->decode_token(token);
+
+                    // Filter <think>...</think> reasoning block
+                    if (think_filter) {
+                        think_buf += piece;
+                        think_tokens++;
+
+                        // Detect thinking model: explicit <think> tag or first token
+                        // decodes to empty (special token like <think>)
+                        if (!think_confirmed) {
+                            if (think_buf.find("<think>") != std::string::npos)
+                                think_confirmed = true;
+                            else if (think_tokens == 1 && piece.empty())
+                                think_confirmed = true;
+                        }
+
+                        // Always check for </think> end marker
+                        auto end_pos = think_buf.find("</think>");
+                        if (end_pos != std::string::npos) {
+                            think_filter = false;
+                            std::string after = think_buf.substr(end_pos + 8);
+                            think_buf.clear();
+                            auto start = after.find_first_not_of("\n\r\t ");
+                            piece = (start != std::string::npos) ? after.substr(start) : "";
+                            if (piece.empty()) continue;
+                        } else if (think_confirmed) {
+                            continue;  // inside confirmed think block, keep buffering
+                        } else if (think_tokens < kThinkScanLimit) {
+                            continue;  // still scanning initial tokens
+                        } else {
+                            // No think block detected — emit buffered text
+                            think_filter = false;
+                            piece = think_buf;
+                            think_buf.clear();
+                        }
+                    }
 
                     if (stop_sequences.empty()) {
                         // No stop sequences: stream directly (with UTF-8 buffering)
@@ -691,6 +765,9 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
         std::string content = !stop_sequences.empty()
             ? output_text : state.tok->decode(output_ids);
 
+        // Strip <think>...</think> reasoning block
+        strip_think_block(content);
+
         // Log request
         auto t_end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
@@ -831,6 +908,9 @@ static std::string load_model_into_state(ServerState& state, const std::string& 
     // Store max sequence length for token clamping
     state.max_seq_len = imp_model_max_seq_len(state.model);
     if (state.max_seq_len <= 0) state.max_seq_len = static_cast<int>(config.max_seq_len);
+
+    // Detect thinking model (DeepSeek R1 etc.) by checking for <think> token in vocab
+    state.is_think_model = (state.tok->find_token("<think>") >= 0);
 
     if (state.have_template) {
         printf("Chat template: %s\n",
@@ -1057,6 +1137,13 @@ static void handle_completions(const httplib::Request& req, httplib::Response& r
                 std::string pending_text;
                 bool text_stop_matched = false;
 
+                // Filter <think>...</think> blocks (DeepSeek R1 etc.)
+                bool think_filter = state.is_think_model;
+                bool think_confirmed = state.is_think_model;
+                std::string think_buf;
+                int think_tokens = 0;
+                const int kThinkScanLimit = 8;
+
                 auto flush_text = [&](size_t up_to) {
                     if (up_to == 0) return true;
                     std::string to_send = pending_text.substr(0, up_to);
@@ -1081,6 +1168,37 @@ static void handle_completions(const httplib::Request& req, httplib::Response& r
 
                     n_output_tokens++;
                     std::string piece = state.tok->decode_token(token);
+
+                    // Filter <think>...</think> reasoning block
+                    if (think_filter) {
+                        think_buf += piece;
+                        think_tokens++;
+
+                        if (!think_confirmed) {
+                            if (think_buf.find("<think>") != std::string::npos)
+                                think_confirmed = true;
+                            else if (think_tokens == 1 && piece.empty())
+                                think_confirmed = true;
+                        }
+
+                        auto end_pos = think_buf.find("</think>");
+                        if (end_pos != std::string::npos) {
+                            think_filter = false;
+                            std::string after = think_buf.substr(end_pos + 8);
+                            think_buf.clear();
+                            auto start = after.find_first_not_of("\n\r\t ");
+                            piece = (start != std::string::npos) ? after.substr(start) : "";
+                            if (piece.empty()) continue;
+                        } else if (think_confirmed) {
+                            continue;
+                        } else if (think_tokens < kThinkScanLimit) {
+                            continue;
+                        } else {
+                            think_filter = false;
+                            piece = think_buf;
+                            think_buf.clear();
+                        }
+                    }
 
                     if (stop_sequences.empty()) {
                         utf8_buf += piece;
@@ -1210,6 +1328,9 @@ static void handle_completions(const httplib::Request& req, httplib::Response& r
         int n_output_tokens = static_cast<int>(output_ids.size());
         std::string text = !stop_sequences.empty()
             ? output_text : state.tok->decode(output_ids);
+
+        // Strip <think>...</think> reasoning block
+        strip_think_block(text);
 
         // Prepend prompt if echo requested
         if (echo) text = prompt + text;
