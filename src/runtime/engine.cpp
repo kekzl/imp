@@ -86,19 +86,28 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     model_ = std::move(model);
     config_ = config;
 
-    // Resolve NVFP4 decode auto mode based on GPU compute capability
+    const auto& mcfg = model_->config();
+
+    // Resolve NVFP4 decode auto mode based on GPU compute capability.
+    // Skip for small models (d_model < 4096): FP4 quantization error accumulates
+    // over layers and degrades output quality on small models, while the decode
+    // speed gain is negligible (small models are already memory-bandwidth-light).
     if (config_.use_nvfp4_decode < 0) {
         int sm = get_device_sm_version();
-        if (sm >= 120)
-            config_.use_nvfp4_decode = 2;
-        else if (sm >= 90)
-            config_.use_nvfp4_decode = 1;
-        else
+        if (mcfg.d_model < 4096) {
             config_.use_nvfp4_decode = 0;
-        IMP_LOG_INFO("NVFP4 decode: auto → mode %d (sm_%d)", config_.use_nvfp4_decode, sm);
+            IMP_LOG_INFO("NVFP4 decode: auto → disabled (d_model=%d < 4096, precision risk)", mcfg.d_model);
+        } else if (sm >= 120) {
+            config_.use_nvfp4_decode = 2;
+            IMP_LOG_INFO("NVFP4 decode: auto → mode %d (sm_%d)", config_.use_nvfp4_decode, sm);
+        } else if (sm >= 90) {
+            config_.use_nvfp4_decode = 1;
+            IMP_LOG_INFO("NVFP4 decode: auto → mode %d (sm_%d)", config_.use_nvfp4_decode, sm);
+        } else {
+            config_.use_nvfp4_decode = 0;
+            IMP_LOG_INFO("NVFP4 decode: auto → disabled (sm_%d < sm_90)", sm);
+        }
     }
-
-    const auto& mcfg = model_->config();
 
     // --- Pre-allocate cuBLAS/cuBLASLt workspace while GPU memory is plentiful ---
     gemm_init();
