@@ -565,7 +565,8 @@ __global__ void write_kv_cache_rope_fused_kernel(
     float theta,
     float inv_scaling,
     int rope_pairs,      // effective_rope_dim / 2
-    bool neox
+    bool neox,
+    const float* __restrict__ longrope_inv_freqs
 ) {
     int token_idx = blockIdx.x;
     if (token_idx >= n_tokens) return;
@@ -604,8 +605,13 @@ __global__ void write_kv_cache_rope_fused_kernel(
                 idx1 = head_offset + 2 * pair_idx + 1;
             }
 
-            float freq = 1.0f / (powf(theta, (2.0f * pair_idx) / static_cast<float>(head_dim)));
-            freq *= inv_scaling;
+            float freq;
+            if (longrope_inv_freqs) {
+                freq = longrope_inv_freqs[pair_idx];
+            } else {
+                freq = 1.0f / (powf(theta, (2.0f * pair_idx) / static_cast<float>(head_dim)));
+                freq *= inv_scaling;
+            }
             float angle = static_cast<float>(pos) * freq;
             float cos_val = __cosf(angle);
             float sin_val = __sinf(angle);
@@ -647,7 +653,8 @@ __global__ void rope_q_only_fp16_kernel(
     float theta,
     float inv_scaling,
     int rope_pairs,
-    bool neox
+    bool neox,
+    const float* __restrict__ longrope_inv_freqs
 ) {
     int head_idx  = blockIdx.y;
     int pair_idx  = threadIdx.x;
@@ -655,8 +662,13 @@ __global__ void rope_q_only_fp16_kernel(
 
     int pos = positions[0];  // decode: single token
 
-    float freq = 1.0f / (powf(theta, (2.0f * pair_idx) / static_cast<float>(head_dim)));
-    freq *= inv_scaling;
+    float freq;
+    if (longrope_inv_freqs) {
+        freq = longrope_inv_freqs[pair_idx];
+    } else {
+        freq = 1.0f / (powf(theta, (2.0f * pair_idx) / static_cast<float>(head_dim)));
+        freq *= inv_scaling;
+    }
     float angle = static_cast<float>(pos) * freq;
     float cos_val = __cosf(angle);
     float sin_val = __sinf(angle);
@@ -1074,6 +1086,30 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
                             cfg.yarn_beta_fast, cfg.yarn_beta_slow, yarn_corr_dims_);
         IMP_LOG_INFO("YaRN corr_dims: [%.1f, %.1f] (n_dims=%d, n_ctx_orig=%d)",
                      yarn_corr_dims_[0], yarn_corr_dims_[1], n_dims, n_ctx_orig);
+    }
+
+    // Pre-compute LongRoPE inverse frequencies if enabled (Phi-4)
+    if (!cfg.rope_short_factor.empty() && !cfg.rope_long_factor.empty()) {
+        int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
+        int rd = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
+        int pairs = rd / 2;
+        longrope_n_pairs_ = pairs;
+        longrope_orig_max_pos_ = cfg.rope_scaling_orig_max_pos;
+
+        // inv_freq[i] = 1.0 / (factor[i] * theta^(2i/rd))
+        std::vector<float> short_freqs(pairs), long_freqs(pairs);
+        for (int i = 0; i < pairs; i++) {
+            float base_freq = 1.0f / std::pow(cfg.rope_theta, (2.0f * i) / static_cast<float>(rd));
+            short_freqs[i] = base_freq / cfg.rope_short_factor[i];
+            long_freqs[i]  = base_freq / cfg.rope_long_factor[i];
+        }
+
+        cudaMalloc(&longrope_short_freqs_, pairs * sizeof(float));
+        cudaMalloc(&longrope_long_freqs_,  pairs * sizeof(float));
+        cudaMemcpy(longrope_short_freqs_, short_freqs.data(), pairs * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(longrope_long_freqs_,  long_freqs.data(),  pairs * sizeof(float), cudaMemcpyHostToDevice);
+
+        IMP_LOG_INFO("LongRoPE: %d freq pairs, orig_max_pos=%d", pairs, longrope_orig_max_pos_);
     }
 
     initialized_ = true;
@@ -1675,6 +1711,12 @@ void GraphExecutor::release_moe_batch_buf() {
 }
 
 void GraphExecutor::free_buffers() {
+    // Free LongRoPE frequency tables
+    if (longrope_short_freqs_) { cudaFree(longrope_short_freqs_); longrope_short_freqs_ = nullptr; }
+    if (longrope_long_freqs_)  { cudaFree(longrope_long_freqs_);  longrope_long_freqs_  = nullptr; }
+    longrope_n_pairs_ = 0;
+    longrope_orig_max_pos_ = 0;
+
     // Free fused KV weight cache
     for (auto& [idx, tensor] : fused_kv_cache_) {
         if (tensor.data) cudaFree(tensor.data);
@@ -2958,6 +3000,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         }
     }
 
+    // Select LongRoPE frequency table based on context length (nullptr if not longrope)
+    const float* longrope_freqs = nullptr;
+    if (longrope_short_freqs_) {
+        longrope_freqs = (state.max_context_len <= longrope_orig_max_pos_)
+                         ? longrope_short_freqs_ : longrope_long_freqs_;
+    }
+
     // 4+5+6. QK-norm + RoPE: fused into single kernel for decode (n=1)
     //    For prefill or models without QK-norm, use separate kernels.
     //    For decode with FP16 cache: fuse K-RoPE into KV write (saves 1 launch).
@@ -2980,7 +3029,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                layer_rope_theta, layer_rope_freq_scale,
                                cfg.rope_dim, cfg.rope_neox, stream, norm_w_off_,
                                cfg.yarn_ext_factor, cfg.yarn_attn_factor,
-                               cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr);
+                               cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr,
+                               longrope_freqs);
         } else if (can_fuse_rope_kv && !has_qk_norm) {
             // Fused path: Q-only RoPE here, K-RoPE deferred to KV write
             const int effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
@@ -2988,7 +3038,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             const float inv_scaling = 1.0f / layer_rope_freq_scale;
             rope_q_only_fp16_kernel<<<dim3(1, nh), pairs, 0, stream>>>(
                 static_cast<half*>(qv.data), state.positions,
-                nh, hd, layer_rope_theta, inv_scaling, pairs, cfg.rope_neox);
+                nh, hd, layer_rope_theta, inv_scaling, pairs, cfg.rope_neox,
+                longrope_freqs);
             rope_k_deferred = true;
         } else {
             // Separate path: QK-norm (if present) + RoPE on both Q and K
@@ -3009,7 +3060,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             rope_forward(q4r_t, k4r_t, state.positions, hd, layer_rope_theta, layer_rope_freq_scale,
                          cfg.rope_dim, cfg.rope_neox,
                          cfg.yarn_ext_factor, cfg.yarn_attn_factor,
-                         cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, stream);
+                         cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, stream,
+                         longrope_freqs);
         }
     }
 
@@ -3076,7 +3128,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                 static_cast<half*>(cache->v_ptr(kv_layer, 0)),
                 block_stride, row_elems, kKVBlockSize, n,
                 state.max_blocks_per_seq, state.n_sequences,
-                nkv, hd, layer_rope_theta, inv_scaling, pairs, cfg.rope_neox);
+                nkv, hd, layer_rope_theta, inv_scaling, pairs, cfg.rope_neox,
+                longrope_freqs);
         } else {
             write_kv_cache(layer, state, stream);
         }

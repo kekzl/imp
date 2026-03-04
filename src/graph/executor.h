@@ -383,6 +383,12 @@ private:
     // yarn_corr_dims_[0] = start (full interpolation below), yarn_corr_dims_[1] = end (full extrapolation above)
     float yarn_corr_dims_[2] = {0.0f, 0.0f};
 
+    // LongRoPE pre-computed inverse frequencies (device memory)
+    float* longrope_short_freqs_ = nullptr;  // [rope_pairs] device
+    float* longrope_long_freqs_  = nullptr;  // [rope_pairs] device
+    int    longrope_orig_max_pos_ = 0;
+    int    longrope_n_pairs_ = 0;
+
     // --- Model feature flags (set during init for workspace computation) ---
     bool has_moe_ = false;
     bool has_ssm_ = false;

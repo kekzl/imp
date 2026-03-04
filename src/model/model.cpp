@@ -71,6 +71,7 @@ ModelArch parse_model_arch(const std::string& s) {
     if (s == "gemma3")                       return ModelArch::GEMMA3;
     if (s == "gemma" || s == "gemma2")       return ModelArch::GEMMA3;  // treat all gemma as gemma3
     if (s == "qwen2")                        return ModelArch::LLAMA;
+    if (s == "phi3")                         return ModelArch::LLAMA;
     return ModelArch::GENERIC;
 }
 

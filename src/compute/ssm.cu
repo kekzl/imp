@@ -456,9 +456,8 @@ void group_rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out,
     int total_dim = static_cast<int>(x.shape[1]);
     int group_size = total_dim / n_groups;
 
-    int threads = std::min(group_size, 256);
     // Power of 2 for reduction
-    threads = 1;
+    int threads = 1;
     while (threads * 2 <= std::min(group_size, 256)) threads *= 2;
 
     dim3 grid(n_tokens, n_groups);

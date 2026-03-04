@@ -54,6 +54,7 @@ template_hint() {
     elif [[ "$lower" == *llama-3* || "$lower" == *llama3* ]]; then echo "llama3"
     elif [[ "$lower" == *llama*   || "$lower" == *mistral* || "$lower" == *mixtral* ]]; then echo "llama2"
     elif [[ "$lower" == *deepseek* ]]; then echo "deepseek_r1"
+    elif [[ "$lower" == *phi* ]]; then echo "phi"
     else echo "chatml"
     fi
 }

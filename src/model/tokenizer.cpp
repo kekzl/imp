@@ -229,10 +229,13 @@ static const std::string SPIECE_SPACE = "\xe2\x96\x81";
 std::vector<int32_t> Tokenizer::encode_spm(const std::string& text) const {
     if (text.empty() || vocab_.empty()) return {};
 
-    // Pre-process: SentencePiece convention - prepend space, replace spaces
+    // Pre-process: SentencePiece convention - replace spaces with ▁
+    // add_space_prefix_: prepend ▁ at start (true for LLaMA/Mistral, false for Gemma)
     std::string processed;
     processed.reserve(text.size() + 4);
-    processed += SPIECE_SPACE;
+    if (add_space_prefix_) {
+        processed += SPIECE_SPACE;
+    }
 
     for (size_t i = 0; i < text.size(); i++) {
         if (text[i] == ' ') {

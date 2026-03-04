@@ -16,6 +16,7 @@ enum class ChatTemplateFamily {
     NEMOTRON,   // <extra_id_0>System\n...<extra_id_1>\n<extra_id_0>User\n...
     GEMMA,      // <start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n
     DEEPSEEK_R1,// <｜User｜>...<｜Assistant｜>...<｜end▁of▁sentence｜>
+    PHI,        // <|user|>...<|end|>...<|assistant|>
 };
 
 const char* chat_template_family_name(ChatTemplateFamily family);
@@ -88,6 +89,11 @@ private:
     int32_t ds_assistant_id_ = -1;   // <｜Assistant｜>
     int32_t ds_eos_id_ = -1;         // <｜end▁of▁sentence｜>
 
+    // Phi tokens
+    int32_t phi_user_id_ = -1;       // <|user|>
+    int32_t phi_assistant_id_ = -1;  // <|assistant|>
+    int32_t phi_end_id_ = -1;        // <|end|>
+
     // Vision tokens (Gemma-3)
     int32_t boi_id_ = -1;           // <start_of_image>
     int32_t eoi_id_ = -1;           // <end_of_image>
@@ -106,6 +112,8 @@ private:
                                       const std::vector<ChatMessage>& msgs) const;
     std::vector<int32_t> apply_deepseek_r1(const Tokenizer& tok,
                                             const std::vector<ChatMessage>& msgs) const;
+    std::vector<int32_t> apply_phi(const Tokenizer& tok,
+                                    const std::vector<ChatMessage>& msgs) const;
 };
 
 } // namespace imp
