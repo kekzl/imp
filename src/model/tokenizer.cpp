@@ -226,14 +226,15 @@ void Tokenizer::load_merges(const std::vector<std::string>& merges) {
 
 static const std::string SPIECE_SPACE = "\xe2\x96\x81";
 
-std::vector<int32_t> Tokenizer::encode_spm(const std::string& text) const {
+std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_prefix) const {
     if (text.empty() || vocab_.empty()) return {};
 
     // Pre-process: SentencePiece convention - replace spaces with ▁
     // add_space_prefix_: prepend ▁ at start (true for LLaMA/Mistral, false for Gemma)
+    // no_prefix: skip the leading ▁ (for chat template pieces after special tokens)
     std::string processed;
     processed.reserve(text.size() + 4);
-    if (add_space_prefix_) {
+    if (add_space_prefix_ && !no_prefix) {
         processed += SPIECE_SPACE;
     }
 
@@ -463,11 +464,11 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
 
 // ---- Encode dispatch ----
 
-std::vector<int32_t> Tokenizer::encode(const std::string& text) const {
+std::vector<int32_t> Tokenizer::encode(const std::string& text, bool no_prefix) const {
     if (type_ == "gpt2") {
         return encode_gpt2(text);
     }
-    return encode_spm(text);
+    return encode_spm(text, no_prefix);
 }
 
 // ---- Decode (SentencePiece) ----

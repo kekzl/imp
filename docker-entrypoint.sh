@@ -102,4 +102,11 @@ if [ -n "$IMP_PREFILL_CHUNK_SIZE" ]; then
     args+=(--prefill-chunk-size "$IMP_PREFILL_CHUNK_SIZE")
 fi
 
+# Models directory
+if [ -n "$IMP_MODELS_DIR" ]; then
+    args+=(--models-dir "$IMP_MODELS_DIR")
+elif [ "$CMD" = "imp-server" ] && [ -d "/models" ]; then
+    args+=(--models-dir "/models")
+fi
+
 exec "$CMD" "${args[@]}" "$@"

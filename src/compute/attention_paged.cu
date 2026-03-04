@@ -2149,7 +2149,9 @@ void paged_attention_decode(
 
         // Cluster GQA: share KV via DSMEM across Q-heads (sm_90+ only).
         // Reduces KV global memory reads by n_q_per_kv× (4-8×).
-        if (n_q_per_kv <= 8 && num_ctx_blocks >= 8 &&
+        // Cluster dimension must be a power of 2 (CUDA requirement).
+        bool valid_cluster_dim = (n_q_per_kv == 2 || n_q_per_kv == 4 || n_q_per_kv == 8);
+        if (valid_cluster_dim && num_ctx_blocks >= 8 &&
             (head_dim == 64 || head_dim == 96 || head_dim == 128 || head_dim == 256)) {
             size_t cluster_smem = 2 * block_size * 2 * head_dim * sizeof(half)
                                 + NUM_WARPS * sizeof(float) * 2
