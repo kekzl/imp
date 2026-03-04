@@ -10,6 +10,14 @@
   <b>Built entirely by <a href="https://claude.ai/claude-code">Claude Code</a> (Opus 4.6) as a proof of concept.</b>
 </p>
 
+<p align="center">
+  <a href="https://github.com/kekzl/imp/stargazers"><img src="https://img.shields.io/github/stars/kekzl/imp?style=flat&color=f5c542" alt="GitHub Stars"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/kekzl/imp?style=flat&color=blue" alt="License"></a>
+  <img src="https://img.shields.io/badge/CUDA-13.1+-76b900?style=flat&logo=nvidia" alt="CUDA 13.1+">
+  <img src="https://img.shields.io/badge/C++-20-00599C?style=flat&logo=cplusplus" alt="C++20">
+  <a href="https://github.com/kekzl/imp/commits/main"><img src="https://img.shields.io/github/last-commit/kekzl/imp?style=flat&color=purple" alt="Last Commit"></a>
+</p>
+
 ---
 
 ## What is this?
