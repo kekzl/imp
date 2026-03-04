@@ -41,7 +41,8 @@ public:
     const std::string& chat_template_str() const { return chat_template_str_; }
 
     // Encode text to token IDs
-    std::vector<int32_t> encode(const std::string& text) const;
+    // no_prefix=true skips SPM space prefix (for chat template pieces after special tokens)
+    std::vector<int32_t> encode(const std::string& text, bool no_prefix = false) const;
 
     // Decode token IDs to text
     std::string decode(const std::vector<int32_t>& tokens) const;
@@ -59,7 +60,7 @@ private:
     static int utf8_char_len(uint8_t c);
 
     // SentencePiece-style BPE (score-based merging, LOWER_ONE_EIGHTH_BLOCK space)
-    std::vector<int32_t> encode_spm(const std::string& text) const;
+    std::vector<int32_t> encode_spm(const std::string& text, bool no_prefix = false) const;
 
     // GPT2-style byte-level BPE (merge-rank based)
     std::vector<int32_t> encode_gpt2(const std::string& text) const;

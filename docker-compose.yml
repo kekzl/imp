@@ -38,3 +38,22 @@ services:
       timeout: 5s
       start_period: 120s
       retries: 3
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    restart: unless-stopped
+    ports:
+      - "${WEBUI_PORT:-3000}:8080"
+    volumes:
+      - open-webui:/app/backend/data
+    environment:
+      - OPENAI_API_BASE_URL=http://imp-server:${IMP_PORT:-8080}/v1
+      - OPENAI_API_KEY=not-needed
+      - WEBUI_AUTH=false
+      - ENABLE_OLLAMA_API=false
+    depends_on:
+      imp-server:
+        condition: service_healthy
+
+volumes:
+  open-webui:

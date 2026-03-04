@@ -218,7 +218,8 @@ std::vector<int32_t> ChatTemplate::apply_chatml(
 {
     std::vector<int32_t> tokens;
 
-    if (tok.add_bos()) {
+    // Skip BOS if it's the same token as im_start (e.g. Nanbeige: bos = <|im_start|>)
+    if (tok.add_bos() && bos_id_ != im_start_id_) {
         tokens.push_back(bos_id_);
     }
 
@@ -226,7 +227,8 @@ std::vector<int32_t> ChatTemplate::apply_chatml(
         tokens.push_back(im_start_id_);
         auto role_ids = tok.encode(msg.role + "\n");
         tokens.insert(tokens.end(), role_ids.begin(), role_ids.end());
-        auto content_ids = tok.encode(msg.content);
+        // Content follows role+newline within the same text piece — skip SPM ▁ prefix
+        auto content_ids = tok.encode(msg.content, /*no_prefix=*/true);
         tokens.insert(tokens.end(), content_ids.begin(), content_ids.end());
         tokens.push_back(im_end_id_);
         auto nl_ids = tok.encode("\n");
@@ -237,6 +239,13 @@ std::vector<int32_t> ChatTemplate::apply_chatml(
     tokens.push_back(im_start_id_);
     auto asst_ids = tok.encode("assistant\n");
     tokens.insert(tokens.end(), asst_ids.begin(), asst_ids.end());
+
+    if (getenv("IMP_DEBUG_TEMPLATE")) {
+        fprintf(stderr, "[DEBUG_TPL] chatml %zu tokens:", tokens.size());
+        for (size_t i = 0; i < tokens.size(); i++)
+            fprintf(stderr, " %d", tokens[i]);
+        fprintf(stderr, "\n");
+    }
 
     return tokens;
 }
