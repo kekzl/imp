@@ -25,6 +25,8 @@ void print_server_usage(const char* prog) {
         "  --decode-nvfp4-only   NVFP4 decode cache (replacement: saves VRAM, slower prefill)\n"
         "  --no-nvfp4            Disable NVFP4 decode cache (override auto-detection)\n"
         "  --mmproj <path>       Path to vision encoder GGUF (mmproj) for multimodal\n"
+        "  --models-dir <path>   Directory to scan for .gguf models (auto-load on select)\n"
+        "  --api-key <key>       Require Bearer token authentication\n"
         "  --help                Show this help message\n",
         prog);
 }
@@ -70,6 +72,10 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.decode_nvfp4 = 0;
         } else if (std::strcmp(arg, "--mmproj") == 0 && i + 1 < argc) {
             args.mmproj_path = argv[++i];
+        } else if (std::strcmp(arg, "--models-dir") == 0 && i + 1 < argc) {
+            args.models_dir = argv[++i];
+        } else if (std::strcmp(arg, "--api-key") == 0 && i + 1 < argc) {
+            args.api_key = argv[++i];
         } else {
             fprintf(stderr, "Unknown argument: %s\n", arg);
             print_server_usage(argv[0]);
