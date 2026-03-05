@@ -891,12 +891,18 @@ bool Engine::step() {
             if (n > d_penalty_tokens_capacity_) {
                 if (d_penalty_tokens_) cudaFree(d_penalty_tokens_);
                 d_penalty_tokens_capacity_ = std::max(n, (size_t)256);
-                cudaMalloc(&d_penalty_tokens_, d_penalty_tokens_capacity_ * sizeof(int32_t));
+                if (cudaMalloc(&d_penalty_tokens_, d_penalty_tokens_capacity_ * sizeof(int32_t)) != cudaSuccess) {
+                    IMP_LOG_ERROR("cudaMalloc failed for penalty tokens (%zu)", d_penalty_tokens_capacity_);
+                    d_penalty_tokens_ = nullptr;
+                    d_penalty_tokens_capacity_ = 0;
+                }
             }
-            cudaMemcpyAsync(d_penalty_tokens_, req->output_tokens.data(),
-                            n * sizeof(int32_t), cudaMemcpyHostToDevice, pf_stream);
-            state.penalty_tokens = d_penalty_tokens_;
-            state.n_penalty_tokens = static_cast<int>(n);
+            if (d_penalty_tokens_) {
+                cudaMemcpyAsync(d_penalty_tokens_, req->output_tokens.data(),
+                                n * sizeof(int32_t), cudaMemcpyHostToDevice, pf_stream);
+                state.penalty_tokens = d_penalty_tokens_;
+                state.n_penalty_tokens = static_cast<int>(n);
+            }
         }
 
         // SSM state for hybrid models
@@ -1175,12 +1181,18 @@ bool Engine::step() {
                     if (n > d_penalty_tokens_capacity_) {
                         if (d_penalty_tokens_) cudaFree(d_penalty_tokens_);
                         d_penalty_tokens_capacity_ = std::max(n, (size_t)256);
-                        cudaMalloc(&d_penalty_tokens_, d_penalty_tokens_capacity_ * sizeof(int32_t));
+                        if (cudaMalloc(&d_penalty_tokens_, d_penalty_tokens_capacity_ * sizeof(int32_t)) != cudaSuccess) {
+                            IMP_LOG_ERROR("cudaMalloc failed for penalty tokens (%zu)", d_penalty_tokens_capacity_);
+                            d_penalty_tokens_ = nullptr;
+                            d_penalty_tokens_capacity_ = 0;
+                        }
                     }
-                    cudaMemcpyAsync(d_penalty_tokens_, req0->output_tokens.data(),
-                                    n * sizeof(int32_t), cudaMemcpyHostToDevice, dec_stream);
-                    state.penalty_tokens = d_penalty_tokens_;
-                    state.n_penalty_tokens = static_cast<int>(n);
+                    if (d_penalty_tokens_) {
+                        cudaMemcpyAsync(d_penalty_tokens_, req0->output_tokens.data(),
+                                        n * sizeof(int32_t), cudaMemcpyHostToDevice, dec_stream);
+                        state.penalty_tokens = d_penalty_tokens_;
+                        state.n_penalty_tokens = static_cast<int>(n);
+                    }
                 }
             }
 

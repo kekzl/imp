@@ -838,7 +838,10 @@ void apply_min_p(float* logits, int vocab_size, float min_p,
 
     // Allocate temp buffer for max value
     float* d_max = nullptr;
-    cudaMalloc(&d_max, sizeof(float));
+    if (cudaMalloc(&d_max, sizeof(float)) != cudaSuccess) {
+        IMP_LOG_ERROR("apply_min_p: cudaMalloc failed");
+        return;
+    }
 
     find_max_logit_kernel<<<1, BLOCK_SIZE, 0, stream>>>(
         logits, vocab_size, d_max);
@@ -927,8 +930,13 @@ void apply_dry_penalty(float* d_logits, int vocab_size,
     // Upload to GPU and apply
     int32_t* d_tokens = nullptr;
     float* d_values = nullptr;
-    cudaMalloc(&d_tokens, n * sizeof(int32_t));
-    cudaMalloc(&d_values, n * sizeof(float));
+    if (cudaMalloc(&d_tokens, n * sizeof(int32_t)) != cudaSuccess ||
+        cudaMalloc(&d_values, n * sizeof(float)) != cudaSuccess) {
+        IMP_LOG_ERROR("apply_dry_penalty: cudaMalloc failed");
+        if (d_tokens) cudaFree(d_tokens);
+        if (d_values) cudaFree(d_values);
+        return;
+    }
     cudaMemcpyAsync(d_tokens, h_tokens.data(), n * sizeof(int32_t),
                     cudaMemcpyHostToDevice, stream);
     cudaMemcpyAsync(d_values, h_values.data(), n * sizeof(float),
@@ -1277,7 +1285,10 @@ int32_t sample_mirostat_v2(const Tensor& logits, float temperature,
                            unsigned int seed, cudaStream_t stream) {
     // Allocate temp buffer: 4 bytes for token + 4 bytes for surprise
     int32_t* d_result = nullptr;
-    cudaMalloc(&d_result, 2 * sizeof(int32_t));
+    if (cudaMalloc(&d_result, 2 * sizeof(int32_t)) != cudaSuccess) {
+        IMP_LOG_ERROR("sample_mirostat_v2: cudaMalloc failed");
+        return 0;
+    }
     return sample_mirostat_v2_impl(logits, temperature, tau, eta, mu,
                                     seed, d_result, true, stream);
 }
