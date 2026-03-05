@@ -19,6 +19,7 @@ struct ServerArgs {
     std::string mmproj_path;   // --mmproj: vision encoder GGUF
     std::string models_dir;    // --models-dir: scan for .gguf files
     std::string api_key;       // --api-key: require Bearer token auth
+    std::string reasoning_format = "deepseek";  // --reasoning-format: deepseek or none
 };
 
 ServerArgs parse_server_args(int argc, char** argv);
