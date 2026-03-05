@@ -392,20 +392,76 @@ ImpError imp_generate(ImpContext ctx, const char* prompt,
     }
 
     try {
-        // Call engine generate with sampling parameters
-        std::string result = ctx->engine->generate(
-            prompt,
-            params->max_tokens,
-            params->temperature,
-            params->top_p,
-            params->top_k,
-            params->seed,
-            params->apply_chat_template != 0,
-            params->min_p,
-            params->repetition_penalty,
-            params->frequency_penalty,
-            params->presence_penalty
-        );
+        auto* tok = ctx->model_handle->model->tokenizer();
+        if (!tok) return IMP_ERROR_INVALID_MODEL;
+
+        // Tokenize (same logic as imp_generate_streaming)
+        std::vector<int32_t> tokens;
+        const auto& tmpl = ctx->engine->chat_template();
+        bool has_img = ctx->engine->has_vision() &&
+                       ctx->engine->has_vision_input();
+        if (params->apply_chat_template && !tmpl.is_raw()) {
+            std::vector<imp::ChatMessage> messages = {{"user", prompt}};
+            if (has_img) {
+                tokens = tmpl.apply_with_image(*tok, messages, 256);
+            } else {
+                tokens = tmpl.apply(*tok, messages);
+            }
+        } else {
+            tokens = tok->encode(prompt);
+            if (tok->add_bos() && (tokens.empty() || tokens[0] != tok->bos_id())) {
+                tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
+            }
+        }
+
+        // Create request with all sampling params
+        auto req = std::make_shared<imp::Request>();
+        req->input_tokens = std::move(tokens);
+        req->max_tokens = params->max_tokens;
+        req->temperature = params->temperature;
+        req->top_p = params->top_p;
+        req->top_k = params->top_k;
+        req->seed = params->seed;
+        req->min_p = params->min_p;
+        req->typical_p = params->typical_p;
+        req->repetition_penalty = params->repetition_penalty;
+        req->frequency_penalty = params->frequency_penalty;
+        req->presence_penalty = params->presence_penalty;
+        req->dry_multiplier = params->dry_multiplier;
+        req->dry_base = params->dry_base;
+        req->dry_allowed_length = params->dry_allowed_length;
+        req->dry_penalty_last_n = params->dry_penalty_last_n;
+        req->mirostat = params->mirostat;
+        req->mirostat_tau = params->mirostat_tau;
+        req->mirostat_eta = params->mirostat_eta;
+        if (params->mirostat == 2) req->mirostat_mu = 2.0f * params->mirostat_tau;
+        req->ignore_eos = (params->ignore_eos != 0);
+        req->logprobs = (params->logprobs != 0);
+        req->top_logprobs = std::max(0, std::min(20, params->top_logprobs));
+        req->json_mode = (params->json_mode != 0);
+        req->status = imp::RequestStatus::PENDING;
+
+        ctx->engine->add_request(req);
+
+        // Prefill
+        while (req->status == imp::RequestStatus::PENDING ||
+               req->status == imp::RequestStatus::PREFILLING) {
+            bool has_work = ctx->engine->step();
+            if (!has_work) break;
+        }
+
+        // Decode
+        while (req->status != imp::RequestStatus::FINISHED &&
+               req->status != imp::RequestStatus::CANCELLED) {
+            bool has_work = ctx->engine->step();
+            if (!has_work && req->status != imp::RequestStatus::FINISHED) break;
+        }
+
+        // Collect output
+        std::string result;
+        for (int32_t t : req->output_tokens) {
+            result += tok->decode({t});
+        }
 
         // Copy result to output buffer
         size_t copy_len = result.size();

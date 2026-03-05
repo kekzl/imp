@@ -513,17 +513,28 @@ static void handle_health(const httplib::Request& /*req*/, httplib::Response& re
     res.set_content(body.dump(), "application/json");
 }
 
-// Recursively find all .gguf files in a directory, returning (filename, full_path) pairs
+// Recursively find all .gguf files in a directory, returning (filename, full_path) pairs.
+// Resolves symlinks and rejects any path that escapes the base directory (path traversal).
 static std::vector<std::pair<std::string, std::string>> scan_gguf_files(const std::string& dir) {
     std::vector<std::pair<std::string, std::string>> results;
     if (dir.empty()) return results;
     std::error_code ec;
+    auto base = std::filesystem::canonical(dir, ec);
+    if (ec) return results;
+    std::string base_prefix = base.string() + "/";
+
     for (const auto& entry : std::filesystem::recursive_directory_iterator(dir, ec)) {
         if (!entry.is_regular_file() && !entry.is_symlink()) continue;
         auto path = entry.path();
-        if (path.extension() == ".gguf" && path.string().find(".no_exist") == std::string::npos) {
-            results.emplace_back(path.filename().string(), path.string());
-        }
+        if (path.extension() != ".gguf" || path.string().find(".no_exist") != std::string::npos)
+            continue;
+        // Resolve to real path and verify it stays under the base directory
+        std::error_code ec2;
+        auto real = std::filesystem::canonical(path, ec2);
+        if (ec2) continue;
+        std::string real_str = real.string();
+        if (real_str.compare(0, base_prefix.size(), base_prefix) != 0) continue;
+        results.emplace_back(path.filename().string(), real_str);
     }
     std::sort(results.begin(), results.end());
     return results;
