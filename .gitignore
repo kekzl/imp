@@ -38,6 +38,9 @@ __pycache__/
 
 # Benchmark results
 benchmarks/results/
+bench_results.txt
+bench_fp8_kv*.sh
+bench_int8_kv*.sh
 
 # Misc
 inspect_gguf.py
