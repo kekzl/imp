@@ -488,7 +488,7 @@ ImpError imp_generate(ImpContext ctx, const char* prompt,
 
 ImpError imp_tokenize(ImpModel model, const char* text,
                       int32_t* tokens, int* n_tokens, int max_tokens) {
-    if (!model || !text || !tokens || !n_tokens) {
+    if (!model || !text || !tokens || !n_tokens || max_tokens <= 0) {
         return IMP_ERROR_INVALID_ARG;
     }
 
@@ -521,7 +521,7 @@ ImpError imp_tokenize(ImpModel model, const char* text,
 ImpError imp_detokenize(ImpModel model, const int32_t* tokens,
                         int n_tokens, char* output_buf,
                         size_t output_buf_size) {
-    if (!model || !tokens || !output_buf || output_buf_size == 0) {
+    if (!model || !tokens || !output_buf || output_buf_size == 0 || n_tokens < 0) {
         return IMP_ERROR_INVALID_ARG;
     }
 
