@@ -65,10 +65,12 @@ public:
 
     // ── Speculative decoding rollback ────────────────────────────────
 
-    // Roll back the last `n_tokens` tokens for a sequence by truncating
-    // its block table. Frees any blocks that become empty after rollback.
-    // This is used when speculative decoding rejects draft tokens.
-    void rollback(int seq_id, int n_tokens);
+    // Truncate a sequence's block table to fit `new_seq_len` tokens.
+    // Frees any blocks beyond what's needed. The caller must also
+    // truncate its own token vectors to match. This correctly handles
+    // partial blocks (only frees blocks that are entirely past the
+    // new length, keeping the last partially-filled block).
+    void rollback(int seq_id, int new_seq_len);
 
     // ── Stats ────────────────────────────────────────────────────────
 

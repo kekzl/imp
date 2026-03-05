@@ -169,24 +169,20 @@ void KVCacheManager::share_prefix(int source_seq_id, int target_seq_id,
 
 // ─── Speculative decoding rollback ───────────────────────────────────
 
-void KVCacheManager::rollback(int seq_id, int n_tokens) {
+void KVCacheManager::rollback(int seq_id, int new_seq_len) {
     auto it = seq_blocks_.find(seq_id);
     if (it == seq_blocks_.end()) return;
 
     auto& blocks = it->second;
-    if (blocks.empty() || n_tokens <= 0) return;
+    if (blocks.empty() || new_seq_len < 0) return;
 
-    // Calculate how many blocks are needed after rollback
-    // Current token count = blocks.size() * kKVBlockSize (approximate upper bound)
-    // We need to free blocks that are no longer needed
-    int tokens_to_remove = n_tokens;
-    while (tokens_to_remove > 0 && !blocks.empty()) {
-        // Check if the last block has more tokens than we need to remove
-        // For simplicity, we free the last block if all its tokens are rejected
-        int last_block = blocks.back();
-        cache_->free_block(last_block);
+    // Keep exactly ceil(new_seq_len / kKVBlockSize) blocks.
+    // A partially-filled last block is retained (its stale slots
+    // will be overwritten on subsequent writes).
+    int blocks_needed = (new_seq_len + kKVBlockSize - 1) / kKVBlockSize;
+    while (static_cast<int>(blocks.size()) > blocks_needed) {
+        cache_->free_block(blocks.back());
         blocks.pop_back();
-        tokens_to_remove -= kKVBlockSize;
     }
 }
 
