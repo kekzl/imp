@@ -289,6 +289,8 @@ if(IMP_BUILD_TESTS)
         tests/test_gemm.cu
         tests/test_paged_attention.cu
         tests/test_reduce.cu
+        tests/test_tokenizer.cpp
+        tests/test_chat_template.cpp
     )
 
     add_executable(imp-tests ${IMP_TEST_SOURCES})
