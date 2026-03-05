@@ -27,6 +27,7 @@ void print_server_usage(const char* prog) {
         "  --mmproj <path>       Path to vision encoder GGUF (mmproj) for multimodal\n"
         "  --models-dir <path>   Directory to scan for .gguf models (auto-load on select)\n"
         "  --api-key <key>       Require Bearer token authentication\n"
+        "  --reasoning-format <f> deepseek (default) or none\n"
         "  --help                Show this help message\n",
         prog);
 }
@@ -76,6 +77,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.models_dir = argv[++i];
         } else if (std::strcmp(arg, "--api-key") == 0 && i + 1 < argc) {
             args.api_key = argv[++i];
+        } else if (std::strcmp(arg, "--reasoning-format") == 0 && i + 1 < argc) {
+            args.reasoning_format = argv[++i];
         } else {
             fprintf(stderr, "Unknown argument: %s\n", arg);
             print_server_usage(argv[0]);

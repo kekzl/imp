@@ -123,6 +123,12 @@ struct ImpContext_T {
     std::shared_ptr<imp::Request> active_request;
 };
 
+struct ParsedToolCall {
+    std::string id;         // "call_imp_0", "call_imp_1", ...
+    std::string name;       // Function name
+    std::string arguments;  // JSON string
+};
+
 struct ServerState {
     ImpModel model = nullptr;
     ImpContext ctx = nullptr;
@@ -134,10 +140,13 @@ struct ServerState {
     int default_max_tokens = 2048;
     int max_seq_len = 0;
     std::atomic<int> next_id{0};
+    std::atomic<int> next_tool_call_id{0};
     ServerArgs default_args;
     std::string models_dir;  // directory to scan for available .gguf files
     std::string api_key;     // if non-empty, require Bearer token auth
     bool is_think_model = false;  // model has <think> token (DeepSeek R1 etc.)
+    int32_t think_start_id = -1;  // <think> token ID (-1 if not present)
+    int32_t think_end_id = -1;    // </think> token ID (-1 if not present)
     bool model_loaded() const { return ctx != nullptr; }
 };
 
@@ -224,6 +233,285 @@ static void strip_think_block(std::string& text) {
         // Unclosed <think> block — model didn't finish thinking, clear output
         text.clear();
     }
+}
+
+// Extract reasoning and content from model output (for non-streaming DeepSeek format).
+// Returns (reasoning, content) pair. If no think block found, reasoning is empty.
+static std::pair<std::string, std::string> extract_reasoning(const std::string& text) {
+    // Find the last </think>
+    auto last_end = text.rfind("</think>");
+    if (last_end != std::string::npos) {
+        std::string reasoning = text.substr(0, last_end);
+        // Strip leading <think> tag
+        auto think_start = reasoning.find("<think>");
+        if (think_start != std::string::npos) {
+            reasoning = reasoning.substr(think_start + 7);
+        }
+        // Trim leading/trailing whitespace from reasoning
+        auto rs = reasoning.find_first_not_of("\n\r\t ");
+        auto re = reasoning.find_last_not_of("\n\r\t ");
+        if (rs != std::string::npos && re != std::string::npos) {
+            reasoning = reasoning.substr(rs, re - rs + 1);
+        } else {
+            reasoning.clear();
+        }
+
+        std::string content = text.substr(last_end + 8);
+        auto cs = content.find_first_not_of("\n\r\t ");
+        content = (cs != std::string::npos) ? content.substr(cs) : "";
+
+        return {reasoning, content};
+    }
+
+    // No </think> — check for unclosed <think>
+    auto think_start = text.find("<think>");
+    if (think_start != std::string::npos) {
+        std::string reasoning = text.substr(think_start + 7);
+        auto rs = reasoning.find_first_not_of("\n\r\t ");
+        auto re = reasoning.find_last_not_of("\n\r\t ");
+        if (rs != std::string::npos && re != std::string::npos) {
+            reasoning = reasoning.substr(rs, re - rs + 1);
+        } else {
+            reasoning.clear();
+        }
+        return {reasoning, ""};
+    }
+
+    // Check for </think> without opening (special token was skipped)
+    // — text before </think> is reasoning
+    // (This case shouldn't happen since we checked rfind above, but handle gracefully)
+
+    return {"", text};
+}
+
+// ============================================================================
+// Tool / Function Calling support
+// ============================================================================
+
+// Build tool-definition prompt text for injection into the system message.
+// Returns empty string if tools array is empty or tool_choice is "none".
+static std::string build_tool_prompt(imp::ChatTemplateFamily family,
+                                     const json& tools,
+                                     const json& tool_choice) {
+    if (tools.empty()) return "";
+
+    // tool_choice "none" means no tool injection
+    if (tool_choice.is_string() && tool_choice.get<std::string>() == "none")
+        return "";
+
+    std::string prompt;
+
+    if (family == imp::ChatTemplateFamily::LLAMA3) {
+        // Llama3 function calling format
+        prompt = "\n\nYou have access to the following functions:\n\n";
+        for (const auto& tool : tools) {
+            if (!tool.contains("function")) continue;
+            const auto& fn = tool["function"];
+            json fn_desc = {
+                {"name", fn.value("name", "")},
+                {"description", fn.value("description", "")},
+                {"parameters", fn.value("parameters", json::object())}
+            };
+            prompt += fn_desc.dump() + "\n\n";
+        }
+        prompt += "For each function call, return a JSON object within <function=function_name> tags:\n"
+                  "<function=function_name>{\"param\": \"value\"}</function>\n\n"
+                  "If no function call is needed, respond normally without any function tags.";
+    } else {
+        // ChatML (Qwen3, Hermes) and all other families — use <tool_call> format
+        prompt = "\n\n# Tools\n\n"
+                 "You may call one or more functions to assist with the user query.\n\n"
+                 "<tools>\n" + tools.dump() + "\n</tools>\n\n"
+                 "For each function call, return a JSON object within <tool_call></tool_call> XML tags:\n"
+                 "<tool_call>\n"
+                 "{\"name\": \"function_name\", \"arguments\": {\"param\": \"value\"}}\n"
+                 "</tool_call>\n\n"
+                 "If no function call is needed, respond normally without any tool_call tags.";
+    }
+
+    // Add constraints based on tool_choice
+    if (tool_choice.is_string()) {
+        std::string choice = tool_choice.get<std::string>();
+        if (choice == "required") {
+            prompt += "\n\nYou MUST call at least one tool.";
+        }
+    } else if (tool_choice.is_object() && tool_choice.contains("function")) {
+        std::string fn_name = tool_choice["function"].value("name", "");
+        if (!fn_name.empty()) {
+            prompt += "\n\nYou MUST call the " + fn_name + " tool.";
+        }
+    }
+
+    return prompt;
+}
+
+// Parse tool calls from ChatML model output (<tool_call>JSON</tool_call>).
+// Returns (content_before_first_tag, vector_of_tool_calls).
+static std::pair<std::string, std::vector<ParsedToolCall>>
+parse_tool_calls_chatml(const std::string& text, ServerState& state) {
+    std::vector<ParsedToolCall> calls;
+    std::string content;
+
+    size_t pos = 0;
+    size_t first_tag = text.find("<tool_call>");
+    if (first_tag == std::string::npos) {
+        return {text, {}};
+    }
+
+    // Content is everything before the first <tool_call>
+    content = text.substr(0, first_tag);
+    // Trim trailing whitespace
+    auto last = content.find_last_not_of("\n\r\t ");
+    if (last != std::string::npos) content = content.substr(0, last + 1);
+    else content.clear();
+
+    pos = first_tag;
+    while (pos < text.size()) {
+        size_t start = text.find("<tool_call>", pos);
+        if (start == std::string::npos) break;
+        start += 11; // skip "<tool_call>"
+
+        size_t end = text.find("</tool_call>", start);
+        if (end == std::string::npos) break; // incomplete tag
+
+        std::string body = text.substr(start, end - start);
+        // Trim whitespace
+        auto bs = body.find_first_not_of("\n\r\t ");
+        auto be = body.find_last_not_of("\n\r\t ");
+        if (bs != std::string::npos && be != std::string::npos)
+            body = body.substr(bs, be - bs + 1);
+
+        // Parse JSON
+        try {
+            json j = json::parse(body);
+            ParsedToolCall tc;
+            tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
+            tc.name = j.value("name", "");
+            if (j.contains("arguments")) {
+                tc.arguments = j["arguments"].dump();
+            } else {
+                // Some models put params at top level minus "name"
+                json args = j;
+                args.erase("name");
+                tc.arguments = args.dump();
+            }
+            if (!tc.name.empty()) {
+                calls.push_back(std::move(tc));
+            }
+        } catch (...) {
+            // Malformed JSON — skip
+        }
+
+        pos = end + 12; // skip "</tool_call>"
+    }
+
+    return {content, calls};
+}
+
+// Parse tool calls from Llama3 model output (<function=name>JSON</function>).
+static std::pair<std::string, std::vector<ParsedToolCall>>
+parse_tool_calls_llama3(const std::string& text, ServerState& state) {
+    std::vector<ParsedToolCall> calls;
+    std::string content;
+
+    size_t first_tag = text.find("<function=");
+    if (first_tag == std::string::npos) {
+        return {text, {}};
+    }
+
+    content = text.substr(0, first_tag);
+    auto last = content.find_last_not_of("\n\r\t ");
+    if (last != std::string::npos) content = content.substr(0, last + 1);
+    else content.clear();
+
+    size_t pos = first_tag;
+    while (pos < text.size()) {
+        size_t start = text.find("<function=", pos);
+        if (start == std::string::npos) break;
+        start += 10; // skip "<function="
+
+        size_t name_end = text.find('>', start);
+        if (name_end == std::string::npos) break;
+
+        std::string name = text.substr(start, name_end - start);
+
+        size_t body_start = name_end + 1;
+        size_t end = text.find("</function>", body_start);
+        if (end == std::string::npos) break;
+
+        std::string body = text.substr(body_start, end - body_start);
+        auto bs = body.find_first_not_of("\n\r\t ");
+        auto be = body.find_last_not_of("\n\r\t ");
+        if (bs != std::string::npos && be != std::string::npos)
+            body = body.substr(bs, be - bs + 1);
+
+        try {
+            // Validate it's valid JSON
+            json j = json::parse(body);
+            ParsedToolCall tc;
+            tc.id = "call_imp_" + std::to_string(state.next_tool_call_id.fetch_add(1));
+            tc.name = name;
+            tc.arguments = j.dump();
+            calls.push_back(std::move(tc));
+        } catch (...) {
+            // Malformed JSON — skip
+        }
+
+        pos = end + 11; // skip "</function>"
+    }
+
+    return {content, calls};
+}
+
+// Dispatch tool call parsing based on template family.
+static std::pair<std::string, std::vector<ParsedToolCall>>
+parse_tool_calls(imp::ChatTemplateFamily family, const std::string& text,
+                 ServerState& state) {
+    if (family == imp::ChatTemplateFamily::LLAMA3)
+        return parse_tool_calls_llama3(text, state);
+    return parse_tool_calls_chatml(text, state);
+}
+
+// Reconstruct assistant message content from structured tool_calls (for multi-turn).
+// This rebuilds what the model originally output so the conversation stays consistent.
+static std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family,
+                                                const json& tool_calls,
+                                                const std::string& content) {
+    std::string result;
+    if (!content.empty() && content != "null") {
+        result = content;
+    }
+
+    for (const auto& tc : tool_calls) {
+        if (!tc.contains("function")) continue;
+        std::string name = tc["function"].value("name", "");
+        std::string args = tc["function"].value("arguments", "{}");
+
+        if (family == imp::ChatTemplateFamily::LLAMA3) {
+            result += "\n<function=" + name + ">" + args + "</function>";
+        } else {
+            // ChatML format
+            json call_obj = {{"name", name}, {"arguments", json::parse(args, nullptr, false)}};
+            if (call_obj["arguments"].is_discarded()) call_obj["arguments"] = args;
+            result += "\n<tool_call>\n" + call_obj.dump() + "\n</tool_call>";
+        }
+    }
+
+    return result;
+}
+
+// Format a tool-role message content for the model.
+// Wraps the content in <tool_response> tags for ChatML, passes as-is for Llama3.
+static std::string format_tool_response(imp::ChatTemplateFamily family,
+                                        const json& msg) {
+    std::string content = msg.value("content", "");
+    std::string tool_call_id = msg.value("tool_call_id", "");
+
+    if (family == imp::ChatTemplateFamily::LLAMA3) {
+        return content;
+    }
+    // ChatML: wrap in <tool_response> tags
+    return "<tool_response>\n" + content + "\n</tool_response>";
 }
 
 static void handle_health(const httplib::Request& /*req*/, httplib::Response& res,
@@ -374,12 +662,35 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
         include_usage = body["stream_options"].value("include_usage", false);
     }
 
+    // Parse tool calling parameters
+    json tools = body.value("tools", json::array());
+    json tool_choice = body.value("tool_choice", json("auto"));
+    bool has_tools = !tools.empty() &&
+        !(tool_choice.is_string() && tool_choice.get<std::string>() == "none");
+
     // Convert JSON messages to ChatMessage vector, extracting image data if present
     std::vector<imp::ChatMessage> chat_msgs;
     std::vector<uint8_t> image_data;  // decoded image bytes (if any)
+    imp::ChatTemplateFamily tpl_family = state.have_template
+        ? state.chat_tpl.family() : imp::ChatTemplateFamily::CHATML;
+
     for (const auto& msg : messages) {
         std::string role = msg.value("role", "user");
-        if (msg.contains("content") && msg["content"].is_array()) {
+
+        if (role == "tool") {
+            // Tool response message — format for the model
+            std::string content = format_tool_response(tpl_family, msg);
+            chat_msgs.push_back({"tool", content});
+        } else if (role == "assistant" && msg.contains("tool_calls")) {
+            // Assistant message with tool_calls — reconstruct model output format
+            std::string content_str;
+            if (msg.contains("content") && !msg["content"].is_null()) {
+                content_str = msg["content"].get<std::string>();
+            }
+            std::string reconstructed = reconstruct_tool_call_output(
+                tpl_family, msg["tool_calls"], content_str);
+            chat_msgs.push_back({"assistant", reconstructed});
+        } else if (msg.contains("content") && msg["content"].is_array()) {
             // OpenAI multimodal format: content is array of parts
             std::string text_parts;
             for (const auto& part : msg["content"]) {
@@ -398,8 +709,33 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
             }
             chat_msgs.push_back({role, text_parts});
         } else {
-            std::string content = msg.value("content", "");
+            std::string content;
+            if (msg.contains("content") && !msg["content"].is_null()) {
+                content = msg["content"].get<std::string>();
+            }
             chat_msgs.push_back({role, content});
+        }
+    }
+
+    // Inject tool definitions into system message
+    if (has_tools && state.have_template) {
+        std::string tool_prompt = build_tool_prompt(tpl_family, tools, tool_choice);
+        if (!tool_prompt.empty()) {
+            // Find or create system message
+            bool found_system = false;
+            for (auto& m : chat_msgs) {
+                if (m.role == "system") {
+                    m.content += tool_prompt;
+                    found_system = true;
+                    break;
+                }
+            }
+            if (!found_system) {
+                std::string sys = state.chat_tpl.default_system_message();
+                if (sys.empty()) sys = "You are a helpful assistant.";
+                sys += tool_prompt;
+                chat_msgs.insert(chat_msgs.begin(), {"system", sys});
+            }
         }
     }
 
@@ -464,6 +800,21 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
         std::string raw;
         for (const auto& m : chat_msgs) raw += m.content + "\n";
         tokens = state.tok->encode(raw);
+    }
+
+    // Optionally append <think> token to trigger reasoning mode.
+    // Enabled when: model supports thinking AND reasoning format is deepseek AND
+    // either the request explicitly asks for it, or no system message disables it.
+    bool enable_thinking = false;
+    if (state.is_think_model && state.default_args.reasoning_format == "deepseek" &&
+        state.think_start_id >= 0) {
+        // Check for explicit enable/disable via request body
+        if (body.contains("enable_thinking")) {
+            enable_thinking = body.value("enable_thinking", false);
+        }
+        if (enable_thinking) {
+            tokens.push_back(state.think_start_id);
+        }
     }
 
     int n_prompt_tokens = static_cast<int>(tokens.size());
@@ -544,7 +895,8 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
         res.set_chunked_content_provider(
             "text/event-stream",
             [&state, params, comp_id, created, max_tokens, n_prompt_tokens, t_start,
-             stop_sequences, max_stop_len, req_logprobs, include_usage, prefill_token](
+             stop_sequences, max_stop_len, req_logprobs, include_usage,
+             prefill_token, enable_thinking, has_tools, tpl_family](
                 size_t /*offset*/, httplib::DataSink& sink) -> bool {
 
                 // Save active request ref for logprobs access
@@ -567,13 +919,44 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                 std::string pending_text;
                 bool text_stop_matched = false;
 
-                // Filter <think>...</think> blocks (DeepSeek R1 etc.)
-                // If the model has <think> in its vocab, buffer until </think>.
-                bool think_filter = state.is_think_model;
-                bool think_confirmed = state.is_think_model;
-                std::string think_buf;
-                int think_tokens = 0;
-                const int kThinkScanLimit = 8;  // tokens before giving up (non-think models)
+                // Tool call detection state machine for streaming
+                enum class ToolPhase { CONTENT, TAG_SCANNING, TOOL_CALL_BODY };
+                ToolPhase tool_phase = ToolPhase::CONTENT;
+                std::string tool_tag_buf;           // buffer for partial tag match
+                std::string tool_body_buf;           // buffer for tool call body
+                std::string tool_close_tag;          // expected closing tag
+                std::string tool_fn_name;            // Llama3: extracted function name from open tag
+                std::vector<ParsedToolCall> stream_tool_calls;
+                bool tool_calls_emitted = false;
+                // The full accumulated output (only used when has_tools, for fallback)
+                std::string full_output;
+
+                // Reasoning content extraction (DeepSeek format)
+                enum class ThinkPhase { SCAN, REASONING, CONTENT };
+                bool use_reasoning = (state.default_args.reasoning_format == "deepseek"
+                                      && state.is_think_model);
+                ThinkPhase think_phase;
+                if (enable_thinking) {
+                    think_phase = ThinkPhase::REASONING;  // <think> in prefill → start reasoning
+                } else if (use_reasoning) {
+                    think_phase = ThinkPhase::SCAN;       // model decides whether to think
+                } else {
+                    think_phase = ThinkPhase::CONTENT;    // no reasoning extraction
+                }
+                std::string reasoning_utf8_buf;
+                std::string think_scan_buf;
+                int think_scan_count = 0;
+                int n_reasoning_tokens = 0;
+                const int kThinkScanLimit = 8;
+
+                // Helper: emit reasoning_content SSE chunk
+                auto emit_reasoning = [&](const std::string& text) -> bool {
+                    if (text.empty()) return true;
+                    json delta = {{"reasoning_content", text}};
+                    std::string sse = sse_chunk(comp_id, created, state.model_name,
+                                                 delta, nullptr);
+                    return sink.write(sse.data(), sse.size());
+                };
 
                 // Helper: flush confirmed text up to a byte position
                 auto flush_text = [&](size_t up_to) {
@@ -619,41 +1002,324 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                     n_output_tokens++;
                     std::string piece = state.tok->decode_token(token);
 
-                    // Filter <think>...</think> reasoning block
-                    if (think_filter) {
-                        think_buf += piece;
-                        think_tokens++;
-
-                        // Detect thinking model: explicit <think> tag or first token
-                        // decodes to empty (special token like <think>)
-                        if (!think_confirmed) {
-                            if (think_buf.find("<think>") != std::string::npos)
-                                think_confirmed = true;
-                            else if (think_tokens == 1 && piece.empty())
-                                think_confirmed = true;
+                    // Reasoning content extraction (DeepSeek format)
+                    if (think_phase == ThinkPhase::SCAN) {
+                        if (token == state.think_start_id) {
+                            think_phase = ThinkPhase::REASONING;
+                            n_reasoning_tokens++;
+                            continue;
                         }
-
-                        // Always check for </think> end marker
-                        auto end_pos = think_buf.find("</think>");
-                        if (end_pos != std::string::npos) {
-                            think_filter = false;
-                            std::string after = think_buf.substr(end_pos + 8);
-                            think_buf.clear();
-                            auto start = after.find_first_not_of("\n\r\t ");
-                            piece = (start != std::string::npos) ? after.substr(start) : "";
-                            if (piece.empty()) continue;
-                        } else if (think_confirmed) {
-                            continue;  // inside confirmed think block, keep buffering
-                        } else if (think_tokens < kThinkScanLimit) {
-                            continue;  // still scanning initial tokens
+                        think_scan_buf += piece;
+                        think_scan_count++;
+                        if (think_scan_buf.find("<think>") != std::string::npos) {
+                            think_phase = ThinkPhase::REASONING;
+                            n_reasoning_tokens += think_scan_count;
+                            auto pos = think_scan_buf.find("<think>");
+                            std::string after = think_scan_buf.substr(pos + 7);
+                            think_scan_buf.clear();
+                            if (!after.empty()) reasoning_utf8_buf += after;
+                            continue;
+                        }
+                        if (think_scan_count == 1 && piece.empty()) {
+                            think_phase = ThinkPhase::REASONING;
+                            n_reasoning_tokens++;
+                            continue;
+                        }
+                        if (think_scan_count >= kThinkScanLimit) {
+                            think_phase = ThinkPhase::CONTENT;
+                            piece = think_scan_buf;
+                            think_scan_buf.clear();
                         } else {
-                            // No think block detected — emit buffered text
-                            think_filter = false;
-                            piece = think_buf;
-                            think_buf.clear();
+                            continue;
                         }
                     }
 
+                    if (think_phase == ThinkPhase::REASONING) {
+                        n_reasoning_tokens++;
+                        if (token == state.think_end_id) {
+                            if (!emit_reasoning(reasoning_utf8_buf)) return false;
+                            reasoning_utf8_buf.clear();
+                            think_phase = ThinkPhase::CONTENT;
+                            continue;
+                        }
+                        reasoning_utf8_buf += piece;
+                        auto end_pos = reasoning_utf8_buf.find("</think>");
+                        if (end_pos != std::string::npos) {
+                            std::string before = reasoning_utf8_buf.substr(0, end_pos);
+                            if (!emit_reasoning(before)) return false;
+                            think_phase = ThinkPhase::CONTENT;
+                            std::string after = reasoning_utf8_buf.substr(end_pos + 8);
+                            reasoning_utf8_buf.clear();
+                            auto start = after.find_first_not_of("\n\r\t ");
+                            if (start != std::string::npos) {
+                                piece = after.substr(start);
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            size_t complete = utf8_complete_len(reasoning_utf8_buf);
+                            if (complete > 0) {
+                                std::string to_emit = reasoning_utf8_buf.substr(0, complete);
+                                reasoning_utf8_buf = reasoning_utf8_buf.substr(complete);
+                                if (!emit_reasoning(to_emit)) return false;
+                            }
+                            continue;
+                        }
+                    }
+
+                    // CONTENT phase — with tool call tag detection
+                    if (has_tools) full_output += piece;
+
+                    // Tool call state machine (only active when tools are present)
+                    if (has_tools && tool_phase == ToolPhase::TOOL_CALL_BODY) {
+                        tool_body_buf += piece;
+                        // Check for close tag
+                        auto close_pos = tool_body_buf.find(tool_close_tag);
+                        if (close_pos != std::string::npos) {
+                            std::string body = tool_body_buf.substr(0, close_pos);
+                            auto bs = body.find_first_not_of("\n\r\t ");
+                            auto be = body.find_last_not_of("\n\r\t ");
+                            if (bs != std::string::npos && be != std::string::npos)
+                                body = body.substr(bs, be - bs + 1);
+
+                            // Parse and emit tool call
+                            try {
+                                json j = json::parse(body);
+                                ParsedToolCall tc;
+                                tc.id = "call_imp_" + std::to_string(
+                                    state.next_tool_call_id.fetch_add(1));
+                                if (tpl_family == imp::ChatTemplateFamily::LLAMA3) {
+                                    tc.name = tool_fn_name;
+                                    tc.arguments = j.dump();
+                                } else {
+                                    tc.name = j.value("name", "");
+                                    if (j.contains("arguments")) {
+                                        tc.arguments = j["arguments"].dump();
+                                    } else {
+                                        json args = j;
+                                        args.erase("name");
+                                        tc.arguments = args.dump();
+                                    }
+                                }
+                                if (!tc.name.empty()) {
+                                    int idx = static_cast<int>(stream_tool_calls.size());
+                                    // Emit name chunk
+                                    json name_delta = {{"tool_calls", json::array({
+                                        {{"index", idx}, {"id", tc.id},
+                                         {"type", "function"},
+                                         {"function", {{"name", tc.name}, {"arguments", ""}}}}
+                                    })}};
+                                    std::string sse = sse_chunk(comp_id, created,
+                                        state.model_name, name_delta, nullptr);
+                                    sink.write(sse.data(), sse.size());
+
+                                    // Emit arguments chunk
+                                    json args_delta = {{"tool_calls", json::array({
+                                        {{"index", idx},
+                                         {"function", {{"arguments", tc.arguments}}}}
+                                    })}};
+                                    sse = sse_chunk(comp_id, created,
+                                        state.model_name, args_delta, nullptr);
+                                    sink.write(sse.data(), sse.size());
+
+                                    stream_tool_calls.push_back(std::move(tc));
+                                    tool_calls_emitted = true;
+                                }
+                            } catch (...) {
+                                // Malformed JSON — skip
+                            }
+
+                            // Check for more content after close tag
+                            std::string after = tool_body_buf.substr(
+                                close_pos + tool_close_tag.size());
+                            tool_body_buf.clear();
+                            tool_phase = ToolPhase::CONTENT;
+                            // If there's remaining text, it might contain more tool calls
+                            if (!after.empty()) {
+                                auto ws = after.find_first_not_of("\n\r\t ");
+                                if (ws != std::string::npos) {
+                                    piece = after.substr(ws);
+                                    // Fall through to CONTENT handling below
+                                } else {
+                                    continue;
+                                }
+                            } else {
+                                continue;
+                            }
+                        } else {
+                            continue; // Still collecting body
+                        }
+                    }
+
+                    if (has_tools && tool_phase == ToolPhase::TAG_SCANNING) {
+                        tool_tag_buf += piece;
+                        // ChatML: check for <tool_call>
+                        if (tpl_family != imp::ChatTemplateFamily::LLAMA3) {
+                            if (tool_tag_buf.size() >= 11) { // len("<tool_call>")
+                                if (tool_tag_buf.find("<tool_call>") != std::string::npos) {
+                                    auto pos = tool_tag_buf.find("<tool_call>");
+                                    // Flush content before the tag
+                                    std::string before = tool_tag_buf.substr(0, pos);
+                                    if (!before.empty()) {
+                                        json cd = {{"content", before}};
+                                        std::string sse = sse_chunk(comp_id, created,
+                                            state.model_name, cd, nullptr);
+                                        sink.write(sse.data(), sse.size());
+                                    }
+                                    tool_body_buf = tool_tag_buf.substr(pos + 11);
+                                    tool_close_tag = "</tool_call>";
+                                    tool_tag_buf.clear();
+                                    tool_phase = ToolPhase::TOOL_CALL_BODY;
+                                    continue;
+                                }
+                                // Check if it's definitely not a tool_call tag
+                                if (tool_tag_buf.find("<tool_call") == std::string::npos &&
+                                    tool_tag_buf.find("<tool_c") == std::string::npos &&
+                                    tool_tag_buf.find("<tool_") == std::string::npos &&
+                                    tool_tag_buf.find("<tool") == std::string::npos &&
+                                    tool_tag_buf.find("<too") == std::string::npos &&
+                                    tool_tag_buf.find("<to") == std::string::npos &&
+                                    tool_tag_buf.find("<t") == std::string::npos) {
+                                    // Not a tool tag — flush as content
+                                    piece = tool_tag_buf;
+                                    tool_tag_buf.clear();
+                                    tool_phase = ToolPhase::CONTENT;
+                                    // Fall through to content emission
+                                } else {
+                                    continue; // Still scanning
+                                }
+                            } else {
+                                // Check partial match
+                                const char* tc_tag = "<tool_call>";
+                                bool could_match = true;
+                                for (size_t ci = 0; ci < tool_tag_buf.size() && ci < 11; ci++) {
+                                    if (tool_tag_buf[ci] != tc_tag[ci]) {
+                                        could_match = false;
+                                        break;
+                                    }
+                                }
+                                if (!could_match) {
+                                    piece = tool_tag_buf;
+                                    tool_tag_buf.clear();
+                                    tool_phase = ToolPhase::CONTENT;
+                                } else {
+                                    continue; // Still matching prefix
+                                }
+                            }
+                        } else {
+                            // Llama3: check for <function=
+                            if (tool_tag_buf.size() >= 10) { // len("<function=")
+                                auto fn_pos = tool_tag_buf.find("<function=");
+                                if (fn_pos != std::string::npos) {
+                                    auto gt = tool_tag_buf.find('>', fn_pos + 10);
+                                    if (gt != std::string::npos) {
+                                        std::string before = tool_tag_buf.substr(0, fn_pos);
+                                        if (!before.empty()) {
+                                            json cd = {{"content", before}};
+                                            std::string sse = sse_chunk(comp_id, created,
+                                                state.model_name, cd, nullptr);
+                                            sink.write(sse.data(), sse.size());
+                                        }
+                                        tool_fn_name = tool_tag_buf.substr(fn_pos + 10,
+                                            gt - (fn_pos + 10));
+                                        tool_body_buf = tool_tag_buf.substr(gt + 1);
+                                        tool_close_tag = "</function>";
+                                        tool_tag_buf.clear();
+                                        tool_phase = ToolPhase::TOOL_CALL_BODY;
+                                        continue;
+                                    } else {
+                                        continue; // Still scanning for >
+                                    }
+                                }
+                                // Check prefix match
+                                const char* fn_tag = "<function=";
+                                bool could_match = true;
+                                for (size_t ci = 0; ci < tool_tag_buf.size() && ci < 10; ci++) {
+                                    if (tool_tag_buf[ci] != fn_tag[ci]) {
+                                        could_match = false;
+                                        break;
+                                    }
+                                }
+                                if (!could_match) {
+                                    piece = tool_tag_buf;
+                                    tool_tag_buf.clear();
+                                    tool_phase = ToolPhase::CONTENT;
+                                } else {
+                                    continue;
+                                }
+                            } else {
+                                const char* fn_tag = "<function=";
+                                bool could_match = true;
+                                for (size_t ci = 0; ci < tool_tag_buf.size() && ci < 10; ci++) {
+                                    if (tool_tag_buf[ci] != fn_tag[ci]) {
+                                        could_match = false;
+                                        break;
+                                    }
+                                }
+                                if (!could_match) {
+                                    piece = tool_tag_buf;
+                                    tool_tag_buf.clear();
+                                    tool_phase = ToolPhase::CONTENT;
+                                } else {
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+
+                    // In CONTENT phase, check for start of tool call tag
+                    if (has_tools && tool_phase == ToolPhase::CONTENT) {
+                        // Look for < that might start a tool call tag
+                        size_t lt_pos = piece.find('<');
+                        if (lt_pos != std::string::npos) {
+                            // Emit everything before the <
+                            if (lt_pos > 0) {
+                                std::string before = piece.substr(0, lt_pos);
+                                if (stop_sequences.empty()) {
+                                    utf8_buf += before;
+                                } else {
+                                    pending_text += before;
+                                }
+                            }
+                            // Start tag scanning with the < and everything after
+                            tool_tag_buf = piece.substr(lt_pos);
+                            tool_phase = ToolPhase::TAG_SCANNING;
+                            // Flush any buffered content before entering tag scan
+                            if (stop_sequences.empty() && !utf8_buf.empty()) {
+                                size_t complete = utf8_complete_len(utf8_buf);
+                                if (complete > 0) {
+                                    std::string to_emit = utf8_buf.substr(0, complete);
+                                    utf8_buf = utf8_buf.substr(complete);
+                                    json cd = {{"content", to_emit}};
+                                    std::string sse = sse_chunk(comp_id, created,
+                                        state.model_name, cd, nullptr);
+                                    if (!sink.write(sse.data(), sse.size())) return false;
+                                }
+                            } else if (!stop_sequences.empty()) {
+                                bool stop_found = false;
+                                for (const auto& stop : stop_sequences) {
+                                    auto pos = pending_text.find(stop);
+                                    if (pos != std::string::npos) {
+                                        if (!flush_text(pos)) return false;
+                                        stop_found = true;
+                                        break;
+                                    }
+                                }
+                                if (stop_found) {
+                                    text_stop_matched = true;
+                                    finish = "stop";
+                                    break;
+                                }
+                                if (pending_text.size() > max_stop_len) {
+                                    size_t safe = pending_text.size() - max_stop_len + 1;
+                                    if (!flush_text(safe)) return false;
+                                }
+                            }
+                            continue;
+                        }
+                    }
+
+                    // Normal content emission (no tool tag detected)
                     if (stop_sequences.empty()) {
                         // No stop sequences: stream directly (with UTF-8 buffering)
                         utf8_buf += piece;
@@ -721,17 +1387,31 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                     }
                 }
 
-                // Flush think buffer: strip think blocks and emit remaining content
-                if (!think_buf.empty()) {
-                    strip_think_block(think_buf);
-                    if (!think_buf.empty()) {
-                        utf8_buf += think_buf;
-                    }
-                    think_buf.clear();
+                // Flush scan buffer if we never left SCAN phase (model didn't think)
+                if (think_phase == ThinkPhase::SCAN && !think_scan_buf.empty()) {
+                    utf8_buf += think_scan_buf;
+                    think_scan_buf.clear();
                 }
 
-                // Flush any remaining UTF-8 buffer
-                if (!utf8_buf.empty() && !text_stop_matched) {
+                // Flush remaining reasoning buffer (model ended while still thinking)
+                if (!reasoning_utf8_buf.empty()) {
+                    emit_reasoning(reasoning_utf8_buf);
+                    reasoning_utf8_buf.clear();
+                }
+
+                // Handle incomplete tool call at end (max_tokens hit while in tag)
+                if (tool_phase != ToolPhase::CONTENT && !tool_calls_emitted) {
+                    // Partial tool call — emit as content, finish_reason stays "length"
+                    std::string leftover;
+                    if (!tool_tag_buf.empty()) leftover += tool_tag_buf;
+                    if (!tool_body_buf.empty()) leftover += tool_body_buf;
+                    if (!leftover.empty()) {
+                        utf8_buf += leftover;
+                    }
+                }
+
+                // Flush any remaining UTF-8 buffer (only if no tool calls were emitted)
+                if (!utf8_buf.empty() && !text_stop_matched && !tool_calls_emitted) {
                     json content_delta = {{"content", utf8_buf}};
                     std::string sse = sse_chunk(comp_id, created, state.model_name,
                                                 content_delta, nullptr);
@@ -739,14 +1419,18 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                 }
 
                 // Flush any remaining buffered text (skip if text-level stop was matched)
-                if (!pending_text.empty() && !text_stop_matched) {
+                if (!pending_text.empty() && !text_stop_matched && !tool_calls_emitted) {
                     json content_delta = {{"content", pending_text}};
                     std::string sse = sse_chunk(comp_id, created, state.model_name,
                                                 content_delta, nullptr);
                     sink.write(sse.data(), sse.size());
                 }
 
-                if (!finish) finish = "length";
+                if (!finish) {
+                    finish = tool_calls_emitted ? "tool_calls" : "length";
+                } else if (tool_calls_emitted && strcmp(finish, "stop") == 0) {
+                    finish = "tool_calls";
+                }
 
                 // Send final chunk with finish_reason
                 json empty_delta = json::object();
@@ -756,17 +1440,23 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
 
                 // Send usage chunk if requested
                 if (include_usage) {
+                    json usage = {
+                        {"prompt_tokens", n_prompt_tokens},
+                        {"completion_tokens", n_output_tokens},
+                        {"total_tokens", n_prompt_tokens + n_output_tokens}
+                    };
+                    if (n_reasoning_tokens > 0) {
+                        usage["completion_tokens_details"] = {
+                            {"reasoning_tokens", n_reasoning_tokens}
+                        };
+                    }
                     json usage_obj = {
                         {"id", comp_id},
                         {"object", "chat.completion.chunk"},
                         {"created", created},
                         {"model", state.model_name},
                         {"choices", json::array()},
-                        {"usage", {
-                            {"prompt_tokens", n_prompt_tokens},
-                            {"completion_tokens", n_output_tokens},
-                            {"total_tokens", n_prompt_tokens + n_output_tokens}
-                        }}
+                        {"usage", usage}
                     };
                     std::string usage_chunk = "data: " + usage_obj.dump() + "\n\n";
                     sink.write(usage_chunk.data(), usage_chunk.size());
@@ -850,8 +1540,17 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
         std::string content = !stop_sequences.empty()
             ? output_text : state.tok->decode(output_ids);
 
-        // Strip <think>...</think> reasoning block
-        strip_think_block(content);
+        // Extract reasoning content (DeepSeek format) or strip think blocks
+        std::string reasoning_content;
+        if (state.is_think_model &&
+            state.default_args.reasoning_format == "deepseek") {
+            auto [reasoning, cleaned] = extract_reasoning(content);
+            reasoning_content = reasoning;
+            content = cleaned;
+        } else if (state.is_think_model &&
+                   state.default_args.reasoning_format != "none") {
+            strip_think_block(content);
+        }
 
         // Log request
         auto t_end = std::chrono::high_resolution_clock::now();
@@ -884,13 +1583,58 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
             logprobs_obj = {{"content", content_logprobs}};
         }
 
+        // Parse tool calls from model output
+        std::vector<ParsedToolCall> tool_calls;
+        if (has_tools && strcmp(finish, "length") != 0) {
+            auto [pre_content, parsed_calls] = parse_tool_calls(tpl_family, content, state);
+            if (!parsed_calls.empty()) {
+                tool_calls = std::move(parsed_calls);
+                content = pre_content;
+                finish = "tool_calls";
+            }
+        }
+
+        json msg = {{"role", "assistant"}};
+        if (!tool_calls.empty()) {
+            // content is null when only tool calls (no preceding text)
+            msg["content"] = content.empty() ? json(nullptr) : json(content);
+            json tc_array = json::array();
+            for (const auto& tc : tool_calls) {
+                tc_array.push_back({
+                    {"id", tc.id},
+                    {"type", "function"},
+                    {"function", {{"name", tc.name}, {"arguments", tc.arguments}}}
+                });
+            }
+            msg["tool_calls"] = tc_array;
+        } else {
+            msg["content"] = content;
+        }
+        if (!reasoning_content.empty()) {
+            msg["reasoning_content"] = reasoning_content;
+        }
+
         json choice = {
             {"index", 0},
-            {"message", {{"role", "assistant"}, {"content", content}}},
+            {"message", msg},
             {"finish_reason", finish}
         };
         if (!logprobs_obj.is_null()) {
             choice["logprobs"] = logprobs_obj;
+        }
+
+        json usage = {
+            {"prompt_tokens", n_prompt_tokens},
+            {"completion_tokens", n_output_tokens},
+            {"total_tokens", n_prompt_tokens + n_output_tokens}
+        };
+        if (!reasoning_content.empty()) {
+            // Estimate reasoning tokens (non-streaming doesn't have exact count)
+            auto reasoning_ids = state.tok->encode(reasoning_content);
+            int n_reasoning_tokens = static_cast<int>(reasoning_ids.size()) + 2;  // +2 for <think>/<think>
+            usage["completion_tokens_details"] = {
+                {"reasoning_tokens", n_reasoning_tokens}
+            };
         }
 
         json response = {
@@ -899,11 +1643,7 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
             {"created", created},
             {"model", state.model_name},
             {"choices", json::array({choice})},
-            {"usage", {
-                {"prompt_tokens", n_prompt_tokens},
-                {"completion_tokens", n_output_tokens},
-                {"total_tokens", n_prompt_tokens + n_output_tokens}
-            }}
+            {"usage", usage}
         };
 
         res.set_content(response.dump(), "application/json");
@@ -995,7 +1735,13 @@ static std::string load_model_into_state(ServerState& state, const std::string& 
     if (state.max_seq_len <= 0) state.max_seq_len = static_cast<int>(config.max_seq_len);
 
     // Detect thinking model (DeepSeek R1 etc.) by checking for <think> token in vocab
-    state.is_think_model = (state.tok->find_token("<think>") >= 0);
+    state.think_start_id = state.tok->find_token("<think>");
+    state.think_end_id = state.tok->find_token("</think>");
+    state.is_think_model = (state.think_start_id >= 0);
+    if (state.is_think_model) {
+        printf("Reasoning model: <think>=%d, </think>=%d\n",
+               state.think_start_id, state.think_end_id);
+    }
 
     if (state.have_template) {
         printf("Chat template: %s\n",
@@ -1228,9 +1974,10 @@ static void handle_completions(const httplib::Request& req, httplib::Response& r
                 std::string pending_text;
                 bool text_stop_matched = false;
 
-                // Filter <think>...</think> blocks (DeepSeek R1 etc.)
-                bool think_filter = state.is_think_model;
-                bool think_confirmed = state.is_think_model;
+                // Strip <think> blocks for completions (no reasoning_content field)
+                bool think_strip = (state.is_think_model &&
+                                    state.default_args.reasoning_format != "none");
+                bool think_confirmed = think_strip;
                 std::string think_buf;
                 int think_tokens = 0;
                 const int kThinkScanLimit = 8;
@@ -1265,8 +2012,8 @@ static void handle_completions(const httplib::Request& req, httplib::Response& r
                     n_output_tokens++;
                     std::string piece = state.tok->decode_token(token);
 
-                    // Filter <think>...</think> reasoning block
-                    if (think_filter) {
+                    // Strip <think>...</think> block for text completions
+                    if (think_strip) {
                         think_buf += piece;
                         think_tokens++;
 
@@ -1279,7 +2026,7 @@ static void handle_completions(const httplib::Request& req, httplib::Response& r
 
                         auto end_pos = think_buf.find("</think>");
                         if (end_pos != std::string::npos) {
-                            think_filter = false;
+                            think_strip = false;
                             std::string after = think_buf.substr(end_pos + 8);
                             think_buf.clear();
                             auto start = after.find_first_not_of("\n\r\t ");
@@ -1290,7 +2037,7 @@ static void handle_completions(const httplib::Request& req, httplib::Response& r
                         } else if (think_tokens < kThinkScanLimit) {
                             continue;
                         } else {
-                            think_filter = false;
+                            think_strip = false;
                             piece = think_buf;
                             think_buf.clear();
                         }
@@ -1439,8 +2186,10 @@ static void handle_completions(const httplib::Request& req, httplib::Response& r
         std::string text = !stop_sequences.empty()
             ? output_text : state.tok->decode(output_ids);
 
-        // Strip <think>...</think> reasoning block
-        strip_think_block(text);
+        // Strip <think>...</think> for text completions (no reasoning_content field)
+        if (state.is_think_model && state.default_args.reasoning_format != "none") {
+            strip_think_block(text);
+        }
 
         // Prepend prompt if echo requested
         if (echo) text = prompt + text;
