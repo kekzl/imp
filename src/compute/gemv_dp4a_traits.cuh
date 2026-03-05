@@ -546,7 +546,8 @@ __global__ void gemv_dp4a_kpar_kernel(
     const uint8_t* row_w = W + (size_t)row * row_bytes;
 
     float sum = 0.0f;
-    for (int b = warp_id * 32 + lane; b < total_q8; b += NWARPS * 32) {
+    constexpr int STRIDE = NWARPS * 32;
+    for (int b = warp_id * 32 + lane; b < total_q8; b += STRIDE) {
         int xi[8]; memcpy(xi, q8_1[b].qs, 32);
         float dq = d8[b];
         float q8_sum = 0.0f;
@@ -588,7 +589,8 @@ __global__ void gemv_dp4a_kpar_fp32_kernel(
     const uint8_t* row_w = W + (size_t)row * row_bytes;
 
     float sum = 0.0f;
-    for (int b = warp_id * 32 + lane; b < total_q8; b += NWARPS * 32) {
+    constexpr int STRIDE = NWARPS * 32;
+    for (int b = warp_id * 32 + lane; b < total_q8; b += STRIDE) {
         int xi[8]; memcpy(xi, q8_1[b].qs, 32);
         float dq = d8[b];
         float q8_sum = 0.0f;
@@ -643,7 +645,8 @@ __global__ void gemv_dp4a_kpar_qkv_kernel(
     const uint8_t* row_w = W + (size_t)local_row * row_bytes;
 
     float sum = 0.0f;
-    for (int b = warp_id * 32 + lane; b < total_q8; b += NWARPS * 32) {
+    constexpr int STRIDE = NWARPS * 32;
+    for (int b = warp_id * 32 + lane; b < total_q8; b += STRIDE) {
         int xi[8]; memcpy(xi, q8_1[b].qs, 32);
         float dq = d8[b];
         float q8_sum = 0.0f;
@@ -688,7 +691,8 @@ __global__ void gemv_dp4a_kpar_gate_up_kernel(
     const uint8_t* row_w = W + (size_t)row * row_bytes;
 
     float sum = 0.0f;
-    for (int b = warp_id * 32 + lane; b < total_q8; b += NWARPS * 32) {
+    constexpr int STRIDE = NWARPS * 32;
+    for (int b = warp_id * 32 + lane; b < total_q8; b += STRIDE) {
         int xi[8]; memcpy(xi, q8_1[b].qs, 32);
         float dq = d8[b];
         float q8_sum = 0.0f;

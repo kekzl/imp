@@ -232,6 +232,7 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
         ecfg.kv_cache_max_blocks = static_cast<int>(config->kv_cache_max_blocks);
         ecfg.compute_dtype = map_dtype(config->compute_dtype);
         ecfg.use_green_contexts = (config->enable_green_contexts != 0);
+        ecfg.green_ctx_prefill_ratio = config->green_ctx_prefill_ratio;
         ecfg.use_cuda_graphs = (config->enable_cuda_graphs != 0);
         ecfg.use_pdl = (config->enable_pdl != 0);
         ecfg.gpu_layers = config->gpu_layers;

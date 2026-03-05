@@ -27,6 +27,7 @@ struct EngineConfig {
     int max_seq_len = 4096;
     int kv_cache_max_blocks = 0;  // 0 = auto
     bool use_green_contexts = false;
+    float green_ctx_prefill_ratio = 0.8f;
     bool use_cuda_graphs = false;
     bool use_pdl = true;
     DType compute_dtype = DType::FP16;

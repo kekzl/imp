@@ -22,6 +22,7 @@
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
+#include "compute/gemm_cublaslt_nvfp4.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "runtime/pdl.h"
@@ -824,7 +825,7 @@ static void gemm_dispatch(const Tensor& input, const Tensor& weight,
                                 static_cast<int>(it->second.N),
                                 static_cast<int>(it->second.K), stream);
             } else if (cutlass_nvfp4_cache != nullptr && cutlass_act_data != nullptr) {
-                // CUTLASS sm_120 native FP4 GEMM
+                // Native FP4 GEMM: try cuBLASLt first, then CUTLASS sm_120
                 auto ct_it = cutlass_nvfp4_cache->find(weight.data);
                 if (ct_it != cutlass_nvfp4_cache->end()) {
                     int M = static_cast<int>(input.shape[0]);
@@ -833,6 +834,16 @@ static void gemm_dispatch(const Tensor& input, const Tensor& weight,
                     quantize_fp16_to_nvfp4_cutlass(input.data, cutlass_act_data,
                                                     cutlass_act_sf, M, K, stream);
 
+                    // cuBLASLt NVFP4: same data/scale format, auto-tuned kernels
+                    if (cublaslt_nvfp4_available()) {
+                        bool ok = gemm_nvfp4_cublaslt(
+                            cutlass_act_data, cutlass_act_sf,
+                            ct_it->second,
+                            output.data, M, N, K, stream);
+                        if (ok) return;
+                    }
+
+                    // Fallback: CUTLASS sm_120 block-scaled kernel
                     bool ok = gemm_nvfp4_cutlass_sm120(
                         cutlass_act_data, cutlass_act_sf,
                         ct_it->second,

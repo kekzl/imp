@@ -124,6 +124,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/moe_routing.cu
     src/compute/reduce.cu
     src/compute/ssm.cu
+    src/compute/gemm_cublaslt_nvfp4.cu
 )
 
 if(IMP_USE_CUTLASS)
