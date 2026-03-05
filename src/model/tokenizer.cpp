@@ -271,7 +271,8 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_pref
     struct MergeCand {
         float score;
         int pos;       // left symbol index
-        int seq;       // sequence number at insertion (for invalidation)
+        int seq;       // left sequence number at insertion (for invalidation)
+        int rseq;      // right sequence number at insertion
     };
     auto cmp = [](const MergeCand& a, const MergeCand& b) {
         if (a.score != b.score) return a.score < b.score;
@@ -287,18 +288,19 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_pref
         std::string merged = symbols[i] + symbols[next[i]];
         auto it = token_to_id_.find(merged);
         if (it != token_to_id_.end()) {
-            pq.push({scores_[it->second], i, seq[i]});
+            pq.push({scores_[it->second], i, seq[i], seq[next[i]]});
         }
     }
 
     while (!pq.empty()) {
-        auto [score, pos, s] = pq.top();
+        auto [score, pos, s, rs] = pq.top();
         pq.pop();
 
-        // Validate: symbol still exists and hasn't been modified since insertion
+        // Validate: both symbols still exist and haven't been modified since insertion
         if (deleted[pos] || seq[pos] != s) continue;
         int right = next[pos];
         if (right >= n || deleted[right]) continue;
+        if (seq[right] != rs) continue;  // right symbol was modified
 
         // Merge: symbols[pos] absorbs symbols[right]
         symbols[pos] = symbols[pos] + symbols[right];
@@ -315,7 +317,7 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_pref
             std::string m = symbols[lp] + symbols[pos];
             auto it = token_to_id_.find(m);
             if (it != token_to_id_.end()) {
-                pq.push({scores_[it->second], lp, seq[lp]});
+                pq.push({scores_[it->second], lp, seq[lp], seq[pos]});
             }
         }
         // Try new pair with right neighbor
@@ -323,7 +325,7 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_pref
             std::string m = symbols[pos] + symbols[next[pos]];
             auto it = token_to_id_.find(m);
             if (it != token_to_id_.end()) {
-                pq.push({scores_[it->second], pos, seq[pos]});
+                pq.push({scores_[it->second], pos, seq[pos], seq[next[pos]]});
             }
         }
     }
