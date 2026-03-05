@@ -11,7 +11,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/kekzl/imp/stargazers"><img src="https://img.shields.io/github/stars/kekzl/imp?style=flat&color=f5c542" alt="GitHub Stars"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/kekzl/imp?style=flat&color=blue" alt="License"></a>
   <img src="https://img.shields.io/badge/CUDA-13.1+-76b900?style=flat&logo=nvidia" alt="CUDA 13.1+">
   <img src="https://img.shields.io/badge/C++-20-00599C?style=flat&logo=cplusplus" alt="C++20">
@@ -58,6 +57,8 @@ Methodology matches `llama-bench`: identical pp/tg/reps, all layers on GPU, sequ
 - **Sampling:** temperature, top-p, top-k, min-p, typical-p, repetition/frequency/presence penalties, DRY, Mirostat v2
 - **Runtime:** continuous batching, speculative decoding, Green Context SM partitioning
 - **API:** C library, OpenAI-compatible HTTP server (SSE streaming, tool calling)
+
+> **Note:** imp currently only runs reliably with the models it has been tested on: Qwen3-4B, DeepSeek-R1-7B, DeepSeek-R1-14B, Qwen3-Coder-30B-A3B, Phi-4-Mini, Gemma-3-12B (text + vision), and Nemotron-3-Nano-30B-A3B. Other models sharing the same architectures may work but are untested.
 
 ## Requirements
 
