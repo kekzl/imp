@@ -571,6 +571,12 @@ int CudaGraphConditionalRunner::steps_completed() const {
 }
 
 void CudaGraphConditionalRunner::cleanup() {
+    // Ensure all GPU work referencing these resources has completed before freeing.
+    if (launched_) {
+        cudaDeviceSynchronize();
+        launched_ = false;
+    }
+
     if (exec_) { cudaGraphExecDestroy(exec_); exec_ = nullptr; }
     if (graph_) { cudaGraphDestroy(graph_); graph_ = nullptr; }
 

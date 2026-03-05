@@ -1,4 +1,5 @@
 #include "compute/sampling.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cmath>
@@ -173,7 +174,10 @@ int32_t sample_greedy(const Tensor& logits, cudaStream_t stream) {
     const float* d_logits = static_cast<const float*>(logits.data);
 
     int32_t* d_result = nullptr;
-    cudaMalloc(&d_result, sizeof(int32_t));
+    if (cudaMalloc(&d_result, sizeof(int32_t)) != cudaSuccess) {
+        IMP_LOG_ERROR("sample_greedy: cudaMalloc failed");
+        return 0;
+    }
 
     argmax_kernel<<<1, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, d_result);
 
@@ -567,7 +571,10 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
     float* d_logits = static_cast<float*>(logits.data);
 
     if (top_k <= 0 || top_k > vocab_size) top_k = vocab_size;
-    if (top_k > MAX_TOP_K) top_k = MAX_TOP_K;
+    if (top_k > MAX_TOP_K) {
+        IMP_LOG_WARN("top_k=%d exceeds MAX_TOP_K=%d, clamping", top_k, MAX_TOP_K);
+        top_k = MAX_TOP_K;
+    }
     if (temperature <= 0.0f) temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
 
@@ -576,7 +583,10 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
         d_logits, vocab_size, inv_temperature);
 
     int32_t* d_result = nullptr;
-    cudaMalloc(&d_result, sizeof(int32_t));
+    if (cudaMalloc(&d_result, sizeof(int32_t)) != cudaSuccess) {
+        IMP_LOG_ERROR("sample_topk_topp: cudaMalloc failed");
+        return 0;
+    }
 
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     size_t smem_bytes = static_cast<size_t>(top_k) * sizeof(float)
@@ -611,7 +621,10 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
     float* d_logits = static_cast<float*>(logits.data);
 
     if (top_k <= 0 || top_k > vocab_size) top_k = vocab_size;
-    if (top_k > MAX_TOP_K) top_k = MAX_TOP_K;
+    if (top_k > MAX_TOP_K) {
+        IMP_LOG_WARN("top_k=%d exceeds MAX_TOP_K=%d, clamping", top_k, MAX_TOP_K);
+        top_k = MAX_TOP_K;
+    }
     if (temperature <= 0.0f) temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
 
@@ -676,7 +689,10 @@ void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p,
     float* d_logits = static_cast<float*>(logits.data);
 
     if (top_k <= 0 || top_k > vocab_size) top_k = vocab_size;
-    if (top_k > MAX_TOP_K) top_k = MAX_TOP_K;
+    if (top_k > MAX_TOP_K) {
+        IMP_LOG_WARN("top_k=%d exceeds MAX_TOP_K=%d, clamping", top_k, MAX_TOP_K);
+        top_k = MAX_TOP_K;
+    }
     if (temperature <= 0.0f) temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
 
