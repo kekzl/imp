@@ -608,8 +608,12 @@ bool Engine::set_image(const std::string& path) {
     // Upload pixels to GPU
     int n_pixels = 3 * img.width * img.height;
     half* d_pixels = nullptr;
-    cudaMalloc(&d_pixels, n_pixels * sizeof(half));
-    cudaMemcpy(d_pixels, img.pixels.data(), n_pixels * sizeof(half), cudaMemcpyHostToDevice);
+    if (cudaMalloc(&d_pixels, n_pixels * sizeof(half)) != cudaSuccess) {
+        IMP_LOG_ERROR("set_image: cudaMalloc failed for %d pixels", n_pixels);
+        return false;
+    }
+    cudaMemcpyAsync(d_pixels, img.pixels.data(), n_pixels * sizeof(half),
+                    cudaMemcpyHostToDevice, stream_);
 
     // Encode
     bool ok = vision_encoder_->encode(d_pixels, d_vision_embeddings_, stream_);
@@ -639,8 +643,12 @@ bool Engine::set_image_from_memory(const uint8_t* data, size_t len) {
 
     int n_pixels = 3 * img.width * img.height;
     half* d_pixels = nullptr;
-    cudaMalloc(&d_pixels, n_pixels * sizeof(half));
-    cudaMemcpy(d_pixels, img.pixels.data(), n_pixels * sizeof(half), cudaMemcpyHostToDevice);
+    if (cudaMalloc(&d_pixels, n_pixels * sizeof(half)) != cudaSuccess) {
+        IMP_LOG_ERROR("set_image_from_memory: cudaMalloc failed for %d pixels", n_pixels);
+        return false;
+    }
+    cudaMemcpyAsync(d_pixels, img.pixels.data(), n_pixels * sizeof(half),
+                    cudaMemcpyHostToDevice, stream_);
 
     bool ok = vision_encoder_->encode(d_pixels, d_vision_embeddings_, stream_);
     cudaFree(d_pixels);

@@ -1,8 +1,7 @@
-#include "imp/imp.h"
+#include "api/imp_internal.h"
 #include "args.h"
 #include "model/chat_template.h"
 #include "model/tokenizer.h"
-#include "runtime/engine.h"
 
 #include <chrono>
 #include <cstdio>
@@ -10,18 +9,6 @@
 #include <cstring>
 #include <string>
 #include <vector>
-
-// Access internal engine from opaque context handle
-// (imp-cli links against imp with PRIVATE src/ include access)
-struct ImpModel_T {
-    std::shared_ptr<imp::Model> model;
-};
-
-struct ImpContext_T {
-    ImpModel model_handle = nullptr;
-    std::unique_ptr<imp::Engine> engine;
-    std::shared_ptr<imp::Request> active_request;
-};
 
 int main(int argc, char** argv) {
     CliArgs args = parse_args(argc, argv);
