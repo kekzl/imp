@@ -428,7 +428,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     // --- Initialize green contexts if requested ---
     if (config_.use_green_contexts) {
-        if (!green_ctx_.init(0, 0.8f)) {
+        if (!green_ctx_.init(0, config_.green_ctx_prefill_ratio)) {
             // Non-fatal: fall back to regular streams
         }
     }
