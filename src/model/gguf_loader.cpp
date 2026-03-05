@@ -244,25 +244,31 @@ static GGUFValue read_gguf_value(BinaryReader& r, GGUFValueType type) {
         case GGUFValueType::ARRAY: {
             auto arr_type = static_cast<GGUFValueType>(r.read_u32());
             uint64_t count = r.read_u64();
+            size_t remaining = r.remaining();
             if (arr_type == GGUFValueType::STRING) {
-                v.str_array.reserve(static_cast<size_t>(count));
-                for (uint64_t i = 0; i < count; i++)
+                // Each string is at least 8 bytes (u64 length prefix)
+                size_t safe = std::min(static_cast<size_t>(count), remaining / 8);
+                v.str_array.reserve(safe);
+                for (uint64_t i = 0; i < count && !r.failed(); i++)
                     v.str_array.push_back(r.read_string());
             } else if (arr_type == GGUFValueType::FLOAT32) {
-                v.float_array.reserve(static_cast<size_t>(count));
-                for (uint64_t i = 0; i < count; i++)
+                size_t safe = std::min(static_cast<size_t>(count), remaining / 4);
+                v.float_array.reserve(safe);
+                for (uint64_t i = 0; i < count && !r.failed(); i++)
                     v.float_array.push_back(r.read_f32());
             } else if (arr_type == GGUFValueType::INT32) {
-                v.int_array.reserve(static_cast<size_t>(count));
-                for (uint64_t i = 0; i < count; i++)
+                size_t safe = std::min(static_cast<size_t>(count), remaining / 4);
+                v.int_array.reserve(safe);
+                for (uint64_t i = 0; i < count && !r.failed(); i++)
                     v.int_array.push_back(r.read_i32());
             } else if (arr_type == GGUFValueType::UINT32) {
-                v.int_array.reserve(static_cast<size_t>(count));
-                for (uint64_t i = 0; i < count; i++)
+                size_t safe = std::min(static_cast<size_t>(count), remaining / 4);
+                v.int_array.reserve(safe);
+                for (uint64_t i = 0; i < count && !r.failed(); i++)
                     v.int_array.push_back(static_cast<int32_t>(r.read_u32()));
             } else {
                 // Skip unknown array element types
-                for (uint64_t i = 0; i < count; i++)
+                for (uint64_t i = 0; i < count && !r.failed(); i++)
                     read_gguf_value(r, arr_type);
             }
             break;

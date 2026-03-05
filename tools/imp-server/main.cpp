@@ -1,8 +1,6 @@
-#include "imp/imp.h"
 #include "args.h"
 #include "model/chat_template.h"
 #include "model/tokenizer.h"
-#include "runtime/engine.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -112,16 +110,8 @@ static std::vector<uint8_t> base64_decode(const std::string& encoded) {
     return out;
 }
 
-// Access internal engine from opaque context handle (same as imp-cli)
-struct ImpModel_T {
-    std::shared_ptr<imp::Model> model;
-};
-
-struct ImpContext_T {
-    ImpModel model_handle = nullptr;
-    std::unique_ptr<imp::Engine> engine;
-    std::shared_ptr<imp::Request> active_request;
-};
+// Internal handle types (shared with imp_api.cpp and imp-cli)
+#include "api/imp_internal.h"
 
 struct ParsedToolCall {
     std::string id;         // "call_imp_0", "call_imp_1", ...

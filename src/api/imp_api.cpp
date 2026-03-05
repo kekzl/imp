@@ -1,11 +1,8 @@
-#include "imp/imp.h"
-#include "model/model.h"
+#include "api/imp_internal.h"
 #include "model/gguf_loader.h"
 #include "model/safetensors_loader.h"
 #include "model/tokenizer.h"
 #include "model/chat_template.h"
-#include "runtime/engine.h"
-#include "runtime/request.h"
 #include "memory/kv_cache.h"
 
 #include "core/logging.h"
@@ -15,20 +12,6 @@
 #include <vector>
 #include <new>
 #include <exception>
-
-// --- Internal handle types ---
-
-struct ImpModel_T {
-    std::shared_ptr<imp::Model> model;
-};
-
-struct ImpContext_T {
-    ImpModel model_handle = nullptr;
-    std::unique_ptr<imp::Engine> engine;
-
-    // State for token-level prefill/decode API
-    std::shared_ptr<imp::Request> active_request;
-};
 
 // --- Error string ---
 
