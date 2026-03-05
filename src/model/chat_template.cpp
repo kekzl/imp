@@ -189,6 +189,34 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer) {
             break;
     }
 
+    // Extract default system message from Jinja template (if any).
+    // Many models embed a default system prompt that's injected when the user
+    // doesn't provide one (e.g. Nanbeige, Qwen).
+    const std::string& jinja = tokenizer.chat_template_str();
+    if (!jinja.empty()) {
+        const std::string sys_prefix = "<|im_start|>system\n";
+        size_t pos = 0;
+        while ((pos = jinja.find(sys_prefix, pos)) != std::string::npos) {
+            size_t content_start = pos + sys_prefix.size();
+            size_t content_end = jinja.find("<|im_end|>", content_start);
+            if (content_end == std::string::npos) break;
+
+            std::string candidate = jinja.substr(content_start, content_end - content_start);
+            // Skip entries that reference Jinja variables (user-provided messages)
+            if (candidate.find("messages") == std::string::npos &&
+                candidate.find("{{") == std::string::npos &&
+                candidate.find("content") == std::string::npos &&
+                !candidate.empty()) {
+                default_system_message_ = candidate;
+                IMP_LOG_INFO("Default system message: %.40s%s",
+                             default_system_message_.c_str(),
+                             default_system_message_.size() > 40 ? "..." : "");
+                break;
+            }
+            pos = content_end;
+        }
+    }
+
     IMP_LOG_INFO("Chat template: %s", chat_template_family_name(family_));
     return true;
 }
@@ -221,6 +249,21 @@ std::vector<int32_t> ChatTemplate::apply_chatml(
     // Skip BOS if it's the same token as im_start (e.g. Nanbeige: bos = <|im_start|>)
     if (tok.add_bos() && bos_id_ != im_start_id_) {
         tokens.push_back(bos_id_);
+    }
+
+    // Inject default system message if the model has one and the user didn't provide one
+    bool has_system = false;
+    for (const auto& m : msgs) {
+        if (m.role == "system") { has_system = true; break; }
+    }
+    if (!has_system && !default_system_message_.empty()) {
+        tokens.push_back(im_start_id_);
+        // Encode role+content as one piece to match reference tokenization
+        auto sys_ids = tok.encode("system\n" + default_system_message_);
+        tokens.insert(tokens.end(), sys_ids.begin(), sys_ids.end());
+        tokens.push_back(im_end_id_);
+        auto nl_ids = tok.encode("\n");
+        tokens.insert(tokens.end(), nl_ids.begin(), nl_ids.end());
     }
 
     for (const auto& msg : msgs) {

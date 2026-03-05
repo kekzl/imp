@@ -19,6 +19,51 @@
 
 using json = nlohmann::json;
 
+// Convert a token text to a JSON-safe string. Tokens may contain partial UTF-8
+// sequences (e.g. emoji fragments) that nlohmann::json rejects. Replace invalid
+// bytes with U+FFFD to avoid serialization errors.
+static json safe_token_json(const std::string& text) {
+    std::string safe;
+    safe.reserve(text.size());
+    size_t i = 0;
+    while (i < text.size()) {
+        unsigned char c = static_cast<unsigned char>(text[i]);
+        int expected = 0;
+        if (c < 0x80) { expected = 1; }
+        else if ((c & 0xE0) == 0xC0) { expected = 2; }
+        else if ((c & 0xF0) == 0xE0) { expected = 3; }
+        else if ((c & 0xF8) == 0xF0) { expected = 4; }
+        else { safe += "\xEF\xBF\xBD"; i++; continue; }  // invalid lead → U+FFFD
+        if (i + expected > text.size()) {
+            // Incomplete sequence at end → U+FFFD for each remaining byte
+            for (; i < text.size(); i++) safe += "\xEF\xBF\xBD";
+            break;
+        }
+        // Validate continuation bytes
+        bool valid = true;
+        for (int j = 1; j < expected; j++) {
+            if ((static_cast<unsigned char>(text[i + j]) & 0xC0) != 0x80) {
+                valid = false; break;
+            }
+        }
+        if (valid) {
+            safe.append(text, i, expected);
+            i += expected;
+        } else {
+            safe += "\xEF\xBF\xBD";
+            i++;
+        }
+    }
+    return json(safe);
+}
+
+// Build a JSON bytes array from raw token bytes (for OpenAI logprobs "bytes" field).
+static json token_bytes_json(const std::string& text) {
+    json arr = json::array();
+    for (unsigned char c : text) arr.push_back(static_cast<int>(c));
+    return arr;
+}
+
 // Returns the number of leading bytes that form complete UTF-8 characters.
 // Bytes from complete_len onwards are an incomplete trailing sequence.
 static size_t utf8_complete_len(const std::string& s) {
@@ -138,33 +183,46 @@ static std::string sse_chunk(const std::string& id, int64_t created,
     return "data: " + obj.dump() + "\n\n";
 }
 
-// Strip leading <think>...</think> block from model output (DeepSeek R1 etc.)
-// Handles both cases:
-//   1. <think>...reasoning...</think> — full block at start
-//   2. ...reasoning...</think> — opening tag was a special token skipped by decode()
+// Strip all <think>...</think> blocks from model output (DeepSeek R1, Nanbeige etc.)
+// Finds the LAST </think> and returns everything after it, handling:
+//   1. Single <think>...reasoning...</think> response
+//   2. Multiple <think>...</think> blocks (some models repeat)
+//   3. Missing opening <think> (special token skipped by decode)
+//   4. Missing </think> (model hit token limit before closing)
+//   5. Trailing unclosed <think> after the last </think>
 static void strip_think_block(std::string& text) {
-    auto first = text.find_first_not_of("\n\r\t ");
-    if (first == std::string::npos) return;
-
-    // Case 1: explicit <think> tag at start
-    if (text.compare(first, 7, "<think>") == 0) {
-        auto end_pos = text.find("</think>", first + 7);
-        if (end_pos == std::string::npos) {
-            text.clear();
-            return;
-        }
-        std::string after = text.substr(end_pos + 8);
+    // Find the last </think> — everything after it is the actual response
+    auto last_end = text.rfind("</think>");
+    if (last_end != std::string::npos) {
+        std::string after = text.substr(last_end + 8);
         auto start = after.find_first_not_of("\n\r\t ");
-        text = (start != std::string::npos) ? after.substr(start) : "";
+        if (start != std::string::npos) {
+            after = after.substr(start);
+            // If remaining text starts with another unclosed <think>, strip it
+            if (after.compare(0, 7, "<think>") == 0) {
+                auto next_end = after.find("</think>", 7);
+                if (next_end == std::string::npos) {
+                    // Unclosed trailing <think> block — discard
+                    text.clear();
+                    return;
+                }
+                // Recursive case: more think blocks after the last </think>
+                text = after;
+                strip_think_block(text);
+                return;
+            }
+            text = after;
+        } else {
+            text.clear();
+        }
         return;
     }
 
-    // Case 2: </think> present without opening tag (special token skipped by decode)
-    auto end_pos = text.find("</think>");
-    if (end_pos != std::string::npos) {
-        std::string after = text.substr(end_pos + 8);
-        auto start = after.find_first_not_of("\n\r\t ");
-        text = (start != std::string::npos) ? after.substr(start) : "";
+    // No </think> found — check if there's an opening <think>
+    auto first = text.find_first_not_of("\n\r\t ");
+    if (first != std::string::npos && text.compare(first, 7, "<think>") == 0) {
+        // Unclosed <think> block — model didn't finish thinking, clear output
+        text.clear();
     }
 }
 
@@ -469,6 +527,12 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
     params.top_logprobs = top_logprobs;
     params.json_mode = json_mode ? 1 : 0;
 
+    // Capture first token produced during prefill (engine samples one token as part of prefill)
+    int32_t prefill_token = -1;
+    if (state.ctx->active_request && !state.ctx->active_request->output_tokens.empty()) {
+        prefill_token = state.ctx->active_request->output_tokens.back();
+    }
+
     std::string comp_id = make_completion_id(state);
     int64_t created = unix_timestamp();
 
@@ -480,7 +544,7 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
         res.set_chunked_content_provider(
             "text/event-stream",
             [&state, params, comp_id, created, max_tokens, n_prompt_tokens, t_start,
-             stop_sequences, max_stop_len, req_logprobs, include_usage](
+             stop_sequences, max_stop_len, req_logprobs, include_usage, prefill_token](
                 size_t /*offset*/, httplib::DataSink& sink) -> bool {
 
                 // Save active request ref for logprobs access
@@ -522,12 +586,18 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                     return sink.write(sse.data(), sse.size());
                 };
 
-                for (int step = 0; step < max_tokens; step++) {
+                for (int step = -1; step < max_tokens; step++) {
                     int32_t token = 0;
-                    ImpError err = imp_decode_step(state.ctx, &params, &token);
-                    if (err != IMP_SUCCESS) {
-                        finish = "stop";
-                        break;
+                    if (step == -1) {
+                        // First iteration: use the token produced during prefill
+                        if (prefill_token < 0) continue;
+                        token = prefill_token;
+                    } else {
+                        ImpError err = imp_decode_step(state.ctx, &params, &token);
+                        if (err != IMP_SUCCESS) {
+                            finish = "stop";
+                            break;
+                        }
                     }
 
                     // Check stop conditions
@@ -602,15 +672,15 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                                     json top_arr = json::array();
                                     for (const auto& t : lp.top) {
                                         top_arr.push_back({
-                                            {"token", t.text},
+                                            {"token", safe_token_json(t.text)},
                                             {"logprob", t.logprob},
-                                            {"bytes", nullptr}
+                                            {"bytes", token_bytes_json(t.text)}
                                         });
                                     }
                                     lp_chunk = {{"content", json::array({
-                                        {{"token", lp.text},
+                                        {{"token", safe_token_json(lp.text)},
                                          {"logprob", lp.logprob},
-                                         {"bytes", nullptr},
+                                         {"bytes", token_bytes_json(lp.text)},
                                          {"top_logprobs", top_arr}}
                                     })}};
                                 }
@@ -649,6 +719,15 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                             if (!flush_text(safe)) return false;
                         }
                     }
+                }
+
+                // Flush think buffer: strip think blocks and emit remaining content
+                if (!think_buf.empty()) {
+                    strip_think_block(think_buf);
+                    if (!think_buf.empty()) {
+                        utf8_buf += think_buf;
+                    }
+                    think_buf.clear();
                 }
 
                 // Flush any remaining UTF-8 buffer
@@ -715,12 +794,18 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
         const char* finish = nullptr;
         std::string output_text;  // accumulated output for stop matching
 
-        for (int step = 0; step < max_tokens; step++) {
+        for (int step = -1; step < max_tokens; step++) {
             int32_t token = 0;
-            err = imp_decode_step(state.ctx, &params, &token);
-            if (err != IMP_SUCCESS) {
-                finish = "stop";
-                break;
+            if (step == -1) {
+                // First iteration: use the token produced during prefill
+                if (prefill_token < 0) continue;
+                token = prefill_token;
+            } else {
+                err = imp_decode_step(state.ctx, &params, &token);
+                if (err != IMP_SUCCESS) {
+                    finish = "stop";
+                    break;
+                }
             }
 
             if (token == state.tok->eos_id()) {
@@ -784,15 +869,15 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                 json top_arr = json::array();
                 for (const auto& t : lp.top) {
                     top_arr.push_back({
-                        {"token", t.text},
+                        {"token", safe_token_json(t.text)},
                         {"logprob", t.logprob},
-                        {"bytes", nullptr}
+                        {"bytes", token_bytes_json(t.text)}
                     });
                 }
                 content_logprobs.push_back({
-                    {"token", lp.text},
+                    {"token", safe_token_json(lp.text)},
                     {"logprob", lp.logprob},
-                    {"bytes", nullptr},
+                    {"bytes", token_bytes_json(lp.text)},
                     {"top_logprobs", top_arr}
                 });
             }
@@ -1089,6 +1174,12 @@ static void handle_completions(const httplib::Request& req, httplib::Response& r
         return;
     }
 
+    // Capture first token produced during prefill
+    int32_t prefill_token = -1;
+    if (state.ctx->active_request && !state.ctx->active_request->output_tokens.empty()) {
+        prefill_token = state.ctx->active_request->output_tokens.back();
+    }
+
     ImpGenerateParams params = imp_generate_params_default();
     params.temperature = temperature;
     params.top_p = top_p;
@@ -1120,7 +1211,7 @@ static void handle_completions(const httplib::Request& req, httplib::Response& r
         res.set_chunked_content_provider(
             "text/event-stream",
             [&state, params, comp_id, created, max_tokens, n_prompt_tokens, t_start,
-             stop_sequences, max_stop_len, echo, prompt, include_usage](
+             stop_sequences, max_stop_len, echo, prompt, include_usage, prefill_token](
                 size_t /*offset*/, httplib::DataSink& sink) -> bool {
 
                 int n_output_tokens = 0;
@@ -1153,12 +1244,17 @@ static void handle_completions(const httplib::Request& req, httplib::Response& r
                     return sink.write(sse.data(), sse.size());
                 };
 
-                for (int step = 0; step < max_tokens; step++) {
+                for (int step = -1; step < max_tokens; step++) {
                     int32_t token = 0;
-                    ImpError err = imp_decode_step(state.ctx, &params, &token);
-                    if (err != IMP_SUCCESS) {
-                        finish = "stop";
-                        break;
+                    if (step == -1) {
+                        if (prefill_token < 0) continue;
+                        token = prefill_token;
+                    } else {
+                        ImpError err = imp_decode_step(state.ctx, &params, &token);
+                        if (err != IMP_SUCCESS) {
+                            finish = "stop";
+                            break;
+                        }
                     }
 
                     if (token == state.tok->eos_id()) {
@@ -1234,6 +1330,15 @@ static void handle_completions(const httplib::Request& req, httplib::Response& r
                     }
                 }
 
+                // Flush think buffer: strip think blocks and emit remaining content
+                if (!think_buf.empty()) {
+                    strip_think_block(think_buf);
+                    if (!think_buf.empty()) {
+                        utf8_buf += think_buf;
+                    }
+                    think_buf.clear();
+                }
+
                 // Flush remaining buffers
                 if (!utf8_buf.empty() && !text_stop_matched) {
                     std::string sse = sse_completion_chunk(comp_id, created,
@@ -1290,12 +1395,17 @@ static void handle_completions(const httplib::Request& req, httplib::Response& r
         const char* finish = nullptr;
         std::string output_text;
 
-        for (int step = 0; step < max_tokens; step++) {
+        for (int step = -1; step < max_tokens; step++) {
             int32_t token = 0;
-            err = imp_decode_step(state.ctx, &params, &token);
-            if (err != IMP_SUCCESS) {
-                finish = "stop";
-                break;
+            if (step == -1) {
+                if (prefill_token < 0) continue;
+                token = prefill_token;
+            } else {
+                err = imp_decode_step(state.ctx, &params, &token);
+                if (err != IMP_SUCCESS) {
+                    finish = "stop";
+                    break;
+                }
             }
 
             if (token == state.tok->eos_id()) {
@@ -1350,15 +1460,15 @@ static void handle_completions(const httplib::Request& req, httplib::Response& r
                 json top_arr = json::array();
                 for (const auto& t : lp.top) {
                     top_arr.push_back({
-                        {"token", t.text},
+                        {"token", safe_token_json(t.text)},
                         {"logprob", t.logprob},
-                        {"bytes", nullptr}
+                        {"bytes", token_bytes_json(t.text)}
                     });
                 }
                 content_logprobs.push_back({
-                    {"token", lp.text},
+                    {"token", safe_token_json(lp.text)},
                     {"logprob", lp.logprob},
-                    {"bytes", nullptr},
+                    {"bytes", token_bytes_json(lp.text)},
                     {"top_logprobs", top_arr}
                 });
             }

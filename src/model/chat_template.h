@@ -55,10 +55,12 @@ public:
     const std::vector<int32_t>& stop_token_ids() const { return stop_token_ids_; }
     ChatTemplateFamily family() const { return family_; }
     bool is_raw() const { return family_ == ChatTemplateFamily::RAW; }
+    const std::string& default_system_message() const { return default_system_message_; }
 
 private:
     ChatTemplateFamily family_ = ChatTemplateFamily::RAW;
     std::vector<int32_t> stop_token_ids_;
+    std::string default_system_message_;
 
     // Resolved special token IDs (set during init)
     int32_t bos_id_ = -1;
