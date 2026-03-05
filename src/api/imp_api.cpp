@@ -73,6 +73,10 @@ ImpConfig imp_config_default(void) {
     config.use_fp8_prefill = 0;         // FP16 weight cache by default
     config.use_nvfp4_decode = -1;       // auto (sm_120→mode2, sm_90→mode1)
     config.num_cpu_threads = 0;         // auto
+    config.enable_speculative = 0;      // no speculative decoding
+    config.draft_model_path = NULL;     // no draft model
+    config.draft_model_format = IMP_FORMAT_GGUF;
+    config.spec_k = 4;                 // default draft tokens
     config.mmproj_path = NULL;          // no vision model
     return config;
 }

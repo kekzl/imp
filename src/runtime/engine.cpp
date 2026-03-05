@@ -1207,6 +1207,35 @@ bool Engine::step() {
                 state.json_constrainer = json_constrainer_.get();
             }
 
+            // Per-request sampling: each request uses its own sampling params.
+            // The InferenceState 'state' carries valid_decode[0]'s params for the
+            // greedy_single check; the actual sampling overrides per request below.
+            auto sample_per_request = [&](const Tensor& logits) -> std::vector<int32_t> {
+                int n = static_cast<int>(valid_decode.size());
+                std::vector<int32_t> result(n);
+                for (int i = 0; i < n; i++) {
+                    auto& req = valid_decode[i];
+                    InferenceState per_state = state;
+                    per_state.temperature = req->temperature;
+                    per_state.top_p = req->top_p;
+                    per_state.top_k = req->top_k;
+                    per_state.min_p = req->min_p;
+                    per_state.typical_p = req->typical_p;
+                    per_state.seed = req->seed;
+                    per_state.mirostat = req->mirostat;
+                    per_state.mirostat_tau = req->mirostat_tau;
+                    per_state.mirostat_eta = req->mirostat_eta;
+                    per_state.mirostat_mu = req->mirostat_mu;
+                    per_state.n_sequences = 1;
+                    Tensor seq_logits = logits.slice(i, i + 1);
+                    auto t = executor_->sample_from_logits(seq_logits, per_state, dec_stream);
+                    result[i] = t[0];
+                    if (per_state.mirostat == 2)
+                        req->mirostat_mu = per_state.mirostat_mu;
+                }
+                return result;
+            };
+
             // 3e. Execute batched forward pass (with CUDA Graph when enabled)
             std::vector<int32_t> tokens;
             Tensor decode_logits_out;  // needed when logprobs are requested
@@ -1267,27 +1296,18 @@ bool Engine::step() {
                     if (logits_out.data == nullptr) {
                         logits_out = executor_->get_logits_view(gpu_batch.n_sequences);
                     }
-                    tokens = executor_->sample_from_logits(logits_out, state, dec_stream);
+                    tokens = sample_per_request(logits_out);
                     if (needs_logprobs) decode_logits_out = logits_out;
                 }
             } else {
-                if (needs_logprobs) {
-                    // Use forward_logits + sample_from_logits to retain logits access
-                    executor_->forward_logits(state, decode_logits_out, dec_stream);
-                    tokens = executor_->sample_from_logits(decode_logits_out, state, dec_stream);
-                } else {
-                    tokens = executor_->forward_batch(state, dec_stream);
-                }
+                executor_->forward_logits(state, decode_logits_out, dec_stream);
+                tokens = sample_per_request(decode_logits_out);
             }
 
             // Only free if not using pool (pool memory is reused)
             if (!decode_batch_pool_.is_allocated()) {
                 gpu_batch.free();
             }
-
-            // Mirostat v2: write back updated mu (single-sequence only)
-            if (state.mirostat == 2 && valid_decode.size() == 1)
-                valid_decode[0]->mirostat_mu = state.mirostat_mu;
 
             Tokenizer* tok = model_->tokenizer();
 
