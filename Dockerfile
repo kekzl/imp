@@ -18,14 +18,19 @@ COPY . .
 # Override -march=native with portable -march=x86-64-v3 for Docker portability
 RUN sed -i 's/-march=native/-march=x86-64-v3/g' cmake/CompilerFlags.cmake
 
-RUN cmake -B build -G Ninja \
+# BuildKit cache mount persists the build directory across Docker builds.
+# On code-only changes, Ninja recompiles only modified translation units
+# instead of rebuilding from scratch (~30s vs ~5min for full CUDA rebuild).
+RUN --mount=type=cache,target=/src/build \
+    cmake -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
         -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" \
         -DIMP_BUILD_TESTS=OFF \
         -DIMP_BUILD_BENCH=OFF \
         -DIMP_BUILD_TOOLS=ON \
         -DIMP_BUILD_SERVER=ON \
-    && cmake --build build -j$(nproc)
+    && cmake --build build -j$(nproc) \
+    && cp build/imp-server build/imp-cli /tmp/
 
 # =============================================================================
 # Stage 2: Minimal runtime image
@@ -40,8 +45,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends --allow-change-
     && rm -rf /var/lib/apt/lists/*
 
 # Copy built binaries
-COPY --from=builder /src/build/imp-server /usr/local/bin/imp-server
-COPY --from=builder /src/build/imp-cli /usr/local/bin/imp-cli
+COPY --from=builder /tmp/imp-server /usr/local/bin/imp-server
+COPY --from=builder /tmp/imp-cli /usr/local/bin/imp-cli
 
 # Copy entrypoint
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
