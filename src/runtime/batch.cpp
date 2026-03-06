@@ -147,6 +147,7 @@ void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq) {
 
     max_batch_size_ = max_batch_size;
     max_blocks_per_seq_ = max_blocks_per_seq;
+    last_upload_n_blocks_ = -1;
 
     // Compute sizes with 256-byte alignment per sub-buffer
     auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
@@ -210,9 +211,17 @@ GPUBatch GPUBatchPool::upload_into_pool(const Batch& batch, cudaStream_t stream)
     }
 
     if (batch.max_blocks_per_seq > 0 && !batch.block_tables.empty()) {
-        cudaMemcpyAsync(d_block_tables_, batch.block_tables.data(),
-                        batch.n_sequences * batch.max_blocks_per_seq * sizeof(int),
-                        cudaMemcpyHostToDevice, stream);
+        // For single-seq decode, skip block_table re-upload when block count unchanged.
+        // Block table only changes when a new KV block is allocated (every kKVBlockSize steps).
+        int n_blocks = static_cast<int>(batch.block_tables.size()) / batch.n_sequences;
+        if (batch.n_sequences == 1 && n_blocks == last_upload_n_blocks_) {
+            // Skip — block_table content is identical to last upload
+        } else {
+            cudaMemcpyAsync(d_block_tables_, batch.block_tables.data(),
+                            batch.n_sequences * batch.max_blocks_per_seq * sizeof(int),
+                            cudaMemcpyHostToDevice, stream);
+            last_upload_n_blocks_ = (batch.n_sequences == 1) ? n_blocks : -1;
+        }
     }
 
     return gpu;
@@ -230,6 +239,7 @@ void GPUBatchPool::free_pool() {
     d_block_tables_ = nullptr;
     d_context_lens_ = nullptr;
     d_sample_result_ = nullptr;
+    last_upload_n_blocks_ = -1;
 }
 
 } // namespace imp
