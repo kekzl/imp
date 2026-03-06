@@ -1523,6 +1523,16 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                     reasoning_utf8_buf.clear();
                 }
 
+                // If model exhausted tokens while still reasoning and never
+                // produced content, emit a notice so the user sees something
+                // instead of a blank response.
+                if (think_phase == ThinkPhase::REASONING
+                    && utf8_buf.empty() && pending_text.empty()) {
+                    std::string notice =
+                        "[Reasoning truncated — increase max_tokens for a complete answer]";
+                    sse_writer.write_content(notice, sink);
+                }
+
                 // Handle incomplete tool call at end (max_tokens hit while in tag)
                 if (tool_phase != ToolPhase::CONTENT && !tool_calls_emitted) {
                     // Partial tool call — emit as content, finish_reason stays "length"
