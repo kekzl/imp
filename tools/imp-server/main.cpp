@@ -212,7 +212,7 @@ struct ServerState {
     bool have_template = false;
     std::string model_name;
     std::timed_mutex mtx;
-    int default_max_tokens = 2048;
+    int default_max_tokens = 16384;
     int max_seq_len = 0;
     std::atomic<int> next_id{0};
     std::atomic<int> next_tool_call_id{0};
@@ -693,8 +693,8 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
         return;
     }
 
-    float temperature = body.value("temperature", 0.7f);
-    float top_p = body.value("top_p", 0.9f);
+    float temperature = body.value("temperature", 0.6f);
+    float top_p = body.value("top_p", 0.95f);
     int top_k = body.value("top_k", 40);
     int max_tokens = body.value("max_tokens", state.default_max_tokens);
     int seed = body.value("seed", -1);
@@ -1916,8 +1916,8 @@ static void handle_completions(const httplib::Request& req, httplib::Response& r
     }
 
     // Extract parameters
-    float temperature = body.value("temperature", 0.7f);
-    float top_p = body.value("top_p", 0.9f);
+    float temperature = body.value("temperature", 0.6f);
+    float top_p = body.value("top_p", 0.95f);
     int top_k = body.value("top_k", 40);
     int max_tokens = body.value("max_tokens", state.default_max_tokens);
     int seed = body.value("seed", -1);
