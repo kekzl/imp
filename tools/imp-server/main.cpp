@@ -82,6 +82,91 @@ static size_t utf8_complete_len(const std::string& s) {
     return i; // incomplete — emit up to start of this sequence
 }
 
+// Append JSON-escaped text to output buffer. Handles ", \, control chars; passes
+// through valid UTF-8 bytes unescaped.
+static void json_escape_into(std::string& out, const char* s, size_t len) {
+    out.reserve(out.size() + len + 8);
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        switch (c) {
+            case '"':  out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if ((unsigned char)c < 0x20) {
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "\\u%04x", (unsigned char)c);
+                    out += buf;
+                } else {
+                    out += c;
+                }
+        }
+    }
+}
+
+// Pre-formatted SSE chunk writer. Builds envelope templates once per request;
+// hot-path write_content/write_reasoning only JSON-escape the token text and
+// concatenate with the pre-built prefix/suffix — no json objects or .dump().
+struct SSEChunkWriter {
+    // content:            ...{"content":"<TEXT>"}...
+    // reasoning_content:  ...{"reasoning_content":"<TEXT>"}...
+    std::string content_prefix;
+    std::string content_suffix;
+    std::string reasoning_prefix;
+    std::string reasoning_suffix;
+    std::string buf_;
+
+    SSEChunkWriter(const std::string& id, int64_t created, const std::string& model) {
+        // JSON-escape id and model (they could theoretically contain quotes)
+        std::string esc_id, esc_model;
+        json_escape_into(esc_id, id.data(), id.size());
+        json_escape_into(esc_model, model.data(), model.size());
+
+        std::string envelope_prefix =
+            "data: {\"id\":\"" + esc_id +
+            "\",\"object\":\"chat.completion.chunk\",\"created\":" +
+            std::to_string(created) +
+            ",\"model\":\"" + esc_model +
+            "\",\"choices\":[{\"index\":0,\"delta\":{\"";
+
+        std::string envelope_suffix =
+            "\"},\"finish_reason\":null}]}\n\n";
+
+        content_prefix   = envelope_prefix + "content\":\"";
+        content_suffix   = envelope_suffix;
+        reasoning_prefix = envelope_prefix + "reasoning_content\":\"";
+        reasoning_suffix = envelope_suffix;
+
+        buf_.reserve(512);
+    }
+
+    bool write_content(const char* text, size_t len, httplib::DataSink& sink) {
+        buf_.clear();
+        buf_ += content_prefix;
+        json_escape_into(buf_, text, len);
+        buf_ += content_suffix;
+        return sink.write(buf_.data(), buf_.size());
+    }
+
+    bool write_content(const std::string& text, httplib::DataSink& sink) {
+        return write_content(text.data(), text.size(), sink);
+    }
+
+    bool write_reasoning(const char* text, size_t len, httplib::DataSink& sink) {
+        buf_.clear();
+        buf_ += reasoning_prefix;
+        json_escape_into(buf_, text, len);
+        buf_ += reasoning_suffix;
+        return sink.write(buf_.data(), buf_.size());
+    }
+
+    bool write_reasoning(const std::string& text, httplib::DataSink& sink) {
+        return write_reasoning(text.data(), text.size(), sink);
+    }
+};
+
 // Simple base64 decoder for image data URIs
 static int b64_val(unsigned char c) {
     if (c >= 'A' && c <= 'Z') return c - 'A';
@@ -627,6 +712,14 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
     float mirostat_tau = body.value("mirostat_tau", 5.0f);
     float mirostat_eta = body.value("mirostat_eta", 0.1f);
 
+    // Prevent repetition degeneration when no penalty is explicitly set.
+    // Reasoning models (DeepSeek-R1 distills) are prone to infinite loops
+    // in their thinking phase without this.
+    if (!body.contains("repetition_penalty") && !body.contains("frequency_penalty")
+        && !body.contains("presence_penalty")) {
+        frequency_penalty = 0.3f;
+    }
+
     // Parse stop sequences (string or array of up to 4 strings)
     std::vector<std::string> stop_sequences;
     if (body.contains("stop") && !body["stop"].is_null()) {
@@ -903,6 +996,9 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                 // Save active request ref for logprobs access
                 auto active_req = state.ctx->active_request;
 
+                // Pre-build SSE envelope templates for fast content/reasoning emission
+                SSEChunkWriter sse_writer(comp_id, created, state.model_name);
+
                 // Send initial chunk with role
                 json role_delta = {{"role", "assistant"}};
                 std::string chunk = sse_chunk(comp_id, created, state.model_name,
@@ -953,21 +1049,16 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                 // Helper: emit reasoning_content SSE chunk
                 auto emit_reasoning = [&](const std::string& text) -> bool {
                     if (text.empty()) return true;
-                    json delta = {{"reasoning_content", text}};
-                    std::string sse = sse_chunk(comp_id, created, state.model_name,
-                                                 delta, nullptr);
-                    return sink.write(sse.data(), sse.size());
+                    return sse_writer.write_reasoning(text, sink);
                 };
 
                 // Helper: flush confirmed text up to a byte position
                 auto flush_text = [&](size_t up_to) {
                     if (up_to == 0) return true;
-                    std::string to_send = pending_text.substr(0, up_to);
-                    pending_text = pending_text.substr(up_to);
-                    json content_delta = {{"content", to_send}};
-                    std::string sse = sse_chunk(comp_id, created, state.model_name,
-                                                content_delta, nullptr);
-                    return sink.write(sse.data(), sse.size());
+                    bool ok = sse_writer.write_content(
+                        pending_text.data(), up_to, sink);
+                    pending_text.erase(0, up_to);
+                    return ok;
                 };
 
                 for (int step = -1; step < max_tokens; step++) {
@@ -1043,7 +1134,15 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                             think_phase = ThinkPhase::CONTENT;
                             continue;
                         }
+                        // Skip duplicate <think> tokens while already reasoning
+                        if (token == state.think_start_id) continue;
                         reasoning_utf8_buf += piece;
+                        // Strip <think> text that appears via multi-token encoding
+                        for (;;) {
+                            auto tp = reasoning_utf8_buf.find("<think>");
+                            if (tp == std::string::npos) break;
+                            reasoning_utf8_buf.erase(tp, 7);
+                        }
                         auto end_pos = reasoning_utf8_buf.find("</think>");
                         if (end_pos != std::string::npos) {
                             std::string before = reasoning_utf8_buf.substr(0, end_pos);
@@ -1066,6 +1165,28 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                             }
                             continue;
                         }
+                    }
+
+                    // CONTENT phase: handle stray think tokens from confused models
+                    if (use_reasoning) {
+                        if (token == state.think_start_id) {
+                            think_phase = ThinkPhase::REASONING;
+                            n_reasoning_tokens++;
+                            continue;
+                        }
+                        if (token == state.think_end_id) {
+                            n_reasoning_tokens++;
+                            continue;
+                        }
+                        // Strip text-level think tags from content piece
+                        for (;;) {
+                            auto p = piece.find("<think>");
+                            if (p != std::string::npos) { piece.erase(p, 7); continue; }
+                            p = piece.find("</think>");
+                            if (p != std::string::npos) { piece.erase(p, 8); continue; }
+                            break;
+                        }
+                        if (piece.empty()) continue;
                     }
 
                     // CONTENT phase — with tool call tag detection
@@ -1289,12 +1410,10 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                             if (stop_sequences.empty() && !utf8_buf.empty()) {
                                 size_t complete = utf8_complete_len(utf8_buf);
                                 if (complete > 0) {
-                                    std::string to_emit = utf8_buf.substr(0, complete);
-                                    utf8_buf = utf8_buf.substr(complete);
-                                    json cd = {{"content", to_emit}};
-                                    std::string sse = sse_chunk(comp_id, created,
-                                        state.model_name, cd, nullptr);
-                                    if (!sink.write(sse.data(), sse.size())) return false;
+                                    if (!sse_writer.write_content(
+                                            utf8_buf.data(), complete, sink))
+                                        return false;
+                                    utf8_buf.erase(0, complete);
                                 }
                             } else if (!stop_sequences.empty()) {
                                 bool stop_found = false;
@@ -1326,13 +1445,12 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                         utf8_buf += piece;
                         size_t complete = utf8_complete_len(utf8_buf);
                         if (complete > 0) {
-                            std::string to_emit = utf8_buf.substr(0, complete);
-                            utf8_buf = utf8_buf.substr(complete);
-
-                            json content_delta = {{"content", to_emit}};
-                            // Build per-token logprobs if requested
-                            json lp_chunk = nullptr;
                             if (req_logprobs && active_req) {
+                                // Logprobs path: fall back to sse_chunk (rare)
+                                std::string to_emit = utf8_buf.substr(0, complete);
+                                utf8_buf.erase(0, complete);
+                                json content_delta = {{"content", to_emit}};
+                                json lp_chunk = nullptr;
                                 size_t lp_idx = n_output_tokens - 1;
                                 if (lp_idx < active_req->output_logprobs.size()) {
                                     const auto& lp = active_req->output_logprobs[lp_idx];
@@ -1351,11 +1469,16 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
                                          {"top_logprobs", top_arr}}
                                     })}};
                                 }
-                            }
-                            std::string chunk = sse_chunk(comp_id, created, state.model_name,
-                                                          content_delta, nullptr, lp_chunk);
-                            if (!sink.write(chunk.data(), chunk.size())) {
-                                return false;
+                                std::string chunk = sse_chunk(comp_id, created,
+                                    state.model_name, content_delta, nullptr, lp_chunk);
+                                if (!sink.write(chunk.data(), chunk.size()))
+                                    return false;
+                            } else {
+                                // Fast path: pre-formatted template
+                                if (!sse_writer.write_content(
+                                        utf8_buf.data(), complete, sink))
+                                    return false;
+                                utf8_buf.erase(0, complete);
                             }
                         }
                     } else {
@@ -1413,18 +1536,12 @@ static void handle_chat_completions(const httplib::Request& req, httplib::Respon
 
                 // Flush any remaining UTF-8 buffer (only if no tool calls were emitted)
                 if (!utf8_buf.empty() && !text_stop_matched && !tool_calls_emitted) {
-                    json content_delta = {{"content", utf8_buf}};
-                    std::string sse = sse_chunk(comp_id, created, state.model_name,
-                                                content_delta, nullptr);
-                    sink.write(sse.data(), sse.size());
+                    sse_writer.write_content(utf8_buf, sink);
                 }
 
                 // Flush any remaining buffered text (skip if text-level stop was matched)
                 if (!pending_text.empty() && !text_stop_matched && !tool_calls_emitted) {
-                    json content_delta = {{"content", pending_text}};
-                    std::string sse = sse_chunk(comp_id, created, state.model_name,
-                                                content_delta, nullptr);
-                    sink.write(sse.data(), sse.size());
+                    sse_writer.write_content(pending_text, sink);
                 }
 
                 if (!finish) {
@@ -1818,6 +1935,12 @@ static void handle_completions(const httplib::Request& req, httplib::Response& r
     int mirostat = body.value("mirostat", 0);
     float mirostat_tau = body.value("mirostat_tau", 5.0f);
     float mirostat_eta = body.value("mirostat_eta", 0.1f);
+
+    if (!body.contains("repetition_penalty") && !body.contains("frequency_penalty")
+        && !body.contains("presence_penalty")) {
+        frequency_penalty = 0.3f;
+    }
+
     bool req_logprobs = body.value("logprobs", false);
     int top_logprobs = body.value("top_logprobs", 0);
     if (top_logprobs < 0) top_logprobs = 0;
