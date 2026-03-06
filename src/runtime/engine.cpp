@@ -39,6 +39,10 @@ Engine::~Engine() {
         cudaFreeHost(h_sample_pinned_);
         h_sample_pinned_ = nullptr;
     }
+    if (decode_done_) {
+        cudaEventDestroy(decode_done_);
+        decode_done_ = nullptr;
+    }
     if (prefill_done_) {
         cudaEventDestroy(prefill_done_);
         prefill_done_ = nullptr;
@@ -521,6 +525,11 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             if (config_.use_cuda_graphs) config_.use_cuda_graphs = false;
             h_sample_pinned_ = nullptr;
         }
+    }
+
+    // Lightweight event for decode spin-poll sync (no timing overhead)
+    if (!decode_done_) {
+        cudaEventCreateWithFlags(&decode_done_, cudaEventDisableTiming);
     }
 
     return true;
@@ -1302,7 +1311,8 @@ bool Engine::step() {
                                                   h_sample_pinned_, s);
                         });
                     decode_graph_runner_.execute(dec_stream);
-                    cudaStreamSynchronize(dec_stream);
+                    cudaEventRecord(decode_done_, dec_stream);
+                    while (cudaEventQuery(decode_done_) == cudaErrorNotReady) {}
                     tokens = {*h_sample_pinned_};
                 } else {
                     // Forward-only graph + sample outside

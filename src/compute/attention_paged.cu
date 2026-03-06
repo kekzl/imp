@@ -86,19 +86,19 @@ __device__ __forceinline__ float warp_reduce_sum(float val) {
 // Block: GQA_BLOCK_THREADS threads
 //
 // Thread mapping:
-//   n_q_per_kv = n_heads / n_kv_heads (e.g. 8)
-//   Each Q head gets NUM_WARPS_PER_Q warps (e.g. 4 warps per Q head)
-//   Total warps = n_q_per_kv * NUM_WARPS_PER_Q (e.g. 8 * 4 = 32)
-//   Total threads = 32 * 32 = 1024
+//   n_q_per_kv = n_heads / n_kv_heads (e.g. 8 or 16)
+//   Each Q head gets warps_per_q warps (4 for ratio<=8, 2 for ratio>8)
+//   Total warps = n_q_per_kv * warps_per_q (always <= 32)
+//   Total threads <= 1024
 //
 // Shared memory: K tile [block_size, head_dim] + V tile [block_size, head_dim]
 //   loaded cooperatively by all threads, then each Q head's warps compute
 //   dot products and accumulate from the shared tile.
 // ---------------------------------------------------------------------------
 
-// For GQA kernel: 4 warps per Q head, up to 8 Q heads per KV head
-static constexpr int NUM_WARPS_PER_Q = 4;
-static constexpr int MAX_Q_PER_KV = 8;
+// For GQA kernel: up to 16 Q heads per KV head
+// warps_per_q is a runtime parameter: 4 for ratio<=8, 2 for ratio>8
+static constexpr int MAX_Q_PER_KV = 16;
 
 __global__ void __launch_bounds__(1024)
 paged_attention_gqa_kernel(
@@ -117,6 +117,7 @@ paged_attention_gqa_kernel(
     int max_context_len,
     int max_num_blocks,
     int n_q_per_kv,
+    int warps_per_q,
     int sliding_window,
     float softcap)
 {
@@ -131,8 +132,8 @@ paged_attention_gqa_kernel(
     const int lane_id = threadIdx.x % WARP_SIZE;
 
     // Which Q head does this warp belong to?
-    const int q_local = warp_id / NUM_WARPS_PER_Q;  // [0, n_q_per_kv)
-    const int warp_in_q = warp_id % NUM_WARPS_PER_Q;  // [0, NUM_WARPS_PER_Q)
+    const int q_local = warp_id / warps_per_q;  // [0, n_q_per_kv)
+    const int warp_in_q = warp_id % warps_per_q;  // [0, warps_per_q)
     const int head_idx = kv_head * n_q_per_kv + q_local;
 
     // Skip if this warp's Q head is out of bounds (when n_q_per_kv < MAX_Q_PER_KV)
@@ -239,7 +240,7 @@ paged_attention_gqa_kernel(
         if (tok_start < effective_start) first_tok = effective_start - tok_start;
 
         if (active) {
-            for (int ti = warp_in_q + first_tok; ti < (tok_end - tok_start); ti += NUM_WARPS_PER_Q) {
+            for (int ti = warp_in_q + first_tok; ti < (tok_end - tok_start); ti += warps_per_q) {
                 float dot = 0.0f;
                 for (int i = 0; i < elems_per_thread; i++) {
                     int d = lane_id + i * WARP_SIZE;
@@ -294,15 +295,15 @@ paged_attention_gqa_kernel(
     __syncthreads();
 
     if (warp_in_q == 0) {
-        int base_w = q_local * NUM_WARPS_PER_Q;
+        int base_w = q_local * warps_per_q;
 
         float global_max = -FLT_MAX;
-        for (int w = 0; w < NUM_WARPS_PER_Q; w++) {
+        for (int w = 0; w < warps_per_q; w++) {
             global_max = fmaxf(global_max, red_max[base_w + w]);
         }
 
         float global_l = 0.0f;
-        for (int w = 0; w < NUM_WARPS_PER_Q; w++) {
+        for (int w = 0; w < warps_per_q; w++) {
             global_l += expf(red_max[base_w + w] - global_max) * red_l[base_w + w];
         }
 
@@ -310,7 +311,7 @@ paged_attention_gqa_kernel(
             int d = lane_id + i * WARP_SIZE;
             if (d < head_dim) {
                 float o_val = 0.0f;
-                for (int w = 0; w < NUM_WARPS_PER_Q; w++) {
+                for (int w = 0; w < warps_per_q; w++) {
                     float weight = expf(red_max[base_w + w] - global_max) * red_l[base_w + w];
                     o_val += weight * red_o[(base_w + w) * head_dim + d];
                 }
@@ -2195,7 +2196,10 @@ void paged_attention_decode(
 
         if (!used_cluster && n_q_per_kv <= MAX_Q_PER_KV) {
             // GQA-aware kernel (short context / non-cluster fallback)
-            int total_warps_gqa = n_q_per_kv * NUM_WARPS_PER_Q;
+            // Use 4 warps per Q head for ratio<=8 (1024 threads max),
+            // 2 warps per Q head for ratio>8 (e.g. ratio=16: 16*2*32=1024)
+            int warps_per_q = (n_q_per_kv <= 8) ? 4 : 2;
+            int total_warps_gqa = n_q_per_kv * warps_per_q;
             int gqa_threads = total_warps_gqa * WARP_SIZE;
 
             size_t kv_tile_bytes = 4 * block_size * head_dim * sizeof(half);
@@ -2214,7 +2218,7 @@ void paged_attention_decode(
                 block_tables, context_lens,
                 batch_size, n_heads, n_kv_heads, head_dim,
                 block_size, scale, max_context_len, max_num_blocks,
-                n_q_per_kv, sliding_window, softcap);
+                n_q_per_kv, warps_per_q, sliding_window, softcap);
         } else if (!used_cluster) {
             // MHA fallback for n_q_per_kv > MAX_Q_PER_KV without cluster
             goto mha_fallback;

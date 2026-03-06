@@ -79,6 +79,9 @@ private:
 
     int max_batch_size_ = 0;
     int max_blocks_per_seq_ = 0;
+
+    // Track block_table changes for single-seq decode: skip re-upload when unchanged
+    int last_upload_n_blocks_ = -1;
 };
 
 class BatchBuilder {
