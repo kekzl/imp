@@ -903,13 +903,13 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                             static_cast<const half*>(h.data),
                                             M_d, K_d, stream);
             } else {
-                // GeGLU: keep separate (rare activation type)
-                geglu(go, uo, so, stream);
-                gemv_nvfp4_residual(wd_nvfp4,
-                                     static_cast<const half*>(so.data),
-                                     static_cast<half*>(h.data),
-                                     static_cast<const half*>(h.data),
-                                     M_d, K_d, stream);
+                // Fused GeGLU + NVFP4 GEMV + residual (saves 1 kernel launch)
+                gemv_nvfp4_geglu_residual(wd_nvfp4,
+                                           static_cast<const half*>(go.data),
+                                           static_cast<const half*>(uo.data),
+                                           static_cast<half*>(h.data),
+                                           static_cast<const half*>(h.data),
+                                           M_d, K_d, stream);
             }
         } else if (fused_down_residual) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);

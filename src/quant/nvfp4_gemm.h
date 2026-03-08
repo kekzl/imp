@@ -52,6 +52,13 @@ void gemv_nvfp4_swiglu_residual(const NvFP4QuantResult& A,
                                  half* y, const half* residual,
                                  int M, int K, cudaStream_t stream);
 
+// Fused GeGLU + GEMV + residual: y[M] = A_nvfp4[M,K] @ geglu(gate,up) + residual[M]
+// For Gemma-3 and similar models using GELU-tanh activation.
+void gemv_nvfp4_geglu_residual(const NvFP4QuantResult& A,
+                                const half* gate, const half* up,
+                                half* y, const half* residual,
+                                int M, int K, cudaStream_t stream);
+
 // ---------------------------------------------------------------------------
 // MoE NVFP4 GEMV: per-expert decode projections.
 // FP16 input (no Q8_1 pre-quantization needed).
