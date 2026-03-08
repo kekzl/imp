@@ -30,14 +30,14 @@ void attention_prefill_dispatch(
     int sm = get_device_sm_version();
 #ifdef IMP_USE_CUTLASS
     // CUTLASS FMHA: WGMMA + TMA on sm_90+. ~2x throughput vs WMMA.
-    // Not supported: softcap (Gemma-2/3), sliding window (Mistral).
+    // Supports softcap (Gemma-2/3). Not supported: sliding window (Mistral).
     // Set IMP_NO_CUTLASS_FMHA=1 to force WMMA fallback (for benchmarking).
     static bool use_cutlass = !getenv("IMP_NO_CUTLASS_FMHA");
     // sliding_window that covers entire seq_kv doesn't restrict attention
     int seq_kv = static_cast<int>(K.shape[1]);
     bool sw_active = (sliding_window > 0 && sliding_window < seq_kv);
-    if (use_cutlass && sm >= 90 && softcap == 0.0f && !sw_active) {
-        if (cutlass_fmha_prefill(Q, K, V, O, scale, causal, stream)) {
+    if (use_cutlass && sm >= 90 && !sw_active) {
+        if (cutlass_fmha_prefill(Q, K, V, O, scale, causal, softcap, stream)) {
             return;
         }
         // Fall through to hand-written kernels on failure

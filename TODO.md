@@ -23,7 +23,18 @@
   - SwiGLU+NVFP4 GEMV+residual: Qwen3-4B 273→298 (+9%), Qwen3-8B 138→184 (+33%)
   - GeGLU+NVFP4 GEMV+residual: Gemma-3-12B 59→100 (+70%)
   - Multi-row dispatch (8 rows/block) for all fused NVFP4 GEMV variants
-  Remaining: RMSNorm+GEMV fusion for further kernel count reduction.
+  - MoE SwiGLU+NVFP4 GEMV fusion for down projection
+  - NVFP4 GEMV kernels registered with PDL, launches via pdl::launch()
+  Tested: RMSNorm+GEMV fusion regresses (extra norm_w loads + muls in inner
+  loop outweigh kernel launch savings). Multi-row threshold >512 also
+  regresses (lower occupancy for large-K projections).
+
+- [x] **CUTLASS FMHA Softcap** — Added `SoftcapCausalFusion` for models with
+  logit soft-capping (Gemma-2). Uses `__constant__` memory for softcap params,
+  applies scale→tanh→undo-scale in `before_softmax` hook. Dispatch relaxed to
+  attempt CUTLASS for softcap models (graceful fallback). HD=256 tiles require
+  >200 KB smem — exceeds RTX 5090 limit (99 KB), so Gemma-3 still uses WMMA.
+  Gemma-3 doesn't actually use softcap (only Gemma-2 does).
 
 - [ ] **cuBLASLt NVFP4 Probe** — status=7 (INTERNAL_ERROR), likely
   driver/CUDA version issue. CUTLASS NVFP4 fallback works fine.

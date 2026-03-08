@@ -2,7 +2,7 @@
 // Uses WGMMA (asynchronous warpgroup MMA) + TMA (Tensor Memory Accelerator)
 // from CUTLASS v4.4.1 Example 88 for ~2x throughput vs WMMA kernels.
 //
-// Supports: FP16, causal/non-causal, GQA (n_heads != n_kv_heads), HD=64/128.
+// Supports: FP16, causal/non-causal, GQA, HD={64,96,128}, softcap.
 // Falls back gracefully for unsupported configurations.
 
 #include "compute/attention_cutlass_fmha.h"
@@ -22,6 +22,51 @@
 using namespace cute;
 using namespace cutlass::fmha::kernel;
 using namespace cutlass::fmha::collective;
+
+// ============================================================================
+// Softcap parameters in __constant__ memory for SoftcapCausalFusion.
+// Set before each kernel launch via cudaMemcpyToSymbol.
+// ============================================================================
+struct SoftcapParams {
+    float softcap;       // softcap value (e.g. 50.0 for Gemma-3)
+    float inv_softcap;   // 1.0 / softcap
+    float scale;         // 1.0 / sqrt(head_dim)
+    float inv_scale;     // sqrt(head_dim) — undo scale after softcap
+};
+
+static __constant__ SoftcapParams d_softcap_params;
+
+// ============================================================================
+// SoftcapCausalFusion: causal masking + logit soft-capping.
+//
+// Applied in before_softmax on raw QK accumulator (before CUTLASS scale).
+// The CUTLASS softmax applies exp2(score * scale_log2) after before_softmax,
+// so we apply scale, softcap, then undo scale:
+//   s = score * scale
+//   s = softcap * tanh(s / softcap)
+//   score = s / scale     (exp2 will re-apply scale_log2)
+// ============================================================================
+struct SoftcapCausalFusion : CausalFusion {
+    template <class AccQK, class CountQK, class ProblemSize>
+    CUTLASS_DEVICE void before_softmax(
+        AccQK& acc_qk, CountQK const& count_qk, ProblemSize const& problem_size) {
+        const float sc     = d_softcap_params.softcap;
+        const float inv_sc = d_softcap_params.inv_softcap;
+        const float s      = d_softcap_params.scale;
+        const float inv_s  = d_softcap_params.inv_scale;
+        CUTLASS_PRAGMA_UNROLL
+        for (int i = 0; i < size(acc_qk); i++) {
+            auto pos = count_qk(i);
+            if (get<0>(pos) < get<1>(pos)) {
+                acc_qk(i) = -INFINITY;
+            } else {
+                float v = acc_qk(i) * s;        // apply 1/sqrt(D)
+                v = sc * tanhf(v * inv_sc);      // softcap * tanh(score / softcap)
+                acc_qk(i) = v * inv_s;           // undo scale for exp2 step
+            }
+        }
+    }
+};
 
 namespace imp {
 
@@ -223,7 +268,7 @@ static bool run_fmha(
 
 bool cutlass_fmha_prefill(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, cudaStream_t stream)
+    float scale, bool causal, float softcap, cudaStream_t stream)
 {
     if (Q.dtype != DType::FP16) return false;
 
@@ -248,50 +293,52 @@ bool cutlass_fmha_prefill(
     const auto* V_ptr = reinterpret_cast<const half*>(V.data);
     auto* O_ptr = reinterpret_cast<half*>(O.data);
 
-    // Note: CUTLASS FMHA applies its own 1/sqrt(D) scaling internally.
-    // Our caller passes scale = 1/sqrt(head_dim), so we don't need to re-apply it.
-    // The CUTLASS kernel computes Q @ K^T / sqrt(D) internally.
-    IMP_LOG_DEBUG("CUTLASS FMHA: B=%d Q=%d KV=%d nh=%d nkv=%d hd=%d causal=%d",
-                  batch, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, causal);
+    const bool use_softcap = softcap > 0.0f;
 
-    // Dispatch by head_dim and causal/non-causal
-    if (head_dim == 128) {
-        // Shape<BlockQ=128, BlockKV=128, HeadDim=128> with warp-specialized cooperative
-        using Tile = Shape<_128, _128, _128>;
-        if (causal) {
-            return run_fmha<Tile, CausalFusion>(
-                Q_ptr, K_ptr, V_ptr, O_ptr,
-                batch, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, scale, stream);
-        } else {
-            return run_fmha<Tile, DefaultFusion>(
-                Q_ptr, K_ptr, V_ptr, O_ptr,
-                batch, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, scale, stream);
-        }
-    } else if (head_dim == 96) {
-        // Shape<BlockQ=128, BlockKV=96, HeadDim=96> for Phi4-mini and similar models
-        using Tile = Shape<_128, _96, _96>;
-        if (causal) {
-            return run_fmha<Tile, CausalFusion>(
-                Q_ptr, K_ptr, V_ptr, O_ptr,
-                batch, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, scale, stream);
-        } else {
-            return run_fmha<Tile, DefaultFusion>(
-                Q_ptr, K_ptr, V_ptr, O_ptr,
-                batch, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, scale, stream);
-        }
-    } else if (head_dim == 64) {
-        // Shape<BlockQ=128, BlockKV=64, HeadDim=64> with warp-specialized cooperative
-        using Tile = Shape<_128, _64, _64>;
-        if (causal) {
-            return run_fmha<Tile, CausalFusion>(
-                Q_ptr, K_ptr, V_ptr, O_ptr,
-                batch, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, scale, stream);
-        } else {
-            return run_fmha<Tile, DefaultFusion>(
-                Q_ptr, K_ptr, V_ptr, O_ptr,
-                batch, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, scale, stream);
-        }
+    // Set softcap __constant__ params before launch (synchronous, safe before kernel)
+    if (use_softcap) {
+        SoftcapParams sp;
+        sp.softcap     = softcap;
+        sp.inv_softcap = 1.0f / softcap;
+        sp.scale       = scale;
+        sp.inv_scale   = 1.0f / scale;
+        cudaMemcpyToSymbol(d_softcap_params, &sp, sizeof(SoftcapParams));
     }
+
+    IMP_LOG_DEBUG("CUTLASS FMHA: B=%d Q=%d KV=%d nh=%d nkv=%d hd=%d causal=%d softcap=%.1f",
+                  batch, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, causal, softcap);
+
+    // Helper: dispatch causal vs default vs softcap for a given tile shape
+    #define DISPATCH_FMHA(Tile) \
+        if (use_softcap && causal) { \
+            return run_fmha<Tile, SoftcapCausalFusion>( \
+                Q_ptr, K_ptr, V_ptr, O_ptr, \
+                batch, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, scale, stream); \
+        } else if (causal) { \
+            return run_fmha<Tile, CausalFusion>( \
+                Q_ptr, K_ptr, V_ptr, O_ptr, \
+                batch, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, scale, stream); \
+        } else { \
+            return run_fmha<Tile, DefaultFusion>( \
+                Q_ptr, K_ptr, V_ptr, O_ptr, \
+                batch, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, scale, stream); \
+        }
+
+    // Dispatch by head_dim
+    // HD=256: CUTLASS FMHA tiles require >200 KB smem (exceeds consumer GPU limits).
+    // Falls back to hand-written WMMA kernels for HD=256 models (Gemma-2/3).
+    if (head_dim == 128) {
+        using Tile = Shape<_128, _128, _128>;
+        DISPATCH_FMHA(Tile)
+    } else if (head_dim == 96) {
+        using Tile = Shape<_128, _96, _96>;
+        DISPATCH_FMHA(Tile)
+    } else if (head_dim == 64) {
+        using Tile = Shape<_128, _64, _64>;
+        DISPATCH_FMHA(Tile)
+    }
+
+    #undef DISPATCH_FMHA
 
     // Unsupported head_dim
     return false;
@@ -305,7 +352,7 @@ namespace imp {
 
 bool cutlass_fmha_prefill(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, cudaStream_t stream)
+    float scale, bool causal, float softcap, cudaStream_t stream)
 {
     return false;  // CUTLASS FMHA not available
 }
