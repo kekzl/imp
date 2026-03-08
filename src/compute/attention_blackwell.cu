@@ -11,6 +11,10 @@
 //   - S/P union shared memory: float S and half P share the same region
 //   - Adaptive Br: 128-row Q tiles when shared memory allows (head_dim <= 64),
 //     64-row Q tiles otherwise — both with 8 warps for better utilisation
+//   - Fast math __expf: direct SFU instruction for softmax exp (~2x vs expf)
+//   - Parallel softmax: all 256 threads cooperate on row max/exp/sum/rescale
+//     (was: only Br threads active, 50-75% idle)
+//   - Fused softmax + float→half: single pass over SP_tile
 //
 // The RTX 5090 (sm_120) has 100 KB shared memory per SM with 99 KB opt-in max.
 // Layout for Br=128, Bc=64, HD=64: ~96.5 KB (fits)
@@ -58,6 +62,10 @@ __global__ void flash_attention_blackwell_kernel(
 {
     constexpr int head_dim = HD;  // compile-time head_dim for optimized div/mod
 
+    // Threads-per-row for parallel softmax (power of 2, fits in warp)
+    constexpr int TPR = BW_BLOCK_THREADS / Br;  // 4 (Br=64) or 2 (Br=128)
+    static_assert(TPR >= 1 && (TPR & (TPR - 1)) == 0, "TPR must be power of 2");
+
     // ---- index computation --------------------------------------------------
     const int tile_q     = blockIdx.x;
     const int batch_head = blockIdx.y;
@@ -68,6 +76,10 @@ __global__ void flash_attention_blackwell_kernel(
     const int tid     = threadIdx.x + threadIdx.y * blockDim.x;  // [0,256)
     const int warp_id = tid / BW_WARP_SIZE;  // [0,8)
     const int q_start = tile_q * Br;
+
+    // Parallel softmax: which row and lane within row
+    const int sm_row  = tid / TPR;   // [0, Br)
+    const int sm_lane = tid % TPR;   // [0, TPR)
 
     // Global memory strides (row-major [batch, seq, heads, head_dim]).
     const int64_t q_row_stride  = (int64_t)n_heads    * head_dim;
@@ -91,7 +103,8 @@ __global__ void flash_attention_blackwell_kernel(
     // KV_buf[1]   : half  [Bc  × hd]   double-buffer slot 1
     // SP_tile     : union { float [Br×Bc], half [Br×Bc] }
     // O_acc       : float [Br  × hd]
-    // scale_pv    : float [Br]
+    // row_m       : float [Br]          running row max
+    // row_l       : float [Br]          running row sum
     extern __shared__ char smem[];
 
     half*  Q_tile    = reinterpret_cast<half*>(smem);
@@ -103,7 +116,8 @@ __global__ void flash_attention_blackwell_kernel(
     float* O_acc     = reinterpret_cast<float*>(
                            reinterpret_cast<char*>(SP_float) +
                            Br * BW_Bc * sizeof(float));
-    float* scale_pv_shared = reinterpret_cast<float*>(O_acc + Br * head_dim);
+    float* row_m     = reinterpret_cast<float*>(O_acc + Br * head_dim);
+    float* row_l     = row_m + Br;
 
     half* KV_bufs[2] = { KV_buf0, KV_buf1 };
 
@@ -121,18 +135,18 @@ __global__ void flash_attention_blackwell_kernel(
         }
     }
 
-    // ---- zero output accumulator --------------------------------------------
+    // ---- zero output accumulator + init running softmax state ---------------
     {
         const int total = Br * head_dim;
         for (int i = tid; i < total; i += BW_BLOCK_THREADS) {
             O_acc[i] = 0.0f;
         }
     }
+    if (tid < Br) {
+        row_m[tid] = -FLT_MAX;
+        row_l[tid] = 0.0f;
+    }
     __syncthreads();
-
-    // ---- per-row softmax running state (thread-local) ----
-    float m_i = -FLT_MAX;
-    float l_i = 0.0f;
 
     // ---- number of KV tiles to iterate ----
     int num_kv_tiles = (seq_kv + BW_Bc - 1) / BW_Bc;
@@ -240,56 +254,76 @@ __global__ void flash_attention_blackwell_kernel(
         __syncthreads();
 
         // ============================================================
-        // Phase 2: Online softmax + rescale O accumulator
+        // Phase 2+3: Parallel online softmax + rescale O + SP→half
+        //
+        // All 256 threads participate. TPR threads per row cooperate
+        // using warp shuffle for reductions.
         // ============================================================
-        if (tid < Br && (q_start + tid) < seq_q) {
-            const int r = tid;
-
-            float m_ij = -FLT_MAX;
-            for (int c = 0; c < BW_Bc; c++) {
-                m_ij = fmaxf(m_ij, SP_float[r * BW_Bc + c]);
-            }
-
-            float m_new = fmaxf(m_i, m_ij);
-
-            float p_sum = 0.0f;
-            for (int c = 0; c < BW_Bc; c++) {
-                float p = expf(SP_float[r * BW_Bc + c] - m_new);
-                SP_float[r * BW_Bc + c] = p;
-                p_sum += p;
-            }
-
-            float alpha = expf(m_i - m_new) * l_i;
-            float l_new = alpha + p_sum;
-
-            float rescale = (l_new > 0.0f) ? (alpha / l_new) : 0.0f;
-            float spv     = (l_new > 0.0f) ? (1.0f / l_new)  : 0.0f;
-
-            for (int d = 0; d < head_dim; d++) {
-                O_acc[r * head_dim + d] *= rescale;
-            }
-
-            scale_pv_shared[r] = spv;
-
-            m_i = m_new;
-            l_i = l_new;
-        }
-        __syncthreads();
-
-        // ============================================================
-        // Phase 3: Convert SP_float -> SP_half with scale_pv baked in
-        // ============================================================
-        // SP_half aliases SP_float. Since sizeof(half) < sizeof(float),
-        // writing half[i] doesn't corrupt later float[i] reads because
-        // we process in order and each element is read (float) then
-        // written (half) exactly once.
         {
-            const int total = Br * BW_Bc;
-            for (int i = tid; i < total; i += BW_BLOCK_THREADS) {
-                int r = i / BW_Bc;
-                float spv = scale_pv_shared[r];
-                float val = SP_float[i];
-                SP_half[i] = __float2half(val * spv);
+            const int r = sm_row;
+            const bool row_valid = (r < Br) && (q_start + r < seq_q);
+
+            // Step 1: Parallel row max
+            float partial_max = -FLT_MAX;
+            if (row_valid) {
+                for (int c = sm_lane; c < BW_Bc; c += TPR) {
+                    partial_max = fmaxf(partial_max, SP_float[r * BW_Bc + c]);
+                }
+            }
+            // Warp shuffle XOR reduction across TPR lanes
+            #pragma unroll
+            for (int offset = TPR / 2; offset >= 1; offset >>= 1) {
+                partial_max = fmaxf(partial_max, __shfl_xor_sync(0xffffffff, partial_max, offset));
+            }
+            float m_ij = partial_max;  // all TPR threads now have row max
+
+            // Step 2: New running max and correction factor
+            float m_old = row_valid ? row_m[r] : -FLT_MAX;
+            float m_new = fmaxf(m_old, m_ij);
+            float alpha = __expf(m_old - m_new);  // fast math: correction for old accumulator
+
+            // Step 3: Parallel exp + sum, and write SP_half in-place
+            float partial_sum = 0.0f;
+            if (row_valid) {
+                for (int c = sm_lane; c < BW_Bc; c += TPR) {
+                    float p = __expf(SP_float[r * BW_Bc + c] - m_new);
+                    partial_sum += p;
+                    SP_float[r * BW_Bc + c] = p;  // store for half conversion below
+                }
+            }
+            // Reduce sum across TPR lanes
+            #pragma unroll
+            for (int offset = TPR / 2; offset >= 1; offset >>= 1) {
+                partial_sum += __shfl_xor_sync(0xffffffff, partial_sum, offset);
+            }
+
+            // Step 4: Update running state (one thread per row writes)
+            float l_old = row_valid ? row_l[r] : 0.0f;
+            float l_new = alpha * l_old + partial_sum;
+            if (sm_lane == 0 && row_valid) {
+                row_m[r] = m_new;
+                row_l[r] = l_new;
+            }
+
+            // Step 5: Rescale O_acc (all TPR threads cooperate over head_dim)
+            float rescale = (l_old > 0.0f) ? (alpha * l_old / l_new) : 0.0f;
+            if (row_valid) {
+                for (int d = sm_lane; d < head_dim; d += TPR) {
+                    O_acc[r * head_dim + d] *= rescale;
+                }
+            }
+
+            // Step 6: Convert SP_float → SP_half with 1/l_new baked in
+            float spv = (l_new > 0.0f) ? (1.0f / l_new) : 0.0f;
+            if (row_valid) {
+                for (int c = sm_lane; c < BW_Bc; c += TPR) {
+                    SP_half[r * BW_Bc + c] = __float2half(SP_float[r * BW_Bc + c] * spv);
+                }
+            } else if (r < Br) {
+                // Zero out invalid rows for clean WMMA input
+                for (int c = sm_lane; c < BW_Bc; c += TPR) {
+                    SP_half[r * BW_Bc + c] = __float2half(0.0f);
+                }
             }
         }
         __syncthreads();
@@ -381,7 +415,7 @@ static size_t compute_smem(int Br, int head_dim) {
          + 2 * (size_t)BW_Bc * head_dim * sizeof(half)  // KV_buf[0] + KV_buf[1]
          + (size_t)Br * BW_Bc * sizeof(float)            // SP_tile (float union)
          + (size_t)Br * head_dim * sizeof(float)          // O_acc
-         + (size_t)Br * sizeof(float);                    // scale_pv
+         + 2 * (size_t)Br * sizeof(float);                // row_m + row_l
 }
 
 // ===== Host-side launcher ====================================================

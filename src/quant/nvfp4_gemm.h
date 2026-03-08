@@ -29,6 +29,10 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C,
 void gemv_nvfp4_kpar(const NvFP4QuantResult& A, const half* x, half* y,
                      int M, int K, cudaStream_t stream);
 
+// FP32 output GEMV for LM head: y[M] = A_nvfp4[M,K] @ x[K] (float output)
+void gemv_nvfp4_kpar_fp32(const NvFP4QuantResult& A, const half* x, float* y,
+                            int M, int K, cudaStream_t stream);
+
 // Fused QKV: 3 weight matrices, shared input, separate outputs
 void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk,
                            const NvFP4QuantResult& wv, const half* x,

@@ -537,11 +537,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     if (state.is_prefill) {
         bool sliding_active = (layer_sliding_window > 0 && n > layer_sliding_window);
 
-        // cuBLAS QK^T materialization: faster than WMMA flash attention for medium
-        // prefill lengths (pp<=~1024) because cuBLAS GEMM kernels achieve higher TC
-        // utilization. Falls back to flash attention for long sequences, sliding
-        // window, or when the S-matrix buffer wasn't allocated (VRAM-constrained).
-        if (attn_scores_buf_ && n <= static_cast<int>(attn_scores_.shape[1]) &&
+        // cuBLAS QK^T materialization: faster than flash attention for short prefills
+        // (pp<=512). Benchmarked: pp128 cuBLAS 3270 vs FMHA 2918 (+12%), pp512 ~equal.
+        // Falls back to flash attention for long sequences, sliding window, or when
+        // the S-matrix buffer wasn't allocated (VRAM-constrained).
+        // Set IMP_NO_CUBLAS_ATTN=1 to force flash attention (for benchmarking).
+        static bool no_cublas_attn = getenv("IMP_NO_CUBLAS_ATTN");
+        if (!no_cublas_attn && attn_scores_buf_ && n <= static_cast<int>(attn_scores_.shape[1]) &&
             !sliding_active) {
             int64_t s_shape[3] = {static_cast<int64_t>(nh),
                                   static_cast<int64_t>(n),
@@ -916,6 +918,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             int M_d = static_cast<int>(ly.w_down.shape[0]);
             // Fuse activation + Q8_1 quantization into a single kernel when possible.
             // This saves 1 kernel launch per layer (activation + quantize → single kernel).
+            // NOTE: tried fusing act+quant+GEMV into one kernel but it regresses ~22%
+            // because the 2-pass SwiGLU recomputation doubles gate/up L2 reads and the
+            // kpar GEMV is already memory-bound on weight reads (same issue as O-proj
+            // inline quant at line 674). Separate quant + kpar achieves higher occupancy.
             if (cfg.ffn_activation != FFNActivation::GEGLU) {
                 swiglu_quantize_q8_1(static_cast<const half*>(go.data),
                                      static_cast<const half*>(uo.data),
@@ -2663,8 +2669,16 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         Tensor h_last = view_tokens(hidden_, n).slice(n - 1, n);
         Tensor lg = view_tokens(logits_, 1);
 
-        if (use_dp4a_lm) {
-            // For debug: compute norm_out separately so we can inspect it
+        auto nvfp4_lm_pf = nvfp4_cache_.find(model_->output_proj().data);
+        if (nvfp4_lm_pf != nvfp4_cache_.end()) {
+            Tensor no_last = view_tokens(norm_out_, 1);
+            rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
+            debug_tensor_stats("after_final_rmsnorm", no_last, stream);
+            gemv_nvfp4_kpar_fp32(nvfp4_lm_pf->second,
+                                  static_cast<const half*>(no_last.data),
+                                  static_cast<float*>(lg.data),
+                                  cfg.vocab_size, cfg.d_model, stream);
+        } else if (use_dp4a_lm) {
             if (debug_forward_enabled()) {
                 Tensor no_last = view_tokens(norm_out_, 1);
                 rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
@@ -2708,7 +2722,16 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         Tensor h_final = view_tokens(hidden_, n);
         Tensor lg = view_tokens(logits_, n);
 
-        if (n == 1 && use_dp4a_lm) {
+        auto nvfp4_lm = nvfp4_cache_.find(model_->output_proj().data);
+        if (n == 1 && nvfp4_lm != nvfp4_cache_.end()) {
+            Tensor no_final = view_tokens(norm_out_, 1);
+            rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
+            debug_tensor_stats("after_final_rmsnorm", no_final, stream);
+            gemv_nvfp4_kpar_fp32(nvfp4_lm->second,
+                                  static_cast<const half*>(no_final.data),
+                                  static_cast<float*>(lg.data),
+                                  cfg.vocab_size, cfg.d_model, stream);
+        } else if (n == 1 && use_dp4a_lm) {
             if (debug_forward_enabled()) {
                 Tensor no_final = view_tokens(norm_out_, 1);
                 rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
