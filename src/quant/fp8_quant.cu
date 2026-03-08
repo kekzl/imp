@@ -193,6 +193,52 @@ __global__ void absmax_final_reduce_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// Fused calibrate+quantize: absmax → scale → quantize, all on device.
+// Reads the absmax result from a device pointer, computes scale = absmax/448,
+// writes scale to d_scale_out, and quantizes in a single kernel launch.
+// ---------------------------------------------------------------------------
+
+__global__ void calibrate_quantize_fp8_kernel(
+    const half*    __restrict__ input,
+    uint8_t*       __restrict__ output,
+    const float*   __restrict__ d_absmax,      // from absmax reduction
+    float*         __restrict__ d_scale_out,    // output: scale for dequant
+    int n)
+{
+    float absmax = d_absmax[0];
+    float scale = (absmax > 0.0f) ? (absmax / 448.0f) : 1.0f;
+    float inv_scale = 1.0f / scale;
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        d_scale_out[0] = scale;
+    }
+
+    const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
+    if (base >= n) return;
+
+#if defined(__CUDA_FP8_TYPES_EXIST__)
+    #pragma unroll
+    for (int i = 0; i < kElemsPerThread; ++i) {
+        int idx = base + i;
+        if (idx < n) {
+            float val = __half2float(input[idx]) * inv_scale;
+            val = fminf(fmaxf(val, -kFP8E4M3Max), kFP8E4M3Max);
+            __nv_fp8_e4m3 fp8_val = __nv_fp8_e4m3(val);
+            memcpy(&output[idx], &fp8_val, 1);
+        }
+    }
+#else
+    #pragma unroll
+    for (int i = 0; i < kElemsPerThread; ++i) {
+        int idx = base + i;
+        if (idx < n) {
+            float val = __half2float(input[idx]) * inv_scale;
+            output[idx] = float_to_fp8_e4m3_sw(val);
+        }
+    }
+#endif
+}
+
+// ---------------------------------------------------------------------------
 // Quantize kernel: FP16 / scale -> FP8 E4M3
 // ---------------------------------------------------------------------------
 
@@ -376,6 +422,42 @@ float calibrate_fp8_scale(const Tensor& input, cudaStream_t stream)
     float scale = absmax / kFP8E4M3Max;
     IMP_LOG_DEBUG("calibrate_fp8_scale: absmax=%.6f  scale=%.6f", absmax, scale);
     return scale;
+}
+
+// ---- calibrate_and_quantize_fp8_async -------------------------------------
+// Fully asynchronous: calibrate + quantize with reusable temp buffers.
+// No host sync — caller provides pre-allocated d_block_maxes and d_absmax.
+// The scale is written to d_scale_out on device.
+
+void calibrate_and_quantize_fp8_async(
+    const void* input_fp16, void* output_fp8, int n_elements,
+    float* d_block_maxes, int max_grid,
+    float* d_absmax, float* d_scale_out,
+    cudaStream_t stream)
+{
+    if (!input_fp16 || !output_fp8 || n_elements <= 0) return;
+
+    const int grid = compute_grid(n_elements);
+    const int reduce_grid = (grid <= max_grid) ? grid : max_grid;
+
+    // Pass 1: absmax reduction
+    absmax_reduce_kernel<<<reduce_grid, kBlockSize, 0, stream>>>(
+        static_cast<const half*>(input_fp16),
+        d_block_maxes,
+        n_elements);
+
+    absmax_final_reduce_kernel<<<1, kBlockSize, 0, stream>>>(
+        d_block_maxes,
+        d_absmax,
+        reduce_grid);
+
+    // Pass 2: fused scale computation + quantize (reads absmax from device)
+    calibrate_quantize_fp8_kernel<<<grid, kBlockSize, 0, stream>>>(
+        static_cast<const half*>(input_fp16),
+        static_cast<uint8_t*>(output_fp8),
+        d_absmax,
+        d_scale_out,
+        n_elements);
 }
 
 // ---- quantize_fp16_to_fp8_e4m3 (Tensor API) ------------------------------

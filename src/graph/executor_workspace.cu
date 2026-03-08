@@ -830,11 +830,49 @@ void GraphExecutor::free_buffers() {
 
     // Free FP8 weight cache
     for (auto& [ptr, entry] : fp8_cache_) {
-        if (entry.weight.data) cudaFree(entry.weight.data);
-        if (entry.d_scale) cudaFree(entry.d_scale);
+        if (entry.weight.data) {
+            // Check if data pointer is inside a bulk buffer
+            bool in_migrated_data = fp8_migrated_data_ &&
+                reinterpret_cast<uintptr_t>(entry.weight.data) >= reinterpret_cast<uintptr_t>(fp8_migrated_data_) &&
+                reinterpret_cast<uintptr_t>(entry.weight.data) < reinterpret_cast<uintptr_t>(fp8_migrated_data_) + fp8_migrated_data_size_;
+            bool in_overflow_data = fp8_overflow_data_ &&
+                reinterpret_cast<uintptr_t>(entry.weight.data) >= reinterpret_cast<uintptr_t>(fp8_overflow_data_) &&
+                reinterpret_cast<uintptr_t>(entry.weight.data) < reinterpret_cast<uintptr_t>(fp8_overflow_data_) + fp8_overflow_data_size_;
+            if (!in_migrated_data && !in_overflow_data) cudaFree(entry.weight.data);
+        }
+        // d_scale pointers from batched paths point into bulk buffers (freed below)
+        if (entry.d_scale) {
+            bool in_migrated = fp8_migrated_scales_ &&
+                               entry.d_scale >= fp8_migrated_scales_ &&
+                               entry.d_scale < fp8_migrated_scales_ + fp8_migrated_count_;
+            bool in_overflow = fp8_overflow_scales_ &&
+                               entry.d_scale >= fp8_overflow_scales_ &&
+                               entry.d_scale < fp8_overflow_scales_ + fp8_overflow_count_;
+            if (!in_migrated && !in_overflow) cudaFree(entry.d_scale);
+        }
     }
     fp8_cache_.clear();
     fp8_cache_bytes_ = 0;
+    if (fp8_migrated_scales_) {
+        cudaFree(fp8_migrated_scales_);
+        fp8_migrated_scales_ = nullptr;
+        fp8_migrated_count_ = 0;
+    }
+    if (fp8_migrated_data_) {
+        cudaFree(fp8_migrated_data_);
+        fp8_migrated_data_ = nullptr;
+        fp8_migrated_data_size_ = 0;
+    }
+    if (fp8_overflow_scales_) {
+        cudaFree(fp8_overflow_scales_);
+        fp8_overflow_scales_ = nullptr;
+        fp8_overflow_count_ = 0;
+    }
+    if (fp8_overflow_data_) {
+        cudaFree(fp8_overflow_data_);
+        fp8_overflow_data_ = nullptr;
+        fp8_overflow_data_size_ = 0;
+    }
     if (fp8_act_buf_) {
         cudaFree(fp8_act_buf_);
         fp8_act_buf_ = nullptr;
@@ -1115,22 +1153,29 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
     // --- Phase 2: FP8 overflow cache for remaining uncached weights ---
     // Weights already in fp16_cache_ keep their fused KV/gate+up optimizations.
     // FP8 is only used for weights that didn't fit in the FP16 budget (50% smaller).
+    // Uses dequant_scratch_ as FP16 staging buffer (stream ordering ensures safety).
     if (use_fp8_cache_) {
         size_t fp8_total = 0;
         int fp8_count = 0;
         bool fp8_exhausted = false;
 
-        auto cache_weight_fp8 = [&](const Tensor& w, GGMLQuantType qtype) {
+        // Collect weights to convert
+        struct FP8OverflowEntry {
+            const void* orig_ptr;
+            Tensor weight;
+            GGMLQuantType qtype;
+            size_t n_elems;
+        };
+        std::vector<FP8OverflowEntry> fp8_entries;
+
+        auto collect_weight_fp8 = [&](const Tensor& w, GGMLQuantType qtype) {
             if (!w.data || !dequant_gpu_supported(qtype)) return;
-            if (fp16_cache_.count(w.data)) return;  // already in FP16 cache
-            if (fp8_cache_.count(w.data)) return;   // already in FP8 cache
+            if (fp16_cache_.count(w.data)) return;
+            if (fp8_cache_.count(w.data)) return;
             if (fp8_exhausted) return;
 
-            int rows = static_cast<int>(w.shape[0]);
-            int cols = static_cast<int>(w.shape[1]);
-            size_t n_elems = static_cast<size_t>(rows) * cols;
-            size_t fp8_bytes = n_elems;  // 1 byte per element
-            size_t fp16_bytes = n_elems * sizeof(half);
+            size_t n_elems = static_cast<size_t>(w.shape[0]) * w.shape[1];
+            size_t fp8_bytes = n_elems;
 
             if (fp8_total + fp8_bytes + sizeof(float) > remaining_budget) {
                 fp8_exhausted = true;
@@ -1140,47 +1185,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
                 return;
             }
 
-            // Dequant to FP16 temporary
-            void* fp16_tmp = nullptr;
-            cudaError_t err = cudaMalloc(&fp16_tmp, fp16_bytes);
-            if (err != cudaSuccess) {
-                cudaGetLastError();
-                fp8_exhausted = true;
-                return;
-            }
-            dequant_gpu(w.data, fp16_tmp, qtype, rows, cols, stream);
-
-            // Calibrate FP8 scale
-            Tensor fp16_tensor(fp16_tmp, DType::FP16, w.ndim, w.shape, true);
-            float scale = calibrate_fp8_scale(fp16_tensor, stream);
-            if (scale == 0.0f) scale = 1.0f;
-
-            // Quantize FP16 → FP8
-            void* fp8_buf = nullptr;
-            err = cudaMalloc(&fp8_buf, fp8_bytes);
-            if (err != cudaSuccess) {
-                cudaGetLastError();
-                cudaFree(fp16_tmp);
-                fp8_exhausted = true;
-                return;
-            }
-            quantize_fp16_to_fp8_e4m3_scaled(fp16_tmp, fp8_buf,
-                                              static_cast<int>(n_elems), scale, stream);
-            cudaFree(fp16_tmp);
-
-            // Device-side scale pointer
-            float* d_scale = nullptr;
-            err = cudaMalloc(reinterpret_cast<void**>(&d_scale), sizeof(float));
-            if (err != cudaSuccess) {
-                cudaGetLastError();
-                cudaFree(fp8_buf);
-                fp8_exhausted = true;
-                return;
-            }
-            cudaMemcpyAsync(d_scale, &scale, sizeof(float), cudaMemcpyHostToDevice, stream);
-
-            Tensor fp8_t(fp8_buf, DType::FP8_E4M3, w.ndim, w.shape, true);
-            fp8_cache_[w.data] = {fp8_t, scale, d_scale};
+            fp8_entries.push_back({w.data, w, qtype, n_elems});
             fp8_total += fp8_bytes + sizeof(float);
             fp8_count++;
         };
@@ -1188,25 +1193,98 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
         // Same priority order — attention first, then SSM/FFN
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
-            cache_weight_fp8(L.wq, L.wq_qtype);
-            cache_weight_fp8(L.wk, L.wk_qtype);
-            cache_weight_fp8(L.wv, L.wv_qtype);
-            cache_weight_fp8(L.wo, L.wo_qtype);
+            collect_weight_fp8(L.wq, L.wq_qtype);
+            collect_weight_fp8(L.wk, L.wk_qtype);
+            collect_weight_fp8(L.wv, L.wv_qtype);
+            collect_weight_fp8(L.wo, L.wo_qtype);
         }
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
-            cache_weight_fp8(L.ssm_in, L.ssm_in_qtype);
-            cache_weight_fp8(L.ssm_out, L.ssm_out_qtype);
-            cache_weight_fp8(L.w_gate_shared, L.w_gate_shared_qtype);
-            cache_weight_fp8(L.w_up_shared, L.w_up_shared_qtype);
-            cache_weight_fp8(L.w_down_shared, L.w_down_shared_qtype);
-            cache_weight_fp8(L.w_gate, L.w_gate_qtype);
-            cache_weight_fp8(L.w_up, L.w_up_qtype);
-            cache_weight_fp8(L.w_down, L.w_down_qtype);
+            collect_weight_fp8(L.ssm_in, L.ssm_in_qtype);
+            collect_weight_fp8(L.ssm_out, L.ssm_out_qtype);
+            collect_weight_fp8(L.w_gate_shared, L.w_gate_shared_qtype);
+            collect_weight_fp8(L.w_up_shared, L.w_up_shared_qtype);
+            collect_weight_fp8(L.w_down_shared, L.w_down_shared_qtype);
+            collect_weight_fp8(L.w_gate, L.w_gate_qtype);
+            collect_weight_fp8(L.w_up, L.w_up_qtype);
+            collect_weight_fp8(L.w_down, L.w_down_qtype);
+        }
+
+        if (!fp8_entries.empty() && dequant_scratch_) {
+            // Pre-allocate reusable calibration temp buffers
+            int max_grid = 0;
+            size_t total_fp8_bytes = 0;
+            for (auto& e : fp8_entries) {
+                int threads_needed = (static_cast<int>(e.n_elems) + 3) / 4;
+                int grid = (threads_needed + 255) / 256;
+                if (grid > max_grid) max_grid = grid;
+                total_fp8_bytes += e.n_elems;
+            }
+
+            float* d_block_maxes = nullptr;
+            float* d_absmax = nullptr;
+            float* d_scales_all = nullptr;
+            cudaMalloc(&d_block_maxes, (size_t)max_grid * sizeof(float));
+            cudaMalloc(&d_absmax, sizeof(float));
+            cudaMalloc(&d_scales_all, fp8_entries.size() * sizeof(float));
+
+            // Bulk-allocate all FP8 data in one cudaMalloc
+            uint8_t* d_fp8_bulk = nullptr;
+            cudaError_t bulk_err = cudaMalloc(&d_fp8_bulk, total_fp8_bytes);
+            if (bulk_err != cudaSuccess) {
+                cudaGetLastError();
+                d_fp8_bulk = nullptr;
+            }
+
+            int actual_count = 0;
+            size_t fp8_offset = 0;
+            for (size_t i = 0; i < fp8_entries.size() && d_fp8_bulk; i++) {
+                auto& e = fp8_entries[i];
+                int rows = static_cast<int>(e.weight.shape[0]);
+                int cols = static_cast<int>(e.weight.shape[1]);
+
+                // Dequant to dequant_scratch_ (reused each iteration, stream-ordered)
+                dequant_gpu(e.weight.data, dequant_scratch_, e.qtype, rows, cols, stream);
+
+                void* fp8_buf = d_fp8_bulk + fp8_offset;
+                fp8_offset += e.n_elems;
+
+                // Async calibrate + quantize (no host sync)
+                calibrate_and_quantize_fp8_async(
+                    dequant_scratch_, fp8_buf, static_cast<int>(e.n_elems),
+                    d_block_maxes, max_grid,
+                    d_absmax, d_scales_all + static_cast<ptrdiff_t>(i), stream);
+
+                Tensor fp8_t(fp8_buf, DType::FP8_E4M3, e.weight.ndim, e.weight.shape, true);
+                fp8_cache_[e.orig_ptr] = {fp8_t, 0.0f, d_scales_all + static_cast<ptrdiff_t>(i)};
+                actual_count++;
+            }
+
+            if (actual_count > 0) {
+                cudaStreamSynchronize(stream);
+                // Read back scales
+                std::vector<float> h_scales(actual_count);
+                cudaMemcpy(h_scales.data(), d_scales_all, actual_count * sizeof(float),
+                           cudaMemcpyDeviceToHost);
+                for (int i = 0; i < actual_count; i++) {
+                    auto it = fp8_cache_.find(fp8_entries[i].orig_ptr);
+                    if (it != fp8_cache_.end()) {
+                        it->second.host_scale = h_scales[i];
+                    }
+                }
+            }
+
+            cudaFree(d_block_maxes);
+            cudaFree(d_absmax);
+            // Track bulk buffers for cleanup
+            fp8_overflow_scales_ = d_scales_all;
+            fp8_overflow_count_ = actual_count;
+            fp8_overflow_data_ = d_fp8_bulk;
+            fp8_overflow_data_size_ = total_fp8_bytes;
+            fp8_count = actual_count;
         }
 
         if (fp8_count > 0) {
-            cudaStreamSynchronize(stream);
             fp8_cache_bytes_ = fp8_total;
             size_t fp16_equivalent = 0;
             for (auto& [ptr, entry] : fp8_cache_) {
@@ -1237,18 +1315,25 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
         bool nvfp4_budget_exhausted = false;
         const char* mode_str = (use_nvfp4_decode_ == 1) ? "additive" : "only";
 
-        auto cache_weight_nvfp4 = [&](const Tensor& w, GGMLQuantType qtype) {
+        // Collect eligible weights first, then batch-process async.
+        struct NvFP4Entry {
+            const void* orig_ptr;
+            Tensor weight;
+            GGMLQuantType qtype;
+            bool from_scratch;
+        };
+        std::vector<NvFP4Entry> nvfp4_entries;
+
+        auto collect_weight_nvfp4 = [&](const Tensor& w, GGMLQuantType qtype) {
             if (!w.data) return;
             if (!nvfp4_beneficial(qtype)) return;
             if (nvfp4_cache_.count(w.data)) return;
             if (nvfp4_budget_exhausted) return;
 
-            int rows = static_cast<int>(w.shape[0]);
             int cols = static_cast<int>(w.shape[1]);
-            // K must be multiple of 16 for NVFP4 micro-blocks
             if (cols % 16 != 0) return;
 
-            // NVFP4 size: packed data + micro-scales + tensor scale
+            int rows = static_cast<int>(w.shape[0]);
             size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 +
                                  static_cast<size_t>(rows) * cols / 16 + 4;
 
@@ -1261,59 +1346,89 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
                 return;
             }
 
-            // Source FP16 data: prefer existing FP16 cache (zero-copy),
-            // otherwise dequant via scratch buffer (GGUF → dequant_scratch_).
-            auto fp16_it = fp16_cache_.find(w.data);
-            const Tensor* fp16_src = nullptr;
-            Tensor scratch_view;
-
-            if (fp16_it != fp16_cache_.end()) {
-                fp16_src = &fp16_it->second;
-            } else {
-                // Not in FP16 cache — dequant from GGUF into scratch buffer
-                if (!dequant_gpu_supported(qtype) || !dequant_scratch_) return;
-                dequant_gpu(w.data, dequant_scratch_, qtype, rows, cols, stream);
-                scratch_view = Tensor(dequant_scratch_, DType::FP16, w.ndim, w.shape, false);
-                fp16_src = &scratch_view;
-                nvfp4_from_scratch++;
-            }
-
-            NvFP4QuantResult result;
-            quantize_fp16_to_nvfp4(*fp16_src, result, stream);
-
-            // If we used scratch, must sync before it's reused by next tensor
-            if (fp16_it == fp16_cache_.end()) {
-                cudaStreamSynchronize(stream);
-            }
-
-            nvfp4_cache_[w.data] = result;
+            bool from_scratch = (fp16_cache_.find(w.data) == fp16_cache_.end());
+            if (from_scratch && (!dequant_gpu_supported(qtype) || !dequant_scratch_)) return;
+            nvfp4_entries.push_back({w.data, w, qtype, from_scratch});
             nvfp4_total += nvfp4_bytes;
             nvfp4_count++;
+            if (from_scratch) nvfp4_from_scratch++;
         };
 
         // Dense attention + FFN first: every tensor benefits every decode step.
         // MoE experts second: each tensor only benefits 1 of N layers.
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
-            cache_weight_nvfp4(L.wq, L.wq_qtype);
-            cache_weight_nvfp4(L.wk, L.wk_qtype);
-            cache_weight_nvfp4(L.wv, L.wv_qtype);
-            cache_weight_nvfp4(L.wo, L.wo_qtype);
+            collect_weight_nvfp4(L.wq, L.wq_qtype);
+            collect_weight_nvfp4(L.wk, L.wk_qtype);
+            collect_weight_nvfp4(L.wv, L.wv_qtype);
+            collect_weight_nvfp4(L.wo, L.wo_qtype);
         }
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
-            cache_weight_nvfp4(L.ssm_in, L.ssm_in_qtype);
-            cache_weight_nvfp4(L.ssm_out, L.ssm_out_qtype);
-            cache_weight_nvfp4(L.w_gate_shared, L.w_gate_shared_qtype);
-            cache_weight_nvfp4(L.w_up_shared, L.w_up_shared_qtype);
-            cache_weight_nvfp4(L.w_down_shared, L.w_down_shared_qtype);
-            cache_weight_nvfp4(L.w_gate, L.w_gate_qtype);
-            cache_weight_nvfp4(L.w_up, L.w_up_qtype);
-            cache_weight_nvfp4(L.w_down, L.w_down_qtype);
+            collect_weight_nvfp4(L.ssm_in, L.ssm_in_qtype);
+            collect_weight_nvfp4(L.ssm_out, L.ssm_out_qtype);
+            collect_weight_nvfp4(L.w_gate_shared, L.w_gate_shared_qtype);
+            collect_weight_nvfp4(L.w_up_shared, L.w_up_shared_qtype);
+            collect_weight_nvfp4(L.w_down_shared, L.w_down_shared_qtype);
+            collect_weight_nvfp4(L.w_gate, L.w_gate_qtype);
+            collect_weight_nvfp4(L.w_up, L.w_up_qtype);
+            collect_weight_nvfp4(L.w_down, L.w_down_qtype);
         }
 
-        if (nvfp4_count > 0) {
+        // Batch-process: quantize all collected entries async, single sync at end.
+        if (!nvfp4_entries.empty()) {
+            // Reusable absmax buffer (overwritten each iteration, stream-ordered)
+            float* d_absmax_buf = nullptr;
+            cudaMalloc(&d_absmax_buf, sizeof(float));
+
+            // Bulk tensor_scale buffer: one float per entry (read back after sync)
+            float* d_tscales_all = nullptr;
+            cudaMalloc(&d_tscales_all, nvfp4_entries.size() * sizeof(float));
+
+            for (size_t i = 0; i < nvfp4_entries.size(); i++) {
+                auto& e = nvfp4_entries[i];
+                const half* fp16_ptr = nullptr;
+                int rows = static_cast<int>(e.weight.shape[0]);
+                int cols = static_cast<int>(e.weight.shape[1]);
+
+                if (e.from_scratch) {
+                    // Dequant GGML→FP16 into scratch (stream-ordered, reused each iter)
+                    dequant_gpu(e.weight.data, dequant_scratch_, e.qtype, rows, cols, stream);
+                    fp16_ptr = reinterpret_cast<const half*>(dequant_scratch_);
+                } else {
+                    auto it = fp16_cache_.find(e.orig_ptr);
+                    fp16_ptr = reinterpret_cast<const half*>(it->second.data);
+                }
+
+                Tensor fp16_view(const_cast<half*>(fp16_ptr), DType::FP16, 2,
+                                 e.weight.shape, true);
+
+                NvFP4QuantResult result;
+                quantize_fp16_to_nvfp4_async(fp16_view, result,
+                                              d_absmax_buf,
+                                              d_tscales_all + i,
+                                              stream);
+                nvfp4_cache_[e.orig_ptr] = result;
+            }
+
+            // Single sync for all NVFP4 quantizations
             cudaStreamSynchronize(stream);
+
+            // Bulk read back tensor_scales
+            std::vector<float> h_tscales(nvfp4_entries.size());
+            cudaMemcpy(h_tscales.data(), d_tscales_all,
+                       nvfp4_entries.size() * sizeof(float),
+                       cudaMemcpyDeviceToHost);
+            for (size_t i = 0; i < nvfp4_entries.size(); i++) {
+                auto it = nvfp4_cache_.find(nvfp4_entries[i].orig_ptr);
+                if (it != nvfp4_cache_.end()) {
+                    it->second.tensor_scale = h_tscales[i];
+                }
+            }
+
+            cudaFree(d_absmax_buf);
+            cudaFree(d_tscales_all);
+
             nvfp4_cache_bytes_ = nvfp4_total;
             if (nvfp4_from_scratch > 0) {
                 IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB (%d from FP16 cache, %d via dequant scratch, mode: %s)",
@@ -1330,46 +1445,99 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
         // retains fast FP8 GEMM instead of falling back to on-the-fly dequant.
         // FP8 = half the size of FP16, so net VRAM savings = 50% of FP16 cache.
         if (use_nvfp4_decode_ == 2 && !fp16_cache_.empty()) {
-            // Migrate FP16→FP8 for weights not already in fp8_cache_
+            // Migrate FP16→FP8 for weights not already in fp8_cache_.
+            // Batched async: all calibrate+quantize kernels enqueued without
+            // per-tensor host sync.  Single sync at the end.
             int migrated = 0;
             size_t migrated_bytes = 0;
             if (use_fp8_cache_) {
+                // Collect tensors to migrate
+                struct MigrateEntry {
+                    const void* orig_ptr;
+                    Tensor fp16_tensor;
+                    size_t n_elems;
+                };
+                std::vector<MigrateEntry> to_migrate;
                 for (auto& [orig_ptr, fp16_tensor] : fp16_cache_) {
-                    if (fp8_cache_.count(orig_ptr)) continue;  // already has FP8
-                    int rows = static_cast<int>(fp16_tensor.shape[0]);
-                    int cols = static_cast<int>(fp16_tensor.shape[1]);
-                    size_t n_elems = static_cast<size_t>(rows) * cols;
-                    size_t fp8_bytes = n_elems;
-
-                    // Calibrate scale from FP16 data
-                    float scale = calibrate_fp8_scale(fp16_tensor, stream);
-                    if (scale == 0.0f) scale = 1.0f;
-
-                    // Allocate FP8 buffer (half the size of FP16)
-                    void* fp8_buf = nullptr;
-                    cudaError_t err = cudaMalloc(&fp8_buf, fp8_bytes);
-                    if (err != cudaSuccess) {
-                        cudaGetLastError();
-                        break;  // VRAM exhausted, stop migrating
-                    }
-                    quantize_fp16_to_fp8_e4m3_scaled(fp16_tensor.data, fp8_buf,
-                                                      static_cast<int>(n_elems), scale, stream);
-
-                    float* d_scale = nullptr;
-                    err = cudaMalloc(reinterpret_cast<void**>(&d_scale), sizeof(float));
-                    if (err != cudaSuccess) {
-                        cudaGetLastError();
-                        cudaFree(fp8_buf);
-                        break;
-                    }
-                    cudaMemcpyAsync(d_scale, &scale, sizeof(float), cudaMemcpyHostToDevice, stream);
-
-                    Tensor fp8_t(fp8_buf, DType::FP8_E4M3, fp16_tensor.ndim, fp16_tensor.shape, true);
-                    fp8_cache_[orig_ptr] = {fp8_t, scale, d_scale};
-                    migrated++;
-                    migrated_bytes += fp8_bytes + sizeof(float);
+                    if (fp8_cache_.count(orig_ptr)) continue;
+                    size_t n = static_cast<size_t>(fp16_tensor.shape[0]) * fp16_tensor.shape[1];
+                    to_migrate.push_back({orig_ptr, fp16_tensor, n});
                 }
-                if (migrated > 0) cudaStreamSynchronize(stream);
+
+                if (!to_migrate.empty()) {
+                    // Find max grid size needed for temp buffers
+                    int max_grid = 0;
+                    size_t total_fp8_bytes = 0;
+                    for (auto& e : to_migrate) {
+                        int threads_needed = (static_cast<int>(e.n_elems) + 3) / 4;
+                        int grid = (threads_needed + 255) / 256;
+                        if (grid > max_grid) max_grid = grid;
+                        total_fp8_bytes += e.n_elems;  // FP8 = 1 byte per element
+                    }
+
+                    // Pre-allocate reusable temp buffers (once, not per-tensor)
+                    float* d_block_maxes = nullptr;
+                    float* d_absmax = nullptr;
+                    cudaMalloc(&d_block_maxes, (size_t)max_grid * sizeof(float));
+                    cudaMalloc(&d_absmax, sizeof(float));
+
+                    // Allocate all scale values in a single buffer
+                    float* d_scales_all = nullptr;
+                    cudaMalloc(&d_scales_all, to_migrate.size() * sizeof(float));
+
+                    // Bulk-allocate all FP8 data in one cudaMalloc
+                    uint8_t* d_fp8_bulk = nullptr;
+                    cudaError_t bulk_err = cudaMalloc(&d_fp8_bulk, total_fp8_bytes);
+                    if (bulk_err != cudaSuccess) {
+                        cudaGetLastError();
+                        d_fp8_bulk = nullptr;
+                    }
+
+                    size_t fp8_offset = 0;
+                    for (size_t i = 0; i < to_migrate.size() && d_fp8_bulk; i++) {
+                        auto& e = to_migrate[i];
+                        void* fp8_buf = d_fp8_bulk + fp8_offset;
+                        fp8_offset += e.n_elems;
+
+                        // Async calibrate + quantize (no host sync)
+                        calibrate_and_quantize_fp8_async(
+                            e.fp16_tensor.data, fp8_buf, static_cast<int>(e.n_elems),
+                            d_block_maxes, max_grid,
+                            d_absmax, d_scales_all + i, stream);
+
+                        Tensor fp8_t(fp8_buf, DType::FP8_E4M3, e.fp16_tensor.ndim,
+                                     e.fp16_tensor.shape, true);
+                        fp8_cache_[e.orig_ptr] = {fp8_t, 0.0f, d_scales_all + static_cast<ptrdiff_t>(i)};
+                        migrated++;
+                        migrated_bytes += e.n_elems + sizeof(float);
+                    }
+
+                    // Track bulk buffer for cleanup
+                    fp8_migrated_data_ = d_fp8_bulk;
+                    fp8_migrated_data_size_ = total_fp8_bytes;
+
+                    // Single sync for ALL migrations
+                    if (migrated > 0) {
+                        cudaStreamSynchronize(stream);
+                        // Read back scales from device to host (for fp8_cache_ host scale field)
+                        std::vector<float> h_scales(migrated);
+                        cudaMemcpy(h_scales.data(), d_scales_all, migrated * sizeof(float),
+                                   cudaMemcpyDeviceToHost);
+                        int idx = 0;
+                        for (size_t i = 0; i < to_migrate.size() && idx < migrated; i++, idx++) {
+                            auto it = fp8_cache_.find(to_migrate[i].orig_ptr);
+                            if (it != fp8_cache_.end()) {
+                                it->second.host_scale = h_scales[idx];
+                            }
+                        }
+                    }
+
+                    cudaFree(d_block_maxes);
+                    cudaFree(d_absmax);
+                    // d_scales_all stays alive — each entry is pointed to by fp8_cache_
+                    fp8_migrated_scales_ = d_scales_all;
+                    fp8_migrated_count_ = migrated;
+                }
             }
 
             // Now free FP16 cache

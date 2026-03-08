@@ -574,6 +574,7 @@ ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
         auto req = std::make_shared<imp::Request>();
         req->input_tokens.assign(tokens, tokens + n_tokens);
         req->max_tokens = 4096;  // Large default; decode_step controls actual stopping
+        req->ignore_eos = true;  // Don't stop during prefill — decode_step controls stopping
         req->status = imp::RequestStatus::PENDING;
 
         // Add to engine (assigns request id)
@@ -619,6 +620,15 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params,
     try {
         auto& req = ctx->active_request;
 
+        // Apply ignore_eos BEFORE the finished check — when benchmarking with
+        // synthetic tokens, prefill may produce EOS as the first output token
+        // (e.g. Gemma-3), marking the request FINISHED.  If the caller wants
+        // to ignore EOS, we must reset the request back to GENERATING.
+        bool caller_ignore_eos = (params->ignore_eos != 0);
+        if (caller_ignore_eos && req->status == imp::RequestStatus::FINISHED) {
+            req->status = imp::RequestStatus::DECODING;
+        }
+
         // Check if already finished
         if (req->status == imp::RequestStatus::FINISHED ||
             req->status == imp::RequestStatus::CANCELLED) {
@@ -631,7 +641,7 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params,
         req->top_k = params->top_k;
         req->seed = params->seed;
         req->max_tokens = params->max_tokens;
-        req->ignore_eos = (params->ignore_eos != 0);
+        req->ignore_eos = caller_ignore_eos;
         req->min_p = params->min_p;
         req->typical_p = params->typical_p;
         req->repetition_penalty = params->repetition_penalty;

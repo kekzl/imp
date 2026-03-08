@@ -31,7 +31,15 @@ void quantize_fp16_to_nvfp4(const Tensor& input, NvFP4QuantResult& result,
 
 // Calibrate optimal tensor scale and micro-scales.
 // Returns tensor_scale = global_absmax / 6.0 (FP4 E2M1 max = 6.0)
-float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream = nullptr);
+// d_reusable_max: optional pre-allocated device buffer (1 float) to avoid per-call malloc
+float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream = nullptr,
+                              float* d_reusable_max = nullptr);
+
+// Fully async variant: no host sync. Caller provides reusable device buffers.
+// tensor_scale is written to d_tensor_scale_buf and must be read back after sync.
+void quantize_fp16_to_nvfp4_async(const Tensor& input, NvFP4QuantResult& result,
+                                   float* d_absmax_buf, float* d_tensor_scale_buf,
+                                   cudaStream_t stream = nullptr);
 
 // Dequantize NVFP4 back to FP16 (for verification).
 void dequantize_nvfp4_to_fp16(const NvFP4QuantResult& quant,
