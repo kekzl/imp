@@ -16,6 +16,7 @@
 #include "memory/layer_offload.h"
 #include "graph/executor.h"
 #include "compute/json_constrain.h"
+#include "core/cuda_raii.h"
 #include <memory>
 #include <string>
 #include <cuda_runtime.h>
@@ -73,10 +74,10 @@ public:
     Engine() = default;
     ~Engine();
 
-    bool init(std::shared_ptr<Model> model, const EngineConfig& config);
+    [[nodiscard]] bool init(std::shared_ptr<Model> model, const EngineConfig& config);
 
     // Run one step of inference (prefill or decode depending on scheduler)
-    bool step();
+    [[nodiscard]] bool step();
 
     // High-level generate with sampling parameters
     std::string generate(const std::string& prompt, int max_tokens,
@@ -92,24 +93,24 @@ public:
 
     // Set draft model for speculative decoding after init.
     // Can only be called once, before any generate/decode_step calls.
-    bool set_draft_model(const std::string& path, int spec_k = 4);
+    [[nodiscard]] bool set_draft_model(const std::string& path, int spec_k = 4);
 
     // Reset SSM state for a sequence (call on context_reset for hybrid models)
     void reset_ssm_state(int seq_id);
 
     // Vision: set image for next generation. Returns false if no mmproj loaded.
-    bool set_image(const std::string& path);
-    bool set_image_from_memory(const uint8_t* data, size_t len);
+    [[nodiscard]] bool set_image(const std::string& path);
+    [[nodiscard]] bool set_image_from_memory(const uint8_t* data, size_t len);
     void clear_image();
-    bool has_vision() const { return vision_encoder_ != nullptr; }
-    bool has_vision_input() const { return has_vision_input_; }
+    bool has_vision() const noexcept { return vision_encoder_ != nullptr; }
+    bool has_vision_input() const noexcept { return has_vision_input_; }
 
     // Accessors for C API
-    Scheduler* scheduler() { return scheduler_.get(); }
-    KVCacheManager* kv_manager() { return kv_manager_.get(); }
-    KVCache* kv_cache() { return kv_cache_raw_; }
-    Model* model() { return model_.get(); }
-    const ChatTemplate& chat_template() const { return chat_template_; }
+    Scheduler* scheduler() const noexcept { return scheduler_.get(); }
+    KVCacheManager* kv_manager() const noexcept { return kv_manager_.get(); }
+    KVCache* kv_cache() const noexcept { return kv_cache_raw_; }
+    Model* model() const noexcept { return model_.get(); }
+    const ChatTemplate& chat_template() const noexcept { return chat_template_; }
 
 private:
     std::shared_ptr<Model> model_;
@@ -119,9 +120,9 @@ private:
     KVCache* kv_cache_raw_ = nullptr;  // Non-owning pointer (owned by kv_manager_)
     std::unique_ptr<GraphExecutor> executor_;
     GreenContextManager green_ctx_;
-    cudaStream_t stream_ = nullptr;
-    cudaEvent_t prefill_done_ = nullptr;
-    cudaEvent_t decode_done_ = nullptr;
+    CudaStream stream_;
+    CudaEvent prefill_done_;
+    CudaEvent decode_done_;
     int next_request_id_ = 0;
 
     // Pre-allocated GPU batch pool for decode (stable pointers for CUDA Graphs)

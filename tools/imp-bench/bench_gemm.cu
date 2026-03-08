@@ -54,9 +54,15 @@ static float bench_fp16_gemm(const GemmSize& sz) {
     size_t bytes_C = static_cast<size_t>(M * N) * sizeof(half);
 
     void *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
-    cudaMalloc(&d_A, bytes_A);
-    cudaMalloc(&d_B, bytes_B);
-    cudaMalloc(&d_C, bytes_C);
+    if (cudaMalloc(&d_A, bytes_A) != cudaSuccess ||
+        cudaMalloc(&d_B, bytes_B) != cudaSuccess ||
+        cudaMalloc(&d_C, bytes_C) != cudaSuccess) {
+        if (d_A) cudaFree(d_A);
+        if (d_B) cudaFree(d_B);
+        if (d_C) cudaFree(d_C);
+        fprintf(stderr, "bench_fp16_gemm: cudaMalloc failed for M=%ld N=%ld K=%ld\n", M, N, K);
+        return -1.0f;
+    }
 
     // Fill with random data
     std::vector<half> h_A(M * K);

@@ -20,11 +20,11 @@ public:
     // existing block table if the sequence already has blocks.  On failure
     // (pool exhausted mid-allocation) all blocks allocated during *this*
     // call are rolled back and the function returns false.
-    bool allocate_blocks(int seq_id, int num_blocks);
+    [[nodiscard]] bool allocate_blocks(int seq_id, int num_blocks);
 
     // Allocate and append a single block to an existing sequence.
     // Returns the new block_id, or -1 on failure.
-    int append_block(int seq_id);
+    [[nodiscard]] int append_block(int seq_id);
 
     // Free every block owned by a sequence (respecting ref-counts via
     // cache_->free_block) and remove it from all tracking structures.
@@ -48,7 +48,7 @@ public:
     // Check whether `num_blocks` blocks are available.  Returns true if
     // the free pool already has enough blocks *or* if evicting LRU
     // sequences could free enough.
-    bool can_allocate(int num_blocks) const;
+    [[nodiscard]] bool can_allocate(int num_blocks) const;
 
     // ── Prefix caching ───────────────────────────────────────────────
 

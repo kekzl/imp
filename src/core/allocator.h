@@ -23,10 +23,10 @@ public:
     // Reset offset to 0 (logically frees all allocations)
     void reset();
 
-    size_t used() const { return offset_; }
-    size_t capacity() const { return capacity_; }
-    size_t remaining() const { return capacity_ - offset_; }
-    bool on_device() const { return on_device_; }
+    size_t used() const noexcept { return offset_; }
+    size_t capacity() const noexcept { return capacity_; }
+    size_t remaining() const noexcept { return capacity_ - offset_; }
+    bool on_device() const noexcept { return on_device_; }
 
 private:
     void* base_      = nullptr;
@@ -52,10 +52,10 @@ public:
     // Return a block to the pool.
     void deallocate(void* ptr);
 
-    size_t block_size() const { return block_size_; }
-    size_t num_blocks() const { return num_blocks_; }
+    size_t block_size() const noexcept { return block_size_; }
+    size_t num_blocks() const noexcept { return num_blocks_; }
     size_t free_count() const;
-    bool on_device() const { return on_device_; }
+    bool on_device() const noexcept { return on_device_; }
 
 private:
     void* base_         = nullptr;

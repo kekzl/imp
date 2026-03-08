@@ -5,6 +5,7 @@
 #include "model/gguf_loader.h"
 #include "model/chat_template.h"
 #include "compute/gemm.h"
+#include "compute/gemm_grouped.h"
 #include "compute/sampling.h"
 #include "compute/attention.h"
 #include "vision/vision_loader.h"
@@ -20,6 +21,7 @@ namespace imp {
 
 Engine::~Engine() {
     gemm_cleanup();
+    gemm_grouped_cleanup();
     if (async_graph_runner_.is_setup()) {
         async_graph_runner_.cleanup();
     }
@@ -39,18 +41,7 @@ Engine::~Engine() {
         cudaFreeHost(h_sample_pinned_);
         h_sample_pinned_ = nullptr;
     }
-    if (decode_done_) {
-        cudaEventDestroy(decode_done_);
-        decode_done_ = nullptr;
-    }
-    if (prefill_done_) {
-        cudaEventDestroy(prefill_done_);
-        prefill_done_ = nullptr;
-    }
-    if (stream_) {
-        cudaStreamDestroy(stream_);
-        stream_ = nullptr;
-    }
+    // stream_, prefill_done_, decode_done_ cleaned up by CudaStream/CudaEvent RAII
 }
 
 cudaStream_t Engine::prefill_stream() const {
@@ -132,10 +123,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // --- Create CUDA stream ---
     // Non-blocking stream avoids implicit synchronization with the default stream,
     // preventing hidden stalls when other CUDA work is in flight.
-    cudaError_t stream_err = cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking);
-    if (stream_err != cudaSuccess) {
-        stream_ = nullptr;
-    }
+    stream_.create(cudaStreamNonBlocking);
 
     // --- Upload model weights to GPU ---
     // Compute dynamic reserve: workspace + KV cache + SSM state + safety margin.
@@ -529,7 +517,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     // Lightweight event for decode spin-poll sync (no timing overhead)
     if (!decode_done_) {
-        cudaEventCreateWithFlags(&decode_done_, cudaEventDisableTiming);
+        decode_done_.create(cudaEventDisableTiming);
     }
 
     return true;
@@ -965,7 +953,7 @@ bool Engine::step() {
                 sample_greedy_device(last_logits, executor_->d_sample_result(),
                                       h_sample_pinned_, pf_stream);
 
-                if (!prefill_done_) cudaEventCreate(&prefill_done_);
+                if (!prefill_done_) prefill_done_.create();
                 cudaEventRecord(prefill_done_, pf_stream);
 
                 cudaFreeAsync(d_token_ids, pf_stream);
