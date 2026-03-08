@@ -162,6 +162,35 @@ gemv_nvfp4_kpar_kernel(
     if (tid == 0) y[row] = __float2half(total);
 }
 
+// FP32 output variant for LM head projection (sampling needs float logits).
+__global__ void __launch_bounds__(kKparThreads, 12)
+gemv_nvfp4_kpar_fp32_kernel(
+    const uint8_t* __restrict__ packed_data,
+    const uint8_t* __restrict__ micro_scales,
+    float                       tensor_scale,
+    const half*    __restrict__ x,
+    float*         __restrict__ y,
+    int M, int K)
+{
+    const int row = blockIdx.x;
+    if (row >= M) return;
+
+    const int tid = threadIdx.x;
+    const int n_mb = K / kMicroBlockSize;
+
+    __shared__ SmemKpar smem;
+    init_lut(smem.lut, tid);
+    __syncthreads();
+
+    float acc = gemv_nvfp4_row(
+        packed_data + (int64_t)row * (K / 2),
+        micro_scales + (int64_t)row * n_mb,
+        tensor_scale, x, n_mb, tid, smem.lut);
+
+    float total = reduce_kpar(acc, tid, smem.warp_sums);
+    if (tid == 0) y[row] = total;
+}
+
 // ---------------------------------------------------------------------------
 // Multi-row GEMV: NR rows per block, 256 threads (8 warps).
 // Each warp handles one row, multiple warps process multiple rows in parallel.
@@ -214,6 +243,53 @@ gemv_nvfp4_multirow_kernel(
         acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
 
     if (lane == 0) y[row] = __float2half(acc);
+}
+
+// FP32 output multi-row variant for LM head projection.
+template<int NR>
+__global__ void __launch_bounds__(kMRThreads, 6)
+gemv_nvfp4_multirow_fp32_kernel(
+    const uint8_t* __restrict__ packed_data,
+    const uint8_t* __restrict__ micro_scales,
+    float                       tensor_scale,
+    const half*    __restrict__ x,
+    float*         __restrict__ y,
+    int M, int K)
+{
+    const int block_row_base = blockIdx.x * NR;
+    const int warp_id = threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    const int K_half = K / 2;
+    const int n_mb = K / kMicroBlockSize;
+
+    __shared__ float s_lut[16];
+    if (threadIdx.x < 16) {
+        constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+        s_lut[threadIdx.x] = (threadIdx.x < 8) ? kMag[threadIdx.x] : -kMag[threadIdx.x & 7];
+    }
+    __syncthreads();
+
+    const int row = block_row_base + warp_id;
+    if (row >= M || warp_id >= NR) return;
+
+    const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
+    const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
+
+    float acc = 0.0f;
+    for (int mi = lane; mi < n_mb; mi += 32) {
+        int byte_off = mi * 8;
+        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
+        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
+        float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
+        float local_dot = dot_micro_block(pb, x, byte_off * 2, s_lut);
+        acc = __fmaf_rn(local_dot, cs, acc);
+    }
+
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+
+    if (lane == 0) y[row] = acc;
 }
 
 // ---------------------------------------------------------------------------
@@ -800,6 +876,27 @@ void gemv_nvfp4_kpar(const NvFP4QuantResult& A, const half* x, half* y,
     }
 }
 
+void gemv_nvfp4_kpar_fp32(const NvFP4QuantResult& A, const half* x, float* y,
+                            int M, int K, cudaStream_t stream)
+{
+    const int n_mb = K / kMicroBlockSize;
+    if (n_mb <= 512) {
+        constexpr int NR = 8;
+        int grid = (M + NR - 1) / NR;
+        pdl::launch(gemv_nvfp4_multirow_fp32_kernel<NR>,
+            dim3(grid), dim3(kMRThreads), size_t(0), stream,
+            reinterpret_cast<const uint8_t*>(A.packed_data),
+            reinterpret_cast<const uint8_t*>(A.micro_scales),
+            A.tensor_scale, x, y, M, K);
+    } else {
+        pdl::launch(gemv_nvfp4_kpar_fp32_kernel,
+            dim3(M), dim3(kKparThreads), size_t(0), stream,
+            reinterpret_cast<const uint8_t*>(A.packed_data),
+            reinterpret_cast<const uint8_t*>(A.micro_scales),
+            A.tensor_scale, x, y, M, K);
+    }
+}
+
 void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk,
                            const NvFP4QuantResult& wv, const half* x,
                            half* yq, half* yk, half* yv,
@@ -1229,7 +1326,9 @@ void nvfp4_gemv_pdl_register() {
     constexpr int NR = 8;
     // Dense GEMV kernels
     pdl::enable_kernel(gemv_nvfp4_kpar_kernel);
+    pdl::enable_kernel(gemv_nvfp4_kpar_fp32_kernel);
     pdl::enable_kernel(gemv_nvfp4_multirow_kernel<NR>);
+    pdl::enable_kernel(gemv_nvfp4_multirow_fp32_kernel<NR>);
     pdl::enable_kernel(gemv_nvfp4_residual_kernel);
     pdl::enable_kernel(gemv_nvfp4_residual_mr_kernel<NR>);
     pdl::enable_kernel(gemv_nvfp4_qkv_fused_kernel);

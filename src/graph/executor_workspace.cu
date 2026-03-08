@@ -1305,18 +1305,14 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
 
     // --- Phase 3: NVFP4 decode weight cache ---
     // Converts eligible weights (> 4.5 bits/elem) to NVFP4 format for faster
-    // decode GEMV.  Weights in fp16_cache_ are quantized directly (zero-copy);
-    // weights NOT in fp16_cache_ (e.g. dense FFN skipped in Phase 1) are
-    // dequantized via dequant_scratch_ as a transient FP16 staging buffer.
-    // Mode 2 additionally frees all FP16 cache at the end.
+    // decode GEMV.  Mode 2 ("only") uses incremental processing: quantize from
+    // FP16 cache and free each entry immediately (NVFP4 ≈ 28% of FP16 size, so
+    // each conversion is net VRAM-negative, bootstrapping space for more tensors).
+    // Mode 1 ("additive") uses standard batch processing with FP16 cache intact.
     if (use_nvfp4_decode_ > 0) {
-        size_t nvfp4_total = 0;
-        int nvfp4_count = 0;
-        int nvfp4_from_scratch = 0;
-        bool nvfp4_budget_exhausted = false;
         const char* mode_str = (use_nvfp4_decode_ == 1) ? "additive" : "only";
 
-        // Collect eligible weights first, then batch-process async.
+        // Collect eligible weights first, then process.
         struct NvFP4Entry {
             const void* orig_ptr;
             Tensor weight;
@@ -1329,34 +1325,19 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
             if (!w.data) return;
             if (!nvfp4_beneficial(qtype)) return;
             if (nvfp4_cache_.count(w.data)) return;
-            if (nvfp4_budget_exhausted) return;
 
             int cols = static_cast<int>(w.shape[1]);
             if (cols % 16 != 0) return;
 
-            int rows = static_cast<int>(w.shape[0]);
-            size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 +
-                                 static_cast<size_t>(rows) * cols / 16 + 4;
-
-            if (nvfp4_total + nvfp4_bytes > remaining_budget) {
-                nvfp4_budget_exhausted = true;
-                IMP_LOG_INFO("NVFP4 cache: VRAM budget reached after %d tensors "
-                             "(%.1f / %.1f MiB), remaining weights use dp4a",
-                             nvfp4_count, nvfp4_total / (1024.0 * 1024.0),
-                             remaining_budget / (1024.0 * 1024.0));
-                return;
-            }
-
             bool from_scratch = (fp16_cache_.find(w.data) == fp16_cache_.end());
             if (from_scratch && (!dequant_gpu_supported(qtype) || !dequant_scratch_)) return;
             nvfp4_entries.push_back({w.data, w, qtype, from_scratch});
-            nvfp4_total += nvfp4_bytes;
-            nvfp4_count++;
-            if (from_scratch) nvfp4_from_scratch++;
         };
 
-        // Dense attention + FFN first: every tensor benefits every decode step.
-        // MoE experts second: each tensor only benefits 1 of N layers.
+        // LM head first: largest single weight (vocab × d_model), biggest bandwidth win.
+        collect_weight_nvfp4(model_->output_proj(), model_->out_proj_qtype_);
+
+        // Dense attention + FFN: every tensor benefits every decode step.
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
             collect_weight_nvfp4(L.wq, L.wq_qtype);
@@ -1376,26 +1357,155 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
             collect_weight_nvfp4(L.w_down, L.w_down_qtype);
         }
 
-        // Batch-process: quantize all collected entries async, single sync at end.
-        if (!nvfp4_entries.empty()) {
-            // Reusable absmax buffer (overwritten each iteration, stream-ordered)
+        if (use_nvfp4_decode_ == 2 && !nvfp4_entries.empty()) {
+            // Mode 2 incremental: process FP16-cached entries first (each conversion
+            // frees net VRAM since NVFP4 ≈ 28% of FP16), then from-scratch entries.
+            // Sort: FP16-cached first (smallest first to bootstrap), then from-scratch.
+            std::stable_sort(nvfp4_entries.begin(), nvfp4_entries.end(),
+                [](const NvFP4Entry& a, const NvFP4Entry& b) {
+                    if (a.from_scratch != b.from_scratch) return !a.from_scratch;
+                    size_t a_sz = static_cast<size_t>(a.weight.shape[0]) * a.weight.shape[1];
+                    size_t b_sz = static_cast<size_t>(b.weight.shape[0]) * b.weight.shape[1];
+                    return a_sz < b_sz;
+                });
+
+            float* d_absmax_buf = nullptr;
+            float* d_tscale_buf = nullptr;
+            cudaMalloc(&d_absmax_buf, sizeof(float));
+            cudaMalloc(&d_tscale_buf, sizeof(float));
+
+            int actual_count = 0;
+            size_t actual_bytes = 0;
+            int actual_from_fp16 = 0;
+            int actual_from_scratch = 0;
+
+            for (auto& e : nvfp4_entries) {
+                int rows = static_cast<int>(e.weight.shape[0]);
+                int cols = static_cast<int>(e.weight.shape[1]);
+                size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 +
+                                     static_cast<size_t>(rows) * cols / 16 + 4;
+
+                // Check actual free VRAM (1 MiB safety margin)
+                size_t free_mem = 0, total_mem = 0;
+                cudaMemGetInfo(&free_mem, &total_mem);
+                if (free_mem < nvfp4_bytes + 1024 * 1024) {
+                    IMP_LOG_INFO("NVFP4 incremental: VRAM exhausted after %d tensors "
+                                 "(%.1f MiB, %.1f MiB free)", actual_count,
+                                 actual_bytes / (1024.0 * 1024.0), free_mem / (1024.0 * 1024.0));
+                    break;
+                }
+
+                const half* fp16_ptr = nullptr;
+                void* tmp_buf = nullptr;
+
+                if (e.from_scratch) {
+                    size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
+                    void* dq_buf = dequant_scratch_;
+                    if (need > dequant_scratch_size_) {
+                        if (cudaMalloc(&tmp_buf, need) != cudaSuccess || !tmp_buf) continue;
+                        dq_buf = tmp_buf;
+                    }
+                    dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
+                    fp16_ptr = reinterpret_cast<const half*>(dq_buf);
+                } else {
+                    auto it = fp16_cache_.find(e.orig_ptr);
+                    fp16_ptr = reinterpret_cast<const half*>(it->second.data);
+                }
+
+                Tensor fp16_view(const_cast<half*>(fp16_ptr), DType::FP16, 2,
+                                 e.weight.shape, true);
+
+                NvFP4QuantResult result;
+                quantize_fp16_to_nvfp4_async(fp16_view, result,
+                                              d_absmax_buf, d_tscale_buf, stream);
+
+                // Sync immediately so we can read tensor_scale and free FP16
+                cudaStreamSynchronize(stream);
+
+                float h_tscale;
+                cudaMemcpy(&h_tscale, d_tscale_buf, sizeof(float), cudaMemcpyDeviceToHost);
+                result.tensor_scale = h_tscale;
+                nvfp4_cache_[e.orig_ptr] = result;
+                actual_bytes += nvfp4_bytes;
+                actual_count++;
+
+                if (tmp_buf) cudaFree(tmp_buf);
+
+                // Free FP16 cache entry to reclaim VRAM for next weight
+                if (!e.from_scratch) {
+                    auto it = fp16_cache_.find(e.orig_ptr);
+                    if (it != fp16_cache_.end()) {
+                        size_t freed = it->second.nbytes();
+                        cudaFree(it->second.data);
+                        fp16_cache_.erase(it);
+                        fp16_cache_bytes_ -= freed;
+                        actual_from_fp16++;
+                    }
+                } else {
+                    actual_from_scratch++;
+                }
+            }
+
+            cudaFree(d_absmax_buf);
+            cudaFree(d_tscale_buf);
+
+            nvfp4_cache_bytes_ = actual_bytes;
+            IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB "
+                         "(%d from FP16, %d from scratch, mode: %s)",
+                         actual_count, actual_bytes / (1024.0 * 1024.0),
+                         actual_from_fp16, actual_from_scratch, mode_str);
+        } else if (!nvfp4_entries.empty()) {
+            // Mode 1 standard batch: quantize entries that fit in budget, single sync.
+            size_t budget_used = 0;
+            int nvfp4_count = 0;
+            int nvfp4_from_scratch = 0;
+            bool budget_exhausted = false;
+
+            std::vector<NvFP4Entry> budgeted;
+            for (auto& e : nvfp4_entries) {
+                size_t rows = e.weight.shape[0], cols = e.weight.shape[1];
+                size_t nvfp4_bytes = rows * cols / 2 + rows * cols / 16 + 4;
+                if (budget_used + nvfp4_bytes > remaining_budget) {
+                    if (!budget_exhausted) {
+                        budget_exhausted = true;
+                        IMP_LOG_INFO("NVFP4 cache: VRAM budget reached after %d/%zu tensors "
+                                     "(%.1f / %.1f MiB)",
+                                     nvfp4_count, nvfp4_entries.size(),
+                                     budget_used / (1024.0 * 1024.0),
+                                     remaining_budget / (1024.0 * 1024.0));
+                    }
+                    continue;
+                }
+                budget_used += nvfp4_bytes;
+                nvfp4_count++;
+                if (e.from_scratch) nvfp4_from_scratch++;
+                budgeted.push_back(e);
+            }
+
             float* d_absmax_buf = nullptr;
             cudaMalloc(&d_absmax_buf, sizeof(float));
 
-            // Bulk tensor_scale buffer: one float per entry (read back after sync)
             float* d_tscales_all = nullptr;
-            cudaMalloc(&d_tscales_all, nvfp4_entries.size() * sizeof(float));
+            cudaMalloc(&d_tscales_all, budgeted.size() * sizeof(float));
 
-            for (size_t i = 0; i < nvfp4_entries.size(); i++) {
-                auto& e = nvfp4_entries[i];
+            std::vector<void*> tmp_bufs;
+            for (size_t i = 0; i < budgeted.size(); i++) {
+                auto& e = budgeted[i];
                 const half* fp16_ptr = nullptr;
                 int rows = static_cast<int>(e.weight.shape[0]);
                 int cols = static_cast<int>(e.weight.shape[1]);
 
                 if (e.from_scratch) {
-                    // Dequant GGML→FP16 into scratch (stream-ordered, reused each iter)
-                    dequant_gpu(e.weight.data, dequant_scratch_, e.qtype, rows, cols, stream);
-                    fp16_ptr = reinterpret_cast<const half*>(dequant_scratch_);
+                    size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
+                    void* dq_buf = dequant_scratch_;
+                    if (need > dequant_scratch_size_) {
+                        void* tmp = nullptr;
+                        if (cudaMalloc(&tmp, need) != cudaSuccess || !tmp) continue;
+                        dq_buf = tmp;
+                        tmp_bufs.push_back(tmp);
+                    }
+                    dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
+                    fp16_ptr = reinterpret_cast<const half*>(dq_buf);
                 } else {
                     auto it = fp16_cache_.find(e.orig_ptr);
                     fp16_ptr = reinterpret_cast<const half*>(it->second.data);
@@ -1412,16 +1522,15 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
                 nvfp4_cache_[e.orig_ptr] = result;
             }
 
-            // Single sync for all NVFP4 quantizations
             cudaStreamSynchronize(stream);
+            for (void* p : tmp_bufs) cudaFree(p);
 
-            // Bulk read back tensor_scales
-            std::vector<float> h_tscales(nvfp4_entries.size());
+            std::vector<float> h_tscales(budgeted.size());
             cudaMemcpy(h_tscales.data(), d_tscales_all,
-                       nvfp4_entries.size() * sizeof(float),
+                       budgeted.size() * sizeof(float),
                        cudaMemcpyDeviceToHost);
-            for (size_t i = 0; i < nvfp4_entries.size(); i++) {
-                auto it = nvfp4_cache_.find(nvfp4_entries[i].orig_ptr);
+            for (size_t i = 0; i < budgeted.size(); i++) {
+                auto it = nvfp4_cache_.find(budgeted[i].orig_ptr);
                 if (it != nvfp4_cache_.end()) {
                     it->second.tensor_scale = h_tscales[i];
                 }
@@ -1430,29 +1539,24 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
             cudaFree(d_absmax_buf);
             cudaFree(d_tscales_all);
 
-            nvfp4_cache_bytes_ = nvfp4_total;
+            nvfp4_cache_bytes_ = budget_used;
             if (nvfp4_from_scratch > 0) {
                 IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB (%d from FP16 cache, %d via dequant scratch, mode: %s)",
-                             nvfp4_count, nvfp4_total / (1024.0 * 1024.0),
+                             nvfp4_count, budget_used / (1024.0 * 1024.0),
                              nvfp4_count - nvfp4_from_scratch, nvfp4_from_scratch, mode_str);
             } else {
                 IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB (mode: %s)",
-                             nvfp4_count, nvfp4_total / (1024.0 * 1024.0), mode_str);
+                             nvfp4_count, budget_used / (1024.0 * 1024.0), mode_str);
             }
         }
 
-        // In "only" mode (2), release FP16 cache to save VRAM.
-        // Before freeing, migrate FP16 weights to FP8 cache so prefill
-        // retains fast FP8 GEMM instead of falling back to on-the-fly dequant.
-        // FP8 = half the size of FP16, so net VRAM savings = 50% of FP16 cache.
+        // In "only" mode (2), release remaining FP16 cache.
+        // Before freeing, migrate FP16 weights to FP8 cache so prefill retains
+        // fast FP8 GEMM.  FP8 = half the size of FP16, net 50% VRAM savings.
         if (use_nvfp4_decode_ == 2 && !fp16_cache_.empty()) {
-            // Migrate FP16→FP8 for weights not already in fp8_cache_.
-            // Batched async: all calibrate+quantize kernels enqueued without
-            // per-tensor host sync.  Single sync at the end.
             int migrated = 0;
             size_t migrated_bytes = 0;
             if (use_fp8_cache_) {
-                // Collect tensors to migrate
                 struct MigrateEntry {
                     const void* orig_ptr;
                     Tensor fp16_tensor;
@@ -1466,27 +1570,23 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
                 }
 
                 if (!to_migrate.empty()) {
-                    // Find max grid size needed for temp buffers
                     int max_grid = 0;
                     size_t total_fp8_bytes = 0;
                     for (auto& e : to_migrate) {
                         int threads_needed = (static_cast<int>(e.n_elems) + 3) / 4;
                         int grid = (threads_needed + 255) / 256;
                         if (grid > max_grid) max_grid = grid;
-                        total_fp8_bytes += e.n_elems;  // FP8 = 1 byte per element
+                        total_fp8_bytes += e.n_elems;
                     }
 
-                    // Pre-allocate reusable temp buffers (once, not per-tensor)
                     float* d_block_maxes = nullptr;
                     float* d_absmax = nullptr;
                     cudaMalloc(&d_block_maxes, (size_t)max_grid * sizeof(float));
                     cudaMalloc(&d_absmax, sizeof(float));
 
-                    // Allocate all scale values in a single buffer
                     float* d_scales_all = nullptr;
                     cudaMalloc(&d_scales_all, to_migrate.size() * sizeof(float));
 
-                    // Bulk-allocate all FP8 data in one cudaMalloc
                     uint8_t* d_fp8_bulk = nullptr;
                     cudaError_t bulk_err = cudaMalloc(&d_fp8_bulk, total_fp8_bytes);
                     if (bulk_err != cudaSuccess) {
@@ -1500,7 +1600,6 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
                         void* fp8_buf = d_fp8_bulk + fp8_offset;
                         fp8_offset += e.n_elems;
 
-                        // Async calibrate + quantize (no host sync)
                         calibrate_and_quantize_fp8_async(
                             e.fp16_tensor.data, fp8_buf, static_cast<int>(e.n_elems),
                             d_block_maxes, max_grid,
@@ -1513,14 +1612,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
                         migrated_bytes += e.n_elems + sizeof(float);
                     }
 
-                    // Track bulk buffer for cleanup
                     fp8_migrated_data_ = d_fp8_bulk;
                     fp8_migrated_data_size_ = total_fp8_bytes;
 
-                    // Single sync for ALL migrations
                     if (migrated > 0) {
                         cudaStreamSynchronize(stream);
-                        // Read back scales from device to host (for fp8_cache_ host scale field)
                         std::vector<float> h_scales(migrated);
                         cudaMemcpy(h_scales.data(), d_scales_all, migrated * sizeof(float),
                                    cudaMemcpyDeviceToHost);
@@ -1535,13 +1631,12 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
 
                     cudaFree(d_block_maxes);
                     cudaFree(d_absmax);
-                    // d_scales_all stays alive — each entry is pointed to by fp8_cache_
                     fp8_migrated_scales_ = d_scales_all;
                     fp8_migrated_count_ = migrated;
                 }
             }
 
-            // Now free FP16 cache
+            // Free remaining FP16 cache
             for (auto& [ptr, tensor] : fp16_cache_) {
                 cudaFree(tensor.data);
             }
@@ -1549,8 +1644,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
             fp16_cache_.clear();
             fp16_cache_bytes_ = 0;
 
-            // Also free fused KV and gate+up caches (prefill uses individual
-            // FP8 Q/K/V weights instead of fused paths)
+            // Free fused caches (prefill uses individual FP8 weights)
             for (auto& [idx, tensor] : fused_kv_cache_) {
                 if (tensor.data) cudaFree(tensor.data);
             }
@@ -1560,7 +1654,6 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
             }
             fused_gate_up_cache_.clear();
 
-            // Reclaim freed VRAM for MoE expert caching
             remaining_budget += freed;
             fp8_cache_bytes_ += migrated_bytes;
             IMP_LOG_INFO("NVFP4 only mode: freed FP16 cache (%.2f MiB), migrated %d weights to FP8 (%.2f MiB)",
@@ -1571,9 +1664,19 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
         // Must be AFTER FP16 free to avoid peak VRAM exceeding physical memory.
         // The CUTLASS cache is a full copy (repacked data + SfAtom scales), so it
         // approximately doubles the NVFP4 cache VRAM.  Budget-aware: stop if VRAM runs out.
-        if (nvfp4_count > 0 && cutlass_sm120_nvfp4_available()) {
-            size_t ct_budget = (remaining_budget > nvfp4_total)
-                               ? (remaining_budget - nvfp4_total) : 0;
+        if (!nvfp4_cache_.empty() && cutlass_sm120_nvfp4_available()) {
+            // After incremental mode, remaining_budget is stale.  Use actual free VRAM.
+            size_t ct_budget;
+            if (use_nvfp4_decode_ == 2) {
+                cudaStreamSynchronize(stream);
+                size_t free_mem = 0, total_mem = 0;
+                cudaMemGetInfo(&free_mem, &total_mem);
+                constexpr size_t kCtReserve = 256ULL * 1024 * 1024;
+                ct_budget = (free_mem > kCtReserve) ? (free_mem - kCtReserve) : 0;
+            } else {
+                ct_budget = (remaining_budget > nvfp4_cache_bytes_)
+                            ? (remaining_budget - nvfp4_cache_bytes_) : 0;
+            }
             int ct_count = 0;
             size_t ct_total = 0;
             bool ct_exhausted = false;
@@ -1601,8 +1704,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
             if (ct_count > 0) {
                 cudaStreamSynchronize(stream);
                 cutlass_nvfp4_cache_bytes_ = ct_total;
-                remaining_budget = (remaining_budget > ct_total + nvfp4_total)
-                                   ? (remaining_budget - ct_total - nvfp4_total) : 0;
+                remaining_budget = (remaining_budget > ct_total + nvfp4_cache_bytes_)
+                                   ? (remaining_budget - ct_total - nvfp4_cache_bytes_) : 0;
                 IMP_LOG_INFO("CUTLASS sm_120 NVFP4 weight cache: %d tensors, %.2f MiB",
                              ct_count, ct_total / (1024.0 * 1024.0));
             }
@@ -1611,8 +1714,16 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
         // Cache MoE expert weights — done after FP16 free so mode 2 has full budget
         int nvfp4_moe_count = 0;
         size_t nvfp4_moe_total = 0;
-        size_t moe_budget = (remaining_budget > nvfp4_total)
-                            ? (remaining_budget - nvfp4_total) : 0;
+        size_t moe_budget;
+        if (use_nvfp4_decode_ == 2) {
+            size_t free_mem = 0, total_mem = 0;
+            cudaMemGetInfo(&free_mem, &total_mem);
+            constexpr size_t kMoeReserve = 128ULL * 1024 * 1024;
+            moe_budget = (free_mem > kMoeReserve) ? (free_mem - kMoeReserve) : 0;
+        } else {
+            moe_budget = (remaining_budget > nvfp4_cache_bytes_)
+                         ? (remaining_budget - nvfp4_cache_bytes_) : 0;
+        }
         bool moe_budget_exhausted = false;
 
         auto cache_moe_expert_nvfp4 = [&](const Tensor& packed, GGMLQuantType qtype) {
@@ -1663,7 +1774,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
             nvfp4_moe_cache_bytes_ = nvfp4_moe_total;
             IMP_LOG_INFO("NVFP4 MoE cache: %d tensors, %.2f MiB",
                          nvfp4_moe_count, nvfp4_moe_total / (1024.0 * 1024.0));
-        } else if (nvfp4_count == 0) {
+        } else if (nvfp4_cache_.empty()) {
             IMP_LOG_INFO("NVFP4 decode: no eligible weights found (all ≤ 4.5 bits/elem)");
         }
     }

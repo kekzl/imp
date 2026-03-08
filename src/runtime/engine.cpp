@@ -84,12 +84,14 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     const auto& mcfg = model_->config();
 
     // Resolve NVFP4 decode auto mode based on GPU compute capability.
-    // Skip for small models (d_model < 4096): FP4 quantization error accumulates
-    // over layers and degrades output quality on small models, while the decode
-    // speed gain is negligible (small models are already memory-bandwidth-light).
+    // Skip for small dense models (d_model < 4096): FP4 quantization error accumulates
+    // over layers and degrades output quality, while the decode speed gain is negligible
+    // (small models are already memory-bandwidth-light).
+    // Exception: MoE models benefit regardless of d_model — expert weights dominate VRAM
+    // and sparse activation limits error accumulation.
     if (config_.use_nvfp4_decode < 0) {
         int sm = get_device_sm_version();
-        if (mcfg.d_model < 4096) {
+        if (mcfg.d_model < 4096 && mcfg.n_experts == 0) {
             config_.use_nvfp4_decode = 0;
             IMP_LOG_INFO("NVFP4 decode: auto → disabled (d_model=%d < 4096, precision risk)", mcfg.d_model);
         } else if (sm >= 120) {
@@ -304,24 +306,37 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             }
         }
 
-        // Target: 2x headroom for batching / prefix caching
-        int target_blocks = needed_blocks * 2;
+        // Target: 2x headroom for batching / prefix caching.
+        // In NVFP4-only mode (2), skip headroom — every MiB freed goes to
+        // weight caching, which directly improves decode throughput.
+        int target_blocks = (config_.use_nvfp4_decode == 2)
+                            ? needed_blocks
+                            : needed_blocks * 2;
 
         size_t free_mem = effective_free_vram();
         if (free_mem == 0 || per_block_total == 0) {
             max_blocks = needed_blocks;
         } else {
             // Reserve space for SSM state + 256 MiB safety margin, then cap KV
-            // at 80% of what remains to leave room for FP16 weight caching.
+            // at a fraction of what remains to leave room for weight caching.
+            // In NVFP4-only mode (2), use only 10% for KV — each extra MiB of
+            // NVFP4 weight cache directly improves decode tok/s, while excess
+            // KV blocks sit unused for typical context lengths.
             constexpr size_t kSafetyMarginBytes = 256ULL * 1024 * 1024;
             size_t reserved = ssm_footprint + kSafetyMarginBytes;
             size_t available = (free_mem > reserved) ? (free_mem - reserved) : 0;
-            size_t kv_budget = static_cast<size_t>(available * 0.8);
+            double kv_fraction = (config_.use_nvfp4_decode == 2) ? 0.1 : 0.8;
+            size_t kv_budget = static_cast<size_t>(available * kv_fraction);
             int budget_blocks = static_cast<int>(kv_budget / per_block_total);
             max_blocks = std::min(target_blocks, budget_blocks);
         }
 
-        max_blocks = std::max(max_blocks, needed_blocks);  // at least what's needed
+        // In NVFP4-only mode, KV budget takes priority over needed_blocks —
+        // excess KV wastes VRAM that weight caching needs for decode throughput.
+        // Sequences exceeding the KV capacity will fail gracefully at runtime.
+        if (config_.use_nvfp4_decode != 2) {
+            max_blocks = std::max(max_blocks, needed_blocks);
+        }
         max_blocks = std::max(max_blocks, 16);
     }
 
