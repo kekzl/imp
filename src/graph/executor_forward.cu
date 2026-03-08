@@ -891,20 +891,26 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                       ly.w_down_qtype == GGMLQuantType::Q2_K ||
                                       ly.w_down_qtype == GGMLQuantType::Q3_K));
         if (will_fuse_down_nvfp4) {
-            // NVFP4 down + residual: SwiGLU/GeGLU to FP16, then NVFP4 GEMV + residual
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
-            if (cfg.ffn_activation != FFNActivation::GEGLU) {
-                swiglu(go, uo, so, stream);
-            } else {
-                geglu(go, uo, so, stream);
-            }
             auto& wd_nvfp4 = nvfp4_cache_.at(ly.w_down.data);
-            gemv_nvfp4_residual(wd_nvfp4,
-                                 static_cast<const half*>(so.data),
-                                 static_cast<half*>(h.data),
-                                 static_cast<const half*>(h.data),
-                                 M_d, K_d, stream);
+            if (cfg.ffn_activation != FFNActivation::GEGLU) {
+                // Fused SwiGLU + NVFP4 GEMV + residual (saves 1 kernel launch)
+                gemv_nvfp4_swiglu_residual(wd_nvfp4,
+                                            static_cast<const half*>(go.data),
+                                            static_cast<const half*>(uo.data),
+                                            static_cast<half*>(h.data),
+                                            static_cast<const half*>(h.data),
+                                            M_d, K_d, stream);
+            } else {
+                // GeGLU: keep separate (rare activation type)
+                geglu(go, uo, so, stream);
+                gemv_nvfp4_residual(wd_nvfp4,
+                                     static_cast<const half*>(so.data),
+                                     static_cast<half*>(h.data),
+                                     static_cast<const half*>(h.data),
+                                     M_d, K_d, stream);
+            }
         } else if (fused_down_residual) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
