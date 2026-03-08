@@ -29,22 +29,26 @@ This is not a wrapper. imp implements its own GGUF parser, tokenizer, KV cache, 
 
 **RTX 5090** (Blackwell, sm_120, 32 GB), CUDA 13.1, batch size 1, pp512/tg128, warmup + 5 averaged reps.
 
+Same models, same machine, same quantizations — measured back-to-back.
+
 | Model | Quant | imp pp | llama.cpp pp | &Delta; | imp tg | llama.cpp tg | &Delta; |
 |---|---|---:|---:|---:|---:|---:|---:|
-| Qwen3-4B | Q8_0 | 16,374 | 17,236 | -5.0% | 304 | 201.0 | **+51.2%** |
-| Qwen3-8B | Q8_0 | 12,236 | 12,780&sup1; | -4.3% | 191 | 158.8&sup1; | **+20.3%** |
-| DeepSeek-R1-7B | Q8_0 | 15,512 | 12,798 | **+21.2%** | 210 | 155.5 | **+35.0%** |
-| Phi-4-mini | Q8_0 | 20,676 | — | | 251 | — | |
-| Gemma-3-12B | Q8_0 | 9,513 | — | | 116 | — | |
-| DeepSeek-R1-14B | Q6_K | 5,916 | 5,528 | **+7.0%** | 108 | 96.8 | **+11.6%** |
-| Qwen3-Coder-30B-A3B (MoE) | Q6_K | 4,592 | 5,741 | -20.0% | 263 | 189.8 | **+38.6%** |
-| Nemotron-30B-A3B (MoE) | Q6_K | 1,750 | — | | 72 | — | |
+| Qwen3-4B | Q8_0 | 15,109 | 21,189 | -28.7% | **308** | 242 | **+27.3%** |
+| Qwen3-8B | Q8_0 | 12,270 | 14,425 | -14.9% | **191** | 156 | **+22.0%** |
+| DeepSeek-R1-7B | Q8_0 | 14,794 | 15,955 | -7.3% | **210** | 175 | **+20.3%** |
+| Phi-4-mini | Q8_0 | 20,408 | 27,620 | -26.1% | 250 | 276 | -9.2% |
+| Gemma-3-12B | Q8_0 | 7,322 | 9,429 | -22.3% | **115** | 98 | **+17.3%** |
+| DeepSeek-R1-14B | Q6_K | 6,019 | 6,314 | -4.7% | 108 | 110 | -1.9% |
+| Qwen3-Coder-30B-A3B (MoE) | Q6_K | 4,580 | 6,079 | -24.7% | **263** | 246 | **+7.1%** |
+| Nemotron-30B-A3B (MoE) | Q6_K | 1,950 | crash&sup1; | — | 71 | crash&sup1; | — |
 
-<sub>pp = prompt processing (tok/s), tg = token generation (tok/s), higher is better. NVFP4 decode cache auto-enabled on sm_120. llama.cpp commit <code>c830f99</code>. &sup1;Llama-3.1-Tulu-3-8B Q8_0 (closest published match, Phoronix).</sub>
+<sub>pp = prompt processing (tok/s), tg = token generation (tok/s), higher is better. NVFP4 decode cache auto-enabled on sm_120. llama.cpp commit <code>35bee03</code>. &sup1;Mamba2 assertion failure in llama.cpp.</sub>
 
-**Decode** — imp wins across all compared models (+11% to +51%). NVFP4 weight caching halves memory bandwidth vs Q8_0 reads, and fused activation+GEMV+residual kernels eliminate intermediate launches. MoE decode benefits from fused expert dispatch with shared-memory caching (263 tok/s on a 30B model).
+**Decode** — imp wins on 5 of 7 models (+7% to +27%). NVFP4 weight caching halves memory bandwidth vs Q8_0 reads, and fused activation+GEMV+residual kernels eliminate intermediate launches. Largest gains on models where NVFP4 auto-activates (d_model &ge; 4096).
 
-**Prefill** — imp wins on dense models where CUTLASS Hopper FMHA (WGMMA + TMA) and FP8 tensor cores dominate. MoE prefill is behind (-20%) due to the grouped GEMM dequant path.
+**Prefill** — llama.cpp leads on prompt processing (-5% to -29%). Their cuBLAS GEMM path is highly optimized for short-context batch-1 prefill. imp's CUTLASS FMHA + FP8 weight cache narrows the gap at longer contexts.
+
+**Nemotron-H** — imp is the only engine that runs this Mamba2 + Attention + MoE hybrid architecture. llama.cpp crashes with an assertion failure in its Mamba2 implementation.
 
 ## Features
 
