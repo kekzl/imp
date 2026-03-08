@@ -1,5 +1,6 @@
 #include "model/model.h"
 #include "graph/executor.h"
+#include "compute/gemm.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -158,6 +159,9 @@ void bench_e2e() {
     printf("Model: d=%d, ff=%d, heads=%d, layers=%d, vocab=%d\n\n",
            d_model, d_ff, n_heads, n_layers, vocab_size);
 
+    // Initialize cuBLAS workspace (must be called before any GEMM)
+    gemm_init();
+
     // Build and upload model
     auto model = make_bench_model(d_model, d_ff, n_heads, n_kv_heads,
                                   n_layers, vocab_size, max_seq_len);
@@ -170,6 +174,10 @@ void bench_e2e() {
     GraphExecutor executor;
     if (!executor.init(*model, DType::FP16, false)) {
         printf("bench_e2e: failed to initialize GraphExecutor\n");
+        return;
+    }
+    if (!executor.allocate_workspaces()) {
+        printf("bench_e2e: failed to allocate GPU workspaces\n");
         return;
     }
 

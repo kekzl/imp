@@ -21,16 +21,21 @@ RUN sed -i 's/-march=native/-march=x86-64-v3/g' cmake/CompilerFlags.cmake
 # BuildKit cache mount persists the build directory across Docker builds.
 # On code-only changes, Ninja recompiles only modified translation units
 # instead of rebuilding from scratch (~30s vs ~5min for full CUDA rebuild).
+ARG IMP_BUILD_TESTS=OFF
+ARG IMP_BUILD_BENCH=OFF
+
 RUN --mount=type=cache,target=/src/build \
     cmake -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
         -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" \
-        -DIMP_BUILD_TESTS=OFF \
-        -DIMP_BUILD_BENCH=OFF \
+        -DIMP_BUILD_TESTS=${IMP_BUILD_TESTS} \
+        -DIMP_BUILD_BENCH=${IMP_BUILD_BENCH} \
         -DIMP_BUILD_TOOLS=ON \
         -DIMP_BUILD_SERVER=ON \
     && cmake --build build -j$(nproc) \
-    && cp build/imp-server build/imp-cli /tmp/
+    && cp build/imp-server build/imp-cli /tmp/ \
+    && ([ -f build/imp-tests ] && cp build/imp-tests /tmp/ || true) \
+    && ([ -f build/imp-bench ] && cp build/imp-bench /tmp/ || true)
 
 # =============================================================================
 # Stage 2: Minimal runtime image
@@ -40,15 +45,16 @@ FROM nvidia/cuda:13.1.0-runtime-ubuntu24.04
 RUN apt-get update && apt-get install -y --no-install-recommends --allow-change-held-packages \
         libcublas-13-1 \
         curl \
-        python3-pip \
-    && pip3 install --no-cache-dir --break-system-packages huggingface-hub \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy built binaries
 COPY --from=builder /tmp/imp-server /usr/local/bin/imp-server
 COPY --from=builder /tmp/imp-cli /usr/local/bin/imp-cli
+COPY --from=builder /tmp/imp-test[s] /usr/local/bin/
+COPY --from=builder /tmp/imp-benc[h] /usr/local/bin/
 
-# Copy entrypoint
+# Copy presets and entrypoint
+COPY presets.toml /usr/local/bin/presets.toml
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 

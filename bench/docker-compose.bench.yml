@@ -1,0 +1,102 @@
+# Benchmark comparison: imp vs llama.cpp
+#
+# Usage:
+#   # Build imp
+#   docker compose -f docker-compose.bench.yml build imp-bench
+#
+#   # Run imp benchmarks
+#   docker compose -f docker-compose.bench.yml run --rm imp-bench
+#
+#   # Run llama.cpp benchmarks
+#   docker compose -f docker-compose.bench.yml run --rm llamacpp-bench
+#
+#   # Run full comparison
+#   docker compose -f docker-compose.bench.yml run --rm bench-compare
+
+services:
+  imp-bench:
+    build:
+      context: ..
+      args:
+        CUDA_ARCHITECTURES: "${CUDA_ARCHITECTURES:-120a}"
+        IMP_BUILD_BENCH: "ON"
+    image: imp:bench
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ${IMP_MODELS_DIR:-../models}:/models
+      - ./results:/results
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo "=== imp benchmark ==="
+        for model in /models/*.gguf; do
+          [ -f "$$model" ] || continue
+          echo "--- $$(basename $$model) ---"
+          imp-cli --model "$$model" --bench --bench-pp 128 --bench-reps 5 --max-tokens 128
+          imp-cli --model "$$model" --bench --bench-pp 2048 --bench-reps 3 --max-tokens 256
+        done
+
+  llamacpp-bench:
+    image: ghcr.io/ggerganov/llama.cpp:server-cuda-b5200
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ${IMP_MODELS_DIR:-../models}:/models
+      - ./results:/results
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo "=== llama.cpp benchmark ==="
+        for model in /models/*.gguf; do
+          [ -f "$$model" ] || continue
+          echo "--- $$(basename $$model) ---"
+          llama-bench -m "$$model" -p 128 -n 128 -r 5 -ngl 999 -fa -t 1
+          llama-bench -m "$$model" -p 2048 -n 256 -r 3 -ngl 999 -fa -t 1
+        done
+
+  bench-compare:
+    build:
+      context: ..
+      args:
+        CUDA_ARCHITECTURES: "${CUDA_ARCHITECTURES:-120a}"
+        IMP_BUILD_BENCH: "ON"
+    image: imp:bench
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ${IMP_MODELS_DIR:-../models}:/models
+      - .:/bench
+      - ./results:/results
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    entrypoint: ["python3", "/bench/bench.py"]
+    command:
+      - "--imp-bin"
+      - "imp-cli"
+      - "--models-dir"
+      - "/models"
+      - "--output"
+      - "/results/imp_baseline.json"

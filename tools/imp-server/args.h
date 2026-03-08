@@ -20,6 +20,8 @@ struct ServerArgs {
     std::string models_dir;    // --models-dir: scan for .gguf files
     std::string api_key;       // --api-key: require Bearer token auth
     std::string reasoning_format = "deepseek";  // --reasoning-format: deepseek or none
+    std::string preset;        // --preset: named model preset (e.g. qwen3-32b)
+    std::string presets_file;  // --presets-file: custom presets.toml path
 };
 
 ServerArgs parse_server_args(int argc, char** argv);

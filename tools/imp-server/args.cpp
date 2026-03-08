@@ -28,6 +28,9 @@ void print_server_usage(const char* prog) {
         "  --models-dir <path>   Directory to scan for .gguf models (auto-load on select)\n"
         "  --api-key <key>       Require Bearer token authentication\n"
         "  --reasoning-format <f> deepseek (default) or none\n"
+        "  --preset <name|none>  Override auto-detected preset, or 'none' to disable\n"
+        "                        Use --preset list to show all available presets\n"
+        "  --presets-file <path> Custom presets.toml path\n"
         "  --help                Show this help message\n",
         prog);
 }
@@ -79,6 +82,10 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.api_key = argv[++i];
         } else if (std::strcmp(arg, "--reasoning-format") == 0 && i + 1 < argc) {
             args.reasoning_format = argv[++i];
+        } else if (std::strcmp(arg, "--preset") == 0 && i + 1 < argc) {
+            args.preset = argv[++i];
+        } else if (std::strcmp(arg, "--presets-file") == 0 && i + 1 < argc) {
+            args.presets_file = argv[++i];
         } else {
             fprintf(stderr, "Unknown argument: %s\n", arg);
             print_server_usage(argv[0]);

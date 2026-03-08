@@ -48,6 +48,9 @@ void print_usage(const char* prog) {
         "  --bench-reps <n>      Repetitions to average (default: 3)\n"
         "  --mmproj <path>       Path to vision encoder GGUF (mmproj) for multimodal\n"
         "  --image <path>        Input image for vision (requires --mmproj)\n"
+        "  --preset <name|none>  Override auto-detected preset, or 'none' to disable\n"
+        "                        Use --preset list to show all available presets\n"
+        "  --presets-file <path> Custom presets.toml path\n"
         "  --help                Show this help message\n",
         prog);
 }
@@ -70,10 +73,13 @@ CliArgs parse_args(int argc, char** argv) {
             args.max_tokens_set = true;
         } else if (std::strcmp(arg, "--temperature") == 0 && i + 1 < argc) {
             args.temperature = static_cast<float>(std::atof(argv[++i]));
+            args.temperature_set = true;
         } else if (std::strcmp(arg, "--top-p") == 0 && i + 1 < argc) {
             args.top_p = static_cast<float>(std::atof(argv[++i]));
+            args.top_p_set = true;
         } else if (std::strcmp(arg, "--top-k") == 0 && i + 1 < argc) {
             args.top_k = std::atoi(argv[++i]);
+            args.top_k_set = true;
         } else if (std::strcmp(arg, "--seed") == 0 && i + 1 < argc) {
             args.seed = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--min-p") == 0 && i + 1 < argc) {
@@ -143,6 +149,10 @@ CliArgs parse_args(int argc, char** argv) {
             args.mmproj_path = argv[++i];
         } else if (std::strcmp(arg, "--image") == 0 && i + 1 < argc) {
             args.image_path = argv[++i];
+        } else if (std::strcmp(arg, "--preset") == 0 && i + 1 < argc) {
+            args.preset = argv[++i];
+        } else if (std::strcmp(arg, "--presets-file") == 0 && i + 1 < argc) {
+            args.presets_file = argv[++i];
         } else {
             fprintf(stderr, "Unknown argument: %s\n", arg);
             print_usage(argv[0]);
