@@ -266,3 +266,13 @@ Gemma-3 vision uses a frozen 400M-parameter SigLIP ViT that produces 256 image t
 
 ### Speculative Decoding
 Draft model generates K candidate tokens, target model verifies in a single pass. Uses stochastic acceptance for non-greedy sampling. KV cache manager supports rollback for rejected tokens.
+
+## Verification Before Commit
+
+**Every change MUST be verified in this order before `git add`, `git commit`, and `git push`:**
+
+1. **Tests** — Build and run the test suite (`ctest --output-on-failure` or `./imp-tests`). All tests must pass.
+2. **Performance** — Run benchmarks (`--bench`) on affected models. Verify no regressions in tok/s (prefill and decode).
+3. **Real prompts** — Test with actual prompts (`--prompt "..."`) on at least 2-3 models to confirm correct, coherent output.
+
+Only after all three checks pass may the changes be committed and pushed.

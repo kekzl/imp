@@ -267,6 +267,18 @@ bool cutlass_fmha_prefill(
                 Q_ptr, K_ptr, V_ptr, O_ptr,
                 batch, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, scale, stream);
         }
+    } else if (head_dim == 96) {
+        // Shape<BlockQ=128, BlockKV=96, HeadDim=96> for Phi4-mini and similar models
+        using Tile = Shape<_128, _96, _96>;
+        if (causal) {
+            return run_fmha<Tile, CausalFusion>(
+                Q_ptr, K_ptr, V_ptr, O_ptr,
+                batch, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, scale, stream);
+        } else {
+            return run_fmha<Tile, DefaultFusion>(
+                Q_ptr, K_ptr, V_ptr, O_ptr,
+                batch, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, scale, stream);
+        }
     } else if (head_dim == 64) {
         // Shape<BlockQ=128, BlockKV=64, HeadDim=64> with warp-specialized cooperative
         using Tile = Shape<_128, _64, _64>;

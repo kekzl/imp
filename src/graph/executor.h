@@ -306,6 +306,14 @@ private:
     std::unordered_map<const void*, FP8CacheEntry> fp8_cache_;
     size_t fp8_cache_bytes_ = 0;
     bool use_fp8_cache_ = false;
+    float* fp8_migrated_scales_ = nullptr;  // bulk-allocated d_scale buffer for FP16→FP8 migration
+    int fp8_migrated_count_ = 0;            // number of entries in fp8_migrated_scales_
+    void* fp8_migrated_data_ = nullptr;     // bulk-allocated FP8 data buffer for migration
+    size_t fp8_migrated_data_size_ = 0;
+    float* fp8_overflow_scales_ = nullptr;  // bulk-allocated d_scale buffer for FP8 overflow cache
+    int fp8_overflow_count_ = 0;            // number of entries in fp8_overflow_scales_
+    void* fp8_overflow_data_ = nullptr;     // bulk-allocated FP8 data buffer for overflow
+    size_t fp8_overflow_data_size_ = 0;
 
     // Scratch buffers for FP8 activation quantization (allocated once, reused per GEMM)
     void* fp8_act_buf_ = nullptr;       // max_tokens * max_dim bytes
