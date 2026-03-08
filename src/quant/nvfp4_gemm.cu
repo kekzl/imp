@@ -249,6 +249,90 @@ gemv_nvfp4_residual_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// Fused SwiGLU + GEMV + residual:
+//   y[row] = A_nvfp4[row,:] @ swiglu(gate, up) + residual[row]
+// Eliminates the separate SwiGLU kernel launch.
+// ---------------------------------------------------------------------------
+
+// SwiGLU micro-block: reads gate[16] and up[16], computes silu(gate)*up,
+// then dots with weight nibbles.
+__device__ __forceinline__ float dot_micro_block_swiglu(
+    const uint8_t* __restrict__ pb,
+    const half*    __restrict__ gate,
+    const half*    __restrict__ up,
+    int            elem_base,
+    const float*   s_lut)
+{
+    float acc = 0.0f;
+    #pragma unroll
+    for (int b = 0; b < 8; b++) {
+        const half2 gh = *reinterpret_cast<const half2*>(gate + elem_base + b * 2);
+        const half2 uh = *reinterpret_cast<const half2*>(up   + elem_base + b * 2);
+        const float2 gf = __half22float2(gh);
+        const float2 uf = __half22float2(uh);
+        // silu(x) = x * sigmoid(x) = x / (1 + exp(-x))
+        float s0 = gf.x / (1.0f + expf(-gf.x)) * uf.x;
+        float s1 = gf.y / (1.0f + expf(-gf.y)) * uf.y;
+        acc = __fmaf_rn(s_lut[pb[b] & 0x0F], s0, acc);
+        acc = __fmaf_rn(s_lut[pb[b] >> 4],   s1, acc);
+    }
+    return acc;
+}
+
+__device__ __forceinline__ float gemv_nvfp4_row_swiglu(
+    const uint8_t* __restrict__ row_packed,
+    const uint8_t* __restrict__ row_ms,
+    float          tensor_scale,
+    const half*    __restrict__ gate,
+    const half*    __restrict__ up,
+    int            n_mb,
+    int            tid,
+    const float*   s_lut)
+{
+    float acc = 0.0f;
+    for (int mi = tid; mi < n_mb; mi += kKparThreads) {
+        int byte_off = mi * 8;
+        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
+        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
+        float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
+        float local_dot = dot_micro_block_swiglu(pb, gate, up, byte_off * 2, s_lut);
+        acc = __fmaf_rn(local_dot, cs, acc);
+    }
+    return acc;
+}
+
+__global__ void __launch_bounds__(kKparThreads, 12)
+gemv_nvfp4_swiglu_residual_kernel(
+    const uint8_t* __restrict__ packed_data,
+    const uint8_t* __restrict__ micro_scales,
+    float                       tensor_scale,
+    const half*    __restrict__ gate,
+    const half*    __restrict__ up,
+    half*          __restrict__ y,
+    const half*    __restrict__ residual,
+    int M, int K)
+{
+    const int row = blockIdx.x;
+    if (row >= M) return;
+
+    const int tid = threadIdx.x;
+    const int K_half = K / 2;
+    const int n_mb = K / kMicroBlockSize;
+
+    __shared__ SmemKpar smem;
+    init_lut(smem.lut, tid);
+    __syncthreads();
+
+    float acc = gemv_nvfp4_row_swiglu(
+        packed_data + (int64_t)row * K_half,
+        micro_scales + (int64_t)row * n_mb,
+        tensor_scale, gate, up, n_mb, tid, smem.lut);
+
+    float total = reduce_kpar(acc, tid, smem.warp_sums);
+    if (tid == 0) y[row] = __float2half(total + __half2float(residual[row]));
+}
+
+// ---------------------------------------------------------------------------
 // Fused QKV: 3 weight matrices, shared input, separate outputs
 // Grid: (q_rows + k_rows + v_rows) blocks.
 // ---------------------------------------------------------------------------
@@ -432,6 +516,17 @@ void gemv_nvfp4_residual(const NvFP4QuantResult& A, const half* x, half* y,
         reinterpret_cast<const uint8_t*>(A.packed_data),
         reinterpret_cast<const uint8_t*>(A.micro_scales),
         A.tensor_scale, x, y, residual, M, K);
+}
+
+void gemv_nvfp4_swiglu_residual(const NvFP4QuantResult& A,
+                                 const half* gate, const half* up,
+                                 half* y, const half* residual,
+                                 int M, int K, cudaStream_t stream)
+{
+    gemv_nvfp4_swiglu_residual_kernel<<<M, kKparThreads, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(A.packed_data),
+        reinterpret_cast<const uint8_t*>(A.micro_scales),
+        A.tensor_scale, gate, up, y, residual, M, K);
 }
 
 // ---------------------------------------------------------------------------

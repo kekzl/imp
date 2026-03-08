@@ -45,6 +45,13 @@ void gemv_nvfp4_gate_up_fused(const NvFP4QuantResult& wg, const NvFP4QuantResult
 void gemv_nvfp4_residual(const NvFP4QuantResult& A, const half* x, half* y,
                           const half* residual, int M, int K, cudaStream_t stream);
 
+// Fused SwiGLU + GEMV + residual: y[M] = A_nvfp4[M,K] @ swiglu(gate,up) + residual[M]
+// Eliminates separate SwiGLU kernel launch. gate, up: [K] FP16 on device.
+void gemv_nvfp4_swiglu_residual(const NvFP4QuantResult& A,
+                                 const half* gate, const half* up,
+                                 half* y, const half* residual,
+                                 int M, int K, cudaStream_t stream);
+
 // ---------------------------------------------------------------------------
 // MoE NVFP4 GEMV: per-expert decode projections.
 // FP16 input (no Q8_1 pre-quantization needed).

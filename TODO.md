@@ -20,10 +20,10 @@
   use async calibrate+quantize with single sync at end. Bulk cudaMalloc for FP8 data
   and scale buffers. DeepSeek-14B init: 55.4s → ~35s (37% faster).
 
-- [ ] **Small Model Decode MBU** — ~450 kernels/decode step, launch overhead dominates.
-  Qwen3-4B/Phi4-mini reach only ~57% MBU (theoretical max at 5us/kernel).
-  CUDA Graphs + PDL already active — remaining gap is per-kernel granularity.
-  Fix: kernel fusion (RMSNorm+Quantize+GEMV), GEMV block size 256→512.
+- [~] **Small Model Decode MBU** — Fused SwiGLU+NVFP4 GEMV+residual kernel eliminates
+  1 kernel/layer (36 launches saved). Results: Qwen3-4B: 273→288 tok/s (+5.5%),
+  Qwen3-8B: 138→184 tok/s (+33%). Remaining: RMSNorm+GEMV fusion, GEMV multi-row
+  for fused QKV/gate+up, GeGLU fusion.
 
 - [ ] **cuBLASLt NVFP4 Probe** — status=7 (INTERNAL_ERROR), likely
   driver/CUDA version issue. CUTLASS NVFP4 fallback works fine.
