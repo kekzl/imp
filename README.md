@@ -33,20 +33,20 @@ Same models, same machine, same quantizations — measured back-to-back.
 
 | Model | Quant | imp pp | llama.cpp pp | &Delta; | imp tg | llama.cpp tg | &Delta; |
 |---|---|---:|---:|---:|---:|---:|---:|
-| Qwen3-4B | Q8_0 | 15,109 | 21,189 | -28.7% | **308** | 242 | **+27.3%** |
-| Qwen3-8B | Q8_0 | 12,270 | 14,425 | -14.9% | **191** | 156 | **+22.0%** |
-| DeepSeek-R1-7B | Q8_0 | 14,794 | 15,955 | -7.3% | **210** | 175 | **+20.3%** |
-| Phi-4-mini | Q8_0 | 20,408 | 27,620 | -26.1% | 250 | 276 | -9.2% |
-| Gemma-3-12B | Q8_0 | 7,322 | 9,429 | -22.3% | **115** | 98 | **+17.3%** |
-| DeepSeek-R1-14B | Q6_K | 6,019 | 6,314 | -4.7% | 108 | 110 | -1.9% |
-| Qwen3-Coder-30B-A3B (MoE) | Q6_K | 4,580 | 6,079 | -24.7% | **263** | 246 | **+7.1%** |
-| Nemotron-30B-A3B (MoE) | Q6_K | 1,950 | crash&sup1; | — | 71 | crash&sup1; | — |
+| Qwen3-4B | Q8_0 | **23,529** | 21,189 | **+11.0%** | **297** | 242 | **+22.7%** |
+| Qwen3-8B | Q8_0 | **15,609** | 14,425 | **+8.2%** | **184** | 156 | **+17.9%** |
+| DeepSeek-R1-7B | Q8_0 | **20,926** | 15,955 | **+31.1%** | **203** | 175 | **+16.0%** |
+| Phi-4-mini | Q8_0 | 20,013 | 27,620 | -27.5% | 241 | 276 | -12.7% |
+| Gemma-3-12B | Q8_0 | 8,816 | 9,429 | -6.5% | **113** | 98 | **+15.3%** |
+| DeepSeek-R1-14B | Q6_K | **10,016** | 6,314 | **+58.6%** | 98 | 110 | -10.9% |
+| Qwen3-Coder-30B-A3B (MoE) | Q6_K | 4,414 | 6,079 | -27.4% | **255** | 246 | **+3.7%** |
+| Nemotron-30B-A3B (MoE) | Q6_K | 1,780 | crash&sup1; | — | **75** | crash&sup1; | — |
 
 <sub>pp = prompt processing (tok/s), tg = token generation (tok/s), higher is better. NVFP4 decode cache auto-enabled on sm_120. llama.cpp commit <code>35bee03</code>. &sup1;Mamba2 assertion failure in llama.cpp.</sub>
 
-**Decode** — imp wins on 5 of 7 models (+7% to +27%). NVFP4 weight caching halves memory bandwidth vs Q8_0 reads, and fused activation+GEMV+residual kernels eliminate intermediate launches. Largest gains on models where NVFP4 auto-activates (d_model &ge; 4096).
+**Prefill** — imp now leads on 4 of 7 models (+8% to +59%). FP8&times;FP8 cuBLASLt weight cache gives 2x tensor core throughput on sm_120. Async activation quantization (no host sync) keeps the GPU pipeline full. Phi-4-mini uses FP16 cache (d_model &lt; 4096).
 
-**Prefill** — llama.cpp leads on prompt processing (-5% to -29%). Their cuBLAS GEMM path is highly optimized for short-context batch-1 prefill. imp's CUTLASS FMHA + FP8 weight cache narrows the gap at longer contexts.
+**Decode** — imp wins on 5 of 7 models (+4% to +23%). NVFP4 weight caching halves memory bandwidth vs Q8_0 reads, and fused activation+GEMV+residual kernels eliminate intermediate launches. Largest gains on models where NVFP4 auto-activates (d_model &ge; 4096).
 
 **Nemotron-H** — imp is the only engine that runs this Mamba2 + Attention + MoE hybrid architecture. llama.cpp crashes with an assertion failure in its Mamba2 implementation.
 

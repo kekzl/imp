@@ -128,10 +128,12 @@ struct GemmCacheKey {
     cudaDataType_t dtA, dtB, dtC;
     cublasComputeType_t compute;
     int64_t M, K, N;
+    bool has_scales;  // FP8 scale pointers present (affects opDesc attributes)
 
     bool operator==(const GemmCacheKey& o) const {
         return dtA == o.dtA && dtB == o.dtB && dtC == o.dtC &&
-               compute == o.compute && M == o.M && K == o.K && N == o.N;
+               compute == o.compute && M == o.M && K == o.K && N == o.N &&
+               has_scales == o.has_scales;
     }
 };
 
@@ -146,6 +148,7 @@ struct GemmCacheKeyHash {
         mix(static_cast<uint64_t>(k.M));
         mix(static_cast<uint64_t>(k.K));
         mix(static_cast<uint64_t>(k.N));
+        mix(static_cast<uint64_t>(k.has_scales));
         return h;
     }
 };
@@ -248,7 +251,7 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C,
 
     cublasLtHandle_t lt = get_cublaslt_handle();
 
-    GemmCacheKey cache_key{cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, compute_type, M, K, N};
+    GemmCacheKey cache_key{cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, compute_type, M, K, N, false};
 
     GemmCacheEntry* entry = nullptr;
     {
@@ -646,63 +649,83 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
 
     cublasLtHandle_t lt = get_cublaslt_handle();
 
-    cublasLtMatmulDesc_t opDesc = nullptr;
-    cublasLtMatmulDescCreate(&opDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
-
-    cublasOperation_t transA = CUBLAS_OP_T;
-    cublasOperation_t transB = CUBLAS_OP_N;
-    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSA,
-                                    &transA, sizeof(transA));
-    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSB,
-                                    &transB, sizeof(transB));
-
-    if (aScale) {
-        cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
-                                        &aScale, sizeof(aScale));
-    }
-    if (bScale) {
-        cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
-                                        &bScale, sizeof(bScale));
-    }
-
+    // Cache key: (M, K, N, dtypes, beta) — scale pointers vary per-call but
+    // don't affect descriptor/algo selection, only set via opDesc attribute.
     cudaDataType_t cuda_dtype_A = dtype_to_cuda(A.dtype);
     cudaDataType_t cuda_dtype_B = dtype_to_cuda(B.dtype);
     cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.dtype);
+    GemmCacheKey cache_key{cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, CUBLAS_COMPUTE_32F,
+                           M, K, N, (aScale != nullptr)};
 
-    cublasLtMatrixLayout_t Bdesc = nullptr, Adesc = nullptr, Cdesc = nullptr;
-    cublasLtMatrixLayoutCreate(&Bdesc, cuda_dtype_B, (int)K, (int)N, (int)K);
-    cublasLtMatrixLayoutCreate(&Adesc, cuda_dtype_A, (int)K, (int)M, (int)K);
-    cublasLtMatrixLayoutCreate(&Cdesc, cuda_dtype_C, (int)N, (int)M, (int)N);
+    GemmCacheEntry* entry = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
+        auto it = s_gemm_cache.find(cache_key);
+        if (it != s_gemm_cache.end()) {
+            entry = &it->second;
+        } else {
+            GemmCacheEntry new_entry{};
+            cublasLtMatmulDescCreate(&new_entry.opDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
 
-    cublasLtMatmulPreference_t pref = nullptr;
-    cublasLtMatmulPreferenceCreate(&pref);
-    cublasLtMatmulPreferenceSetAttribute(pref,
-        CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-        &s_workspace_size, sizeof(s_workspace_size));
+            cublasOperation_t transA = CUBLAS_OP_T;
+            cublasOperation_t transB = CUBLAS_OP_N;
+            cublasLtMatmulDescSetAttribute(new_entry.opDesc, CUBLASLT_MATMUL_DESC_TRANSA,
+                                            &transA, sizeof(transA));
+            cublasLtMatmulDescSetAttribute(new_entry.opDesc, CUBLASLT_MATMUL_DESC_TRANSB,
+                                            &transB, sizeof(transB));
 
-    cublasLtMatmulHeuristicResult_t result = {};
-    int nresults = 0;
-    cublasLtMatmulAlgoGetHeuristic(lt, opDesc, Bdesc, Adesc, Cdesc, Cdesc,
-                                    pref, 1, &result, &nresults);
+            cublasLtMatrixLayoutCreate(&new_entry.Bdesc, cuda_dtype_B, (int)K, (int)N, (int)K);
+            cublasLtMatrixLayoutCreate(&new_entry.Adesc, cuda_dtype_A, (int)K, (int)M, (int)K);
+            cublasLtMatrixLayoutCreate(&new_entry.Cdesc, cuda_dtype_C, (int)N, (int)M, (int)N);
 
-    size_t ws = (nresults > 0 && result.workspaceSize <= s_workspace_size)
-                    ? result.workspaceSize : 0;
+            // Run heuristic once per unique shape
+            cublasLtMatmulPreference_t pref = nullptr;
+            cublasLtMatmulPreferenceCreate(&pref);
+            cublasLtMatmulPreferenceSetAttribute(pref,
+                CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                &s_workspace_size, sizeof(s_workspace_size));
 
-    cublasStatus_t st = cublasLtMatmul(lt, opDesc,
-        &alpha, B.data, Bdesc, A.data, Adesc,
-        &beta,  C.data, Cdesc, C.data, Cdesc,
-        (nresults > 0) ? &result.algo : nullptr,
-        s_workspace, ws, stream);
+            cublasLtMatmulHeuristicResult_t heur = {};
+            int nresults = 0;
+            cublasLtMatmulAlgoGetHeuristic(lt, new_entry.opDesc,
+                new_entry.Bdesc, new_entry.Adesc, new_entry.Cdesc, new_entry.Cdesc,
+                pref, 1, &heur, &nresults);
+
+            cublasLtMatmulPreferenceDestroy(pref);
+
+            if (nresults > 0 && heur.workspaceSize <= s_workspace_size) {
+                new_entry.algo = heur.algo;
+                new_entry.workspace_size = heur.workspaceSize;
+                new_entry.has_algo = true;
+            } else {
+                new_entry.has_algo = false;
+                new_entry.workspace_size = 0;
+            }
+
+            auto [ins_it, _] = s_gemm_cache.emplace(cache_key, new_entry);
+            entry = &ins_it->second;
+        }
+    }
+
+    // Set per-call scale pointers (vary by weight tensor, not cached)
+    if (aScale) {
+        cublasLtMatmulDescSetAttribute(entry->opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                        &aScale, sizeof(aScale));
+    }
+    if (bScale) {
+        cublasLtMatmulDescSetAttribute(entry->opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                        &bScale, sizeof(bScale));
+    }
+
+    cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc,
+        &alpha, B.data, entry->Bdesc, A.data, entry->Adesc,
+        &beta,  C.data, entry->Cdesc, C.data, entry->Cdesc,
+        entry->has_algo ? &entry->algo : nullptr,
+        s_workspace, entry->workspace_size, stream);
 
     if (st != CUBLAS_STATUS_SUCCESS) {
         fprintf(stderr, "imp::gemm_cublaslt: cublasLtMatmul failed (status %d)\n", (int)st);
     }
-
-    cublasLtMatmulPreferenceDestroy(pref);
-    cublasLtMatrixLayoutDestroy(Adesc);
-    cublasLtMatrixLayoutDestroy(Bdesc);
-    cublasLtMatrixLayoutDestroy(Cdesc);
-    cublasLtMatmulDescDestroy(opDesc);
 }
 
 // ---------------------------------------------------------------------------

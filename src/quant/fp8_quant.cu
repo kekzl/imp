@@ -464,7 +464,10 @@ void calibrate_and_quantize_fp8_async(
 
 void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
                                 float* d_scale_out,
-                                cudaStream_t stream)
+                                cudaStream_t stream,
+                                float* d_block_maxes_ext,
+                                float* d_absmax_ext,
+                                int max_grid_ext)
 {
     if (!input.on_device || input.data == nullptr) {
         IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3: input must be a non-null device tensor");
@@ -488,7 +491,16 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
         return;
     }
 
-    // Step 1: Calibrate scale via absmax reduction.
+    // Fast path: pre-allocated reduction buffers → fully async (no malloc, no sync)
+    if (d_block_maxes_ext && d_absmax_ext && max_grid_ext > 0) {
+        calibrate_and_quantize_fp8_async(
+            input.data, output.data, n,
+            d_block_maxes_ext, max_grid_ext,
+            d_absmax_ext, d_scale_out, stream);
+        return;
+    }
+
+    // Slow path: allocate temp buffers + host sync (backward compat)
     const int grid = compute_grid(n);
 
     float* d_block_maxes = nullptr;
@@ -506,13 +518,6 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
         d_scale_device,
         grid);
 
-    // d_scale_device currently holds absmax; compute scale = absmax / 448.
-    // We do this on device via a small single-thread kernel inline.
-    // For simplicity, use the combined quantize kernel that reads the scale.
-
-    // To compute scale = absmax / 448 on device, we use a tiny lambda-like kernel.
-    // Alternatively, we memcpy to host, compute, and push back. For streaming
-    // correctness we do host round-trip with stream sync.
     float absmax = 0.0f;
     cudaMemcpyAsync(&absmax, d_scale_device, sizeof(float), cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
@@ -520,12 +525,10 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
     float scale = (absmax > 0.0f) ? (absmax / kFP8E4M3Max) : 1.0f;
     float inv_scale = 1.0f / scale;
 
-    // Write scale to caller's device pointer.
     if (d_scale_out != nullptr) {
         cudaMemcpyAsync(d_scale_out, &scale, sizeof(float), cudaMemcpyHostToDevice, stream);
     }
 
-    // Step 2: Quantize.
     quantize_fp16_to_fp8_scaled_kernel<<<grid, kBlockSize, 0, stream>>>(
         static_cast<const half*>(input.data),
         static_cast<uint8_t*>(output.data),

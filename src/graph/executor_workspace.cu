@@ -698,9 +698,22 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             IMP_LOG_WARN("Failed to allocate FP8 act scale: %s", cudaGetErrorString(err));
             d_act_scale_ = nullptr;
         }
+        // Pre-allocate reduction buffers for async FP8 activation quantization.
+        // Eliminates per-call cudaMalloc + cudaStreamSynchronize from the hot path.
         if (fp8_act_buf_ && d_act_scale_) {
-            IMP_LOG_INFO("FP8 activation scratch: %.2f MiB (max_tokens=%d, max_dim=%d)",
-                         fp8_act_buf_size_ / (1024.0 * 1024.0), max_tokens_, max_dim);
+            int max_n = static_cast<int>(fp8_act_buf_size_);  // max elements
+            int threads_needed = (max_n + 3) / 4;  // kElemsPerThread=4
+            fp8_max_grid_ = (threads_needed + 255) / 256;  // kBlockSize=256
+            cudaMalloc(&d_fp8_block_maxes_, static_cast<size_t>(fp8_max_grid_) * sizeof(float));
+            cudaMalloc(&d_fp8_absmax_, sizeof(float));
+            if (!d_fp8_block_maxes_ || !d_fp8_absmax_) {
+                IMP_LOG_WARN("Failed to allocate FP8 reduction buffers — will use sync path");
+                if (d_fp8_block_maxes_) { cudaFree(d_fp8_block_maxes_); d_fp8_block_maxes_ = nullptr; }
+                if (d_fp8_absmax_) { cudaFree(d_fp8_absmax_); d_fp8_absmax_ = nullptr; }
+                fp8_max_grid_ = 0;
+            }
+            IMP_LOG_INFO("FP8 activation scratch: %.2f MiB (max_tokens=%d, max_dim=%d, async reduction grid=%d)",
+                         fp8_act_buf_size_ / (1024.0 * 1024.0), max_tokens_, max_dim, fp8_max_grid_);
         }
     }
 
@@ -883,6 +896,15 @@ void GraphExecutor::free_buffers() {
         cudaFree(d_act_scale_);
         d_act_scale_ = nullptr;
     }
+    if (d_fp8_block_maxes_) {
+        cudaFree(d_fp8_block_maxes_);
+        d_fp8_block_maxes_ = nullptr;
+    }
+    if (d_fp8_absmax_) {
+        cudaFree(d_fp8_absmax_);
+        d_fp8_absmax_ = nullptr;
+    }
+    fp8_max_grid_ = 0;
 
     moe_routing_buffers_.free();
     if (moe_dequant_buf_) {
@@ -994,8 +1016,15 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
         }
     };
 
-    {
-        // --- Phase 1: FP16 weight cache + fused KV + fused gate+up (always) ---
+    if (use_fp8_cache_) {
+        // Skip Phase 1 entirely: FP8 cache (Phase 2) is the primary path.
+        // FP8 is 50% smaller than FP16 and uses FP8×FP8 cuBLASLt (2x throughput
+        // on sm_120 tensor cores).  Fused KV/gate+up (saving 1 launch each) are
+        // replaced by individual FP8 GEMMs with 2x throughput — net win.
+        IMP_LOG_INFO("FP8 prefill: skipping FP16 cache (Phase 1), "
+                     "all dense weights → FP8 cache (Phase 2)");
+    } else {
+        // --- Phase 1: FP16 weight cache + fused KV + fused gate+up ---
         auto cache_weight = [&](const Tensor& w, GGMLQuantType qtype) {
             if (!w.data || !dequant_gpu_supported(qtype)) return;
             if (fp16_cache_.count(w.data)) return;  // already cached
@@ -1145,15 +1174,16 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
                          cached_count, total_cache_bytes / (1024.0 * 1024.0),
                          fused_kv_count, fused_gu_count);
         }
-    }
+    } // end Phase 1
 
     // Deduct Phase 1 allocation from shared budget
     remaining_budget = (remaining_budget > total_cache_bytes)
                        ? (remaining_budget - total_cache_bytes) : 0;
 
-    // --- Phase 2: FP8 overflow cache for remaining uncached weights ---
-    // Weights already in fp16_cache_ keep their fused KV/gate+up optimizations.
-    // FP8 is only used for weights that didn't fit in the FP16 budget (50% smaller).
+    // --- Phase 2: FP8 cache for uncached weights (primary when use_fp8_cache_) ---
+    // When use_fp8_cache_ is true and Phase 1 was skipped, this is the primary path
+    // for ALL dense projection weights.  FP8 is 50% smaller than FP16 and uses
+    // FP8×FP8 cuBLASLt with 2x tensor core throughput on sm_120.
     // Uses dequant_scratch_ as FP16 staging buffer (stream ordering ensures safety).
     if (use_fp8_cache_) {
         size_t fp8_total = 0;
@@ -1291,11 +1321,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
             for (auto& [ptr, entry] : fp8_cache_) {
                 fp16_equivalent += entry.weight.numel() * sizeof(half);
             }
-            IMP_LOG_INFO("FP8 overflow cache: %d tensors, %.2f MiB (%.2f MiB saved vs FP16)",
+            IMP_LOG_INFO("FP8 weight cache: %d tensors, %.2f MiB (%.2f MiB saved vs FP16)",
                          fp8_count, fp8_total / (1024.0 * 1024.0),
                          (fp16_equivalent - fp8_total) / (1024.0 * 1024.0));
         } else {
-            IMP_LOG_INFO("FP8 prefill: all weights fit in FP16 cache, no FP8 overflow needed");
+            IMP_LOG_INFO("FP8 prefill: no weights cached (budget=0 or no eligible weights)");
         }
     }
 

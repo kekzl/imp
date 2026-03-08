@@ -12,7 +12,10 @@ namespace imp {
 // scale_out: scalar FP32 (written to device pointer)
 void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
                                 float* d_scale_out,
-                                cudaStream_t stream = nullptr);
+                                cudaStream_t stream = nullptr,
+                                float* d_block_maxes = nullptr,
+                                float* d_absmax = nullptr,
+                                int max_grid = 0);
 
 // Calibrate optimal FP8 scale by finding absmax of input tensor.
 // Returns the scale = absmax / 448.0 (E4M3 max representable).
