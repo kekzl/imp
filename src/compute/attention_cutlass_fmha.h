@@ -12,11 +12,14 @@ namespace imp {
 // K,V: [batch, seq_kv, n_kv_heads, head_dim]
 // O: [batch, seq_q, n_heads, head_dim]
 //
+// Supports softcap (logit soft-capping): score = softcap * tanh(score / softcap).
+// Pass softcap=0 to disable. Used by Gemma-2/3.
+//
 // Returns true on success, false if configuration is unsupported
 // (unsupported head_dim, smem too large, etc.) — caller should fall back.
 bool cutlass_fmha_prefill(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, cudaStream_t stream);
+    float scale, bool causal, float softcap, cudaStream_t stream);
 
 // Pre-allocate FMHA workspace (LSE buffer + kernel workspace) at max dimensions.
 // Call during engine init so these allocations are tracked in the VRAM budget.

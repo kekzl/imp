@@ -74,7 +74,7 @@ static float bench_kernel(
     auto run_kernel = [&]() {
 #ifdef IMP_USE_CUTLASS
         if (use_cutlass) {
-            if (cutlass_fmha_prefill(Q, K, V, O, scale, true, stream))
+            if (cutlass_fmha_prefill(Q, K, V, O, scale, true, 0.0f, stream))
                 return;
         }
 #endif
