@@ -71,6 +71,7 @@ set(IMP_CORE_SOURCES
     src/core/allocator.cpp
     src/core/logging.cpp
     src/core/threading.cpp
+    src/core/toml_parser.cpp
 )
 
 set(IMP_MEMORY_SOURCES
@@ -105,11 +106,14 @@ set(IMP_QUANT_SOURCES
 
 set(IMP_COMPUTE_SOURCES
     src/compute/gemm.cu
+    src/compute/gemm_dp4a.cu
     src/compute/gemm_grouped.cu
     src/compute/gemm_moe_fused.cu
     src/compute/gemm_q6k.cu
     src/compute/attention.cu
     src/compute/attention_paged.cu
+    src/compute/attention_paged_fp8.cu
+    src/compute/attention_paged_int8.cu
     src/compute/attention_tc.cu
     src/compute/attention_blackwell.cu
     src/compute/attention_cublas.cu
@@ -142,12 +146,16 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/cuda_graph.cu
     src/runtime/pdl.cu
     src/runtime/speculative.cpp
+    src/runtime/presets.cpp
 )
 
 set(IMP_GRAPH_SOURCES
     src/graph/op.cpp
     src/graph/graph.cpp
     src/graph/executor.cu
+    src/graph/executor_kernels.cu
+    src/graph/executor_workspace.cu
+    src/graph/executor_forward.cu
 )
 
 set(IMP_VISION_SOURCES
@@ -256,6 +264,9 @@ if(IMP_BUILD_SERVER)
     add_executable(imp-server
         tools/imp-server/main.cpp
         tools/imp-server/args.cpp
+        tools/imp-server/utils.cpp
+        tools/imp-server/tool_call.cpp
+        tools/imp-server/handlers.cpp
     )
     target_link_libraries(imp-server PRIVATE imp httplib::httplib nlohmann_json::nlohmann_json)
     target_include_directories(imp-server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

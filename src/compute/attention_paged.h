@@ -51,4 +51,13 @@ void paged_attention_decode_int8(
     int max_context_len, int sliding_window = 0,
     float softcap = 0.0f, cudaStream_t stream = nullptr);
 
+// Split-K scratch buffer accessor (for use by FP8/INT8 launcher TUs).
+// Returns pointer + size. Either can be nullptr/0 if unset.
+void paged_attention_get_splitk_scratch(void** out_ptr, size_t* out_size);
+
+// Launch the split-K reduce kernel (shared across FP16/FP8/INT8).
+void paged_attention_launch_reduce(float* partial, half* O,
+                                   int batch_size, int n_heads, int head_dim,
+                                   int num_splits, cudaStream_t stream);
+
 } // namespace imp

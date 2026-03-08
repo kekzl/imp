@@ -54,17 +54,19 @@ static void probe_availability() {
     cublasLtHandle_t lt = get_handle();
     if (!lt) { s_available = false; return; }
 
-    // Tiny probe: M=32, N=32, K=64
-    constexpr int pM = 32, pN = 32, pK = 64;
+    // Probe: M=128, N=128, K=128 — realistic dimensions for FP4 GEMM.
+    // FP4 tensor cores require CUBLAS_OP_N for both operands (no transpose).
+    // Layout: A = weight [N,K] col-major, B = activation [K,M] col-major.
+    constexpr int pM = 128, pN = 128, pK = 128;
 
     cublasLtMatmulDesc_t opDesc = nullptr;
     cublasStatus_t st = cublasLtMatmulDescCreate(&opDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
     if (st != CUBLAS_STATUS_SUCCESS) { s_available = false; return; }
 
-    cublasOperation_t transa = CUBLAS_OP_T;
-    cublasOperation_t transb = CUBLAS_OP_N;
-    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(transa));
-    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(transb));
+    // FP4 requires OP_N for both matrices (no transpose support)
+    cublasOperation_t op_n = CUBLAS_OP_N;
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSA, &op_n, sizeof(op_n));
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSB, &op_n, sizeof(op_n));
 
     cublasLtMatmulMatrixScale_t sm = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
     cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &sm, sizeof(sm));
@@ -75,11 +77,12 @@ static void probe_availability() {
     cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &dummy, sizeof(dummy));
     cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &dummy, sizeof(dummy));
 
-    // cuBLAS A = weight [N,K] row-major → col-major [K,N], transa=T
-    // cuBLAS B = activation [M,K] row-major → col-major [K,M], transb=N
-    // D = [N,M] col-major = [M,N] row-major
+    // cuBLAS with OP_N for both:
+    //   A = weight [N,K] col-major, OP_N → op(A) = [N,K]
+    //   B = activation [K,M] col-major, OP_N → op(B) = [K,M]
+    //   D = op(A) × op(B) = [N,K]×[K,M] = [N,M] col-major = [M,N] row-major
     cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr;
-    cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_4F_E2M1, pK, pN, pK);
+    cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_4F_E2M1, pN, pK, pN);
     cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_4F_E2M1, pK, pM, pK);
     cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_16F, pN, pM, pN);
 
@@ -103,9 +106,10 @@ static void probe_availability() {
     cublasLtMatmulDescDestroy(opDesc);
 
     if (s_available) {
-        IMP_LOG_INFO("cuBLASLt NVFP4 GEMM: available (probe passed)");
+        IMP_LOG_INFO("cuBLASLt NVFP4 GEMM: available (probe passed, OP_N layout)");
     } else {
-        IMP_LOG_INFO("cuBLASLt NVFP4 GEMM: not available (probe: status=%d n_result=%d)",
+        IMP_LOG_INFO("cuBLASLt NVFP4 GEMM: not available (probe: status=%d n_result=%d)"
+                     " — using CUTLASS NVFP4 path instead",
                      (int)st, n_result);
     }
 }
@@ -128,14 +132,14 @@ bool gemm_nvfp4_cublaslt(const void* a_data, const void* a_sf,
     cublasStatus_t st = cublasLtMatmulDescCreate(&opDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
     if (st != CUBLAS_STATUS_SUCCESS) return false;
 
-    // Layout mapping (row-major → cuBLAS column-major):
-    //   cuBLAS "A" = weight  [N,K] row-major = [K,N] col-major, transa=T → op(A)=[N,K]
-    //   cuBLAS "B" = activation [M,K] row-major = [K,M] col-major, transb=N → op(B)=[K,M]
+    // FP4 requires OP_N for both matrices (transpose not supported on FP4 tensor cores).
+    // Weight must be pre-transposed to col-major [N,K] layout.
+    //   cuBLAS "A" = weight  [N,K] col-major, OP_N → op(A)=[N,K]
+    //   cuBLAS "B" = activation [K,M] col-major (= [M,K] row-major), OP_N → op(B)=[K,M]
     //   D = op(A) × op(B) = [N,K]×[K,M] = [N,M] col-major = [M,N] row-major
-    cublasOperation_t transa = CUBLAS_OP_T;
-    cublasOperation_t transb = CUBLAS_OP_N;
-    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transa, sizeof(transa));
-    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transb, sizeof(transb));
+    cublasOperation_t op_n = CUBLAS_OP_N;
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSA, &op_n, sizeof(op_n));
+    cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_TRANSB, &op_n, sizeof(op_n));
 
     // Block-scale mode: VEC16_UE4M3 (1 unsigned E4M3 scale per 16 FP4 elements)
     cublasLtMatmulMatrixScale_t scaleMode = CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
@@ -152,9 +156,9 @@ bool gemm_nvfp4_cublaslt(const void* a_data, const void* a_sf,
     cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                     &b_scale_ptr, sizeof(b_scale_ptr));
 
-    // --- Matrix layouts ---
+    // --- Matrix layouts (OP_N for both, weight must be col-major [N,K]) ---
     cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr, Ddesc = nullptr;
-    cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_4F_E2M1, K, N, K);   // weight  [K,N] col-major
+    cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_4F_E2M1, N, K, N);   // weight  [N,K] col-major
     cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_4F_E2M1, K, M, K);   // activation [K,M] col-major
     cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_16F, N, M, N);        // C = D buffer (beta=0)
     cublasLtMatrixLayoutCreate(&Ddesc, CUDA_R_16F, N, M, N);        // output [N,M] col-major

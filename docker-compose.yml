@@ -34,10 +34,10 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:${IMP_PORT:-8080}/health"]
-      interval: 30s
+      interval: 10s
       timeout: 5s
       start_period: 120s
-      retries: 3
+      retries: 10
 
   open-webui:
     image: ghcr.io/open-webui/open-webui:main
@@ -54,6 +54,15 @@ services:
     depends_on:
       imp-server:
         condition: service_healthy
+
+  imp-pull:
+    image: python:3.13-slim
+    volumes:
+      - ${IMP_MODELS_DIR:-./models}:/models
+      - .:/app
+    working_dir: /app/scripts
+    entrypoint: ["/bin/sh", "-c", "pip install -q huggingface_hub && python3 imp-pull.py \"$@\"", "--"]
+    profiles: ["tools"]
 
 volumes:
   open-webui:

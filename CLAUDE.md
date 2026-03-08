@@ -77,6 +77,44 @@ cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 - **stb_image / stb_image_resize2** (vendored in `third_party/stb/`) — image loading for vision
 - **pthread** (linked privately)
 
+### Target GPU: NVIDIA RTX 5090 (GB202, Blackwell)
+
+| Spec | Value |
+|---|---|
+| Compute Capability | sm_120a |
+| SMs | 170 |
+| CUDA Cores | 21,760 (128/SM) |
+| Tensor Cores | 680 (5th gen, 4/SM) |
+| Boost Clock | 2,407 MHz |
+| VRAM | 32 GB GDDR7, 512-bit bus |
+| Memory Bandwidth | 1,792 GB/s (28 Gbps/pin) |
+| TDP | 575 W |
+
+**Cache Hierarchy:**
+
+| Level | Size | Notes |
+|---|---|---|
+| L0 Instruction Cache | 32 KB/SM | |
+| L1 Data Cache / Shared Memory | 128 KB/SM | Configurable split (e.g. 64/64, 100/28, 28/100) |
+| L2 Cache | 96 MB | Unified, shared across all SMs |
+| L3 Cache | n/a | L3 only on data center Blackwell (B200/B300) |
+
+**Tensor Core Throughput (at boost clock):**
+
+| Precision | Dense | 2:4 Sparse |
+|---|---|---|
+| FP4 (NVFP4 E2M1) | 3,354 TOPS | 6,708 TOPS |
+| FP8 (E4M3/E5M2) | 1,677 TFLOPS | 3,354 TFLOPS |
+| FP16 / BF16 | 838 TFLOPS | 1,677 TFLOPS |
+| INT8 (dp4a) | 1,677 TOPS | 3,354 TOPS |
+| FP32 (CUDA Cores) | 105 TFLOPS | — |
+
+**Key for imp kernel tuning:**
+- L2 is large enough to cache full KV blocks for moderate context lengths
+- 128 KB configurable L1/SMEM per SM — attention kernels use high SMEM configs
+- NVFP4 tensor cores give 2x FP8 throughput — decode GEMV is still memory-bound
+- 170 SMs → split-K paged attention targets ~340 blocks (2 blocks/SM occupancy)
+
 ### Hardware Constraints
 
 Only one GPU is available. **Always test models sequentially** — never run multiple model instances in parallel.

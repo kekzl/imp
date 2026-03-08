@@ -7,10 +7,15 @@ struct CliArgs {
     std::string model_path;
     std::string prompt;
     int max_tokens = 256;
-    bool max_tokens_set = false;  // true if --max-tokens was explicitly given
     float temperature = 0.7f;
     float top_p = 0.9f;
     int top_k = 40;
+
+    // Track which values were explicitly set (vs defaults / preset)
+    bool max_tokens_set = false;
+    bool temperature_set = false;
+    bool top_p_set = false;
+    bool top_k_set = false;
     int seed = -1;
     float min_p = 0.0f;
     float typical_p = 1.0f;        // Locally typical sampling (1.0 = disabled)
@@ -41,6 +46,8 @@ struct CliArgs {
     int bench_reps = 3;        // --bench-reps: repetitions to average
     std::string mmproj_path;   // --mmproj: vision encoder GGUF
     std::string image_path;    // --image: input image for vision
+    std::string preset;        // --preset: named model preset (e.g. qwen3-32b)
+    std::string presets_file;  // --presets-file: custom presets.toml path
 };
 
 CliArgs parse_args(int argc, char** argv);

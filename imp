@@ -1,0 +1,126 @@
+#!/bin/bash
+# imp — Helper script for model management and Docker Compose control
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
+ENV_FILE=".env"
+
+usage() {
+    cat <<'EOF'
+Usage: ./imp <command> [args]
+
+Model management:
+  list                  Show all models and download status
+  pull <id>             Download a model from HuggingFace
+  delete <id>           Delete a downloaded model
+  use <id>              Set model in .env and restart imp container
+
+Docker control:
+  logs                  Show imp-server container logs (follow)
+  status                Show nvidia-smi + container status
+  up                    Start all services
+  down                  Stop all services
+  build                 Build the imp Docker image
+EOF
+}
+
+ensure_models_dir() {
+    mkdir -p "$SCRIPT_DIR/models"
+}
+
+cmd_list() {
+    ensure_models_dir
+    docker compose --profile tools run --rm -e MODELS_DIR=/models imp-pull list
+}
+
+cmd_pull() {
+    ensure_models_dir
+    docker compose --profile tools run --rm -e MODELS_DIR=/models imp-pull pull "$1"
+}
+
+cmd_delete() {
+    ensure_models_dir
+    docker compose --profile tools run --rm -e MODELS_DIR=/models imp-pull delete "$1"
+}
+
+cmd_use() {
+    local model_id="$1"
+
+    # Find matching .gguf file in models/ directory
+    # Uses case-insensitive glob matching against the model ID
+    local model_file=""
+    local pattern
+    # Convert model ID to a loose glob: qwen3-32b -> *qwen3*32b*
+    pattern="*$(echo "$model_id" | sed 's/-/*/g')*"
+
+    for f in "$SCRIPT_DIR"/models/*.gguf; do
+        [ -f "$f" ] || continue
+        local basename
+        basename=$(basename "$f")
+        local lower
+        lower=$(echo "$basename" | tr '[:upper:]' '[:lower:]')
+        # shellcheck disable=SC2254
+        case "$lower" in
+            $pattern) model_file="$basename"; break ;;
+        esac
+    done
+
+    if [ -z "$model_file" ]; then
+        echo "Error: No .gguf file matching '$model_id' found in models/"
+        echo "Run: ./imp pull $model_id"
+        exit 1
+    fi
+
+    local model_path="/models/$model_file"
+
+    # Write .env
+    if [ -f "$ENV_FILE" ]; then
+        # Update existing IMP_MODEL or append
+        if grep -q "^IMP_MODEL=" "$ENV_FILE"; then
+            sed -i "s|^IMP_MODEL=.*|IMP_MODEL=$model_path|" "$ENV_FILE"
+        else
+            echo "IMP_MODEL=$model_path" >> "$ENV_FILE"
+        fi
+    else
+        echo "IMP_MODEL=$model_path" > "$ENV_FILE"
+    fi
+
+    echo "Set IMP_MODEL=$model_path"
+    echo "Restarting imp-server..."
+    docker compose up -d --no-deps imp-server
+}
+
+cmd_logs() {
+    docker compose logs -f imp-server
+}
+
+cmd_status() {
+    echo "=== GPU Status ==="
+    nvidia-smi 2>/dev/null || echo "(nvidia-smi not available on host)"
+    echo
+    echo "=== Container Status ==="
+    docker compose ps
+}
+
+# --- Main ---
+
+if [ $# -lt 1 ]; then
+    usage
+    exit 1
+fi
+
+case "$1" in
+    list)       cmd_list ;;
+    pull)       [ $# -lt 2 ] && { echo "Usage: ./imp pull <model-id>"; exit 1; }; cmd_pull "$2" ;;
+    delete)     [ $# -lt 2 ] && { echo "Usage: ./imp delete <model-id>"; exit 1; }; cmd_delete "$2" ;;
+    use)        [ $# -lt 2 ] && { echo "Usage: ./imp use <model-id>"; exit 1; }; cmd_use "$2" ;;
+    logs)       cmd_logs ;;
+    status)     cmd_status ;;
+    up)         docker compose up -d ;;
+    down)       docker compose down ;;
+    build)      docker compose build ;;
+    help|-h|--help) usage ;;
+    *)          echo "Unknown command: $1"; usage; exit 1 ;;
+esac

@@ -2,6 +2,7 @@
 #include "args.h"
 #include "model/chat_template.h"
 #include "model/tokenizer.h"
+#include "runtime/presets.h"
 
 #include <chrono>
 #include <cstdio>
@@ -12,6 +13,15 @@
 
 int main(int argc, char** argv) {
     CliArgs args = parse_args(argc, argv);
+
+    // Load presets (TOML file or built-in fallback)
+    imp::load_presets(args.presets_file);
+
+    // Handle --preset list
+    if (args.preset == "list") {
+        imp::print_presets();
+        return 0;
+    }
 
     if (args.model_path.empty()) {
         print_usage(argv[0]);
@@ -31,20 +41,56 @@ int main(int argc, char** argv) {
     }
 
     ImpConfig config = imp_config_default();
+
+    // Resolve preset: explicit --preset flag > auto-detect from filename
+    const imp::PresetConfig* preset = nullptr;
+    if (args.preset == "none") {
+        // Explicitly disabled
+    } else if (!args.preset.empty()) {
+        preset = imp::find_preset(args.preset);
+        if (!preset) {
+            fprintf(stderr, "Unknown preset: %s (use --preset list to see available presets)\n",
+                    args.preset.c_str());
+            return 1;
+        }
+    } else {
+        preset = imp::detect_preset(args.model_path);
+    }
+
+    if (preset) {
+        imp::apply_preset(preset, config);
+        fprintf(stderr, "Preset: %s\n", preset->description.c_str());
+    }
+
+    // CLI flags override preset values (only when explicitly set)
     config.device_id = args.device;
+    // CLI is single-request — always cap batch size to 1 (preset values are for server).
     config.max_batch_size = 1;
-    config.max_seq_len = 4096;
+    if (!preset) {
+        config.max_seq_len = 4096;
+    }
     config.gpu_layers = args.gpu_layers;
     if (args.kv_fp8) config.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
     if (args.kv_int8) config.kv_cache_dtype = IMP_DTYPE_INT8;
     if (args.ssm_fp16) config.ssm_state_dtype = IMP_DTYPE_FP16;
-    // CUDA graphs enabled by default in imp_config_default(); --no-cuda-graphs can disable
     if (args.no_cuda_graphs) config.enable_cuda_graphs = 0;
-    config.prefill_chunk_size = args.prefill_chunk_size;
+    if (args.prefill_chunk_size > 0) config.prefill_chunk_size = args.prefill_chunk_size;
     if (args.prefill_fp8) config.use_fp8_prefill = 1;
-    config.use_nvfp4_decode = args.decode_nvfp4;
+    if (args.decode_nvfp4 != -1 || !preset)
+        config.use_nvfp4_decode = args.decode_nvfp4;
     if (!args.mmproj_path.empty())
         config.mmproj_path = args.mmproj_path.c_str();
+
+    // In bench mode, cap KV cache to what the benchmark actually needs.
+    // Prevents OOM when presets specify large max_seq_len (e.g. 131072).
+    if (args.bench) {
+        int bench_need = args.bench_pp + args.max_tokens + 256;  // +256 headroom
+        if (config.max_seq_len > bench_need) {
+            config.max_seq_len = bench_need;
+        }
+        // Single-request benchmark — no batching needed
+        config.max_batch_size = 1;
+    }
 
     ImpContext ctx = nullptr;
     err = imp_context_create(model, &config, &ctx);
@@ -59,9 +105,10 @@ int main(int argc, char** argv) {
     fprintf(stderr, "Init: %.2f ms (model load + engine setup)\n", init_ms);
 
     ImpGenerateParams params = imp_generate_params_default();
-    params.temperature = args.temperature;
-    params.top_p = args.top_p;
-    params.top_k = args.top_k;
+    // Use preset sampling values unless explicitly overridden via CLI flags
+    params.temperature = (preset && !args.temperature_set) ? config.temperature : args.temperature;
+    params.top_p = (preset && !args.top_p_set) ? config.top_p : args.top_p;
+    params.top_k = (preset && !args.top_k_set) ? config.top_k : args.top_k;
     params.max_tokens = args.max_tokens;
     params.seed = args.seed;
     params.min_p = args.min_p;

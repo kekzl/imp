@@ -29,6 +29,11 @@ static constexpr int kMicroBlockSize = 16;
 static constexpr int kKparWarps = 4;
 static constexpr int kKparThreads = kKparWarps * 32;  // 128
 
+// Multi-row kernel: 8 warps, NR rows per block for small-K models.
+// Reduces launch overhead and improves SM occupancy.
+static constexpr int kMRWarps = 8;
+static constexpr int kMRThreads = kMRWarps * 32;  // 256
+
 // Fast FP8 E4M3 -> FP32 via bit manipulation (no exp2f).
 __device__ __forceinline__ float fp8_e4m3_to_float_fast(uint8_t bits)
 {
@@ -154,6 +159,60 @@ gemv_nvfp4_kpar_kernel(
 
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0) y[row] = __float2half(total);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-row GEMV: NR rows per block, 256 threads (8 warps).
+// Each warp handles one row, multiple warps process multiple rows in parallel.
+// Amortizes block launch overhead and improves occupancy for small K.
+// ---------------------------------------------------------------------------
+template<int NR>
+__global__ void __launch_bounds__(kMRThreads, 6)
+gemv_nvfp4_multirow_kernel(
+    const uint8_t* __restrict__ packed_data,
+    const uint8_t* __restrict__ micro_scales,
+    float                       tensor_scale,
+    const half*    __restrict__ x,
+    half*          __restrict__ y,
+    int M, int K)
+{
+    const int block_row_base = blockIdx.x * NR;
+    const int warp_id = threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    const int K_half = K / 2;
+    const int n_mb = K / kMicroBlockSize;
+
+    __shared__ float s_lut[16];
+    if (threadIdx.x < 16) {
+        constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+        s_lut[threadIdx.x] = (threadIdx.x < 8) ? kMag[threadIdx.x] : -kMag[threadIdx.x & 7];
+    }
+    __syncthreads();
+
+    // Each warp handles one row within the NR-row tile
+    const int row = block_row_base + warp_id;
+    if (row >= M || warp_id >= NR) return;
+
+    const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
+    const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
+
+    // K-parallel within warp (32 threads)
+    float acc = 0.0f;
+    for (int mi = lane; mi < n_mb; mi += 32) {
+        int byte_off = mi * 8;
+        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
+        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
+        float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
+        float local_dot = dot_micro_block(pb, x, byte_off * 2, s_lut);
+        acc = __fmaf_rn(local_dot, cs, acc);
+    }
+
+    // Warp-level reduction
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+
+    if (lane == 0) y[row] = __float2half(acc);
 }
 
 // ---------------------------------------------------------------------------
@@ -308,10 +367,25 @@ gemv_nvfp4_gate_up_fused_kernel(
 void gemv_nvfp4_kpar(const NvFP4QuantResult& A, const half* x, half* y,
                      int M, int K, cudaStream_t stream)
 {
-    gemv_nvfp4_kpar_kernel<<<M, kKparThreads, 0, stream>>>(
-        reinterpret_cast<const uint8_t*>(A.packed_data),
-        reinterpret_cast<const uint8_t*>(A.micro_scales),
-        A.tensor_scale, x, y, M, K);
+    const int n_mb = K / kMicroBlockSize;
+    // Use multi-row kernel when K is small relative to thread count.
+    // With 128 threads doing K-parallel, each thread only gets n_mb/128 iterations.
+    // When that's < 4, the kernel is launch-overhead-dominated → switch to multi-row.
+    if (n_mb <= 512) {
+        // NR=8: each warp (32 threads) handles one row, 8 rows per block.
+        // Each thread gets n_mb/32 iterations — much better work per thread.
+        constexpr int NR = 8;
+        int grid = (M + NR - 1) / NR;
+        gemv_nvfp4_multirow_kernel<NR><<<grid, kMRThreads, 0, stream>>>(
+            reinterpret_cast<const uint8_t*>(A.packed_data),
+            reinterpret_cast<const uint8_t*>(A.micro_scales),
+            A.tensor_scale, x, y, M, K);
+    } else {
+        gemv_nvfp4_kpar_kernel<<<M, kKparThreads, 0, stream>>>(
+            reinterpret_cast<const uint8_t*>(A.packed_data),
+            reinterpret_cast<const uint8_t*>(A.micro_scales),
+            A.tensor_scale, x, y, M, K);
+    }
 }
 
 void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk,
@@ -321,6 +395,8 @@ void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk
                            cudaStream_t stream)
 {
     int total_rows = q_rows + k_rows + v_rows;
+    // For QKV fused, total_rows is typically q+k+v = 4096+1024+1024 = 6144 for 8B models.
+    // Always enough blocks, so keep the existing kernel.
     gemv_nvfp4_qkv_fused_kernel<<<total_rows, kKparThreads, 0, stream>>>(
         reinterpret_cast<const uint8_t*>(wq.packed_data),
         reinterpret_cast<const uint8_t*>(wq.micro_scales),
