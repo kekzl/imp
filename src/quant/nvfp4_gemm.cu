@@ -3,6 +3,7 @@
 #include "compute/gemm.h"
 #include "core/tensor.h"
 #include "core/logging.h"
+#include "runtime/pdl.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cublasLt.h>
@@ -785,12 +786,14 @@ void gemv_nvfp4_kpar(const NvFP4QuantResult& A, const half* x, half* y,
         // Each thread gets n_mb/32 iterations — much better work per thread.
         constexpr int NR = 8;
         int grid = (M + NR - 1) / NR;
-        gemv_nvfp4_multirow_kernel<NR><<<grid, kMRThreads, 0, stream>>>(
+        pdl::launch(gemv_nvfp4_multirow_kernel<NR>,
+            dim3(grid), dim3(kMRThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(A.packed_data),
             reinterpret_cast<const uint8_t*>(A.micro_scales),
             A.tensor_scale, x, y, M, K);
     } else {
-        gemv_nvfp4_kpar_kernel<<<M, kKparThreads, 0, stream>>>(
+        pdl::launch(gemv_nvfp4_kpar_kernel,
+            dim3(M), dim3(kKparThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(A.packed_data),
             reinterpret_cast<const uint8_t*>(A.micro_scales),
             A.tensor_scale, x, y, M, K);
@@ -808,7 +811,8 @@ void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk
     if (n_mb <= 512) {
         constexpr int NR = 8;
         int grid = (total_rows + NR - 1) / NR;
-        gemv_nvfp4_qkv_fused_mr_kernel<NR><<<grid, kMRThreads, 0, stream>>>(
+        pdl::launch(gemv_nvfp4_qkv_fused_mr_kernel<NR>,
+            dim3(grid), dim3(kMRThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(wq.packed_data),
             reinterpret_cast<const uint8_t*>(wq.micro_scales), wq.tensor_scale,
             reinterpret_cast<const uint8_t*>(wk.packed_data),
@@ -817,7 +821,8 @@ void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk
             reinterpret_cast<const uint8_t*>(wv.micro_scales), wv.tensor_scale,
             x, yq, yk, yv, q_rows, k_rows, v_rows, K);
     } else {
-        gemv_nvfp4_qkv_fused_kernel<<<total_rows, kKparThreads, 0, stream>>>(
+        pdl::launch(gemv_nvfp4_qkv_fused_kernel,
+            dim3(total_rows), dim3(kKparThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(wq.packed_data),
             reinterpret_cast<const uint8_t*>(wq.micro_scales), wq.tensor_scale,
             reinterpret_cast<const uint8_t*>(wk.packed_data),
@@ -837,14 +842,16 @@ void gemv_nvfp4_gate_up_fused(const NvFP4QuantResult& wg, const NvFP4QuantResult
     if (n_mb <= 512) {
         constexpr int NR = 8;
         int grid = (total_rows + NR - 1) / NR;
-        gemv_nvfp4_gate_up_fused_mr_kernel<NR><<<grid, kMRThreads, 0, stream>>>(
+        pdl::launch(gemv_nvfp4_gate_up_fused_mr_kernel<NR>,
+            dim3(grid), dim3(kMRThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(wg.packed_data),
             reinterpret_cast<const uint8_t*>(wg.micro_scales), wg.tensor_scale,
             reinterpret_cast<const uint8_t*>(wu.packed_data),
             reinterpret_cast<const uint8_t*>(wu.micro_scales), wu.tensor_scale,
             x, yg, yu, rows, K);
     } else {
-        gemv_nvfp4_gate_up_fused_kernel<<<total_rows, kKparThreads, 0, stream>>>(
+        pdl::launch(gemv_nvfp4_gate_up_fused_kernel,
+            dim3(total_rows), dim3(kKparThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(wg.packed_data),
             reinterpret_cast<const uint8_t*>(wg.micro_scales), wg.tensor_scale,
             reinterpret_cast<const uint8_t*>(wu.packed_data),
@@ -860,12 +867,14 @@ void gemv_nvfp4_residual(const NvFP4QuantResult& A, const half* x, half* y,
     if (n_mb <= 512) {
         constexpr int NR = 8;
         int grid = (M + NR - 1) / NR;
-        gemv_nvfp4_residual_mr_kernel<NR><<<grid, kMRThreads, 0, stream>>>(
+        pdl::launch(gemv_nvfp4_residual_mr_kernel<NR>,
+            dim3(grid), dim3(kMRThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(A.packed_data),
             reinterpret_cast<const uint8_t*>(A.micro_scales),
             A.tensor_scale, x, y, residual, M, K);
     } else {
-        gemv_nvfp4_residual_kernel<<<M, kKparThreads, 0, stream>>>(
+        pdl::launch(gemv_nvfp4_residual_kernel,
+            dim3(M), dim3(kKparThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(A.packed_data),
             reinterpret_cast<const uint8_t*>(A.micro_scales),
             A.tensor_scale, x, y, residual, M, K);
@@ -881,12 +890,14 @@ void gemv_nvfp4_swiglu_residual(const NvFP4QuantResult& A,
     if (n_mb <= 512) {
         constexpr int NR = 8;
         int grid = (M + NR - 1) / NR;
-        gemv_nvfp4_swiglu_residual_mr_kernel<NR><<<grid, kMRThreads, 0, stream>>>(
+        pdl::launch(gemv_nvfp4_swiglu_residual_mr_kernel<NR>,
+            dim3(grid), dim3(kMRThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(A.packed_data),
             reinterpret_cast<const uint8_t*>(A.micro_scales),
             A.tensor_scale, gate, up, y, residual, M, K);
     } else {
-        gemv_nvfp4_swiglu_residual_kernel<<<M, kKparThreads, 0, stream>>>(
+        pdl::launch(gemv_nvfp4_swiglu_residual_kernel,
+            dim3(M), dim3(kKparThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(A.packed_data),
             reinterpret_cast<const uint8_t*>(A.micro_scales),
             A.tensor_scale, gate, up, y, residual, M, K);
@@ -902,12 +913,14 @@ void gemv_nvfp4_geglu_residual(const NvFP4QuantResult& A,
     if (n_mb <= 512) {
         constexpr int NR = 8;
         int grid = (M + NR - 1) / NR;
-        gemv_nvfp4_geglu_residual_mr_kernel<NR><<<grid, kMRThreads, 0, stream>>>(
+        pdl::launch(gemv_nvfp4_geglu_residual_mr_kernel<NR>,
+            dim3(grid), dim3(kMRThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(A.packed_data),
             reinterpret_cast<const uint8_t*>(A.micro_scales),
             A.tensor_scale, gate, up, y, residual, M, K);
     } else {
-        gemv_nvfp4_geglu_residual_kernel<<<M, kKparThreads, 0, stream>>>(
+        pdl::launch(gemv_nvfp4_geglu_residual_kernel,
+            dim3(M), dim3(kKparThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(A.packed_data),
             reinterpret_cast<const uint8_t*>(A.micro_scales),
             A.tensor_scale, gate, up, y, residual, M, K);
@@ -1024,7 +1037,8 @@ void gemv_nvfp4_moe_decode(const NvFP4MoEQuantResult& w,
                             cudaStream_t stream)
 {
     int total_blocks = top_k * rows;
-    gemv_nvfp4_moe_decode_kernel<<<total_blocks, kKparThreads, 0, stream>>>(
+    pdl::launch(gemv_nvfp4_moe_decode_kernel,
+        dim3(total_blocks), dim3(kKparThreads), size_t(0), stream,
         reinterpret_cast<const uint8_t*>(w.packed_data),
         reinterpret_cast<const uint8_t*>(w.micro_scales),
         w.tensor_scales,
@@ -1043,7 +1057,8 @@ void gemv_nvfp4_moe_gate_up_fused(const NvFP4MoEQuantResult& gate,
                                     cudaStream_t stream)
 {
     dim3 grid(top_k * rows, 2);
-    gemv_nvfp4_moe_gate_up_fused_kernel<<<grid, kKparThreads, 0, stream>>>(
+    pdl::launch(gemv_nvfp4_moe_gate_up_fused_kernel,
+        grid, dim3(kKparThreads), size_t(0), stream,
         reinterpret_cast<const uint8_t*>(gate.packed_data),
         reinterpret_cast<const uint8_t*>(gate.micro_scales),
         gate.tensor_scales,
@@ -1056,6 +1071,72 @@ void gemv_nvfp4_moe_gate_up_fused(const NvFP4MoEQuantResult& gate,
         gate.expert_stride_packed,
         gate.expert_stride_ms,
         rows);
+}
+
+// ---------------------------------------------------------------------------
+// Fused SwiGLU + MoE NVFP4 GEMV for down projection.
+// Eliminates separate swiglu() kernel launch.
+// Grid: top_k * rows blocks, 128 threads.
+// ---------------------------------------------------------------------------
+__global__ void __launch_bounds__(kKparThreads, 12)
+gemv_nvfp4_moe_swiglu_decode_kernel(
+    const uint8_t* __restrict__ packed_data,
+    const uint8_t* __restrict__ micro_scales,
+    const float*   __restrict__ tensor_scales,
+    const int32_t* __restrict__ expert_indices,
+    const half*    __restrict__ gate,
+    const half*    __restrict__ up,
+    half*          __restrict__ y,
+    int rows, int K,
+    size_t expert_stride_packed,
+    size_t expert_stride_ms,
+    int x_stride,
+    int blocks_per_expert)
+{
+    const int expert_slot = blockIdx.x / blocks_per_expert;
+    const int row = blockIdx.x % blocks_per_expert;
+    if (row >= rows) return;
+
+    const int tid = threadIdx.x;
+    const int n_mb = K / kMicroBlockSize;
+    const int expert_id = expert_indices[expert_slot];
+
+    const uint8_t* W = packed_data + (size_t)expert_id * expert_stride_packed;
+    const uint8_t* MS = micro_scales + (size_t)expert_id * expert_stride_ms;
+    float ts = tensor_scales[expert_id];
+    const half* gi = gate + (size_t)expert_slot * x_stride;
+    const half* ui = up   + (size_t)expert_slot * x_stride;
+
+    __shared__ SmemKpar smem;
+    init_lut(smem.lut, tid);
+    __syncthreads();
+
+    float acc = gemv_nvfp4_row_swiglu(
+        W + (size_t)row * (K / 2),
+        MS + (size_t)row * n_mb,
+        ts, gi, ui, n_mb, tid, smem.lut);
+
+    float total = reduce_kpar(acc, tid, smem.warp_sums);
+    if (tid == 0) y[(size_t)expert_slot * rows + row] = __float2half(total);
+}
+
+void gemv_nvfp4_moe_swiglu_decode(const NvFP4MoEQuantResult& w,
+                                    const int32_t* expert_indices,
+                                    const half* gate, const half* up, half* y,
+                                    int rows, int K, int x_stride, int top_k,
+                                    cudaStream_t stream)
+{
+    int total_blocks = top_k * rows;
+    pdl::launch(gemv_nvfp4_moe_swiglu_decode_kernel,
+        dim3(total_blocks), dim3(kKparThreads), size_t(0), stream,
+        reinterpret_cast<const uint8_t*>(w.packed_data),
+        reinterpret_cast<const uint8_t*>(w.micro_scales),
+        w.tensor_scales,
+        expert_indices, gate, up, y,
+        rows, K,
+        w.expert_stride_packed,
+        w.expert_stride_ms,
+        x_stride, rows);
 }
 
 // ---------------------------------------------------------------------------
@@ -1138,6 +1219,31 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C,
     Tensor A_fp16(dequant_buf, DType::FP16, 2, A_shape, /*on_device=*/true);
 
     gemm(B, A_fp16, C, 1.0f, 0.0f, stream);
+}
+
+// ---------------------------------------------------------------------------
+// PDL registration for all NVFP4 GEMV kernels.
+// Called from GraphExecutor::init() when PDL is enabled.
+// ---------------------------------------------------------------------------
+void nvfp4_gemv_pdl_register() {
+    constexpr int NR = 8;
+    // Dense GEMV kernels
+    pdl::enable_kernel(gemv_nvfp4_kpar_kernel);
+    pdl::enable_kernel(gemv_nvfp4_multirow_kernel<NR>);
+    pdl::enable_kernel(gemv_nvfp4_residual_kernel);
+    pdl::enable_kernel(gemv_nvfp4_residual_mr_kernel<NR>);
+    pdl::enable_kernel(gemv_nvfp4_qkv_fused_kernel);
+    pdl::enable_kernel(gemv_nvfp4_qkv_fused_mr_kernel<NR>);
+    pdl::enable_kernel(gemv_nvfp4_gate_up_fused_kernel);
+    pdl::enable_kernel(gemv_nvfp4_gate_up_fused_mr_kernel<NR>);
+    pdl::enable_kernel(gemv_nvfp4_swiglu_residual_kernel);
+    pdl::enable_kernel(gemv_nvfp4_swiglu_residual_mr_kernel<NR>);
+    pdl::enable_kernel(gemv_nvfp4_geglu_residual_kernel);
+    pdl::enable_kernel(gemv_nvfp4_geglu_residual_mr_kernel<NR>);
+    // MoE GEMV kernels
+    pdl::enable_kernel(gemv_nvfp4_moe_decode_kernel);
+    pdl::enable_kernel(gemv_nvfp4_moe_gate_up_fused_kernel);
+    pdl::enable_kernel(gemv_nvfp4_moe_swiglu_decode_kernel);
 }
 
 } // namespace imp

@@ -125,6 +125,7 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
         rope_pdl_register();
         activation_pdl_register();
         gemv_pdl_register();
+        nvfp4_gemv_pdl_register();
         IMP_LOG_INFO("PDL enabled on executor + compute + GEMV kernels");
     } else if (use_pdl_) {
         IMP_LOG_WARN("PDL requested but not available on this device/CUDA version");
