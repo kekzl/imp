@@ -6,10 +6,9 @@
   Fix: `ignore_eos=true` during prefill (synthetic tokens → immediate EOS → FINISHED).
   `imp_decode_step` sets ignore_eos correctly for actual decode.
 
-- [ ] **Gemma-3-12B NVFP4 Decode** — head_dim=256 KV cache consumes too much VRAM.
-  NVFP4 budget = 0 tensors (no room after KV+weights). dp4a fallback works,
-  but without NVFP4 bandwidth boost: ~89 tok/s (bench) vs ~44 tok/s (full KV).
-  Fix: reduce KV cache preset, or implement NVFP4 for post-norm architecture.
+- [~] **Gemma-3-12B NVFP4 Decode** — head_dim=256 KV cache consumes VRAM, limiting
+  NVFP4 budget. GeGLU+GEMV fusion boosted decode: 59→100 tok/s (+70%).
+  Remaining: VRAM budget still limited by head_dim=256 KV cache.
 
 - [x] **CUTLASS FMHA head_dim=96** — Added template `Shape<_128, _96, _96>`.
   Phi4-mini actually has head_dim=128 (rope_dim=96 is partial RoPE, not head_dim).
@@ -20,10 +19,11 @@
   use async calibrate+quantize with single sync at end. Bulk cudaMalloc for FP8 data
   and scale buffers. DeepSeek-14B init: 55.4s → ~35s (37% faster).
 
-- [~] **Small Model Decode MBU** — Fused SwiGLU+NVFP4 GEMV+residual kernel eliminates
-  1 kernel/layer (36 launches saved). Results: Qwen3-4B: 273→288 tok/s (+5.5%),
-  Qwen3-8B: 138→184 tok/s (+33%). Remaining: RMSNorm+GEMV fusion, GEMV multi-row
-  for fused QKV/gate+up, GeGLU fusion.
+- [x] **Decode Kernel Fusion** — Fused activation+GEMV+residual kernels:
+  - SwiGLU+NVFP4 GEMV+residual: Qwen3-4B 273→298 (+9%), Qwen3-8B 138→184 (+33%)
+  - GeGLU+NVFP4 GEMV+residual: Gemma-3-12B 59→100 (+70%)
+  - Multi-row dispatch (8 rows/block) for all fused NVFP4 GEMV variants
+  Remaining: RMSNorm+GEMV fusion for further kernel count reduction.
 
 - [ ] **cuBLASLt NVFP4 Probe** — status=7 (INTERNAL_ERROR), likely
   driver/CUDA version issue. CUTLASS NVFP4 fallback works fine.
