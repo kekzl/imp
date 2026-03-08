@@ -27,22 +27,24 @@ This is not a wrapper. imp implements its own GGUF parser, tokenizer, KV cache, 
 
 ## Performance
 
-**RTX 5090** (Blackwell, sm_120, 32 GB), CUDA 13.1, batch size 1, warmup + 5 averaged reps.
+**RTX 5090** (Blackwell, sm_120, 32 GB), CUDA 13.1, batch size 1, pp512/tg128, warmup + 5 averaged reps.
 
-Methodology matches `llama-bench`: identical pp/tg/reps, all layers on GPU, sequential runs.
+| Model | Quant | pp512 (tok/s) | tg128 (tok/s) |
+|---|---|---:|---:|
+| Qwen3-4B | Q8_0 | 16,374 | 304 |
+| Qwen3-8B | Q8_0 | 12,236 | 191 |
+| DeepSeek-R1-7B | Q8_0 | 15,512 | 210 |
+| Phi-4-mini | Q8_0 | 20,676 | 251 |
+| Gemma-3-12B | Q8_0 | 9,513 | 116 |
+| DeepSeek-R1-14B | Q6_K | 5,916 | 108 |
+| Qwen3-Coder-30B-A3B (MoE) | Q6_K | 4,592 | 263 |
+| Nemotron-30B-A3B (MoE) | Q6_K | 1,750 | 72 |
 
-| Model | Quant | imp pp | llama.cpp pp | &Delta; | imp tg | llama.cpp tg | &Delta; |
-|---|---|---:|---:|---:|---:|---:|---:|
-| Qwen3-4B | Q8_0 | 19,537 | 17,236 | **+13.3%** | 236.1 | 201.0 | **+17.5%** |
-| DeepSeek-R1-7B | Q8_0 | 13,457 | 12,798 | **+5.1%** | 162.3 | 155.5 | **+4.3%** |
-| DeepSeek-R1-14B | Q6_K | 9,758 | 5,528 | **+76.5%** | 121.4 | 96.8 | **+25.5%** |
-| Qwen3-Coder-30B-A3B (MoE) | Q6_K | 4,575 | 5,741 | -20.3% | 243.0 | 189.8 | **+28.0%** |
+<sub>pp = prompt processing, tg = token generation, higher is better. NVFP4 decode cache auto-enabled on sm_120.</sub>
 
-<sub>pp = prompt processing (tok/s, higher is better), tg = token generation (tok/s, higher is better). llama.cpp commit <code>c830f99</code>.</sub>
+**Decode** is where imp shines — NVFP4 weight caching halves memory bandwidth vs Q8_0 reads, and fused activation+GEMV+residual kernels eliminate intermediate launches. MoE models benefit from fused expert dispatch with shared-memory caching (263 tok/s on a 30B model).
 
-**Decode** — imp wins across all models (+4% to +28%). NVFP4 decode cache on the 14B model gives the largest gain. MoE decode benefits from fused expert kernels with shared-memory caching.
-
-**Prefill** — imp wins on dense models (+5% to +77%). The 14B model benefits from CUTLASS NVFP4 GEMM on sm_120. MoE prefill is behind (-20%) due to the grouped GEMM dequant path.
+**Prefill** uses CUTLASS Hopper FMHA (WGMMA + TMA) for attention and FP8 tensor cores for large-K GEMMs.
 
 ## Features
 
