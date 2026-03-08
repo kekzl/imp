@@ -784,6 +784,9 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
                            const std::unordered_map<const void*, GraphExecutor::FP8CacheEntry>* fp8_cache,
                            void* fp8_act_buf,
                            float* d_act_scale,
+                           float* d_fp8_block_maxes,
+                           float* d_fp8_absmax,
+                           int fp8_max_grid,
                            const std::unordered_map<const void*, NvFP4QuantResult>* nvfp4_cache,
                            const std::unordered_map<const void*, CutlassNvFP4Weight>* cutlass_nvfp4_cache,
                            void* cutlass_act_data,
@@ -926,7 +929,8 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
         auto it = fp8_cache->find(weight.data);
         if (it != fp8_cache->end()) {
             Tensor fp8_act(fp8_act_buf, DType::FP8_E4M3, input.ndim, input.shape, true);
-            quantize_fp16_to_fp8_e4m3(input, fp8_act, d_act_scale, stream);
+            quantize_fp16_to_fp8_e4m3(input, fp8_act, d_act_scale, stream,
+                                       d_fp8_block_maxes, d_fp8_absmax, fp8_max_grid);
             gemm_cublaslt(fp8_act, it->second.weight, output, 1.0f, 0.0f,
                           d_act_scale, it->second.d_scale, stream);
         } else if (dequant_scratch != nullptr && dequant_gpu_supported(qtype)) {

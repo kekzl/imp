@@ -319,6 +319,9 @@ private:
     void* fp8_act_buf_ = nullptr;       // max_tokens * max_dim bytes
     size_t fp8_act_buf_size_ = 0;
     float* d_act_scale_ = nullptr;      // 1 float on device
+    float* d_fp8_block_maxes_ = nullptr; // pre-allocated reduction buffer
+    float* d_fp8_absmax_ = nullptr;      // pre-allocated absmax scalar
+    int fp8_max_grid_ = 0;              // max grid size for reduction
 
     // NVFP4 decode weight cache: quantized from FP16 cache at init.
     // Provides 31-47% bandwidth reduction vs raw Q8_0/Q6_K during decode GEMV.
