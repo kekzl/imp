@@ -6,6 +6,9 @@
 
 namespace imp {
 
+// Free static cuBLASLt grouped GEMM workspace. Call at shutdown.
+void gemm_grouped_cleanup();
+
 // cuBLASLt Grouped GEMM for MoE expert parallelism
 void gemm_grouped(const std::vector<Tensor>& A,
                   const std::vector<Tensor>& B,

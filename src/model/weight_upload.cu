@@ -907,8 +907,13 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
                     void* gpu_ptr = nullptr;
                     cudaError_t err = cudaMalloc(&gpu_ptr, total_raw);
                     if (err == cudaSuccess) {
-                        cudaMemcpyAsync(gpu_ptr, packed.data, total_raw,
-                                        cudaMemcpyHostToDevice, stream);
+                        cudaError_t cpy_err = cudaMemcpyAsync(gpu_ptr, packed.data, total_raw,
+                                                               cudaMemcpyHostToDevice, stream);
+                        if (cpy_err != cudaSuccess) {
+                            IMP_LOG_ERROR("  %s: cudaMemcpyAsync failed: %s", name, cudaGetErrorString(cpy_err));
+                            cudaFree(gpu_ptr);
+                            return false;
+                        }
                         packed.data = gpu_ptr;
                         packed.on_device = true;
                         gpu_allocations_.push_back(gpu_ptr);
@@ -936,7 +941,8 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
                         IMP_LOG_INFO("  %s: WSL2 pinned copy (%.2f MiB, DMA-ready)",
                                      name, total_raw / (1024.0 * 1024.0));
                     } else {
-                        IMP_LOG_DEBUG("Cleared WSL2 cudaHostAlloc error: %s", cudaGetErrorString(cudaGetLastError()));
+                        IMP_LOG_DEBUG("Cleared WSL2 cudaHostAlloc error: %s", cudaGetErrorString(pin_err));
+                        cudaGetLastError();  // clear sticky CUDA error state
                         IMP_LOG_INFO("  %s: WSL2 cudaHostAlloc failed, falling back to "
                                      "unpinned mmap (%.2f MiB)", name,
                                      total_raw / (1024.0 * 1024.0));

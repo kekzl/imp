@@ -416,6 +416,14 @@ static cublasLtHandle_t get_grouped_cublaslt_handle() {
 static void* s_grouped_workspace = nullptr;
 static size_t s_grouped_workspace_size = 0;
 
+void gemm_grouped_cleanup() {
+    if (s_grouped_workspace) {
+        cudaFree(s_grouped_workspace);
+        s_grouped_workspace = nullptr;
+        s_grouped_workspace_size = 0;
+    }
+}
+
 static void ensure_grouped_workspace() {
     if (s_grouped_workspace) return;
     constexpr size_t kTrySizes[] = {32ULL << 20, 8ULL << 20, 2ULL << 20};

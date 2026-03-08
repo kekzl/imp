@@ -101,14 +101,14 @@ public:
 
     // Phase 1: Initialize model reference, compute workspace sizes, enable PDL.
     // Does NOT allocate GPU memory — call allocate_workspaces() after weight upload.
-    bool init(const Model& model, DType compute_dtype = DType::FP16, bool use_pdl = false,
-              int max_batch_size = 1, int max_seq_len = 0, bool use_fp8_prefill = false,
-              int use_nvfp4_decode = 0);
+    [[nodiscard]] bool init(const Model& model, DType compute_dtype = DType::FP16, bool use_pdl = false,
+                            int max_batch_size = 1, int max_seq_len = 0, bool use_fp8_prefill = false,
+                            int use_nvfp4_decode = 0);
 
     // Phase 2: Allocate all GPU workspace buffers.
     // Call AFTER weight upload to maximize VRAM available for expert layers.
     // experts_on_host: if true, skip MoE batch dequant buffer allocation.
-    bool allocate_workspaces(bool experts_on_host = false);
+    [[nodiscard]] bool allocate_workspaces(bool experts_on_host = false);
 
     // Estimated GPU memory needed by allocate_workspaces().
     // Used by Engine to compute the expert upload reserve.
@@ -160,7 +160,7 @@ public:
 
     // Resize workspace for a different max token count (Phase 4: decode-mode optimization).
     // Uses cudaFreeAsync/cudaMallocAsync for near-instant resize via CUDA memory pool.
-    bool resize_workspace(int new_max_tokens, cudaStream_t stream);
+    [[nodiscard]] bool resize_workspace(int new_max_tokens, cudaStream_t stream);
 
     // Get a view of the logits buffer for n tokens (for CUDA graph replay,
     // where forward_logits isn't called but the graph writes to this buffer).
