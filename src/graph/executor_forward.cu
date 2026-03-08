@@ -1269,27 +1269,23 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     eff, d, /*x_stride=*/0, top_k, stream);
             }
 
-            // Activation (SwiGLU or relu²)
-            {
+            // Down projection (fused SwiGLU+GEMV for gated, separate for non-gated)
+            if (!non_gated_experts) {
+                // Fused: swiglu(gate,up) computed inline during down GEMV
+                gemv_nvfp4_moe_swiglu_decode(
+                    nvfp4_moe_cache_.at(ly.expert_down_packed.data),
+                    expert_indices, gate_buf, up_buf, down_buf,
+                    d, eff, /*x_stride=*/eff, top_k, stream);
+            } else {
                 int64_t act_shape[2] = {static_cast<int64_t>(top_k),
                                          static_cast<int64_t>(eff)};
-                if (!non_gated_experts) {
-                    Tensor gate_t(gate_buf, compute_dtype_, 2, act_shape, true);
-                    Tensor up_t(up_buf, compute_dtype_, 2, act_shape, true);
-                    Tensor act_t(act_buf, compute_dtype_, 2, act_shape, true);
-                    swiglu(gate_t, up_t, act_t, stream);
-                } else {
-                    Tensor up_t(up_buf, compute_dtype_, 2, act_shape, true);
-                    relu_sqr_inplace(up_t, stream);
-                }
+                Tensor up_t(up_buf, compute_dtype_, 2, act_shape, true);
+                relu_sqr_inplace(up_t, stream);
+                gemv_nvfp4_moe_decode(
+                    nvfp4_moe_cache_.at(ly.expert_down_packed.data),
+                    expert_indices, up_buf, down_buf,
+                    d, eff, /*x_stride=*/eff, top_k, stream);
             }
-
-            // Down projection: NVFP4 MoE GEMV with per-expert input
-            half* down_input = non_gated_experts ? up_buf : act_buf;
-            gemv_nvfp4_moe_decode(
-                nvfp4_moe_cache_.at(ly.expert_down_packed.data),
-                expert_indices, down_input, down_buf,
-                d, eff, /*x_stride=*/eff, top_k, stream);
 
             // Weighted sum + residual
             {
