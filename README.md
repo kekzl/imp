@@ -29,22 +29,22 @@ This is not a wrapper. imp implements its own GGUF parser, tokenizer, KV cache, 
 
 **RTX 5090** (Blackwell, sm_120, 32 GB), CUDA 13.1, batch size 1, pp512/tg128, warmup + 5 averaged reps.
 
-| Model | Quant | pp512 (tok/s) | tg128 (tok/s) |
-|---|---|---:|---:|
-| Qwen3-4B | Q8_0 | 16,374 | 304 |
-| Qwen3-8B | Q8_0 | 12,236 | 191 |
-| DeepSeek-R1-7B | Q8_0 | 15,512 | 210 |
-| Phi-4-mini | Q8_0 | 20,676 | 251 |
-| Gemma-3-12B | Q8_0 | 9,513 | 116 |
-| DeepSeek-R1-14B | Q6_K | 5,916 | 108 |
-| Qwen3-Coder-30B-A3B (MoE) | Q6_K | 4,592 | 263 |
-| Nemotron-30B-A3B (MoE) | Q6_K | 1,750 | 72 |
+| Model | Quant | imp pp | llama.cpp pp | &Delta; | imp tg | llama.cpp tg | &Delta; |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Qwen3-4B | Q8_0 | 16,374 | 17,236 | -5.0% | 304 | 201.0 | **+51.2%** |
+| Qwen3-8B | Q8_0 | 12,236 | 12,780&sup1; | -4.3% | 191 | 158.8&sup1; | **+20.3%** |
+| DeepSeek-R1-7B | Q8_0 | 15,512 | 12,798 | **+21.2%** | 210 | 155.5 | **+35.0%** |
+| Phi-4-mini | Q8_0 | 20,676 | — | | 251 | — | |
+| Gemma-3-12B | Q8_0 | 9,513 | — | | 116 | — | |
+| DeepSeek-R1-14B | Q6_K | 5,916 | 5,528 | **+7.0%** | 108 | 96.8 | **+11.6%** |
+| Qwen3-Coder-30B-A3B (MoE) | Q6_K | 4,592 | 5,741 | -20.0% | 263 | 189.8 | **+38.6%** |
+| Nemotron-30B-A3B (MoE) | Q6_K | 1,750 | — | | 72 | — | |
 
-<sub>pp = prompt processing, tg = token generation, higher is better. NVFP4 decode cache auto-enabled on sm_120.</sub>
+<sub>pp = prompt processing (tok/s), tg = token generation (tok/s), higher is better. NVFP4 decode cache auto-enabled on sm_120. llama.cpp commit <code>c830f99</code>. &sup1;Llama-3.1-Tulu-3-8B Q8_0 (closest published match, Phoronix).</sub>
 
-**Decode** is where imp shines — NVFP4 weight caching halves memory bandwidth vs Q8_0 reads, and fused activation+GEMV+residual kernels eliminate intermediate launches. MoE models benefit from fused expert dispatch with shared-memory caching (263 tok/s on a 30B model).
+**Decode** — imp wins across all compared models (+11% to +51%). NVFP4 weight caching halves memory bandwidth vs Q8_0 reads, and fused activation+GEMV+residual kernels eliminate intermediate launches. MoE decode benefits from fused expert dispatch with shared-memory caching (263 tok/s on a 30B model).
 
-**Prefill** uses CUTLASS Hopper FMHA (WGMMA + TMA) for attention and FP8 tensor cores for large-K GEMMs.
+**Prefill** — imp wins on dense models where CUTLASS Hopper FMHA (WGMMA + TMA) and FP8 tensor cores dominate. MoE prefill is behind (-20%) due to the grouped GEMM dequant path.
 
 ## Features
 
