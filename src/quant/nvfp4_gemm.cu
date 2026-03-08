@@ -445,6 +445,221 @@ gemv_nvfp4_gate_up_fused_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// Multi-row variants of fused kernels (NR rows/block, 256 threads, 8 warps).
+// Used when K is small (n_mb ≤ 512) to reduce block count and improve
+// per-thread work (32 threads/row vs 128 threads/row).
+// ---------------------------------------------------------------------------
+
+// Multi-row QKV fused: each warp determines its matrix and row independently.
+template<int NR>
+__global__ void __launch_bounds__(kMRThreads, 6)
+gemv_nvfp4_qkv_fused_mr_kernel(
+    const uint8_t* __restrict__ packed_q, const uint8_t* __restrict__ ms_q, float ts_q,
+    const uint8_t* __restrict__ packed_k, const uint8_t* __restrict__ ms_k, float ts_k,
+    const uint8_t* __restrict__ packed_v, const uint8_t* __restrict__ ms_v, float ts_v,
+    const half* __restrict__ x,
+    half* __restrict__ yq, half* __restrict__ yk, half* __restrict__ yv,
+    int q_rows, int k_rows, int v_rows, int K)
+{
+    const int warp_id = threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    const int global_row = blockIdx.x * NR + warp_id;
+    const int total_rows = q_rows + k_rows + v_rows;
+    if (global_row >= total_rows || warp_id >= NR) return;
+
+    const int K_half = K / 2;
+    const int n_mb = K / kMicroBlockSize;
+
+    __shared__ float s_lut[16];
+    if (threadIdx.x < 16) {
+        constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+        s_lut[threadIdx.x] = (threadIdx.x < 8) ? kMag[threadIdx.x] : -kMag[threadIdx.x & 7];
+    }
+    __syncthreads();
+
+    const uint8_t* row_packed;
+    const uint8_t* row_ms;
+    float ts;
+    half* out;
+    int local_row;
+
+    if (global_row < q_rows) {
+        local_row = global_row;
+        row_packed = packed_q + (int64_t)local_row * K_half;
+        row_ms = ms_q + (int64_t)local_row * n_mb;
+        ts = ts_q; out = yq;
+    } else if (global_row < q_rows + k_rows) {
+        local_row = global_row - q_rows;
+        row_packed = packed_k + (int64_t)local_row * K_half;
+        row_ms = ms_k + (int64_t)local_row * n_mb;
+        ts = ts_k; out = yk;
+    } else {
+        local_row = global_row - q_rows - k_rows;
+        row_packed = packed_v + (int64_t)local_row * K_half;
+        row_ms = ms_v + (int64_t)local_row * n_mb;
+        ts = ts_v; out = yv;
+    }
+
+    float acc = 0.0f;
+    for (int mi = lane; mi < n_mb; mi += 32) {
+        int byte_off = mi * 8;
+        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
+        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
+        float cs = ts * fp8_e4m3_to_float_fast(row_ms[mi]);
+        float local_dot = dot_micro_block(pb, x, byte_off * 2, s_lut);
+        acc = __fmaf_rn(local_dot, cs, acc);
+    }
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+    if (lane == 0) out[local_row] = __float2half(acc);
+}
+
+// Multi-row gate+up fused.
+template<int NR>
+__global__ void __launch_bounds__(kMRThreads, 6)
+gemv_nvfp4_gate_up_fused_mr_kernel(
+    const uint8_t* __restrict__ packed_g, const uint8_t* __restrict__ ms_g, float ts_g,
+    const uint8_t* __restrict__ packed_u, const uint8_t* __restrict__ ms_u, float ts_u,
+    const half* __restrict__ x,
+    half* __restrict__ yg, half* __restrict__ yu,
+    int rows, int K)
+{
+    const int warp_id = threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    const int global_row = blockIdx.x * NR + warp_id;
+    const int total_rows = 2 * rows;
+    if (global_row >= total_rows || warp_id >= NR) return;
+
+    const int K_half = K / 2;
+    const int n_mb = K / kMicroBlockSize;
+
+    __shared__ float s_lut[16];
+    if (threadIdx.x < 16) {
+        constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+        s_lut[threadIdx.x] = (threadIdx.x < 8) ? kMag[threadIdx.x] : -kMag[threadIdx.x & 7];
+    }
+    __syncthreads();
+
+    const uint8_t* row_packed;
+    const uint8_t* row_ms;
+    float ts;
+    half* out;
+    int local_row;
+
+    if (global_row < rows) {
+        local_row = global_row;
+        row_packed = packed_g + (int64_t)local_row * K_half;
+        row_ms = ms_g + (int64_t)local_row * n_mb;
+        ts = ts_g; out = yg;
+    } else {
+        local_row = global_row - rows;
+        row_packed = packed_u + (int64_t)local_row * K_half;
+        row_ms = ms_u + (int64_t)local_row * n_mb;
+        ts = ts_u; out = yu;
+    }
+
+    float acc = 0.0f;
+    for (int mi = lane; mi < n_mb; mi += 32) {
+        int byte_off = mi * 8;
+        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
+        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
+        float cs = ts * fp8_e4m3_to_float_fast(row_ms[mi]);
+        float local_dot = dot_micro_block(pb, x, byte_off * 2, s_lut);
+        acc = __fmaf_rn(local_dot, cs, acc);
+    }
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+    if (lane == 0) out[local_row] = __float2half(acc);
+}
+
+// Multi-row residual.
+template<int NR>
+__global__ void __launch_bounds__(kMRThreads, 6)
+gemv_nvfp4_residual_mr_kernel(
+    const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales,
+    float tensor_scale, const half* __restrict__ x,
+    half* __restrict__ y, const half* __restrict__ residual,
+    int M, int K)
+{
+    const int warp_id = threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    const int row = blockIdx.x * NR + warp_id;
+    if (row >= M || warp_id >= NR) return;
+
+    const int K_half = K / 2;
+    const int n_mb = K / kMicroBlockSize;
+
+    __shared__ float s_lut[16];
+    if (threadIdx.x < 16) {
+        constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+        s_lut[threadIdx.x] = (threadIdx.x < 8) ? kMag[threadIdx.x] : -kMag[threadIdx.x & 7];
+    }
+    __syncthreads();
+
+    const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
+    const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
+
+    float acc = 0.0f;
+    for (int mi = lane; mi < n_mb; mi += 32) {
+        int byte_off = mi * 8;
+        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
+        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
+        float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
+        float local_dot = dot_micro_block(pb, x, byte_off * 2, s_lut);
+        acc = __fmaf_rn(local_dot, cs, acc);
+    }
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+    if (lane == 0) y[row] = __float2half(acc + __half2float(residual[row]));
+}
+
+// Multi-row SwiGLU + residual.
+template<int NR>
+__global__ void __launch_bounds__(kMRThreads, 6)
+gemv_nvfp4_swiglu_residual_mr_kernel(
+    const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales,
+    float tensor_scale,
+    const half* __restrict__ gate, const half* __restrict__ up,
+    half* __restrict__ y, const half* __restrict__ residual,
+    int M, int K)
+{
+    const int warp_id = threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    const int row = blockIdx.x * NR + warp_id;
+    if (row >= M || warp_id >= NR) return;
+
+    const int K_half = K / 2;
+    const int n_mb = K / kMicroBlockSize;
+
+    __shared__ float s_lut[16];
+    if (threadIdx.x < 16) {
+        constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+        s_lut[threadIdx.x] = (threadIdx.x < 8) ? kMag[threadIdx.x] : -kMag[threadIdx.x & 7];
+    }
+    __syncthreads();
+
+    const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
+    const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
+
+    float acc = 0.0f;
+    for (int mi = lane; mi < n_mb; mi += 32) {
+        int byte_off = mi * 8;
+        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
+        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
+        float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
+        float local_dot = dot_micro_block_swiglu(pb, gate, up, byte_off * 2, s_lut);
+        acc = __fmaf_rn(local_dot, cs, acc);
+    }
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+    if (lane == 0) y[row] = __float2half(acc + __half2float(residual[row]));
+}
+
+// ---------------------------------------------------------------------------
 // Host launchers
 // ---------------------------------------------------------------------------
 
@@ -479,43 +694,72 @@ void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk
                            cudaStream_t stream)
 {
     int total_rows = q_rows + k_rows + v_rows;
-    // For QKV fused, total_rows is typically q+k+v = 4096+1024+1024 = 6144 for 8B models.
-    // Always enough blocks, so keep the existing kernel.
-    gemv_nvfp4_qkv_fused_kernel<<<total_rows, kKparThreads, 0, stream>>>(
-        reinterpret_cast<const uint8_t*>(wq.packed_data),
-        reinterpret_cast<const uint8_t*>(wq.micro_scales),
-        wq.tensor_scale,
-        reinterpret_cast<const uint8_t*>(wk.packed_data),
-        reinterpret_cast<const uint8_t*>(wk.micro_scales),
-        wk.tensor_scale,
-        reinterpret_cast<const uint8_t*>(wv.packed_data),
-        reinterpret_cast<const uint8_t*>(wv.micro_scales),
-        wv.tensor_scale,
-        x, yq, yk, yv, q_rows, k_rows, v_rows, K);
+    const int n_mb = K / kMicroBlockSize;
+    if (n_mb <= 512) {
+        constexpr int NR = 8;
+        int grid = (total_rows + NR - 1) / NR;
+        gemv_nvfp4_qkv_fused_mr_kernel<NR><<<grid, kMRThreads, 0, stream>>>(
+            reinterpret_cast<const uint8_t*>(wq.packed_data),
+            reinterpret_cast<const uint8_t*>(wq.micro_scales), wq.tensor_scale,
+            reinterpret_cast<const uint8_t*>(wk.packed_data),
+            reinterpret_cast<const uint8_t*>(wk.micro_scales), wk.tensor_scale,
+            reinterpret_cast<const uint8_t*>(wv.packed_data),
+            reinterpret_cast<const uint8_t*>(wv.micro_scales), wv.tensor_scale,
+            x, yq, yk, yv, q_rows, k_rows, v_rows, K);
+    } else {
+        gemv_nvfp4_qkv_fused_kernel<<<total_rows, kKparThreads, 0, stream>>>(
+            reinterpret_cast<const uint8_t*>(wq.packed_data),
+            reinterpret_cast<const uint8_t*>(wq.micro_scales), wq.tensor_scale,
+            reinterpret_cast<const uint8_t*>(wk.packed_data),
+            reinterpret_cast<const uint8_t*>(wk.micro_scales), wk.tensor_scale,
+            reinterpret_cast<const uint8_t*>(wv.packed_data),
+            reinterpret_cast<const uint8_t*>(wv.micro_scales), wv.tensor_scale,
+            x, yq, yk, yv, q_rows, k_rows, v_rows, K);
+    }
 }
 
 void gemv_nvfp4_gate_up_fused(const NvFP4QuantResult& wg, const NvFP4QuantResult& wu,
                                const half* x, half* yg, half* yu,
                                int rows, int K, cudaStream_t stream)
 {
-    int total_blocks = 2 * rows;
-    gemv_nvfp4_gate_up_fused_kernel<<<total_blocks, kKparThreads, 0, stream>>>(
-        reinterpret_cast<const uint8_t*>(wg.packed_data),
-        reinterpret_cast<const uint8_t*>(wg.micro_scales),
-        wg.tensor_scale,
-        reinterpret_cast<const uint8_t*>(wu.packed_data),
-        reinterpret_cast<const uint8_t*>(wu.micro_scales),
-        wu.tensor_scale,
-        x, yg, yu, rows, K);
+    int total_rows = 2 * rows;
+    const int n_mb = K / kMicroBlockSize;
+    if (n_mb <= 512) {
+        constexpr int NR = 8;
+        int grid = (total_rows + NR - 1) / NR;
+        gemv_nvfp4_gate_up_fused_mr_kernel<NR><<<grid, kMRThreads, 0, stream>>>(
+            reinterpret_cast<const uint8_t*>(wg.packed_data),
+            reinterpret_cast<const uint8_t*>(wg.micro_scales), wg.tensor_scale,
+            reinterpret_cast<const uint8_t*>(wu.packed_data),
+            reinterpret_cast<const uint8_t*>(wu.micro_scales), wu.tensor_scale,
+            x, yg, yu, rows, K);
+    } else {
+        gemv_nvfp4_gate_up_fused_kernel<<<total_rows, kKparThreads, 0, stream>>>(
+            reinterpret_cast<const uint8_t*>(wg.packed_data),
+            reinterpret_cast<const uint8_t*>(wg.micro_scales), wg.tensor_scale,
+            reinterpret_cast<const uint8_t*>(wu.packed_data),
+            reinterpret_cast<const uint8_t*>(wu.micro_scales), wu.tensor_scale,
+            x, yg, yu, rows, K);
+    }
 }
 
 void gemv_nvfp4_residual(const NvFP4QuantResult& A, const half* x, half* y,
                           const half* residual, int M, int K, cudaStream_t stream)
 {
-    gemv_nvfp4_residual_kernel<<<M, kKparThreads, 0, stream>>>(
-        reinterpret_cast<const uint8_t*>(A.packed_data),
-        reinterpret_cast<const uint8_t*>(A.micro_scales),
-        A.tensor_scale, x, y, residual, M, K);
+    const int n_mb = K / kMicroBlockSize;
+    if (n_mb <= 512) {
+        constexpr int NR = 8;
+        int grid = (M + NR - 1) / NR;
+        gemv_nvfp4_residual_mr_kernel<NR><<<grid, kMRThreads, 0, stream>>>(
+            reinterpret_cast<const uint8_t*>(A.packed_data),
+            reinterpret_cast<const uint8_t*>(A.micro_scales),
+            A.tensor_scale, x, y, residual, M, K);
+    } else {
+        gemv_nvfp4_residual_kernel<<<M, kKparThreads, 0, stream>>>(
+            reinterpret_cast<const uint8_t*>(A.packed_data),
+            reinterpret_cast<const uint8_t*>(A.micro_scales),
+            A.tensor_scale, x, y, residual, M, K);
+    }
 }
 
 void gemv_nvfp4_swiglu_residual(const NvFP4QuantResult& A,
@@ -523,10 +767,20 @@ void gemv_nvfp4_swiglu_residual(const NvFP4QuantResult& A,
                                  half* y, const half* residual,
                                  int M, int K, cudaStream_t stream)
 {
-    gemv_nvfp4_swiglu_residual_kernel<<<M, kKparThreads, 0, stream>>>(
-        reinterpret_cast<const uint8_t*>(A.packed_data),
-        reinterpret_cast<const uint8_t*>(A.micro_scales),
-        A.tensor_scale, gate, up, y, residual, M, K);
+    const int n_mb = K / kMicroBlockSize;
+    if (n_mb <= 512) {
+        constexpr int NR = 8;
+        int grid = (M + NR - 1) / NR;
+        gemv_nvfp4_swiglu_residual_mr_kernel<NR><<<grid, kMRThreads, 0, stream>>>(
+            reinterpret_cast<const uint8_t*>(A.packed_data),
+            reinterpret_cast<const uint8_t*>(A.micro_scales),
+            A.tensor_scale, gate, up, y, residual, M, K);
+    } else {
+        gemv_nvfp4_swiglu_residual_kernel<<<M, kKparThreads, 0, stream>>>(
+            reinterpret_cast<const uint8_t*>(A.packed_data),
+            reinterpret_cast<const uint8_t*>(A.micro_scales),
+            A.tensor_scale, gate, up, y, residual, M, K);
+    }
 }
 
 // ---------------------------------------------------------------------------
