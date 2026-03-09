@@ -54,9 +54,9 @@ imp is a single-backend engine that assumes NVIDIA hardware. llama.cpp's pluggab
 | | imp | llama.cpp |
 |---|---|---|
 | Model format (runtime) | GGUF + SafeTensors | GGUF only |
-| Model architectures | ~8 (LLaMA, Mistral, Mixtral, DeepSeek, Qwen3, Qwen3-MoE, Nemotron-H, generic) | 161 (dense, MoE, SSM, recurrent, encoder, vision, embedding) |
+| Model architectures | ~10 (LLaMA, Mistral, Mixtral, DeepSeek, Qwen3, Qwen3-MoE, Phi-4, Gemma-3, Nemotron-H, generic) | 161 (dense, MoE, SSM, recurrent, encoder, vision, embedding) |
 | Hybrid SSM+Attention | Nemotron-H (Mamba2 + Attention + MoE) | Jamba, Falcon-H1, Mamba, Mamba2 |
-| Vision models | No | CLIP, Gemma3N, Qwen2VL |
+| Vision models | Gemma-3 (SigLIP ViT, 896x896, 256 tokens) | CLIP, Gemma3N, Qwen2VL |
 | Embedding models | No | BERT, Nomic, Jina, Llama Embed |
 
 imp's native SafeTensors support avoids the GGUF conversion step. llama.cpp requires `convert_hf_to_gguf.py` for SafeTensors models but covers far more architectures.
@@ -72,7 +72,7 @@ imp's native SafeTensors support avoids the GGUF conversion step. llama.cpp requ
 | Q4_K_M | Yes | Yes |
 | Q6_K | Yes (dedicated GEMV kernel) | Yes |
 | Q8_0 | Yes (dp4a GEMV) | Yes |
-| Q2_K / Q3_K_* / Q5_K_* | No | Yes |
+| Q2_K / Q3_K / Q5_K | Yes (dp4a GEMV) | Yes |
 | IQ (importance-weighted) | No | Yes (IQ1_S through IQ4_NL) |
 | TQ (ternary) | No | Yes (TQ1_0, TQ2_0) |
 | FP8 E4M3 | Yes (cuBLAS GEMM, per-tensor scale) | Not a native GGUF type |
@@ -144,11 +144,11 @@ llama.cpp offers more speculative decoding strategies. imp's implementation focu
 |---|---|---|
 | Continuous batching | Yes (Scheduler with prefill/decode separation) | Yes (llama-server) |
 | Prefix caching | Yes (KV cache LRU with prefix sharing) | Yes (sequence ID sharing) |
-| HTTP server | No | Yes (llama-server, OpenAI-compatible API) |
+| HTTP server | Yes (imp-server, OpenAI-compatible API, SSE streaming) | Yes (llama-server, OpenAI-compatible API) |
 | Concurrent sequences | Yes | Yes |
 | Prompt caching across requests | Via KV cache prefix matching | Via shared sequence IDs |
 
-llama.cpp ships a production-ready HTTP server with OpenAI-compatible endpoints. imp provides a C API and CLI tool; serving infrastructure is left to the integrator.
+Both engines ship OpenAI-compatible HTTP servers with SSE streaming. imp-server supports `/v1/chat/completions`, `/v1/completions`, tool/function calling, logprobs, vision (base64 images), and API key auth.
 
 ---
 
@@ -196,7 +196,7 @@ llama.cpp runs on essentially any platform with a C compiler. imp requires a mod
 - **Hardware breadth:** Runs on CPU, NVIDIA, AMD, Intel, Apple, browser
 - **Model coverage:** 161 architectures vs ~8
 - **Quantization variety:** 30+ formats including sub-2-bit (IQ1_S, TQ1_0)
-- **Production-ready serving:** Built-in HTTP server with OpenAI API compatibility
+- **Production-ready serving:** Mature HTTP server with extensive OpenAI API compatibility
 - **Multi-GPU:** Layer/row/graph split across multiple GPUs
 - **Community & ecosystem:** Largest open-source LLM inference community, extensive tooling
 

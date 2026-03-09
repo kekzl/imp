@@ -1,4 +1,6 @@
-# Next-Gen CUDA 13.1 Optimization Plan for imp
+# Next-Gen CUDA 13.1 Optimization Plan for imp (Historical)
+
+> **Note:** This was an early planning document. The actual implementation took a different path — NVFP4 decode weight cache, FP8 prefill weight cache, CUTLASS Hopper FMHA, and fused activation+GEMV+residual kernels delivered larger gains than the phases outlined here. See [AUDIT.md](../AUDIT.md) for the implemented optimizations (P2-P29).
 
 ## Context
 

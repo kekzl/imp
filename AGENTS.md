@@ -18,7 +18,7 @@ imp was built entirely by [Claude Code](https://claude.ai/claude-code) (Claude O
 
 6. **MoE and hybrid architectures.** Mixture-of-Experts (Mixtral, DeepSeek, Qwen3-MoE) and hybrid Mamba2+Attention+MoE (Nemotron) were added iteratively. Custom fused MoE kernels with shared-memory expert caching outperform llama.cpp by 12-134% on these architectures.
 
-7. **Testing throughout.** 226 Google Tests cover tensor ops, GGUF parsing, KV cache, attention kernels, RoPE, LayerNorm, MoE routing, quantization, and end-to-end generation. Tests were written alongside the code, not after.
+7. **Testing throughout.** 289 Google Tests cover tensor ops, GGUF parsing, KV cache, attention kernels, RoPE, LayerNorm, MoE routing, quantization, and end-to-end generation. Tests were written alongside the code, not after.
 
 ### Hard-Won Lessons
 
@@ -41,7 +41,7 @@ This project welcomes contributions from AI coding agents. If you're an AI agent
 2. **Build and test before committing.** Every change must:
    ```bash
    cmake --build build -j$(nproc)   # Clean compile, zero warnings
-   ./build/imp-tests                  # 226/226 tests pass
+   ./build/imp-tests                  # 289/289 tests pass
    ```
    If you add new functionality, add tests for it in `tests/`.
 
@@ -74,13 +74,11 @@ This project welcomes contributions from AI coding agents. If you're an AI agent
 
 | Area | Difficulty | Impact | Notes |
 |------|-----------|--------|-------|
-| NVFP4 quantized GEMV | Hard | High | RTX 5090 has native FP4 — could significantly improve decode throughput |
-| Batched decode (bs>1) | Medium | High | Current optimizations target bs=1; multi-request batching needs work |
+| JSON Schema / GBNF grammar | Medium | High | JSON mode (syntax-level) exists; schema validation and GBNF grammars would extend structured output |
 | More model architectures | Medium | Medium | Phi-3, Command-R, Falcon — mostly weight mapping + config parsing |
 | Multi-image / Pan-and-Scan vision | Medium | Medium | Single-image Gemma-3 SigLIP implemented; multi-image and variable resolution would extend coverage |
-| FP8 KV cache quantization | Medium | Medium | Infrastructure exists but needs end-to-end integration |
-| Prefill chunking | Medium | Medium | `prefill_chunk_size` config exists but implementation is incomplete |
-| Additional quantization formats | Medium | Low | IQ4_XS, Q3_K, Q2_K from GGML |
+| Batched decode (bs>1) | Medium | Medium | Current optimizations target bs=1; multi-request batching needs work |
+| Additional quantization formats | Medium | Low | IQ4_XS from GGML |
 
 ### Architecture Overview for Agents
 
@@ -104,7 +102,7 @@ Engine::step()  ◄── called in loop until request complete
     │       │   ├─ QKV projection (fused GEMV for decode, cuBLAS for prefill)
     │       │   ├─ RoPE
     │       │   ├─ KV cache write
-    │       │   ├─ Attention (Blackwell TCGEN05 / Hopper WMMA / scalar)
+    │       │   ├─ Attention (CUTLASS FMHA (pf) / Blackwell WMMA / Hopper WMMA / scalar)
     │       │   ├─ O-projection + residual
     │       │   ├─ RMSNorm
     │       │   └─ FFN (SwiGLU or MoE)

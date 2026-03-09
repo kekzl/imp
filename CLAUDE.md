@@ -144,18 +144,27 @@ Tests require an NVIDIA GPU with the appropriate compute capability. Test files 
 |---|---|
 | `test_tensor.cpp` | Tensor construction, strides, reshape, slicing |
 | `test_gguf_loader.cpp` | GGUF model file parsing |
+| `test_tokenizer.cpp` | Tokenizer encode/decode |
 | `test_kv_cache.cpp` | KV cache block allocation, ref counting, LRU |
 | `test_attention.cu` | Flash attention prefill kernels |
 | `test_attention_tc.cu` | Tensor-core attention (Hopper WMMA) |
+| `test_paged_attention.cu` | Paged attention decode (split-K, FP8, INT8) |
 | `test_rope.cu` | Rotary positional embeddings |
 | `test_layernorm.cu` | RMSNorm kernels |
+| `test_activation.cu` | SwiGLU, GeGLU activation kernels |
+| `test_embedding.cu` | Token embedding lookup |
+| `test_gemm.cu` | GEMM/GEMV correctness |
 | `test_moe.cu` | Mixture-of-Experts routing |
 | `test_moe_executor.cu` | MoE end-to-end execution |
 | `test_quant.cu` | Quantization kernels |
 | `test_quant_integration.cu` | Quantized inference pipeline |
 | `test_fp8_gemm.cu` | FP8 GEMM correctness |
+| `test_fp8_kv_cache.cu` | FP8 E4M3 KV cache read/write |
 | `test_nvfp4_quant.cu` | NVFP4 quantization |
+| `test_sampling.cu` | Sampling kernels (argmax, top-k/p) |
+| `test_reduce.cu` | Reduction kernels |
 | `test_green_ctx.cu` | CUDA Green Context SM partitioning |
+| `test_chat_template.cpp` | Chat template rendering |
 | `test_e2e.cpp` | End-to-end generation pipeline |
 | `test_continuous_batching.cpp` | Continuous batching scheduler |
 | `test_speculative.cpp` | Speculative decoding (draft + verify) |
