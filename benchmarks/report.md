@@ -1,4 +1,6 @@
-# imp vs llama.cpp Benchmark Report
+# imp vs llama.cpp Benchmark Report (Historical)
+
+> **Note:** This report predates NVFP4 decode cache, FP8 prefill cache, CUTLASS FMHA, and decode kernel fusion optimizations. See the performance table in [README.md](../README.md) for current numbers.
 
 **Date:** 2026-03-01 20:23 UTC
 **GPU:** NVIDIA GeForce RTX 5090 (32607 MiB)

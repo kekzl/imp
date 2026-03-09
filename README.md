@@ -60,11 +60,37 @@ Same models, same machine, same quantizations — measured back-to-back.
 - **KV cache:** paged blocks (size 16), LRU eviction, prefix caching, FP16/FP8/INT8
 - **Decode:** CUDA Graphs, PDL, fused RMSNorm+Q8_1, fused QKV GEMV (dp4a), NVFP4 decode cache, multi-block argmax
 - **Prefill:** CUTLASS FMHA, CUTLASS NVFP4 GEMM (sm_120), FP16/FP8 weight cache, batched K/V GEMM, fused O-proj+residual
-- **Sampling:** temperature, top-p, top-k, min-p, typical-p, repetition/frequency/presence penalties, DRY, Mirostat v2
+- **Sampling:** temperature, top-p, top-k, min-p, typical-p, repetition/frequency/presence penalties (windowed via `repeat_last_n`), DRY, Mirostat v2
 - **Runtime:** continuous batching, speculative decoding, Green Context SM partitioning
 - **API:** C library, OpenAI-compatible HTTP server (SSE streaming, tool calling)
 
 > **Note:** imp currently only runs reliably with the models it has been tested on: Qwen3-4B, DeepSeek-R1-7B, DeepSeek-R1-14B, Qwen3-Coder-30B-A3B, Phi-4-Mini, Gemma-3-12B (text + vision), and Nemotron-3-Nano-30B-A3B. Other models sharing the same architectures may work but are untested.
+
+## Quickstart (Docker)
+
+The fastest way to run imp — no local CUDA toolkit needed.
+
+```bash
+# Build the server image
+docker compose build imp-server
+
+# Run with a GGUF model
+docker run --gpus all -v ./models:/models -p 8080:8080 \
+  imp-server --model /models/Qwen3-8B-Q8_0.gguf --port 8080
+
+# Chat
+curl -s http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages":[{"role":"user","content":"Hello!"}],"max_tokens":64}'
+```
+
+Works with the OpenAI Python SDK, any OpenAI-compatible client, or the CLI:
+
+```bash
+# Build and run CLI directly
+docker run --gpus all -v ./models:/models imp-server \
+  imp-cli --model /models/Qwen3-8B-Q8_0.gguf --interactive
+```
 
 ## Requirements
 
@@ -138,6 +164,7 @@ Sampling:
   --min-p <f>               (default: 0.0, disabled)
   --typical-p <f>           (default: 1.0, disabled)
   --repeat-penalty <f>      (default: 1.0, disabled)
+  --repeat-last-n <n>       Penalty window (default: 0, all tokens)
   --frequency-penalty <f>   (default: 0.0)
   --presence-penalty <f>    (default: 0.0)
   --seed <n>                -1 for random (default: -1)
@@ -248,7 +275,7 @@ imp/
 │   ├── imp-cli/          CLI (interactive + single-prompt + benchmark)
 │   ├── imp-server/       OpenAI-compatible HTTP server
 │   └── imp-bench/        Standalone benchmarks
-├── tests/                Google Test suite (22 files, 226 tests)
+├── tests/                Google Test suite (26 files, 289 tests)
 └── third_party/stb/      stb_image (image loading for vision)
 ```
 
