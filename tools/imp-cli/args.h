@@ -22,6 +22,7 @@ struct CliArgs {
     float repetition_penalty = 1.0f;
     float frequency_penalty = 0.0f;
     float presence_penalty = 0.0f;
+    int repeat_last_n = 0;          // Penalty window (0 = all tokens)
     float dry_multiplier = 0.0f;   // DRY penalty (0=disabled)
     float dry_base = 1.75f;        // DRY exponential base
     int dry_allowed_length = 2;    // N-grams ≤ this not penalized

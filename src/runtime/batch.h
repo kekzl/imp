@@ -61,6 +61,7 @@ public:
 
     bool is_allocated() const { return pool_ != nullptr; }
     int max_blocks_per_seq() const { return max_blocks_per_seq_; }
+    void reset_upload_cache() { last_upload_n_blocks_ = -1; last_upload_first_block_ = -1; }
 
     // Pre-allocated single int32 result buffer for sampling kernels
     int32_t* d_sample_result() const { return d_sample_result_; }
@@ -80,8 +81,12 @@ private:
     int max_batch_size_ = 0;
     int max_blocks_per_seq_ = 0;
 
-    // Track block_table changes for single-seq decode: skip re-upload when unchanged
+    // Track block_table changes for single-seq decode: skip re-upload when unchanged.
+    // We track both block count and first block ID — the count only changes when a new
+    // KV block is allocated, and the first block ID changes between requests (different
+    // physical pages), preventing cross-request stale reads.
     int last_upload_n_blocks_ = -1;
+    int last_upload_first_block_ = -1;
 };
 
 class BatchBuilder {

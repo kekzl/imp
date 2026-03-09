@@ -535,6 +535,50 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         decode_done_.create(cudaEventDisableTiming);
     }
 
+    // Warmup: run one prefill+decode step to prime cuBLAS algorithm selection,
+    // NVFP4 kernels, and attention dispatch.  Without this, the first real
+    // request on some models (Qwen3) produces incorrect output due to
+    // non-deterministic kernel state on first invocation.
+    {
+        Tokenizer* tok = model_->tokenizer();
+        int32_t warmup_id = tok ? tok->bos_id() : 1;
+        if (warmup_id < 0) warmup_id = 1;
+
+        // Use a multi-token prompt to prime both prefill GEMM shapes and decode
+        // GEMV paths.  Single-token warmup only primes decode; the first prefill
+        // with a real prompt would still trigger cuBLAS autotuning.
+        auto req = std::make_shared<Request>();
+        req->id = next_request_id_++;
+        req->input_tokens.resize(16, warmup_id);
+        req->max_tokens = 4;
+        req->temperature = 0.0f;
+        req->ignore_eos = true;
+        scheduler_->add_request(req);
+
+        // Run prefill + decode steps to prime all kernel paths
+        for (int i = 0; i < 8 && req->status != RequestStatus::FINISHED; i++) {
+            step();
+        }
+
+        // Clean up warmup state
+        kv_manager_->free_sequence(req->id);
+        req->status = RequestStatus::CANCELLED;
+        decode_graph_runner_.invalidate();
+        decode_batch_pool_.reset_upload_cache();
+        if (async_graph_runner_.is_setup()) {
+            async_graph_runner_.cleanup();
+        }
+        if (async_d_block_tables_) {
+            cudaFree(async_d_block_tables_);
+            async_d_block_tables_ = nullptr;
+        }
+        async_graph_req_ = nullptr;
+        async_pending_tokens_.clear();
+        async_pending_cursor_ = 0;
+        cudaStreamSynchronize(stream_);
+        IMP_LOG_INFO("Warmup complete");
+    }
+
     return true;
 }
 
@@ -867,6 +911,7 @@ bool Engine::step() {
         state.repetition_penalty = req->repetition_penalty;
         state.frequency_penalty = req->frequency_penalty;
         state.presence_penalty = req->presence_penalty;
+        state.repeat_last_n = req->repeat_last_n;
         state.dry_multiplier = req->dry_multiplier;
         state.dry_base = req->dry_base;
         state.dry_allowed_length = req->dry_allowed_length;
@@ -1169,6 +1214,7 @@ bool Engine::step() {
             state.repetition_penalty = valid_decode[0]->repetition_penalty;
             state.frequency_penalty = valid_decode[0]->frequency_penalty;
             state.presence_penalty = valid_decode[0]->presence_penalty;
+            state.repeat_last_n = valid_decode[0]->repeat_last_n;
             state.dry_multiplier = valid_decode[0]->dry_multiplier;
             state.dry_base = valid_decode[0]->dry_base;
             state.dry_allowed_length = valid_decode[0]->dry_allowed_length;
@@ -1254,6 +1300,16 @@ bool Engine::step() {
                     per_state.min_p = req->min_p;
                     per_state.typical_p = req->typical_p;
                     per_state.seed = req->seed;
+                    per_state.repetition_penalty = req->repetition_penalty;
+                    per_state.frequency_penalty = req->frequency_penalty;
+                    per_state.presence_penalty = req->presence_penalty;
+                    per_state.repeat_last_n = req->repeat_last_n;
+                    per_state.dry_multiplier = req->dry_multiplier;
+                    per_state.dry_base = req->dry_base;
+                    per_state.dry_allowed_length = req->dry_allowed_length;
+                    per_state.dry_penalty_last_n = req->dry_penalty_last_n;
+                    if (req->dry_multiplier > 0.0f && !req->output_tokens.empty())
+                        per_state.host_penalty_tokens = req->output_tokens.data();
                     per_state.mirostat = req->mirostat;
                     per_state.mirostat_tau = req->mirostat_tau;
                     per_state.mirostat_eta = req->mirostat_eta;
@@ -1287,12 +1343,19 @@ bool Engine::step() {
                 // Check if we can include greedy sampling in the graph.
                 // This captures argmax + D2H memcpy inside the graph, eliminating
                 // separate kernel launch + sync overhead per step.
-                // Disable when logprobs or json_mode are active.
+                // Disable when logprobs, json_mode, or penalties are active
+                // (penalties modify logits each step with changing token history).
+                bool has_penalties = (state.penalty_tokens != nullptr &&
+                                     state.n_penalty_tokens > 0 &&
+                                     (state.repetition_penalty != 1.0f ||
+                                      state.frequency_penalty != 0.0f ||
+                                      state.presence_penalty != 0.0f));
                 bool greedy_single = (state.temperature <= 0.0f || state.top_k == 1) &&
                                      gpu_batch.n_sequences == 1 &&
                                      h_sample_pinned_ != nullptr &&
                                      executor_->d_sample_result() != nullptr &&
-                                     !needs_logprobs && !needs_json_mode;
+                                     !needs_logprobs && !needs_json_mode &&
+                                     !has_penalties;
 
                 // Invalidate graph if sampling mode changed
                 if (greedy_single != graph_includes_sampling_) {
@@ -1428,8 +1491,12 @@ bool Engine::step() {
                 config_.use_cuda_graphs && !async_graph_runner_.is_setup() &&
                 !needs_logprobs && !needs_json_mode) {
                 auto& dreq = valid_decode[0];
+                bool dreq_has_penalties = (dreq->repetition_penalty != 1.0f ||
+                                           dreq->frequency_penalty != 0.0f ||
+                                           dreq->presence_penalty != 0.0f);
                 if (dreq->status == RequestStatus::DECODING &&
-                    !dreq->output_tokens.empty() && !dreq->ignore_eos) {
+                    !dreq->output_tokens.empty() && !dreq->ignore_eos &&
+                    !dreq_has_penalties) {
                     int32_t last_token = dreq->output_tokens.back();
                     try_launch_async_graph_loop(dreq, last_token, dec_stream);
                 }
@@ -1514,9 +1581,12 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     }
 
     // ---- Step 2: Decode — try conditional graph loop, fall back to step() ----
+    bool req_has_penalties = (req->repetition_penalty != 1.0f ||
+                              req->frequency_penalty != 0.0f ||
+                              req->presence_penalty != 0.0f);
     if (req->status == RequestStatus::DECODING && !req->output_tokens.empty() &&
         config_.use_cuda_graphs && !offload_mgr_ && !ssm_state_ &&
-        !config_.enable_speculative && !req->ignore_eos) {
+        !config_.enable_speculative && !req->ignore_eos && !req_has_penalties) {
         int32_t first_token = req->output_tokens.back();
         Tokenizer* gtok = model_->tokenizer();
         auto graph_tokens = try_graph_loop_decode(req, first_token, decode_stream());

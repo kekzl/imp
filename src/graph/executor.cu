@@ -44,8 +44,15 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
     int vocab_size = static_cast<int>(last_logits.shape[0]);
 
     if (state.penalty_tokens != nullptr && state.n_penalty_tokens > 0) {
+        // Apply repeat_last_n window: only scan the last N tokens
+        const int32_t* pen_ptr = state.penalty_tokens;
+        int pen_n = state.n_penalty_tokens;
+        if (state.repeat_last_n > 0 && pen_n > state.repeat_last_n) {
+            pen_ptr += (pen_n - state.repeat_last_n);
+            pen_n = state.repeat_last_n;
+        }
         apply_penalties(logits_ptr, vocab_size,
-                        state.penalty_tokens, state.n_penalty_tokens,
+                        pen_ptr, pen_n,
                         state.repetition_penalty,
                         state.frequency_penalty,
                         state.presence_penalty, stream);
@@ -119,9 +126,47 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits,
         return t.reshape(1, vocab_shape);
     };
 
+    // Helper: apply penalties + filters to logits before sampling
+    auto apply_pre_sample = [&](Tensor& seq_logits, const InferenceState& st) {
+        float* lp = static_cast<float*>(seq_logits.data);
+        int vocab = static_cast<int>(seq_logits.shape[0]);
+
+        if (st.penalty_tokens != nullptr && st.n_penalty_tokens > 0) {
+            const int32_t* pen_ptr = st.penalty_tokens;
+            int pen_n = st.n_penalty_tokens;
+            if (st.repeat_last_n > 0 && pen_n > st.repeat_last_n) {
+                pen_ptr += (pen_n - st.repeat_last_n);
+                pen_n = st.repeat_last_n;
+            }
+            apply_penalties(lp, vocab,
+                            pen_ptr, pen_n,
+                            st.repetition_penalty,
+                            st.frequency_penalty,
+                            st.presence_penalty, stream);
+        }
+        if (st.dry_multiplier > 0.0f && st.host_penalty_tokens != nullptr &&
+            st.n_penalty_tokens > 0) {
+            apply_dry_penalty(lp, vocab,
+                              st.host_penalty_tokens, st.n_penalty_tokens,
+                              st.dry_multiplier, st.dry_base,
+                              st.dry_allowed_length, st.dry_penalty_last_n,
+                              stream);
+        }
+        if (st.json_constrainer) {
+            st.json_constrainer->apply_mask(lp, vocab, stream);
+        }
+        if (st.min_p > 0.0f) {
+            apply_min_p(lp, vocab, st.min_p, stream);
+        }
+        if (st.typical_p > 0.0f && st.typical_p < 1.0f) {
+            apply_typical_p(lp, vocab, st.typical_p, stream);
+        }
+    };
+
     if (state.is_prefill || n_seq <= 1) {
         // Single sequence or prefill: logits is [1, V] (forward_logits already sliced)
         Tensor last_logits = flatten_logits(logits.slice(0, 1));
+        apply_pre_sample(last_logits, state);
 
         if (state.mirostat == 2) {
             unsigned int seed = state.seed >= 0
@@ -155,6 +200,7 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits,
         // Batched decode: n_tokens == n_sequences, each row is one sequence's logits
         for (int i = 0; i < n_seq; i++) {
             Tensor seq_logits = flatten_logits(logits.slice(i, i + 1));
+            apply_pre_sample(seq_logits, state);
             tokens[i] = (state.temperature <= 0.0f || state.top_k == 1)
                 ? (d_sample_result_ ? sample_greedy(seq_logits, d_sample_result_, stream)
                                     : sample_greedy(seq_logits, stream))

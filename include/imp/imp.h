@@ -69,6 +69,7 @@ typedef struct {
     float repetition_penalty;      // >1 penalizes repeats (1.0 = disabled)
     float frequency_penalty;       // subtractive per-occurrence (0 = disabled)
     float presence_penalty;        // subtractive binary (0 = disabled)
+    int repeat_last_n;             // penalty window: scan last N tokens (0 = all)
     float dry_multiplier;          // DRY penalty scale (0 = disabled)
     float dry_base;                // DRY exponential base (default 1.75)
     int dry_allowed_length;        // N-gram lengths ≤ this not penalized (default 2)

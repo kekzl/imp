@@ -268,6 +268,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     float repetition_penalty = body.value("repetition_penalty", 1.0f);
     float frequency_penalty = body.value("frequency_penalty", 0.0f);
     float presence_penalty = body.value("presence_penalty", 0.0f);
+    int repeat_last_n = body.value("repeat_last_n", 0);
     float dry_multiplier = body.value("dry_multiplier", 0.0f);
     float dry_base = body.value("dry_base", 1.75f);
     int dry_allowed_length = body.value("dry_allowed_length", 2);
@@ -275,14 +276,6 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     int mirostat = body.value("mirostat", 0);
     float mirostat_tau = body.value("mirostat_tau", 5.0f);
     float mirostat_eta = body.value("mirostat_eta", 0.1f);
-
-    // Prevent repetition degeneration when no penalty is explicitly set.
-    // Reasoning models (DeepSeek-R1 distills) are prone to infinite loops
-    // in their thinking phase without this.
-    if (!body.contains("repetition_penalty") && !body.contains("frequency_penalty")
-        && !body.contains("presence_penalty")) {
-        frequency_penalty = 0.3f;
-    }
 
     // Parse stop sequences (string or array of up to 4 strings)
     std::vector<std::string> stop_sequences;
@@ -525,6 +518,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     params.repetition_penalty = repetition_penalty;
     params.frequency_penalty = frequency_penalty;
     params.presence_penalty = presence_penalty;
+    params.repeat_last_n = repeat_last_n;
     params.dry_multiplier = dry_multiplier;
     params.dry_base = dry_base;
     params.dry_allowed_length = dry_allowed_length;
@@ -1379,6 +1373,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
     float repetition_penalty = body.value("repetition_penalty", 1.0f);
     float frequency_penalty = body.value("frequency_penalty", 0.0f);
     float presence_penalty = body.value("presence_penalty", 0.0f);
+    int repeat_last_n = body.value("repeat_last_n", 0);
     float dry_multiplier = body.value("dry_multiplier", 0.0f);
     float dry_base = body.value("dry_base", 1.75f);
     int dry_allowed_length = body.value("dry_allowed_length", 2);
@@ -1386,11 +1381,6 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
     int mirostat = body.value("mirostat", 0);
     float mirostat_tau = body.value("mirostat_tau", 5.0f);
     float mirostat_eta = body.value("mirostat_eta", 0.1f);
-
-    if (!body.contains("repetition_penalty") && !body.contains("frequency_penalty")
-        && !body.contains("presence_penalty")) {
-        frequency_penalty = 0.3f;
-    }
 
     bool req_logprobs = body.value("logprobs", false);
     int top_logprobs = body.value("top_logprobs", 0);
@@ -1512,6 +1502,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
     params.repetition_penalty = repetition_penalty;
     params.frequency_penalty = frequency_penalty;
     params.presence_penalty = presence_penalty;
+    params.repeat_last_n = repeat_last_n;
     params.dry_multiplier = dry_multiplier;
     params.dry_base = dry_base;
     params.dry_allowed_length = dry_allowed_length;

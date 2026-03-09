@@ -51,6 +51,7 @@ struct InferenceState {
     float repetition_penalty = 1.0f;
     float frequency_penalty = 0.0f;
     float presence_penalty = 0.0f;
+    int repeat_last_n = 0;               // How many recent tokens to scan (0 = all)
 
     // DRY (Don't Repeat Yourself) penalty
     float dry_multiplier = 0.0f;     // 0 = disabled

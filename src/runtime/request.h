@@ -46,6 +46,7 @@ struct Request {
     float repetition_penalty = 1.0f;   // >1 penalizes repeats (multiplicative)
     float frequency_penalty = 0.0f;    // Subtractive per-occurrence
     float presence_penalty = 0.0f;     // Subtractive binary (appeared or not)
+    int repeat_last_n = 0;            // How many recent tokens to scan for penalties (0 = all)
     float dry_multiplier = 0.0f;      // DRY penalty scale (0 = disabled)
     float dry_base = 1.75f;           // DRY exponential base
     int dry_allowed_length = 2;       // N-grams at or below this not penalized

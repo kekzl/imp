@@ -92,6 +92,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.frequency_penalty = static_cast<float>(std::atof(argv[++i]));
         } else if (std::strcmp(arg, "--presence-penalty") == 0 && i + 1 < argc) {
             args.presence_penalty = static_cast<float>(std::atof(argv[++i]));
+        } else if (std::strcmp(arg, "--repeat-last-n") == 0 && i + 1 < argc) {
+            args.repeat_last_n = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--dry-multiplier") == 0 && i + 1 < argc) {
             args.dry_multiplier = static_cast<float>(std::atof(argv[++i]));
         } else if (std::strcmp(arg, "--dry-base") == 0 && i + 1 < argc) {
