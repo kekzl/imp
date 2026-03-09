@@ -109,6 +109,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_dp4a.cu
     src/compute/gemm_grouped.cu
     src/compute/gemm_moe_fused.cu
+    src/compute/gemm_moe_fused_tc.cu
     src/compute/gemm_q6k.cu
     src/compute/attention.cu
     src/compute/attention_paged.cu

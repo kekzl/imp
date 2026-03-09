@@ -116,6 +116,7 @@ int main(int argc, char** argv) {
     params.repetition_penalty = args.repetition_penalty;
     params.frequency_penalty = args.frequency_penalty;
     params.presence_penalty = args.presence_penalty;
+    params.repeat_last_n = args.repeat_last_n;
     params.dry_multiplier = args.dry_multiplier;
     params.dry_base = args.dry_base;
     params.dry_allowed_length = args.dry_allowed_length;
@@ -209,11 +210,6 @@ int main(int argc, char** argv) {
         if (!args.max_tokens_set) {
             params.max_tokens = 16384;
         }
-        // Prevent repetition degeneration with long output budgets
-        if (params.repetition_penalty <= 1.0f && params.frequency_penalty == 0.0f) {
-            params.frequency_penalty = 0.3f;
-        }
-
         // Multi-turn interactive mode using token-level API with chat template
         imp::Tokenizer* tok = model->model->tokenizer();
         const imp::ChatTemplate& engine_tpl = ctx->engine->chat_template();

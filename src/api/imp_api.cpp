@@ -78,6 +78,7 @@ ImpGenerateParams imp_generate_params_default(void) {
     params.repetition_penalty = 1.0f;
     params.frequency_penalty = 0.0f;
     params.presence_penalty = 0.0f;
+    params.repeat_last_n = 0;
     params.dry_multiplier = 0.0f;
     params.dry_base = 1.75f;
     params.dry_allowed_length = 2;
@@ -328,6 +329,7 @@ ImpError imp_generate_streaming(ImpContext ctx, const char* prompt,
         req->repetition_penalty = params->repetition_penalty;
         req->frequency_penalty = params->frequency_penalty;
         req->presence_penalty = params->presence_penalty;
+        req->repeat_last_n = params->repeat_last_n;
         req->dry_multiplier = params->dry_multiplier;
         req->dry_base = params->dry_base;
         req->dry_allowed_length = params->dry_allowed_length;
@@ -428,6 +430,7 @@ ImpError imp_generate(ImpContext ctx, const char* prompt,
         req->repetition_penalty = params->repetition_penalty;
         req->frequency_penalty = params->frequency_penalty;
         req->presence_penalty = params->presence_penalty;
+        req->repeat_last_n = params->repeat_last_n;
         req->dry_multiplier = params->dry_multiplier;
         req->dry_base = params->dry_base;
         req->dry_allowed_length = params->dry_allowed_length;
@@ -647,6 +650,7 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params,
         req->repetition_penalty = params->repetition_penalty;
         req->frequency_penalty = params->frequency_penalty;
         req->presence_penalty = params->presence_penalty;
+        req->repeat_last_n = params->repeat_last_n;
         req->dry_multiplier = params->dry_multiplier;
         req->dry_base = params->dry_base;
         req->dry_allowed_length = params->dry_allowed_length;

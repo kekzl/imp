@@ -6,6 +6,7 @@
 #include "compute/gemm.h"
 #include "compute/gemm_grouped.h"
 #include "compute/gemm_moe_fused.h"
+#include "compute/gemm_moe_fused_tc.h"
 #include "compute/gemm_q6k.h"
 #ifdef IMP_USE_CUTLASS
 #include "compute/gemm_cutlass.h"
@@ -1518,18 +1519,13 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     }
 
     // =========================================================================
-    // FUSED Q6_K PREFILL PATH: reads Q6_K weights directly, multiplies with
-    // FP16 activations. Only processes active experts (not all n_experts).
-    // Preferred for high expert counts (>16) where dequanting ALL experts to
-    // FP8 wastes bandwidth on inactive experts. ~5x less DRAM vs dequant-all.
+    // FUSED Q6_K PREFILL PATH: reads Q6_K weights directly, eliminates the
+    // intermediate FP16/FP8 dequant buffer. Two variants:
+    //   TC (tensor core): WMMA 16×16×16, preferred for large batches
+    //   Scalar: disabled (FP16 batch path always wins for small batches)
     // =========================================================================
     {
-    // Fused Q6_K kernel reads weights directly (no dequant step) but uses scalar
-    // FP32 math (~14 TFLOP/s). For large prefills, the FP8/FP16 tensor-core batch
-    // paths are faster despite dequanting ALL experts, because tensor cores provide
-    // ~30x higher throughput. Crossover: ~1400 expanded tokens (model-dependent).
     bool can_fused_q6k = (ne > 16 &&
-                          expanded <= ne * 12 &&
                           ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
                           ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
                           up_qtype == GGMLQuantType::Q6_K &&
@@ -1540,8 +1536,17 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                          ly.expert_gate_packed.on_device &&
                          ly.expert_gate_qtype == GGMLQuantType::Q6_K);
 
-    if (can_fused_q6k) {
-        if (layer == 0) IMP_LOG_INFO("MoE prefill: fused Q6_K path (n=%d, expanded=%d)", n, expanded);
+    // TC variant: at expanded > ne*24 (~3072), avg M per expert ≈ 24 → WMMA
+    // tile waste is small enough that fused TC beats dequant+cuBLAS.
+    // Scalar fused: for small batches (expanded <= ne*12), scalar FP32 math
+    // beats FP16 batch dequant+cuBLAS since it avoids dequanting ALL experts.
+    bool use_tc = can_fused_q6k && (expanded > ne * 24);
+    bool use_scalar = can_fused_q6k && !use_tc && (expanded <= ne * 12);
+
+    if (use_tc || use_scalar) {
+        auto fused_fn = use_tc ? gemm_q6k_fused_moe_prefill_tc : gemm_q6k_fused_moe_prefill;
+        if (layer == 0) IMP_LOG_INFO("MoE prefill: fused Q6_K %s path (n=%d, expanded=%d)",
+                                      use_tc ? "TC" : "scalar", n, expanded);
         const int32_t* d_offsets = static_cast<const int32_t*>(routing.expert_offsets.data);
         char* gathered_base     = static_cast<char*>(moe_gathered_.data);
         char* expert_gate_base  = static_cast<char*>(moe_expert_gate_.data);
@@ -1557,18 +1562,18 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
         // Gate projection (gated models only)
         if (!non_gated_experts)
-            gemm_q6k_fused_moe_prefill(ly.expert_gate_packed.data,
-                                        gathered_base, expert_gate_base, d_offsets,
-                                        eff, d,
-                                        expert_stride_fn(ly.expert_gate_packed, ly.expert_gate_qtype),
-                                        ne, stream);
+            fused_fn(ly.expert_gate_packed.data,
+                     gathered_base, expert_gate_base, d_offsets,
+                     eff, d,
+                     expert_stride_fn(ly.expert_gate_packed, ly.expert_gate_qtype),
+                     ne, stream);
 
         // Up projection
-        gemm_q6k_fused_moe_prefill(ly.expert_up_packed.data,
-                                    gathered_base, expert_up_base, d_offsets,
-                                    eff, d,
-                                    expert_stride_fn(ly.expert_up_packed, up_qtype),
-                                    ne, stream);
+        fused_fn(ly.expert_up_packed.data,
+                 gathered_base, expert_up_base, d_offsets,
+                 eff, d,
+                 expert_stride_fn(ly.expert_up_packed, up_qtype),
+                 ne, stream);
 
         // Activation (FP16)
         {
@@ -1586,11 +1591,11 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
         // Down projection
         char* fused_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
-        gemm_q6k_fused_moe_prefill(ly.expert_down_packed.data,
-                                    fused_down_act, expert_down_base, d_offsets,
-                                    d, eff,
-                                    expert_stride_fn(ly.expert_down_packed, ly.expert_down_qtype),
-                                    ne, stream);
+        fused_fn(ly.expert_down_packed.data,
+                 fused_down_act, expert_down_base, d_offsets,
+                 d, eff,
+                 expert_stride_fn(ly.expert_down_packed, ly.expert_down_qtype),
+                 ne, stream);
 
         // Falls through to scatter (step 7)
     } else {
