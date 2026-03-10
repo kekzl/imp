@@ -232,17 +232,7 @@ float lcg_rand_float(unsigned int& state) {
     return static_cast<float>(lcg_rand(state)) / 4294967296.0f;
 }
 
-// Kernel 1: Apply temperature in-place.  logits[i] /= temperature.
-__global__ void apply_temperature_kernel(float* __restrict__ logits,
-                                         int vocab_size,
-                                         float inv_temperature) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < vocab_size) {
-        logits[idx] *= inv_temperature;
-    }
-}
-
-// Kernel 2: Full top-k + top-p sampling in a single block.
+// Full top-k + top-p sampling in a single block.
 //
 // Strategy (single block, BLOCK_SIZE threads):
 //   1. Find global max for numerical stability of softmax.
@@ -265,6 +255,7 @@ __global__ void topk_topp_sample_kernel(
         int vocab_size,
         int top_k,
         float top_p,
+        float inv_temperature,
         unsigned int seed,
         int32_t* __restrict__ d_result) {
 
@@ -313,10 +304,11 @@ __global__ void topk_topp_sample_kernel(
     __syncthreads();
     float gmax = s_global_max[0];
 
-    // ---- Step 2: Compute exp(logits[i] - gmax) and partial sum ----
+    // ---- Step 2: Compute exp((logits[i] - gmax) * inv_temperature) and partial sum ----
+    // Temperature is folded into the softmax: softmax(logits/T) = softmax((logits-max)/T)
     float local_sum = 0.0f;
     for (int i = tid; i < vocab_size; i += blockDim.x) {
-        float e = expf(logits[i] - gmax);
+        float e = expf((logits[i] - gmax) * inv_temperature);
         local_sum += e;
     }
     // Warp reduction for sum
@@ -350,7 +342,7 @@ __global__ void topk_topp_sample_kernel(
     int   local_min_pos = 0;
 
     for (int i = tid; i < vocab_size; i += blockDim.x) {
-        float prob = expf(logits[i] - gmax) * inv_sum;
+        float prob = expf((logits[i] - gmax) * inv_temperature) * inv_sum;
         if (local_count < local_k) {
             local_vals[local_count] = prob;
             local_idxs[local_count] = i;
@@ -568,7 +560,7 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
                          float temperature, unsigned int seed,
                          cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
-    float* d_logits = static_cast<float*>(logits.data);
+    const float* d_logits = static_cast<const float*>(logits.data);
 
     if (top_k <= 0 || top_k > vocab_size) top_k = vocab_size;
     if (top_k > MAX_TOP_K) {
@@ -577,10 +569,6 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
     }
     if (temperature <= 0.0f) temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
-
-    int grid = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    apply_temperature_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, inv_temperature);
 
     int32_t* d_result = nullptr;
     if (cudaMalloc(&d_result, sizeof(int32_t)) != cudaSuccess) {
@@ -598,11 +586,7 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
                       + NUM_WARPS * top_k * sizeof(int);
 
     topk_topp_sample_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(
-        d_logits, vocab_size, top_k, top_p, seed, d_result);
-
-    float temperature_restore = temperature;
-    apply_temperature_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, temperature_restore);
+        d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result);
 
     int32_t h_result = 0;
     cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
@@ -618,7 +602,7 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
                          int32_t* d_result,
                          cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
-    float* d_logits = static_cast<float*>(logits.data);
+    const float* d_logits = static_cast<const float*>(logits.data);
 
     if (top_k <= 0 || top_k > vocab_size) top_k = vocab_size;
     if (top_k > MAX_TOP_K) {
@@ -627,10 +611,6 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
     }
     if (temperature <= 0.0f) temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
-
-    int grid = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    apply_temperature_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, inv_temperature);
 
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     size_t smem_bytes = static_cast<size_t>(top_k) * sizeof(float)
@@ -642,11 +622,7 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
                       + NUM_WARPS * top_k * sizeof(int);
 
     topk_topp_sample_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(
-        d_logits, vocab_size, top_k, top_p, seed, d_result);
-
-    float temperature_restore = temperature;
-    apply_temperature_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, temperature_restore);
+        d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result);
 
     int32_t h_result = 0;
     cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
@@ -686,7 +662,7 @@ void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p,
                               int32_t* d_result, int32_t* h_mapped,
                               cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
-    float* d_logits = static_cast<float*>(logits.data);
+    const float* d_logits = static_cast<const float*>(logits.data);
 
     if (top_k <= 0 || top_k > vocab_size) top_k = vocab_size;
     if (top_k > MAX_TOP_K) {
@@ -695,10 +671,6 @@ void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p,
     }
     if (temperature <= 0.0f) temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
-
-    int grid = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    apply_temperature_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, inv_temperature);
 
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     size_t smem_bytes = static_cast<size_t>(top_k) * sizeof(float)
@@ -710,11 +682,7 @@ void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p,
                       + NUM_WARPS * top_k * sizeof(int);
 
     topk_topp_sample_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(
-        d_logits, vocab_size, top_k, top_p, seed, d_result);
-
-    float temperature_restore = temperature;
-    apply_temperature_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, temperature_restore);
+        d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result);
 
     // Async copy to mapped pinned memory — no sync needed.
     cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t),
@@ -787,79 +755,56 @@ void apply_penalties(float* logits, int vocab_size,
 // min_p filtering
 // ===========================================================================
 
-// Two-pass approach:
-// Pass 1: find max logit (for softmax stability)
-// Pass 2: set logits where exp(logit - max) < min_p to -inf
-// This works because min_p threshold on probabilities = min_p * max_prob,
-// and max_prob = exp(max_logit - max_logit) / sum = 1/sum, so the threshold
-// in logit space is: logit < max_logit + log(min_p).
-
-__global__ void find_max_logit_kernel(
-        const float* __restrict__ logits,
+// Single-kernel min_p: finds max logit via cooperative reduction, then
+// filters tokens in logit space.  threshold = max_logit + log(min_p).
+// No host sync or temp allocation needed.
+__global__ void apply_min_p_kernel(
+        float* __restrict__ logits,
         int vocab_size,
-        float* __restrict__ d_max) {
-    __shared__ float s_max[BLOCK_SIZE / WARP_SIZE];
+        float log_min_p) {
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    __shared__ float s_max[NUM_WARPS];
+    __shared__ float s_threshold;
+
+    const int tid = threadIdx.x;
+
+    // Pass 1: find max logit (cooperative reduction)
     float local_max = -FLT_MAX;
-    for (int i = threadIdx.x; i < vocab_size; i += blockDim.x) {
+    for (int i = tid; i < vocab_size; i += blockDim.x) {
         float v = logits[i];
         if (v > local_max) local_max = v;
     }
-    // Warp reduction
     for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
         float other = __shfl_xor_sync(0xFFFFFFFF, local_max, offset);
         if (other > local_max) local_max = other;
     }
-    int warp_id = threadIdx.x / WARP_SIZE;
-    int lane_id = threadIdx.x % WARP_SIZE;
+    int warp_id = tid / WARP_SIZE;
+    int lane_id = tid % WARP_SIZE;
     if (lane_id == 0) s_max[warp_id] = local_max;
     __syncthreads();
-    if (threadIdx.x == 0) {
+    if (tid == 0) {
         float mx = -FLT_MAX;
-        for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; w++) {
+        for (int w = 0; w < NUM_WARPS; w++)
             if (s_max[w] > mx) mx = s_max[w];
-        }
-        d_max[0] = mx;
+        s_threshold = mx + log_min_p;
     }
-}
+    __syncthreads();
 
-__global__ void apply_min_p_kernel(
-        float* __restrict__ logits,
-        int vocab_size,
-        float threshold_logit) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= vocab_size) return;
-    if (logits[idx] < threshold_logit)
-        logits[idx] = -FLT_MAX;
+    // Pass 2: filter tokens below threshold
+    float threshold = s_threshold;
+    for (int i = tid; i < vocab_size; i += blockDim.x) {
+        if (logits[i] < threshold)
+            logits[i] = -FLT_MAX;
+    }
 }
 
 void apply_min_p(float* logits, int vocab_size, float min_p,
                  cudaStream_t stream) {
     if (min_p <= 0.0f) return;
 
-    // Allocate temp buffer for max value
-    float* d_max = nullptr;
-    if (cudaMalloc(&d_max, sizeof(float)) != cudaSuccess) {
-        IMP_LOG_ERROR("apply_min_p: cudaMalloc failed");
-        return;
-    }
-
-    find_max_logit_kernel<<<1, BLOCK_SIZE, 0, stream>>>(
-        logits, vocab_size, d_max);
-
-    // Read max back to compute threshold
-    float h_max = 0.0f;
-    cudaMemcpyAsync(&h_max, d_max, sizeof(float),
-                    cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
-    cudaFree(d_max);
-
-    // threshold = max_logit + log(min_p)
-    // Tokens with logit < threshold get -inf
-    float threshold = h_max + logf(min_p);
-
-    int blocks = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    apply_min_p_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
-        logits, vocab_size, threshold);
+    float log_min_p = logf(min_p);
+    apply_min_p_kernel<<<1, BLOCK_SIZE, 0, stream>>>(
+        logits, vocab_size, log_min_p);
 }
 
 // ===========================================================================
@@ -1110,6 +1055,7 @@ __global__ void mirostat_v2_sample_kernel(
         const float* __restrict__ logits,
         int vocab_size,
         float mu,
+        float inv_temperature,
         unsigned int seed,
         int32_t* __restrict__ d_result,
         float* __restrict__ d_surprise) {
@@ -1145,10 +1091,10 @@ __global__ void mirostat_v2_sample_kernel(
     __syncthreads();
     float gmax = s_max;
 
-    // --- Step 2: Compute sum of exp(logit - max) ---
+    // --- Step 2: Compute sum of exp((logit - max) * inv_temperature) ---
     float local_sum = 0.0f;
     for (int i = tid; i < vocab_size; i += blockDim.x)
-        local_sum += expf(logits[i] - gmax);
+        local_sum += expf((logits[i] - gmax) * inv_temperature);
 
     #pragma unroll
     for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
@@ -1164,16 +1110,19 @@ __global__ void mirostat_v2_sample_kernel(
     __syncthreads();
 
     // Mirostat threshold: keep tokens with surprise ≤ mu
-    // surprise_i = -log2(p_i), p_i = exp(l_i - max) / sum_exp
-    // surprise_i ≤ mu  ⟺  l_i ≥ max + log(sum_exp) - mu * ln(2)
-    float log_sum_exp = gmax + logf(s_sum);
-    float threshold = log_sum_exp - mu * 0.6931471805599453f;
+    // With temperature T, p_i = exp((l_i - max)/T) / sum_exp
+    // surprise_i = -log2(p_i) ≤ mu
+    // ⟺ (l_i - max)/T ≥ log(sum_exp) - mu * ln(2)
+    // ⟺ l_i ≥ max + T * (log(sum_exp) - mu * ln(2))
+    float temperature = (inv_temperature > 0.0f) ? (1.0f / inv_temperature) : 1.0f;
+    float log_sum_exp = logf(s_sum);
+    float threshold = gmax + temperature * (log_sum_exp - mu * 0.6931471805599453f);
 
     // --- Step 3: Compute filtered probability sum ---
     float local_fsum = 0.0f;
     for (int i = tid; i < vocab_size; i += blockDim.x) {
         if (logits[i] >= threshold)
-            local_fsum += expf(logits[i] - gmax);
+            local_fsum += expf((logits[i] - gmax) * inv_temperature);
     }
 
     #pragma unroll
@@ -1206,7 +1155,7 @@ __global__ void mirostat_v2_sample_kernel(
 
         for (int i = 0; i < vocab_size; i++) {
             if (!use_threshold || logits[i] >= threshold) {
-                float p = expf(logits[i] - gmax) * inv_fsum;
+                float p = expf((logits[i] - gmax) * inv_temperature) * inv_fsum;
                 acc += p;
                 if (r < acc) {
                     chosen = i;
@@ -1224,8 +1173,8 @@ __global__ void mirostat_v2_sample_kernel(
             }
         }
 
-        // Compute surprise using original (unfiltered) probability
-        float chosen_prob = expf(logits[chosen] - gmax) / s_sum;
+        // Compute surprise using temperature-adjusted probability
+        float chosen_prob = expf((logits[chosen] - gmax) * inv_temperature) / s_sum;
         float surprise = -log2f(fmaxf(chosen_prob, 1e-30f));
 
         d_result[0] = chosen;
@@ -1240,28 +1189,16 @@ static int32_t sample_mirostat_v2_impl(
         cudaStream_t stream) {
 
     const int vocab_size = static_cast<int>(logits.shape[0]);
-    float* d_logits = static_cast<float*>(logits.data);
+    const float* d_logits = static_cast<const float*>(logits.data);
 
-    // Apply temperature
-    if (temperature > 0.0f && temperature != 1.0f) {
-        float inv_temp = 1.0f / temperature;
-        int grid = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        apply_temperature_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
-            d_logits, vocab_size, inv_temp);
-    }
+    if (temperature <= 0.0f) temperature = 1.0f;
+    float inv_temperature = 1.0f / temperature;
 
     // Surprise value stored right after the token result
     float* d_surprise = reinterpret_cast<float*>(d_result + 1);
 
     mirostat_v2_sample_kernel<<<1, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, *mu, seed, d_result, d_surprise);
-
-    // Restore temperature
-    if (temperature > 0.0f && temperature != 1.0f) {
-        int grid = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        apply_temperature_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
-            d_logits, vocab_size, temperature);
-    }
+        d_logits, vocab_size, *mu, inv_temperature, seed, d_result, d_surprise);
 
     // Read results
     int32_t h_result = 0;
