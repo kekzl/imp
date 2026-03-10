@@ -43,7 +43,7 @@ GraphExecutor::~GraphExecutor() {
 
 bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
                          int max_batch_size, int max_seq_len, bool use_fp8_prefill,
-                         int use_nvfp4_decode) {
+                         int use_nvfp4_decode, bool use_mxfp4_prefill) {
     if (initialized_) {
         free_buffers();
     }
@@ -54,6 +54,7 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
     use_pdl_ = use_pdl;
     use_fp8_cache_ = use_fp8_prefill;
     use_nvfp4_decode_ = use_nvfp4_decode;
+    use_mxfp4_prefill_ = use_mxfp4_prefill;
 
     const auto& cfg = model.config();
 
@@ -793,6 +794,29 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                              cutlass_act_data_size_ / (1024.0 * 1024.0),
                              cutlass_act_sf_size_ / (1024.0 * 1024.0),
                              cutlass_workspace_size_ / (1024.0 * 1024.0));
+
+                // MXFP4 activation buffers: shares packed data with NVFP4, only needs
+                // separate UE8M0 scale factors (SFVecSize=32 vs NVFP4's 16).
+                if (cutlass_sm120_mxfp4_available()) {
+                    mxfp4_act_sf_size_ = cutlass_mxfp4_sf_size(max_tokens_, max_k);
+                    mxfp4_workspace_size_ = gemm_mxfp4_cutlass_sm120_workspace(max_tokens_, max_n, max_k);
+                    cudaError_t e1 = cudaMalloc(&mxfp4_act_sf_, mxfp4_act_sf_size_);
+                    cudaError_t e2 = (mxfp4_workspace_size_ > 0)
+                                     ? cudaMalloc(&mxfp4_workspace_, mxfp4_workspace_size_)
+                                     : cudaSuccess;
+                    if (e1 != cudaSuccess || e2 != cudaSuccess) {
+                        IMP_LOG_WARN("Failed to allocate MXFP4 activation buffers, MXFP4 prefill disabled");
+                        if (mxfp4_act_sf_) { cudaFree(mxfp4_act_sf_); mxfp4_act_sf_ = nullptr; }
+                        if (mxfp4_workspace_) { cudaFree(mxfp4_workspace_); mxfp4_workspace_ = nullptr; }
+                        mxfp4_act_sf_size_ = 0;
+                        mxfp4_workspace_size_ = 0;
+                        cudaGetLastError();
+                    } else {
+                        IMP_LOG_INFO("CUTLASS MXFP4 activation scratch: sf=%.2f MiB, ws=%.2f MiB",
+                                     mxfp4_act_sf_size_ / (1024.0 * 1024.0),
+                                     mxfp4_workspace_size_ / (1024.0 * 1024.0));
+                    }
+                }
             }
         }
     }
@@ -871,6 +895,25 @@ void GraphExecutor::free_buffers() {
         cudaFree(cutlass_workspace_);
         cutlass_workspace_ = nullptr;
         cutlass_workspace_size_ = 0;
+    }
+
+    // Free CUTLASS MXFP4 weight cache
+    for (auto& [ptr, mw] : cutlass_mxfp4_cache_) {
+        free_cutlass_mxfp4_weight(mw);
+    }
+    cutlass_mxfp4_cache_.clear();
+    cutlass_mxfp4_cache_bytes_ = 0;
+
+    // Free MXFP4 activation buffers
+    if (mxfp4_act_sf_) {
+        cudaFree(mxfp4_act_sf_);
+        mxfp4_act_sf_ = nullptr;
+        mxfp4_act_sf_size_ = 0;
+    }
+    if (mxfp4_workspace_) {
+        cudaFree(mxfp4_workspace_);
+        mxfp4_workspace_ = nullptr;
+        mxfp4_workspace_size_ = 0;
     }
 
     // Free FP8 weight cache
@@ -1770,6 +1813,32 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
                                    ? (remaining_budget - ct_total - nvfp4_cache_bytes_) : 0;
                 IMP_LOG_INFO("CUTLASS sm_120 NVFP4 weight cache: %d tensors, %.2f MiB",
                              ct_count, ct_total / (1024.0 * 1024.0));
+            }
+
+            // Convert NVFP4 weights to MXFP4 (UE8M0 scales) if MXFP4 prefill is enabled.
+            // Same packed FP4 data (borrowed), only allocates new scale factor buffers.
+            // Note: Hadamard rotation requires MR-GPTQ pre-rotated weights (SafeTensors).
+            // For GGUF models, we use direct scale conversion (no rotation).
+            if (use_mxfp4_prefill_ && mxfp4_act_sf_ != nullptr && cutlass_sm120_mxfp4_available()) {
+                int mx_count = 0;
+                size_t mx_total = 0;
+                for (auto& [ptr, nvfp4] : nvfp4_cache_) {
+                    // Only convert weights where K is multiple of 32 (MXFP4 requirement)
+                    if (nvfp4.K % 32 != 0) continue;
+                    CutlassMxFP4Weight mw;
+                    convert_nvfp4_to_mxfp4_cutlass(nvfp4, mw, stream);
+                    if (mw.data) {
+                        cutlass_mxfp4_cache_[ptr] = mw;
+                        mx_total += mw.sf_bytes;
+                        mx_count++;
+                    }
+                }
+                if (mx_count > 0) {
+                    cudaStreamSynchronize(stream);
+                    cutlass_mxfp4_cache_bytes_ = mx_total;
+                    IMP_LOG_INFO("CUTLASS sm_120 MXFP4 weight cache: %d tensors, %.2f MiB",
+                                 mx_count, mx_total / (1024.0 * 1024.0));
+                }
             }
         }
 

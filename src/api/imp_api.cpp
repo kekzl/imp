@@ -55,6 +55,7 @@ ImpConfig imp_config_default(void) {
     config.prefill_chunk_size = 0;      // no chunking
     config.use_fp8_prefill = 0;         // FP16 weight cache by default
     config.use_nvfp4_decode = -1;       // auto (sm_120→mode2, sm_90→mode1)
+    config.use_mxfp4_prefill = 0;       // off by default
     config.use_prefix_caching = 0;      // off by default
     config.num_cpu_threads = 0;         // auto
     config.enable_speculative = 0;      // no speculative decoding
@@ -247,6 +248,7 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
         ecfg.prefill_chunk_size = config->prefill_chunk_size;
         ecfg.use_fp8_prefill = (config->use_fp8_prefill != 0);
         ecfg.use_nvfp4_decode = config->use_nvfp4_decode;
+        ecfg.use_mxfp4_prefill = (config->use_mxfp4_prefill != 0);
         ecfg.use_prefix_caching = (config->use_prefix_caching != 0);
         if (config->mmproj_path)
             ecfg.mmproj_path = config->mmproj_path;

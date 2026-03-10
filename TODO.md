@@ -180,3 +180,49 @@ Per-layer weight pinning. Highest potential but most complex.
   bytes — misaligned; Q4_K: 144 bytes — aligned to 16 but not 32).
 - **Prefill is compute-bound** — L2 tuning targets decode GEMV only. Do not apply
   streaming hints to prefill cuBLAS GEMM paths.
+
+---
+
+## QuTLASS / MR-GPTQ (arXiv:2509.23202)
+
+Fused online-rotation + MXFP4 GEMM kernels für Blackwell. Höherer Throughput als ideale
+NVFP4 Matmul durch lightweight fused Aktivierungsrotation direkt im Kernel. Evaluiert auf
+RTX 5090: **6x layer-wise Speedup, 4x End-to-End Inference Speedup**.
+
+- [x] Paper lesen und Kernelarchitektur verstehen (online rotation vs. unsere statische Quantisierung)
+- [x] Evaluieren ob MR-GPTQ-Gewichte (4-bit rotated) als neues Quantformat in imp integrierbar sind
+- [x] Walsh-Hadamard Kernel: `hadamard.cu` — block-diagonal WHT (16/32/64/128), warp-shuffle + SMEM
+- [x] CUTLASS MXFP4 GEMM: `gemm_cutlass_mxfp4_sm120.cu` — mx_float4_t + UE8M0 scales (SFVecSize=32)
+- [x] NVFP4→MXFP4 Scale-Konvertierung: 2× UE4M3 per 16 → 1× UE8M0 per 32
+- [x] MXFP4 Aktivierungsquantisierung: absmax per 32 → UE8M0 + FP4 E2M1 pack
+- [ ] Integration in Prefill-Pfad: MXFP4 GEMM als Alternative zum NVFP4 CUTLASS Pfad
+- [ ] Bench: MXFP4 vs. NVFP4 CUTLASS Prefill auf Qwen3-8B
+- [ ] Fused rotation+MXFP4 GEMM Kernel für Decode GEMV prototypen
+- [ ] MR-GPTQ SafeTensors Loader (nur LLaMA-8B verfügbar, niedrige Priorität)
+
+**Erkenntnisse:**
+- QuTLASS: Apache 2.0, CUTLASS v4.2.1, PyTorch-only. Portierbar.
+- MR-GPTQ: SafeTensors mit qweight + scales + forward_hadamard_matrix + weight/act_global_scale
+- hadamard_group_size=128 (pro Projektion, nicht global)
+- Nur LLaMA-3.1-8B-Instruct MR-GPTQ verfügbar (kein Qwen/Gemma)
+- Decode (90% GEMV, memory-bound): MXFP4 = NVFP4 = 4 bits/element → kein BW-Vorteil
+- Prefill (compute-bound): MXFP4 Tensor Cores = same throughput as NVFP4 (both FP4)
+- Hauptvorteil von MR-GPTQ: bessere Accuracy durch Hadamard-Rotation (96% vs ~93% FP16 recovery)
+- **Nächster Schritt**: MXFP4 GEMM in Prefill-Pfad einbauen und gegen NVFP4 benchen
+
+---
+
+## BitDecoding (arXiv:2503.18773)
+
+Tensor-Core-basiertes Decoding mit Low-bit KV-Cache. Übertrifft FP16 FlashDecoding-v2 um **8.6x
+auf RTX 5090** (native MXFP4). Reduziert Single-Batch Decode-Latenz um **3x bei 128K Kontext**
+(LLaMA-3.1-8B).
+
+- [ ] Paper lesen: wie werden Tensor Cores für Decode-Attention mit quantisiertem KV genutzt?
+- [ ] MXFP4 KV-Cache Format evaluieren (aktuell: FP8 E4M3 / INT8, kein FP4 KV)
+- [ ] TC-basierte Paged Attention prototypen (aktuell: WMMA nur FP16/FP8 in decode)
+- [ ] Integration mit bestehendem KV-Cache-Manager (Block-basiert, kKVBlockSize=16)
+
+**Relevanz:** Unser Decode ist 90%+ GEMV (memory-bound, ~44% peak BW). Paged Attention nutzt
+WMMA nur für FP16/FP8. MXFP4 KV-Cache mit TC-Decoding könnte bei langen Kontexten massiv helfen —
+4x weniger KV-Daten + höherer TC-Throughput. Besonders relevant für 32GB VRAM-Limit der RTX 5090.

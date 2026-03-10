@@ -156,6 +156,8 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
     if (nvfp4 != -1 || !preset)
         config.use_nvfp4_decode = nvfp4;
 
+    if (args.mxfp4_prefill) config.use_mxfp4_prefill = 1;
+
     if (!args.mmproj_path.empty())
         config.mmproj_path = args.mmproj_path.c_str();
 

@@ -5,7 +5,9 @@
 #ifdef IMP_USE_CUTLASS
 #include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
+#include "compute/gemm_cutlass_mxfp4_sm120.h"
 #endif
+#include "compute/hadamard.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
@@ -792,7 +794,11 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
                            void* cutlass_act_data,
                            void* cutlass_act_sf,
                            void* cutlass_workspace,
-                           size_t cutlass_workspace_size) {
+                           size_t cutlass_workspace_size,
+                           const std::unordered_map<const void*, CutlassMxFP4Weight>* mxfp4_cache,
+                           void* mxfp4_act_sf,
+                           void* mxfp4_workspace,
+                           size_t mxfp4_workspace_size) {
     // NVFP4 cache path: GEMV for M=1 (decode), CUTLASS/dequant for M>1 (prefill).
     if (nvfp4_cache != nullptr && input.dtype == DType::FP16) {
         auto it = nvfp4_cache->find(weight.data);
@@ -812,6 +818,22 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
                     int N = static_cast<int>(it->second.N);
                     quantize_fp16_to_nvfp4_cutlass(input.data, cutlass_act_data,
                                                     cutlass_act_sf, M, K, stream);
+
+                    // MXFP4 CUTLASS: UE8M0 scales per 32 elements (alternative to NVFP4)
+                    if (mxfp4_cache != nullptr && mxfp4_act_sf != nullptr && K % 32 == 0) {
+                        auto mx_it = mxfp4_cache->find(weight.data);
+                        if (mx_it != mxfp4_cache->end()) {
+                            quantize_fp16_to_mxfp4_cutlass(input.data, cutlass_act_data,
+                                                            mxfp4_act_sf, M, K, stream);
+                            bool ok = gemm_mxfp4_cutlass_sm120(
+                                cutlass_act_data, mxfp4_act_sf,
+                                mx_it->second,
+                                output.data, M, N, K,
+                                mxfp4_workspace, mxfp4_workspace_size,
+                                stream);
+                            if (ok) return;
+                        }
+                    }
 
                     // cuBLASLt NVFP4: same data/scale format, auto-tuned kernels
                     if (cublaslt_nvfp4_available()) {

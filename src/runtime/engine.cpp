@@ -118,7 +118,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     executor_ = std::make_unique<GraphExecutor>();
     if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl,
                          config_.max_batch_size, config_.max_seq_len,
-                         config_.use_fp8_prefill, config_.use_nvfp4_decode)) {
+                         config_.use_fp8_prefill, config_.use_nvfp4_decode,
+                         config_.use_mxfp4_prefill)) {
         return false;
     }
 
