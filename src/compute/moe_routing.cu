@@ -511,7 +511,8 @@ __global__ void scatter_token_ids_with_flat_idx_kernel(
         int top_k,
         int32_t* __restrict__ sorted_token_ids,
         int32_t* __restrict__ sorted_flat_idx,
-        int32_t* __restrict__ expert_write_pos) {
+        int32_t* __restrict__ expert_write_pos,
+        int32_t* __restrict__ token_to_expanded) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = n_tokens * top_k;
     if (idx < total) {
@@ -521,6 +522,7 @@ __global__ void scatter_token_ids_with_flat_idx_kernel(
         int dest = expert_offsets[expert] + pos;
         sorted_token_ids[dest] = token;
         sorted_flat_idx[dest]  = idx;  // flat index into expert_weights
+        if (token_to_expanded) token_to_expanded[idx] = dest;  // inverse map
     }
 }
 
@@ -729,7 +731,7 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
     // ---- Kernel 4: Scatter token IDs (and flat indices) into sorted order ----
     scatter_token_ids_with_flat_idx_kernel<<<grid_count, BLOCK_SIZE, 0, stream>>>(
         d_expert_indices, d_expert_offsets, n_tokens, top_k,
-        d_sorted_token_ids, d_sorted_flat_idx, d_expert_write_pos);
+        d_sorted_token_ids, d_sorted_flat_idx, d_expert_write_pos, nullptr);
 
     // ---- Free temporaries ----
     // We defer freeing to after stream sync, but since these are only needed
@@ -839,8 +841,9 @@ void MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val) {
     size_t offsets_sz  = align256(static_cast<size_t>(max_experts + 1) * sizeof(int32_t));
     size_t counts_sz   = align256(static_cast<size_t>(max_experts) * sizeof(int32_t));
     size_t wpos_sz     = align256(static_cast<size_t>(max_experts) * sizeof(int32_t));
+    size_t t2e_sz      = align256(static_cast<size_t>(total_assignments) * sizeof(int32_t));
 
-    pool_size = indices_sz + weights_sz + sorted_sz + offsets_sz + counts_sz + wpos_sz;
+    pool_size = indices_sz + weights_sz + sorted_sz + offsets_sz + counts_sz + wpos_sz + t2e_sz;
     cudaError_t err = cudaMalloc(&pool, pool_size);
     if (err != cudaSuccess) {
         pool = nullptr;
@@ -855,6 +858,7 @@ void MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val) {
     expert_offsets    = reinterpret_cast<int32_t*>(ptr);  ptr += offsets_sz;
     expert_counts     = reinterpret_cast<int32_t*>(ptr);  ptr += counts_sz;
     expert_write_pos  = reinterpret_cast<int32_t*>(ptr);  ptr += wpos_sz;
+    token_to_expanded = reinterpret_cast<int32_t*>(ptr);  ptr += t2e_sz;
 }
 
 void MoeRoutingBuffers::free() {
@@ -869,6 +873,7 @@ void MoeRoutingBuffers::free() {
     expert_offsets = nullptr;
     expert_counts = nullptr;
     expert_write_pos = nullptr;
+    token_to_expanded = nullptr;
 }
 
 // ============================================================================
@@ -945,11 +950,13 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
         // Kernel 4: Scatter token IDs (and flat indices) into sorted order
         scatter_token_ids_with_flat_idx_kernel<<<grid_count, BLOCK_SIZE, 0, stream>>>(
             d_expert_indices, d_expert_offsets, n_tokens, top_k,
-            d_sorted_token_ids, d_sorted_flat_idx, d_expert_write_pos);
+            d_sorted_token_ids, d_sorted_flat_idx, d_expert_write_pos,
+            buffers.token_to_expanded);
     }
 
     // Fill result struct (no ownership -- memory belongs to buffers)
     result.owns_memory = false;
+    result.token_to_expanded = buffers.token_to_expanded;
     result.expert_indices = make_tensor_2d(d_expert_indices, DType::INT32,
                                            n_tokens, top_k, true);
     result.expert_weights = make_tensor_2d(d_expert_weights, DType::FP32,
@@ -1004,6 +1011,50 @@ void moe_weighted_sum_residual(const void* expert_outputs, const float* expert_w
         static_cast<const half*>(expert_outputs), expert_weights,
         static_cast<const half*>(residual),
         static_cast<half*>(output), d_model, top_k);
+}
+
+// ============================================================================
+// Fused token-centric scatter + FP32->FP16 + residual add (prefill).
+//
+// One block per output token. Each block reads top_k expert output rows via
+// token_to_expanded inverse map, accumulates weighted sum in FP32 registers,
+// converts to FP16, optionally adds residual, writes to output.
+// No atomicAdd, no output zeroing, no intermediate FP32 buffer.
+// ============================================================================
+
+__global__ void moe_scatter_fused_residual_kernel(
+        const half* __restrict__ expert_output,  // [expanded, d_model]
+        const int32_t* __restrict__ token_to_expanded, // [n_tokens * top_k]
+        const float* __restrict__ expert_weights,      // [n_tokens * top_k]
+        const half* residual,   // [n_tokens, d_model] or nullptr
+        half* output,           // [n_tokens, d_model]
+        int d_model, int top_k) {
+    const int token = blockIdx.x;
+    const int base_flat = token * top_k;
+
+    for (int col = threadIdx.x; col < d_model; col += blockDim.x) {
+        float sum = 0.0f;
+        for (int k = 0; k < top_k; ++k) {
+            int expanded_row = token_to_expanded[base_flat + k];
+            float w = expert_weights[base_flat + k];
+            sum += w * __half2float(expert_output[static_cast<int64_t>(expanded_row) * d_model + col]);
+        }
+        if (residual) sum += __half2float(residual[static_cast<int64_t>(token) * d_model + col]);
+        output[static_cast<int64_t>(token) * d_model + col] = __float2half(sum);
+    }
+}
+
+void moe_scatter_fused_residual(const void* expert_output,
+                                 const int32_t* token_to_expanded,
+                                 const float* expert_weights,
+                                 const void* residual, void* output,
+                                 int n_tokens, int d_model, int top_k,
+                                 cudaStream_t stream) {
+    int threads = 256;
+    moe_scatter_fused_residual_kernel<<<n_tokens, threads, 0, stream>>>(
+        static_cast<const half*>(expert_output), token_to_expanded, expert_weights,
+        static_cast<const half*>(residual), static_cast<half*>(output),
+        d_model, top_k);
 }
 
 // ============================================================================

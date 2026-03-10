@@ -11,6 +11,7 @@ struct MoeRoutingResult {
     Tensor expert_weights;   // [n_tokens, top_k] float
     Tensor sorted_token_ids; // tokens sorted by expert
     Tensor expert_offsets;   // [n_experts+1] scan offsets
+    int32_t* token_to_expanded = nullptr; // [n_tokens * top_k] inverse map: flat_idx -> expanded row
     bool owns_memory = true; // if true, caller must cudaFree tensors
 };
 
@@ -27,6 +28,7 @@ struct MoeRoutingBuffers {
     int32_t* expert_offsets = nullptr;   // [max_experts + 1]
     int32_t* expert_counts = nullptr;    // [max_experts]
     int32_t* expert_write_pos = nullptr; // [max_experts]
+    int32_t* token_to_expanded = nullptr; // [max_tokens * top_k] inverse map
 
     int max_tokens = 0;
     int max_experts = 0;
@@ -61,6 +63,18 @@ void moe_gather(const Tensor& input, const MoeRoutingResult& routing,
 
 void moe_scatter(const Tensor& expert_output, const MoeRoutingResult& routing,
                  Tensor& output, cudaStream_t stream = nullptr);
+
+// Fused token-centric scatter + FP32->FP16 conversion + residual add.
+// Replaces: moe_scatter + fp32_to_fp16_kernel + elementwise_add for prefill.
+// Uses token_to_expanded inverse map to avoid atomicAdd contention.
+// expert_output: [expanded, d_model] FP16. residual: [n_tokens, d_model] FP16 (or nullptr).
+// output: [n_tokens, d_model] FP16.
+void moe_scatter_fused_residual(const void* expert_output,
+                                 const int32_t* token_to_expanded,
+                                 const float* expert_weights,
+                                 const void* residual, void* output,
+                                 int n_tokens, int d_model, int top_k,
+                                 cudaStream_t stream = nullptr);
 
 // Weighted sum of expert outputs for single-token decode (replaces gather+scatter).
 // expert_outputs: [top_k, d_model] FP16 (passed as void*). expert_weights: [top_k] FP32 on device.
