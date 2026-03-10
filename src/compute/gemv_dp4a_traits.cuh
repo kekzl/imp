@@ -1218,12 +1218,13 @@ __global__ void gemv_dp4a_gate_up_kernel(
 }
 
 // ============================================================================
-// Template kernel #5: MoE Decode (replaces 4 hand-written kernels)
+// Template kernel #5: MoE Decode with NR (replaces 4 hand-written kernels)
 // Q8_1 data cooperatively loaded into shared memory — all 8 warps share
 // the same Q8_1 input per expert slot, eliminating 8x redundant L2 reads.
+// NR>1: each warp handles multiple rows, halving CTAs and smem loads.
 // ============================================================================
 
-template<typename QT>
+template<typename QT, int NR>
 __global__ void gemv_dp4a_moe_decode_kernel(
         const uint8_t* __restrict__ packed_weights,
         const int32_t* __restrict__ expert_indices,
@@ -1241,7 +1242,7 @@ __global__ void gemv_dp4a_moe_decode_kernel(
 
     const int expert_slot = blockIdx.x / blocks_per_expert;
     const int local_block = blockIdx.x % blocks_per_expert;
-    const int row = local_block * warps_per_block + warp_id;
+    const int row_base = (local_block * warps_per_block + warp_id) * NR;
 
     const int total_q8 = (K / QT::kBlockElems) * QT::kQ8PerWeight;
 
@@ -1270,14 +1271,16 @@ __global__ void gemv_dp4a_moe_decode_kernel(
     }
     __syncthreads();
 
-    if (row >= rows) return;
+    if (row_base >= rows) return;
 
     const int expert_id = expert_indices[expert_slot];
     const uint8_t* W = packed_weights + (size_t)expert_id * expert_stride_bytes;
     const size_t row_bytes = (size_t)(K / QT::kBlockElems) * QT::kBlockBytes;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
 
-    float sum = 0.0f;
+    float sum[NR];
+    #pragma unroll
+    for (int r = 0; r < NR; r++) sum[r] = 0.0f;
+
     for (int b = lane; b < total_q8; b += 32) {
         int xi[8];
         memcpy(xi, smem_qs + b * kSmemQ8Stride, 32);
@@ -1290,14 +1293,26 @@ __global__ void gemv_dp4a_moe_decode_kernel(
 
         const int wb  = b / QT::kQ8PerWeight;
         const int sub = b % QT::kQ8PerWeight;
-        const uint8_t* bp = W_row + (size_t)wb * QT::kBlockBytes;
-        sum += QT::dp4a_block(bp, sub, xi, dq, q8_sum);
+
+        #pragma unroll
+        for (int r = 0; r < NR; r++) {
+            const int row = row_base + r;
+            if (row >= rows) break;
+            const uint8_t* bp = W + (size_t)row * row_bytes + (size_t)wb * QT::kBlockBytes;
+            sum[r] += QT::dp4a_block(bp, sub, xi, dq, q8_sum);
+        }
     }
 
-    for (int off = 16; off > 0; off >>= 1)
-        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
-
-    if (lane == 0) y[expert_slot * rows + row] = __float2half(sum);
+    #pragma unroll
+    for (int r = 0; r < NR; r++) {
+        for (int off = 16; off > 0; off >>= 1)
+            sum[r] += __shfl_down_sync(0xFFFFFFFF, sum[r], off);
+        if (lane == 0) {
+            const int row = row_base + r;
+            if (row < rows)
+                y[expert_slot * rows + row] = __float2half(sum[r]);
+        }
+    }
 }
 
 template<typename QT>
@@ -1310,19 +1325,34 @@ static void launch_gemv_dp4a_moe_decode(
         cudaStream_t stream) {
     const int threads_per_block = 256;
     const int warps_per_block = threads_per_block / 32;
-    const int blocks_per_expert = (rows + warps_per_block - 1) / warps_per_block;
-    const int total_blocks = top_k * blocks_per_expert;
     const int total_q8 = (K / QT::kBlockElems) * QT::kQ8PerWeight;
     const size_t smem_size = (size_t)total_q8 * (40 + QT::kSmemExtra);
-    pdl::launch(gemv_dp4a_moe_decode_kernel<QT>,
-        dim3(total_blocks), dim3(threads_per_block), smem_size, stream,
-        packed_weights, expert_indices, q8_1, d8, y, rows, K,
-        expert_stride_bytes, q8_1_stride, d8_stride, blocks_per_expert);
+
+    constexpr int MAX_NR = QT::kMaxNRows;
+    auto launch = [&](auto nr_tag) {
+        constexpr int NR = decltype(nr_tag)::value;
+        const int rows_per_block = warps_per_block * NR;
+        const int blocks_per_expert = (rows + rows_per_block - 1) / rows_per_block;
+        const int total_blocks = top_k * blocks_per_expert;
+        pdl::launch(gemv_dp4a_moe_decode_kernel<QT, NR>,
+            dim3(total_blocks), dim3(threads_per_block), smem_size, stream,
+            packed_weights, expert_indices, q8_1, d8, y, rows, K,
+            expert_stride_bytes, q8_1_stride, d8_stride, blocks_per_expert);
+    };
+
+    // Use NR=2 when enough blocks to fill SMs (same threshold as dense kernel)
+    if constexpr (MAX_NR >= 2) {
+        int nr2_rows_per_block = warps_per_block * 2;
+        int nr2_blocks = top_k * ((rows + nr2_rows_per_block - 1) / nr2_rows_per_block);
+        if (nr2_blocks >= 64) { launch(std::integral_constant<int, 2>{}); return; }
+    }
+    launch(std::integral_constant<int, 1>{});
 }
 
 // ============================================================================
-// Template kernel #6: MoE Gate+Up Fused (replaces 4 hand-written kernels)
-// blockIdx.y: 0 = gate, 1 = up. Q8_1 cooperatively loaded into shared memory.
+// Template kernel #6: MoE Gate+Up Dual-Matrix (replaces 4 hand-written kernels)
+// Each warp computes BOTH gate and up projections for the same row, sharing
+// Q8_1 from smem. Halves CTA count and smem loads vs separate gate/up blocks.
 // ============================================================================
 
 template<typename QT>
@@ -1377,17 +1407,14 @@ __global__ void gemv_dp4a_moe_gate_up_kernel(
 
     if (row >= rows) return;
 
-    const bool is_up = (blockIdx.y == 1);
-    const uint8_t* packed = is_up ? up_weights : gate_weights;
-    size_t stride = is_up ? up_stride_bytes : gate_stride_bytes;
-    half* y = is_up ? y_up : y_gate;
-
     const int expert_id = expert_indices[expert_slot];
-    const uint8_t* W = packed + (size_t)expert_id * stride;
     const size_t row_bytes = (size_t)(K / QT::kBlockElems) * QT::kBlockBytes;
-    const uint8_t* W_row = W + (size_t)row * row_bytes;
+    const uint8_t* W_gate_row = gate_weights + (size_t)expert_id * gate_stride_bytes
+                              + (size_t)row * row_bytes;
+    const uint8_t* W_up_row = up_weights + (size_t)expert_id * up_stride_bytes
+                            + (size_t)row * row_bytes;
 
-    float sum = 0.0f;
+    float sum_gate = 0.0f, sum_up = 0.0f;
     for (int b = lane; b < total_q8; b += 32) {
         int xi[8];
         memcpy(xi, smem_qs + b * kSmemQ8Stride, 32);
@@ -1400,14 +1427,21 @@ __global__ void gemv_dp4a_moe_gate_up_kernel(
 
         const int wb  = b / QT::kQ8PerWeight;
         const int sub = b % QT::kQ8PerWeight;
-        const uint8_t* bp = W_row + (size_t)wb * QT::kBlockBytes;
-        sum += QT::dp4a_block(bp, sub, xi, dq, q8_sum);
+        const size_t block_off = (size_t)wb * QT::kBlockBytes;
+        sum_gate += QT::dp4a_block(W_gate_row + block_off, sub, xi, dq, q8_sum);
+        sum_up   += QT::dp4a_block(W_up_row   + block_off, sub, xi, dq, q8_sum);
     }
 
-    for (int off = 16; off > 0; off >>= 1)
-        sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
+    for (int off = 16; off > 0; off >>= 1) {
+        sum_gate += __shfl_down_sync(0xFFFFFFFF, sum_gate, off);
+        sum_up   += __shfl_down_sync(0xFFFFFFFF, sum_up,   off);
+    }
 
-    if (lane == 0) y[expert_slot * rows + row] = __float2half(sum);
+    if (lane == 0) {
+        const int out_idx = expert_slot * rows + row;
+        y_gate[out_idx] = __float2half(sum_gate);
+        y_up[out_idx]   = __float2half(sum_up);
+    }
 }
 
 template<typename QT>
@@ -1425,9 +1459,8 @@ static void launch_gemv_dp4a_moe_gate_up(
     const int blocks_per_expert = (rows + warps_per_block - 1) / warps_per_block;
     const int total_q8 = (K / QT::kBlockElems) * QT::kQ8PerWeight;
     const size_t smem_size = (size_t)total_q8 * (40 + QT::kSmemExtra);
-    dim3 grid(top_k * blocks_per_expert, 2);
     pdl::launch(gemv_dp4a_moe_gate_up_kernel<QT>,
-        grid, dim3(threads_per_block), smem_size, stream,
+        dim3(top_k * blocks_per_expert), dim3(threads_per_block), smem_size, stream,
         gate_weights, up_weights, expert_indices, q8_1, d8,
         y_gate, y_up, rows, K,
         gate_stride_bytes, up_stride_bytes,
