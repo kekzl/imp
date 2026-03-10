@@ -27,6 +27,9 @@ namespace imp {
 // K:                   inner dimension (cols, must be multiple of 256)
 // expert_stride_bytes: bytes between experts in packed_weights
 // n_experts:           total number of experts
+// sorted_token_ids: optional [total_expanded] int32. When non-null, activations
+// are read via indirection (gather-free): activations[sorted_token_ids[i], :].
+// When null, reads activations[i, :] directly (requires pre-gathered input).
 void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights,
                                     const void* activations,
                                     void* output,
@@ -34,6 +37,7 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights,
                                     int N, int K,
                                     size_t expert_stride_bytes,
                                     int n_experts,
-                                    cudaStream_t stream = nullptr);
+                                    cudaStream_t stream = nullptr,
+                                    const int32_t* sorted_token_ids = nullptr);
 
 } // namespace imp
