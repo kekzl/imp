@@ -33,20 +33,22 @@ Same models, same machine, same quantizations — measured back-to-back.
 
 | Model | Quant | imp pp | llama.cpp pp | &Delta; | imp tg | llama.cpp tg | &Delta; |
 |---|---|---:|---:|---:|---:|---:|---:|
-| Qwen3-4B | Q8_0 | **23,529** | 21,189 | **+11.0%** | **297** | 242 | **+22.7%** |
-| Qwen3-8B | Q8_0 | **15,609** | 14,425 | **+8.2%** | **184** | 156 | **+17.9%** |
-| DeepSeek-R1-7B | Q8_0 | **20,926** | 15,955 | **+31.1%** | **203** | 175 | **+16.0%** |
-| Phi-4-mini | Q8_0 | 20,013 | 27,620 | -27.5% | 241 | 276 | -12.7% |
-| Gemma-3-12B | Q8_0 | 8,816 | 9,429 | -6.5% | **113** | 98 | **+15.3%** |
-| DeepSeek-R1-14B | Q6_K | **10,016** | 6,314 | **+58.6%** | 98 | 110 | -10.9% |
-| Qwen3-Coder-30B-A3B (MoE) | Q6_K | 4,414 | 6,079 | -27.4% | **255** | 246 | **+3.7%** |
-| Nemotron-30B-A3B (MoE) | Q6_K | 1,780 | crash&sup1; | — | **75** | crash&sup1; | — |
+| Qwen3-4B | Q8_0 | **21,327** | 17,833 | **+19.6%** | **306** | 227 | **+34.8%** |
+| Qwen3-8B | Q8_0 | **16,687** | 12,830 | **+30.1%** | **190** | 150 | **+26.7%** |
+| Llama 3.1 8B | Q8_0 | **18,885** | 13,389 | **+41.0%** | **197** | 157 | **+25.7%** |
+| Mistral 7B v0.3 | Q8_0 | **19,364** | 13,520 | **+43.2%** | **203** | 164 | **+24.0%** |
+| DeepSeek-R1-7B | Q8_0 | **21,459** | 14,634 | **+46.6%** | **209** | 169 | **+23.7%** |
+| Phi-4-mini | Q8_0 | 20,785 | **23,968** | -13.3% | 250 | **261** | -4.3% |
+| Gemma-3-12B | Q8_0 | **14,443** | 8,653 | **+66.9%** | **118** | 96 | **+22.1%** |
+| DeepSeek-R1-14B | Q6_K | **10,406** | 5,838 | **+78.2%** | 102 | **104** | -2.3% |
+| Qwen3-Coder-30B-A3B (MoE) | Q6_K | 5,005 | **5,648** | -11.4% | **263** | 229 | **+14.9%** |
+| Nemotron-30B-A3B (MoE) | Q6_K | 686&sup2; | crash&sup1; | — | **106** | crash&sup1; | — |
 
-<sub>pp = prompt processing (tok/s), tg = token generation (tok/s), higher is better. NVFP4 decode cache auto-enabled on sm_120. llama.cpp commit <code>35bee03</code>. &sup1;Mamba2 assertion failure in llama.cpp.</sub>
+<sub>pp = prompt processing (tok/s), tg = token generation (tok/s), higher is better. NVFP4 decode cache auto-enabled on sm_120. llama.cpp commit <code>35bee03</code>. &sup1;Mamba2 assertion failure in llama.cpp. &sup2;pp128 (pp512 exceeds 32 GB VRAM).</sub>
 
-**Prefill** — imp leads on 4 of 7 models (+8% to +59%). FP8&times;FP8 cuBLASLt weight cache gives 2x tensor core throughput on sm_120. Async activation quantization (no host sync) keeps the GPU pipeline full.
+**Prefill** — imp leads on 7 of 9 models (+20% to +78%). FP8&times;FP8 cuBLASLt weight cache gives 2x tensor core throughput on sm_120. CUTLASS MXFP4 prefill GEMM and async activation quantization (no host sync) keep the GPU pipeline full.
 
-**Decode** — imp wins on 5 of 7 models (+4% to +23%). NVFP4 weight caching halves memory bandwidth vs Q8_0 reads, and fused activation+GEMV+residual kernels eliminate intermediate launches.
+**Decode** — imp wins on 7 of 9 models (+15% to +35%). NVFP4 weight caching halves memory bandwidth vs Q8_0 reads, and fused activation+GEMV+residual kernels eliminate intermediate launches.
 
 **Nemotron-H** — imp is the only engine that runs this Mamba2 + Attention + MoE hybrid architecture. llama.cpp crashes with an assertion failure in its Mamba2 implementation.
 
@@ -166,7 +168,7 @@ Benchmark:
 - **Runtime:** continuous batching, speculative decoding, Green Context SM partitioning
 - **API:** C library, OpenAI-compatible HTTP server (SSE streaming, tool calling, logprobs, JSON mode)
 
-> **Note:** imp currently only runs reliably with the models it has been tested on: Qwen3-4B, Qwen3-8B, DeepSeek-R1-7B, DeepSeek-R1-14B, Qwen3-Coder-30B-A3B, Phi-4-Mini, Gemma-3-12B (text + vision), and Nemotron-3-Nano-30B-A3B. Other models sharing the same architectures may work but are untested.
+> **Note:** imp currently only runs reliably with the models it has been tested on: Qwen3-4B, Qwen3-8B, Llama 3.1 8B, Mistral 7B v0.3, DeepSeek-R1-7B, DeepSeek-R1-14B, Qwen3-Coder-30B-A3B, Phi-4-Mini, Gemma-3-12B (text + vision), and Nemotron-3-Nano-30B-A3B. Other models sharing the same architectures may work but are untested.
 
 ## Documentation
 
