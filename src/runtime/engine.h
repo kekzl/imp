@@ -60,6 +60,9 @@ struct EngineConfig {
     // NVFP4 decode weight cache: -1=auto, 0=off, 1=additive (FP16+NVFP4), 2=NVFP4 only
     int use_nvfp4_decode = -1;
 
+    // MXFP4 prefill: CUTLASS MXFP4 GEMM for prefill (converts NVFP4 → MXFP4 format, sm_120)
+    bool use_mxfp4_prefill = false;
+
     // Speculative decoding
     bool enable_speculative = false;
     std::string draft_model_path;

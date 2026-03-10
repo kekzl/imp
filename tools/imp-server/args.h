@@ -16,6 +16,7 @@ struct ServerArgs {
     bool kv_int8 = false;
     int prefill_chunk_size = 0;
     int decode_nvfp4 = -1;     // -1=auto, 0=off, 1=additive, 2=NVFP4-only
+    bool mxfp4_prefill = false;  // --mxfp4-prefill: CUTLASS MXFP4 GEMM for prefill
     std::string mmproj_path;   // --mmproj: vision encoder GGUF
     std::string models_dir;    // --models-dir: scan for .gguf files
     std::string api_key;       // --api-key: require Bearer token auth

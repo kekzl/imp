@@ -5,6 +5,7 @@
 #include "quant/quant_gemm.h"
 #include "quant/nvfp4_quant.h"
 #include "compute/gemm_cutlass_sm120.h"
+#include "compute/gemm_cutlass_mxfp4_sm120.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -197,6 +198,10 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
                    void* cutlass_act_data = nullptr,
                    void* cutlass_act_sf = nullptr,
                    void* cutlass_workspace = nullptr,
-                   size_t cutlass_workspace_size = 0);
+                   size_t cutlass_workspace_size = 0,
+                   const std::unordered_map<const void*, CutlassMxFP4Weight>* mxfp4_cache = nullptr,
+                   void* mxfp4_act_sf = nullptr,
+                   void* mxfp4_workspace = nullptr,
+                   size_t mxfp4_workspace_size = 0);
 
 } // namespace imp

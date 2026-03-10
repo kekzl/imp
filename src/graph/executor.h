@@ -8,6 +8,7 @@
 #include "compute/json_constrain.h"
 #include "quant/nvfp4_quant.h"
 #include "compute/gemm_cutlass_sm120.h"
+#include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -172,7 +173,7 @@ public:
     // Does NOT allocate GPU memory — call allocate_workspaces() after weight upload.
     [[nodiscard]] bool init(const Model& model, DType compute_dtype = DType::FP16, bool use_pdl = false,
                             int max_batch_size = 1, int max_seq_len = 0, bool use_fp8_prefill = false,
-                            int use_nvfp4_decode = 0);
+                            int use_nvfp4_decode = 0, bool use_mxfp4_prefill = false);
 
     // Phase 2: Allocate all GPU workspace buffers.
     // Call AFTER weight upload to maximize VRAM available for expert layers.
@@ -424,11 +425,25 @@ private:
 
     // Pre-allocated activation buffers for CUTLASS NVFP4 prefill.
     void* cutlass_act_data_ = nullptr;     // [max_tokens, max_K/2] packed FP4
-    void* cutlass_act_sf_ = nullptr;       // SfAtom scale factors
+    void* cutlass_act_sf_ = nullptr;       // SfAtom scale factors (NVFP4: UE4M3)
     size_t cutlass_act_data_size_ = 0;
     size_t cutlass_act_sf_size_ = 0;
     void* cutlass_workspace_ = nullptr;    // CUTLASS GEMM workspace
     size_t cutlass_workspace_size_ = 0;
+
+    // CUTLASS sm_120 MXFP4 weight cache (alternative to NVFP4 CUTLASS path).
+    // MXFP4 uses UE8M0 scales per 32 elements (vs NVFP4 UE4M3 per 16).
+    // Same packed FP4 data (borrowed), only scale factors differ.
+    std::unordered_map<const void*, CutlassMxFP4Weight> cutlass_mxfp4_cache_;
+    size_t cutlass_mxfp4_cache_bytes_ = 0;
+    bool use_mxfp4_prefill_ = false;
+
+    // MXFP4 activation buffers (SfAtom UE8M0 scales, SFVecSize=32).
+    // Packed data shares cutlass_act_data_ (same FP4 nibble format).
+    void* mxfp4_act_sf_ = nullptr;        // SfAtom UE8M0 scale factors
+    size_t mxfp4_act_sf_size_ = 0;
+    void* mxfp4_workspace_ = nullptr;     // MXFP4 GEMM workspace
+    size_t mxfp4_workspace_size_ = 0;
 
     // Fused KV weight cache: concatenated [wk; wv] as [2*nkv*hd, d_model] FP16.
     // Enables strided batched GEMM for K+V in a single cuBLAS call during prefill.
