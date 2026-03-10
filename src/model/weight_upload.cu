@@ -23,15 +23,90 @@ namespace imp {
 // ---------------------------------------------------------------------------
 static constexpr size_t kWeightReserveMiB = 256;  // reserve for KV cache, SSM state, misc
 
+// Cached VRAM state — refreshed once per upload pass instead of per-tensor.
+// Eliminates ~500+ cudaMemGetInfo roundtrips during weight upload.
+static size_t g_cached_free_mem = 0;
+static size_t g_total_allocated = 0;
+
 static cudaError_t checked_cuda_malloc(void** ptr, size_t size) {
+    size_t reserve = kWeightReserveMiB << 20;
+    // Use cached free memory (updated at start of each upload pass)
+    if (g_cached_free_mem > 0) {
+        if (g_total_allocated + size + reserve > g_cached_free_mem) {
+            *ptr = nullptr;
+            return cudaErrorMemoryAllocation;
+        }
+        cudaError_t err = cudaMalloc(ptr, size);
+        if (err == cudaSuccess) g_total_allocated += size;
+        return err;
+    }
+    // Fallback: per-tensor check (used outside upload passes)
     size_t free_mem = 0, total_mem = 0;
     cudaMemGetInfo(&free_mem, &total_mem);
-    size_t reserve = kWeightReserveMiB << 20;
     if (size + reserve > free_mem) {
         *ptr = nullptr;
         return cudaErrorMemoryAllocation;
     }
     return cudaMalloc(ptr, size);
+}
+
+// ---------------------------------------------------------------------------
+// Double-buffered pinned staging for fast H2D transfers.
+// On WSL2, mmap'd memory cannot be pinned (cudaHostRegister fails/corrupts),
+// so cudaMemcpyAsync from mmap'd memory falls back to synchronous staging
+// inside the CUDA driver (~8 GB/s on PCIe 5.0 x16).
+// This stager pre-allocates two pinned buffers and pipelines:
+//   CPU: memcpy(pinned[i], mmap_data)  ←→  GPU: DMA(gpu, pinned[i^1])
+// Achieves true async DMA at full PCIe bandwidth (~25 GB/s on PCIe 5.0).
+// ---------------------------------------------------------------------------
+struct PinnedStager {
+    static constexpr size_t kChunkSize = 64 << 20;  // 64 MiB per buffer
+    void* buf[2] = {};
+    cudaEvent_t done[2] = {};
+    int idx = 0;
+
+    bool init() {
+        for (int i = 0; i < 2; i++) {
+            if (cudaHostAlloc(&buf[i], kChunkSize, cudaHostAllocDefault) != cudaSuccess) {
+                destroy();
+                return false;
+            }
+            cudaEventCreateWithFlags(&done[i], cudaEventDisableTiming);
+        }
+        return true;
+    }
+
+    cudaError_t copy(void* dst, const void* src, size_t n, cudaStream_t s) {
+        cudaError_t last = cudaSuccess;
+        for (size_t off = 0; off < n; ) {
+            size_t chunk = std::min(n - off, kChunkSize);
+            int b = idx & 1;
+            cudaEventSynchronize(done[b]);
+            memcpy(buf[b], static_cast<const char*>(src) + off, chunk);
+            last = cudaMemcpyAsync(static_cast<char*>(dst) + off, buf[b],
+                                   chunk, cudaMemcpyHostToDevice, s);
+            cudaEventRecord(done[b], s);
+            off += chunk;
+            idx++;
+        }
+        return last;
+    }
+
+    void destroy() {
+        for (int i = 0; i < 2; i++) {
+            if (done[i]) { cudaEventSynchronize(done[i]); cudaEventDestroy(done[i]); done[i] = nullptr; }
+            if (buf[i]) { cudaFreeHost(buf[i]); buf[i] = nullptr; }
+        }
+    }
+};
+
+// Active stager for current upload pass (nullptr = use plain cudaMemcpyAsync)
+static PinnedStager* g_stager = nullptr;
+
+// H2D copy that routes through pinned staging when available
+static cudaError_t h2d_copy(void* dst, const void* src, size_t n, cudaStream_t s) {
+    if (g_stager) return g_stager->copy(dst, src, n, s);
+    return cudaMemcpyAsync(dst, src, n, cudaMemcpyHostToDevice, s);
 }
 
 // ---------------------------------------------------------------------------
@@ -179,8 +254,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
             void* d_data = nullptr;
             checked_cuda_malloc(&d_data, raw_bytes);
             if (!d_data) return false;
-            cudaMemcpyAsync(d_data, weight.data, raw_bytes,
-                            cudaMemcpyHostToDevice, stream);
+            h2d_copy(d_data, weight.data, raw_bytes, stream);
             gpu_allocs.push_back(d_data);
 
             // Logical shape [N, K] — qtype tells executor data is raw quantized
@@ -223,8 +297,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         void* d_nibbles = nullptr;
         checked_cuda_malloc(&d_nibbles, nibbles_bytes);
         if (!d_nibbles) return false;
-        cudaMemcpyAsync(d_nibbles, h_nibbles.data(), nibbles_bytes,
-                        cudaMemcpyHostToDevice, stream);
+        h2d_copy(d_nibbles, h_nibbles.data(), nibbles_bytes, stream);
         gpu_allocs.push_back(d_nibbles);
 
         // Upload scales to GPU
@@ -232,8 +305,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         size_t scales_bytes = scales_count * sizeof(uint16_t);
         checked_cuda_malloc(&d_scales, scales_bytes);
         if (!d_scales) { cudaFree(d_nibbles); return false; }
-        cudaMemcpyAsync(d_scales, h_scales.data(), scales_bytes,
-                        cudaMemcpyHostToDevice, stream);
+        h2d_copy(d_scales, h_scales.data(), scales_bytes, stream);
         gpu_allocs.push_back(d_scales);
 
         // Update weight tensor to point to packed nibbles on GPU
@@ -263,8 +335,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
             void* d_data = nullptr;
             checked_cuda_malloc(&d_data, raw_bytes);
             if (!d_data) return false;
-            cudaMemcpyAsync(d_data, weight.data, raw_bytes,
-                            cudaMemcpyHostToDevice, stream);
+            h2d_copy(d_data, weight.data, raw_bytes, stream);
             gpu_allocs.push_back(d_data);
 
             // Logical shape [N, K] — qtype tells executor data is raw quantized
@@ -302,8 +373,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         void* d_data = nullptr;
         checked_cuda_malloc(&d_data, bytes);
         if (!d_data) return false;
-        cudaMemcpyAsync(d_data, h_fp16.data(), bytes,
-                        cudaMemcpyHostToDevice, stream);
+        h2d_copy(d_data, h_fp16.data(), bytes, stream);
         gpu_allocs.push_back(d_data);
 
         int64_t new_shape[4] = {N, K, 0, 0};
@@ -327,8 +397,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
             void* d_data = nullptr;
             checked_cuda_malloc(&d_data, raw_bytes);
             if (!d_data) return false;
-            cudaMemcpyAsync(d_data, weight.data, raw_bytes,
-                            cudaMemcpyHostToDevice, stream);
+            h2d_copy(d_data, weight.data, raw_bytes, stream);
             gpu_allocs.push_back(d_data);
 
             int64_t new_shape[4] = {N, K, 0, 0};
@@ -379,8 +448,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         void* d_data = nullptr;
         checked_cuda_malloc(&d_data, bytes);
         if (!d_data) return false;
-        cudaMemcpyAsync(d_data, h_fp16.data(), bytes,
-                        cudaMemcpyHostToDevice, stream);
+        h2d_copy(d_data, h_fp16.data(), bytes, stream);
         gpu_allocs.push_back(d_data);
 
         int64_t new_shape[4] = {N, K, 0, 0};
@@ -400,10 +468,9 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
             void* d_data = nullptr;
             checked_cuda_malloc(&d_data, raw_bytes);
             if (!d_data) return false;
-            cudaError_t cpy_err = cudaMemcpyAsync(d_data, weight.data, raw_bytes,
-                            cudaMemcpyHostToDevice, stream);
+            cudaError_t cpy_err = h2d_copy(d_data, weight.data, raw_bytes, stream);
             if (cpy_err != cudaSuccess) {
-                IMP_LOG_ERROR("cudaMemcpyAsync failed for qtype=%u [%ldx%ld] %zu bytes: %s",
+                IMP_LOG_ERROR("h2d_copy failed for qtype=%u [%ldx%ld] %zu bytes: %s",
                               (unsigned)qtype, (long)N, (long)K, raw_bytes,
                               cudaGetErrorString(cpy_err));
             }
@@ -419,8 +486,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
             void* d_raw = nullptr;
             checked_cuda_malloc(&d_raw, raw_bytes);
             if (!d_raw) return false;
-            cudaMemcpyAsync(d_raw, weight.data, raw_bytes,
-                            cudaMemcpyHostToDevice, stream);
+            h2d_copy(d_raw, weight.data, raw_bytes, stream);
 
             size_t fp16_bytes = static_cast<size_t>(N) * K * sizeof(uint16_t);
             void* d_fp16 = nullptr;
@@ -444,8 +510,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         void* d_data = nullptr;
         checked_cuda_malloc(&d_data, bytes);
         if (!d_data) return false;
-        cudaMemcpyAsync(d_data, weight.data, bytes,
-                        cudaMemcpyHostToDevice, stream);
+        h2d_copy(d_data, weight.data, bytes, stream);
         gpu_allocs.push_back(d_data);
 
         weight.data = d_data;
@@ -462,8 +527,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
             void* d_data = nullptr;
             checked_cuda_malloc(&d_data, bytes);
             if (!d_data) return false;
-            cudaMemcpyAsync(d_data, weight.data, bytes,
-                            cudaMemcpyHostToDevice, stream);
+            h2d_copy(d_data, weight.data, bytes, stream);
             gpu_allocs.push_back(d_data);
             weight.data = d_data;
             weight.on_device = true;
@@ -482,8 +546,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         void* d_data = nullptr;
         checked_cuda_malloc(&d_data, bytes);
         if (!d_data) return false;
-        cudaMemcpyAsync(d_data, h_fp16.data(), bytes,
-                        cudaMemcpyHostToDevice, stream);
+        h2d_copy(d_data, h_fp16.data(), bytes, stream);
         gpu_allocs.push_back(d_data);
 
         weight = Tensor(d_data, DType::FP16, weight.ndim, weight.shape, true);
@@ -543,6 +606,37 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
     }
 
     IMP_LOG_INFO("Uploading model weights to GPU (%d layers)...", n_layers());
+
+    // Initialize pinned staging for fast H2D (especially on WSL2 where mmap can't be pinned).
+    // StagingGuard provides RAII cleanup on all exit paths (including early return false).
+    struct StagingGuard {
+        PinnedStager stager;
+        ~StagingGuard() {
+            g_stager = nullptr;
+            stager.destroy();
+            g_cached_free_mem = 0;
+            g_total_allocated = 0;
+        }
+    } staging_guard;
+
+    if (staging_guard.stager.init()) {
+        g_stager = &staging_guard.stager;
+        IMP_LOG_INFO("Pinned staging enabled (2x %.0f MiB buffers)",
+                     PinnedStager::kChunkSize / (1024.0 * 1024.0));
+    } else {
+        IMP_LOG_WARN("Pinned staging alloc failed, using default H2D path");
+    }
+
+    // Cache VRAM state to avoid per-tensor cudaMemGetInfo calls
+    {
+        size_t free_mem = 0, total_mem = 0;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        g_cached_free_mem = free_mem;
+        g_total_allocated = 0;
+        IMP_LOG_DEBUG("VRAM at upload start: %.2f GiB free / %.2f GiB total",
+                      free_mem / (1024.0 * 1024.0 * 1024.0),
+                      total_mem / (1024.0 * 1024.0 * 1024.0));
+    }
 
     // Upload token embedding
     // Embedding lookup only supports Q8_0/Q6_K natively; other quant types
@@ -754,8 +848,7 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
                     IMP_LOG_ERROR("Failed to allocate GPU memory for SSM F32 tensor in layer %d", i);
                     return false;
                 }
-                cudaMemcpyAsync(d_data, t->data, bytes,
-                                cudaMemcpyHostToDevice, stream);
+                h2d_copy(d_data, t->data, bytes, stream);
                 gpu_allocations_.push_back(d_data);
                 t->data = d_data;
                 t->on_device = true;
@@ -907,10 +1000,9 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
                     void* gpu_ptr = nullptr;
                     cudaError_t err = cudaMalloc(&gpu_ptr, total_raw);
                     if (err == cudaSuccess) {
-                        cudaError_t cpy_err = cudaMemcpyAsync(gpu_ptr, packed.data, total_raw,
-                                                               cudaMemcpyHostToDevice, stream);
+                        cudaError_t cpy_err = h2d_copy(gpu_ptr, packed.data, total_raw, stream);
                         if (cpy_err != cudaSuccess) {
-                            IMP_LOG_ERROR("  %s: cudaMemcpyAsync failed: %s", name, cudaGetErrorString(cpy_err));
+                            IMP_LOG_ERROR("  %s: h2d_copy failed: %s", name, cudaGetErrorString(cpy_err));
                             cudaFree(gpu_ptr);
                             return false;
                         }

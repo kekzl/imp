@@ -102,6 +102,11 @@ if [ -n "$IMP_PREFILL_CHUNK_SIZE" ]; then
     args+=(--prefill-chunk-size "$IMP_PREFILL_CHUNK_SIZE")
 fi
 
+# Think budget
+if [ -n "$IMP_THINK_BUDGET" ]; then
+    args+=(--think-budget "$IMP_THINK_BUDGET")
+fi
+
 # Models directory
 if [ -n "$IMP_MODELS_DIR" ]; then
     args+=(--models-dir "$IMP_MODELS_DIR")

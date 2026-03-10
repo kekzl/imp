@@ -1873,13 +1873,20 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
         const char* src;
         if (!packed.on_device) {
-            // Expert weights offloaded to host — direct H2D to staging buffer.
-            // If host data is pinned (cudaHostAlloc'd), this is true async DMA.
-            // If unpinned (mmap'd fallback), CUDA runtime handles staging internally.
+            // Expert weights offloaded to host — try LRU cache first, then staging buffer.
             const char* host_ptr = static_cast<const char*>(packed.data) + offset;
-            cudaMemcpyAsync(moe_raw_staging_buf_, host_ptr, expert_raw,
-                            cudaMemcpyHostToDevice, stream);
-            src = static_cast<const char*>(moe_raw_staging_buf_);
+            if (expert_cache_.n_slots_ > 0) {
+                ExpertCacheKey ck{packed.data, expert_idx};
+                void* cached = expert_cache_.get_or_load(ck, host_ptr, expert_raw, stream);
+                src = static_cast<const char*>(cached);
+            } else if (moe_raw_staging_buf_) {
+                cudaMemcpyAsync(moe_raw_staging_buf_, host_ptr, expert_raw,
+                                cudaMemcpyHostToDevice, stream);
+                src = static_cast<const char*>(moe_raw_staging_buf_);
+            } else {
+                IMP_LOG_ERROR("dequant_expert: no staging buffer for host expert %d", expert_idx);
+                return Tensor();
+            }
         } else {
             src = static_cast<const char*>(packed.data) + offset;
         }
@@ -1911,14 +1918,15 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 // On-device: point directly into packed tensor
                 w = static_cast<const char*>(packed.data) +
                     (size_t)eidx * (size_t)rows * rb;
-            } else if (moe_raw_staging_buf_) {
-                // Host-resident: H2D to staging buffer, fused GEMV reads from there.
-                // If host data is pinned (cudaHostAlloc'd), this is true async DMA.
-                // If unpinned (mmap'd fallback), CUDA runtime handles staging internally.
+            } else {
+                // Host-resident: try LRU cache, then staging buffer.
                 size_t expert_raw = (size_t)rows * rb;
-                if (expert_raw <= moe_raw_staging_size_) {
-                    size_t offset = (size_t)eidx * expert_raw;
-                    const char* host_ptr = static_cast<const char*>(packed.data) + offset;
+                size_t offset = (size_t)eidx * expert_raw;
+                const char* host_ptr = static_cast<const char*>(packed.data) + offset;
+                if (expert_cache_.n_slots_ > 0) {
+                    ExpertCacheKey ck{packed.data, eidx};
+                    w = expert_cache_.get_or_load(ck, host_ptr, expert_raw, stream);
+                } else if (moe_raw_staging_buf_ && expert_raw <= moe_raw_staging_size_) {
                     cudaMemcpyAsync(moe_raw_staging_buf_, host_ptr, expert_raw,
                                     cudaMemcpyHostToDevice, stream);
                     w = moe_raw_staging_buf_;

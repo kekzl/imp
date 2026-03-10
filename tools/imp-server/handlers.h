@@ -1,6 +1,7 @@
 #pragma once
 
 #include "args.h"
+#include "batching_engine.h"
 #include "model/chat_template.h"
 #include "model/tokenizer.h"
 
@@ -9,10 +10,23 @@
 #include <nlohmann/json.hpp>
 
 #include <atomic>
+#include <chrono>
+#include <memory>
 #include <mutex>
 #include <string>
 
 using json = nlohmann::json;
+
+// Server-wide metrics (atomics for lock-free reads from /metrics endpoint)
+struct ServerMetrics {
+    std::atomic<int64_t> requests_total{0};
+    std::atomic<int64_t> requests_failed{0};
+    std::atomic<int64_t> tokens_prompt_total{0};
+    std::atomic<int64_t> tokens_completion_total{0};
+    std::atomic<int64_t> last_request_duration_ms{0};
+    std::atomic<int64_t> model_loads_total{0};
+    std::chrono::steady_clock::time_point start_time = std::chrono::steady_clock::now();
+};
 
 struct ServerState {
     ImpModel model = nullptr;
@@ -22,7 +36,7 @@ struct ServerState {
     bool have_template = false;
     std::string model_name;
     std::timed_mutex mtx;
-    int default_max_tokens = 16384;
+    int default_max_tokens = 8192;
     int max_seq_len = 0;
     std::atomic<int> next_id{0};
     std::atomic<int> next_tool_call_id{0};
@@ -32,6 +46,13 @@ struct ServerState {
     bool is_think_model = false;  // model has <think> token (DeepSeek R1 etc.)
     int32_t think_start_id = -1;  // <think> token ID (-1 if not present)
     int32_t think_end_id = -1;    // </think> token ID (-1 if not present)
+    float default_think_budget = 0.5f;  // fraction of max_tokens for reasoning (0=disabled, 0.5=50%)
+    ServerMetrics metrics;
+
+    // Continuous batching engine: runs inference in a background thread,
+    // allowing multiple concurrent requests to be processed together.
+    std::unique_ptr<BatchingEngine> batching;
+
     bool model_loaded() const { return ctx != nullptr; }
 };
 
@@ -58,3 +79,5 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res, Server
 void handle_detokenize(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_load_model(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_unload_model(const httplib::Request& req, httplib::Response& res, ServerState& state);
+void handle_metrics(const httplib::Request& req, httplib::Response& res, ServerState& state);
+void handle_embeddings(const httplib::Request& req, httplib::Response& res, ServerState& state);

@@ -12,7 +12,7 @@ void print_server_usage(const char* prog) {
         "  --model <path>        Path to model file (optional; load later via API)\n"
         "  --host <addr>         Listen address (default: 127.0.0.1)\n"
         "  --port <n>            Listen port (default: 8080)\n"
-        "  --max-tokens <n>      Default max tokens (default: 2048)\n"
+        "  --max-tokens <n>      Default max tokens (default: 8192)\n"
         "  --gpu-layers <n>      Layers on GPU, -1 = all (default: -1)\n"
         "  --device <n>          CUDA device ID (default: 0)\n"
         "  --chat-template <t>   auto, none, chatml, llama2, llama3, nemotron, gemma\n"
@@ -28,6 +28,7 @@ void print_server_usage(const char* prog) {
         "  --models-dir <path>   Directory to scan for .gguf models (auto-load on select)\n"
         "  --api-key <key>       Require Bearer token authentication\n"
         "  --reasoning-format <f> deepseek (default) or none\n"
+        "  --think-budget <f>    Fraction of max_tokens for reasoning (default: 0.5, 0=disabled)\n"
         "  --preset <name|none>  Override auto-detected preset, or 'none' to disable\n"
         "                        Use --preset list to show all available presets\n"
         "  --presets-file <path> Custom presets.toml path\n"
@@ -82,6 +83,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.api_key = argv[++i];
         } else if (std::strcmp(arg, "--reasoning-format") == 0 && i + 1 < argc) {
             args.reasoning_format = argv[++i];
+        } else if (std::strcmp(arg, "--think-budget") == 0 && i + 1 < argc) {
+            args.think_budget = std::atof(argv[++i]);
         } else if (std::strcmp(arg, "--preset") == 0 && i + 1 < argc) {
             args.preset = argv[++i];
         } else if (std::strcmp(arg, "--presets-file") == 0 && i + 1 < argc) {

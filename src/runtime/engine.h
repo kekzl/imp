@@ -65,6 +65,9 @@ struct EngineConfig {
     std::string draft_model_path;
     int spec_k = 4;
 
+    // Prefix caching: reuse KV cache blocks for shared token prefixes
+    bool use_prefix_caching = false;
+
     // Vision (multimodal)
     std::string mmproj_path;  // path to mmproj GGUF, empty = text-only
 };
@@ -111,6 +114,7 @@ public:
     KVCache* kv_cache() const noexcept { return kv_cache_raw_; }
     Model* model() const noexcept { return model_.get(); }
     const ChatTemplate& chat_template() const noexcept { return chat_template_; }
+    GraphExecutor* executor() const noexcept { return executor_.get(); }
 
 private:
     std::shared_ptr<Model> model_;

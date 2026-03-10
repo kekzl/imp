@@ -157,6 +157,7 @@ set(IMP_GRAPH_SOURCES
     src/graph/executor_kernels.cu
     src/graph/executor_workspace.cu
     src/graph/executor_forward.cu
+    src/graph/expert_cache.cu
 )
 
 set(IMP_VISION_SOURCES
@@ -268,6 +269,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/utils.cpp
         tools/imp-server/tool_call.cpp
         tools/imp-server/handlers.cpp
+        tools/imp-server/batching_engine.cpp
     )
     target_link_libraries(imp-server PRIVATE imp httplib::httplib nlohmann_json::nlohmann_json)
     target_include_directories(imp-server PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

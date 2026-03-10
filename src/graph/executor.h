@@ -13,8 +13,76 @@
 #include <cuda_fp16.h>
 #include <vector>
 #include <unordered_map>
+#include <list>
 
 namespace imp {
+
+// ---------------------------------------------------------------------------
+// LRU cache for GPU-resident expert weights.
+// When MoE experts don't fit in VRAM, they reside on host (mmap/pinned).
+// This cache keeps recently-used experts on GPU to avoid repeated H2D copies.
+// Key = (packed_tensor_ptr, expert_index), Value = GPU slot with raw bytes.
+// ---------------------------------------------------------------------------
+struct ExpertCacheKey {
+    const void* packed_ptr;  // pointer to packed tensor (identifies weight matrix)
+    int expert_idx;
+    bool operator==(const ExpertCacheKey& o) const {
+        return packed_ptr == o.packed_ptr && expert_idx == o.expert_idx;
+    }
+};
+
+struct ExpertCacheKeyHash {
+    size_t operator()(const ExpertCacheKey& k) const {
+        // Combine pointer hash and expert index
+        size_t h = std::hash<const void*>{}(k.packed_ptr);
+        h ^= std::hash<int>{}(k.expert_idx) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
+struct ExpertLRUCache {
+    // Each slot holds one expert's raw quantized bytes on GPU.
+    // Slots are fixed-size (max_expert_raw bytes each).
+    struct Slot {
+        void* gpu_ptr = nullptr;       // points into pool_
+        ExpertCacheKey key = {};
+        bool occupied = false;
+    };
+
+    void* pool_ = nullptr;             // contiguous GPU allocation for all slots
+    size_t slot_size_ = 0;             // bytes per slot (max expert raw size)
+    int n_slots_ = 0;                  // number of slots
+    std::vector<Slot> slots_;          // slot metadata
+
+    // LRU tracking: front = most recently used, back = least recently used
+    std::list<int> lru_order_;         // slot indices in LRU order
+    // Map from cache key to (slot_index, lru_iterator)
+    using LRUIter = std::list<int>::iterator;
+    std::unordered_map<ExpertCacheKey, std::pair<int, LRUIter>, ExpertCacheKeyHash> lookup_;
+
+    int64_t hits_ = 0;
+    int64_t misses_ = 0;
+
+    // Initialize: allocate n_slots * slot_size bytes on GPU.
+    // Returns false if GPU allocation fails (cache disabled).
+    bool init(size_t max_expert_raw, size_t budget_bytes);
+
+    // Lookup or insert an expert. Returns GPU pointer to cached expert data.
+    // If cache miss: copies from host, evicts LRU entry if needed.
+    // src_host = host pointer to this expert's raw bytes.
+    void* get_or_load(ExpertCacheKey key, const void* src_host,
+                      size_t expert_bytes, cudaStream_t stream);
+
+    // Check if expert is cached (no insertion).
+    void* find(ExpertCacheKey key);
+
+    void destroy();
+
+    float hit_rate() const {
+        int64_t total = hits_ + misses_;
+        return total > 0 ? static_cast<float>(hits_) / total : 0.0f;
+    }
+};
 
 // All the state needed for a single forward pass invocation.
 struct InferenceState {
@@ -180,6 +248,13 @@ public:
     // Ensure pinned logits buffer is allocated for the given vocab size.
     void ensure_logits_pinned(int vocab_size);
 
+    // Access the hidden state buffer after forward_logits().
+    // Returns [max_tokens, d_model] FP16 on device. Use view_tokens() to get [n, d_model].
+    const Tensor& hidden_state() const { return hidden_; }
+
+    // Public view_tokens wrapper for external callers.
+    Tensor view_hidden(int n_tokens) const { return view_tokens(hidden_, n_tokens); }
+
 private:
     const Model* model_ = nullptr;
     DType compute_dtype_ = DType::FP16;
@@ -289,8 +364,13 @@ private:
     int d_moe_weight_ptrs_count_ = 0;
 
     // GPU staging buffer for one expert's raw quantized bytes (H2D copy).
+    // Used as fallback when expert_cache_ is not available.
     void* moe_raw_staging_buf_ = nullptr;
     size_t moe_raw_staging_size_ = 0;
+
+    // LRU cache for host-resident expert weights on GPU.
+    // Keeps recently-used experts in VRAM to avoid repeated H2D copies.
+    ExpertLRUCache expert_cache_;
 
     // On-the-fly dequant scratch buffer for non-MoE quantized weights (Q8_0/Q6_K).
     void* dequant_scratch_ = nullptr;

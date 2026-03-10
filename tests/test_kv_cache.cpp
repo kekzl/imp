@@ -605,5 +605,190 @@ TEST(KVCacheManagerTest, ManagerPrefixCaching) {
     EXPECT_EQ(mgr->num_free_blocks(), 16);
 }
 
+// ============================================================================
+// Content-addressed prefix caching tests
+// ============================================================================
+
+// 20. BlockHashDeterministic
+TEST(KVCacheManagerTest, BlockHashDeterministic) {
+    // Verify that compute_block_hash is deterministic.
+    std::vector<int32_t> tokens = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    size_t h1 = KVCacheManager::compute_block_hash(tokens.data(), 16, 0);
+    size_t h2 = KVCacheManager::compute_block_hash(tokens.data(), 16, 0);
+    EXPECT_EQ(h1, h2);
+
+    // Different tokens produce different hashes.
+    tokens[0] = 99;
+    size_t h3 = KVCacheManager::compute_block_hash(tokens.data(), 16, 0);
+    EXPECT_NE(h1, h3);
+}
+
+// 21. BlockHashChaining
+TEST(KVCacheManagerTest, BlockHashChaining) {
+    // Parent hash changes the result even for identical tokens.
+    std::vector<int32_t> tokens = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    size_t h_parent0 = KVCacheManager::compute_block_hash(tokens.data(), 16, 0);
+    size_t h_parent1 = KVCacheManager::compute_block_hash(tokens.data(), 16, 42);
+    EXPECT_NE(h_parent0, h_parent1);
+}
+
+// 22. ContentAddressedPrefixCaching
+TEST(KVCacheManagerTest, ContentAddressedPrefixCaching) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(32);
+    mgr->set_prefix_caching_enabled(true);
+    EXPECT_TRUE(mgr->prefix_caching_enabled());
+
+    // Sequence 0: 48 tokens = 3 full blocks.
+    std::vector<int32_t> tokens(48);
+    std::iota(tokens.begin(), tokens.end(), 100);
+
+    // Allocate with prefix matching — no cache yet, so 0 reused.
+    int reused = mgr->allocate_blocks_with_prefix(0, tokens.data(), 48);
+    ASSERT_GE(reused, 0);
+    EXPECT_EQ(reused, 0);  // No cache hits on first request.
+    EXPECT_EQ(static_cast<int>(mgr->block_table(0).size()), 3);
+
+    // Register hashes after "prefill."
+    mgr->register_block_hashes(0, tokens.data(), 48);
+
+    // Free sequence 0 — blocks should be cached (not returned to pool).
+    int free_before = mgr->num_free_blocks();
+    mgr->free_sequence(0);
+    // Blocks are cached, not freed to pool — free count should NOT increase.
+    EXPECT_EQ(mgr->num_free_blocks(), free_before);
+    EXPECT_EQ(mgr->num_cached_blocks(), 3);
+
+    // Sequence 1: same 48 tokens — should reuse all 3 blocks.
+    reused = mgr->allocate_blocks_with_prefix(1, tokens.data(), 48);
+    ASSERT_GE(reused, 0);
+    EXPECT_EQ(reused, 3);
+    EXPECT_EQ(static_cast<int>(mgr->block_table(1).size()), 3);
+    // Cached blocks should have been consumed.
+    EXPECT_EQ(mgr->num_cached_blocks(), 0);
+
+    // Clean up.
+    mgr->free_sequence(1);
+}
+
+// 23. PrefixCachingPartialMatch
+TEST(KVCacheManagerTest, PrefixCachingPartialMatch) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(32);
+    mgr->set_prefix_caching_enabled(true);
+
+    // Seq 0: 32 tokens = 2 full blocks.
+    std::vector<int32_t> tokens_a(32);
+    std::iota(tokens_a.begin(), tokens_a.end(), 200);
+
+    int reused = mgr->allocate_blocks_with_prefix(0, tokens_a.data(), 32);
+    EXPECT_EQ(reused, 0);
+    mgr->register_block_hashes(0, tokens_a.data(), 32);
+    mgr->free_sequence(0);
+    EXPECT_EQ(mgr->num_cached_blocks(), 2);
+
+    // Seq 1: same first 16 tokens + different next 16 tokens.
+    // Only the first block should be reused.
+    std::vector<int32_t> tokens_b(32);
+    std::iota(tokens_b.begin(), tokens_b.begin() + 16, 200);  // Same first block
+    std::iota(tokens_b.begin() + 16, tokens_b.end(), 999);    // Different second block
+
+    reused = mgr->allocate_blocks_with_prefix(1, tokens_b.data(), 32);
+    ASSERT_GE(reused, 0);
+    EXPECT_EQ(reused, 1);  // Only first block matched.
+    EXPECT_EQ(static_cast<int>(mgr->block_table(1).size()), 2);
+
+    // One cached block was consumed (first), one remains (second from seq 0
+    // that didn't match due to parent hash chaining).
+    EXPECT_EQ(mgr->num_cached_blocks(), 1);
+
+    mgr->free_sequence(1);
+}
+
+// 24. CachedBlockEviction
+TEST(KVCacheManagerTest, CachedBlockEviction) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(8);  // Small pool to force eviction.
+    mgr->set_prefix_caching_enabled(true);
+
+    // Seq 0: fill 4 blocks.
+    std::vector<int32_t> tokens(64);
+    std::iota(tokens.begin(), tokens.end(), 300);
+    int reused = mgr->allocate_blocks_with_prefix(0, tokens.data(), 64);
+    EXPECT_EQ(reused, 0);
+    mgr->register_block_hashes(0, tokens.data(), 64);
+    mgr->free_sequence(0);
+    EXPECT_EQ(mgr->num_cached_blocks(), 4);
+    EXPECT_EQ(mgr->num_free_blocks(), 4);  // 8 total - 4 cached (held at ref=1)
+
+    // Seq 1: needs 5 blocks — must evict cached blocks to fit.
+    std::vector<int32_t> tokens2(80);
+    std::iota(tokens2.begin(), tokens2.end(), 500);
+    reused = mgr->allocate_blocks_with_prefix(1, tokens2.data(), 80);
+    ASSERT_GE(reused, 0);
+    EXPECT_EQ(reused, 0);  // No matching prefix.
+    EXPECT_EQ(static_cast<int>(mgr->block_table(1).size()), 5);
+
+    // At least 1 cached block should have been evicted.
+    EXPECT_LT(mgr->num_cached_blocks(), 4);
+
+    mgr->free_sequence(1);
+}
+
+// 25. PrefixCachingDisabled
+TEST(KVCacheManagerTest, PrefixCachingDisabled) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(16);
+    EXPECT_FALSE(mgr->prefix_caching_enabled());  // Off by default.
+
+    std::vector<int32_t> tokens(32);
+    std::iota(tokens.begin(), tokens.end(), 400);
+
+    // allocate_blocks_with_prefix with caching disabled — should still work
+    // but never cache or reuse.
+    int reused = mgr->allocate_blocks_with_prefix(0, tokens.data(), 32);
+    EXPECT_EQ(reused, 0);
+    EXPECT_EQ(static_cast<int>(mgr->block_table(0).size()), 2);
+
+    mgr->free_sequence(0);
+    // No cached blocks since prefix caching is disabled.
+    EXPECT_EQ(mgr->num_cached_blocks(), 0);
+    EXPECT_EQ(mgr->num_free_blocks(), 16);  // All returned to pool.
+}
+
+// 26. PrefixCachingWithPartialLastBlock
+TEST(KVCacheManagerTest, PrefixCachingWithPartialLastBlock) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(16);
+    mgr->set_prefix_caching_enabled(true);
+
+    // 20 tokens = 1 full block (16 tokens) + 1 partial block (4 tokens).
+    std::vector<int32_t> tokens(20);
+    std::iota(tokens.begin(), tokens.end(), 500);
+
+    int reused = mgr->allocate_blocks_with_prefix(0, tokens.data(), 20);
+    EXPECT_EQ(reused, 0);
+    EXPECT_EQ(static_cast<int>(mgr->block_table(0).size()), 2);
+
+    mgr->register_block_hashes(0, tokens.data(), 20);
+    mgr->free_sequence(0);
+
+    // Only the first (full) block should be cached. The partial block
+    // should be freed normally.
+    EXPECT_EQ(mgr->num_cached_blocks(), 1);
+
+    // Seq 1: same 20 tokens — first block reused, second allocated fresh.
+    reused = mgr->allocate_blocks_with_prefix(1, tokens.data(), 20);
+    EXPECT_EQ(reused, 1);
+    EXPECT_EQ(static_cast<int>(mgr->block_table(1).size()), 2);
+
+    mgr->free_sequence(1);
+}
+
 } // namespace
 } // namespace imp
