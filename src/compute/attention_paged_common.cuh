@@ -32,6 +32,32 @@ __device__ __forceinline__ void cp_async_ca_8(void* smem, const void* glob) {
     asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" :: "r"(s), "l"(glob));
 }
 
+// Streaming variant: cache at global level only (skip L1), evict-first from L2.
+// Used for KV cache loads that have no intra-step reuse across kernels.
+__device__ __forceinline__ void cp_async_cg_8(void* smem, const void* glob) {
+    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 8;\n" :: "r"(s), "l"(glob));
+}
+
+// ---------------------------------------------------------------------------
+// L2 streaming load/store hints for paged attention decode.
+// KV cache data is read once per decode step with no inter-kernel reuse.
+// Streaming loads (__ldcs = .cs) hint L2 to evict these lines first,
+// preserving L2 space for weight data used by subsequent FFN GEMV kernels.
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ half ldcs_half(const half* p) {
+    return __ushort_as_half(__ldcs(reinterpret_cast<const unsigned short*>(p)));
+}
+
+__device__ __forceinline__ half2 ldcs_half2(const half2* p) {
+    unsigned int v = __ldcs(reinterpret_cast<const unsigned int*>(p));
+    half2 r; memcpy(&r, &v, 4); return r;
+}
+
+__device__ __forceinline__ void stcs_half(half* p, half v) {
+    __stcs(reinterpret_cast<unsigned short*>(p), __half_as_ushort(v));
+}
+
 __device__ __forceinline__ void cp_async_commit() {
     asm volatile("cp.async.commit_group;\n");
 }

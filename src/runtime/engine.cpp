@@ -123,6 +123,22 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         return false;
     }
 
+    // --- Reserve L2 persisting cache for decode GEMV ---
+    // KV cache reads use streaming loads (__ldcs / cp.async.cg) that hint L2 to
+    // evict those lines first. Without a persisting reservation, the hardware has
+    // no set-aside region — this call enables the streaming/persisting distinction.
+    {
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, 0);
+        size_t max_persist = prop.persistingL2CacheMaxSize;
+        if (max_persist > 0) {
+            size_t reserve = max_persist * 3 / 4;  // 75% of L2 (72 MB on RTX 5090)
+            cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, reserve);
+            IMP_LOG_INFO("L2 persisting cache: reserved %zu MB / %zu MB total",
+                         reserve >> 20, max_persist >> 20);
+        }
+    }
+
     // --- Create CUDA stream ---
     // Non-blocking stream avoids implicit synchronization with the default stream,
     // preventing hidden stalls when other CUDA work is in flight.

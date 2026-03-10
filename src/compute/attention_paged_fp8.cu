@@ -428,7 +428,7 @@ __global__ void paged_attention_splitk_fp8_kernel(
                     const uint32_t* K_v = reinterpret_cast<const uint32_t*>(K_tok + lane_offset);
                     #pragma unroll
                     for (int i = 0; i < FP8_VEC4; i++) {
-                        uint32_t packed = K_v[i];
+                        uint32_t packed = __ldcs(&K_v[i]);
                         uint8_t b0 = packed & 0xFF;
                         uint8_t b1 = (packed >> 8) & 0xFF;
                         uint8_t b2 = (packed >> 16) & 0xFF;
@@ -470,7 +470,7 @@ __global__ void paged_attention_splitk_fp8_kernel(
                     const uint32_t* V_v = reinterpret_cast<const uint32_t*>(V_tok + lane_offset);
                     #pragma unroll
                     for (int i = 0; i < FP8_VEC4; i++) {
-                        uint32_t packed = V_v[i];
+                        uint32_t packed = __ldcs(&V_v[i]);
                         uint8_t b0 = packed & 0xFF;
                         uint8_t b1 = (packed >> 8) & 0xFF;
                         uint8_t b2 = (packed >> 16) & 0xFF;
@@ -635,7 +635,7 @@ __global__ void paged_attention_decode_fp8_kernel(
                     const uint32_t* K_v = reinterpret_cast<const uint32_t*>(K_tok + lane_offset);
                     #pragma unroll
                     for (int i = 0; i < FP8_VEC4; i++) {
-                        uint32_t packed = K_v[i];
+                        uint32_t packed = __ldcs(&K_v[i]);
                         dot += q_reg[i*4 + 0] * fp8_e4m3_to_float(packed & 0xFF);
                         dot += q_reg[i*4 + 1] * fp8_e4m3_to_float((packed >> 8) & 0xFF);
                         dot += q_reg[i*4 + 2] * fp8_e4m3_to_float((packed >> 16) & 0xFF);
@@ -669,7 +669,7 @@ __global__ void paged_attention_decode_fp8_kernel(
                     const uint32_t* V_v = reinterpret_cast<const uint32_t*>(V_tok + lane_offset);
                     #pragma unroll
                     for (int i = 0; i < FP8_VEC4; i++) {
-                        uint32_t packed = V_v[i];
+                        uint32_t packed = __ldcs(&V_v[i]);
                         o_reg[i*4 + 0] = rescale * o_reg[i*4 + 0] + w_new_scaled * fp8_e4m3_to_float(packed & 0xFF);
                         o_reg[i*4 + 1] = rescale * o_reg[i*4 + 1] + w_new_scaled * fp8_e4m3_to_float((packed >> 8) & 0xFF);
                         o_reg[i*4 + 2] = rescale * o_reg[i*4 + 2] + w_new_scaled * fp8_e4m3_to_float((packed >> 16) & 0xFF);
@@ -727,7 +727,7 @@ __global__ void paged_attention_decode_fp8_kernel(
 
             int out_idx = batch_idx * n_heads * HEAD_DIM
                         + head_idx * HEAD_DIM + d;
-            O[out_idx] = __float2half(o_val);
+            stcs_half(&O[out_idx], __float2half(o_val));
         }
     }
 }

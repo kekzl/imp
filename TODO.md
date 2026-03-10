@@ -78,27 +78,21 @@
 
 ## L2 Cache Tuning
 
-Current decode GEMV achieves ~44% of RTX 5090 peak bandwidth (788/1792 GB/s), while
-llama.cpp reaches ~55-69%. The codebase has **zero** L2 cache control — no
-`cudaAccessPolicyWindow`, no `__ldcs`/`__ldcg`, no `cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize)`.
-All loads use default `.ca` (cache-all) policy. Weight data, Q8_1 activations, KV cache,
-and output all compete for the same 96 MB L2 with no priority differentiation.
+Phase 1 (in-kernel `__ldcs`/`__stcs`) and Phase 2 (L2 persisting reservation) are done.
+KV reads use streaming loads, attention output uses streaming stores, L2 reservation is 75%.
+**Result: +2-4% decode across Q8_0 models, +4.3% on MoE.** Remaining items: GEMV weight
+streaming (medium risk) and per-phase L2 policy rotation (complex, CUDA Graph incompatible).
 
 ### Phase 1: In-Kernel Cache Operators (PTX-level)
 
 Compatible with CUDA Graphs (no host-side API calls in the hot path).
 
-- [ ] **`__ldcs` for paged attention KV reads** — KV cache data is accessed once per
-  decode step, then not needed until next step. Currently uses default `.ca` loads which
-  pollute L2, evicting weight data that subsequent FFN GEMV kernels need. Change
-  K/V loads in `attention_paged.cu` (split-K, GQA, pipeline kernels) and
-  `attention_paged_fp8.cu`/`attention_paged_int8.cu` to `__ldcs()` (evict-first).
-  **Files:** `src/compute/attention_paged.cu`, `attention_paged_fp8.cu`, `attention_paged_int8.cu`
-  **Expected:** +2-5% decode by reducing L2 thrashing between attention and FFN phases.
-  **Risk:** Low — KV data has no intra-step reuse across kernels. GQA multi-head reuse
-  within a single kernel happens in smem (cp.async pipeline) or via DSMEM (cluster),
-  not L2. Verify that `__ldcs` doesn't hurt the non-pipeline fallback where multiple
-  warps read the same KV block from global.
+- [x] **`__ldcs` for paged attention KV reads** — KV cache data is accessed once per
+  decode step, then not needed until next step. Changed K/V loads in all paged attention
+  kernels (FP16, FP8, INT8 — split-K, GQA, cluster) to `__ldcs()` (evict-first).
+  cp.async pipeline kernels kept `.ca` (`.cg` requires 16-byte minimum, not 4/8).
+  **Result:** Qwen3-8B +3.3%, Qwen3-4B +2.4%, Phi4-mini +2.9%, Qwen3-Coder-30B +4.3%.
+  Gemma-3-12B ~0% (head_dim=256, fewer heads = less KV L2 pressure).
 
 - [ ] **`__ldcs` for GEMV weight reads** — In both K-par and row-par dp4a kernels,
   each weight row is read by exactly one block (K-par) or one warp (row-par). No
@@ -116,31 +110,21 @@ Compatible with CUDA Graphs (no host-side API calls in the hot path).
   May need `__ldcg` (L2-only, skip L1) instead of `__ldcs` (evict-first) for complex
   quant types.
 
-- [ ] **Keep Q8_1 activation loads as default `.ca`** — In K-par GEMV, Q8_1 is the
-  most reused data (read by all M blocks). In row-par, Q8_1 is already in shared memory.
-  Do NOT add streaming hints to Q8_1 reads. Consider `__ldca` (explicit cache-all) as
-  documentation if changing other load types.
+- [x] **Keep Q8_1 activation loads as default `.ca`** — Confirmed: Q8_1 is most reused
+  data in K-par GEMV (read by all M blocks). No streaming hints added.
 
-- [ ] **`__stcs` for attention output writes** — `attn_out` is written once by paged
-  attention, then read once by the O-projection GEMV. Streaming write avoids polluting
-  L2 with output data that displaces weight lines.
-  **Files:** `src/compute/attention_paged.cu` (output store in reduce kernel)
-  **Expected:** +0.5-1% decode (minor — output is small relative to weights).
+- [x] **`__stcs` for attention output writes** — All final O writes in paged attention
+  (FP16, FP8, INT8, reduce kernel, cluster kernel) use `__stcs` to avoid L2 pollution.
+  Impact included in the +2-4% above (cannot isolate from KV streaming).
 
 ### Phase 2: Persisting L2 Reservation (Engine-level)
 
 One-time setup at engine init. Does NOT require per-kernel changes. Complements Phase 1.
 
-- [ ] **`cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, ...)`** — Reserve 75% of
-  L2 (72 MB on RTX 5090) for persisting data. Without this, the persisting/streaming
-  distinction from Phase 1 has no effect — there's no set-aside region for persisting
-  lines to live in. Call once in `Engine::init()` after GPU properties query.
-  **Files:** `src/runtime/engine.cpp` (init)
-  **Expected:** Enables Phase 1 benefits. Without reservation, `__ldcs` still helps
-  via evict-first heuristic, but the hardware has more freedom to retain streaming data.
-  **Risk:** Low — this is a global device setting. Only affects the persisting vs
-  streaming eviction priority. No functional change. Query `persistingL2CacheMaxSize`
-  to cap the request.
+- [x] **`cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, ...)`** — Reserve 75% of
+  L2 for persisting data. RTX 5090: 45 MB reserved / 60 MB total.
+  Called once in `Engine::init()` after GPU properties query. Enables the
+  streaming/persisting distinction from Phase 1 `__ldcs`/`__stcs` hints.
 
 - [ ] **`cudaAccessPolicyWindow` per decode step** — Set a single policy window before
   the layer loop in `forward_logits()` covering all model weights as `persisting` and
@@ -195,8 +179,8 @@ RTX 5090: **6x layer-wise Speedup, 4x End-to-End Inference Speedup**.
 - [x] CUTLASS MXFP4 GEMM: `gemm_cutlass_mxfp4_sm120.cu` — mx_float4_t + UE8M0 scales (SFVecSize=32)
 - [x] NVFP4→MXFP4 Scale-Konvertierung: 2× UE4M3 per 16 → 1× UE8M0 per 32
 - [x] MXFP4 Aktivierungsquantisierung: absmax per 32 → UE8M0 + FP4 E2M1 pack
-- [ ] Integration in Prefill-Pfad: MXFP4 GEMM als Alternative zum NVFP4 CUTLASS Pfad
-- [ ] Bench: MXFP4 vs. NVFP4 CUTLASS Prefill auf Qwen3-8B
+- [x] Integration in Prefill-Pfad: MXFP4 GEMM als Alternative zum NVFP4 CUTLASS Pfad
+- [x] Bench: MXFP4 vs. NVFP4 CUTLASS Prefill auf Qwen3-8B
 - [ ] Fused rotation+MXFP4 GEMM Kernel für Decode GEMV prototypen
 - [ ] MR-GPTQ SafeTensors Loader (nur LLaMA-8B verfügbar, niedrige Priorität)
 

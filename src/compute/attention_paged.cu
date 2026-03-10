@@ -182,8 +182,8 @@ paged_attention_gqa_kernel(
             int slot = idx / head_dim;
             int d    = idx % head_dim;
             int src_offset = slot * kv_slot_stride + d;
-            s_k[idx] = K_block_base[src_offset];
-            s_v[idx] = V_block_base[src_offset];
+            s_k[idx] = ldcs_half(&K_block_base[src_offset]);
+            s_v[idx] = ldcs_half(&V_block_base[src_offset]);
         }
     }
     __syncthreads();
@@ -207,8 +207,8 @@ paged_attention_gqa_kernel(
                 int slot = idx / head_dim;
                 int d    = idx % head_dim;
                 int src_offset = slot * kv_slot_stride + d;
-                s_k_next[idx] = K_next[src_offset];
-                s_v_next[idx] = V_next[src_offset];
+                s_k_next[idx] = ldcs_half(&K_next[src_offset]);
+                s_v_next[idx] = ldcs_half(&V_next[src_offset]);
             }
         }
 
@@ -300,7 +300,7 @@ paged_attention_gqa_kernel(
 
                 int out_idx = batch_idx * n_heads * head_dim
                             + head_idx * head_dim + d;
-                O[out_idx] = __float2half(o_val);
+                stcs_half(&O[out_idx], __float2half(o_val));
             }
         }
     }
@@ -387,13 +387,13 @@ __global__ void paged_attention_decode_kernel(
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
             const half* K_tok = K_block + t * kv_slot_stride + kv_head * HEAD_DIM;
 
-            // Vectorized Q.K dot product using half2 loads
+            // Vectorized Q.K dot product using half2 streaming loads
             float dot = 0.0f;
             {
                 const half2* K_tok2 = reinterpret_cast<const half2*>(K_tok + lane_offset);
                 #pragma unroll
                 for (int i = 0; i < ELEMS / 2; i++) {
-                    half2 k2 = K_tok2[i];
+                    half2 k2 = ldcs_half2(&K_tok2[i]);
                     dot += q_reg[2*i]   * __half2float(k2.x);
                     dot += q_reg[2*i+1] * __half2float(k2.y);
                 }
@@ -410,13 +410,13 @@ __global__ void paged_attention_decode_kernel(
             float rescale = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
             float w_new   = (l_new > 0.0f) ? (p / l_new) : 0.0f;
 
-            // Vectorized V accumulation using half2 loads
+            // Vectorized V accumulation using half2 streaming loads
             const half* V_tok = V_block + t * kv_slot_stride + kv_head * HEAD_DIM;
             {
                 const half2* V_tok2 = reinterpret_cast<const half2*>(V_tok + lane_offset);
                 #pragma unroll
                 for (int i = 0; i < ELEMS / 2; i++) {
-                    half2 v2 = V_tok2[i];
+                    half2 v2 = ldcs_half2(&V_tok2[i]);
                     o_reg[2*i]   = rescale * o_reg[2*i]   + w_new * __half2float(v2.x);
                     o_reg[2*i+1] = rescale * o_reg[2*i+1] + w_new * __half2float(v2.y);
                 }
@@ -463,7 +463,7 @@ __global__ void paged_attention_decode_kernel(
 
             int out_idx = batch_idx * n_heads * HEAD_DIM
                         + head_idx * HEAD_DIM + d;
-            O[out_idx] = __float2half(o_val);
+            stcs_half(&O[out_idx], __float2half(o_val));
         }
     }
 }
@@ -544,7 +544,7 @@ __global__ void paged_attention_decode_kernel_generic(
             for (int i = 0; i < elems_per_thread; i++) {
                 int d = lane_id + i * WARP_SIZE;
                 if (d < head_dim)
-                    dot += q_reg[i] * __half2float(K_tok[d]);
+                    dot += q_reg[i] * __half2float(ldcs_half(&K_tok[d]));
             }
             dot = warp_reduce_sum(dot);
             dot *= scale;
@@ -562,7 +562,7 @@ __global__ void paged_attention_decode_kernel_generic(
             for (int i = 0; i < elems_per_thread; i++) {
                 int d = lane_id + i * WARP_SIZE;
                 if (d < head_dim)
-                    o_reg[i] = rescale * o_reg[i] + w_new * __half2float(V_tok[d]);
+                    o_reg[i] = rescale * o_reg[i] + w_new * __half2float(ldcs_half(&V_tok[d]));
             }
 
             m_w = m_new;
@@ -607,7 +607,7 @@ __global__ void paged_attention_decode_kernel_generic(
 
                 int out_idx = batch_idx * n_heads * head_dim
                             + head_idx * head_dim + d;
-                O[out_idx] = __float2half(o_val);
+                stcs_half(&O[out_idx], __float2half(o_val));
             }
         }
     }
@@ -748,7 +748,7 @@ __global__ void paged_attention_splitk_kernel(
                     const float4* K_v = reinterpret_cast<const float4*>(K_tok + lane_offset);
                     #pragma unroll
                     for (int i = 0; i < K_VEC8; i++) {
-                        float4 k_raw = K_v[i];
+                        float4 k_raw = __ldcs(&K_v[i]);
                         const half2* k_h2 = reinterpret_cast<const half2*>(&k_raw);
                         #pragma unroll
                         for (int j = 0; j < 4; j++) {
@@ -762,7 +762,7 @@ __global__ void paged_attention_splitk_kernel(
                         const half2* K_rem = reinterpret_cast<const half2*>(K_tok + lane_offset + done);
                         #pragma unroll
                         for (int i = 0; i < K_REM / 2; i++) {
-                            half2 k2 = K_rem[i];
+                            half2 k2 = ldcs_half2(&K_rem[i]);
                             dot += q_reg[done + 2*i]   * __half2float(k2.x);
                             dot += q_reg[done + 2*i+1] * __half2float(k2.y);
                         }
@@ -772,7 +772,7 @@ __global__ void paged_attention_splitk_kernel(
                     const half2* K_tok2 = reinterpret_cast<const half2*>(K_tok + lane_offset);
                     #pragma unroll
                     for (int i = 0; i < ELEMS / 2; i++) {
-                        half2 k2 = K_tok2[i];
+                        half2 k2 = ldcs_half2(&K_tok2[i]);
                         dot += q_reg[2*i]   * __half2float(k2.x);
                         dot += q_reg[2*i+1] * __half2float(k2.y);
                     }
@@ -797,7 +797,7 @@ __global__ void paged_attention_splitk_kernel(
                     const float4* V_v = reinterpret_cast<const float4*>(V_tok + lane_offset);
                     #pragma unroll
                     for (int i = 0; i < K_VEC8; i++) {
-                        float4 v_raw = V_v[i];
+                        float4 v_raw = __ldcs(&V_v[i]);
                         const half2* v_h2 = reinterpret_cast<const half2*>(&v_raw);
                         #pragma unroll
                         for (int j = 0; j < 4; j++) {
@@ -810,7 +810,7 @@ __global__ void paged_attention_splitk_kernel(
                         const half2* V_rem = reinterpret_cast<const half2*>(V_tok + lane_offset + done);
                         #pragma unroll
                         for (int i = 0; i < K_REM / 2; i++) {
-                            half2 v2 = V_rem[i];
+                            half2 v2 = ldcs_half2(&V_rem[i]);
                             o_reg[done + 2*i]   = rescale * o_reg[done + 2*i]   + w_new * __half2float(v2.x);
                             o_reg[done + 2*i+1] = rescale * o_reg[done + 2*i+1] + w_new * __half2float(v2.y);
                         }
@@ -819,7 +819,7 @@ __global__ void paged_attention_splitk_kernel(
                     const half2* V_tok2 = reinterpret_cast<const half2*>(V_tok + lane_offset);
                     #pragma unroll
                     for (int i = 0; i < ELEMS / 2; i++) {
-                        half2 v2 = V_tok2[i];
+                        half2 v2 = ldcs_half2(&V_tok2[i]);
                         o_reg[2*i]   = rescale * o_reg[2*i]   + w_new * __half2float(v2.x);
                         o_reg[2*i+1] = rescale * o_reg[2*i+1] + w_new * __half2float(v2.y);
                     }
@@ -1190,7 +1190,7 @@ __global__ void paged_attention_reduce_kernel(
 
         int out_idx = batch_idx * n_heads * head_dim
                     + head_idx * head_dim + d;
-        O[out_idx] = __float2half(o_val);
+        stcs_half(&O[out_idx], __float2half(o_val));
     }
 }
 
@@ -1347,8 +1347,8 @@ __global__ void paged_attention_cluster_kernel(
         for (int idx = threadIdx.x; idx < block_size * HEAD_DIM; idx += BLOCK_THREADS) {
             int slot = idx / HEAD_DIM;
             int d    = idx % HEAD_DIM;
-            buf0[slot * 2 * HEAD_DIM + d]             = K_base[slot * kv_slot_stride + d];
-            buf0[slot * 2 * HEAD_DIM + HEAD_DIM + d]  = V_base[slot * kv_slot_stride + d];
+            buf0[slot * 2 * HEAD_DIM + d]             = ldcs_half(&K_base[slot * kv_slot_stride + d]);
+            buf0[slot * 2 * HEAD_DIM + HEAD_DIM + d]  = ldcs_half(&V_base[slot * kv_slot_stride + d]);
         }
     }
     cluster.sync();
@@ -1369,8 +1369,8 @@ __global__ void paged_attention_cluster_kernel(
             for (int idx = threadIdx.x; idx < block_size * HEAD_DIM; idx += BLOCK_THREADS) {
                 int slot = idx / HEAD_DIM;
                 int d    = idx % HEAD_DIM;
-                next_ptr[slot * 2 * HEAD_DIM + d]             = K_next[slot * kv_slot_stride + d];
-                next_ptr[slot * 2 * HEAD_DIM + HEAD_DIM + d]  = V_next[slot * kv_slot_stride + d];
+                next_ptr[slot * 2 * HEAD_DIM + d]             = ldcs_half(&K_next[slot * kv_slot_stride + d]);
+                next_ptr[slot * 2 * HEAD_DIM + HEAD_DIM + d]  = ldcs_half(&V_next[slot * kv_slot_stride + d]);
             }
         }
 
@@ -1459,7 +1459,7 @@ __global__ void paged_attention_cluster_kernel(
                 float weight = expf(warp_max[w] - global_max) * warp_l[w];
                 o_val += weight * warp_o[w * HEAD_DIM + d];
             }
-            O_ptr[d] = __float2half(o_val * inv_gl);
+            stcs_half(&O_ptr[d], __float2half(o_val * inv_gl));
         }
     }
 }

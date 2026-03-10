@@ -171,10 +171,10 @@ __global__ void paged_attention_splitk_int8_kernel(
                                 p |= (static_cast<uint32_t>(static_cast<uint8_t>(K_rem[j])) << (j * 8));
                             k_val = static_cast<int>(p);
                         } else {
-                            k_val = K_v[i];
+                            k_val = __ldcs(&K_v[i]);
                         }
                     } else {
-                        k_val = K_v[i];
+                        k_val = __ldcs(&K_v[i]);
                     }
                     sumi = __dp4a(k_val, q_packed[i], sumi);
                 }
@@ -218,10 +218,10 @@ __global__ void paged_attention_splitk_int8_kernel(
                                 packed |= (static_cast<uint32_t>(V_rem[j]) << (j * 8));
                             count = DP4A_REM;
                         } else {
-                            packed = V_v[i];
+                            packed = __ldcs(&V_v[i]);
                         }
                     } else {
-                        packed = V_v[i];
+                        packed = __ldcs(&V_v[i]);
                     }
 
                     if (count > 0) {
@@ -428,10 +428,10 @@ __global__ void paged_attention_decode_int8_kernel(
                                 p |= (static_cast<uint32_t>(static_cast<uint8_t>(K_rem[j])) << (j * 8));
                             k_val = static_cast<int>(p);
                         } else {
-                            k_val = K_v[i];
+                            k_val = __ldcs(&K_v[i]);
                         }
                     } else {
-                        k_val = K_v[i];
+                        k_val = __ldcs(&K_v[i]);
                     }
                     sumi = __dp4a(k_val, q_packed[i], sumi);
                 }
@@ -470,10 +470,10 @@ __global__ void paged_attention_decode_int8_kernel(
                                 packed |= (static_cast<uint32_t>(V_rem[j]) << (j * 8));
                             count = DP4A_REM;
                         } else {
-                            packed = V_v[i];
+                            packed = __ldcs(&V_v[i]);
                         }
                     } else {
-                        packed = V_v[i];
+                        packed = __ldcs(&V_v[i]);
                     }
 
                     if (count > 0)
@@ -533,7 +533,7 @@ __global__ void paged_attention_decode_int8_kernel(
 
             int out_idx = batch_idx * n_heads * HEAD_DIM
                         + head_idx * HEAD_DIM + d;
-            O[out_idx] = __float2half(o_val);
+            stcs_half(&O[out_idx], __float2half(o_val));
         }
     }
 }
