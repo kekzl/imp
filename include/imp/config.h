@@ -60,6 +60,9 @@ typedef struct {
     // NVFP4 decode weight cache
     int use_nvfp4_decode;          // -1 = auto (sm_120→mode2, sm_90→mode1), 0 = off, 1 = additive, 2 = NVFP4 only
 
+    // Prefix caching
+    int use_prefix_caching;        // 0 = off (default), 1 = on — reuse KV blocks for shared prefixes
+
     // Threading
     int num_cpu_threads;           // 0 = auto (hardware_concurrency)
 

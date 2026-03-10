@@ -48,6 +48,7 @@ int main(int argc, char** argv) {
 
     ServerState state;
     state.default_max_tokens = args.max_tokens;
+    state.default_think_budget = args.think_budget;
     state.default_args = args;
 
     // Set models directory (explicit flag → model parent → /models → HF cache)
@@ -146,6 +147,11 @@ int main(int argc, char** argv) {
             handle_completions(req, res, state);
         });
 
+    svr.Post("/v1/embeddings",
+        [&state](const httplib::Request& req, httplib::Response& res) {
+            handle_embeddings(req, res, state);
+        });
+
     svr.Post("/tokenize",
         [&state](const httplib::Request& req, httplib::Response& res) {
             handle_tokenize(req, res, state);
@@ -155,6 +161,16 @@ int main(int argc, char** argv) {
         [&state](const httplib::Request& req, httplib::Response& res) {
             handle_detokenize(req, res, state);
         });
+
+    svr.Get("/metrics",
+        [&state](const httplib::Request& req, httplib::Response& res) {
+            handle_metrics(req, res, state);
+        });
+
+    // Track failed requests via post-routing
+    svr.set_post_routing_handler([&state](const httplib::Request&, httplib::Response& res) {
+        if (res.status >= 500) state.metrics.requests_failed++;
+    });
 
     // Graceful shutdown on SIGINT/SIGTERM
     g_server.store(&svr, std::memory_order_relaxed);
@@ -171,8 +187,10 @@ int main(int argc, char** argv) {
     printf("  DELETE /v1/models          Unload model\n");
     printf("  POST   /v1/chat/completions\n");
     printf("  POST   /v1/completions\n");
+    printf("  POST   /v1/embeddings\n");
     printf("  POST   /tokenize\n");
     printf("  POST   /detokenize\n");
+    printf("  GET    /metrics             Prometheus metrics\n");
     fflush(stdout);
 
     if (!svr.listen(args.host, args.port)) {
@@ -186,6 +204,10 @@ int main(int argc, char** argv) {
     }
 
     g_server.store(nullptr, std::memory_order_relaxed);
+    if (state.batching) {
+        state.batching->stop();
+        state.batching.reset();
+    }
     imp_context_free(state.ctx);
     imp_model_free(state.model);
     return 0;

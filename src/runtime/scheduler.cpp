@@ -46,10 +46,24 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 // Not enough memory even with eviction -- stop admitting
                 break;
             }
-            // Reserve blocks under req->id so subsequent requests see reduced
-            // availability and the engine can reuse them during prefill.
-            if (!kv_manager_->allocate_blocks(req->id, blocks_needed)) {
-                break;
+            // Reserve blocks, using prefix caching when enabled.
+            if (kv_manager_->prefix_caching_enabled()) {
+                int reused = kv_manager_->allocate_blocks_with_prefix(
+                    req->id, req->input_tokens.data(),
+                    static_cast<int>(req->input_tokens.size()));
+                if (reused < 0) break;
+                // Skip prefill for tokens covered by reused blocks.
+                if (reused > 0) {
+                    int skip = reused * kKVBlockSize;
+                    int total = static_cast<int>(req->input_tokens.size());
+                    if (skip >= total) skip = (total / kKVBlockSize) * kKVBlockSize;
+                    if (skip >= total) skip = total - 1;
+                    req->prefill_offset = skip;
+                }
+            } else {
+                if (!kv_manager_->allocate_blocks(req->id, blocks_needed)) {
+                    break;
+                }
             }
         }
 

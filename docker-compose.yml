@@ -21,7 +21,7 @@ services:
       - IMP_MODEL=${IMP_MODEL:-}
       - IMP_HOST=0.0.0.0
       - IMP_PORT=${IMP_PORT:-8080}
-      - IMP_MAX_TOKENS=${IMP_MAX_TOKENS:-2048}
+      - IMP_MAX_TOKENS=${IMP_MAX_TOKENS:-}
       - IMP_CHAT_TEMPLATE=${IMP_CHAT_TEMPLATE:-auto}
       - IMP_KV_FP8=${IMP_KV_FP8:-}
       - IMP_KV_INT8=${IMP_KV_INT8:-}
@@ -30,6 +30,7 @@ services:
       - IMP_SSM_FP16=${IMP_SSM_FP16:-}
       - IMP_MMPROJ=${IMP_MMPROJ:-}
       - IMP_PREFILL_CHUNK_SIZE=${IMP_PREFILL_CHUNK_SIZE:-}
+      - IMP_THINK_BUDGET=${IMP_THINK_BUDGET:-}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     healthcheck:

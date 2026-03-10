@@ -6,7 +6,7 @@ struct ServerArgs {
     std::string model_path;
     std::string host = "127.0.0.1";
     int port = 8080;
-    int max_tokens = 2048;
+    int max_tokens = 8192;
     int gpu_layers = -1;       // -1 = all on GPU
     int device = 0;
     std::string chat_template = "auto";
@@ -20,6 +20,7 @@ struct ServerArgs {
     std::string models_dir;    // --models-dir: scan for .gguf files
     std::string api_key;       // --api-key: require Bearer token auth
     std::string reasoning_format = "deepseek";  // --reasoning-format: deepseek or none
+    float think_budget = 0.5f; // --think-budget: fraction of max_tokens for reasoning (0=disabled)
     std::string preset;        // --preset: named model preset (e.g. qwen3-32b)
     std::string presets_file;  // --presets-file: custom presets.toml path
 };

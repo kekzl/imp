@@ -363,6 +363,11 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
 
+    if (config_.use_prefix_caching) {
+        kv_manager_->set_prefix_caching_enabled(true);
+        IMP_LOG_INFO("Prefix caching enabled");
+    }
+
     // Pass KV layer mapping to executor for correct cache indexing
     executor_->set_kv_layer_map(std::move(kv_layer_map));
 
@@ -780,6 +785,12 @@ bool Engine::step() {
         if (generation_done) {
             // Stop/max_tokens reached — request is truly finished
             saved_req->status = RequestStatus::FINISHED;
+            // Register block hashes for prefix caching before freeing.
+            if (kv_manager_->prefix_caching_enabled()) {
+                kv_manager_->register_block_hashes(
+                    saved_req->id, saved_req->input_tokens.data(),
+                    static_cast<int>(saved_req->input_tokens.size()));
+            }
             kv_manager_->free_sequence(saved_req->id);
             return scheduler_->has_pending() || scheduler_->active_count() > 0;
         }
@@ -829,18 +840,70 @@ bool Engine::step() {
 
         int num_blocks = (ctx_len + kKVBlockSize - 1) / kKVBlockSize;
 
-        // Allocate KV cache blocks incrementally
+        // Allocate KV cache blocks, using prefix caching when enabled.
+        int prefix_reused = 0;
         int existing = static_cast<int>(kv_manager_->block_table(req->id).size());
-        int additional = num_blocks - existing;
-        if (additional > 0) {
-            if (!kv_manager_->allocate_blocks(req->id, additional)) {
-                while (kv_manager_->num_free_blocks() < additional) {
+
+        if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0) {
+            // First chunk of a fresh sequence — try content-addressed prefix match.
+            // Allocate all blocks for the full input at once (not just this chunk).
+            int total_blocks_needed = (total_input + kKVBlockSize - 1) / kKVBlockSize;
+            prefix_reused = kv_manager_->allocate_blocks_with_prefix(
+                req->id, req->input_tokens.data(), total_input);
+            if (prefix_reused < 0) {
+                // Allocation failed — try eviction.
+                while (kv_manager_->num_free_blocks() < total_blocks_needed) {
                     int evicted = kv_manager_->evict_lru();
                     if (evicted < 0) break;
                 }
-                if (!kv_manager_->allocate_blocks(req->id, additional)) {
+                prefix_reused = kv_manager_->allocate_blocks_with_prefix(
+                    req->id, req->input_tokens.data(), total_input);
+                if (prefix_reused < 0) {
                     req->status = RequestStatus::CANCELLED;
                     continue;
+                }
+            }
+
+            // Skip prefill for tokens covered by reused blocks.
+            if (prefix_reused > 0) {
+                int skip_tokens = prefix_reused * kKVBlockSize;
+                // Must keep at least 1 token for the forward pass.
+                if (skip_tokens >= total_input) {
+                    skip_tokens = (total_input / kKVBlockSize) * kKVBlockSize;
+                    if (skip_tokens >= total_input) {
+                        skip_tokens = total_input - 1;
+                    }
+                }
+                if (skip_tokens > offset) {
+                    IMP_LOG_INFO("PrefixCache: seq %d skipping %d/%d prefill tokens (%d blocks reused)",
+                                 req->id, skip_tokens, total_input, prefix_reused);
+                    offset = skip_tokens;
+                    req->prefill_offset = offset;
+                    // Recalculate chunk boundaries with new offset.
+                    chunk_len = total_input - offset;
+                    is_last_chunk = true;
+                    if (config_.prefill_chunk_size > 0 && chunk_len > config_.prefill_chunk_size) {
+                        chunk_len = config_.prefill_chunk_size;
+                        is_last_chunk = false;
+                    }
+                    ctx_len = offset + chunk_len;
+                    // Re-resize workspace for the smaller chunk.
+                    executor_->resize_workspace(chunk_len, pf_stream);
+                }
+            }
+        } else {
+            // Normal incremental allocation.
+            int additional = num_blocks - existing;
+            if (additional > 0) {
+                if (!kv_manager_->allocate_blocks(req->id, additional)) {
+                    while (kv_manager_->num_free_blocks() < additional) {
+                        int evicted = kv_manager_->evict_lru();
+                        if (evicted < 0) break;
+                    }
+                    if (!kv_manager_->allocate_blocks(req->id, additional)) {
+                        req->status = RequestStatus::CANCELLED;
+                        continue;
+                    }
                 }
             }
         }
@@ -1098,10 +1161,22 @@ bool Engine::step() {
             if (is_stop ||
                 static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
                 req->status = RequestStatus::FINISHED;
+                // Register block hashes before freeing so blocks can be cached.
+                if (kv_manager_->prefix_caching_enabled()) {
+                    kv_manager_->register_block_hashes(
+                        req->id, req->input_tokens.data(),
+                        static_cast<int>(req->input_tokens.size()));
+                }
                 kv_manager_->free_sequence(req->id);
                 if (req->json_mode && json_constrainer_) json_constrainer_->reset();
             } else {
                 req->status = RequestStatus::DECODING;
+                // Register block hashes so future sequences can reuse prefix blocks.
+                if (kv_manager_->prefix_caching_enabled()) {
+                    kv_manager_->register_block_hashes(
+                        req->id, req->input_tokens.data(),
+                        static_cast<int>(req->input_tokens.size()));
+                }
             }
         }
 

@@ -6,10 +6,14 @@
 #include "runtime/presets.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <vector>
+
+#include <cuda_runtime.h>
 
 // Graceful shutdown
 std::atomic<httplib::Server*> g_server{nullptr};
@@ -33,7 +37,8 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res,
                    ServerState& state) {
     json body = {
         {"status", "ok"},
-        {"model_loaded", state.model_loaded()}
+        {"model_loaded", state.model_loaded()},
+        {"queue_depth", state.batching ? state.batching->queue_depth() : 0}
     };
     res.set_content(body.dump(), "application/json");
 }
@@ -129,7 +134,7 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
 
     config.device_id = args.device;
     if (!preset) {
-        config.max_batch_size = 1;
+        config.max_batch_size = 8;  // Allow concurrent requests for continuous batching
         config.max_seq_len = overrides.value("max_seq_len", 4096);
     } else if (overrides.contains("max_seq_len")) {
         config.max_seq_len = overrides.value("max_seq_len", config.max_seq_len);
@@ -154,6 +159,9 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
     if (!args.mmproj_path.empty())
         config.mmproj_path = args.mmproj_path.c_str();
 
+    // Prefix caching: always on for server (reuses KV blocks across requests)
+    config.use_prefix_caching = 1;
+
     return config;
 }
 
@@ -161,6 +169,12 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
 // Returns error message on failure, empty string on success.
 std::string load_model_into_state(ServerState& state, const std::string& path,
                                   const json& config_overrides) {
+    // Stop batching engine before freeing context
+    if (state.batching) {
+        state.batching->stop();
+        state.batching.reset();
+    }
+
     // Free existing model/context
     if (state.ctx) { imp_context_free(state.ctx); state.ctx = nullptr; }
     if (state.model) { imp_model_free(state.model); state.model = nullptr; }
@@ -230,6 +244,12 @@ std::string load_model_into_state(ServerState& state, const std::string& path,
         printf("No chat template (raw mode)\n");
     }
 
+    // Start the continuous batching engine
+    state.batching = std::make_unique<BatchingEngine>();
+    state.batching->start(state.ctx);
+    printf("Continuous batching: started\n");
+
+    state.metrics.model_loads_total++;
     return "";
 }
 
@@ -257,7 +277,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         return;
     }
 
-    float temperature = body.value("temperature", 0.6f);
+    float temperature = body.value("temperature", 0.7f);
     float top_p = body.value("top_p", 0.95f);
     int top_k = body.value("top_k", 40);
     int max_tokens = body.value("max_tokens", state.default_max_tokens);
@@ -276,6 +296,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     int mirostat = body.value("mirostat", 0);
     float mirostat_tau = body.value("mirostat_tau", 5.0f);
     float mirostat_eta = body.value("mirostat_eta", 0.1f);
+    float think_budget = body.value("think_budget", state.default_think_budget);
 
     // Parse stop sequences (string or array of up to 4 strings)
     std::vector<std::string> stop_sequences;
@@ -351,10 +372,39 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     text_parts += part.value("text", "");
                 } else if (type == "image_url" && part.contains("image_url")) {
                     std::string url = part["image_url"].value("url", "");
-                    // Handle data URI: data:image/...;base64,...
-                    auto comma = url.find(',');
-                    if (url.rfind("data:", 0) == 0 && comma != std::string::npos) {
-                        image_data = base64_decode(url.substr(comma + 1));
+                    if (url.rfind("data:", 0) == 0) {
+                        // Data URI: data:image/...;base64,...
+                        auto comma = url.find(',');
+                        if (comma != std::string::npos) {
+                            image_data = base64_decode(url.substr(comma + 1));
+                        }
+                    } else if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
+                        // Remote URL: fetch image via HTTP
+                        // Parse URL into host + path
+                        bool is_https = (url.rfind("https://", 0) == 0);
+                        std::string rest = url.substr(is_https ? 8 : 7);
+                        auto slash = rest.find('/');
+                        std::string host = (slash != std::string::npos) ? rest.substr(0, slash) : rest;
+                        std::string path_str = (slash != std::string::npos) ? rest.substr(slash) : "/";
+                        if (is_https) {
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+                            httplib::SSLClient cli(host);
+                            cli.set_follow_location(true);
+                            cli.set_connection_timeout(10);
+                            auto img_res = cli.Get(path_str);
+                            if (img_res && img_res->status == 200) {
+                                image_data.assign(img_res->body.begin(), img_res->body.end());
+                            }
+#endif
+                        } else {
+                            httplib::Client cli(host);
+                            cli.set_follow_location(true);
+                            cli.set_connection_timeout(10);
+                            auto img_res = cli.Get(path_str);
+                            if (img_res && img_res->status == 200) {
+                                image_data.assign(img_res->body.begin(), img_res->body.end());
+                            }
+                        }
                     }
                 }
             }
@@ -390,23 +440,26 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         }
     }
 
-    // Acquire inference lock — wait up to 5 minutes (covers model load + generation)
-    std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(5));
-    if (!lock.owns_lock()) {
-        res.status = 503;
-        json err = {{"error", {{"message", "Server is busy processing another request. Please retry."},
-                                {"type", "server_error"}}}};
-        res.set_content(err.dump(), "application/json");
-        return;
-    }
+    // Log request received (structured)
+    std::string req_id = make_completion_id(state);
+    fprintf(stderr, "[%s] chat/completions: prompt_msgs=%zu stream=%s max_tokens=%d temp=%.2f\n",
+            req_id.c_str(), messages.size(), stream ? "true" : "false", max_tokens, temperature);
 
-    // Auto-load model if request specifies a different one
+    // Auto-load model if request specifies a different one (requires exclusive lock)
     std::string requested_model = body.value("model", "");
     if (!requested_model.empty() && requested_model != state.model_name) {
         std::string path = find_model_path(state, requested_model);
         if (!path.empty()) {
-            printf("Auto-loading model: %s\n", requested_model.c_str());
-            fflush(stdout);
+            std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(5));
+            if (!lock.owns_lock()) {
+                res.status = 503;
+                json err = {{"error", {{"message", "Server is busy loading a model. Please retry."},
+                                        {"type", "server_error"}}}};
+                res.set_content(err.dump(), "application/json");
+                return;
+            }
+            fprintf(stderr, "[%s] auto-loading model: %s\n", req_id.c_str(), requested_model.c_str());
+            fflush(stderr);
             std::string error = load_model_into_state(state, path);
             if (!error.empty()) {
                 res.status = 500;
@@ -414,8 +467,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 res.set_content(err.dump(), "application/json");
                 return;
             }
-            printf("Model loaded: %s\n", state.model_name.c_str());
-            fflush(stdout);
+            fprintf(stderr, "[%s] model loaded: %s\n", req_id.c_str(), state.model_name.c_str());
+            fflush(stderr);
         }
     }
 
@@ -428,10 +481,23 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         return;
     }
 
-    // Handle vision: clear previous, encode new image if present
-    state.ctx->engine->clear_image();
-    if (!image_data.empty() && state.ctx->engine->has_vision()) {
+    // Handle vision: requires exclusive lock since it modifies engine state
+    bool has_vision_request = !image_data.empty() && state.ctx->engine->has_vision();
+    if (has_vision_request) {
+        std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(5));
+        if (!lock.owns_lock()) {
+            res.status = 503;
+            json err = {{"error", {{"message", "Server is busy. Please retry."},
+                                    {"type", "server_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+        // Stop batching engine for exclusive vision access
+        if (state.batching) state.batching->stop();
+
+        state.ctx->engine->clear_image();
         if (!state.ctx->engine->set_image_from_memory(image_data.data(), image_data.size())) {
+            if (state.batching) state.batching->start(state.ctx);
             res.status = 400;
             json error = {{"error", {{"message", "Failed to process image"},
                                       {"type", "invalid_request_error"}}}};
@@ -442,7 +508,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
     // Tokenize with chat template (with image tokens if vision is active)
     std::vector<int32_t> tokens;
-    if (state.have_template && state.ctx->engine->has_vision_input()) {
+    if (state.have_template && has_vision_request) {
         tokens = state.chat_tpl.apply_with_image(*state.tok, chat_msgs, 256);
     } else if (state.have_template) {
         tokens = state.chat_tpl.apply(*state.tok, chat_msgs);
@@ -454,12 +520,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     }
 
     // Optionally append <think> token to trigger reasoning mode.
-    // Enabled when: model supports thinking AND reasoning format is deepseek AND
-    // either the request explicitly asks for it, or no system message disables it.
     bool enable_thinking = false;
     if (state.is_think_model && state.default_args.reasoning_format == "deepseek" &&
         state.think_start_id >= 0) {
-        // Check for explicit enable/disable via request body
         if (body.contains("enable_thinking")) {
             enable_thinking = body.value("enable_thinking", false);
         }
@@ -472,6 +535,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
     // Validate prompt length against context window
     if (n_prompt_tokens >= state.max_seq_len) {
+        if (has_vision_request && state.batching) state.batching->start(state.ctx);
         res.status = 400;
         json error = {{"error", {{"message", "Prompt exceeds context window (" +
                                               std::to_string(n_prompt_tokens) + " tokens >= " +
@@ -488,55 +552,164 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     // Start timing
     auto t_start = std::chrono::high_resolution_clock::now();
 
-    // Reset context and prefill
-    ImpError err = imp_context_reset(state.ctx);
-    if (err != IMP_SUCCESS) {
-        res.status = 500;
-        json error = {{"error", {{"message", std::string("Context reset failed: ") + imp_error_string(err)},
-                                  {"type", "server_error"}}}};
-        res.set_content(error.dump(), "application/json");
+    // Create an imp::Request for the batching engine
+    auto imp_req = std::make_shared<imp::Request>();
+    imp_req->input_tokens = std::move(tokens);
+    imp_req->max_tokens = max_tokens;
+    imp_req->temperature = temperature;
+    imp_req->top_p = top_p;
+    imp_req->top_k = top_k;
+    imp_req->seed = seed;
+    imp_req->min_p = min_p;
+    imp_req->typical_p = typical_p;
+    imp_req->repetition_penalty = repetition_penalty;
+    imp_req->frequency_penalty = frequency_penalty;
+    imp_req->presence_penalty = presence_penalty;
+    imp_req->repeat_last_n = repeat_last_n;
+    imp_req->dry_multiplier = dry_multiplier;
+    imp_req->dry_base = dry_base;
+    imp_req->dry_allowed_length = dry_allowed_length;
+    imp_req->dry_penalty_last_n = dry_penalty_last_n;
+    imp_req->mirostat = mirostat;
+    imp_req->mirostat_tau = mirostat_tau;
+    imp_req->mirostat_eta = mirostat_eta;
+    imp_req->logprobs = req_logprobs;
+    imp_req->top_logprobs = top_logprobs;
+    imp_req->json_mode = json_mode;
+    imp_req->status = imp::RequestStatus::PENDING;
+
+    // Create a ServerRequest wrapper and submit to the batching engine
+    auto server_req = std::make_shared<ServerRequest>();
+    server_req->request = imp_req;
+
+    // For vision requests, fall back to blocking mode since vision state
+    // is per-engine (not per-request). Use the old C API path.
+    if (has_vision_request) {
+        // Vision path: use blocking C API (batching engine is stopped)
+        ImpError err = imp_context_reset(state.ctx);
+        if (err != IMP_SUCCESS) {
+            state.ctx->engine->clear_image();
+            state.batching->start(state.ctx);
+            res.status = 500;
+            json error = {{"error", {{"message", std::string("Context reset failed: ") + imp_error_string(err)},
+                                      {"type", "server_error"}}}};
+            res.set_content(error.dump(), "application/json");
+            return;
+        }
+
+        err = imp_prefill(state.ctx, imp_req->input_tokens.data(), n_prompt_tokens);
+        if (err != IMP_SUCCESS) {
+            state.ctx->engine->clear_image();
+            state.batching->start(state.ctx);
+            res.status = 500;
+            json error = {{"error", {{"message", std::string("Prefill failed: ") + imp_error_string(err)},
+                                      {"type", "server_error"}}}};
+            res.set_content(error.dump(), "application/json");
+            return;
+        }
+
+        // After prefill, clear vision and restart batching engine
+        // The rest of generation will use the old blocking decode path
+        // (via imp_decode_step, which calls engine->step() directly)
+        // This is safe because batching engine is stopped.
+
+        ImpGenerateParams params = imp_generate_params_default();
+        params.temperature = temperature;
+        params.top_p = top_p;
+        params.top_k = top_k;
+        params.max_tokens = max_tokens;
+        params.seed = seed;
+        params.min_p = min_p;
+        params.typical_p = typical_p;
+        params.repetition_penalty = repetition_penalty;
+        params.frequency_penalty = frequency_penalty;
+        params.presence_penalty = presence_penalty;
+        params.repeat_last_n = repeat_last_n;
+        params.dry_multiplier = dry_multiplier;
+        params.dry_base = dry_base;
+        params.dry_allowed_length = dry_allowed_length;
+        params.dry_penalty_last_n = dry_penalty_last_n;
+        params.mirostat = mirostat;
+        params.mirostat_tau = mirostat_tau;
+        params.mirostat_eta = mirostat_eta;
+        params.logprobs = req_logprobs ? 1 : 0;
+        params.top_logprobs = top_logprobs;
+        params.json_mode = json_mode ? 1 : 0;
+
+        // Blocking decode loop for vision requests
+        std::vector<int32_t> output_ids;
+        int32_t prefill_token = -1;
+        if (state.ctx->active_request && !state.ctx->active_request->output_tokens.empty()) {
+            prefill_token = state.ctx->active_request->output_tokens.back();
+        }
+
+        for (int step = -1; step < max_tokens; step++) {
+            int32_t token = 0;
+            if (step == -1) {
+                if (prefill_token < 0) continue;
+                token = prefill_token;
+            } else {
+                err = imp_decode_step(state.ctx, &params, &token);
+                if (err != IMP_SUCCESS) break;
+            }
+            if (token == state.tok->eos_id()) break;
+            if (state.have_template) {
+                bool is_stop = false;
+                for (int32_t stop_id : state.chat_tpl.stop_token_ids()) {
+                    if (token == stop_id) { is_stop = true; break; }
+                }
+                if (is_stop) break;
+            }
+            output_ids.push_back(token);
+        }
+
+        state.ctx->engine->clear_image();
+        state.batching->start(state.ctx);
+
+        // Build simple non-streaming response for vision
+        auto t_end = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+        int n_output_tokens = static_cast<int>(output_ids.size());
+        std::string content = state.tok->decode(output_ids);
+
+        fprintf(stderr, "[%s] vision: %d prompt + %d completion tokens, %.1f ms\n",
+                req_id.c_str(), n_prompt_tokens, n_output_tokens, ms);
+        state.metrics.requests_total++;
+        state.metrics.tokens_prompt_total += n_prompt_tokens;
+        state.metrics.tokens_completion_total += n_output_tokens;
+        state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
+
+        json response = {
+            {"id", req_id},
+            {"object", "chat.completion"},
+            {"created", unix_timestamp()},
+            {"model", state.model_name},
+            {"choices", json::array({{
+                {"index", 0},
+                {"message", {{"role", "assistant"}, {"content", content}}},
+                {"finish_reason", "stop"}
+            }})},
+            {"usage", {
+                {"prompt_tokens", n_prompt_tokens},
+                {"completion_tokens", n_output_tokens},
+                {"total_tokens", n_prompt_tokens + n_output_tokens}
+            }}
+        };
+        res.set_content(response.dump(), "application/json");
         return;
     }
 
-    err = imp_prefill(state.ctx, tokens.data(), n_prompt_tokens);
-    if (err != IMP_SUCCESS) {
-        res.status = 500;
-        json error = {{"error", {{"message", std::string("Prefill failed: ") + imp_error_string(err)},
-                                  {"type", "server_error"}}}};
-        res.set_content(error.dump(), "application/json");
+    // Submit to batching engine for continuous batching
+    if (!state.batching || !state.batching->is_running()) {
+        res.status = 503;
+        json err = {{"error", {{"message", "Inference engine not ready. Please retry."},
+                                {"type", "server_error"}}}};
+        res.set_content(err.dump(), "application/json");
         return;
     }
+    state.batching->submit(server_req);
 
-    ImpGenerateParams params = imp_generate_params_default();
-    params.temperature = temperature;
-    params.top_p = top_p;
-    params.top_k = top_k;
-    params.max_tokens = max_tokens;
-    params.seed = seed;
-    params.min_p = min_p;
-    params.typical_p = typical_p;
-    params.repetition_penalty = repetition_penalty;
-    params.frequency_penalty = frequency_penalty;
-    params.presence_penalty = presence_penalty;
-    params.repeat_last_n = repeat_last_n;
-    params.dry_multiplier = dry_multiplier;
-    params.dry_base = dry_base;
-    params.dry_allowed_length = dry_allowed_length;
-    params.dry_penalty_last_n = dry_penalty_last_n;
-    params.mirostat = mirostat;
-    params.mirostat_tau = mirostat_tau;
-    params.mirostat_eta = mirostat_eta;
-    params.logprobs = req_logprobs ? 1 : 0;
-    params.top_logprobs = top_logprobs;
-    params.json_mode = json_mode ? 1 : 0;
-
-    // Capture first token produced during prefill (engine samples one token as part of prefill)
-    int32_t prefill_token = -1;
-    if (state.ctx->active_request && !state.ctx->active_request->output_tokens.empty()) {
-        prefill_token = state.ctx->active_request->output_tokens.back();
-    }
-
-    std::string comp_id = make_completion_id(state);
+    std::string comp_id = req_id;
     int64_t created = unix_timestamp();
 
     if (stream) {
@@ -546,13 +719,13 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
         res.set_chunked_content_provider(
             "text/event-stream",
-            [&state, params, comp_id, created, max_tokens, n_prompt_tokens, t_start,
+            [&state, server_req, comp_id, created, max_tokens, n_prompt_tokens, t_start,
              stop_sequences, max_stop_len, req_logprobs, include_usage,
-             prefill_token, enable_thinking, has_tools, tpl_family](
+             enable_thinking, has_tools, tpl_family, think_budget](
                 size_t /*offset*/, httplib::DataSink& sink) -> bool {
 
-                // Save active request ref for logprobs access
-                auto active_req = state.ctx->active_request;
+                // Active request ref for logprobs access
+                auto active_req = server_req->request;
 
                 // Pre-build SSE envelope templates for fast content/reasoning emission
                 SSEChunkWriter sse_writer(comp_id, created, state.model_name);
@@ -619,34 +792,39 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     return ok;
                 };
 
-                for (int step = -1; step < max_tokens; step++) {
-                    int32_t token = 0;
-                    if (step == -1) {
-                        // First iteration: use the token produced during prefill
-                        if (prefill_token < 0) continue;
-                        token = prefill_token;
-                    } else {
-                        ImpError err = imp_decode_step(state.ctx, &params, &token);
-                        if (err != IMP_SUCCESS) {
-                            finish = "stop";
-                            break;
-                        }
-                    }
+                for (;;) {
+                    // Read next token from the batching engine
+                    TokenEvent evt;
+                    server_req->pop_token(evt);
 
-                    // Check stop conditions
-                    if (token == state.tok->eos_id()) {
-                        finish = "stop";
+                    if (evt.token_id < 0) {
+                        // Finish event with no token
+                        finish = evt.finish_reason ? evt.finish_reason : "stop";
                         break;
                     }
-                    if (state.have_template) {
-                        bool is_stop = false;
-                        for (int32_t stop_id : state.chat_tpl.stop_token_ids()) {
-                            if (token == stop_id) { is_stop = true; break; }
-                        }
-                        if (is_stop) {
-                            finish = "stop";
+
+                    int32_t token = evt.token_id;
+
+                    // Check stop conditions (EOS/stop tokens already detected by engine)
+                    if (evt.is_last) {
+                        // The engine marked this as the last token.
+                        // Don't emit EOS/stop tokens — they're structural, not content.
+                        if (token == state.tok->eos_id()) {
+                            finish = evt.finish_reason ? evt.finish_reason : "stop";
                             break;
                         }
+                        bool is_stop = false;
+                        if (state.have_template) {
+                            for (int32_t stop_id : state.chat_tpl.stop_token_ids()) {
+                                if (token == stop_id) { is_stop = true; break; }
+                            }
+                        }
+                        if (is_stop) {
+                            finish = evt.finish_reason ? evt.finish_reason : "stop";
+                            break;
+                        }
+                        // Not a stop token — emit it, then finish after this iteration
+                        finish = evt.finish_reason ? evt.finish_reason : "length";
                     }
 
                     n_output_tokens++;
@@ -686,6 +864,15 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
                     if (think_phase == ThinkPhase::REASONING) {
                         n_reasoning_tokens++;
+                        // Think budget: cap reasoning at configured fraction of max_tokens
+                        int think_limit = (think_budget > 0.0f)
+                            ? static_cast<int>(max_tokens * think_budget) : max_tokens;
+                        if (state.think_end_id >= 0 &&
+                            n_reasoning_tokens >= think_limit &&
+                            token != state.think_end_id) {
+                            token = state.think_end_id;
+                            piece = state.tok->decode_token(token);
+                        }
                         if (token == state.think_end_id) {
                             if (!emit_reasoning(reasoning_utf8_buf)) return false;
                             reasoning_utf8_buf.clear();
@@ -1067,6 +1254,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                             if (!flush_text(safe)) return false;
                         }
                     }
+
+                    // Break after processing the last non-EOS token from batching engine
+                    if (finish) break;
                 }
 
                 // Flush scan buffer if we never left SCAN phase (model didn't think)
@@ -1158,44 +1348,69 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
                 fprintf(stderr, "[%s] %d prompt + %d completion tokens, %.1f ms\n",
                         comp_id.c_str(), n_prompt_tokens, n_output_tokens, ms);
+                state.metrics.requests_total++;
+                state.metrics.tokens_prompt_total += n_prompt_tokens;
+                state.metrics.tokens_completion_total += n_output_tokens;
+                state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
 
                 return true;
             }
         );
     } else {
         // Non-streaming: decode all tokens, return complete response
-        // Save request reference for logprobs access (active_request gets cleared on finish)
-        auto active_req = state.ctx->active_request;
+        auto active_req = server_req->request;
         std::vector<int32_t> output_ids;
         const char* finish = nullptr;
         std::string output_text;  // accumulated output for stop matching
+        bool ns_in_think = false;   // non-streaming think budget tracking
+        int ns_think_tokens = 0;
 
-        for (int step = -1; step < max_tokens; step++) {
-            int32_t token = 0;
-            if (step == -1) {
-                // First iteration: use the token produced during prefill
-                if (prefill_token < 0) continue;
-                token = prefill_token;
-            } else {
-                err = imp_decode_step(state.ctx, &params, &token);
-                if (err != IMP_SUCCESS) {
-                    finish = "stop";
-                    break;
-                }
-            }
+        for (;;) {
+            // Read next token from the batching engine
+            TokenEvent evt;
+            server_req->pop_token(evt);
 
-            if (token == state.tok->eos_id()) {
-                finish = "stop";
+            if (evt.token_id < 0) {
+                finish = evt.finish_reason ? evt.finish_reason : "stop";
                 break;
             }
-            if (state.have_template) {
+
+            int32_t token = evt.token_id;
+
+            // Check stop conditions
+            if (evt.is_last) {
+                if (token == state.tok->eos_id()) {
+                    finish = evt.finish_reason ? evt.finish_reason : "stop";
+                    break;
+                }
                 bool is_stop = false;
-                for (int32_t stop_id : state.chat_tpl.stop_token_ids()) {
-                    if (token == stop_id) { is_stop = true; break; }
+                if (state.have_template) {
+                    for (int32_t stop_id : state.chat_tpl.stop_token_ids()) {
+                        if (token == stop_id) { is_stop = true; break; }
+                    }
                 }
                 if (is_stop) {
-                    finish = "stop";
+                    finish = evt.finish_reason ? evt.finish_reason : "stop";
                     break;
+                }
+                finish = evt.finish_reason ? evt.finish_reason : "length";
+            }
+
+            // Think budget: cap reasoning at configured fraction of max_tokens (non-streaming)
+            if (state.is_think_model && state.think_end_id >= 0 &&
+                state.default_args.reasoning_format == "deepseek" &&
+                think_budget > 0.0f) {
+                if (token == state.think_start_id) {
+                    ns_in_think = true;
+                } else if (token == state.think_end_id) {
+                    ns_in_think = false;
+                } else if (ns_in_think) {
+                    ns_think_tokens++;
+                    int think_limit = static_cast<int>(max_tokens * think_budget);
+                    if (ns_think_tokens >= think_limit) {
+                        token = state.think_end_id;
+                        ns_in_think = false;
+                    }
                 }
             }
 
@@ -1218,6 +1433,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     break;
                 }
             }
+
+            // Break after processing the last non-EOS token
+            if (finish) break;
         }
 
         if (!finish) finish = "length";
@@ -1243,6 +1461,10 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
         fprintf(stderr, "[%s] %d prompt + %d completion tokens, %.1f ms\n",
                 comp_id.c_str(), n_prompt_tokens, n_output_tokens, ms);
+        state.metrics.requests_total++;
+        state.metrics.tokens_prompt_total += n_prompt_tokens;
+        state.metrics.tokens_completion_total += n_output_tokens;
+        state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
 
         // Build logprobs object if requested
         json logprobs_obj = nullptr;
@@ -1315,9 +1537,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             {"total_tokens", n_prompt_tokens + n_output_tokens}
         };
         if (!reasoning_content.empty()) {
-            // Estimate reasoning tokens (non-streaming doesn't have exact count)
-            auto reasoning_ids = state.tok->encode(reasoning_content);
-            int n_reasoning_tokens = static_cast<int>(reasoning_ids.size()) + 2;  // +2 for <think>/<think>
+            // Use actual tracked count if available, otherwise estimate
+            int n_reasoning_tokens = (ns_think_tokens > 0) ? ns_think_tokens + 2
+                : static_cast<int>(state.tok->encode(reasoning_content).size()) + 2;
             usage["completion_tokens_details"] = {
                 {"reasoning_tokens", n_reasoning_tokens}
             };
@@ -1361,7 +1583,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
     }
 
     // Extract parameters
-    float temperature = body.value("temperature", 0.6f);
+    float temperature = body.value("temperature", 0.7f);
     float top_p = body.value("top_p", 0.95f);
     int top_k = body.value("top_k", 40);
     int max_tokens = body.value("max_tokens", state.default_max_tokens);
@@ -1410,23 +1632,26 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
         include_usage = body["stream_options"].value("include_usage", false);
     }
 
-    // Acquire inference lock
-    std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(5));
-    if (!lock.owns_lock()) {
-        res.status = 503;
-        json err = {{"error", {{"message", "Server is busy processing another request. Please retry."},
-                                {"type", "server_error"}}}};
-        res.set_content(err.dump(), "application/json");
-        return;
-    }
+    // Log request received
+    std::string req_id = make_completion_id(state);
+    fprintf(stderr, "[%s] completions: prompt_len=%zu stream=%s max_tokens=%d temp=%.2f\n",
+            req_id.c_str(), prompt.size(), stream ? "true" : "false", max_tokens, temperature);
 
-    // Auto-load model if request specifies a different one
+    // Auto-load model if request specifies a different one (requires exclusive lock)
     std::string requested_model = body.value("model", "");
     if (!requested_model.empty() && requested_model != state.model_name) {
         std::string path = find_model_path(state, requested_model);
         if (!path.empty()) {
-            printf("Auto-loading model: %s\n", requested_model.c_str());
-            fflush(stdout);
+            std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(5));
+            if (!lock.owns_lock()) {
+                res.status = 503;
+                json err = {{"error", {{"message", "Server is busy loading a model. Please retry."},
+                                        {"type", "server_error"}}}};
+                res.set_content(err.dump(), "application/json");
+                return;
+            }
+            fprintf(stderr, "[%s] auto-loading model: %s\n", req_id.c_str(), requested_model.c_str());
+            fflush(stderr);
             std::string error = load_model_into_state(state, path);
             if (!error.empty()) {
                 res.status = 500;
@@ -1434,8 +1659,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                 res.set_content(err.dump(), "application/json");
                 return;
             }
-            printf("Model loaded: %s\n", state.model_name.c_str());
-            fflush(stdout);
+            fprintf(stderr, "[%s] model loaded: %s\n", req_id.c_str(), state.model_name.c_str());
+            fflush(stderr);
         }
     }
 
@@ -1466,54 +1691,44 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
 
     auto t_start = std::chrono::high_resolution_clock::now();
 
-    // Reset and prefill
-    ImpError err = imp_context_reset(state.ctx);
-    if (err != IMP_SUCCESS) {
-        res.status = 500;
-        json error = {{"error", {{"message", std::string("Context reset failed: ") + imp_error_string(err)},
-                                  {"type", "server_error"}}}};
-        res.set_content(error.dump(), "application/json");
+    // Create an imp::Request and submit to batching engine
+    auto imp_req = std::make_shared<imp::Request>();
+    imp_req->input_tokens = std::move(tokens);
+    imp_req->max_tokens = max_tokens;
+    imp_req->temperature = temperature;
+    imp_req->top_p = top_p;
+    imp_req->top_k = top_k;
+    imp_req->seed = seed;
+    imp_req->min_p = min_p;
+    imp_req->typical_p = typical_p;
+    imp_req->repetition_penalty = repetition_penalty;
+    imp_req->frequency_penalty = frequency_penalty;
+    imp_req->presence_penalty = presence_penalty;
+    imp_req->repeat_last_n = repeat_last_n;
+    imp_req->dry_multiplier = dry_multiplier;
+    imp_req->dry_base = dry_base;
+    imp_req->dry_allowed_length = dry_allowed_length;
+    imp_req->dry_penalty_last_n = dry_penalty_last_n;
+    imp_req->mirostat = mirostat;
+    imp_req->mirostat_tau = mirostat_tau;
+    imp_req->mirostat_eta = mirostat_eta;
+    imp_req->logprobs = req_logprobs;
+    imp_req->top_logprobs = top_logprobs;
+    imp_req->status = imp::RequestStatus::PENDING;
+
+    auto server_req = std::make_shared<ServerRequest>();
+    server_req->request = imp_req;
+
+    if (!state.batching || !state.batching->is_running()) {
+        res.status = 503;
+        json err = {{"error", {{"message", "Inference engine not ready. Please retry."},
+                                {"type", "server_error"}}}};
+        res.set_content(err.dump(), "application/json");
         return;
     }
+    state.batching->submit(server_req);
 
-    err = imp_prefill(state.ctx, tokens.data(), n_prompt_tokens);
-    if (err != IMP_SUCCESS) {
-        res.status = 500;
-        json error = {{"error", {{"message", std::string("Prefill failed: ") + imp_error_string(err)},
-                                  {"type", "server_error"}}}};
-        res.set_content(error.dump(), "application/json");
-        return;
-    }
-
-    // Capture first token produced during prefill
-    int32_t prefill_token = -1;
-    if (state.ctx->active_request && !state.ctx->active_request->output_tokens.empty()) {
-        prefill_token = state.ctx->active_request->output_tokens.back();
-    }
-
-    ImpGenerateParams params = imp_generate_params_default();
-    params.temperature = temperature;
-    params.top_p = top_p;
-    params.top_k = top_k;
-    params.max_tokens = max_tokens;
-    params.seed = seed;
-    params.min_p = min_p;
-    params.typical_p = typical_p;
-    params.repetition_penalty = repetition_penalty;
-    params.frequency_penalty = frequency_penalty;
-    params.presence_penalty = presence_penalty;
-    params.repeat_last_n = repeat_last_n;
-    params.dry_multiplier = dry_multiplier;
-    params.dry_base = dry_base;
-    params.dry_allowed_length = dry_allowed_length;
-    params.dry_penalty_last_n = dry_penalty_last_n;
-    params.mirostat = mirostat;
-    params.mirostat_tau = mirostat_tau;
-    params.mirostat_eta = mirostat_eta;
-    params.logprobs = req_logprobs ? 1 : 0;
-    params.top_logprobs = top_logprobs;
-
-    std::string comp_id = make_completion_id(state);
+    std::string comp_id = req_id;
     int64_t created = unix_timestamp();
 
     if (stream) {
@@ -1522,8 +1737,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
 
         res.set_chunked_content_provider(
             "text/event-stream",
-            [&state, params, comp_id, created, max_tokens, n_prompt_tokens, t_start,
-             stop_sequences, max_stop_len, echo, prompt, include_usage, prefill_token](
+            [&state, server_req, comp_id, created, max_tokens, n_prompt_tokens, t_start,
+             stop_sequences, max_stop_len, echo, prompt, include_usage](
                 size_t /*offset*/, httplib::DataSink& sink) -> bool {
 
                 int n_output_tokens = 0;
@@ -1557,22 +1772,23 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                     return sink.write(sse.data(), sse.size());
                 };
 
-                for (int step = -1; step < max_tokens; step++) {
-                    int32_t token = 0;
-                    if (step == -1) {
-                        if (prefill_token < 0) continue;
-                        token = prefill_token;
-                    } else {
-                        ImpError err = imp_decode_step(state.ctx, &params, &token);
-                        if (err != IMP_SUCCESS) {
-                            finish = "stop";
-                            break;
-                        }
+                for (;;) {
+                    TokenEvent evt;
+                    server_req->pop_token(evt);
+
+                    if (evt.token_id < 0) {
+                        finish = evt.finish_reason ? evt.finish_reason : "stop";
+                        break;
                     }
 
-                    if (token == state.tok->eos_id()) {
-                        finish = "stop";
-                        break;
+                    int32_t token = evt.token_id;
+
+                    if (evt.is_last) {
+                        if (token == state.tok->eos_id()) {
+                            finish = evt.finish_reason ? evt.finish_reason : "stop";
+                            break;
+                        }
+                        finish = evt.finish_reason ? evt.finish_reason : "length";
                     }
 
                     n_output_tokens++;
@@ -1641,6 +1857,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                             if (!flush_text(safe)) return false;
                         }
                     }
+
+                    if (finish) break;
                 }
 
                 // Flush think buffer: strip think blocks and emit remaining content
@@ -1697,33 +1915,38 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                 double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
                 fprintf(stderr, "[%s] %d prompt + %d completion tokens, %.1f ms\n",
                         comp_id.c_str(), n_prompt_tokens, n_output_tokens, ms);
+                state.metrics.requests_total++;
+                state.metrics.tokens_prompt_total += n_prompt_tokens;
+                state.metrics.tokens_completion_total += n_output_tokens;
+                state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
 
                 return true;
             }
         );
     } else {
         // Non-streaming
-        auto active_req = state.ctx->active_request;
+        auto active_req = server_req->request;
         std::vector<int32_t> output_ids;
         const char* finish = nullptr;
         std::string output_text;
 
-        for (int step = -1; step < max_tokens; step++) {
-            int32_t token = 0;
-            if (step == -1) {
-                if (prefill_token < 0) continue;
-                token = prefill_token;
-            } else {
-                err = imp_decode_step(state.ctx, &params, &token);
-                if (err != IMP_SUCCESS) {
-                    finish = "stop";
-                    break;
-                }
+        for (;;) {
+            TokenEvent evt;
+            server_req->pop_token(evt);
+
+            if (evt.token_id < 0) {
+                finish = evt.finish_reason ? evt.finish_reason : "stop";
+                break;
             }
 
-            if (token == state.tok->eos_id()) {
-                finish = "stop";
-                break;
+            int32_t token = evt.token_id;
+
+            if (evt.is_last) {
+                if (token == state.tok->eos_id()) {
+                    finish = evt.finish_reason ? evt.finish_reason : "stop";
+                    break;
+                }
+                finish = evt.finish_reason ? evt.finish_reason : "length";
             }
 
             output_ids.push_back(token);
@@ -1744,6 +1967,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                     break;
                 }
             }
+
+            if (finish) break;
         }
 
         if (!finish) finish = "length";
@@ -1764,6 +1989,10 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
         fprintf(stderr, "[%s] %d prompt + %d completion tokens, %.1f ms\n",
                 comp_id.c_str(), n_prompt_tokens, n_output_tokens, ms);
+        state.metrics.requests_total++;
+        state.metrics.tokens_prompt_total += n_prompt_tokens;
+        state.metrics.tokens_completion_total += n_output_tokens;
+        state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
 
         // Build logprobs if requested
         json logprobs_obj = nullptr;
@@ -1959,6 +2188,12 @@ void handle_unload_model(const httplib::Request& /*req*/, httplib::Response& res
                          ServerState& state) {
     std::lock_guard<std::timed_mutex> lock(state.mtx);
 
+    // Stop batching engine before freeing context
+    if (state.batching) {
+        state.batching->stop();
+        state.batching.reset();
+    }
+
     if (state.ctx) { imp_context_free(state.ctx); state.ctx = nullptr; }
     if (state.model) { imp_model_free(state.model); state.model = nullptr; }
     state.tok = nullptr;
@@ -1970,5 +2205,278 @@ void handle_unload_model(const httplib::Request& /*req*/, httplib::Response& res
     fflush(stdout);
 
     json response = {{"status", "unloaded"}};
+    res.set_content(response.dump(), "application/json");
+}
+
+void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res,
+                    ServerState& state) {
+    auto& m = state.metrics;
+    auto uptime = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - m.start_time).count();
+
+    std::string out;
+    out.reserve(1024);
+    out += "# HELP imp_uptime_seconds Server uptime in seconds\n";
+    out += "# TYPE imp_uptime_seconds gauge\n";
+    out += "imp_uptime_seconds " + std::to_string(uptime) + "\n";
+    out += "# HELP imp_requests_total Total inference requests\n";
+    out += "# TYPE imp_requests_total counter\n";
+    out += "imp_requests_total " + std::to_string(m.requests_total.load()) + "\n";
+    out += "# HELP imp_requests_failed_total Failed inference requests\n";
+    out += "# TYPE imp_requests_failed_total counter\n";
+    out += "imp_requests_failed_total " + std::to_string(m.requests_failed.load()) + "\n";
+    out += "# HELP imp_tokens_prompt_total Total prompt tokens processed\n";
+    out += "# TYPE imp_tokens_prompt_total counter\n";
+    out += "imp_tokens_prompt_total " + std::to_string(m.tokens_prompt_total.load()) + "\n";
+    out += "# HELP imp_tokens_completion_total Total completion tokens generated\n";
+    out += "# TYPE imp_tokens_completion_total counter\n";
+    out += "imp_tokens_completion_total " + std::to_string(m.tokens_completion_total.load()) + "\n";
+    out += "# HELP imp_last_request_duration_ms Duration of last request in milliseconds\n";
+    out += "# TYPE imp_last_request_duration_ms gauge\n";
+    out += "imp_last_request_duration_ms " + std::to_string(m.last_request_duration_ms.load()) + "\n";
+    out += "# HELP imp_model_loads_total Total model loads\n";
+    out += "# TYPE imp_model_loads_total counter\n";
+    out += "imp_model_loads_total " + std::to_string(m.model_loads_total.load()) + "\n";
+    out += "# HELP imp_model_loaded Whether a model is currently loaded\n";
+    out += "# TYPE imp_model_loaded gauge\n";
+    out += "imp_model_loaded " + std::string(state.model_loaded() ? "1" : "0") + "\n";
+    out += "# HELP imp_queue_depth Current number of active and pending requests\n";
+    out += "# TYPE imp_queue_depth gauge\n";
+    out += "imp_queue_depth " + std::to_string(state.batching ? state.batching->queue_depth() : 0) + "\n";
+
+    res.set_content(out, "text/plain; version=0.0.4; charset=utf-8");
+}
+
+// Convert IEEE 754 FP16 (uint16_t) to FP32 on host
+static float fp16_to_fp32(uint16_t h) {
+    uint32_t sign = (h >> 15) & 1;
+    uint32_t exp  = (h >> 10) & 0x1f;
+    uint32_t mant = h & 0x3ff;
+
+    uint32_t f;
+    if (exp == 0) {
+        if (mant == 0) {
+            f = sign << 31;
+        } else {
+            // Subnormal: normalize
+            exp = 1;
+            while (!(mant & 0x400)) { mant <<= 1; exp--; }
+            mant &= 0x3ff;
+            f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
+        }
+    } else if (exp == 0x1f) {
+        f = (sign << 31) | 0x7f800000 | (mant << 13);
+    } else {
+        f = (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13);
+    }
+    float result;
+    std::memcpy(&result, &f, sizeof(float));
+    return result;
+}
+
+void handle_embeddings(const httplib::Request& req, httplib::Response& res,
+                       ServerState& state) {
+    // Parse request body
+    json body;
+    try {
+        body = json::parse(req.body);
+    } catch (const json::parse_error& e) {
+        res.status = 400;
+        json err = {{"error", {{"message", std::string("Invalid JSON: ") + e.what()},
+                                {"type", "invalid_request_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
+    // Collect inputs: "input" can be a string or array of strings
+    std::vector<std::string> inputs;
+    if (body.contains("input")) {
+        if (body["input"].is_string()) {
+            inputs.push_back(body["input"].get<std::string>());
+        } else if (body["input"].is_array()) {
+            for (const auto& item : body["input"]) {
+                if (item.is_string()) {
+                    inputs.push_back(item.get<std::string>());
+                } else {
+                    res.status = 400;
+                    json err = {{"error", {{"message", "Each input must be a string"},
+                                            {"type", "invalid_request_error"}}}};
+                    res.set_content(err.dump(), "application/json");
+                    return;
+                }
+            }
+        } else {
+            res.status = 400;
+            json err = {{"error", {{"message", "\"input\" must be a string or array of strings"},
+                                    {"type", "invalid_request_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+    } else {
+        res.status = 400;
+        json err = {{"error", {{"message", "\"input\" is required"},
+                                {"type", "invalid_request_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
+    if (inputs.empty()) {
+        res.status = 400;
+        json err = {{"error", {{"message", "\"input\" must not be empty"},
+                                {"type", "invalid_request_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
+    if (!state.model_loaded()) {
+        res.status = 503;
+        json err = {{"error", {{"message", "No model loaded"},
+                                {"type", "server_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
+    // Acquire inference lock and pause batching engine for exclusive access
+    std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(1));
+    if (!lock.owns_lock()) {
+        res.status = 503;
+        json err = {{"error", {{"message", "Server is busy processing another request. Please retry."},
+                                {"type", "server_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
+    // Pause batching engine for exclusive C API access, restart on scope exit
+    bool had_batching = (state.batching && state.batching->is_running());
+    if (had_batching) state.batching->stop();
+    auto restart_batching = [&] {
+        if (had_batching && state.batching && state.ctx)
+            state.batching->start(state.ctx);
+    };
+    // Use a simple scope guard
+    struct ScopeGuard {
+        std::function<void()> fn;
+        ~ScopeGuard() { fn(); }
+    } batching_guard{restart_batching};
+
+    state.metrics.requests_total++;
+    auto t0 = std::chrono::steady_clock::now();
+
+    // Get model dimensions
+    int d_model = imp_model_d_model(state.model);
+    int total_prompt_tokens = 0;
+
+    json data = json::array();
+
+    for (size_t input_idx = 0; input_idx < inputs.size(); ++input_idx) {
+        const auto& text = inputs[input_idx];
+
+        // Tokenize
+        std::vector<int32_t> tokens(32768);
+        int n_tokens = 0;
+        ImpError err = imp_tokenize(state.model, text.c_str(),
+                                     tokens.data(), &n_tokens, 32768);
+        if (err != IMP_SUCCESS) {
+            res.status = 500;
+            json error = {{"error", {{"message",
+                std::string("Tokenize failed: ") + imp_error_string(err)},
+                {"type", "server_error"}}}};
+            res.set_content(error.dump(), "application/json");
+            return;
+        }
+        tokens.resize(n_tokens);
+
+        if (n_tokens == 0) {
+            res.status = 400;
+            json error = {{"error", {{"message", "Input tokenizes to zero tokens"},
+                                      {"type", "invalid_request_error"}}}};
+            res.set_content(error.dump(), "application/json");
+            return;
+        }
+
+        total_prompt_tokens += n_tokens;
+
+        // Run prefill (forward pass without generation)
+        err = imp_prefill(state.ctx, tokens.data(), n_tokens);
+        if (err != IMP_SUCCESS) {
+            imp_context_reset(state.ctx);
+            res.status = 500;
+            json error = {{"error", {{"message",
+                std::string("Prefill failed: ") + imp_error_string(err)},
+                {"type", "server_error"}}}};
+            res.set_content(error.dump(), "application/json");
+            return;
+        }
+
+        // Extract hidden states from the executor
+        // hidden_ is [n_tokens, d_model] FP16 on GPU after forward_logits()
+        auto* engine = state.ctx->engine.get();
+        auto* executor = engine->executor();
+        imp::Tensor hidden_view = executor->view_hidden(n_tokens);
+
+        // Copy FP16 hidden states from GPU to host as uint16_t
+        size_t n_elements = static_cast<size_t>(n_tokens) * d_model;
+        std::vector<uint16_t> h_hidden(n_elements);
+        cudaError_t cuda_err = cudaMemcpy(h_hidden.data(), hidden_view.data,
+                                           n_elements * sizeof(uint16_t),
+                                           cudaMemcpyDeviceToHost);
+        if (cuda_err != cudaSuccess) {
+            imp_context_reset(state.ctx);
+            res.status = 500;
+            json error = {{"error", {{"message",
+                std::string("CUDA memcpy failed: ") + cudaGetErrorString(cuda_err)},
+                {"type", "server_error"}}}};
+            res.set_content(error.dump(), "application/json");
+            return;
+        }
+
+        // Mean-pool across tokens: average all token hidden states
+        std::vector<float> embedding(d_model, 0.0f);
+        for (int t = 0; t < n_tokens; ++t) {
+            for (int d = 0; d < d_model; ++d) {
+                embedding[d] += fp16_to_fp32(h_hidden[t * d_model + d]);
+            }
+        }
+        float inv_n = 1.0f / static_cast<float>(n_tokens);
+        for (int d = 0; d < d_model; ++d) {
+            embedding[d] *= inv_n;
+        }
+
+        // L2 normalize
+        float norm_sq = 0.0f;
+        for (int d = 0; d < d_model; ++d) {
+            norm_sq += embedding[d] * embedding[d];
+        }
+        float inv_norm = 1.0f / std::sqrt(norm_sq + 1e-12f);
+        for (int d = 0; d < d_model; ++d) {
+            embedding[d] *= inv_norm;
+        }
+
+        data.push_back({
+            {"object", "embedding"},
+            {"embedding", embedding},
+            {"index", input_idx}
+        });
+
+        // Reset context for next input
+        imp_context_reset(state.ctx);
+    }
+
+    auto t1 = std::chrono::steady_clock::now();
+    int64_t duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    state.metrics.last_request_duration_ms.store(duration_ms);
+    state.metrics.tokens_prompt_total += total_prompt_tokens;
+
+    // batching_guard restarts the batching engine automatically on scope exit
+
+    json response = {
+        {"object", "list"},
+        {"data", data},
+        {"model", body.value("model", state.model_name)},
+        {"usage", {
+            {"prompt_tokens", total_prompt_tokens},
+            {"total_tokens", total_prompt_tokens}
+        }}
+    };
     res.set_content(response.dump(), "application/json");
 }

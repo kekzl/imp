@@ -574,8 +574,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
 
         // Staging buffer for host→device expert weight transfer
+        size_t max_expert_raw = 0;
         {
-            size_t max_expert_raw = 0;
             for (int li = 0; li < model_->n_layers(); li++) {
                 const auto& L = model_->layer(li);
                 auto check = [&](const Tensor& p, GGMLQuantType qt) {
@@ -599,6 +599,37 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     moe_raw_staging_size_ = max_expert_raw;
                     IMP_LOG_INFO("MoE staging buffer: %.2f MiB (1 expert raw)",
                                  max_expert_raw / (1024.0 * 1024.0));
+                }
+            }
+        }
+
+        // LRU expert cache: keeps recently-used host experts on GPU.
+        // Only allocated when some experts reside on host (not all fit in VRAM).
+        if (max_expert_raw > 0) {
+            bool has_host_experts = false;
+            for (int li = 0; li < model_->n_layers(); li++) {
+                const auto& L = model_->layer(li);
+                if ((L.expert_up_packed.data && !L.expert_up_packed.on_device) ||
+                    (L.expert_down_packed.data && !L.expert_down_packed.on_device) ||
+                    (L.expert_gate_packed.data && !L.expert_gate_packed.on_device)) {
+                    has_host_experts = true;
+                    break;
+                }
+            }
+            if (has_host_experts) {
+                // Budget: use available VRAM minus a safety margin.
+                // Target: cache as many experts as possible.
+                size_t free_mem = 0, total_mem = 0;
+                cudaMemGetInfo(&free_mem, &total_mem);
+                size_t safety = 128 << 20;  // 128 MiB reserve
+                size_t budget = (free_mem > safety) ? free_mem - safety : 0;
+                // Cap at 2 GiB to leave room for other allocations
+                budget = std::min(budget, static_cast<size_t>(2) << 30);
+                if (expert_cache_.init(max_expert_raw, budget)) {
+                    IMP_LOG_INFO("Expert LRU cache: %d slots (%.2f MiB / %.2f MiB budget)",
+                                 expert_cache_.n_slots_,
+                                 expert_cache_.n_slots_ * max_expert_raw / (1024.0 * 1024.0),
+                                 budget / (1024.0 * 1024.0));
                 }
             }
         }
@@ -917,6 +948,7 @@ void GraphExecutor::free_buffers() {
         moe_raw_staging_buf_ = nullptr;
         moe_raw_staging_size_ = 0;
     }
+    expert_cache_.destroy();
     if (moe_batch_dequant_buf_) {
         cudaFree(moe_batch_dequant_buf_);
         moe_batch_dequant_buf_ = nullptr;
