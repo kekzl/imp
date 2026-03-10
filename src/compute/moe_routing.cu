@@ -572,6 +572,70 @@ __global__ void moe_scatter_fp16_kernel(const half* __restrict__ expert_output,
 }
 
 // ============================================================================
+// Fused count + scan + scatter kernel (single launch)
+//
+// Replaces: 2× zero_int32 + count_tokens_per_expert + exclusive_scan +
+//           scatter_token_ids_with_flat_idx = 5 kernel launches → 1.
+//
+// Single block.  Shared memory holds expert_counts and write_pos arrays.
+// Requires n_experts ≤ 1024 (covers all current models).
+// ============================================================================
+
+__global__ void __launch_bounds__(256)
+moe_fused_permute_kernel(
+        const int32_t* __restrict__ expert_indices,
+        int n_tokens,
+        int top_k,
+        int n_experts,
+        int32_t* __restrict__ sorted_token_ids,
+        int32_t* __restrict__ sorted_flat_idx,
+        int32_t* __restrict__ expert_offsets,
+        int32_t* __restrict__ token_to_expanded) {
+    // Dynamic shared memory: [n_experts] counts + [n_experts] write_pos
+    extern __shared__ int32_t smem[];
+    int32_t* s_counts    = smem;
+    int32_t* s_write_pos = smem + n_experts;
+
+    const int tid = threadIdx.x;
+    const int total = n_tokens * top_k;
+
+    // Phase 1: Zero counts
+    for (int i = tid; i < n_experts; i += blockDim.x)
+        s_counts[i] = 0;
+    __syncthreads();
+
+    // Phase 2: Count tokens per expert (atomics in shared memory)
+    for (int i = tid; i < total; i += blockDim.x) {
+        int expert = expert_indices[i];
+        atomicAdd(&s_counts[expert], 1);
+    }
+    __syncthreads();
+
+    // Phase 3: Exclusive scan + write offsets to global memory (thread 0)
+    if (tid == 0) {
+        int32_t running = 0;
+        for (int i = 0; i < n_experts; i++) {
+            expert_offsets[i] = running;
+            s_write_pos[i] = 0;
+            running += s_counts[i];
+        }
+        expert_offsets[n_experts] = running;
+    }
+    __syncthreads();
+
+    // Phase 4: Scatter token IDs + flat indices (atomics on smem write_pos)
+    for (int idx = tid; idx < total; idx += blockDim.x) {
+        int token = idx / top_k;
+        int expert = expert_indices[idx];
+        int pos = atomicAdd(&s_write_pos[expert], 1);
+        int dest = expert_offsets[expert] + pos;
+        sorted_token_ids[dest] = token;
+        sorted_flat_idx[dest]  = idx;
+        if (token_to_expanded) token_to_expanded[idx] = dest;
+    }
+}
+
+// ============================================================================
 // Utility: zero-initialize device memory
 // ============================================================================
 
@@ -684,34 +748,8 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
         return;
     }
 
-    // Temporary: expert_counts [n_experts], expert_write_pos [n_experts]
-    int32_t* d_expert_counts = nullptr;
-    int32_t* d_expert_write_pos = nullptr;
-    if (!check_alloc(cudaMalloc(&d_expert_counts,
-            static_cast<size_t>(n_experts) * sizeof(int32_t)), "expert_counts") ||
-        !check_alloc(cudaMalloc(&d_expert_write_pos,
-            static_cast<size_t>(n_experts) * sizeof(int32_t)), "expert_write_pos")) {
-        cudaFree(d_expert_indices);
-        cudaFree(d_expert_weights);
-        cudaFree(d_sorted_token_ids);
-        cudaFree(d_expert_offsets);
-        cudaFree(d_expert_counts);  // safe even if null
-        return;
-    }
-
-    // Zero-initialize counts and write positions
-    int grid_z = (n_experts + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    zero_int32_kernel<<<grid_z, BLOCK_SIZE, 0, stream>>>(d_expert_counts, n_experts);
-    zero_int32_kernel<<<grid_z, BLOCK_SIZE, 0, stream>>>(d_expert_write_pos, n_experts);
-
     // ---- Kernel 1: Softmax + top-k selection per token ----
-    // Shared memory: n_experts floats (s_probs) + top_k floats + top_k ints
-    //                + NUM_WARPS floats (s_warp, reused from register area)
-    // The s_warp area is separate from the extern shared, it's __shared__ inside
-    // the kernel.  Actually we declared it inside the kernel as extern __shared__.
-    // Let's compute the needed shared memory.
-    // Shared memory: s_probs (n_experts) + optionally s_sel_probs (n_experts) + s_topk_val (top_k) + s_topk_idx (top_k)
-    int probs_arrays = score_bias ? 2 : 1;  // need extra array for biased selection scores
+    int probs_arrays = score_bias ? 2 : 1;
     size_t smem_gating = static_cast<size_t>(n_experts) * probs_arrays * sizeof(float)
                        + static_cast<size_t>(top_k) * sizeof(float)
                        + static_cast<size_t>(top_k) * sizeof(int32_t);
@@ -720,27 +758,11 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
         d_logits, n_experts, top_k, d_expert_indices, d_expert_weights, use_sigmoid, normalize_weights,
         static_cast<const half*>(score_bias));
 
-    // ---- Kernel 2: Count tokens per expert ----
-    int grid_count = (total_assignments + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    count_tokens_per_expert_kernel<<<grid_count, BLOCK_SIZE, 0, stream>>>(
-        d_expert_indices, n_tokens, top_k, d_expert_counts);
-
-    // ---- Kernel 3: Exclusive prefix sum for offsets ----
-    exclusive_scan_kernel<<<1, 1, 0, stream>>>(d_expert_counts, d_expert_offsets, n_experts);
-
-    // ---- Kernel 4: Scatter token IDs (and flat indices) into sorted order ----
-    scatter_token_ids_with_flat_idx_kernel<<<grid_count, BLOCK_SIZE, 0, stream>>>(
-        d_expert_indices, d_expert_offsets, n_tokens, top_k,
-        d_sorted_token_ids, d_sorted_flat_idx, d_expert_write_pos, nullptr);
-
-    // ---- Free temporaries ----
-    // We defer freeing to after stream sync, but since these are only needed
-    // during gating, we can use cudaFreeAsync if available.  For compatibility,
-    // we'll record an event and free after.  For simplicity, free synchronously.
-    // In production code, use memory pools.
-    cudaStreamSynchronize(stream);
-    cudaFree(d_expert_counts);
-    cudaFree(d_expert_write_pos);
+    // ---- Fused count + scan + scatter (single kernel) ----
+    size_t smem_permute = static_cast<size_t>(n_experts) * 2 * sizeof(int32_t);
+    moe_fused_permute_kernel<<<1, BLOCK_SIZE, smem_permute, stream>>>(
+        d_expert_indices, n_tokens, top_k, n_experts,
+        d_sorted_token_ids, d_sorted_flat_idx, d_expert_offsets, nullptr);
 
     // ---- Fill result struct ----
     result.expert_indices = make_tensor_2d(d_expert_indices, DType::INT32,
@@ -930,27 +952,12 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
         static_cast<const half*>(score_bias));
 
     if (!skip_sorting) {
-        int32_t* d_sorted_flat_idx   = d_sorted_token_ids + total_assignments;
-        int32_t* d_expert_counts     = buffers.expert_counts;
-        int32_t* d_expert_write_pos  = buffers.expert_write_pos;
+        int32_t* d_sorted_flat_idx = d_sorted_token_ids + total_assignments;
+        size_t smem_bytes = static_cast<size_t>(n_experts) * 2 * sizeof(int32_t);
 
-        // Zero-initialize counts and write positions
-        int grid_z = (n_experts + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        zero_int32_kernel<<<grid_z, BLOCK_SIZE, 0, stream>>>(d_expert_counts, n_experts);
-        zero_int32_kernel<<<grid_z, BLOCK_SIZE, 0, stream>>>(d_expert_write_pos, n_experts);
-
-        // Kernel 2: Count tokens per expert
-        int grid_count = (total_assignments + BLOCK_SIZE - 1) / BLOCK_SIZE;
-        count_tokens_per_expert_kernel<<<grid_count, BLOCK_SIZE, 0, stream>>>(
-            d_expert_indices, n_tokens, top_k, d_expert_counts);
-
-        // Kernel 3: Exclusive prefix sum for offsets
-        exclusive_scan_kernel<<<1, 1, 0, stream>>>(d_expert_counts, d_expert_offsets, n_experts);
-
-        // Kernel 4: Scatter token IDs (and flat indices) into sorted order
-        scatter_token_ids_with_flat_idx_kernel<<<grid_count, BLOCK_SIZE, 0, stream>>>(
-            d_expert_indices, d_expert_offsets, n_tokens, top_k,
-            d_sorted_token_ids, d_sorted_flat_idx, d_expert_write_pos,
+        moe_fused_permute_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(
+            d_expert_indices, n_tokens, top_k, n_experts,
+            d_sorted_token_ids, d_sorted_flat_idx, d_expert_offsets,
             buffers.token_to_expanded);
     }
 
