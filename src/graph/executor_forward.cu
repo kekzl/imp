@@ -2204,34 +2204,45 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     } // FP8/FP16 prefill scope
     } // else branch of can_fused_q6k + fused Q6_K scope
 
-    // 7. Scatter: weighted scatter-add expert outputs back to token positions.
-    //    Output is FP32 (atomicAdd on floats). Must zero-init before atomic adds.
+    // 7+8. Scatter expert outputs back to token positions.
+    //      Fused path: token-centric scatter + FP16 convert (+ residual if no shared expert).
+    //      Fallback: atomicAdd scatter + FP32->FP16 convert.
     {
-        int64_t expert_out_shape[2] = {static_cast<int64_t>(expanded),
-                                        static_cast<int64_t>(d)};
-        Tensor expert_down_view(moe_expert_down_.data, compute_dtype_,
-                                2, expert_out_shape, true);
-        Tensor scatter_out = slice_rows(moe_scatter_out_, n);
-        cudaMemsetAsync(scatter_out.data, 0,
-                        static_cast<size_t>(n) * d * sizeof(float), stream);
-        moe_scatter(expert_down_view, routing, scatter_out, stream);
-    }
-
-    // 8. Convert scatter output FP32 -> compute_dtype into hidden
-    {
-        int64_t numel = static_cast<int64_t>(n) * d;
-        int threads = 256;
-        int blocks = static_cast<int>((numel + threads - 1) / threads);
-        if (compute_dtype_ == DType::FP16) {
-            fp32_to_fp16_kernel<<<blocks, threads, 0, stream>>>(
-                static_cast<const float*>(moe_scatter_out_.data),
-                static_cast<half*>(h.data),
-                numel);
+        bool has_shared_expert = (ly.w_up_shared.data != nullptr);
+        if (routing.token_to_expanded && compute_dtype_ == DType::FP16) {
+            // Fused token-centric scatter: no atomics, no FP32 intermediate buffer.
+            // If no shared expert, also fuse residual add.
+            const void* res_ptr = (!has_shared_expert && !residual_fused) ? r.data : nullptr;
+            moe_scatter_fused_residual(
+                moe_expert_down_.data, routing.token_to_expanded,
+                static_cast<const float*>(routing.expert_weights.data),
+                res_ptr, h.data,
+                n, d, top_k, stream);
+            if (!has_shared_expert) residual_fused = true;
         } else {
-            // FP32 compute_dtype: just copy
-            cudaMemcpyAsync(h.data, moe_scatter_out_.data,
-                            static_cast<size_t>(numel) * sizeof(float),
-                            cudaMemcpyDeviceToDevice, stream);
+            // Fallback: atomicAdd scatter into FP32 buffer, then convert
+            int64_t expert_out_shape[2] = {static_cast<int64_t>(expanded),
+                                            static_cast<int64_t>(d)};
+            Tensor expert_down_view(moe_expert_down_.data, compute_dtype_,
+                                    2, expert_out_shape, true);
+            Tensor scatter_out = slice_rows(moe_scatter_out_, n);
+            cudaMemsetAsync(scatter_out.data, 0,
+                            static_cast<size_t>(n) * d * sizeof(float), stream);
+            moe_scatter(expert_down_view, routing, scatter_out, stream);
+
+            int64_t numel = static_cast<int64_t>(n) * d;
+            int threads = 256;
+            int blocks = static_cast<int>((numel + threads - 1) / threads);
+            if (compute_dtype_ == DType::FP16) {
+                fp32_to_fp16_kernel<<<blocks, threads, 0, stream>>>(
+                    static_cast<const float*>(moe_scatter_out_.data),
+                    static_cast<half*>(h.data),
+                    numel);
+            } else {
+                cudaMemcpyAsync(h.data, moe_scatter_out_.data,
+                                static_cast<size_t>(numel) * sizeof(float),
+                                cudaMemcpyDeviceToDevice, stream);
+            }
         }
     }
 

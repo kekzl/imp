@@ -43,7 +43,7 @@ Same models, same machine, same quantizations — measured back-to-back.
 | Gemma-3-12B | Q8_0 | **14,443** | 8,653 | **+66.9%** | **118** | 96 | **+22.1%** |
 | DeepSeek-R1-14B | Q6_K | **10,406** | 5,838 | **+78.2%** | 102 | **104** | -2.3% |
 | Mixtral 8x7B (MoE) | Q4_K_M | **7,107** | crash&sup3; | — | **48** | crash&sup3; | — |
-| Qwen3-Coder-30B-A3B (MoE) | Q6_K | 5,005 | **5,648** | -11.4% | **263** | 229 | **+14.9%** |
+| Qwen3-Coder-30B-A3B (MoE) | Q6_K | 5,161 | **5,648** | -8.6% | **263** | 229 | **+14.9%** |
 | Nemotron-30B-A3B (MoE) | Q6_K | 686&sup2; | crash&sup1; | — | **106** | crash&sup1; | — |
 
 <sub>pp = prompt processing (tok/s), tg = token generation (tok/s), higher is better. NVFP4 decode cache auto-enabled on sm_120. llama.cpp commit <code>35bee03</code>. &sup1;Mamba2 assertion failure in llama.cpp. &sup2;pp128 (pp512 exceeds 32 GB VRAM). &sup3;llama.cpp fails to load Mixtral Q4_K_M.</sub>
