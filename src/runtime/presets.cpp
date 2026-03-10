@@ -258,6 +258,7 @@ static void load_builtin() {
         p.max_seq_len = 32768;
         p.max_batch_size = 1;
         p.ssm_state_dtype = IMP_DTYPE_FP16;
+        p.prefill_chunk_size = 256;
         merge_defaults(p, g_defaults);
         g_presets.push_back(std::move(p));
     }
