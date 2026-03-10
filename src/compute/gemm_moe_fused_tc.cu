@@ -43,6 +43,7 @@ gemm_q6k_fused_moe_prefill_tc_kernel(
     const half*    __restrict__ activations,
     half*          __restrict__ output,
     const int32_t* __restrict__ offsets,
+    const int32_t* __restrict__ sorted_token_ids,  // optional: gather-free indirection
     int N, int K,
     size_t expert_stride_bytes,
     int n_experts)
@@ -137,6 +138,8 @@ gemm_q6k_fused_moe_prefill_tc_kernel(
 
             // --- Load A: activations → AC_smem ---
             // 256 threads load 32×256 = 8192 elements, 4 vectorized uint4 loads each
+            // When sorted_token_ids is set, reads from original hidden state via indirection
+            // (gather-free: hidden state fits in L2, avoids separate gather kernel)
             #pragma unroll 4
             for (int i = 0; i < (TC_TILE_M * TC_K_TILE / 8) / TC_BLOCK; i++) {
                 const int load_idx = tid + i * TC_BLOCK;
@@ -145,7 +148,10 @@ gemm_q6k_fused_moe_prefill_tc_kernel(
                 const int col  = flat % TC_K_TILE;
 
                 if (row < M_cur) {
-                    const int64_t token = start + m_base + row;
+                    const int expanded_idx = start + m_base + row;
+                    const int64_t token = sorted_token_ids
+                        ? static_cast<int64_t>(sorted_token_ids[expanded_idx])
+                        : static_cast<int64_t>(expanded_idx);
                     *reinterpret_cast<uint4*>(&AC_smem[row * TC_STRIDE + col]) =
                         *reinterpret_cast<const uint4*>(
                             &activations[token * K + k_block * TC_K_TILE + col]);
@@ -210,7 +216,8 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights,
                                     int N, int K,
                                     size_t expert_stride_bytes,
                                     int n_experts,
-                                    cudaStream_t stream)
+                                    cudaStream_t stream,
+                                    const int32_t* sorted_token_ids)
 {
     if (n_experts == 0 || N == 0) return;
 
@@ -231,6 +238,7 @@ void gemm_q6k_fused_moe_prefill_tc(const void* packed_weights,
         static_cast<const half*>(activations),
         static_cast<half*>(output),
         d_offsets,
+        sorted_token_ids,
         N, K,
         expert_stride_bytes,
         n_experts);

@@ -1525,15 +1525,6 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // GENERAL PATH: prefill or host-offloaded or non-Q6K/Q8_0 experts
     // =========================================================================
 
-    // 5. Gather: reorder tokens by expert assignment
-    //    norm_out [n, d_model] -> gathered [expanded, d_model]
-    {
-        int64_t gath_shape[2] = {static_cast<int64_t>(expanded),
-                                  static_cast<int64_t>(d)};
-        Tensor gathered(moe_gathered_.data, compute_dtype_, 2, gath_shape, true);
-        moe_gather(no, routing, gathered, stream);
-    }
-
     // =========================================================================
     // FUSED Q6_K PREFILL PATH: reads Q6_K weights directly, eliminates the
     // intermediate FP16/FP8 dequant buffer. Two variants:
@@ -1552,19 +1543,14 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                          ly.expert_gate_packed.on_device &&
                          ly.expert_gate_qtype == GGMLQuantType::Q6_K);
 
-    // TC variant: at expanded > ne*24 (~3072), avg M per expert ≈ 24 → WMMA
-    // tile waste is small enough that fused TC beats dequant+cuBLAS.
-    // Scalar fused: for small batches (expanded <= ne*12), scalar FP32 math
-    // beats FP16 batch dequant+cuBLAS since it avoids dequanting ALL experts.
     bool use_tc = can_fused_q6k && (expanded > ne * 24);
     bool use_scalar = can_fused_q6k && !use_tc && (expanded <= ne * 12);
 
     if (use_tc || use_scalar) {
-        auto fused_fn = use_tc ? gemm_q6k_fused_moe_prefill_tc : gemm_q6k_fused_moe_prefill;
         if (layer == 0) IMP_LOG_INFO("MoE prefill: fused Q6_K %s path (n=%d, expanded=%d)",
                                       use_tc ? "TC" : "scalar", n, expanded);
         const int32_t* d_offsets = static_cast<const int32_t*>(routing.expert_offsets.data);
-        char* gathered_base     = static_cast<char*>(moe_gathered_.data);
+        const int32_t* d_sorted  = static_cast<const int32_t*>(routing.sorted_token_ids.data);
         char* expert_gate_base  = static_cast<char*>(moe_expert_gate_.data);
         char* expert_up_base    = static_cast<char*>(moe_expert_up_.data);
         char* expert_swiglu_base= static_cast<char*>(moe_expert_swiglu_.data);
@@ -1576,20 +1562,53 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             return static_cast<size_t>(rows) * ggml_quant_row_bytes(qtype, cols);
         };
 
-        // Gate projection (gated models only)
-        if (!non_gated_experts)
-            fused_fn(ly.expert_gate_packed.data,
-                     gathered_base, expert_gate_base, d_offsets,
-                     eff, d,
-                     expert_stride_fn(ly.expert_gate_packed, ly.expert_gate_qtype),
-                     ne, stream);
+        if (use_tc) {
+            // TC path: gather-free via sorted_token_ids indirection.
+            // Gate and up read from original hidden state (no.data), down reads
+            // from SwiGLU output (already in expanded layout, no indirection).
 
-        // Up projection
-        fused_fn(ly.expert_up_packed.data,
-                 gathered_base, expert_up_base, d_offsets,
-                 eff, d,
-                 expert_stride_fn(ly.expert_up_packed, up_qtype),
-                 ne, stream);
+            // Gate projection (gated models only)
+            if (!non_gated_experts)
+                gemm_q6k_fused_moe_prefill_tc(
+                    ly.expert_gate_packed.data,
+                    no.data, expert_gate_base, d_offsets,
+                    eff, d,
+                    expert_stride_fn(ly.expert_gate_packed, ly.expert_gate_qtype),
+                    ne, stream, d_sorted);
+
+            // Up projection
+            gemm_q6k_fused_moe_prefill_tc(
+                ly.expert_up_packed.data,
+                no.data, expert_up_base, d_offsets,
+                eff, d,
+                expert_stride_fn(ly.expert_up_packed, up_qtype),
+                ne, stream, d_sorted);
+
+        } else {
+            // Scalar path: needs gathered buffer
+            {
+                int64_t gath_shape[2] = {static_cast<int64_t>(expanded),
+                                          static_cast<int64_t>(d)};
+                Tensor gathered(moe_gathered_.data, compute_dtype_, 2, gath_shape, true);
+                moe_gather(no, routing, gathered, stream);
+            }
+            char* gathered_base = static_cast<char*>(moe_gathered_.data);
+
+            if (!non_gated_experts)
+                gemm_q6k_fused_moe_prefill(
+                    ly.expert_gate_packed.data,
+                    gathered_base, expert_gate_base, d_offsets,
+                    eff, d,
+                    expert_stride_fn(ly.expert_gate_packed, ly.expert_gate_qtype),
+                    ne, stream);
+
+            gemm_q6k_fused_moe_prefill(
+                ly.expert_up_packed.data,
+                gathered_base, expert_up_base, d_offsets,
+                eff, d,
+                expert_stride_fn(ly.expert_up_packed, up_qtype),
+                ne, stream);
+        }
 
         // Activation (FP16)
         {
@@ -1605,13 +1624,23 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             }
         }
 
-        // Down projection
+        // Down projection (reads from expanded-layout SwiGLU output, no indirection)
         char* fused_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
-        fused_fn(ly.expert_down_packed.data,
-                 fused_down_act, expert_down_base, d_offsets,
-                 d, eff,
-                 expert_stride_fn(ly.expert_down_packed, ly.expert_down_qtype),
-                 ne, stream);
+        if (use_tc) {
+            gemm_q6k_fused_moe_prefill_tc(
+                ly.expert_down_packed.data,
+                fused_down_act, expert_down_base, d_offsets,
+                d, eff,
+                expert_stride_fn(ly.expert_down_packed, ly.expert_down_qtype),
+                ne, stream);
+        } else {
+            gemm_q6k_fused_moe_prefill(
+                ly.expert_down_packed.data,
+                fused_down_act, expert_down_base, d_offsets,
+                d, eff,
+                expert_stride_fn(ly.expert_down_packed, ly.expert_down_qtype),
+                ne, stream);
+        }
 
         // Falls through to scatter (step 7)
     } else {
@@ -1621,6 +1650,15 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // simpler pipeline). FP8 batch is only used as fallback when FP16 batch
     // isn't available.
     // =========================================================================
+
+    // Gather: reorder tokens by expert assignment (required for batch/legacy paths)
+    {
+        int64_t gath_shape[2] = {static_cast<int64_t>(expanded),
+                                  static_cast<int64_t>(d)};
+        Tensor gathered(moe_gathered_.data, compute_dtype_, 2, gath_shape, true);
+        moe_gather(no, routing, gathered, stream);
+    }
+
     {
     // FP16 batch check: can we dequant all experts to FP16 and use device-grouped GEMM?
     size_t fp16_per_expert = static_cast<size_t>(std::max(
