@@ -477,8 +477,8 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
             gpu_allocs.push_back(d_data);
             IMP_LOG_DEBUG("Upload raw qtype=%u [%ldx%ld] %zu bytes -> GPU %p",
                           (unsigned)qtype, (long)N, (long)K, raw_bytes, d_data);
-            weight.data = d_data;
-            weight.on_device = true;
+            int64_t new_shape[4] = {N, K, 0, 0};
+            weight = Tensor(d_data, DType::FP16, 2, new_shape, true);
             return true;
         } else {
             // Dequant on GPU: upload raw → dequant to FP16 → free raw
@@ -1094,7 +1094,7 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
         for (size_t e = 0; e < L.expert_w_gate.size(); ++e) {
             if (!L.expert_w_gate[e].data || L.expert_w_gate[e].on_device) continue;
             Tensor dummy_scales;
-            if (!upload_weight(L.expert_w_gate[e], L.w_gate_qtype, dummy_scales,
+            if (!upload_weight(L.expert_w_gate[e], L.expert_gate_qtype, dummy_scales,
                                compute_dtype, stream, gpu_allocations_)) {
                 IMP_LOG_ERROR("Failed to upload expert_w_gate[%zu] for layer %d", e, i);
                 return false;
@@ -1103,7 +1103,7 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
         for (size_t e = 0; e < L.expert_w_up.size(); ++e) {
             if (!L.expert_w_up[e].data || L.expert_w_up[e].on_device) continue;
             Tensor dummy_scales;
-            if (!upload_weight(L.expert_w_up[e], L.w_up_qtype, dummy_scales,
+            if (!upload_weight(L.expert_w_up[e], L.expert_up_qtype, dummy_scales,
                                compute_dtype, stream, gpu_allocations_)) {
                 IMP_LOG_ERROR("Failed to upload expert_w_up[%zu] for layer %d", e, i);
                 return false;
@@ -1112,7 +1112,7 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
         for (size_t e = 0; e < L.expert_w_down.size(); ++e) {
             if (!L.expert_w_down[e].data || L.expert_w_down[e].on_device) continue;
             Tensor dummy_scales;
-            if (!upload_weight(L.expert_w_down[e], L.w_down_qtype, dummy_scales,
+            if (!upload_weight(L.expert_w_down[e], L.expert_down_qtype, dummy_scales,
                                compute_dtype, stream, gpu_allocations_)) {
                 IMP_LOG_ERROR("Failed to upload expert_w_down[%zu] for layer %d", e, i);
                 return false;

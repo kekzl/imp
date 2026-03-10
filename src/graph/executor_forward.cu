@@ -2078,10 +2078,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             if (!non_gated_experts)
                 gemm_moe_batched(gathered_base, expert_gate_base,
                                   h_offsets.data(), gate_w_ptrs.data(),
-                                  d, eff, compute_dtype_, ne, stream, d_moe_work_ptrs_);
+                                  d, eff, DType::FP16, ne, stream, d_moe_work_ptrs_);
             gemm_moe_batched(gathered_base, expert_up_base,
                               h_offsets.data(), up_w_ptrs.data(),
-                              d, eff, compute_dtype_, ne, stream, d_moe_work_ptrs_);
+                              d, eff, DType::FP16, ne, stream, d_moe_work_ptrs_);
 
             {
                 int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
@@ -2101,7 +2101,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 char* batch_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
                 gemm_moe_batched(batch_down_act, expert_down_base,
                                   h_offsets.data(), down_w_ptrs.data(),
-                                  eff, d, compute_dtype_, ne, stream, d_moe_work_ptrs_);
+                                  eff, d, DType::FP16, ne, stream, d_moe_work_ptrs_);
             }
 
         } else if (can_dequant_batch) {

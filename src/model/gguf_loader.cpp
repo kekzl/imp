@@ -454,9 +454,9 @@ static bool assign_tensor(Model& model, const std::string& name,
         int n_experts = model.config().n_experts;
         if (expert_idx < 0 || expert_idx >= n_experts) return false;
 
-        if      (field == "ffn_gate") layer.expert_w_gate[expert_idx] = tensor;
-        else if (field == "ffn_up")   layer.expert_w_up[expert_idx] = tensor;
-        else if (field == "ffn_down") layer.expert_w_down[expert_idx] = tensor;
+        if      (field == "ffn_gate") { layer.expert_w_gate[expert_idx] = tensor; if (expert_idx == 0) layer.expert_gate_qtype = qtype; }
+        else if (field == "ffn_up")   { layer.expert_w_up[expert_idx] = tensor; if (expert_idx == 0) layer.expert_up_qtype = qtype; }
+        else if (field == "ffn_down") { layer.expert_w_down[expert_idx] = tensor; if (expert_idx == 0) layer.expert_down_qtype = qtype; }
         else return false;
         return true;
     }
