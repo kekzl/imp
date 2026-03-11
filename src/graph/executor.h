@@ -155,6 +155,12 @@ struct InferenceState {
     // Used by self-speculative decoding to generate cheap draft tokens.
     int exit_layer = -1;
 
+    // Layer skip: skip layers in [skip_layer_start, skip_layer_end) during forward.
+    // Used by self-speculative decoding for better acceptance than pure early exit.
+    // Runs layers {0..skip_start-1, skip_end..n_layers-1}. -1 = disabled.
+    int skip_layer_start = -1;
+    int skip_layer_end = -1;
+
     // When true, project ALL tokens through the LM head during prefill
     // (normally only the last token is projected). Used by speculative verify.
     bool all_logits = false;
