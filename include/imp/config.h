@@ -39,6 +39,11 @@ typedef struct {
     ImpModelFormat draft_model_format; // format of the draft model
     int spec_k;                    // number of draft tokens (default 4)
 
+    // Self-speculative decoding (early-exit draft from same model)
+    int enable_self_speculative;   // 0 = off, 1 = on
+    int self_spec_k;               // draft tokens per step (default 4)
+    int self_spec_exit_layer;      // early-exit layer (-1 = n_layers/2)
+
     // Layer offloading
     int gpu_layers;                // Layers to keep on GPU (-1 = all, 0 = all offloaded)
 

@@ -49,6 +49,9 @@ struct CliArgs {
     int bench_reps = 3;        // --bench-reps: repetitions to average
     std::string mmproj_path;   // --mmproj: vision encoder GGUF
     std::string image_path;    // --image: input image for vision
+    bool self_speculative = false;  // --self-speculative: early-exit draft decode
+    int self_spec_k = 4;            // --self-spec-k: draft tokens per step
+    int self_spec_exit_layer = -1;  // --self-spec-exit-layer: -1 = n_layers/2
     std::string preset;        // --preset: named model preset (e.g. qwen3-32b)
     std::string presets_file;  // --presets-file: custom presets.toml path
 };

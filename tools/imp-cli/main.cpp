@@ -82,6 +82,11 @@ int main(int argc, char** argv) {
         config.use_nvfp4_decode = args.decode_nvfp4;
     if (!args.mmproj_path.empty())
         config.mmproj_path = args.mmproj_path.c_str();
+    if (args.self_speculative) {
+        config.enable_self_speculative = 1;
+        config.self_spec_k = args.self_spec_k;
+        config.self_spec_exit_layer = args.self_spec_exit_layer;
+    }
 
     // In bench mode, cap KV cache to what the benchmark actually needs.
     // Prevents OOM when presets specify large max_seq_len (e.g. 131072).

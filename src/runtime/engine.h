@@ -8,6 +8,7 @@
 #include "runtime/green_ctx.h"
 #include "runtime/cuda_graph.h"
 #include "runtime/speculative.h"
+#include "runtime/self_speculative.h"
 #include "vision/vision_model.h"
 #include "vision/vision_encoder.h"
 #include "memory/kv_cache.h"
@@ -70,6 +71,11 @@ struct EngineConfig {
 
     // Prefix caching: reuse KV cache blocks for shared token prefixes
     bool use_prefix_caching = false;
+
+    // Self-speculative decoding (early-exit draft from same model)
+    bool enable_self_speculative = false;
+    int self_spec_k = 4;              // draft tokens per step
+    int self_spec_exit_layer = -1;    // -1 = n_layers/2
 
     // Vision (multimodal)
     std::string mmproj_path;  // path to mmproj GGUF, empty = text-only
@@ -171,6 +177,9 @@ private:
     std::shared_ptr<Model> draft_model_;
     std::unique_ptr<KVCacheManager> draft_kv_manager_;
     std::unique_ptr<SpeculativeDecoder> spec_decoder_;
+
+    // Self-speculative decoding (early-exit, same model)
+    std::unique_ptr<SelfSpeculativeDecoder> self_spec_decoder_;
 
     // Device buffer for penalty token history (reused across steps)
     int32_t* d_penalty_tokens_ = nullptr;

@@ -245,6 +245,8 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
     const auto& cfg = model_->config();
     int n = state.n_tokens;  // should be 1 for decode
     cur_n_tokens_ = n;
+    cur_force_fp16_ = false;  // async decode path never forces FP16
+    cur_per_row_lm_ = false;
     // Clear any stale CUDA error state before starting the decode pass.
     { cudaError_t e_ = cudaGetLastError();
       if (e_ != cudaSuccess) IMP_LOG_DEBUG("Cleared stale error before decode: %s", cudaGetErrorString(e_)); }

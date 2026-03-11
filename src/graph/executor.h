@@ -150,6 +150,22 @@ struct InferenceState {
     const half* vision_embeddings = nullptr;  // [n_vision_tokens, d_model] FP16 on device
     int vision_token_id = -1;                 // <image_soft_token> ID
     int n_vision_tokens = 0;                  // 256
+
+    // Early exit: run only the first exit_layer layers (-1 = all layers).
+    // Used by self-speculative decoding to generate cheap draft tokens.
+    int exit_layer = -1;
+
+    // When true, project ALL tokens through the LM head during prefill
+    // (normally only the last token is projected). Used by speculative verify.
+    bool all_logits = false;
+
+    // When true, bypass FP8 GEMM paths and use dequant→FP16 GEMM instead.
+    // Avoids compound FP8 quantization error over many layers (self-spec verify).
+    bool force_fp16_gemm = false;
+
+    // When true, use per-row Q8_1 GEMV for LM head instead of batched FP8 GEMM.
+    // Avoids FP8 per-tensor quantization artifacts in batched verification.
+    bool per_row_lm_head = false;
 };
 
 // Imperative executor for the transformer forward pass.
@@ -264,6 +280,8 @@ private:
     int max_tokens_ = 0;
     int max_logit_tokens_ = 0;  // max tokens needing LM head projection (= max_batch_size)
     int cur_n_tokens_ = 0;  // set by forward_logits for use by run_ffn
+    bool cur_force_fp16_ = false;  // set by forward_logits, bypasses FP8 GEMM paths
+    bool cur_per_row_lm_ = false;  // set by forward_logits, per-row Q8_1 LM head
 
     // Programmatic Dependent Launch: when true, custom kernels have the PDL
     // attribute set so the GPU can overlap tail of one kernel with head of next.

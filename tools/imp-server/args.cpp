@@ -30,6 +30,9 @@ void print_server_usage(const char* prog) {
         "  --api-key <key>       Require Bearer token authentication\n"
         "  --reasoning-format <f> deepseek (default) or none\n"
         "  --think-budget <f>    Fraction of max_tokens for reasoning (default: 0.5, 0=disabled)\n"
+        "  --self-speculative    Self-speculative decoding (early-exit draft, same model)\n"
+        "  --self-spec-k <n>     Draft tokens per self-spec step (default: 4)\n"
+        "  --self-spec-exit-layer <n>  Early-exit layer (-1 = n_layers/2)\n"
         "  --preset <name|none>  Override auto-detected preset, or 'none' to disable\n"
         "                        Use --preset list to show all available presets\n"
         "  --presets-file <path> Custom presets.toml path\n"
@@ -88,6 +91,12 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.reasoning_format = argv[++i];
         } else if (std::strcmp(arg, "--think-budget") == 0 && i + 1 < argc) {
             args.think_budget = std::atof(argv[++i]);
+        } else if (std::strcmp(arg, "--self-speculative") == 0) {
+            args.self_speculative = true;
+        } else if (std::strcmp(arg, "--self-spec-k") == 0 && i + 1 < argc) {
+            args.self_spec_k = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--self-spec-exit-layer") == 0 && i + 1 < argc) {
+            args.self_spec_exit_layer = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--preset") == 0 && i + 1 < argc) {
             args.preset = argv[++i];
         } else if (std::strcmp(arg, "--presets-file") == 0 && i + 1 < argc) {
