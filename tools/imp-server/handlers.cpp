@@ -161,6 +161,12 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
     if (!args.mmproj_path.empty())
         config.mmproj_path = args.mmproj_path.c_str();
 
+    if (args.self_speculative) {
+        config.enable_self_speculative = 1;
+        config.self_spec_k = args.self_spec_k;
+        config.self_spec_exit_layer = args.self_spec_exit_layer;
+    }
+
     // Prefix caching: always on for server (reuses KV blocks across requests)
     config.use_prefix_caching = 1;
 

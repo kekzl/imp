@@ -1,5 +1,6 @@
 #include "runtime/engine.h"
 #include "runtime/speculative.h"
+#include "runtime/self_speculative.h"
 #include "runtime/batch.h"
 #include "memory/kv_cache.h"
 #include "model/gguf_loader.h"
@@ -116,11 +117,19 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // GPU workspace allocation is deferred to AFTER weight upload to maximize
     // VRAM available for expert layers during upload.
     executor_ = std::make_unique<GraphExecutor>();
-    if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl,
-                         config_.max_batch_size, config_.max_seq_len,
-                         config_.use_fp8_prefill, config_.use_nvfp4_decode,
-                         config_.use_mxfp4_prefill)) {
-        return false;
+    {
+        // Self-speculative verify needs logits for K+1 tokens in one pass.
+        // Ensure max_batch_size (which sizes the logits buffer) is large enough.
+        int eff_batch = config_.max_batch_size;
+        if (config_.enable_self_speculative) {
+            eff_batch = std::max(eff_batch, config_.self_spec_k + 1);
+        }
+        if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl,
+                             eff_batch, config_.max_seq_len,
+                             config_.use_fp8_prefill, config_.use_nvfp4_decode,
+                             config_.use_mxfp4_prefill)) {
+            return false;
+        }
     }
 
     // --- Reserve L2 persisting cache for decode GEMV ---
@@ -467,6 +476,25 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         if (!init_speculative()) {
             IMP_LOG_WARN("Speculative decoding init failed, continuing without it");
             config_.enable_speculative = false;
+        }
+    }
+
+    // --- Initialize self-speculative decoding if configured ---
+    if (config_.enable_self_speculative) {
+        // Self-spec is incompatible with CUDA graphs (batch shape changes between draft/verify)
+        if (config_.use_cuda_graphs) {
+            IMP_LOG_INFO("Disabling CUDA graphs: self-speculative decoding active");
+            config_.use_cuda_graphs = false;
+        }
+        self_spec_decoder_ = std::make_unique<SelfSpeculativeDecoder>();
+        SelfSpecConfig ssc;
+        ssc.spec_k = config_.self_spec_k;
+        ssc.exit_layer = config_.self_spec_exit_layer;
+        if (!self_spec_decoder_->init(executor_.get(), kv_manager_.get(),
+                                       kv_cache_raw_, mcfg.n_layers, ssc)) {
+            IMP_LOG_WARN("Self-speculative init failed, continuing without it");
+            self_spec_decoder_.reset();
+            config_.enable_self_speculative = false;
         }
     }
 
@@ -1233,6 +1261,48 @@ bool Engine::step() {
         }
 
         if (!valid_decode.empty()) {
+            // ── Self-speculative decode shortcut (single-sequence only) ──
+            if (self_spec_decoder_ && config_.enable_self_speculative &&
+                valid_decode.size() == 1) {
+                auto& req = valid_decode[0];
+                int32_t last_token = req->output_tokens.empty()
+                    ? req->input_tokens.back()
+                    : req->output_tokens.back();
+                int position = req->context_len() - 1;
+
+                auto spec_tokens = self_spec_decoder_->step(
+                    last_token, position, req->id,
+                    req->temperature, req->top_p, req->top_k, req->seed,
+                    dec_stream);
+
+                Tokenizer* tok = model_->tokenizer();
+                for (int32_t t : spec_tokens) {
+                    req->output_tokens.push_back(t);
+
+                    IMP_LOG_DEBUG("SelfSpec decode (ctx=%d): id=%d [%s]",
+                                  req->context_len(), t,
+                                  tok ? tok->decode_token(t).c_str() : "?");
+
+                    bool is_stop = false;
+                    if (!req->ignore_eos && tok) {
+                        is_stop = (t == tok->eos_id());
+                        for (int32_t stop_id : chat_template_.stop_token_ids()) {
+                            if (t == stop_id) { is_stop = true; break; }
+                        }
+                    }
+                    if (is_stop ||
+                        static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
+                        req->status = RequestStatus::FINISHED;
+                        kv_manager_->free_sequence(req->id);
+                        break;
+                    }
+                }
+                kv_manager_->touch(req->id);
+
+                // Skip normal batched decode
+                goto decode_done;
+            }
+
             // Resize workspace for decode batch size (much smaller than prefill)
             executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
 
@@ -1595,6 +1665,7 @@ bool Engine::step() {
             }
         }
     }
+decode_done:
 
     return scheduler_->has_pending() || scheduler_->active_count() > 0;
 }

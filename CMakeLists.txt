@@ -149,6 +149,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/cuda_graph.cu
     src/runtime/pdl.cu
     src/runtime/speculative.cpp
+    src/runtime/self_speculative.cpp
     src/runtime/presets.cpp
 )
 
