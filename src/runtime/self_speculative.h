@@ -10,7 +10,7 @@
 namespace imp {
 
 struct SelfSpecConfig {
-    int spec_k = 4;           // number of draft tokens per step
+    int spec_k = 2;           // number of draft tokens per step
     int exit_layer = -1;      // -1 = n_layers/2 (early exit mode)
     bool layer_skip = true;   // use layer skipping instead of early exit
     int skip_n = -1;          // layers to skip (-1 = n_layers/2, centered)
@@ -58,10 +58,15 @@ private:
     int d_block_table_cap_ = 0;
     int* d_ctx_len_ = nullptr;       // [max_n]
 
-    // CUDA graph for draft forward pass (batch_size=1 decode with layer skip)
+    // CUDA graph for draft forward pass: captures ALL K iterations in one graph.
+    // Eliminates per-iteration host sync by pre-uploading position/ctx_len arrays
+    // and using D2D memcpy between iterations inside the graph.
     CudaGraphRunner draft_graph_;
-    int32_t* h_draft_sample_ = nullptr;   // mapped pinned memory for draft token readback
-    int32_t* d_draft_sample_ = nullptr;   // device pointer to mapped pinned memory
+    int32_t* d_draft_scratch_ = nullptr;  // [ARGMAX_SCRATCH_BYTES] argmax scratch for graph
+    int32_t* h_draft_results_ = nullptr;  // [max_k] mapped pinned for draft token readback
+    int32_t* d_draft_results_ = nullptr;  // device pointer to h_draft_results_ (mapped)
+    int* d_position_array_ = nullptr;     // [max_k] pre-computed positions for K iterations
+    int* d_ctx_len_array_ = nullptr;      // [max_k] pre-computed ctx_lens for K iterations
     int draft_graph_max_blocks_ = -1;     // max_blocks_per_seq used for current graph
 
     // Stats

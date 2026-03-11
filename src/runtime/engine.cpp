@@ -490,6 +490,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         SelfSpecConfig ssc;
         ssc.spec_k = config_.self_spec_k;
         ssc.exit_layer = config_.self_spec_exit_layer;
+        ssc.skip_n = config_.self_spec_skip_n;
         if (!self_spec_decoder_->init(executor_.get(), kv_manager_.get(),
                                        kv_cache_raw_, mcfg.n_layers, ssc)) {
             IMP_LOG_WARN("Self-speculative init failed, continuing without it");

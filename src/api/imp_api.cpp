@@ -63,8 +63,9 @@ ImpConfig imp_config_default(void) {
     config.draft_model_format = IMP_FORMAT_GGUF;
     config.spec_k = 4;                 // default draft tokens
     config.enable_self_speculative = 0; // no self-speculative decoding
-    config.self_spec_k = 4;            // default draft tokens
-    config.self_spec_exit_layer = -1;   // auto (n_layers/2)
+    config.self_spec_k = 2;            // default draft tokens
+    config.self_spec_exit_layer = -1;   // auto
+    config.self_spec_skip_n = -1;       // auto
     config.mmproj_path = NULL;          // no vision model
     return config;
 }
@@ -256,6 +257,7 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
         ecfg.enable_self_speculative = (config->enable_self_speculative != 0);
         ecfg.self_spec_k = config->self_spec_k;
         ecfg.self_spec_exit_layer = config->self_spec_exit_layer;
+        ecfg.self_spec_skip_n = config->self_spec_skip_n;
         if (config->mmproj_path)
             ecfg.mmproj_path = config->mmproj_path;
 

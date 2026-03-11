@@ -50,9 +50,10 @@ void print_usage(const char* prog) {
         "  --bench-reps <n>      Repetitions to average (default: 3)\n"
         "  --mmproj <path>       Path to vision encoder GGUF (mmproj) for multimodal\n"
         "  --image <path>        Input image for vision (requires --mmproj)\n"
-        "  --self-speculative    Self-speculative decoding (early-exit draft, same model)\n"
-        "  --self-spec-k <n>     Draft tokens per self-spec step (default: 4)\n"
-        "  --self-spec-exit-layer <n>  Early-exit layer (-1 = n_layers/2)\n"
+        "  --self-speculative    Self-speculative decoding (layer-skip draft, same model)\n"
+        "  --self-spec-k <n>     Draft tokens per self-spec step (default: 2)\n"
+        "  --self-spec-exit-layer <n>  Layers to run in draft (-1 = auto)\n"
+        "  --self-spec-skip-n <n>  Layers to skip in draft (-1 = auto)\n"
         "  --preset <name|none>  Override auto-detected preset, or 'none' to disable\n"
         "                        Use --preset list to show all available presets\n"
         "  --presets-file <path> Custom presets.toml path\n"
@@ -166,6 +167,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.self_spec_k = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--self-spec-exit-layer") == 0 && i + 1 < argc) {
             args.self_spec_exit_layer = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--self-spec-skip-n") == 0 && i + 1 < argc) {
+            args.self_spec_skip_n = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--preset") == 0 && i + 1 < argc) {
             args.preset = argv[++i];
         } else if (std::strcmp(arg, "--presets-file") == 0 && i + 1 < argc) {

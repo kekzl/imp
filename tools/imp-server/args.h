@@ -23,8 +23,9 @@ struct ServerArgs {
     std::string reasoning_format = "deepseek";  // --reasoning-format: deepseek or none
     float think_budget = 0.5f; // --think-budget: fraction of max_tokens for reasoning (0=disabled)
     bool self_speculative = false;  // --self-speculative
-    int self_spec_k = 4;
+    int self_spec_k = 2;
     int self_spec_exit_layer = -1;
+    int self_spec_skip_n = -1;
     std::string preset;        // --preset: named model preset (e.g. qwen3-32b)
     std::string presets_file;  // --presets-file: custom presets.toml path
 };

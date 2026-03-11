@@ -72,10 +72,11 @@ struct EngineConfig {
     // Prefix caching: reuse KV cache blocks for shared token prefixes
     bool use_prefix_caching = false;
 
-    // Self-speculative decoding (early-exit draft from same model)
+    // Self-speculative decoding (layer-skip draft from same model)
     bool enable_self_speculative = false;
-    int self_spec_k = 4;              // draft tokens per step
-    int self_spec_exit_layer = -1;    // -1 = n_layers/2
+    int self_spec_k = 2;              // draft tokens per step
+    int self_spec_exit_layer = -1;    // layers to run in draft (-1 = auto)
+    int self_spec_skip_n = -1;        // layers to skip in draft (-1 = auto)
 
     // Vision (multimodal)
     std::string mmproj_path;  // path to mmproj GGUF, empty = text-only
