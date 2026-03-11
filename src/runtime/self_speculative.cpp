@@ -19,7 +19,10 @@ SelfSpeculativeDecoder::~SelfSpeculativeDecoder() {
     if (d_positions_) cudaFree(d_positions_);
     if (d_block_table_) cudaFree(d_block_table_);
     if (d_ctx_len_) cudaFree(d_ctx_len_);
-    if (h_draft_sample_) cudaFreeHost(h_draft_sample_);
+    if (d_draft_scratch_) cudaFree(d_draft_scratch_);
+    if (h_draft_results_) cudaFreeHost(h_draft_results_);
+    if (d_position_array_) cudaFree(d_position_array_);
+    if (d_ctx_len_array_) cudaFree(d_ctx_len_array_);
 }
 
 bool SelfSpeculativeDecoder::init(GraphExecutor* executor,
@@ -58,15 +61,23 @@ bool SelfSpeculativeDecoder::init(GraphExecutor* executor,
 
     // Pre-allocate device buffers for max K+1 tokens
     int max_n = config_.spec_k + 1;
+    int K = config_.spec_k;
     check_cuda(cudaMalloc(&d_tokens_, max_n * sizeof(int32_t)), "malloc d_tokens");
     check_cuda(cudaMalloc(&d_positions_, max_n * sizeof(int)), "malloc d_positions");
     check_cuda(cudaMalloc(&d_ctx_len_, max_n * sizeof(int)), "malloc d_ctx_len");
 
-    // Allocate mapped pinned memory for draft sample readback (zero-copy)
-    check_cuda(cudaHostAlloc(&h_draft_sample_, sizeof(int32_t),
-               cudaHostAllocMapped), "hostalloc draft_sample");
-    check_cuda(cudaHostGetDevicePointer(&d_draft_sample_, h_draft_sample_, 0),
-               "getdevptr draft_sample");
+    // Argmax scratch buffer (needs ARGMAX_SCRATCH_BYTES for multi-block reduction)
+    check_cuda(cudaMalloc(&d_draft_scratch_, ARGMAX_SCRATCH_BYTES), "malloc d_draft_scratch");
+
+    // Mapped pinned memory for K draft tokens (zero-copy readback after graph)
+    check_cuda(cudaHostAlloc(&h_draft_results_, K * sizeof(int32_t),
+               cudaHostAllocMapped), "hostalloc draft_results");
+    check_cuda(cudaHostGetDevicePointer(&d_draft_results_, h_draft_results_, 0),
+               "getdevptr draft_results");
+
+    // Pre-computed position/ctx_len arrays for K iterations (uploaded before graph)
+    check_cuda(cudaMalloc(&d_position_array_, K * sizeof(int)), "malloc d_position_array");
+    check_cuda(cudaMalloc(&d_ctx_len_array_, K * sizeof(int)), "malloc d_ctx_len_array");
 
     initialized_ = true;
     if (config.layer_skip) {
@@ -136,22 +147,25 @@ void SelfSpeculativeDecoder::ensure_kv_blocks(int seq_id, int ctx_len) {
     }
 }
 
-// ─── Draft token generation (with CUDA graph) ───────────────────────────────
+// ─── Draft token generation (GPU-autonomous K-iteration CUDA graph) ──────────
+//
+// All K draft iterations are captured in a single CUDA graph. Between iterations,
+// D2D memcpy stages position/ctx_len from pre-computed arrays, and the sampled
+// token feeds back to d_tokens_[0] for the next forward pass. Only ONE host sync
+// is needed after all K iterations complete.
 
 std::vector<int32_t> SelfSpeculativeDecoder::draft_tokens(
         int32_t last_token, int position, int seq_id, cudaStream_t stream) {
-    std::vector<int32_t> drafts;
-    drafts.reserve(config_.spec_k);
+    const int K = config_.spec_k;
 
     // Pre-allocate KV blocks for all K draft steps
-    int max_ctx = position + config_.spec_k + 1;
+    int max_ctx = position + K + 1;
     ensure_kv_blocks(seq_id, max_ctx);
     upload_block_table(seq_id, stream);
 
     int n_blocks = static_cast<int>(kv_manager_->block_table(seq_id).size());
 
     // Pad max_blocks_per_seq to reduce graph re-captures.
-    // Round up to next multiple of 8 to avoid invalidation on every block alloc.
     int max_blocks_per_seq = (n_blocks + 7) & ~7;
     if (max_blocks_per_seq < 8) max_blocks_per_seq = 8;
 
@@ -161,9 +175,27 @@ std::vector<int32_t> SelfSpeculativeDecoder::draft_tokens(
         draft_graph_max_blocks_ = max_blocks_per_seq;
     }
 
+    // Upload initial token BEFORE the graph
+    check_cuda(cudaMemcpyAsync(d_tokens_, &last_token, sizeof(int32_t),
+               cudaMemcpyHostToDevice, stream), "memcpy token");
+
+    // Upload pre-computed position and ctx_len arrays for K iterations
+    {
+        std::vector<int> positions(K), ctx_lens(K);
+        for (int k = 0; k < K; ++k) {
+            positions[k] = position + k;
+            ctx_lens[k] = position + k + 1;
+        }
+        check_cuda(cudaMemcpyAsync(d_position_array_, positions.data(),
+                   K * sizeof(int), cudaMemcpyHostToDevice, stream),
+                   "memcpy position_array");
+        check_cuda(cudaMemcpyAsync(d_ctx_len_array_, ctx_lens.data(),
+                   K * sizeof(int), cudaMemcpyHostToDevice, stream),
+                   "memcpy ctx_len_array");
+    }
+
     // Build a fixed InferenceState for graph capture/replay.
     // max_context_len is set to maximum (position+K+1) so split-K grid is stable.
-    // Actual context length comes from d_ctx_len_ (device memory, updated per step).
     InferenceState state;
     state.token_ids = d_tokens_;
     state.positions = d_positions_;
@@ -181,48 +213,54 @@ std::vector<int32_t> SelfSpeculativeDecoder::draft_tokens(
     state.skip_layer_start = skip_start_;
     state.skip_layer_end = skip_end_;
 
-    // Set up the graph decode function: forward_logits + greedy sample
+    // Set up the graph decode function: ALL K iterations captured in one graph.
+    // Each iteration:
+    //   1. D2D memcpy: d_position_array_[k] → d_positions_[0]
+    //   2. D2D memcpy: d_ctx_len_array_[k] → d_ctx_len_[0]
+    //   3. forward_logits (reads d_tokens_[0], d_positions_[0], d_ctx_len_[0])
+    //   4. sample_greedy_device → d_draft_scratch_ (scratch) + D2H to h_draft_results_[k]
+    //   5. D2D memcpy: d_draft_scratch_[0] → d_tokens_[0] (feed token to next iter)
     draft_graph_.set_decode_fn(
-        [this, &state](cudaStream_t s) {
-            Tensor logits_out;
-            executor_->forward_logits(state, logits_out, s);
-            if (logits_out.data == nullptr)
-                logits_out = executor_->get_logits_view(1);
-            int64_t vshape[1] = {logits_out.shape[logits_out.ndim - 1]};
-            Tensor flat = logits_out.slice(0, 1).reshape(1, vshape);
-            sample_greedy_device(flat, d_draft_sample_, h_draft_sample_, s);
+        [this, &state, K](cudaStream_t s) {
+            for (int k = 0; k < K; ++k) {
+                // Stage position and ctx_len from pre-computed arrays
+                cudaMemcpyAsync(d_positions_, d_position_array_ + k,
+                                sizeof(int), cudaMemcpyDeviceToDevice, s);
+                cudaMemcpyAsync(d_ctx_len_, d_ctx_len_array_ + k,
+                                sizeof(int), cudaMemcpyDeviceToDevice, s);
+
+                // Forward pass (layer-skip/early-exit)
+                Tensor logits_out;
+                executor_->forward_logits(state, logits_out, s);
+                if (logits_out.data == nullptr)
+                    logits_out = executor_->get_logits_view(1);
+                int64_t vshape[1] = {logits_out.shape[logits_out.ndim - 1]};
+                Tensor flat = logits_out.slice(0, 1).reshape(1, vshape);
+
+                // Greedy sample → scratch buffer + mapped readback slot
+                sample_greedy_device(flat, d_draft_scratch_,
+                                     h_draft_results_ + k, s);
+
+                // Feed sampled token back to d_tokens_[0] for next iteration
+                cudaMemcpyAsync(d_tokens_, d_draft_scratch_,
+                                sizeof(int32_t), cudaMemcpyDeviceToDevice, s);
+            }
         });
 
-    int32_t cur_token = last_token;
-    int cur_pos = position;
+    // Execute graph (warmup → capture → replay)
+    draft_graph_.execute(stream);
+
+    // Single sync after all K iterations — read all draft tokens
     cudaEvent_t draft_done;
     cudaEventCreateWithFlags(&draft_done, cudaEventDisableTiming);
-
-    for (int k = 0; k < config_.spec_k; ++k) {
-        int ctx_len = cur_pos + 1;
-
-        // Upload token/position/ctx_len OUTSIDE the graph
-        check_cuda(cudaMemcpyAsync(d_tokens_, &cur_token, sizeof(int32_t),
-                   cudaMemcpyHostToDevice, stream), "memcpy token");
-        check_cuda(cudaMemcpyAsync(d_positions_, &cur_pos, sizeof(int),
-                   cudaMemcpyHostToDevice, stream), "memcpy pos");
-        check_cuda(cudaMemcpyAsync(d_ctx_len_, &ctx_len, sizeof(int),
-                   cudaMemcpyHostToDevice, stream), "memcpy ctx_len");
-
-        // Execute graph (warmup → capture → replay)
-        draft_graph_.execute(stream);
-
-        // Read sampled token from mapped pinned memory
-        cudaEventRecord(draft_done, stream);
-        while (cudaEventQuery(draft_done) == cudaErrorNotReady) {}
-
-        int32_t sampled = *h_draft_sample_;
-        drafts.push_back(sampled);
-        cur_token = sampled;
-        cur_pos += 1;
-    }
-
+    cudaEventRecord(draft_done, stream);
+    while (cudaEventQuery(draft_done) == cudaErrorNotReady) {}
     cudaEventDestroy(draft_done);
+
+    std::vector<int32_t> drafts(K);
+    for (int k = 0; k < K; ++k)
+        drafts[k] = h_draft_results_[k];
+
     return drafts;
 }
 
@@ -345,11 +383,11 @@ std::vector<int32_t> SelfSpeculativeDecoder::step(
                               temperature, top_p, top_k, seed, stream);
     total_accepted_ += vr.n_accepted;
 
-    IMP_LOG_INFO("self_spec: accepted %d/%d (cumulative: %lld/%lld = %.1f%%)",
-                 vr.n_accepted, static_cast<int>(draft.size()),
-                 static_cast<long long>(total_accepted_),
-                 static_cast<long long>(total_drafted_),
-                 total_drafted_ > 0 ? 100.0 * total_accepted_ / total_drafted_ : 0.0);
+    IMP_LOG_DEBUG("self_spec: accepted %d/%d (cumulative: %lld/%lld = %.1f%%)",
+                  vr.n_accepted, static_cast<int>(draft.size()),
+                  static_cast<long long>(total_accepted_),
+                  static_cast<long long>(total_drafted_),
+                  total_drafted_ > 0 ? 100.0 * total_accepted_ / total_drafted_ : 0.0);
 
     // 3. Combine: accepted + next token
     std::vector<int32_t> output;

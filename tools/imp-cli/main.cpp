@@ -86,6 +86,7 @@ int main(int argc, char** argv) {
         config.enable_self_speculative = 1;
         config.self_spec_k = args.self_spec_k;
         config.self_spec_exit_layer = args.self_spec_exit_layer;
+        config.self_spec_skip_n = args.self_spec_skip_n;
     }
 
     // In bench mode, cap KV cache to what the benchmark actually needs.

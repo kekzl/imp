@@ -97,6 +97,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.self_spec_k = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--self-spec-exit-layer") == 0 && i + 1 < argc) {
             args.self_spec_exit_layer = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--self-spec-skip-n") == 0 && i + 1 < argc) {
+            args.self_spec_skip_n = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--preset") == 0 && i + 1 < argc) {
             args.preset = argv[++i];
         } else if (std::strcmp(arg, "--presets-file") == 0 && i + 1 < argc) {
