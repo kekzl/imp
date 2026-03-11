@@ -1,6 +1,7 @@
 #pragma once
 
 #include "graph/executor.h"
+#include "runtime/cuda_graph.h"
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
 #include <vector>
@@ -10,7 +11,9 @@ namespace imp {
 
 struct SelfSpecConfig {
     int spec_k = 4;           // number of draft tokens per step
-    int exit_layer = -1;      // -1 = n_layers/2
+    int exit_layer = -1;      // -1 = n_layers/2 (early exit mode)
+    bool layer_skip = true;   // use layer skipping instead of early exit
+    int skip_n = -1;          // layers to skip (-1 = n_layers/2, centered)
 };
 
 // Self-speculative decoding: uses early exit (first N layers) of the same
@@ -42,7 +45,10 @@ private:
     GraphExecutor* executor_ = nullptr;
     KVCacheManager* kv_manager_ = nullptr;
     KVCache* kv_cache_ = nullptr;
-    int exit_layer_ = 0;
+    int exit_layer_ = 0;         // early exit (when not using layer skip)
+    int skip_start_ = -1;       // layer skip range [start, end)
+    int skip_end_ = -1;
+    int n_layers_ = 0;
     bool initialized_ = false;
 
     // Pre-allocated device buffers for up to K+1 tokens
@@ -51,6 +57,12 @@ private:
     int* d_block_table_ = nullptr;   // [max_blocks] (single-seq) or [max_n * max_blocks_per_seq] (replicated)
     int d_block_table_cap_ = 0;
     int* d_ctx_len_ = nullptr;       // [max_n]
+
+    // CUDA graph for draft forward pass (batch_size=1 decode with layer skip)
+    CudaGraphRunner draft_graph_;
+    int32_t* h_draft_sample_ = nullptr;   // mapped pinned memory for draft token readback
+    int32_t* d_draft_sample_ = nullptr;   // device pointer to mapped pinned memory
+    int draft_graph_max_blocks_ = -1;     // max_blocks_per_seq used for current graph
 
     // Stats
     int64_t total_drafted_ = 0;

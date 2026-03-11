@@ -595,6 +595,7 @@ ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
 
         // Store as the active request for subsequent decode_step calls
         ctx->active_request = req;
+        ctx->consumed_output = 0;
 
         // Run steps until prefill completes (may take multiple steps with chunked prefill)
         do {
@@ -606,6 +607,10 @@ ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
             ctx->active_request = nullptr;
             return IMP_ERROR_OUT_OF_MEMORY;
         }
+
+        // After prefill, any tokens already in output_tokens are "consumed"
+        // by the prefill path (the first decode token).
+        ctx->consumed_output = req->output_tokens.size();
 
         return IMP_SUCCESS;
     } catch (const std::bad_alloc&) {
@@ -675,18 +680,24 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params,
         if (params->mirostat == 2 && req->mirostat_mu == 0.0f)
             req->mirostat_mu = 2.0f * params->mirostat_tau;
 
-        // Record output size before the step
-        size_t prev_output_size = req->output_tokens.size();
-
-        // Run one decode step
-        ctx->engine->step();
-
-        // Return the newly generated token
-        if (req->output_tokens.size() > prev_output_size) {
-            *out_token = req->output_tokens.back();
+        // Self-speculative (and future multi-token) steps may produce
+        // multiple tokens per engine->step().  Track how many have been
+        // consumed so we only call step() when all previous tokens are
+        // returned to the caller.
+        if (ctx->consumed_output < req->output_tokens.size()) {
+            // Still have unconsumed tokens from a previous multi-token step
+            *out_token = req->output_tokens[ctx->consumed_output++];
         } else {
-            // No token was generated (should not happen in normal operation)
-            return IMP_ERROR_INTERNAL;
+            // Need a new engine step
+            size_t prev_output_size = req->output_tokens.size();
+            ctx->engine->step();
+
+            if (req->output_tokens.size() > prev_output_size) {
+                ctx->consumed_output = prev_output_size;
+                *out_token = req->output_tokens[ctx->consumed_output++];
+            } else {
+                return IMP_ERROR_INTERNAL;
+            }
         }
 
         // If the request finished (eos or max_tokens), clean up
@@ -723,6 +734,7 @@ ImpError imp_context_reset(ImpContext ctx) {
         ctx->engine->reset_ssm_state(ctx->active_request->id);
         ctx->active_request->status = imp::RequestStatus::CANCELLED;
         ctx->active_request = nullptr;
+        ctx->consumed_output = 0;
     }
 
     // Note: We do not reset the entire scheduler here because other sequences

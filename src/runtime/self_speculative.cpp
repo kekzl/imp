@@ -1,4 +1,5 @@
 #include "runtime/self_speculative.h"
+#include "compute/sampling.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cmath>
@@ -18,6 +19,7 @@ SelfSpeculativeDecoder::~SelfSpeculativeDecoder() {
     if (d_positions_) cudaFree(d_positions_);
     if (d_block_table_) cudaFree(d_block_table_);
     if (d_ctx_len_) cudaFree(d_ctx_len_);
+    if (h_draft_sample_) cudaFreeHost(h_draft_sample_);
 }
 
 bool SelfSpeculativeDecoder::init(GraphExecutor* executor,
@@ -38,7 +40,21 @@ bool SelfSpeculativeDecoder::init(GraphExecutor* executor,
     executor_ = executor;
     kv_manager_ = kv_manager;
     kv_cache_ = kv_cache;
-    exit_layer_ = (config.exit_layer > 0) ? config.exit_layer : (n_layers / 2);
+    n_layers_ = n_layers;
+
+    if (config.layer_skip) {
+        // Layer skipping: skip middle layers, keep first and last
+        // exit_layer controls how many layers to actually run (skip the rest)
+        int run_n = (config.exit_layer > 0) ? config.exit_layer : std::max(n_layers - 8, n_layers / 2);
+        int skip_n = (config.skip_n > 0) ? config.skip_n : (n_layers - run_n);
+        skip_start_ = (n_layers - skip_n) / 2;  // centered
+        skip_end_ = skip_start_ + skip_n;
+        exit_layer_ = -1;  // not used
+    } else {
+        exit_layer_ = (config.exit_layer > 0) ? config.exit_layer : (n_layers / 2);
+        skip_start_ = -1;
+        skip_end_ = -1;
+    }
 
     // Pre-allocate device buffers for max K+1 tokens
     int max_n = config_.spec_k + 1;
@@ -46,9 +62,21 @@ bool SelfSpeculativeDecoder::init(GraphExecutor* executor,
     check_cuda(cudaMalloc(&d_positions_, max_n * sizeof(int)), "malloc d_positions");
     check_cuda(cudaMalloc(&d_ctx_len_, max_n * sizeof(int)), "malloc d_ctx_len");
 
+    // Allocate mapped pinned memory for draft sample readback (zero-copy)
+    check_cuda(cudaHostAlloc(&h_draft_sample_, sizeof(int32_t),
+               cudaHostAllocMapped), "hostalloc draft_sample");
+    check_cuda(cudaHostGetDevicePointer(&d_draft_sample_, h_draft_sample_, 0),
+               "getdevptr draft_sample");
+
     initialized_ = true;
-    IMP_LOG_INFO("self_spec: initialized with spec_k=%d, exit_layer=%d/%d",
-                 config_.spec_k, exit_layer_, n_layers);
+    if (config.layer_skip) {
+        IMP_LOG_INFO("self_spec: layer-skip mode, spec_k=%d, skip layers [%d,%d) of %d (runs %d/%d layers)",
+                     config_.spec_k, skip_start_, skip_end_, n_layers,
+                     n_layers - (skip_end_ - skip_start_), n_layers);
+    } else {
+        IMP_LOG_INFO("self_spec: early-exit mode, spec_k=%d, exit_layer=%d/%d",
+                     config_.spec_k, exit_layer_, n_layers);
+    }
     return true;
 }
 
@@ -62,6 +90,7 @@ void SelfSpeculativeDecoder::upload_block_table(int seq_id, cudaStream_t stream)
         d_block_table_cap_ = n_blocks + 16;
         check_cuda(cudaMalloc(&d_block_table_, d_block_table_cap_ * sizeof(int)),
                    "malloc d_block_table");
+        draft_graph_.invalidate();  // device pointer changed
     }
     check_cuda(cudaMemcpyAsync(d_block_table_, bt.data(),
                n_blocks * sizeof(int), cudaMemcpyHostToDevice, stream),
@@ -81,6 +110,7 @@ void SelfSpeculativeDecoder::upload_block_table_replicated(
         d_block_table_cap_ = total_entries + 16;
         check_cuda(cudaMalloc(&d_block_table_, d_block_table_cap_ * sizeof(int)),
                    "malloc d_block_table replicated");
+        draft_graph_.invalidate();  // device pointer changed
     }
 
     // Build replicated layout on host
@@ -106,21 +136,72 @@ void SelfSpeculativeDecoder::ensure_kv_blocks(int seq_id, int ctx_len) {
     }
 }
 
-// ─── Draft token generation (early exit) ─────────────────────────────────────
+// ─── Draft token generation (with CUDA graph) ───────────────────────────────
 
 std::vector<int32_t> SelfSpeculativeDecoder::draft_tokens(
         int32_t last_token, int position, int seq_id, cudaStream_t stream) {
     std::vector<int32_t> drafts;
     drafts.reserve(config_.spec_k);
 
+    // Pre-allocate KV blocks for all K draft steps
+    int max_ctx = position + config_.spec_k + 1;
+    ensure_kv_blocks(seq_id, max_ctx);
+    upload_block_table(seq_id, stream);
+
+    int n_blocks = static_cast<int>(kv_manager_->block_table(seq_id).size());
+
+    // Pad max_blocks_per_seq to reduce graph re-captures.
+    // Round up to next multiple of 8 to avoid invalidation on every block alloc.
+    int max_blocks_per_seq = (n_blocks + 7) & ~7;
+    if (max_blocks_per_seq < 8) max_blocks_per_seq = 8;
+
+    // Invalidate graph if padded block count changed (grid size depends on it)
+    if (max_blocks_per_seq != draft_graph_max_blocks_) {
+        draft_graph_.invalidate();
+        draft_graph_max_blocks_ = max_blocks_per_seq;
+    }
+
+    // Build a fixed InferenceState for graph capture/replay.
+    // max_context_len is set to maximum (position+K+1) so split-K grid is stable.
+    // Actual context length comes from d_ctx_len_ (device memory, updated per step).
+    InferenceState state;
+    state.token_ids = d_tokens_;
+    state.positions = d_positions_;
+    state.n_tokens = 1;
+    state.kv_cache = kv_cache_;
+    state.block_tables = d_block_table_;
+    state.context_lens = d_ctx_len_;
+    state.max_context_len = max_ctx;  // fixed for stable grid
+    state.n_sequences = 1;
+    state.max_blocks_per_seq = max_blocks_per_seq;
+    state.is_prefill = false;
+    state.temperature = 0.0f;  // greedy draft
+    state.top_k = 1;
+    state.exit_layer = exit_layer_;  // -1 when using layer skip
+    state.skip_layer_start = skip_start_;
+    state.skip_layer_end = skip_end_;
+
+    // Set up the graph decode function: forward_logits + greedy sample
+    draft_graph_.set_decode_fn(
+        [this, &state](cudaStream_t s) {
+            Tensor logits_out;
+            executor_->forward_logits(state, logits_out, s);
+            if (logits_out.data == nullptr)
+                logits_out = executor_->get_logits_view(1);
+            int64_t vshape[1] = {logits_out.shape[logits_out.ndim - 1]};
+            Tensor flat = logits_out.slice(0, 1).reshape(1, vshape);
+            sample_greedy_device(flat, d_draft_sample_, h_draft_sample_, s);
+        });
+
     int32_t cur_token = last_token;
     int cur_pos = position;
+    cudaEvent_t draft_done;
+    cudaEventCreateWithFlags(&draft_done, cudaEventDisableTiming);
 
     for (int k = 0; k < config_.spec_k; ++k) {
         int ctx_len = cur_pos + 1;
-        ensure_kv_blocks(seq_id, ctx_len);
-        upload_block_table(seq_id, stream);
 
+        // Upload token/position/ctx_len OUTSIDE the graph
         check_cuda(cudaMemcpyAsync(d_tokens_, &cur_token, sizeof(int32_t),
                    cudaMemcpyHostToDevice, stream), "memcpy token");
         check_cuda(cudaMemcpyAsync(d_positions_, &cur_pos, sizeof(int),
@@ -128,29 +209,20 @@ std::vector<int32_t> SelfSpeculativeDecoder::draft_tokens(
         check_cuda(cudaMemcpyAsync(d_ctx_len_, &ctx_len, sizeof(int),
                    cudaMemcpyHostToDevice, stream), "memcpy ctx_len");
 
-        int n_blocks = static_cast<int>(kv_manager_->block_table(seq_id).size());
+        // Execute graph (warmup → capture → replay)
+        draft_graph_.execute(stream);
 
-        InferenceState state;
-        state.token_ids = d_tokens_;
-        state.positions = d_positions_;
-        state.n_tokens = 1;
-        state.kv_cache = kv_cache_;
-        state.block_tables = d_block_table_;
-        state.context_lens = d_ctx_len_;
-        state.max_context_len = ctx_len;
-        state.n_sequences = 1;
-        state.max_blocks_per_seq = n_blocks;
-        state.is_prefill = false;
-        state.temperature = 0.0f;  // greedy draft
-        state.top_k = 1;
-        state.exit_layer = exit_layer_;
+        // Read sampled token from mapped pinned memory
+        cudaEventRecord(draft_done, stream);
+        while (cudaEventQuery(draft_done) == cudaErrorNotReady) {}
 
-        int32_t sampled = executor_->forward(state, stream);
+        int32_t sampled = *h_draft_sample_;
         drafts.push_back(sampled);
         cur_token = sampled;
         cur_pos += 1;
     }
 
+    cudaEventDestroy(draft_done);
     return drafts;
 }
 
@@ -264,7 +336,7 @@ std::vector<int32_t> SelfSpeculativeDecoder::step(
     // Resize workspace for single-token draft passes
     executor_->resize_workspace(1, stream);
 
-    // 1. Draft K tokens with early exit
+    // 1. Draft K tokens with layer skip/early exit
     std::vector<int32_t> draft = draft_tokens(last_token, position, seq_id, stream);
     total_drafted_ += draft.size();
 
@@ -273,7 +345,7 @@ std::vector<int32_t> SelfSpeculativeDecoder::step(
                               temperature, top_p, top_k, seed, stream);
     total_accepted_ += vr.n_accepted;
 
-    IMP_LOG_INFO("self_spec: accepted %d/%d draft tokens (cumulative: %lld/%lld = %.1f%%)",
+    IMP_LOG_INFO("self_spec: accepted %d/%d (cumulative: %lld/%lld = %.1f%%)",
                  vr.n_accepted, static_cast<int>(draft.size()),
                  static_cast<long long>(total_accepted_),
                  static_cast<long long>(total_drafted_),

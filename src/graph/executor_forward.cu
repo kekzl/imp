@@ -2750,7 +2750,12 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     int max_layer = (state.exit_layer > 0)
                     ? std::min(state.exit_layer, cfg.n_layers)
                     : cfg.n_layers;
+    const int skip_start = state.skip_layer_start;
+    const int skip_end   = state.skip_layer_end;
     for (int i = 0; i < max_layer; ++i) {
+        // Layer skipping: skip layers in [skip_start, skip_end)
+        if (skip_start >= 0 && skip_end > skip_start && i >= skip_start && i < skip_end)
+            continue;
         // Layer offloading: ensure weights are on GPU, prefetch next layer
         if (offload_mgr_) {
             offload_mgr_->ensure_layer(i, stream);

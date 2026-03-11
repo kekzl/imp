@@ -21,4 +21,7 @@ struct ImpContext_T {
 
     // State for token-level prefill/decode API
     std::shared_ptr<imp::Request> active_request;
+
+    // Multi-token step consumption (self-speculative decode produces N tokens per step)
+    size_t consumed_output = 0;
 };
