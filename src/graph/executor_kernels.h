@@ -9,9 +9,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
-#ifdef __CUDA_FP8_TYPES_EXIST__
 #include <cuda_fp8.h>
-#endif
 #include <unordered_map>
 
 namespace imp {
@@ -102,6 +100,21 @@ __global__ void write_kv_cache_fp8_kernel(
     int max_blocks_per_seq,
     int n_sequences);
 #endif
+
+__global__ void write_kv_cache_fp8_fused_kernel(
+    const half* __restrict__ k_in,
+    const half* __restrict__ v_in,
+    const int* __restrict__ positions,
+    const int* __restrict__ block_tables,
+    __nv_fp8_e4m3* k_cache_base,
+    __nv_fp8_e4m3* v_cache_base,
+    float inv_scale,
+    int block_stride,
+    int row_elems,
+    int block_size,
+    int n_tokens,
+    int max_blocks_per_seq,
+    int n_sequences);
 
 __global__ void write_kv_cache_int8_kernel(
     const half* __restrict__ k_in,

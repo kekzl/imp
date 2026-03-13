@@ -31,9 +31,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
-#ifdef __CUDA_FP8_TYPES_EXIST__
 #include <cuda_fp8.h>
-#endif
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
@@ -111,49 +109,20 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
             inv_scale = 1.0f;
         }
 
-        // K view: [n_tokens, nkv * hd]
         Tensor kv = view_tokens(k_, n);
-#ifdef __CUDA_FP8_TYPES_EXIST__
-        write_kv_cache_fp8_kernel<<<nblocks, threads, 0, stream>>>(
-            static_cast<const half*>(kv.data),
-            state.positions,
-            state.block_tables,
-            static_cast<__nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
-            inv_scale,
-            block_stride, row_elems, kKVBlockSize, n,
-            state.max_blocks_per_seq, state.n_sequences);
-#else
-        write_kv_cache_fp8_kernel<<<nblocks, threads, 0, stream>>>(
-            static_cast<const half*>(kv.data),
-            state.positions,
-            state.block_tables,
-            static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
-            inv_scale,
-            block_stride, row_elems, kKVBlockSize, n,
-            state.max_blocks_per_seq, state.n_sequences);
-#endif
-
-        // V view
         Tensor vv = view_tokens(v_, n);
-#ifdef __CUDA_FP8_TYPES_EXIST__
-        write_kv_cache_fp8_kernel<<<nblocks, threads, 0, stream>>>(
+        // Fused K+V FP8 write: single kernel launch with blockIdx.y
+        dim3 fp8_grid(n, 2);
+        write_kv_cache_fp8_fused_kernel<<<fp8_grid, threads, 0, stream>>>(
+            static_cast<const half*>(kv.data),
             static_cast<const half*>(vv.data),
             state.positions,
             state.block_tables,
+            static_cast<__nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
             static_cast<__nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)),
             inv_scale,
             block_stride, row_elems, kKVBlockSize, n,
             state.max_blocks_per_seq, state.n_sequences);
-#else
-        write_kv_cache_fp8_kernel<<<nblocks, threads, 0, stream>>>(
-            static_cast<const half*>(vv.data),
-            state.positions,
-            state.block_tables,
-            static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
-            inv_scale,
-            block_stride, row_elems, kKVBlockSize, n,
-            state.max_blocks_per_seq, state.n_sequences);
-#endif
     } else {
         // Standard FP16 KV cache write path — fused K+V in single launch
         Tensor kv = view_tokens(k_, n);
@@ -967,22 +936,39 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
             auto& wd_nvfp4 = nvfp4_cache_.at(ly.w_down.data);
-            if (cfg.ffn_activation != FFNActivation::GEGLU) {
-                // Fused SwiGLU + NVFP4 GEMV + residual (saves 1 kernel launch)
-                gemv_nvfp4_swiglu_residual(wd_nvfp4,
-                                            static_cast<const half*>(go.data),
-                                            static_cast<const half*>(uo.data),
-                                            static_cast<half*>(h.data),
-                                            static_cast<const half*>(h.data),
-                                            M_d, K_d, stream);
+            int n_mb_d = K_d / 16;
+            if (n_mb_d <= 512) {
+                // Small K: fused SwiGLU/GeGLU + NVFP4 GEMV + residual (MR path)
+                if (cfg.ffn_activation != FFNActivation::GEGLU) {
+                    gemv_nvfp4_swiglu_residual(wd_nvfp4,
+                                                static_cast<const half*>(go.data),
+                                                static_cast<const half*>(uo.data),
+                                                static_cast<half*>(h.data),
+                                                static_cast<const half*>(h.data),
+                                                M_d, K_d, stream);
+                } else {
+                    gemv_nvfp4_geglu_residual(wd_nvfp4,
+                                               static_cast<const half*>(go.data),
+                                               static_cast<const half*>(uo.data),
+                                               static_cast<half*>(h.data),
+                                               static_cast<const half*>(h.data),
+                                               M_d, K_d, stream);
+                }
             } else {
-                // Fused GeGLU + NVFP4 GEMV + residual (saves 1 kernel launch)
-                gemv_nvfp4_geglu_residual(wd_nvfp4,
-                                           static_cast<const half*>(go.data),
-                                           static_cast<const half*>(uo.data),
-                                           static_cast<half*>(h.data),
-                                           static_cast<const half*>(h.data),
-                                           M_d, K_d, stream);
+                // Large K (e.g. 12288): split activation + GEMV.
+                // The fused kernel's silu/gelu compute dominates at large K,
+                // while the separate vectorized activation kernel is ~1 μs,
+                // then GEMV uses prmt dequant (no smem LUT, no bank conflicts).
+                if (cfg.ffn_activation != FFNActivation::GEGLU) {
+                    swiglu(go, uo, so, stream);
+                } else {
+                    geglu(go, uo, so, stream);
+                }
+                gemv_nvfp4_residual(wd_nvfp4,
+                                     static_cast<const half*>(so.data),
+                                     static_cast<half*>(h.data),
+                                     static_cast<const half*>(h.data),
+                                     M_d, K_d, stream);
             }
         } else if (fused_down_residual) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);
