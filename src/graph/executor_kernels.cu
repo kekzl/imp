@@ -622,6 +622,54 @@ __global__ void write_kv_cache_rope_fused_kernel(
     }
 }
 
+// Fused K+V FP8 write: combines K and V quantize+write into one kernel launch.
+// blockIdx.x = token index, blockIdx.y = 0 (K) or 1 (V).
+__global__ void write_kv_cache_fp8_fused_kernel(
+    const half* __restrict__ k_in,
+    const half* __restrict__ v_in,
+    const int* __restrict__ positions,
+    const int* __restrict__ block_tables,
+    __nv_fp8_e4m3* k_cache_base,
+    __nv_fp8_e4m3* v_cache_base,
+    float inv_scale,
+    int block_stride,
+    int row_elems,
+    int block_size,
+    int n_tokens,
+    int max_blocks_per_seq,
+    int n_sequences
+) {
+    int token_idx = blockIdx.x;
+    if (token_idx >= n_tokens) return;
+
+    int pos = positions[token_idx];
+    int block_idx = pos / block_size;
+    int slot_in_block = pos % block_size;
+
+    int block_id;
+    if (max_blocks_per_seq > 0 && n_sequences > 1) {
+        block_id = block_tables[token_idx * max_blocks_per_seq + block_idx];
+    } else {
+        block_id = block_tables[block_idx];
+    }
+
+    const half* src;
+    __nv_fp8_e4m3* dst;
+    if (blockIdx.y == 0) {
+        src = k_in + static_cast<int64_t>(token_idx) * row_elems;
+        dst = k_cache_base + static_cast<int64_t>(block_id) * block_stride
+                           + static_cast<int64_t>(slot_in_block) * row_elems;
+    } else {
+        src = v_in + static_cast<int64_t>(token_idx) * row_elems;
+        dst = v_cache_base + static_cast<int64_t>(block_id) * block_stride
+                           + static_cast<int64_t>(slot_in_block) * row_elems;
+    }
+
+    for (int i = threadIdx.x; i < row_elems; i += blockDim.x) {
+        dst[i] = __nv_fp8_e4m3(__half2float(src[i]) * inv_scale);
+    }
+}
+
 // Q-only RoPE for decode (n=1): applies RoPE to Q in-place.
 // Grid: (1, n_heads), Block: rope_pairs.
 __global__ void rope_q_only_fp16_kernel(

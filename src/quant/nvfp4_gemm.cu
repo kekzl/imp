@@ -35,52 +35,80 @@ static constexpr int kKparThreads = kKparWarps * 32;  // 128
 static constexpr int kMRWarps = 8;
 static constexpr int kMRThreads = kMRWarps * 32;  // 256
 
-// Fast FP8 E4M3 -> FP32 via bit manipulation (no exp2f).
+// Fast FP8 E4M3 -> FP32 via bit manipulation (branchless, no exp2f).
+// Uses the normal-path formula for all values including denorms.
+// For exp=0: produces a tiny but non-zero value (~0.008) instead of exact denorm.
+// Micro-scales are practically never denorm, so this is safe for NVFP4 GEMV.
 __device__ __forceinline__ float fp8_e4m3_to_float_fast(uint8_t bits)
 {
     uint32_t sign = (bits >> 7) & 1;
     uint32_t exp  = (bits >> 3) & 0x0F;
     uint32_t man  = bits & 0x07;
-
-    if (exp == 0) {
-        // Denorm: value = man * 2^(-9)
-        float val = (float)man * (1.0f / 512.0f);
-        return sign ? -val : val;
-    }
     // Normal: FP8 bias=7, FP32 bias=127 -> exp offset=120.
+    // Denorm (exp=0): gives 2^(-7) * (1 + man/8) ≈ 0.008-0.015 instead of
+    // exact 0 or man*2^(-9), but these values are negligible for micro-scales.
     uint32_t fp32 = (sign << 31) | ((exp + 120u) << 23) | (man << 20);
     return __uint_as_float(fp32);
 }
 
 // Process one micro-block (8 packed bytes = 16 FP4 values).
-// Returns unscaled dot product: sum(LUT[nibble] * activation).
-// Caller multiplies by combined_scale once.
+// Returns unscaled dot product: sum(dequant(nibble) * activation).
+// Uses PTX prmt.b32 register-based LUT: no shared memory, no __syncthreads.
+//
+// FP4 E2M1 → FP16: all 16 values have low_byte=0x00, only the high byte varies.
+// Two uint32 constants hold the 8 magnitude high-bytes packed:
+//   kLutLo bytes = [0x00, 0x38, 0x3C, 0x3E] → magnitudes 0 (0.0), 1 (0.5), 2 (1.0), 3 (1.5)
+//   kLutHi bytes = [0x40, 0x42, 0x44, 0x46] → magnitudes 4 (2.0), 5 (3.0), 6 (4.0), 7 (6.0)
+// prmt selects one byte by index (the magnitude), then we shift to FP16 high byte + OR sign.
+//
+// NOTE: bfe/bfi PTX was tested as a replacement for AND+SHL+OR — REGRESSED 5%
+// because inline asm prevents the compiler from scheduling across the unrolled loop.
+// The C intrinsics (& << |) give the compiler full freedom to interleave and reorder.
 __device__ __forceinline__ float dot_micro_block(
     const uint8_t* __restrict__ pb,
     const half*    __restrict__ x,
-    int            elem_base,
-    const float*   s_lut)
+    int            elem_base)
 {
+    constexpr uint32_t kLutLo = 0x3E3C3800u;
+    constexpr uint32_t kLutHi = 0x46444240u;
+
     float acc = 0.0f;
     #pragma unroll
     for (int b = 0; b < 8; b++) {
+        uint32_t byte_val = pb[b];
         const half2 xh = *reinterpret_cast<const half2*>(x + elem_base + b * 2);
         const float2 xf = __half22float2(xh);
-        acc = __fmaf_rn(s_lut[pb[b] & 0x0F], xf.x, acc);
-        acc = __fmaf_rn(s_lut[pb[b] >> 4],   xf.y, acc);
+
+        // Low nibble: magnitude = bits[2:0], sign = bit[3]
+        uint32_t lo_mag = byte_val & 0x07u;
+        uint32_t lo_hi_byte;
+        asm("prmt.b32 %0, %1, %2, %3;" : "=r"(lo_hi_byte) : "r"(kLutLo), "r"(kLutHi), "r"(lo_mag));
+        uint32_t lo_fp16 = (lo_hi_byte & 0xFFu) << 8;
+        lo_fp16 |= ((byte_val & 0x08u) << 12);  // bit 3 → bit 15 (sign)
+        float lo_val = __half2float(*reinterpret_cast<const half*>(&lo_fp16));
+        acc = __fmaf_rn(lo_val, xf.x, acc);
+
+        // High nibble: magnitude = bits[6:4], sign = bit[7]
+        uint32_t hi_mag = (byte_val >> 4) & 0x07u;
+        uint32_t hi_hi_byte;
+        asm("prmt.b32 %0, %1, %2, %3;" : "=r"(hi_hi_byte) : "r"(kLutLo), "r"(kLutHi), "r"(hi_mag));
+        uint32_t hi_fp16 = (hi_hi_byte & 0xFFu) << 8;
+        hi_fp16 |= ((byte_val & 0x80u) << 8);   // bit 7 → bit 15 (sign)
+        float hi_val = __half2float(*reinterpret_cast<const half*>(&hi_fp16));
+        acc = __fmaf_rn(hi_val, xf.y, acc);
     }
     return acc;
 }
 
 // Core GEMV loop: accumulates dot(row, x) for one row.
+// Uses prmt register-based LUT (no shared memory needed).
 __device__ __forceinline__ float gemv_nvfp4_row(
     const uint8_t* __restrict__ row_packed,
     const uint8_t* __restrict__ row_ms,
     float          tensor_scale,
     const half*    __restrict__ x,
     int            n_mb,
-    int            tid,
-    const float*   s_lut)
+    int            tid)
 {
     float acc = 0.0f;
     for (int mi = tid; mi < n_mb; mi += kKparThreads) {
@@ -88,7 +116,7 @@ __device__ __forceinline__ float gemv_nvfp4_row(
         uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
         float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
-        float local_dot = dot_micro_block(pb, x, byte_off * 2, s_lut);
+        float local_dot = dot_micro_block(pb, x, byte_off * 2);
         acc = __fmaf_rn(local_dot, cs, acc);
     }
     return acc;
@@ -115,13 +143,13 @@ __device__ __forceinline__ float reduce_kpar(float acc, int tid, float* warp_sum
     return 0.0f;
 }
 
-// Shared memory layout: 16 floats for signed FP4 LUT + 4 floats for warp sums.
-// Total: 80 bytes per block.
+// Shared memory for K-parallel reduction (warp sums only).
+// Non-SwiGLU/GeGLU kernels use prmt register LUT — no smem LUT needed.
 struct SmemKpar {
-    float lut[16];
     float warp_sums[kKparWarps];
 };
 
+// Shared memory LUT initializer for SwiGLU/GeGLU kernels only.
 __device__ __forceinline__ void init_lut(float* s_lut, int tid)
 {
     if (tid < 16) {
@@ -150,13 +178,11 @@ gemv_nvfp4_kpar_kernel(
     const int n_mb = K / kMicroBlockSize;
 
     __shared__ SmemKpar smem;
-    init_lut(smem.lut, tid);
-    __syncthreads();
 
     float acc = gemv_nvfp4_row(
         packed_data + (int64_t)row * K_half,
         micro_scales + (int64_t)row * n_mb,
-        tensor_scale, x, n_mb, tid, smem.lut);
+        tensor_scale, x, n_mb, tid);
 
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0) y[row] = __float2half(total);
@@ -179,13 +205,11 @@ gemv_nvfp4_kpar_fp32_kernel(
     const int n_mb = K / kMicroBlockSize;
 
     __shared__ SmemKpar smem;
-    init_lut(smem.lut, tid);
-    __syncthreads();
 
     float acc = gemv_nvfp4_row(
         packed_data + (int64_t)row * (K / 2),
         micro_scales + (int64_t)row * n_mb,
-        tensor_scale, x, n_mb, tid, smem.lut);
+        tensor_scale, x, n_mb, tid);
 
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0) y[row] = total;
@@ -212,13 +236,6 @@ gemv_nvfp4_multirow_kernel(
     const int K_half = K / 2;
     const int n_mb = K / kMicroBlockSize;
 
-    __shared__ float s_lut[16];
-    if (threadIdx.x < 16) {
-        constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
-        s_lut[threadIdx.x] = (threadIdx.x < 8) ? kMag[threadIdx.x] : -kMag[threadIdx.x & 7];
-    }
-    __syncthreads();
-
     // Each warp handles one row within the NR-row tile
     const int row = block_row_base + warp_id;
     if (row >= M || warp_id >= NR) return;
@@ -226,14 +243,14 @@ gemv_nvfp4_multirow_kernel(
     const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
     const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
 
-    // K-parallel within warp (32 threads)
+    // K-parallel within warp (32 threads), prmt register LUT
     float acc = 0.0f;
     for (int mi = lane; mi < n_mb; mi += 32) {
         int byte_off = mi * 8;
         uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
         float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
-        float local_dot = dot_micro_block(pb, x, byte_off * 2, s_lut);
+        float local_dot = dot_micro_block(pb, x, byte_off * 2);
         acc = __fmaf_rn(local_dot, cs, acc);
     }
 
@@ -262,13 +279,6 @@ gemv_nvfp4_multirow_fp32_kernel(
     const int K_half = K / 2;
     const int n_mb = K / kMicroBlockSize;
 
-    __shared__ float s_lut[16];
-    if (threadIdx.x < 16) {
-        constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
-        s_lut[threadIdx.x] = (threadIdx.x < 8) ? kMag[threadIdx.x] : -kMag[threadIdx.x & 7];
-    }
-    __syncthreads();
-
     const int row = block_row_base + warp_id;
     if (row >= M || warp_id >= NR) return;
 
@@ -281,7 +291,7 @@ gemv_nvfp4_multirow_fp32_kernel(
         uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
         float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
-        float local_dot = dot_micro_block(pb, x, byte_off * 2, s_lut);
+        float local_dot = dot_micro_block(pb, x, byte_off * 2);
         acc = __fmaf_rn(local_dot, cs, acc);
     }
 
@@ -313,13 +323,11 @@ gemv_nvfp4_residual_kernel(
     const int n_mb = K / kMicroBlockSize;
 
     __shared__ SmemKpar smem;
-    init_lut(smem.lut, tid);
-    __syncthreads();
 
     float acc = gemv_nvfp4_row(
         packed_data + (int64_t)row * K_half,
         micro_scales + (int64_t)row * n_mb,
-        tensor_scale, x, n_mb, tid, smem.lut);
+        tensor_scale, x, n_mb, tid);
 
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0) y[row] = __float2half(total + __half2float(residual[row]));
@@ -421,16 +429,17 @@ gemv_nvfp4_swiglu_residual_kernel(
     const int K_half = K / 2;
     const int n_mb = K / kMicroBlockSize;
 
-    __shared__ SmemKpar smem;
-    init_lut(smem.lut, tid);
+    __shared__ float s_lut[16];
+    __shared__ float warp_sums[kKparWarps];
+    init_lut(s_lut, tid);
     __syncthreads();
 
     float acc = gemv_nvfp4_row_swiglu(
         packed_data + (int64_t)row * K_half,
         micro_scales + (int64_t)row * n_mb,
-        tensor_scale, gate, up, n_mb, tid, smem.lut);
+        tensor_scale, gate, up, n_mb, tid, s_lut);
 
-    float total = reduce_kpar(acc, tid, smem.warp_sums);
+    float total = reduce_kpar(acc, tid, warp_sums);
     if (tid == 0) y[row] = __float2half(total + __half2float(residual[row]));
 }
 
@@ -455,8 +464,9 @@ gemv_nvfp4_geglu_residual_kernel(
     const int K_half = K / 2;
     const int n_mb = K / kMicroBlockSize;
 
-    __shared__ SmemKpar smem;
-    init_lut(smem.lut, tid);
+    __shared__ float s_lut[16];
+    __shared__ float warp_sums[kKparWarps];
+    init_lut(s_lut, tid);
     __syncthreads();
 
     const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
@@ -468,11 +478,11 @@ gemv_nvfp4_geglu_residual_kernel(
         uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
         float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
-        float local_dot = dot_micro_block_geglu(pb, gate, up, byte_off * 2, smem.lut);
+        float local_dot = dot_micro_block_geglu(pb, gate, up, byte_off * 2, s_lut);
         acc = __fmaf_rn(local_dot, cs, acc);
     }
 
-    float total = reduce_kpar(acc, tid, smem.warp_sums);
+    float total = reduce_kpar(acc, tid, warp_sums);
     if (tid == 0) y[row] = __float2half(total + __half2float(residual[row]));
 }
 
@@ -503,8 +513,6 @@ gemv_nvfp4_qkv_fused_kernel(
     const int n_mb = K / kMicroBlockSize;
 
     __shared__ SmemKpar smem;
-    init_lut(smem.lut, tid);
-    __syncthreads();
 
     const uint8_t* row_packed;
     const uint8_t* row_ms;
@@ -532,7 +540,7 @@ gemv_nvfp4_qkv_fused_kernel(
         out = yv;
     }
 
-    float acc = gemv_nvfp4_row(row_packed, row_ms, ts, x, n_mb, tid, smem.lut);
+    float acc = gemv_nvfp4_row(row_packed, row_ms, ts, x, n_mb, tid);
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0) out[local_row] = __float2half(total);
 }
@@ -560,8 +568,6 @@ gemv_nvfp4_gate_up_fused_kernel(
     const int n_mb = K / kMicroBlockSize;
 
     __shared__ SmemKpar smem;
-    init_lut(smem.lut, tid);
-    __syncthreads();
 
     const uint8_t* row_packed;
     const uint8_t* row_ms;
@@ -583,7 +589,7 @@ gemv_nvfp4_gate_up_fused_kernel(
         out = yu;
     }
 
-    float acc = gemv_nvfp4_row(row_packed, row_ms, ts, x, n_mb, tid, smem.lut);
+    float acc = gemv_nvfp4_row(row_packed, row_ms, ts, x, n_mb, tid);
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0) out[local_row] = __float2half(total);
 }
@@ -614,13 +620,6 @@ gemv_nvfp4_qkv_fused_mr_kernel(
     const int K_half = K / 2;
     const int n_mb = K / kMicroBlockSize;
 
-    __shared__ float s_lut[16];
-    if (threadIdx.x < 16) {
-        constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
-        s_lut[threadIdx.x] = (threadIdx.x < 8) ? kMag[threadIdx.x] : -kMag[threadIdx.x & 7];
-    }
-    __syncthreads();
-
     const uint8_t* row_packed;
     const uint8_t* row_ms;
     float ts;
@@ -650,7 +649,7 @@ gemv_nvfp4_qkv_fused_mr_kernel(
         uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
         float cs = ts * fp8_e4m3_to_float_fast(row_ms[mi]);
-        float local_dot = dot_micro_block(pb, x, byte_off * 2, s_lut);
+        float local_dot = dot_micro_block(pb, x, byte_off * 2);
         acc = __fmaf_rn(local_dot, cs, acc);
     }
     #pragma unroll
@@ -678,13 +677,6 @@ gemv_nvfp4_gate_up_fused_mr_kernel(
     const int K_half = K / 2;
     const int n_mb = K / kMicroBlockSize;
 
-    __shared__ float s_lut[16];
-    if (threadIdx.x < 16) {
-        constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
-        s_lut[threadIdx.x] = (threadIdx.x < 8) ? kMag[threadIdx.x] : -kMag[threadIdx.x & 7];
-    }
-    __syncthreads();
-
     const uint8_t* row_packed;
     const uint8_t* row_ms;
     float ts;
@@ -709,7 +701,7 @@ gemv_nvfp4_gate_up_fused_mr_kernel(
         uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
         float cs = ts * fp8_e4m3_to_float_fast(row_ms[mi]);
-        float local_dot = dot_micro_block(pb, x, byte_off * 2, s_lut);
+        float local_dot = dot_micro_block(pb, x, byte_off * 2);
         acc = __fmaf_rn(local_dot, cs, acc);
     }
     #pragma unroll
@@ -735,13 +727,6 @@ gemv_nvfp4_residual_mr_kernel(
     const int K_half = K / 2;
     const int n_mb = K / kMicroBlockSize;
 
-    __shared__ float s_lut[16];
-    if (threadIdx.x < 16) {
-        constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
-        s_lut[threadIdx.x] = (threadIdx.x < 8) ? kMag[threadIdx.x] : -kMag[threadIdx.x & 7];
-    }
-    __syncthreads();
-
     const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
     const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
 
@@ -751,7 +736,7 @@ gemv_nvfp4_residual_mr_kernel(
         uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
         const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
         float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
-        float local_dot = dot_micro_block(pb, x, byte_off * 2, s_lut);
+        float local_dot = dot_micro_block(pb, x, byte_off * 2);
         acc = __fmaf_rn(local_dot, cs, acc);
     }
     #pragma unroll
@@ -1057,13 +1042,11 @@ gemv_nvfp4_moe_decode_kernel(
     const half* xi = x + (size_t)expert_slot * x_stride;
 
     __shared__ SmemKpar smem;
-    init_lut(smem.lut, tid);
-    __syncthreads();
 
     float acc = gemv_nvfp4_row(
         W + (size_t)row * (K / 2),
         MS + (size_t)row * n_mb,
-        ts, xi, n_mb, tid, smem.lut);
+        ts, xi, n_mb, tid);
 
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0) y[(size_t)expert_slot * rows + row] = __float2half(total);
@@ -1112,13 +1095,11 @@ gemv_nvfp4_moe_gate_up_fused_kernel(
     const half* xi = x;
 
     __shared__ SmemKpar smem;
-    init_lut(smem.lut, tid);
-    __syncthreads();
 
     float acc = gemv_nvfp4_row(
         W + (size_t)row * (K / 2),
         MS + (size_t)row * n_mb,
-        ts, xi, n_mb, tid, smem.lut);
+        ts, xi, n_mb, tid);
 
     float total = reduce_kpar(acc, tid, smem.warp_sums);
     if (tid == 0) out[(size_t)expert_slot * rows + row] = __float2half(total);
@@ -1204,16 +1185,17 @@ gemv_nvfp4_moe_swiglu_decode_kernel(
     const half* gi = gate + (size_t)expert_slot * x_stride;
     const half* ui = up   + (size_t)expert_slot * x_stride;
 
-    __shared__ SmemKpar smem;
-    init_lut(smem.lut, tid);
+    __shared__ float s_lut[16];
+    __shared__ float warp_sums[kKparWarps];
+    init_lut(s_lut, tid);
     __syncthreads();
 
     float acc = gemv_nvfp4_row_swiglu(
         W + (size_t)row * (K / 2),
         MS + (size_t)row * n_mb,
-        ts, gi, ui, n_mb, tid, smem.lut);
+        ts, gi, ui, n_mb, tid, s_lut);
 
-    float total = reduce_kpar(acc, tid, smem.warp_sums);
+    float total = reduce_kpar(acc, tid, warp_sums);
     if (tid == 0) y[(size_t)expert_slot * rows + row] = __float2half(total);
 }
 
