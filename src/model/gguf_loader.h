@@ -85,6 +85,7 @@ struct GGUFTensorInfo {
     int64_t dims[4];     // GGUF order: dims[0] = innermost (fastest-changing)
     GGMLType type;
     uint64_t offset;     // relative to start of tensor data section
+    const uint8_t* data_base = nullptr;  // shard data base pointer (for split GGUF)
 };
 
 // Load a model from a GGUF file.

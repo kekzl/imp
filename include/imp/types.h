@@ -27,7 +27,8 @@ typedef enum {
     IMP_ARCH_QWEN3          = 5,
     IMP_ARCH_QWEN3_MOE      = 6,
     IMP_ARCH_GEMMA3         = 7,
-    IMP_ARCH_GENERIC        = 8,
+    IMP_ARCH_LLAMA4         = 8,
+    IMP_ARCH_GENERIC        = 9,
 } ImpModelArch;
 
 typedef enum {
