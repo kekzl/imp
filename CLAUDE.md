@@ -190,6 +190,34 @@ Benchmarks for GEMM, attention, and end-to-end inference.
 ./build/imp-bench
 ```
 
+## Benchmark Results (v0.2, RTX 5090, 2026-03-14)
+
+All benchmarks on a single NVIDIA RTX 5090 (32 GB GDDR7, Blackwell sm_120). Models loaded from GGUF. imp uses NVFP4 decode cache + FP8 prefill cache. llama.cpp b5285 with flash attention enabled (`-fa 1`).
+
+### Decode Throughput (tg128, tok/s)
+
+| Model | Quant | imp v0.2 | llama.cpp | Speedup |
+|-------|-------|----------|-----------|---------|
+| Qwen3-4B | Q8_0 | **393** | 244 | **+61%** |
+| Qwen3-8B | Q8_0 | **262** | 157 | **+67%** |
+| Gemma-3-12B | Q8_0 | **146** | 98 | **+49%** |
+| Phi-4-mini | Q8_0 | 264 | **277** | -5% |
+| Qwen3-Coder-30B MoE | Q6_K | **293** | 251 | **+17%** |
+
+### Prefill Throughput (pp512, tok/s)
+
+| Model | Quant | imp v0.2 | llama.cpp | Speedup |
+|-------|-------|----------|-----------|---------|
+| Qwen3-4B | Q8_0 | **27240** | 21337 | **+28%** |
+| Qwen3-8B | Q8_0 | **17486** | 14172 | **+23%** |
+| Gemma-3-12B | Q8_0 | **11262** | 9269 | **+22%** |
+| Phi-4-mini | Q8_0 | 20949 | **27259** | -23% |
+| Qwen3-Coder-30B MoE | Q6_K | 5722 | **6090** | -6% |
+
+**Notes:**
+- Phi-4-mini: imp disables NVFP4 for d_model < 4096 dense models, using dp4a Q8_0 path instead. llama.cpp's Q8_0 CUDA kernels are well-tuned for this model size.
+- Prefill numbers have high variance due to cuBLAS autotuning algorithm selection between container restarts (up to 2.6x range on Gemma-3). Decode numbers are stable.
+
 ## Code Conventions
 
 ### Language and Standards
