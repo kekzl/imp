@@ -1020,6 +1020,26 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                           M_d, K_d, stream);
             }
         } else if (has_post_ffn_norm && using_fp32_accum && n == 1 &&
+                   nvfp4_cache_.count(ly.w_down.data) && h.dtype == DType::FP16) {
+            // NVFP4 post-norm FP32 accum decode: activation → NVFP4 GEMV → post-norm.
+            // ~40% less weight traffic than dp4a Q8_0 path.
+            int K_d = static_cast<int>(ly.w_down.shape[1]);
+            int M_d = static_cast<int>(ly.w_down.shape[0]);
+            auto& wd_nvfp4 = nvfp4_cache_.at(ly.w_down.data);
+            if (cfg.ffn_activation != FFNActivation::GEGLU)
+                swiglu(go, uo, so, stream);
+            else
+                geglu(go, uo, so, stream);
+            gemv_nvfp4_kpar(wd_nvfp4, static_cast<const half*>(so.data),
+                             static_cast<half*>(fo.data), M_d, K_d, stream);
+            Tensor fp32_h = view_tokens(fp32_hidden_, n);
+            rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
+                static_cast<const half*>(fo.data),
+                static_cast<const half*>(ly.post_ffn_norm.data),
+                static_cast<float*>(fp32_h.data),
+                static_cast<half*>(h.data),
+                cfg.d_model, eps, norm_w_off_);
+        } else if (has_post_ffn_norm && using_fp32_accum && n == 1 &&
                    q8 != nullptr && d8_buf_ != nullptr &&
                    (ly.w_down_qtype == GGMLQuantType::Q6_K ||
                     ly.w_down_qtype == GGMLQuantType::Q8_0 ||
