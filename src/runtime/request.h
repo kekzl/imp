@@ -65,6 +65,7 @@ struct Request {
 
     // JSON mode
     bool json_mode = false;                         // Constrain output to valid JSON
+    std::string json_schema;                        // JSON Schema string (empty = disabled)
 
     int context_len() const {
         return static_cast<int>(input_tokens.size() + output_tokens.size());

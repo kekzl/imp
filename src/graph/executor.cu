@@ -68,8 +68,10 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
                           stream);
     }
 
-    // JSON mode: apply logit mask to constrain output to valid JSON
-    if (state.json_constrainer) {
+    // JSON/Schema mode: apply logit mask to constrain output
+    if (state.schema_constrainer) {
+        state.schema_constrainer->apply_mask(logits_ptr, vocab_size, stream);
+    } else if (state.json_constrainer) {
         state.json_constrainer->apply_mask(logits_ptr, vocab_size, stream);
     }
 
@@ -153,7 +155,9 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits,
                               st.dry_allowed_length, st.dry_penalty_last_n,
                               stream);
         }
-        if (st.json_constrainer) {
+        if (st.schema_constrainer) {
+            st.schema_constrainer->apply_mask(lp, vocab, stream);
+        } else if (st.json_constrainer) {
             st.json_constrainer->apply_mask(lp, vocab, stream);
         }
         if (st.min_p > 0.0f) {

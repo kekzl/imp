@@ -17,6 +17,7 @@
 #include "memory/layer_offload.h"
 #include "graph/executor.h"
 #include "compute/json_constrain.h"
+#include "compute/schema_constrain.h"
 #include "core/cuda_raii.h"
 #include <memory>
 #include <string>
@@ -188,6 +189,9 @@ private:
 
     // JSON constrainer (lazily initialized on first json_mode request)
     std::unique_ptr<JsonConstrainer> json_constrainer_;
+
+    // Schema constrainer (created per-request when json_schema is set)
+    std::unique_ptr<SchemaConstrainer> schema_constrainer_;
 
     // Pinned host buffer for graph-captured greedy sampling results.
     // When sampling is included in the CUDA graph, the argmax kernel writes

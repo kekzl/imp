@@ -6,6 +6,7 @@
 #include "memory/layer_offload.h"
 #include "compute/moe_routing.h"
 #include "compute/json_constrain.h"
+#include "compute/schema_constrain.h"
 #include "quant/nvfp4_quant.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
@@ -145,6 +146,7 @@ struct InferenceState {
 
     // JSON mode: when non-null, apply logit mask before sampling
     JsonConstrainer* json_constrainer = nullptr;
+    SchemaConstrainer* schema_constrainer = nullptr;
 
     // Vision: when non-null, replace vision_token_id positions with vision embeddings
     const half* vision_embeddings = nullptr;  // [n_vision_tokens, d_model] FP16 on device
