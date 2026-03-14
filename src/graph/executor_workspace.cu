@@ -2074,6 +2074,119 @@ bool GraphExecutor::resize_workspace(int new_max_tokens, cudaStream_t stream) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Dual workspace for concurrent prefill/decode overlap
+// ---------------------------------------------------------------------------
+
+bool GraphExecutor::allocate_decode_workspace(cudaStream_t stream) {
+    if (decode_workspace_) return true;  // already allocated
+
+    const auto& cfg = model_->config();
+    int dm = cfg.d_model;
+
+    // Persistent workspace for n=1: hidden + residual + norm_out + logits
+    size_t persistent = static_cast<size_t>(dm) * sizeof(half) * 3  // hidden + residual + norm_out
+                      + static_cast<size_t>(cfg.vocab_size) * sizeof(float);  // logits
+    if (fp32_accum_buf_) persistent += static_cast<size_t>(dm) * sizeof(float);  // fp32_hidden
+
+    cudaError_t err = cudaMalloc(&decode_workspace_, persistent);
+    if (err != cudaSuccess) {
+        IMP_LOG_ERROR("Failed to allocate decode workspace: %s", cudaGetErrorString(err));
+        return false;
+    }
+    decode_persistent_size_ = persistent;
+
+    // Shared workspace for n=1 (small)
+    int saved = max_tokens_;
+    max_tokens_ = 1;
+    compute_shared_sizes(1);
+    max_tokens_ = saved;
+
+    size_t shared = std::max({attn_shared_size_, ffn_shared_size_,
+                              moe_shared_size_, ssm_shared_size_});
+    if (shared > 0) {
+        err = cudaMalloc(&decode_shared_workspace_, shared);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("Failed to allocate decode shared workspace: %s", cudaGetErrorString(err));
+            cudaFree(decode_workspace_);
+            decode_workspace_ = nullptr;
+            return false;
+        }
+    }
+    decode_shared_size_ = shared;
+
+    // Recompute sizes for original max_tokens
+    compute_shared_sizes(max_tokens_);
+
+    IMP_LOG_INFO("Decode overlap workspace: %.2f MiB (persistent=%.1f KB, shared=%.1f KB)",
+                 (persistent + shared) / (1024.0 * 1024.0),
+                 persistent / 1024.0, shared / 1024.0);
+    return true;
+}
+
+void GraphExecutor::use_workspace(int slot) {
+    if (slot == active_workspace_) return;
+
+    const auto& cfg = model_->config();
+    int dm = cfg.d_model;
+
+    if (slot == 1 && decode_workspace_) {
+        // Save prefill workspace
+        saved_prefill_ws_.persistent = persistent_workspace_;
+        saved_prefill_ws_.persistent_size = persistent_workspace_size_;
+        saved_prefill_ws_.shared = shared_workspace_;
+        saved_prefill_ws_.shared_size = shared_workspace_size_;
+        saved_prefill_ws_.shared_max_tokens = shared_workspace_max_tokens_;
+        saved_prefill_ws_.hidden = hidden_;
+        saved_prefill_ws_.residual = residual_;
+        saved_prefill_ws_.norm_out = norm_out_;
+        saved_prefill_ws_.logits = logits_;
+        saved_prefill_ws_.fp32_accum = fp32_accum_buf_;
+        saved_prefill_ws_.fp32_hidden = fp32_hidden_;
+
+        // Switch to decode workspace
+        persistent_workspace_ = decode_workspace_;
+        persistent_workspace_size_ = decode_persistent_size_;
+        shared_workspace_ = decode_shared_workspace_;
+        shared_workspace_size_ = decode_shared_size_;
+        shared_workspace_max_tokens_ = 1;
+
+        // Set up tensor views into decode workspace
+        char* p = static_cast<char*>(decode_workspace_);
+        int64_t shape1[2] = {1, dm};
+        hidden_ = Tensor(p, DType::FP16, 2, shape1, true);
+        p += dm * sizeof(half);
+        residual_ = Tensor(p, DType::FP16, 2, shape1, true);
+        p += dm * sizeof(half);
+        norm_out_ = Tensor(p, DType::FP16, 2, shape1, true);
+        p += dm * sizeof(half);
+        int64_t shape_logits[2] = {1, cfg.vocab_size};
+        logits_ = Tensor(p, DType::FP32, 2, shape_logits, true);
+        p += cfg.vocab_size * sizeof(float);
+        if (saved_prefill_ws_.fp32_accum) {
+            fp32_accum_buf_ = p;
+            int64_t shape_fp32[2] = {1, dm};
+            fp32_hidden_ = Tensor(p, DType::FP32, 2, shape_fp32, true);
+        }
+
+        active_workspace_ = 1;
+    } else if (slot == 0) {
+        // Restore prefill workspace
+        persistent_workspace_ = saved_prefill_ws_.persistent;
+        persistent_workspace_size_ = saved_prefill_ws_.persistent_size;
+        shared_workspace_ = saved_prefill_ws_.shared;
+        shared_workspace_size_ = saved_prefill_ws_.shared_size;
+        shared_workspace_max_tokens_ = saved_prefill_ws_.shared_max_tokens;
+        hidden_ = saved_prefill_ws_.hidden;
+        residual_ = saved_prefill_ws_.residual;
+        norm_out_ = saved_prefill_ws_.norm_out;
+        logits_ = saved_prefill_ws_.logits;
+        fp32_accum_buf_ = saved_prefill_ws_.fp32_accum;
+        fp32_hidden_ = saved_prefill_ws_.fp32_hidden;
+        active_workspace_ = 0;
+    }
+}
+
 bool GraphExecutor::layer_has_attention(int layer) const {
     return model_->layer(layer).wq.data != nullptr;
 }

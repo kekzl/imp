@@ -492,6 +492,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         if (!green_ctx_.init(0, config_.green_ctx_prefill_ratio)) {
             // Non-fatal: fall back to regular streams
         }
+        // Allocate decode workspace for concurrent prefill/decode overlap
+        if (green_ctx_.is_available() && config_.prefill_chunk_size > 0) {
+            if (executor_->allocate_decode_workspace(stream_)) {
+                IMP_LOG_INFO("Concurrent prefill/decode overlap enabled");
+            }
+        }
     }
 
     // --- Initialize speculative decoding if configured ---
@@ -1130,7 +1136,12 @@ bool Engine::step() {
         }
 
         if (!is_last_chunk) {
-            // Intermediate chunk: run forward to fill KV cache, discard logits
+            // Intermediate chunk: run forward to fill KV cache, discard logits.
+            // With decode workspace available, use workspace 0 (prefill) and
+            // DON'T sync — decode can overlap on dec_stream with workspace 1.
+            if (executor_->has_decode_workspace()) {
+                executor_->use_workspace(0);
+            }
             Tensor logits_out;
             executor_->forward_logits(state, logits_out, pf_stream);
 
@@ -1138,6 +1149,9 @@ bool Engine::step() {
             cudaFreeAsync(d_positions, pf_stream);
             cudaFreeAsync(d_block_tables, pf_stream);
             cudaFreeAsync(d_context_lens, pf_stream);
+
+            // DON'T sync pf_stream here — let it overlap with decode
+            // (prefill writes to NEW KV blocks, decode reads from EXISTING blocks)
 
             // Advance offset, stay in PREFILLING
             req->prefill_offset = offset + chunk_len;
@@ -1274,6 +1288,14 @@ bool Engine::step() {
     }
 
     // ====================================================================
+    // 2b. Overlap: if we had intermediate prefill chunks (no sampling needed)
+    //     AND decode workspace is available, switch workspace back for decode.
+    // ====================================================================
+    if (executor_->has_decode_workspace() && executor_->active_workspace() != 0) {
+        executor_->use_workspace(0);
+    }
+
+    // ====================================================================
     // 3. Process decode requests (BATCHED)
     // ====================================================================
     if (!decode_batch.empty()) {
@@ -1348,8 +1370,13 @@ bool Engine::step() {
                 goto decode_done;
             }
 
-            // Resize workspace for decode batch size (much smaller than prefill)
-            executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
+            // Switch to decode workspace for concurrent overlap (if available)
+            if (executor_->has_decode_workspace()) {
+                executor_->use_workspace(1);
+            } else {
+                // Resize workspace for decode batch size (much smaller than prefill)
+                executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
+            }
 
             // 3b. Build batched decode using BatchBuilder
             BatchBuilder builder;
@@ -1725,6 +1752,11 @@ bool Engine::step() {
         }
     }
 decode_done:
+
+    // Restore prefill workspace for next step
+    if (executor_->has_decode_workspace() && executor_->active_workspace() != 0) {
+        executor_->use_workspace(0);
+    }
 
     return scheduler_->has_pending() || scheduler_->active_count() > 0;
 }
