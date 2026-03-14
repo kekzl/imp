@@ -330,11 +330,23 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     if (top_logprobs < 0) top_logprobs = 0;
     if (top_logprobs > 20) top_logprobs = 20;
 
-    // Parse response_format for JSON mode
+    // Parse response_format for JSON mode / JSON Schema
     bool json_mode = false;
+    std::string json_schema_str;
     if (body.contains("response_format") && body["response_format"].is_object()) {
         std::string fmt_type = body["response_format"].value("type", "text");
-        if (fmt_type == "json_object") json_mode = true;
+        if (fmt_type == "json_object") {
+            json_mode = true;
+        } else if (fmt_type == "json_schema") {
+            json_mode = true;
+            if (body["response_format"].contains("json_schema") &&
+                body["response_format"]["json_schema"].is_object()) {
+                auto& js = body["response_format"]["json_schema"];
+                if (js.contains("schema") && js["schema"].is_object()) {
+                    json_schema_str = js["schema"].dump();
+                }
+            }
+        }
     }
 
     // Parse stream_options for include_usage
@@ -585,6 +597,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     imp_req->logprobs = req_logprobs;
     imp_req->top_logprobs = top_logprobs;
     imp_req->json_mode = json_mode;
+    imp_req->json_schema = json_schema_str;
     imp_req->status = imp::RequestStatus::PENDING;
 
     // Create a ServerRequest wrapper and submit to the batching engine

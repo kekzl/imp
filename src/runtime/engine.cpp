@@ -1033,7 +1033,7 @@ bool Engine::step() {
         state.mirostat_mu = req->mirostat_mu;
 
         // JSON mode: lazily init constrainer and set on state
-        if (req->json_mode) {
+        if (req->json_mode && req->json_schema.empty()) {
             if (!json_constrainer_) {
                 json_constrainer_ = std::make_unique<JsonConstrainer>();
                 Tokenizer* jtok = model_->tokenizer();
@@ -1045,6 +1045,23 @@ bool Engine::step() {
             if (json_constrainer_) {
                 json_constrainer_->reset();
                 state.json_constrainer = json_constrainer_.get();
+            }
+        }
+
+        // Schema-constrained JSON mode
+        if (!req->json_schema.empty()) {
+            auto schema = parse_json_schema(req->json_schema);
+            if (schema) {
+                schema_constrainer_ = std::make_unique<SchemaConstrainer>();
+                Tokenizer* stok = model_->tokenizer();
+                if (schema_constrainer_->init(*stok, std::move(schema))) {
+                    state.schema_constrainer = schema_constrainer_.get();
+                } else {
+                    IMP_LOG_ERROR("Failed to initialize schema constrainer");
+                    schema_constrainer_.reset();
+                }
+            } else {
+                IMP_LOG_ERROR("Failed to parse JSON schema");
             }
         }
 
@@ -1109,7 +1126,9 @@ bool Engine::step() {
             bool use_event_sync = (h_sample_pinned_ != nullptr &&
                                    executor_->d_sample_result() != nullptr &&
                                    (state.temperature <= 0.0f || state.top_k == 1) &&
-                                   !req->logprobs);  // disable event sync for logprobs
+                                   !req->logprobs &&
+                                   !state.json_constrainer &&
+                                   !state.schema_constrainer);
 
             Tensor prefill_logits_out;  // retained for logprobs extraction
 
@@ -1199,8 +1218,10 @@ bool Engine::step() {
                 }
             }
 
-            // Update JSON constrainer FSM with the first token
-            if (req->json_mode && json_constrainer_) {
+            // Update JSON/schema constrainer FSM with the first token
+            if (schema_constrainer_) {
+                schema_constrainer_->update(next_token);
+            } else if (req->json_mode && json_constrainer_) {
                 json_constrainer_->update(next_token);
             }
 
@@ -1423,12 +1444,14 @@ bool Engine::step() {
                 state.ssm_seq_id = valid_decode[0]->id % ssm_state_->max_sequences();
             }
 
-            // Check if any request needs logprobs or json_mode
+            // Check if any request needs logprobs or json/schema mode
             bool needs_logprobs = false;
             bool needs_json_mode = false;
+            bool needs_schema_mode = false;
             for (const auto& r : valid_decode) {
                 if (r->logprobs) needs_logprobs = true;
-                if (r->json_mode) needs_json_mode = true;
+                if (r->json_mode && r->json_schema.empty()) needs_json_mode = true;
+                if (!r->json_schema.empty()) needs_schema_mode = true;
             }
 
             // Lazily initialize JSON constrainer on first json_mode request
@@ -1439,6 +1462,14 @@ bool Engine::step() {
                     IMP_LOG_ERROR("Failed to initialize JSON constrainer");
                     json_constrainer_.reset();
                     needs_json_mode = false;
+                }
+            }
+
+            // Schema constrainer: reuse existing (state persists across decode steps)
+            if (needs_schema_mode && valid_decode.size() == 1 &&
+                !valid_decode[0]->json_schema.empty()) {
+                if (schema_constrainer_ && schema_constrainer_->is_initialized()) {
+                    state.schema_constrainer = schema_constrainer_.get();
                 }
             }
 
@@ -1518,7 +1549,7 @@ bool Engine::step() {
                                      h_sample_pinned_ != nullptr &&
                                      executor_->d_sample_result() != nullptr &&
                                      !needs_logprobs && !needs_json_mode &&
-                                     !has_penalties;
+                                     !needs_schema_mode && !has_penalties;
 
                 // Invalidate graph if sampling mode changed
                 if (greedy_single != graph_includes_sampling_) {
@@ -1631,14 +1662,18 @@ bool Engine::step() {
                     static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
                     req->status = RequestStatus::FINISHED;
                     kv_manager_->free_sequence(req->id);
-                    // Reset JSON constrainer when request finishes
-                    if (req->json_mode && json_constrainer_) {
+                    // Reset constrainer when request finishes
+                    if (schema_constrainer_) {
+                        schema_constrainer_->reset();
+                    } else if (req->json_mode && json_constrainer_) {
                         json_constrainer_->reset();
                     }
                 }
 
-                // Update JSON constrainer FSM with the sampled token
-                if (req->json_mode && json_constrainer_) {
+                // Update constrainer FSM with the sampled token
+                if (schema_constrainer_) {
+                    schema_constrainer_->update(next_token);
+                } else if (req->json_mode && json_constrainer_) {
                     json_constrainer_->update(next_token);
                 }
 
@@ -1652,7 +1687,7 @@ bool Engine::step() {
             if (decode_graph_runner_.is_ready() && valid_decode.size() == 1 &&
                 !offload_mgr_ && !ssm_state_ && !config_.enable_speculative &&
                 config_.use_cuda_graphs && !async_graph_runner_.is_setup() &&
-                !needs_logprobs && !needs_json_mode) {
+                !needs_logprobs && !needs_json_mode && !needs_schema_mode) {
                 auto& dreq = valid_decode[0];
                 bool dreq_has_penalties = (dreq->repetition_penalty != 1.0f ||
                                            dreq->frequency_penalty != 0.0f ||
