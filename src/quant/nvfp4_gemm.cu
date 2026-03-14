@@ -221,7 +221,7 @@ gemv_nvfp4_kpar_fp32_kernel(
 // Amortizes block launch overhead and improves occupancy for small K.
 // ---------------------------------------------------------------------------
 template<int NR>
-__global__ void __launch_bounds__(kMRThreads, 6)
+__global__ void __launch_bounds__(kMRThreads, 8)
 gemv_nvfp4_multirow_kernel(
     const uint8_t* __restrict__ packed_data,
     const uint8_t* __restrict__ micro_scales,
@@ -264,7 +264,7 @@ gemv_nvfp4_multirow_kernel(
 
 // FP32 output multi-row variant for LM head projection.
 template<int NR>
-__global__ void __launch_bounds__(kMRThreads, 6)
+__global__ void __launch_bounds__(kMRThreads, 8)
 gemv_nvfp4_multirow_fp32_kernel(
     const uint8_t* __restrict__ packed_data,
     const uint8_t* __restrict__ micro_scales,
@@ -602,7 +602,7 @@ gemv_nvfp4_gate_up_fused_kernel(
 
 // Multi-row QKV fused: each warp determines its matrix and row independently.
 template<int NR>
-__global__ void __launch_bounds__(kMRThreads, 6)
+__global__ void __launch_bounds__(kMRThreads, 8)
 gemv_nvfp4_qkv_fused_mr_kernel(
     const uint8_t* __restrict__ packed_q, const uint8_t* __restrict__ ms_q, float ts_q,
     const uint8_t* __restrict__ packed_k, const uint8_t* __restrict__ ms_k, float ts_k,
@@ -660,7 +660,7 @@ gemv_nvfp4_qkv_fused_mr_kernel(
 
 // Multi-row gate+up fused.
 template<int NR>
-__global__ void __launch_bounds__(kMRThreads, 6)
+__global__ void __launch_bounds__(kMRThreads, 8)
 gemv_nvfp4_gate_up_fused_mr_kernel(
     const uint8_t* __restrict__ packed_g, const uint8_t* __restrict__ ms_g, float ts_g,
     const uint8_t* __restrict__ packed_u, const uint8_t* __restrict__ ms_u, float ts_u,
@@ -712,7 +712,7 @@ gemv_nvfp4_gate_up_fused_mr_kernel(
 
 // Multi-row residual.
 template<int NR>
-__global__ void __launch_bounds__(kMRThreads, 6)
+__global__ void __launch_bounds__(kMRThreads, 8)
 gemv_nvfp4_residual_mr_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales,
     float tensor_scale, const half* __restrict__ x,
@@ -747,7 +747,7 @@ gemv_nvfp4_residual_mr_kernel(
 
 // Multi-row SwiGLU + residual.
 template<int NR>
-__global__ void __launch_bounds__(kMRThreads, 6)
+__global__ void __launch_bounds__(kMRThreads, 8)
 gemv_nvfp4_swiglu_residual_mr_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales,
     float tensor_scale,
@@ -790,7 +790,7 @@ gemv_nvfp4_swiglu_residual_mr_kernel(
 
 // Multi-row GeGLU + residual.
 template<int NR>
-__global__ void __launch_bounds__(kMRThreads, 6)
+__global__ void __launch_bounds__(kMRThreads, 8)
 gemv_nvfp4_geglu_residual_mr_kernel(
     const uint8_t* __restrict__ packed_data, const uint8_t* __restrict__ micro_scales,
     float tensor_scale,
