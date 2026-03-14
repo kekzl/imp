@@ -11,6 +11,13 @@
 #include <unordered_map>
 #include <mutex>
 
+#define CUBLASLT_CHECK(call) do { \
+    cublasStatus_t _st = (call); \
+    if (_st != CUBLAS_STATUS_SUCCESS) { \
+        fprintf(stderr, "imp::gemm: %s failed (status %d)\n", #call, (int)_st); \
+    } \
+} while(0)
+
 namespace imp {
 
 #if IMP_CUDA_13_1
@@ -59,6 +66,12 @@ static cublasLtHandle_t get_cublaslt_handle() {
 static void* s_workspace = nullptr;
 static size_t s_workspace_size = 0;
 
+// Static benchmark scratch buffer for algo selection (allocated once in gemm_init).
+// Avoids per-cache-miss cudaMalloc/cudaFree which fragment GPU memory.
+static void* s_bench_scratch = nullptr;
+static size_t s_bench_scratch_size = 0;
+static constexpr size_t kBenchScratchSize = 32ULL << 20;  // 32 MiB
+
 void gemm_init() {
     // Force handle creation early.
     get_cublas_handle();
@@ -85,6 +98,13 @@ void gemm_init() {
     // Also let legacy cuBLAS API use the same workspace.
     if (s_workspace) {
         cublasSetWorkspace(get_cublas_handle(), s_workspace, s_workspace_size);
+    }
+
+    // Pre-allocate benchmark scratch buffer for algo selection.
+    if (!s_bench_scratch) {
+        if (cudaMalloc(&s_bench_scratch, kBenchScratchSize) == cudaSuccess) {
+            s_bench_scratch_size = kBenchScratchSize;
+        }
     }
 }
 
@@ -163,6 +183,86 @@ struct GemmCacheEntry {
 
 static std::unordered_map<GemmCacheKey, GemmCacheEntry, GemmCacheKeyHash> s_gemm_cache;
 static std::mutex s_gemm_cache_mutex;
+
+// ---------------------------------------------------------------------------
+// Algorithm benchmarking: request top-N candidates, time each, pick fastest.
+// Uses a temporary output buffer to avoid corrupting C during live inference.
+// Eliminates 2.6x prefill variance from non-deterministic cuBLAS autotuning.
+// ---------------------------------------------------------------------------
+static constexpr int kMaxAlgoCandidates = 8;
+static constexpr int kBenchmarkIters = 5;
+
+static void benchmark_and_select_algo(
+        cublasLtHandle_t lt, GemmCacheEntry& entry,
+        const void* A_data, const void* B_data, size_t C_bytes,
+        float alpha, float beta, bool is_int_compute, cudaStream_t stream) {
+    cublasLtMatmulPreference_t pref = nullptr;
+    CUBLASLT_CHECK(cublasLtMatmulPreferenceCreate(&pref));
+    CUBLASLT_CHECK(cublasLtMatmulPreferenceSetAttribute(pref,
+        CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+        &s_workspace_size, sizeof(s_workspace_size)));
+
+    cublasLtMatmulHeuristicResult_t results[kMaxAlgoCandidates];
+    int nresults = 0;
+    cublasLtMatmulAlgoGetHeuristic(lt, entry.opDesc, entry.Bdesc,
+        entry.Adesc, entry.Cdesc, entry.Cdesc,
+        pref, kMaxAlgoCandidates, results, &nresults);
+    cublasLtMatmulPreferenceDestroy(pref);
+
+    if (nresults <= 0) { entry.has_algo = false; entry.workspace_size = 0; return; }
+    if (nresults == 1) {
+        entry.algo = results[0].algo;
+        entry.workspace_size = (results[0].workspaceSize <= s_workspace_size)
+                                   ? results[0].workspaceSize : 0;
+        entry.has_algo = true;
+        return;
+    }
+
+    // Use pre-allocated scratch buffer to avoid fragmenting GPU memory
+    if (!s_bench_scratch || C_bytes > s_bench_scratch_size) {
+        entry.algo = results[0].algo;
+        entry.workspace_size = (results[0].workspaceSize <= s_workspace_size)
+                                   ? results[0].workspaceSize : 0;
+        entry.has_algo = true;
+        return;
+    }
+    void* temp_c = s_bench_scratch;
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    float best_ms = 1e30f;
+    int best_idx = 0;
+
+    for (int i = 0; i < nresults; i++) {
+        if (results[i].workspaceSize > s_workspace_size) continue;
+        float zero = 0.0f;
+        // Warmup
+        cublasLtMatmul(lt, entry.opDesc, &alpha, B_data, entry.Bdesc,
+            A_data, entry.Adesc, &zero, temp_c, entry.Cdesc,
+            temp_c, entry.Cdesc, &results[i].algo,
+            s_workspace, results[i].workspaceSize, stream);
+        // Timed
+        cudaEventRecord(start, stream);
+        for (int r = 0; r < kBenchmarkIters; r++)
+            cublasLtMatmul(lt, entry.opDesc, &alpha, B_data, entry.Bdesc,
+                A_data, entry.Adesc, &zero, temp_c, entry.Cdesc,
+                temp_c, entry.Cdesc, &results[i].algo,
+                s_workspace, results[i].workspaceSize, stream);
+        cudaEventRecord(stop, stream);
+        cudaEventSynchronize(stop);
+        float ms = 0;
+        cudaEventElapsedTime(&ms, start, stop);
+        if (ms < best_ms) { best_ms = ms; best_idx = i; }
+    }
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    entry.algo = results[best_idx].algo;
+    entry.workspace_size = results[best_idx].workspaceSize;
+    entry.has_algo = true;
+}
 
 void gemm_cleanup() {
     std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
@@ -273,50 +373,14 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C,
             cublasLtMatmulDescSetAttribute(new_entry.opDesc, CUBLASLT_MATMUL_DESC_TRANSB,
                                             &transB, sizeof(transB));
 
-            cublasLtMatrixLayoutCreate(&new_entry.Bdesc, cuda_dtype_B, (int)K, (int)N, (int)K);
-            cublasLtMatrixLayoutCreate(&new_entry.Adesc, cuda_dtype_A, (int)K, (int)M, (int)K);
-            cublasLtMatrixLayoutCreate(&new_entry.Cdesc, cuda_dtype_C, (int)N, (int)M, (int)N);
+            CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&new_entry.Bdesc, cuda_dtype_B, (int)K, (int)N, (int)K));
+            CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&new_entry.Adesc, cuda_dtype_A, (int)K, (int)M, (int)K));
+            CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&new_entry.Cdesc, cuda_dtype_C, (int)N, (int)M, (int)N));
 
-            cublasLtMatmulPreference_t pref = nullptr;
-            cublasLtMatmulPreferenceCreate(&pref);
-            cublasLtMatmulPreferenceSetAttribute(pref,
-                CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                &s_workspace_size, sizeof(s_workspace_size));
-
-            cublasLtMatmulHeuristicResult_t result = {};
-            int nresults = 0;
-            cublasLtMatmulAlgoGetHeuristic(lt, new_entry.opDesc, new_entry.Bdesc,
-                                            new_entry.Adesc, new_entry.Cdesc, new_entry.Cdesc,
-                                            pref, 1, &result, &nresults);
-
-            cublasLtMatmulPreferenceDestroy(pref);
-
-            new_entry.has_algo = (nresults > 0);
-            if (nresults > 0) {
-                new_entry.algo = result.algo;
-                new_entry.workspace_size = (result.workspaceSize <= s_workspace_size)
-                                               ? result.workspaceSize : 0;
-            } else {
-                new_entry.workspace_size = 0;
-            }
-
-            // Diagnostic logging gated by IMP_DEBUG_GEMM=1
-            static const bool debug_gemm = (std::getenv("IMP_DEBUG_GEMM") != nullptr);
-            if (debug_gemm) {
-                if (nresults == 0) {
-                    fprintf(stderr, "[GEMM] WARNING: AlgoGetHeuristic returned 0 results "
-                            "M=%ld K=%ld N=%ld dtA=%d dtB=%d dtC=%d ws=%zu\n",
-                            (long)M, (long)K, (long)N,
-                            (int)cuda_dtype_A, (int)cuda_dtype_B, (int)cuda_dtype_C,
-                            s_workspace_size);
-                } else {
-                    fprintf(stderr, "[GEMM] cache miss M=%ld K=%ld N=%ld "
-                            "dtA=%d dtB=%d dtC=%d algo_ws=%zu/%zu\n",
-                            (long)M, (long)K, (long)N,
-                            (int)cuda_dtype_A, (int)cuda_dtype_B, (int)cuda_dtype_C,
-                            result.workspaceSize, s_workspace_size);
-                }
-            }
+            size_t c_bytes = (size_t)M * N * dtype_size(C.dtype);
+            benchmark_and_select_algo(lt, new_entry,
+                A.data, B.data, c_bytes, alpha, beta,
+                (compute_type == CUBLAS_COMPUTE_32I), stream);
 
             auto [inserted_it, _] = s_gemm_cache.emplace(cache_key, new_entry);
             entry = &inserted_it->second;
@@ -674,33 +738,23 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
             cublasLtMatmulDescSetAttribute(new_entry.opDesc, CUBLASLT_MATMUL_DESC_TRANSB,
                                             &transB, sizeof(transB));
 
-            cublasLtMatrixLayoutCreate(&new_entry.Bdesc, cuda_dtype_B, (int)K, (int)N, (int)K);
-            cublasLtMatrixLayoutCreate(&new_entry.Adesc, cuda_dtype_A, (int)K, (int)M, (int)K);
-            cublasLtMatrixLayoutCreate(&new_entry.Cdesc, cuda_dtype_C, (int)N, (int)M, (int)N);
+            CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&new_entry.Bdesc, cuda_dtype_B, (int)K, (int)N, (int)K));
+            CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&new_entry.Adesc, cuda_dtype_A, (int)K, (int)M, (int)K));
+            CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&new_entry.Cdesc, cuda_dtype_C, (int)N, (int)M, (int)N));
 
-            // Run heuristic once per unique shape
-            cublasLtMatmulPreference_t pref = nullptr;
-            cublasLtMatmulPreferenceCreate(&pref);
-            cublasLtMatmulPreferenceSetAttribute(pref,
-                CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-                &s_workspace_size, sizeof(s_workspace_size));
-
-            cublasLtMatmulHeuristicResult_t heur = {};
-            int nresults = 0;
-            cublasLtMatmulAlgoGetHeuristic(lt, new_entry.opDesc,
-                new_entry.Bdesc, new_entry.Adesc, new_entry.Cdesc, new_entry.Cdesc,
-                pref, 1, &heur, &nresults);
-
-            cublasLtMatmulPreferenceDestroy(pref);
-
-            if (nresults > 0 && heur.workspaceSize <= s_workspace_size) {
-                new_entry.algo = heur.algo;
-                new_entry.workspace_size = heur.workspaceSize;
-                new_entry.has_algo = true;
-            } else {
-                new_entry.has_algo = false;
-                new_entry.workspace_size = 0;
+            // Set scale pointers before benchmarking so FP8 algos run correctly
+            if (aScale) {
+                cublasLtMatmulDescSetAttribute(new_entry.opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+                                                &aScale, sizeof(aScale));
             }
+            if (bScale) {
+                cublasLtMatmulDescSetAttribute(new_entry.opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+                                                &bScale, sizeof(bScale));
+            }
+
+            size_t c_bytes = (size_t)M * N * dtype_size(C.dtype);
+            benchmark_and_select_algo(lt, new_entry,
+                A.data, B.data, c_bytes, alpha, beta, false, stream);
 
             auto [ins_it, _] = s_gemm_cache.emplace(cache_key, new_entry);
             entry = &ins_it->second;
