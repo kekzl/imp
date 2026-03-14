@@ -66,8 +66,28 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
 
     bool use_fp8 = (cache->dtype() == DType::FP8_E4M3);
     bool use_int8 = (cache->dtype() == DType::INT8);
+    bool use_int4 = (cache->dtype() == DType::INT4);
 
-    if (use_int8) {
+    if (use_int4) {
+        // INT4 quantized KV cache write — 2 values packed per byte, per-head scales
+        Tensor kv = view_tokens(k_, n);
+        Tensor vv = view_tokens(v_, n);
+        int int4_block_stride = kKVBlockSize * nkv * hd / 2;  // bytes (half the INT8 stride)
+        int scale_block_stride = kKVBlockSize * nkv;
+        dim3 grid_int4(n, 2);
+        write_kv_cache_int4_kernel<<<grid_int4, 256, 0, stream>>>(
+            static_cast<const half*>(kv.data),
+            static_cast<const half*>(vv.data),
+            state.positions,
+            state.block_tables,
+            static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
+            static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
+            static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
+            static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)),
+            int4_block_stride, scale_block_stride, nkv, hd,
+            kKVBlockSize, n,
+            state.max_blocks_per_seq, state.n_sequences);
+    } else if (use_int8) {
         // INT8 quantized KV cache write path with per-head scales.
         // No per-layer calibration needed — scales are computed per-head at write time.
         Tensor kv = view_tokens(k_, n);
@@ -634,7 +654,16 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         Tensor k_c(cache->k_ptr(kv_layer, 0), cache_dtype, 4, cs, true);
         Tensor v_c(cache->v_ptr(kv_layer, 0), cache_dtype, 4, cs, true);
 
-        if (cache_dtype == DType::INT8) {
+        if (cache_dtype == DType::INT4) {
+            // INT4 paged attention with per-head scales and INT4 unpack
+            paged_attention_decode_int4(q4, k_c, v_c, o4,
+                                        static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
+                                        static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
+                                        state.block_tables, state.context_lens,
+                                        kKVBlockSize, scale,
+                                        state.max_context_len, layer_sliding_window,
+                                        cfg.attn_logit_softcap, stream);
+        } else if (cache_dtype == DType::INT8) {
             // INT8 dp4a paged attention with per-head scales (Split-K enabled)
             paged_attention_set_splitk_scratch(splitk_scratch_, splitk_scratch_size_);
             paged_attention_decode_int8(q4, k_c, v_c, o4,

@@ -33,6 +33,7 @@ void print_usage(const char* prog) {
         "  --gpu-layers <n>      Layers to keep on GPU (-1 = all) (default: -1)\n"
         "  --kv-fp8              Use FP8 E4M3 KV cache (halves KV memory)\n"
         "  --kv-int8             Use INT8 KV cache with dp4a attention (halves KV memory)\n"
+        "  --kv-int4             Use INT4 KV cache (quarters KV memory)\n"
         "  --ssm-fp16            Use FP16 for SSM h_state (saves ~50%% SSM VRAM)\n"
         "  --cuda-graphs         (default, no-op — graphs enabled by default)\n"
         "  --no-cuda-graphs      Disable CUDA Graph capture for decode\n"
@@ -124,6 +125,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.kv_fp8 = true;
         } else if (std::strcmp(arg, "--kv-int8") == 0) {
             args.kv_int8 = true;
+        } else if (std::strcmp(arg, "--kv-int4") == 0) {
+            args.kv_int4 = true;
         } else if (std::strcmp(arg, "--ssm-fp16") == 0) {
             args.ssm_fp16 = true;
         } else if (std::strcmp(arg, "--cuda-graphs") == 0) {

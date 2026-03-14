@@ -30,8 +30,10 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
     , head_dim_(head_dim)
     , max_blocks_(max_blocks)
     , dtype_(dtype)
-    , block_bytes_(static_cast<size_t>(kKVBlockSize) * n_kv_heads * head_dim *
-                   dtype_size(dtype)) {
+    , block_bytes_((dtype == DType::INT4)
+                   ? (static_cast<size_t>(kKVBlockSize) * n_kv_heads * head_dim / 2)
+                   : (static_cast<size_t>(kKVBlockSize) * n_kv_heads * head_dim *
+                      dtype_size(dtype))) {
 
     // Allocate contiguous GPU pool
     size_t total = static_cast<size_t>(n_layers_) * max_blocks_ * 2 * block_bytes_;
@@ -48,8 +50,8 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
     // Zero-initialize the pool so fresh blocks start clean
     cudaMemset(pool_, 0, total);
 
-    // Allocate separate scale buffer for INT8 KV cache (per-head-per-token scales)
-    if (dtype == DType::INT8) {
+    // Allocate separate scale buffer for INT8/INT4 KV cache (per-head-per-token scales)
+    if (dtype == DType::INT8 || dtype == DType::INT4) {
         scale_block_bytes_ = static_cast<size_t>(kKVBlockSize) * n_kv_heads * sizeof(half);
         size_t scale_total = static_cast<size_t>(n_layers_) * max_blocks_ * 2 * scale_block_bytes_;
         cudaError_t serr = cudaMalloc(&scale_pool_, scale_total);
@@ -58,7 +60,8 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
             pool_ = nullptr;
             char msg[256];
             std::snprintf(msg, sizeof(msg),
-                          "KVCache: cudaMalloc failed for INT8 scale pool %.2f MiB (%s)",
+                          "KVCache: cudaMalloc failed for %s scale pool %.2f MiB (%s)",
+                          (dtype == DType::INT4) ? "INT4" : "INT8",
                           static_cast<double>(scale_total) / (1024.0 * 1024.0),
                           cudaGetErrorString(serr));
             throw std::runtime_error(msg);
