@@ -256,6 +256,14 @@ public:
     // Uses cudaFreeAsync/cudaMallocAsync for near-instant resize via CUDA memory pool.
     [[nodiscard]] bool resize_workspace(int new_max_tokens, cudaStream_t stream);
 
+    // Dual workspace for concurrent prefill/decode overlap.
+    // allocate_decode_workspace: creates a second tiny workspace for n=1 decode.
+    // use_workspace(0) = prefill (default), use_workspace(1) = decode.
+    bool allocate_decode_workspace(cudaStream_t stream);
+    void use_workspace(int slot);  // 0=prefill, 1=decode
+    bool has_decode_workspace() const { return decode_workspace_ != nullptr; }
+    int active_workspace() const { return active_workspace_; }
+
     // Get a view of the logits buffer for n tokens (for CUDA graph replay,
     // where forward_logits isn't called but the graph writes to this buffer).
     Tensor get_logits_view(int n) const { return view_tokens(logits_, n); }
@@ -529,6 +537,28 @@ private:
 
     // Max expert FFN hidden dim from actual packed tensor shapes (may differ from cfg.expert_d_ff)
     int max_expert_eff_ = 0;
+
+    // --- Dual workspace for concurrent prefill/decode overlap ---
+    // Slot 0 (default): main workspace (prefill, sized for max_tokens)
+    // Slot 1: decode workspace (tiny, sized for n=1)
+    void* decode_workspace_ = nullptr;         // persistent buf for decode
+    void* decode_shared_workspace_ = nullptr;   // shared buf for decode
+    size_t decode_persistent_size_ = 0;
+    size_t decode_shared_size_ = 0;
+    int active_workspace_ = 0;
+
+    // Saved prefill workspace pointers (restored when switching back)
+    struct SavedWorkspace {
+        void* persistent;
+        size_t persistent_size;
+        void* shared;
+        size_t shared_size;
+        int shared_max_tokens;
+        Tensor hidden, residual, norm_out, logits;
+        void* fp32_accum;
+        Tensor fp32_hidden;
+    };
+    SavedWorkspace saved_prefill_ws_;
 
     // --- Layer offload manager (non-owning, set by engine) ---
     LayerOffloadManager* offload_mgr_ = nullptr;
