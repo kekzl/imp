@@ -3,7 +3,9 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdio>
 #include <functional>
+#include <cuda_runtime.h>
 
 namespace imp {
 
@@ -452,6 +454,181 @@ int KVCacheManager::total_allocated_blocks() const {
         total += static_cast<int>(blocks.size());
     }
     return total;
+}
+
+// ─── Persistent prefix cache ────────────────────────────────────────
+
+// Binary format:
+//   Header: magic(4) version(4) n_blocks(4) n_layers(4) n_kv_heads(4)
+//           head_dim(4) dtype(4) block_bytes(8)
+//   Per block: hash(8) + KV data (n_layers * 2 * block_bytes)
+
+static constexpr uint32_t kPrefixCacheMagic = 0x494D5043;  // "IMPC"
+static constexpr uint32_t kPrefixCacheVersion = 1;
+
+struct PrefixCacheHeader {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t n_blocks;
+    uint32_t n_layers;
+    uint32_t n_kv_heads;
+    uint32_t head_dim;
+    uint32_t dtype;
+    uint64_t block_bytes;
+};
+
+int KVCacheManager::save_prefix_cache(const std::string& path, cudaStream_t stream) {
+    if (!prefix_caching_enabled_ || cached_blocks_lru_.empty()) {
+        IMP_LOG_INFO("Prefix cache: nothing to save (0 cached blocks)");
+        return 0;
+    }
+
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) {
+        IMP_LOG_ERROR("Failed to open %s for writing", path.c_str());
+        return -1;
+    }
+
+    int n_blocks = static_cast<int>(cached_blocks_lru_.size());
+    size_t bb = cache_->block_bytes();
+    int nl = cache_->n_layers();
+
+    PrefixCacheHeader hdr = {};
+    hdr.magic = kPrefixCacheMagic;
+    hdr.version = kPrefixCacheVersion;
+    hdr.n_blocks = static_cast<uint32_t>(n_blocks);
+    hdr.n_layers = static_cast<uint32_t>(nl);
+    hdr.n_kv_heads = static_cast<uint32_t>(cache_->n_kv_heads());
+    hdr.head_dim = static_cast<uint32_t>(cache_->head_dim());
+    hdr.dtype = static_cast<uint32_t>(cache_->dtype());
+    hdr.block_bytes = bb;
+
+    fwrite(&hdr, sizeof(hdr), 1, f);
+
+    // Allocate host buffer for one block's KV data (all layers, K+V)
+    size_t per_block_total = static_cast<size_t>(nl) * 2 * bb;
+    std::vector<uint8_t> host_buf(per_block_total);
+
+    int saved = 0;
+    for (int block_id : cached_blocks_lru_) {
+        auto hash_it = block_id_to_hash_.find(block_id);
+        if (hash_it == block_id_to_hash_.end()) continue;
+
+        size_t hash = hash_it->second;
+        fwrite(&hash, sizeof(hash), 1, f);
+
+        // Copy KV data from GPU to host
+        size_t offset = 0;
+        for (int l = 0; l < nl; l++) {
+            cudaMemcpy(host_buf.data() + offset, cache_->k_ptr(l, block_id),
+                       bb, cudaMemcpyDeviceToHost);
+            offset += bb;
+            cudaMemcpy(host_buf.data() + offset, cache_->v_ptr(l, block_id),
+                       bb, cudaMemcpyDeviceToHost);
+            offset += bb;
+        }
+
+        fwrite(host_buf.data(), per_block_total, 1, f);
+        saved++;
+    }
+
+    fclose(f);
+    IMP_LOG_INFO("Prefix cache: saved %d blocks (%.1f MiB) to %s",
+                 saved, (sizeof(hdr) + saved * (8 + per_block_total)) / (1024.0 * 1024.0),
+                 path.c_str());
+    return saved;
+}
+
+int KVCacheManager::load_prefix_cache(const std::string& path, cudaStream_t stream) {
+    if (!prefix_caching_enabled_) {
+        IMP_LOG_WARN("Prefix cache: loading disabled (prefix caching not enabled)");
+        return -1;
+    }
+
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) {
+        IMP_LOG_INFO("Prefix cache: no cache file at %s", path.c_str());
+        return 0;
+    }
+
+    PrefixCacheHeader hdr;
+    if (fread(&hdr, sizeof(hdr), 1, f) != 1 || hdr.magic != kPrefixCacheMagic) {
+        IMP_LOG_WARN("Prefix cache: invalid header in %s", path.c_str());
+        fclose(f);
+        return -1;
+    }
+
+    if (hdr.version != kPrefixCacheVersion) {
+        IMP_LOG_WARN("Prefix cache: version mismatch (%u vs %u)", hdr.version, kPrefixCacheVersion);
+        fclose(f);
+        return -1;
+    }
+
+    // Validate config matches current KV cache
+    if (hdr.n_layers != static_cast<uint32_t>(cache_->n_layers()) ||
+        hdr.n_kv_heads != static_cast<uint32_t>(cache_->n_kv_heads()) ||
+        hdr.head_dim != static_cast<uint32_t>(cache_->head_dim()) ||
+        hdr.dtype != static_cast<uint32_t>(cache_->dtype()) ||
+        hdr.block_bytes != cache_->block_bytes()) {
+        IMP_LOG_WARN("Prefix cache: config mismatch (layers=%u/%d, heads=%u/%d, "
+                     "dim=%u/%d, dtype=%u/%d)",
+                     hdr.n_layers, cache_->n_layers(), hdr.n_kv_heads, cache_->n_kv_heads(),
+                     hdr.head_dim, cache_->head_dim(), hdr.dtype, static_cast<int>(cache_->dtype()));
+        fclose(f);
+        return -1;
+    }
+
+    int n_blocks = static_cast<int>(hdr.n_blocks);
+    int nl = cache_->n_layers();
+    size_t bb = cache_->block_bytes();
+    size_t per_block_total = static_cast<size_t>(nl) * 2 * bb;
+    std::vector<uint8_t> host_buf(per_block_total);
+
+    int loaded = 0;
+    int skipped = 0;
+
+    for (int i = 0; i < n_blocks; i++) {
+        size_t hash;
+        if (fread(&hash, sizeof(hash), 1, f) != 1) break;
+        if (fread(host_buf.data(), per_block_total, 1, f) != 1) break;
+
+        // Skip if hash already exists (shouldn't happen on fresh start)
+        if (block_hash_to_id_.count(hash)) { skipped++; continue; }
+
+        // Allocate a fresh block
+        int block_id = cache_->allocate_block();
+        if (block_id < 0) {
+            IMP_LOG_INFO("Prefix cache: pool exhausted after %d blocks", loaded);
+            break;
+        }
+
+        // Upload KV data to GPU
+        size_t offset = 0;
+        for (int l = 0; l < nl; l++) {
+            cudaMemcpy(cache_->k_ptr(l, block_id), host_buf.data() + offset,
+                       bb, cudaMemcpyHostToDevice);
+            offset += bb;
+            cudaMemcpy(cache_->v_ptr(l, block_id), host_buf.data() + offset,
+                       bb, cudaMemcpyHostToDevice);
+            offset += bb;
+        }
+
+        // Register in hash maps
+        block_hash_to_id_[hash] = block_id;
+        block_id_to_hash_[block_id] = hash;
+
+        // Add to cached LRU (unreferenced, available for prefix matching)
+        cached_blocks_lru_.push_back(block_id);
+        cached_blocks_map_[block_id] = std::prev(cached_blocks_lru_.end());
+
+        loaded++;
+    }
+
+    fclose(f);
+    IMP_LOG_INFO("Prefix cache: restored %d blocks (%.1f MiB) from %s%s",
+                 loaded, (loaded * per_block_total) / (1024.0 * 1024.0), path.c_str(),
+                 skipped > 0 ? " (some skipped)" : "");
+    return loaded;
 }
 
 } // namespace imp

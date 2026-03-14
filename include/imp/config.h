@@ -71,6 +71,7 @@ typedef struct {
 
     // Prefix caching
     int use_prefix_caching;        // 0 = off (default), 1 = on — reuse KV blocks for shared prefixes
+    char prefix_cache_path[512];   // path to save/load prefix cache (empty = disabled)
 
     // Threading
     int num_cpu_threads;           // 0 = auto (hardware_concurrency)

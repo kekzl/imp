@@ -57,6 +57,7 @@ ImpConfig imp_config_default(void) {
     config.use_nvfp4_decode = -1;       // auto (sm_120→mode2, sm_90→mode1)
     config.use_mxfp4_prefill = 0;       // off by default
     config.use_prefix_caching = 0;      // off by default
+    config.prefix_cache_path[0] = '\0'; // no persistence by default
     config.num_cpu_threads = 0;         // auto
     config.enable_speculative = 0;      // no speculative decoding
     config.draft_model_path = NULL;     // no draft model
@@ -255,6 +256,8 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
         ecfg.use_nvfp4_decode = config->use_nvfp4_decode;
         ecfg.use_mxfp4_prefill = (config->use_mxfp4_prefill != 0);
         ecfg.use_prefix_caching = (config->use_prefix_caching != 0);
+        if (config->prefix_cache_path[0] != '\0')
+            ecfg.prefix_cache_path = config->prefix_cache_path;
         ecfg.enable_self_speculative = (config->enable_self_speculative != 0);
         ecfg.self_spec_k = config->self_spec_k;
         ecfg.self_spec_exit_layer = config->self_spec_exit_layer;
