@@ -6,6 +6,7 @@
 #include "compute/gemm_q6k.h"
 #include "compute/sampling.h"
 #include "quant/quant_gemm.h"
+#include "quant/nvfp4_gemm.h"
 #include "compute/json_constrain.h"
 #include "core/logging.h"
 
@@ -298,7 +299,16 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
     Tensor lg = view_tokens(logits_, n);
 
     const auto out_qtype = model_->out_proj_qtype_;
-    if (q8_1_buf_ && compute_dtype_ == DType::FP16 &&
+    auto nvfp4_lm = nvfp4_cache_.find(model_->output_proj().data);
+    if (nvfp4_lm != nvfp4_cache_.end()) {
+        // NVFP4 LM head: ~43% less memory traffic than Q8_0 dp4a path
+        Tensor no_final = view_tokens(norm_out_, n);
+        rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
+        gemv_nvfp4_kpar_fp32(nvfp4_lm->second,
+                              static_cast<const half*>(no_final.data),
+                              static_cast<float*>(lg.data),
+                              cfg.vocab_size, cfg.d_model, stream);
+    } else if (q8_1_buf_ && compute_dtype_ == DType::FP16 &&
         (out_qtype == GGMLQuantType::Q6_K || out_qtype == GGMLQuantType::Q8_0 ||
          out_qtype == GGMLQuantType::Q4_0 || out_qtype == GGMLQuantType::Q4_K ||
          out_qtype == GGMLQuantType::Q5_K || out_qtype == GGMLQuantType::Q2_K ||
