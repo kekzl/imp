@@ -237,9 +237,9 @@ __global__ void rmsnorm_quantize_q8_1_kernel(
         int d_model,
         float eps,
         float weight_offset) {
-    // Minimal shared memory: 8 floats for cross-warp reduction + 1 for inv_rms.
-    // All intermediate values kept in registers — no d_model-sized shared buffer.
-    __shared__ float warp_reduce[8];
+    // Shared memory for cross-warp reduction + inv_rms.
+    // Support up to 32 warps (1024 threads).
+    __shared__ float warp_reduce[32];
     __shared__ float s_inv_rms;
 
     const int lane = threadIdx.x & 31;
@@ -314,9 +314,7 @@ void rmsnorm_quantize_q8_1(const half* x, const half* weight,
                              int d_model, float eps,
                              cudaStream_t stream,
                              float weight_offset) {
-    const int threads = 256;
-    // Shared memory: only warp_reduce[8] + s_inv_rms declared as __shared__ in kernel
-    // (no dynamic shared memory needed).
+    const int threads = 1024;
     rmsnorm_quantize_q8_1_kernel<<<1, threads, 0, stream>>>(
         x, weight, q8_out, d8_out, norm_out, d_model, eps, weight_offset);
 }
