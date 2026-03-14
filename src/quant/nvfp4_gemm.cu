@@ -35,6 +35,27 @@ static constexpr int kKparThreads = kKparWarps * 32;  // 128
 static constexpr int kMRWarps = 8;
 static constexpr int kMRThreads = kMRWarps * 32;  // 256
 
+// Minimum blocks/SM for multi-row to be efficient. Below this, kpar is better
+// because more blocks (M instead of M/NR) give higher warp occupancy.
+static constexpr int kMinBlocksPerSM = 6;
+
+// Cached SM count for dispatch decisions.
+static int nvfp4_n_sms() {
+    static int n_sms = 0;
+    if (__builtin_expect(n_sms == 0, 0)) {
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, 0);
+        n_sms = prop.multiProcessorCount;
+    }
+    return n_sms;
+}
+
+// Returns true if multi-row should be used: K is small enough AND there are
+// enough blocks for good SM occupancy (>= kMinBlocksPerSM blocks/SM).
+static bool use_multirow(int n_mb, int mr_blocks) {
+    return n_mb <= 512 && mr_blocks >= kMinBlocksPerSM * nvfp4_n_sms();
+}
+
 // Fast FP8 E4M3 -> FP32 via bit manipulation (branchless, no exp2f).
 // Uses the normal-path formula for all values including denorms.
 // For exp=0: produces a tiny but non-zero value (~0.008) instead of exact denorm.
@@ -839,16 +860,11 @@ void gemv_nvfp4_kpar(const NvFP4QuantResult& A, const half* x, half* y,
                      int M, int K, cudaStream_t stream)
 {
     const int n_mb = K / kMicroBlockSize;
-    // Use multi-row kernel when K is small relative to thread count.
-    // With 128 threads doing K-parallel, each thread only gets n_mb/128 iterations.
-    // When that's < 4, the kernel is launch-overhead-dominated → switch to multi-row.
-    if (n_mb <= 512) {
-        // NR=8: each warp (32 threads) handles one row, 8 rows per block.
-        // Each thread gets n_mb/32 iterations — much better work per thread.
-        constexpr int NR = 8;
-        int grid = (M + NR - 1) / NR;
+    constexpr int NR = 8;
+    int mr_blocks = (M + NR - 1) / NR;
+    if (use_multirow(n_mb, mr_blocks)) {
         pdl::launch(gemv_nvfp4_multirow_kernel<NR>,
-            dim3(grid), dim3(kMRThreads), size_t(0), stream,
+            dim3(mr_blocks), dim3(kMRThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(A.packed_data),
             reinterpret_cast<const uint8_t*>(A.micro_scales),
             A.tensor_scale, x, y, M, K);
@@ -865,11 +881,11 @@ void gemv_nvfp4_kpar_fp32(const NvFP4QuantResult& A, const half* x, float* y,
                             int M, int K, cudaStream_t stream)
 {
     const int n_mb = K / kMicroBlockSize;
-    if (n_mb <= 512) {
-        constexpr int NR = 8;
-        int grid = (M + NR - 1) / NR;
+    constexpr int NR = 8;
+    int mr_blocks = (M + NR - 1) / NR;
+    if (use_multirow(n_mb, mr_blocks)) {
         pdl::launch(gemv_nvfp4_multirow_fp32_kernel<NR>,
-            dim3(grid), dim3(kMRThreads), size_t(0), stream,
+            dim3(mr_blocks), dim3(kMRThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(A.packed_data),
             reinterpret_cast<const uint8_t*>(A.micro_scales),
             A.tensor_scale, x, y, M, K);
@@ -890,11 +906,11 @@ void gemv_nvfp4_qkv_fused(const NvFP4QuantResult& wq, const NvFP4QuantResult& wk
 {
     int total_rows = q_rows + k_rows + v_rows;
     const int n_mb = K / kMicroBlockSize;
-    if (n_mb <= 512) {
-        constexpr int NR = 8;
-        int grid = (total_rows + NR - 1) / NR;
+    constexpr int NR = 8;
+    int mr_blocks = (total_rows + NR - 1) / NR;
+    if (use_multirow(n_mb, mr_blocks)) {
         pdl::launch(gemv_nvfp4_qkv_fused_mr_kernel<NR>,
-            dim3(grid), dim3(kMRThreads), size_t(0), stream,
+            dim3(mr_blocks), dim3(kMRThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(wq.packed_data),
             reinterpret_cast<const uint8_t*>(wq.micro_scales), wq.tensor_scale,
             reinterpret_cast<const uint8_t*>(wk.packed_data),
@@ -921,11 +937,11 @@ void gemv_nvfp4_gate_up_fused(const NvFP4QuantResult& wg, const NvFP4QuantResult
 {
     int total_rows = 2 * rows;
     const int n_mb = K / kMicroBlockSize;
-    if (n_mb <= 512) {
-        constexpr int NR = 8;
-        int grid = (total_rows + NR - 1) / NR;
+    constexpr int NR = 8;
+    int mr_blocks = (total_rows + NR - 1) / NR;
+    if (use_multirow(n_mb, mr_blocks)) {
         pdl::launch(gemv_nvfp4_gate_up_fused_mr_kernel<NR>,
-            dim3(grid), dim3(kMRThreads), size_t(0), stream,
+            dim3(mr_blocks), dim3(kMRThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(wg.packed_data),
             reinterpret_cast<const uint8_t*>(wg.micro_scales), wg.tensor_scale,
             reinterpret_cast<const uint8_t*>(wu.packed_data),
@@ -946,11 +962,11 @@ void gemv_nvfp4_residual(const NvFP4QuantResult& A, const half* x, half* y,
                           const half* residual, int M, int K, cudaStream_t stream)
 {
     const int n_mb = K / kMicroBlockSize;
-    if (n_mb <= 512) {
-        constexpr int NR = 8;
-        int grid = (M + NR - 1) / NR;
+    constexpr int NR = 8;
+    int mr_blocks = (M + NR - 1) / NR;
+    if (use_multirow(n_mb, mr_blocks)) {
         pdl::launch(gemv_nvfp4_residual_mr_kernel<NR>,
-            dim3(grid), dim3(kMRThreads), size_t(0), stream,
+            dim3(mr_blocks), dim3(kMRThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(A.packed_data),
             reinterpret_cast<const uint8_t*>(A.micro_scales),
             A.tensor_scale, x, y, residual, M, K);
@@ -969,11 +985,11 @@ void gemv_nvfp4_swiglu_residual(const NvFP4QuantResult& A,
                                  int M, int K, cudaStream_t stream)
 {
     const int n_mb = K / kMicroBlockSize;
-    if (n_mb <= 512) {
-        constexpr int NR = 8;
-        int grid = (M + NR - 1) / NR;
+    constexpr int NR = 8;
+    int mr_blocks = (M + NR - 1) / NR;
+    if (use_multirow(n_mb, mr_blocks)) {
         pdl::launch(gemv_nvfp4_swiglu_residual_mr_kernel<NR>,
-            dim3(grid), dim3(kMRThreads), size_t(0), stream,
+            dim3(mr_blocks), dim3(kMRThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(A.packed_data),
             reinterpret_cast<const uint8_t*>(A.micro_scales),
             A.tensor_scale, gate, up, y, residual, M, K);
@@ -992,11 +1008,11 @@ void gemv_nvfp4_geglu_residual(const NvFP4QuantResult& A,
                                 int M, int K, cudaStream_t stream)
 {
     const int n_mb = K / kMicroBlockSize;
-    if (n_mb <= 512) {
-        constexpr int NR = 8;
-        int grid = (M + NR - 1) / NR;
+    constexpr int NR = 8;
+    int mr_blocks = (M + NR - 1) / NR;
+    if (use_multirow(n_mb, mr_blocks)) {
         pdl::launch(gemv_nvfp4_geglu_residual_mr_kernel<NR>,
-            dim3(grid), dim3(kMRThreads), size_t(0), stream,
+            dim3(mr_blocks), dim3(kMRThreads), size_t(0), stream,
             reinterpret_cast<const uint8_t*>(A.packed_data),
             reinterpret_cast<const uint8_t*>(A.micro_scales),
             A.tensor_scale, gate, up, y, residual, M, K);
