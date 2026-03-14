@@ -184,6 +184,7 @@ ImpModelArch imp_model_arch(ImpModel model) {
         case imp::ModelArch::QWEN3:          return IMP_ARCH_QWEN3;
         case imp::ModelArch::QWEN3_MOE:      return IMP_ARCH_QWEN3_MOE;
         case imp::ModelArch::GEMMA3:         return IMP_ARCH_GEMMA3;
+        case imp::ModelArch::LLAMA4:         return IMP_ARCH_LLAMA4;
         case imp::ModelArch::GENERIC:        return IMP_ARCH_GENERIC;
     }
     return IMP_ARCH_GENERIC;

@@ -583,10 +583,120 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
     IMP_LOG_DEBUG("Tensor data starts at offset %zu (alignment=%zu)", tensor_data_start, alignment);
 
+    // Set data_base for primary shard tensors
+    for (auto& info : tensor_infos) {
+        info.data_base = data + tensor_data_start;
+    }
+
+    // 5b. Handle split GGUF files (multiple shards)
+    auto it_split = metadata.find("split.count");
+    int split_count = (it_split != metadata.end()) ? static_cast<int>(val_uint(it_split->second)) : 1;
+
+    // Store extra shard mmaps for cleanup (primary shard stored separately in model)
+    std::vector<std::pair<void*, size_t>> extra_mmaps;
+
+    if (split_count > 1) {
+        IMP_LOG_INFO("Split GGUF: %d shards", split_count);
+
+        // Derive shard filenames: path ends with -00001-of-NNNNN.gguf
+        // Replace the shard number for each additional shard
+        std::string base_path = path;
+        auto dash_pos = base_path.rfind("-00001-of-");
+        if (dash_pos == std::string::npos) {
+            // Try without the -00001 suffix (user passed the base name)
+            IMP_LOG_WARN("Split GGUF: cannot derive shard paths from '%s'", path.c_str());
+        } else {
+            for (int shard = 2; shard <= split_count; shard++) {
+                char shard_path[4096];
+                snprintf(shard_path, sizeof(shard_path), "%.*s-%05d-of-%05d.gguf",
+                         static_cast<int>(dash_pos), base_path.c_str(), shard, split_count);
+
+                int sfd = open(shard_path, O_RDONLY);
+                if (sfd < 0) {
+                    IMP_LOG_ERROR("Failed to open shard %d: %s", shard, shard_path);
+                    for (auto& [p, s] : extra_mmaps) munmap(p, s);
+                    munmap(mmap_base, file_size);
+                    return nullptr;
+                }
+
+                struct stat sst;
+                fstat(sfd, &sst);
+                size_t shard_size = static_cast<size_t>(sst.st_size);
+                void* shard_mmap = mmap(nullptr, shard_size, PROT_READ, MAP_PRIVATE, sfd, 0);
+                close(sfd);
+
+                if (shard_mmap == MAP_FAILED) {
+                    IMP_LOG_ERROR("Failed to mmap shard %d: %s", shard, shard_path);
+                    for (auto& [p, s] : extra_mmaps) munmap(p, s);
+                    munmap(mmap_base, file_size);
+                    return nullptr;
+                }
+                madvise(shard_mmap, shard_size, MADV_SEQUENTIAL);
+                extra_mmaps.emplace_back(shard_mmap, shard_size);
+
+                // Parse shard header to get tensor infos
+                auto* sdata = reinterpret_cast<const uint8_t*>(shard_mmap);
+                BinaryReader sreader(sdata, shard_size);
+                uint32_t smagic = sreader.read_u32();
+                uint32_t sversion = sreader.read_u32();
+                uint64_t stensor_count = sreader.read_u64();
+                uint64_t skv_count = sreader.read_u64();
+
+                if (smagic != GGUF_MAGIC || sreader.failed()) {
+                    IMP_LOG_ERROR("Invalid shard %d header", shard);
+                    for (auto& [p, s] : extra_mmaps) munmap(p, s);
+                    munmap(mmap_base, file_size);
+                    return nullptr;
+                }
+
+                // Skip shard metadata (we already have it from shard 0)
+                for (uint64_t i = 0; i < skv_count && !sreader.failed(); i++) {
+                    sreader.read_string();
+                    auto vtype = static_cast<GGUFValueType>(sreader.read_u32());
+                    read_gguf_value(sreader, vtype);
+                }
+
+                // Parse shard tensor infos
+                for (uint64_t i = 0; i < stensor_count && !sreader.failed(); i++) {
+                    GGUFTensorInfo info;
+                    info.name = sreader.read_string();
+                    info.n_dims = sreader.read_u32();
+                    for (uint32_t d = 0; d < info.n_dims && d < 4; d++)
+                        info.dims[d] = static_cast<int64_t>(sreader.read_u64());
+                    for (uint32_t d = 4; d < info.n_dims; d++)
+                        sreader.read_u64();
+                    for (uint32_t d = info.n_dims; d < 4; d++)
+                        info.dims[d] = 1;
+                    info.type = static_cast<GGMLType>(sreader.read_u32());
+                    info.offset = sreader.read_u64();
+                    tensor_infos.push_back(std::move(info));
+                }
+
+                // Compute shard tensor data start
+                size_t salign = alignment;  // use same alignment as primary
+                sreader.align(salign);
+                size_t shard_data_start = sreader.pos();
+
+                // Set data_base for this shard's tensors
+                size_t shard_tensor_start = tensor_infos.size() - static_cast<size_t>(stensor_count);
+                for (size_t ti = shard_tensor_start; ti < tensor_infos.size(); ti++) {
+                    tensor_infos[ti].data_base = sdata + shard_data_start;
+                }
+
+                IMP_LOG_INFO("  Shard %d: %lu tensors, %.1f MiB",
+                             shard, (unsigned long)stensor_count,
+                             shard_size / (1024.0 * 1024.0));
+            }
+        }
+
+        tensor_count = tensor_infos.size();
+    }
+
     // 6. Extract model config from metadata
     auto model = std::make_unique<Model>();
     model->mmap_base_ = mmap_base;
     model->mmap_size_ = file_size;
+    model->split_mmaps_ = std::move(extra_mmaps);
 
     ModelConfig& cfg = model->config_;
 
@@ -828,9 +938,9 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     int assigned = 0, skipped = 0;
 
     for (const auto& info : tensor_infos) {
-        // Compute pointer into mmap'd data
+        // Compute pointer into mmap'd data (supports split GGUF via per-tensor data_base)
         auto* tensor_data = const_cast<void*>(
-            static_cast<const void*>(data + tensor_data_start + info.offset));
+            static_cast<const void*>(info.data_base + info.offset));
 
         // Build tensor descriptor
         // GGUF stores dims as ne[0]=innermost. We reverse for shape[0]=outermost.

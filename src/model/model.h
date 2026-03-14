@@ -162,6 +162,7 @@ public:
 
     void* mmap_base_ = nullptr;
     size_t mmap_size_ = 0;
+    std::vector<std::pair<void*, size_t>> split_mmaps_;  // additional shard mmaps
 
     bool gpu_weights_ready_ = false;
     std::vector<void*> gpu_allocations_;

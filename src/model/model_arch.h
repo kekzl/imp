@@ -13,6 +13,7 @@ enum class ModelArch {
     QWEN3,
     QWEN3_MOE,
     GEMMA3,
+    LLAMA4,
     GENERIC,
 };
 
