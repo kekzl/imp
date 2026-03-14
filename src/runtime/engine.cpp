@@ -722,10 +722,10 @@ bool Engine::set_image(const std::string& path) {
     cudaMemcpyAsync(d_pixels, img.pixels.data(), n_pixels * sizeof(half),
                     cudaMemcpyHostToDevice, stream_);
 
-    // Encode
+    // Encode — sync before freeing d_pixels (encode runs async on stream_)
     bool ok = vision_encoder_->encode(d_pixels, d_vision_embeddings_, stream_);
-    cudaFree(d_pixels);
     cudaStreamSynchronize(stream_);
+    cudaFree(d_pixels);
 
     if (ok) {
         has_vision_input_ = true;
@@ -758,8 +758,8 @@ bool Engine::set_image_from_memory(const uint8_t* data, size_t len) {
                     cudaMemcpyHostToDevice, stream_);
 
     bool ok = vision_encoder_->encode(d_pixels, d_vision_embeddings_, stream_);
-    cudaFree(d_pixels);
     cudaStreamSynchronize(stream_);
+    cudaFree(d_pixels);
 
     if (ok) {
         has_vision_input_ = true;
