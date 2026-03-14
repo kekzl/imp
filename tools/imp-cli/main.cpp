@@ -72,6 +72,7 @@ int main(int argc, char** argv) {
     config.gpu_layers = args.gpu_layers;
     if (args.kv_fp8) config.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
     if (args.kv_int8) config.kv_cache_dtype = IMP_DTYPE_INT8;
+    if (args.kv_int4) config.kv_cache_dtype = IMP_DTYPE_INT4;
     if (args.ssm_fp16) config.ssm_state_dtype = IMP_DTYPE_FP16;
     if (args.no_cuda_graphs) config.enable_cuda_graphs = 0;
     if (args.prefill_chunk_size > 0) config.prefill_chunk_size = args.prefill_chunk_size;

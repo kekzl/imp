@@ -574,6 +574,103 @@ __global__ void write_kv_cache_int8_kernel(
     }
 }
 
+// ---------------------------------------------------------------------------
+// INT4 KV cache write: FP16 → 4-bit symmetric quantization with per-head scales.
+// Two INT4 values packed into one byte (low nibble = even index, high nibble = odd).
+// Range: [-8, 7] symmetric. Scale = absmax / 7.0.
+// blockIdx.x = token, blockIdx.y = 0 (K) or 1 (V).
+// ---------------------------------------------------------------------------
+__global__ void write_kv_cache_int4_kernel(
+    const half* __restrict__ k_in,
+    const half* __restrict__ v_in,
+    const int* __restrict__ positions,
+    const int* __restrict__ block_tables,
+    uint8_t* __restrict__ k_cache_base,   // packed INT4 pairs
+    uint8_t* __restrict__ v_cache_base,
+    half* __restrict__ k_scale_base,
+    half* __restrict__ v_scale_base,
+    int block_stride,                     // kKVBlockSize * n_kv_heads * head_dim / 2 (bytes)
+    int scale_block_stride,               // kKVBlockSize * n_kv_heads (half elems)
+    int n_kv_heads,
+    int head_dim,
+    int block_size,
+    int n_tokens,
+    int max_blocks_per_seq,
+    int n_sequences)
+{
+    const int token_idx = blockIdx.x;
+    if (token_idx >= n_tokens) return;
+
+    const int pos = positions[token_idx];
+    const int block_idx = pos / block_size;
+    const int slot_in_block = pos % block_size;
+
+    int block_id;
+    if (max_blocks_per_seq > 0 && n_sequences > 1) {
+        int seq_idx = token_idx;
+        block_id = block_tables[seq_idx * max_blocks_per_seq + block_idx];
+    } else {
+        block_id = block_tables[block_idx];
+    }
+
+    const half* src_base = (blockIdx.y == 0) ? k_in : v_in;
+    uint8_t* cache_base = (blockIdx.y == 0) ? k_cache_base : v_cache_base;
+    half* scale_base = (blockIdx.y == 0) ? k_scale_base : v_scale_base;
+
+    const int row_elems = n_kv_heads * head_dim;
+    const int row_bytes = row_elems / 2;  // 2 INT4 values per byte
+    const half* src = src_base + static_cast<int64_t>(token_idx) * row_elems;
+    uint8_t* dst = cache_base + static_cast<int64_t>(block_id) * block_stride
+                              + static_cast<int64_t>(slot_in_block) * row_bytes;
+    half* scale_dst = scale_base + static_cast<int64_t>(block_id) * scale_block_stride
+                                 + static_cast<int64_t>(slot_in_block) * n_kv_heads;
+
+    const int warp_id = threadIdx.x / 32;
+    const int lane_id = threadIdx.x % 32;
+    const int num_warps = blockDim.x / 32;
+
+    for (int h = warp_id; h < n_kv_heads; h += num_warps) {
+        const int head_offset = h * head_dim;
+
+        // Step 1: Per-head absmax
+        float amax = 0.0f;
+        for (int d = lane_id; d < head_dim; d += 32) {
+            float val = __half2float(src[head_offset + d]);
+            amax = fmaxf(amax, fabsf(val));
+        }
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1)
+            amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset));
+
+        // Step 2: Scale (symmetric INT4: [-8, 7], use 7 for range)
+        float sc = amax / 7.0f;
+        float inv_sc = (amax > 1e-8f) ? (7.0f / amax) : 0.0f;
+
+        // Step 3: Quantize and pack pairs into bytes
+        // Each lane handles 2 elements at a time (d, d+1) → 1 byte
+        const int head_byte_offset = h * head_dim / 2;
+        for (int d = lane_id * 2; d < head_dim; d += 64) {
+            float v0 = __half2float(src[head_offset + d]);
+            float v1 = (d + 1 < head_dim) ? __half2float(src[head_offset + d + 1]) : 0.0f;
+
+            int q0 = __float2int_rn(v0 * inv_sc);
+            int q1 = __float2int_rn(v1 * inv_sc);
+            q0 = max(-8, min(7, q0));
+            q1 = max(-8, min(7, q1));
+
+            // Pack: low nibble = q0, high nibble = q1
+            uint8_t packed = (static_cast<uint8_t>(q0 & 0xF)) |
+                             (static_cast<uint8_t>(q1 & 0xF) << 4);
+            dst[head_byte_offset + d / 2] = packed;
+        }
+
+        // Step 4: Write scale
+        if (lane_id == 0) {
+            scale_dst[h] = __float2half(sc);
+        }
+    }
+}
+
 // Fused KV cache write with RoPE on K: applies RoPE to K during write, copies V directly.
 // blockIdx.x = token index, blockIdx.y = 0 (K+RoPE) or 1 (V copy).
 // Eliminates the separate RoPE kernel launch for K in the decode path.

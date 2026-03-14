@@ -306,12 +306,19 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     } else {
         // Auto-size: allocate what's needed plus headroom, bounded by free VRAM.
         // Pre-calculate SSM footprint so we don't starve SSM state allocation.
-        size_t elem_size = dtype_size(config_.kv_cache_dtype);
-        size_t single_block_bytes = static_cast<size_t>(kKVBlockSize) *
-                                    mcfg.n_kv_heads * head_dim * elem_size;
+        size_t single_block_bytes;
+        if (config_.kv_cache_dtype == DType::INT4) {
+            // INT4: 0.5 bytes per element (2 elements packed per byte)
+            single_block_bytes = static_cast<size_t>(kKVBlockSize) *
+                                 mcfg.n_kv_heads * head_dim / 2;
+        } else {
+            single_block_bytes = static_cast<size_t>(kKVBlockSize) *
+                                 mcfg.n_kv_heads * head_dim * dtype_size(config_.kv_cache_dtype);
+        }
         size_t per_block_total = single_block_bytes * 2 * n_kv_layers;
-        // INT8 scale overhead: one half per head per token per block (K+V)
-        if (config_.kv_cache_dtype == DType::INT8) {
+        // INT8/INT4 scale overhead: one half per head per token per block (K+V)
+        if (config_.kv_cache_dtype == DType::INT8 ||
+            config_.kv_cache_dtype == DType::INT4) {
             size_t scale_per_block = static_cast<size_t>(kKVBlockSize) *
                                      mcfg.n_kv_heads * sizeof(half);
             per_block_total += scale_per_block * 2 * n_kv_layers;
@@ -384,7 +391,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                      static_cast<double>(max_blocks) * kKVBlockSize,
                      static_cast<double>(total_kv) / (1024.0 * 1024.0),
                      kv_dtype == DType::FP8_E4M3 ? "FP8_E4M3" :
-                     kv_dtype == DType::INT8 ? "INT8" : "FP16",
+                     kv_dtype == DType::INT8 ? "INT8" :
+                     kv_dtype == DType::INT4 ? "INT4" : "FP16",
                      n_kv_layers, mcfg.n_layers, mcfg.n_kv_heads, head_dim, kKVBlockSize);
     }
 

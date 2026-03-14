@@ -134,6 +134,24 @@ __global__ void write_kv_cache_int8_kernel(
     int max_blocks_per_seq,
     int n_sequences);
 
+__global__ void write_kv_cache_int4_kernel(
+    const half* __restrict__ k_in,
+    const half* __restrict__ v_in,
+    const int* __restrict__ positions,
+    const int* __restrict__ block_tables,
+    uint8_t* __restrict__ k_cache_base,
+    uint8_t* __restrict__ v_cache_base,
+    half* __restrict__ k_scale_base,
+    half* __restrict__ v_scale_base,
+    int block_stride,
+    int scale_block_stride,
+    int n_kv_heads,
+    int head_dim,
+    int block_size,
+    int n_tokens,
+    int max_blocks_per_seq,
+    int n_sequences);
+
 __global__ void write_kv_cache_rope_fused_kernel(
     const half* __restrict__ k_in,
     const half* __restrict__ v_in,

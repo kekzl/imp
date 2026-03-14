@@ -35,6 +35,7 @@ struct CliArgs {
     int gpu_layers = -1;       // -1 = all on GPU
     bool kv_fp8 = false;       // Use FP8 E4M3 KV cache (half size)
     bool kv_int8 = false;      // Use INT8 KV cache with dp4a attention
+    bool kv_int4 = false;      // Use INT4 KV cache (quarter size)
     bool ssm_fp16 = false;     // Use FP16 for SSM h_state
     bool no_cuda_graphs = false;  // Disable CUDA Graph capture for decode
     std::string chat_template = "auto";  // auto, none, chatml, llama2, llama3, nemotron, gemma

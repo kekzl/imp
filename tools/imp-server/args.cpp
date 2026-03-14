@@ -20,6 +20,7 @@ void print_server_usage(const char* prog) {
         "  --ssm-fp16            Use FP16 for SSM h_state\n"
         "  --kv-fp8              Use FP8 E4M3 KV cache (halves KV memory)\n"
         "  --kv-int8             Use INT8 KV cache with dp4a attention\n"
+        "  --kv-int4             Use INT4 KV cache (quarters KV memory)\n"
         "  --prefill-chunk-size <n> Max tokens per prefill chunk (0 = no chunking)\n"
         "  --decode-nvfp4        NVFP4 decode cache (additive: FP16 prefill + NVFP4 decode)\n"
         "  --decode-nvfp4-only   NVFP4 decode cache (replacement: saves VRAM, slower prefill)\n"
@@ -74,6 +75,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.kv_fp8 = true;
         } else if (std::strcmp(arg, "--kv-int8") == 0) {
             args.kv_int8 = true;
+        } else if (std::strcmp(arg, "--kv-int4") == 0) {
+            args.kv_int4 = true;
         } else if (std::strcmp(arg, "--prefill-chunk-size") == 0 && i + 1 < argc) {
             args.prefill_chunk_size = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--decode-nvfp4") == 0) {

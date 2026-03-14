@@ -146,8 +146,10 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
     // KV cache dtype: explicit overrides only (preset already set optimal value)
     bool kv_fp8 = overrides.value("kv_fp8", args.kv_fp8);
     bool kv_int8 = overrides.value("kv_int8", args.kv_int8);
+    bool kv_int4 = overrides.value("kv_int4", args.kv_int4);
     if (kv_fp8) config.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
     if (kv_int8) config.kv_cache_dtype = IMP_DTYPE_INT8;
+    if (kv_int4) config.kv_cache_dtype = IMP_DTYPE_INT4;
 
     int chunk = overrides.value("prefill_chunk_size", args.prefill_chunk_size);
     if (chunk > 0) config.prefill_chunk_size = chunk;
