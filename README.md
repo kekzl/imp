@@ -27,34 +27,17 @@ This is not a wrapper. imp implements its own GGUF parser, tokenizer, KV cache, 
 
 ## Performance
 
-**RTX 5090** (Blackwell, sm_120, 32 GB), CUDA 13.1, batch size 1, pp512/tg128, warmup + 5 averaged reps.
+**RTX 5090** (Blackwell, sm_120, 32 GB) &mdash; decode tok/s, same machine, back-to-back.
 
-Same models, same machine, same quantizations — measured back-to-back. Full results: **[BENCHMARKS.md](BENCHMARKS.md)**
+| Model | Quant | imp | llama.cpp | &Delta; |
+|---|---|---:|---:|---:|
+| Qwen3-8B | Q8_0 | **262** | 157 | **+67%** |
+| Qwen3-4B | Q8_0 | **393** | 244 | **+61%** |
+| Llama 3.1 8B | Q8_0 | **262** | 165 | **+59%** |
+| Gemma-3-12B | Q8_0 | **146** | 98 | **+49%** |
+| Qwen3-Coder-30B (MoE) | Q6_K | **293** | 251 | **+17%** |
 
-| Model | Quant | imp tg | llama.cpp tg | &Delta; | imp pp | llama.cpp pp | &Delta; |
-|---|---|---:|---:|---:|---:|---:|---:|
-| Qwen3-1.7B | Q8_0 | **477** | 446 | **+7%** | **39,506** | 38,464 | +3% |
-| Qwen3-4B | Q8_0 | **393** | 244 | **+61%** | **27,240** | 21,337 | **+28%** |
-| DeepSeek-R1-7B | Q8_0 | **283** | 176 | **+61%** | **21,386** | 15,867 | **+35%** |
-| Mistral 7B v0.3 | Q8_0 | **270** | 173 | **+56%** | **19,661** | 15,097 | **+30%** |
-| Llama 3.1 8B | Q8_0 | **262** | 165 | **+59%** | **18,611** | 15,152 | **+23%** |
-| Qwen3-8B | Q8_0 | **262** | 157 | **+67%** | **17,486** | 14,172 | **+23%** |
-| Phi-4-mini | Q8_0 | 264 | **277** | -5% | 20,949 | **27,259** | -23% |
-| Gemma-3-12B | Q8_0 | **146** | 98 | **+49%** | **11,262** | 9,269 | **+22%** |
-| DeepSeek-R1-14B | Q6_K | **126** | 110 | **+15%** | **10,264** | 6,367 | **+61%** |
-| Qwen3-Coder-30B (MoE) | Q6_K | **293** | 251 | **+17%** | 5,722 | **6,090** | -6% |
-| Mixtral 8x7B (MoE) | Q4_K_M | **64** | crash&sup2; | — | **7,390** | crash&sup2; | — |
-| Nemotron-30B (MoE) | Q6_K | **86** | crash&sup1; | — | — | crash&sup1; | — |
-
-<sub>tg = token generation (tok/s), pp = prompt processing (tok/s), higher is better. NVFP4 decode cache auto-enabled on sm_120. llama.cpp b5285 (<code>35bee03</code>), flash attention enabled. &sup1;Mamba2 hybrid not supported. &sup2;Fails to load on 32 GB.</sub>
-
-**Decode** — imp wins on 9 of 10 comparable models (+7% to +67%). NVFP4 weight caching halves memory bandwidth vs Q8_0 reads. Occupancy-aware GEMV dispatch, fused activation+GEMV+residual kernels, and prmt register-based FP4 dequant eliminate overhead.
-
-**Prefill** — imp leads on 8 of 10 comparable models (+3% to +61%). FP8&times;FP8 cuBLASLt weight cache gives 2x tensor core throughput on sm_120.
-
-**Mixtral 8x7B** — imp is the only engine that loads Mixtral Q4_K_M on 32 GB. llama.cpp fails to load the model.
-
-**Nemotron-H** — imp is the only engine that runs this Mamba2 + Attention + MoE hybrid architecture. llama.cpp crashes with an assertion failure.
+<sub>Wins on 9/10 comparable models. Full results with 12 models + prefill: **[BENCHMARKS.md](BENCHMARKS.md)**</sub>
 
 ## Quickstart (Docker)
 
