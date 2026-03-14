@@ -49,11 +49,14 @@ struct ServerRequest {
         token_cv.notify_one();
     }
 
-    // Pop next token event, blocking until available.
-    // Returns false if no more events (should not happen if used correctly).
-    bool pop_token(TokenEvent& out) {
+    // Pop next token event, blocking until available or timeout.
+    // Returns false on timeout (caller should check client disconnect).
+    bool pop_token(TokenEvent& out, int timeout_ms = 500) {
         std::unique_lock<std::mutex> lock(token_mutex);
-        token_cv.wait(lock, [this] { return !token_queue.empty(); });
+        if (!token_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                               [this] { return !token_queue.empty(); })) {
+            return false;  // timeout — caller should check is_writable
+        }
         out = token_queue.front();
         token_queue.pop_front();
         return true;

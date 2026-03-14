@@ -815,9 +815,18 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 };
 
                 for (;;) {
-                    // Read next token from the batching engine
+                    // Check client disconnect
+                    if (!sink.is_writable()) {
+                        server_req->cancel();
+                        finish = "cancelled";
+                        break;
+                    }
+
+                    // Read next token from the batching engine (with timeout)
                     TokenEvent evt;
-                    server_req->pop_token(evt);
+                    if (!server_req->pop_token(evt)) {
+                        continue;  // timeout — loop back to check is_writable
+                    }
 
                     if (evt.token_id < 0) {
                         // Finish event with no token
@@ -1795,8 +1804,17 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                 };
 
                 for (;;) {
+                    // Check client disconnect
+                    if (!sink.is_writable()) {
+                        server_req->cancel();
+                        finish = "cancelled";
+                        break;
+                    }
+
                     TokenEvent evt;
-                    server_req->pop_token(evt);
+                    if (!server_req->pop_token(evt)) {
+                        continue;  // timeout — loop back to check is_writable
+                    }
 
                     if (evt.token_id < 0) {
                         finish = evt.finish_reason ? evt.finish_reason : "stop";
