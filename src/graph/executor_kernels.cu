@@ -138,32 +138,42 @@ __global__ void rmsnorm_fp32_accum_to_fp16_kernel(
         int d_model,
         float eps,
         float weight_offset) {
-    __shared__ float warp_reduce[8];
+    __shared__ float warp_reduce[32];  // support up to 1024 threads (32 warps)
     __shared__ float s_inv_rms;
     __shared__ float s_row_max;
 
-    const int lane = threadIdx.x & 31;
-    const int warp_id = threadIdx.x >> 5;
+    const int tid = threadIdx.x;
+    const int lane = tid & 31;
+    const int warp_id = tid >> 5;
     const int n_warps = blockDim.x >> 5;
     const int row = blockIdx.x;
-    const int n_blocks = d_model >> 5;  // d_model / 32
 
-    const half* x_row = input + static_cast<int64_t>(row) * d_model;
-    float* accum_row = fp32_accum + static_cast<int64_t>(row) * d_model;
-    half* out_row = output + static_cast<int64_t>(row) * d_model;
+    // Vectorized: process 8 halfs (1 float4 = 2 half2) per iteration.
+    const int d_model_v = d_model / 8;  // number of float4-sized chunks
 
-    // Phase 1: Load input, cache in registers, compute sum of squares.
-    float x_cache[32];
+    const float4* x_row4 = reinterpret_cast<const float4*>(
+        input + static_cast<int64_t>(row) * d_model);
+    const float4* nw_row4 = reinterpret_cast<const float4*>(norm_w);
+    float4* accum_row4 = reinterpret_cast<float4*>(
+        fp32_accum + static_cast<int64_t>(row) * d_model);
+    float4* out_row4 = reinterpret_cast<float4*>(
+        output + static_cast<int64_t>(row) * d_model);
+
+    // Phase 1: Load input (half→float via float4 loads), compute sum of squares.
+    // Each thread handles d_model_v / blockDim.x chunks, each chunk = 8 halfs.
     float sum_sq = 0.0f;
-    int n_cached = 0;
-
-    for (int b = warp_id; b < n_blocks; b += n_warps) {
-        float v = __half2float(x_row[b * 32 + lane]);
-        x_cache[n_cached++] = v;
-        sum_sq += v * v;
+    for (int i = tid; i < d_model_v; i += blockDim.x) {
+        float4 h4 = x_row4[i];  // 8 halfs packed as float4
+        const half2* h2 = reinterpret_cast<const half2*>(&h4);
+        float2 f0 = __half22float2(h2[0]);
+        float2 f1 = __half22float2(h2[1]);
+        float2 f2 = __half22float2(h2[2]);
+        float2 f3 = __half22float2(h2[3]);
+        sum_sq += f0.x*f0.x + f0.y*f0.y + f1.x*f1.x + f1.y*f1.y
+                + f2.x*f2.x + f2.y*f2.y + f3.x*f3.x + f3.y*f3.y;
     }
 
-    // Warp reduce sum_sq
+    // Block reduce sum_sq
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1)
         sum_sq += __shfl_xor_sync(0xFFFFFFFF, sum_sq, off);
@@ -181,21 +191,52 @@ __global__ void rmsnorm_fp32_accum_to_fp16_kernel(
     __syncthreads();
     float inv_rms = s_inv_rms;
 
-    // Phase 2: Normalize, add to FP32 accumulator, find max_abs of accumulated row.
+    // Phase 2: Normalize, add to FP32 accumulator, find max_abs.
+    // Vectorized: read float4 from accum (4 floats), half2×4 from input/norm_w.
     float local_max = 0.0f;
-    int cache_idx = 0;
-    for (int b = warp_id; b < n_blocks; b += n_warps) {
-        int idx = b * 32 + lane;
-        float normed = x_cache[cache_idx] * inv_rms *
-                        (__half2float(norm_w[idx]) + weight_offset);
-        float acc_val = accum_row[idx] + normed;
-        accum_row[idx] = acc_val;
-        x_cache[cache_idx] = acc_val;  // reuse cache for Phase 3
-        local_max = fmaxf(local_max, fabsf(acc_val));
-        cache_idx++;
+    for (int i = tid; i < d_model_v; i += blockDim.x) {
+        // Re-read input (small enough to stay in L1/L2)
+        float4 h4 = x_row4[i];
+        const half2* h2 = reinterpret_cast<const half2*>(&h4);
+        float4 nw4 = nw_row4[i];
+        const half2* nw2 = reinterpret_cast<const half2*>(&nw4);
+
+        // Read FP32 accumulator (2 float4s = 8 floats)
+        float4 acc_lo = accum_row4[i * 2];
+        float4 acc_hi = accum_row4[i * 2 + 1];
+        float* acc_f = reinterpret_cast<float*>(&acc_lo);
+        float* acc_f_hi = reinterpret_cast<float*>(&acc_hi);
+
+        float2 f0 = __half22float2(h2[0]);
+        float2 f1 = __half22float2(h2[1]);
+        float2 f2 = __half22float2(h2[2]);
+        float2 f3 = __half22float2(h2[3]);
+        float2 w0 = __half22float2(nw2[0]);
+        float2 w1 = __half22float2(nw2[1]);
+        float2 w2 = __half22float2(nw2[2]);
+        float2 w3 = __half22float2(nw2[3]);
+
+        acc_f[0] += f0.x * inv_rms * (w0.x + weight_offset);
+        acc_f[1] += f0.y * inv_rms * (w0.y + weight_offset);
+        acc_f[2] += f1.x * inv_rms * (w1.x + weight_offset);
+        acc_f[3] += f1.y * inv_rms * (w1.y + weight_offset);
+        acc_f_hi[0] += f2.x * inv_rms * (w2.x + weight_offset);
+        acc_f_hi[1] += f2.y * inv_rms * (w2.y + weight_offset);
+        acc_f_hi[2] += f3.x * inv_rms * (w3.x + weight_offset);
+        acc_f_hi[3] += f3.y * inv_rms * (w3.y + weight_offset);
+
+        accum_row4[i * 2] = acc_lo;
+        accum_row4[i * 2 + 1] = acc_hi;
+
+        local_max = fmaxf(local_max, fmaxf(
+            fmaxf(fabsf(acc_f[0]), fabsf(acc_f[1])),
+            fmaxf(fabsf(acc_f[2]), fabsf(acc_f[3]))));
+        local_max = fmaxf(local_max, fmaxf(
+            fmaxf(fabsf(acc_f_hi[0]), fabsf(acc_f_hi[1])),
+            fmaxf(fabsf(acc_f_hi[2]), fabsf(acc_f_hi[3]))));
     }
 
-    // Warp reduce max_abs
+    // Block reduce max_abs
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1)
         local_max = fmaxf(local_max, __shfl_xor_sync(0xFFFFFFFF, local_max, off));
@@ -213,10 +254,20 @@ __global__ void rmsnorm_fp32_accum_to_fp16_kernel(
     __syncthreads();
     float inv_scale = (s_row_max > 65000.0f) ? (65000.0f / s_row_max) : 1.0f;
 
-    // Phase 3: Scale accumulated FP32 → FP16.
-    cache_idx = 0;
-    for (int b = warp_id; b < n_blocks; b += n_warps) {
-        out_row[b * 32 + lane] = __float2half(x_cache[cache_idx++] * inv_scale);
+    // Phase 3: Scale FP32 accum → FP16 output (vectorized float4 reads, half2×4 writes).
+    for (int i = tid; i < d_model_v; i += blockDim.x) {
+        float4 acc_lo = accum_row4[i * 2];
+        float4 acc_hi = accum_row4[i * 2 + 1];
+        float* af = reinterpret_cast<float*>(&acc_lo);
+        float* af_hi = reinterpret_cast<float*>(&acc_hi);
+
+        float4 out4;
+        half2* oh2 = reinterpret_cast<half2*>(&out4);
+        oh2[0] = __floats2half2_rn(af[0] * inv_scale, af[1] * inv_scale);
+        oh2[1] = __floats2half2_rn(af[2] * inv_scale, af[3] * inv_scale);
+        oh2[2] = __floats2half2_rn(af_hi[0] * inv_scale, af_hi[1] * inv_scale);
+        oh2[3] = __floats2half2_rn(af_hi[2] * inv_scale, af_hi[3] * inv_scale);
+        out_row4[i] = out4;
     }
 }
 
