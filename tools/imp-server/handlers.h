@@ -9,11 +9,14 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 using json = nlohmann::json;
 
@@ -53,7 +56,31 @@ struct ServerState {
     // allowing multiple concurrent requests to be processed together.
     std::unique_ptr<BatchingEngine> batching;
 
+    // Server limits
+    int max_concurrent = 64;
+    int request_timeout = 300;
+    int rate_limit = 0;  // requests per minute per IP (0=unlimited)
+
+    // Rate limiter state: IP → list of request timestamps
+    std::mutex rate_mutex;
+    std::unordered_map<std::string, std::vector<std::chrono::steady_clock::time_point>> rate_tracker;
+
     bool model_loaded() const { return ctx != nullptr; }
+
+    // Check rate limit for an IP. Returns true if allowed.
+    bool check_rate_limit(const std::string& ip) {
+        if (rate_limit <= 0) return true;
+        std::lock_guard<std::mutex> lock(rate_mutex);
+        auto now = std::chrono::steady_clock::now();
+        auto cutoff = now - std::chrono::seconds(60);
+        auto& stamps = rate_tracker[ip];
+        // Remove old entries
+        stamps.erase(std::remove_if(stamps.begin(), stamps.end(),
+                     [&](auto& t) { return t < cutoff; }), stamps.end());
+        if (static_cast<int>(stamps.size()) >= rate_limit) return false;
+        stamps.push_back(now);
+        return true;
+    }
 };
 
 // Graceful shutdown

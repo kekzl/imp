@@ -87,8 +87,11 @@ int main(int argc, char** argv) {
     // Limit request body size to 100 MiB (prevents DoS via large base64 images)
     svr.set_payload_max_length(100 * 1024 * 1024);
 
-    // Store API key in state
+    // Store API key and limits in state
     state.api_key = args.api_key;
+    state.max_concurrent = args.max_concurrent;
+    state.request_timeout = args.request_timeout;
+    state.rate_limit = args.rate_limit;
 
     // CORS headers + API key auth on every response
     svr.set_pre_routing_handler([&state](const httplib::Request& req, httplib::Response& res) {
@@ -96,9 +99,35 @@ int main(int argc, char** argv) {
         res.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
         res.set_header("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
-        // Skip auth for health checks and CORS preflight
-        if (req.path == "/health" || req.method == "OPTIONS")
+        // Skip auth/limits for health checks and CORS preflight
+        if (req.path == "/health" || req.path == "/metrics" || req.method == "OPTIONS")
             return httplib::Server::HandlerResponse::Unhandled;
+
+        // Rate limiting (per-IP, inference endpoints only)
+        if (state.rate_limit > 0 &&
+            (req.path == "/v1/chat/completions" || req.path == "/v1/completions")) {
+            std::string ip = req.get_header_value("X-Forwarded-For");
+            if (ip.empty()) ip = req.remote_addr;
+            if (!state.check_rate_limit(ip)) {
+                res.status = 429;
+                json err = {{"error", {{"message", "Rate limit exceeded"},
+                                        {"type", "rate_limit_error"}}}};
+                res.set_content(err.dump(), "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+        }
+
+        // Max concurrent requests
+        if (state.max_concurrent > 0 && state.batching &&
+            (req.path == "/v1/chat/completions" || req.path == "/v1/completions")) {
+            if (state.batching->queue_depth() >= state.max_concurrent) {
+                res.status = 429;
+                json err = {{"error", {{"message", "Server overloaded, too many concurrent requests"},
+                                        {"type", "rate_limit_error"}}}};
+                res.set_content(err.dump(), "application/json");
+                return httplib::Server::HandlerResponse::Handled;
+            }
+        }
 
         // Enforce API key if configured
         if (!state.api_key.empty()) {
@@ -178,6 +207,9 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, signal_handler);
 
     if (!state.api_key.empty()) printf("API key: enabled\n");
+    if (state.max_concurrent > 0) printf("Max concurrent: %d\n", state.max_concurrent);
+    if (state.request_timeout > 0) printf("Request timeout: %ds\n", state.request_timeout);
+    if (state.rate_limit > 0) printf("Rate limit: %d req/min per IP\n", state.rate_limit);
 
     printf("Server listening on http://%s:%d\n", args.host.c_str(), args.port);
     printf("Endpoints:\n");
