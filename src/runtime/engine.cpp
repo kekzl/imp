@@ -21,6 +21,12 @@
 namespace imp {
 
 Engine::~Engine() {
+    // Save prefix cache to disk before shutdown
+    if (kv_manager_ && !config_.prefix_cache_path.empty() &&
+        kv_manager_->prefix_caching_enabled()) {
+        kv_manager_->save_prefix_cache(config_.prefix_cache_path, stream_);
+    }
+
     gemm_cleanup();
     gemm_grouped_cleanup();
     if (async_graph_runner_.is_setup()) {
@@ -392,6 +398,15 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     if (config_.use_prefix_caching) {
         kv_manager_->set_prefix_caching_enabled(true);
         IMP_LOG_INFO("Prefix caching enabled");
+
+        // Restore prefix cache from disk if available
+        if (!config_.prefix_cache_path.empty()) {
+            int restored = kv_manager_->load_prefix_cache(config_.prefix_cache_path, stream_);
+            if (restored > 0) {
+                IMP_LOG_INFO("Restored %d prefix cache blocks from %s",
+                             restored, config_.prefix_cache_path.c_str());
+            }
+        }
     }
 
     // Pass KV layer mapping to executor for correct cache indexing

@@ -112,6 +112,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.request_timeout = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--rate-limit") == 0 && i + 1 < argc) {
             args.rate_limit = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--prefix-cache") == 0 && i + 1 < argc) {
+            args.prefix_cache_path = argv[++i];
         } else {
             fprintf(stderr, "Unknown argument: %s\n", arg);
             print_server_usage(argv[0]);

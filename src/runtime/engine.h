@@ -72,6 +72,7 @@ struct EngineConfig {
 
     // Prefix caching: reuse KV cache blocks for shared token prefixes
     bool use_prefix_caching = false;
+    std::string prefix_cache_path;  // path to persist prefix cache (empty = disabled)
 
     // Self-speculative decoding (layer-skip draft from same model)
     bool enable_self_speculative = false;

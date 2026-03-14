@@ -170,6 +170,10 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
 
     // Prefix caching: always on for server (reuses KV blocks across requests)
     config.use_prefix_caching = 1;
+    if (!args.prefix_cache_path.empty()) {
+        snprintf(config.prefix_cache_path, sizeof(config.prefix_cache_path),
+                 "%s", args.prefix_cache_path.c_str());
+    }
 
     return config;
 }
