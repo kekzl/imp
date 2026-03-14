@@ -1541,7 +1541,7 @@ bool Engine::step() {
                         });
                     decode_graph_runner_.execute(dec_stream);
                     cudaEventRecord(decode_done_, dec_stream);
-                    while (cudaEventQuery(decode_done_) == cudaErrorNotReady) {}
+                    cudaEventSynchronize(decode_done_);
                     tokens = {*h_sample_pinned_};
                 } else {
                     // Forward-only graph + sample outside
