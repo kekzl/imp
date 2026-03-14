@@ -28,6 +28,11 @@ struct ServerArgs {
     int self_spec_skip_n = -1;
     std::string preset;        // --preset: named model preset (e.g. qwen3-32b)
     std::string presets_file;  // --presets-file: custom presets.toml path
+
+    // Server limits
+    int max_concurrent = 64;   // --max-concurrent: max simultaneous requests (0=unlimited)
+    int request_timeout = 300; // --request-timeout: per-request timeout in seconds (0=unlimited)
+    int rate_limit = 0;        // --rate-limit: max requests per minute per IP (0=unlimited)
 };
 
 ServerArgs parse_server_args(int argc, char** argv);

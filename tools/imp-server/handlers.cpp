@@ -814,6 +814,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     return ok;
                 };
 
+                auto request_start = std::chrono::steady_clock::now();
                 for (;;) {
                     // Check client disconnect
                     if (!sink.is_writable()) {
@@ -822,10 +823,20 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                         break;
                     }
 
+                    // Check request timeout
+                    if (state.request_timeout > 0) {
+                        auto elapsed = std::chrono::steady_clock::now() - request_start;
+                        if (elapsed > std::chrono::seconds(state.request_timeout)) {
+                            server_req->cancel();
+                            finish = "length";
+                            break;
+                        }
+                    }
+
                     // Read next token from the batching engine (with timeout)
                     TokenEvent evt;
                     if (!server_req->pop_token(evt)) {
-                        continue;  // timeout — loop back to check is_writable
+                        continue;  // timeout — loop back to check disconnect/timeout
                     }
 
                     if (evt.token_id < 0) {
@@ -1396,10 +1407,23 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         bool ns_in_think = false;   // non-streaming think budget tracking
         int ns_think_tokens = 0;
 
+        auto ns_request_start = std::chrono::steady_clock::now();
         for (;;) {
+            // Check request timeout
+            if (state.request_timeout > 0) {
+                auto elapsed = std::chrono::steady_clock::now() - ns_request_start;
+                if (elapsed > std::chrono::seconds(state.request_timeout)) {
+                    server_req->cancel();
+                    finish = "length";
+                    break;
+                }
+            }
+
             // Read next token from the batching engine
             TokenEvent evt;
-            server_req->pop_token(evt);
+            if (!server_req->pop_token(evt)) {
+                continue;  // timeout — loop back to check request timeout
+            }
 
             if (evt.token_id < 0) {
                 finish = evt.finish_reason ? evt.finish_reason : "stop";
@@ -1803,6 +1827,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                     return sink.write(sse.data(), sse.size());
                 };
 
+                auto request_start_c = std::chrono::steady_clock::now();
                 for (;;) {
                     // Check client disconnect
                     if (!sink.is_writable()) {
@@ -1811,9 +1836,19 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                         break;
                     }
 
+                    // Check request timeout
+                    if (state.request_timeout > 0) {
+                        auto elapsed = std::chrono::steady_clock::now() - request_start_c;
+                        if (elapsed > std::chrono::seconds(state.request_timeout)) {
+                            server_req->cancel();
+                            finish = "length";
+                            break;
+                        }
+                    }
+
                     TokenEvent evt;
                     if (!server_req->pop_token(evt)) {
-                        continue;  // timeout — loop back to check is_writable
+                        continue;
                     }
 
                     if (evt.token_id < 0) {
@@ -1970,9 +2005,21 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
         const char* finish = nullptr;
         std::string output_text;
 
+        auto ns_comp_start = std::chrono::steady_clock::now();
         for (;;) {
+            if (state.request_timeout > 0) {
+                auto elapsed = std::chrono::steady_clock::now() - ns_comp_start;
+                if (elapsed > std::chrono::seconds(state.request_timeout)) {
+                    server_req->cancel();
+                    finish = "length";
+                    break;
+                }
+            }
+
             TokenEvent evt;
-            server_req->pop_token(evt);
+            if (!server_req->pop_token(evt)) {
+                continue;
+            }
 
             if (evt.token_id < 0) {
                 finish = evt.finish_reason ? evt.finish_reason : "stop";

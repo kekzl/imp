@@ -36,6 +36,9 @@ void print_server_usage(const char* prog) {
         "  --preset <name|none>  Override auto-detected preset, or 'none' to disable\n"
         "                        Use --preset list to show all available presets\n"
         "  --presets-file <path> Custom presets.toml path\n"
+        "  --max-concurrent <n>  Max simultaneous requests (default: 64, 0=unlimited)\n"
+        "  --request-timeout <s> Per-request timeout in seconds (default: 300, 0=unlimited)\n"
+        "  --rate-limit <n>      Max requests/minute per IP (default: 0=unlimited)\n"
         "  --help                Show this help message\n",
         prog);
 }
@@ -103,6 +106,12 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.preset = argv[++i];
         } else if (std::strcmp(arg, "--presets-file") == 0 && i + 1 < argc) {
             args.presets_file = argv[++i];
+        } else if (std::strcmp(arg, "--max-concurrent") == 0 && i + 1 < argc) {
+            args.max_concurrent = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--request-timeout") == 0 && i + 1 < argc) {
+            args.request_timeout = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--rate-limit") == 0 && i + 1 < argc) {
+            args.rate_limit = std::atoi(argv[++i]);
         } else {
             fprintf(stderr, "Unknown argument: %s\n", arg);
             print_server_usage(argv[0]);
