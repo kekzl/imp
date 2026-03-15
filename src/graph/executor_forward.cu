@@ -655,7 +655,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         Tensor v_c(cache->v_ptr(kv_layer, 0), cache_dtype, 4, cs, true);
 
         if (cache_dtype == DType::INT4) {
-            // INT4 paged attention with per-head scales and INT4 unpack
+            // INT4 paged attention with per-head scales and INT4 unpack (Split-K enabled)
+            paged_attention_set_splitk_scratch(splitk_scratch_, splitk_scratch_size_);
             paged_attention_decode_int4(q4, k_c, v_c, o4,
                                         static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
                                         static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
