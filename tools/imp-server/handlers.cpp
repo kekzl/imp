@@ -771,6 +771,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
                 int n_output_tokens = 0;
                 const char* finish = nullptr;
+                double ttft_ms = 0.0;  // Time to first token
 
                 // Buffer for incomplete UTF-8 sequences across token boundaries
                 std::string utf8_buf;
@@ -881,6 +882,10 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     }
 
                     n_output_tokens++;
+                    if (n_output_tokens == 1) {
+                        auto t_first = std::chrono::high_resolution_clock::now();
+                        ttft_ms = std::chrono::duration<double, std::milli>(t_first - t_start).count();
+                    }
                     std::string piece = state.tok->decode_token(token);
 
                     // Reasoning content extraction (DeepSeek format)
@@ -1402,15 +1407,18 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 sink.write(done.data(), done.size());
                 sink.done();
 
-                // Log request
+                // Log request with TTFT and cache hit info
                 auto t_end = std::chrono::high_resolution_clock::now();
                 double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-                fprintf(stderr, "[%s] %d prompt + %d completion tokens, %.1f ms\n",
-                        comp_id.c_str(), n_prompt_tokens, n_output_tokens, ms);
+                int cached = (active_req && active_req->cached_tokens > 0) ? active_req->cached_tokens : 0;
+                fprintf(stderr, "[%s] %d prompt + %d completion tokens, %.1f ms (ttft=%.1f ms, cached=%d)\n",
+                        comp_id.c_str(), n_prompt_tokens, n_output_tokens, ms, ttft_ms, cached);
                 state.metrics.requests_total++;
                 state.metrics.tokens_prompt_total += n_prompt_tokens;
                 state.metrics.tokens_completion_total += n_output_tokens;
+                state.metrics.tokens_cached_total += cached;
                 state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
+                state.metrics.last_ttft_ms = static_cast<int64_t>(ttft_ms);
 
                 return true;
             }
@@ -2341,6 +2349,12 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res,
     out += "# HELP imp_model_loads_total Total model loads\n";
     out += "# TYPE imp_model_loads_total counter\n";
     out += "imp_model_loads_total " + std::to_string(m.model_loads_total.load()) + "\n";
+    out += "# HELP imp_tokens_cached_total Total prompt tokens served from prefix cache\n";
+    out += "# TYPE imp_tokens_cached_total counter\n";
+    out += "imp_tokens_cached_total " + std::to_string(m.tokens_cached_total.load()) + "\n";
+    out += "# HELP imp_last_ttft_ms Time to first token of last request in milliseconds\n";
+    out += "# TYPE imp_last_ttft_ms gauge\n";
+    out += "imp_last_ttft_ms " + std::to_string(m.last_ttft_ms.load()) + "\n";
     out += "# HELP imp_model_loaded Whether a model is currently loaded\n";
     out += "# TYPE imp_model_loaded gauge\n";
     out += "imp_model_loaded " + std::string(state.model_loaded() ? "1" : "0") + "\n";
