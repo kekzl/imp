@@ -35,10 +35,17 @@ int64_t unix_timestamp() {
 
 void handle_health(const httplib::Request& /*req*/, httplib::Response& res,
                    ServerState& state) {
+    bool loaded;
+    int queue = 0;
+    {
+        std::lock_guard<std::timed_mutex> lock(state.mtx);
+        loaded = state.model_loaded();
+        if (state.batching) queue = state.batching->queue_depth();
+    }
     json body = {
         {"status", "ok"},
-        {"model_loaded", state.model_loaded()},
-        {"queue_depth", state.batching ? state.batching->queue_depth() : 0}
+        {"model_loaded", loaded},
+        {"queue_depth", queue}
     };
     res.set_content(body.dump(), "application/json");
 }
@@ -74,8 +81,19 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res,
                    ServerState& state) {
     json data = json::array();
 
+    // Snapshot state fields under lock
+    std::string models_dir;
+    bool loaded;
+    std::string model_name;
+    {
+        std::lock_guard<std::timed_mutex> lock(state.mtx);
+        models_dir = state.models_dir;
+        loaded = state.model_loaded();
+        model_name = state.model_name;
+    }
+
     // Scan models directory for all available .gguf files
-    auto available = scan_gguf_files(state.models_dir);
+    auto available = scan_gguf_files(models_dir);
     if (!available.empty()) {
         for (const auto& [name, path] : available) {
             data.push_back({
@@ -85,10 +103,10 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res,
                 {"path", path}
             });
         }
-    } else if (state.model_loaded()) {
+    } else if (loaded) {
         // Fallback: only show loaded model if no models_dir configured
         data.push_back({
-            {"id", state.model_name},
+            {"id", model_name},
             {"object", "model"},
             {"owned_by", "imp"}
         });
@@ -375,8 +393,14 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     // Convert JSON messages to ChatMessage vector, extracting image data if present
     std::vector<imp::ChatMessage> chat_msgs;
     std::vector<uint8_t> image_data;  // decoded image bytes (if any)
-    imp::ChatTemplateFamily tpl_family = state.have_template
-        ? state.chat_tpl.family() : imp::ChatTemplateFamily::CHATML;
+
+    // Snapshot template family (may be re-snapshotted under lock below)
+    imp::ChatTemplateFamily tpl_family;
+    {
+        std::lock_guard<std::timed_mutex> lock(state.mtx);
+        tpl_family = state.have_template
+            ? state.chat_tpl.family() : imp::ChatTemplateFamily::CHATML;
+    }
 
     for (const auto& msg : messages) {
         std::string role = msg.value("role", "user");
@@ -450,8 +474,80 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         }
     }
 
+    // Log request received (structured)
+    std::string req_id = make_completion_id(state);
+    fprintf(stderr, "[%s] chat/completions: prompt_msgs=%zu stream=%s max_tokens=%d temp=%.2f\n",
+            req_id.c_str(), messages.size(), stream ? "true" : "false", max_tokens, temperature);
+
+    // Auto-load model if request specifies a different one (requires exclusive lock)
+    std::string requested_model = body.value("model", "");
+    if (!requested_model.empty()) {
+        std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(5));
+        if (!lock.owns_lock()) {
+            res.status = 503;
+            json err = {{"error", {{"message", "Server is busy loading a model. Please retry."},
+                                    {"type", "server_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+        if (requested_model != state.model_name) {
+            std::string path = find_model_path(state, requested_model);
+            if (!path.empty()) {
+                fprintf(stderr, "[%s] auto-loading model: %s\n", req_id.c_str(), requested_model.c_str());
+                fflush(stderr);
+                std::string error = load_model_into_state(state, path);
+                if (!error.empty()) {
+                    res.status = 500;
+                    json err = {{"error", {{"message", error}, {"type", "server_error"}}}};
+                    res.set_content(err.dump(), "application/json");
+                    return;
+                }
+                fprintf(stderr, "[%s] model loaded: %s\n", req_id.c_str(), state.model_name.c_str());
+                fflush(stderr);
+            }
+        }
+    }
+
+    // Snapshot all state fields needed for request processing under lock.
+    // This protects against concurrent model load/unload invalidating pointers.
+    imp::Tokenizer* snap_tok;
+    imp::ChatTemplate snap_chat_tpl;
+    bool snap_have_template;
+    std::string snap_model_name;
+    bool snap_is_think_model;
+    int32_t snap_think_start_id;
+    int32_t snap_think_end_id;
+    int snap_max_seq_len;
+    bool snap_model_loaded;
+    bool snap_has_vision = false;
+    std::vector<int32_t> snap_stop_token_ids;
+    {
+        std::lock_guard<std::timed_mutex> lock(state.mtx);
+        snap_model_loaded = state.model_loaded();
+        if (!snap_model_loaded) {
+            res.status = 503;
+            json err = {{"error", {{"message", "No model loaded. Use POST /v1/models to load one."},
+                                    {"type", "server_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+        snap_tok = state.tok;
+        snap_chat_tpl = state.chat_tpl;
+        snap_have_template = state.have_template;
+        snap_model_name = state.model_name;
+        snap_is_think_model = state.is_think_model;
+        snap_think_start_id = state.think_start_id;
+        snap_think_end_id = state.think_end_id;
+        snap_max_seq_len = state.max_seq_len;
+        tpl_family = snap_have_template
+            ? snap_chat_tpl.family() : imp::ChatTemplateFamily::CHATML;
+        if (snap_have_template)
+            snap_stop_token_ids = snap_chat_tpl.stop_token_ids();
+        snap_has_vision = !image_data.empty() && state.ctx && state.ctx->engine->has_vision();
+    }
+
     // Inject tool definitions into system message
-    if (has_tools && state.have_template) {
+    if (has_tools && snap_have_template) {
         std::string tool_prompt = build_tool_prompt(tpl_family, tools, tool_choice);
         if (!tool_prompt.empty()) {
             // Find or create system message
@@ -464,7 +560,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 }
             }
             if (!found_system) {
-                std::string sys = state.chat_tpl.default_system_message();
+                std::string sys = snap_chat_tpl.default_system_message();
                 if (sys.empty()) sys = "You are a helpful assistant.";
                 sys += tool_prompt;
                 chat_msgs.insert(chat_msgs.begin(), {"system", sys});
@@ -472,49 +568,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         }
     }
 
-    // Log request received (structured)
-    std::string req_id = make_completion_id(state);
-    fprintf(stderr, "[%s] chat/completions: prompt_msgs=%zu stream=%s max_tokens=%d temp=%.2f\n",
-            req_id.c_str(), messages.size(), stream ? "true" : "false", max_tokens, temperature);
-
-    // Auto-load model if request specifies a different one (requires exclusive lock)
-    std::string requested_model = body.value("model", "");
-    if (!requested_model.empty() && requested_model != state.model_name) {
-        std::string path = find_model_path(state, requested_model);
-        if (!path.empty()) {
-            std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(5));
-            if (!lock.owns_lock()) {
-                res.status = 503;
-                json err = {{"error", {{"message", "Server is busy loading a model. Please retry."},
-                                        {"type", "server_error"}}}};
-                res.set_content(err.dump(), "application/json");
-                return;
-            }
-            fprintf(stderr, "[%s] auto-loading model: %s\n", req_id.c_str(), requested_model.c_str());
-            fflush(stderr);
-            std::string error = load_model_into_state(state, path);
-            if (!error.empty()) {
-                res.status = 500;
-                json err = {{"error", {{"message", error}, {"type", "server_error"}}}};
-                res.set_content(err.dump(), "application/json");
-                return;
-            }
-            fprintf(stderr, "[%s] model loaded: %s\n", req_id.c_str(), state.model_name.c_str());
-            fflush(stderr);
-        }
-    }
-
-    // Check if a model is loaded
-    if (!state.model_loaded()) {
-        res.status = 503;
-        json err = {{"error", {{"message", "No model loaded. Use POST /v1/models to load one."},
-                                {"type", "server_error"}}}};
-        res.set_content(err.dump(), "application/json");
-        return;
-    }
-
     // Handle vision: requires exclusive lock since it modifies engine state
-    bool has_vision_request = !image_data.empty() && state.ctx->engine->has_vision();
+    bool has_vision_request = snap_has_vision;
     if (has_vision_request) {
         std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(5));
         if (!lock.owns_lock()) {
@@ -540,45 +595,48 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
     // Tokenize with chat template (with image tokens if vision is active)
     std::vector<int32_t> tokens;
-    if (state.have_template && has_vision_request) {
-        tokens = state.chat_tpl.apply_with_image(*state.tok, chat_msgs, 256);
-    } else if (state.have_template) {
-        tokens = state.chat_tpl.apply(*state.tok, chat_msgs);
+    if (snap_have_template && has_vision_request) {
+        tokens = snap_chat_tpl.apply_with_image(*snap_tok, chat_msgs, 256);
+    } else if (snap_have_template) {
+        tokens = snap_chat_tpl.apply(*snap_tok, chat_msgs);
     } else {
         // Concatenate all message content as raw text
         std::string raw;
         for (const auto& m : chat_msgs) raw += m.content + "\n";
-        tokens = state.tok->encode(raw);
+        tokens = snap_tok->encode(raw);
     }
 
     // Optionally append <think> token to trigger reasoning mode.
     bool enable_thinking = false;
-    if (state.is_think_model && state.default_args.reasoning_format == "deepseek" &&
-        state.think_start_id >= 0) {
+    if (snap_is_think_model && state.default_args.reasoning_format == "deepseek" &&
+        snap_think_start_id >= 0) {
         if (body.contains("enable_thinking")) {
             enable_thinking = body.value("enable_thinking", false);
         }
         if (enable_thinking) {
-            tokens.push_back(state.think_start_id);
+            tokens.push_back(snap_think_start_id);
         }
     }
 
     int n_prompt_tokens = static_cast<int>(tokens.size());
 
     // Validate prompt length against context window
-    if (n_prompt_tokens >= state.max_seq_len) {
-        if (has_vision_request && state.batching) state.batching->start(state.ctx);
+    if (n_prompt_tokens >= snap_max_seq_len) {
+        if (has_vision_request) {
+            std::lock_guard<std::timed_mutex> lock(state.mtx);
+            if (state.batching) state.batching->start(state.ctx);
+        }
         res.status = 400;
         json error = {{"error", {{"message", "Prompt exceeds context window (" +
                                               std::to_string(n_prompt_tokens) + " tokens >= " +
-                                              std::to_string(state.max_seq_len) + " max)"},
+                                              std::to_string(snap_max_seq_len) + " max)"},
                                   {"type", "invalid_request_error"}}}};
         res.set_content(error.dump(), "application/json");
         return;
     }
 
     // Clamp max_tokens to remaining context window
-    int remaining = state.max_seq_len - n_prompt_tokens;
+    int remaining = snap_max_seq_len - n_prompt_tokens;
     if (max_tokens > remaining) max_tokens = remaining;
 
     // Start timing
@@ -685,10 +743,10 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 err = imp_decode_step(state.ctx, &params, &token);
                 if (err != IMP_SUCCESS) break;
             }
-            if (token == state.tok->eos_id()) break;
-            if (state.have_template) {
+            if (token == snap_tok->eos_id()) break;
+            if (snap_have_template) {
                 bool is_stop = false;
-                for (int32_t stop_id : state.chat_tpl.stop_token_ids()) {
+                for (int32_t stop_id : snap_stop_token_ids) {
                     if (token == stop_id) { is_stop = true; break; }
                 }
                 if (is_stop) break;
@@ -703,7 +761,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         auto t_end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
         int n_output_tokens = static_cast<int>(output_ids.size());
-        std::string content = state.tok->decode(output_ids);
+        std::string content = snap_tok->decode(output_ids);
 
         fprintf(stderr, "[%s] vision: %d prompt + %d completion tokens, %.1f ms\n",
                 req_id.c_str(), n_prompt_tokens, n_output_tokens, ms);
@@ -716,7 +774,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             {"id", req_id},
             {"object", "chat.completion"},
             {"created", unix_timestamp()},
-            {"model", state.model_name},
+            {"model", snap_model_name},
             {"choices", json::array({{
                 {"index", 0},
                 {"message", {{"role", "assistant"}, {"content", content}}},
@@ -733,14 +791,17 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     }
 
     // Submit to batching engine for continuous batching
-    if (!state.batching || !state.batching->is_running()) {
-        res.status = 503;
-        json err = {{"error", {{"message", "Inference engine not ready. Please retry."},
-                                {"type", "server_error"}}}};
-        res.set_content(err.dump(), "application/json");
-        return;
+    {
+        std::lock_guard<std::timed_mutex> lock(state.mtx);
+        if (!state.batching || !state.batching->is_running()) {
+            res.status = 503;
+            json err = {{"error", {{"message", "Inference engine not ready. Please retry."},
+                                    {"type", "server_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+        state.batching->submit(server_req);
     }
-    state.batching->submit(server_req);
 
     std::string comp_id = req_id;
     int64_t created = unix_timestamp();
@@ -754,18 +815,20 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             "text/event-stream",
             [&state, server_req, comp_id, created, max_tokens, n_prompt_tokens, t_start,
              stop_sequences, max_stop_len, req_logprobs, include_usage,
-             enable_thinking, has_tools, tpl_family, think_budget](
+             enable_thinking, has_tools, tpl_family, think_budget,
+             snap_tok, snap_have_template, snap_model_name, snap_is_think_model,
+             snap_think_start_id, snap_think_end_id, snap_stop_token_ids](
                 size_t /*offset*/, httplib::DataSink& sink) -> bool {
 
                 // Active request ref for logprobs access
                 auto active_req = server_req->request;
 
                 // Pre-build SSE envelope templates for fast content/reasoning emission
-                SSEChunkWriter sse_writer(comp_id, created, state.model_name);
+                SSEChunkWriter sse_writer(comp_id, created, snap_model_name);
 
                 // Send initial chunk with role
                 json role_delta = {{"role", "assistant"}};
-                std::string chunk = sse_chunk(comp_id, created, state.model_name,
+                std::string chunk = sse_chunk(comp_id, created, snap_model_name,
                                               role_delta, nullptr);
                 sink.write(chunk.data(), chunk.size());
 
@@ -796,7 +859,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 // Reasoning content extraction (DeepSeek format)
                 enum class ThinkPhase { SCAN, REASONING, CONTENT };
                 bool use_reasoning = (state.default_args.reasoning_format == "deepseek"
-                                      && state.is_think_model);
+                                      && snap_is_think_model);
                 ThinkPhase think_phase;
                 if (enable_thinking) {
                     think_phase = ThinkPhase::REASONING;  // <think> in prefill -> start reasoning
@@ -863,13 +926,13 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     if (evt.is_last) {
                         // The engine marked this as the last token.
                         // Don't emit EOS/stop tokens — they're structural, not content.
-                        if (token == state.tok->eos_id()) {
+                        if (token == snap_tok->eos_id()) {
                             finish = evt.finish_reason ? evt.finish_reason : "stop";
                             break;
                         }
                         bool is_stop = false;
-                        if (state.have_template) {
-                            for (int32_t stop_id : state.chat_tpl.stop_token_ids()) {
+                        if (snap_have_template) {
+                            for (int32_t stop_id : snap_stop_token_ids) {
                                 if (token == stop_id) { is_stop = true; break; }
                             }
                         }
@@ -886,11 +949,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                         auto t_first = std::chrono::high_resolution_clock::now();
                         ttft_ms = std::chrono::duration<double, std::milli>(t_first - t_start).count();
                     }
-                    std::string piece = state.tok->decode_token(token);
+                    std::string piece = snap_tok->decode_token(token);
 
                     // Reasoning content extraction (DeepSeek format)
                     if (think_phase == ThinkPhase::SCAN) {
-                        if (token == state.think_start_id) {
+                        if (token == snap_think_start_id) {
                             think_phase = ThinkPhase::REASONING;
                             n_reasoning_tokens++;
                             continue;
@@ -925,20 +988,20 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                         // Think budget: cap reasoning at configured fraction of max_tokens
                         int think_limit = (think_budget > 0.0f)
                             ? static_cast<int>(max_tokens * think_budget) : max_tokens;
-                        if (state.think_end_id >= 0 &&
+                        if (snap_think_end_id >= 0 &&
                             n_reasoning_tokens >= think_limit &&
-                            token != state.think_end_id) {
-                            token = state.think_end_id;
-                            piece = state.tok->decode_token(token);
+                            token != snap_think_end_id) {
+                            token = snap_think_end_id;
+                            piece = snap_tok->decode_token(token);
                         }
-                        if (token == state.think_end_id) {
+                        if (token == snap_think_end_id) {
                             if (!emit_reasoning(reasoning_utf8_buf)) return false;
                             reasoning_utf8_buf.clear();
                             think_phase = ThinkPhase::CONTENT;
                             continue;
                         }
                         // Skip duplicate <think> tokens while already reasoning
-                        if (token == state.think_start_id) continue;
+                        if (token == snap_think_start_id) continue;
                         reasoning_utf8_buf += piece;
                         // Strip <think> text that appears via multi-token encoding
                         for (;;) {
@@ -972,12 +1035,12 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
                     // CONTENT phase: handle stray think tokens from confused models
                     if (use_reasoning) {
-                        if (token == state.think_start_id) {
+                        if (token == snap_think_start_id) {
                             think_phase = ThinkPhase::REASONING;
                             n_reasoning_tokens++;
                             continue;
                         }
-                        if (token == state.think_end_id) {
+                        if (token == snap_think_end_id) {
                             n_reasoning_tokens++;
                             continue;
                         }
@@ -1035,7 +1098,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                          {"function", {{"name", tc.name}, {"arguments", ""}}}}
                                     })}};
                                     std::string sse = sse_chunk(comp_id, created,
-                                        state.model_name, name_delta, nullptr);
+                                        snap_model_name, name_delta, nullptr);
                                     sink.write(sse.data(), sse.size());
 
                                     // Emit arguments chunk
@@ -1044,7 +1107,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                          {"function", {{"arguments", tc.arguments}}}}
                                     })}};
                                     sse = sse_chunk(comp_id, created,
-                                        state.model_name, args_delta, nullptr);
+                                        snap_model_name, args_delta, nullptr);
                                     sink.write(sse.data(), sse.size());
 
                                     stream_tool_calls.push_back(std::move(tc));
@@ -1088,7 +1151,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                     if (!before.empty()) {
                                         json cd = {{"content", before}};
                                         std::string sse = sse_chunk(comp_id, created,
-                                            state.model_name, cd, nullptr);
+                                            snap_model_name, cd, nullptr);
                                         sink.write(sse.data(), sse.size());
                                     }
                                     tool_body_buf = tool_tag_buf.substr(pos + 11);
@@ -1142,7 +1205,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                         if (!before.empty()) {
                                             json cd = {{"content", before}};
                                             std::string sse = sse_chunk(comp_id, created,
-                                                state.model_name, cd, nullptr);
+                                                snap_model_name, cd, nullptr);
                                             sink.write(sse.data(), sse.size());
                                         }
                                         tool_fn_name = tool_tag_buf.substr(fn_pos + 10,
@@ -1273,7 +1336,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                     })}};
                                 }
                                 std::string chunk = sse_chunk(comp_id, created,
-                                    state.model_name, content_delta, nullptr, lp_chunk);
+                                    snap_model_name, content_delta, nullptr, lp_chunk);
                                 if (!sink.write(chunk.data(), chunk.size()))
                                     return false;
                             } else {
@@ -1368,7 +1431,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
                 // Send final chunk with finish_reason
                 json empty_delta = json::object();
-                std::string final_chunk = sse_chunk(comp_id, created, state.model_name,
+                std::string final_chunk = sse_chunk(comp_id, created, snap_model_name,
                                                     empty_delta, finish);
                 sink.write(final_chunk.data(), final_chunk.size());
 
@@ -1394,7 +1457,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                         {"id", comp_id},
                         {"object", "chat.completion.chunk"},
                         {"created", created},
-                        {"model", state.model_name},
+                        {"model", snap_model_name},
                         {"choices", json::array()},
                         {"usage", usage}
                     };
@@ -1459,13 +1522,13 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
             // Check stop conditions
             if (evt.is_last) {
-                if (token == state.tok->eos_id()) {
+                if (token == snap_tok->eos_id()) {
                     finish = evt.finish_reason ? evt.finish_reason : "stop";
                     break;
                 }
                 bool is_stop = false;
-                if (state.have_template) {
-                    for (int32_t stop_id : state.chat_tpl.stop_token_ids()) {
+                if (snap_have_template) {
+                    for (int32_t stop_id : snap_stop_token_ids) {
                         if (token == stop_id) { is_stop = true; break; }
                     }
                 }
@@ -1477,18 +1540,18 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             }
 
             // Think budget: cap reasoning at configured fraction of max_tokens (non-streaming)
-            if (state.is_think_model && state.think_end_id >= 0 &&
+            if (snap_is_think_model && snap_think_end_id >= 0 &&
                 state.default_args.reasoning_format == "deepseek" &&
                 think_budget > 0.0f) {
-                if (token == state.think_start_id) {
+                if (token == snap_think_start_id) {
                     ns_in_think = true;
-                } else if (token == state.think_end_id) {
+                } else if (token == snap_think_end_id) {
                     ns_in_think = false;
                 } else if (ns_in_think) {
                     ns_think_tokens++;
                     int think_limit = static_cast<int>(max_tokens * think_budget);
                     if (ns_think_tokens >= think_limit) {
-                        token = state.think_end_id;
+                        token = snap_think_end_id;
                         ns_in_think = false;
                     }
                 }
@@ -1498,7 +1561,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
             // Check text-level stop sequences
             if (!stop_sequences.empty()) {
-                output_text += state.tok->decode_token(token);
+                output_text += snap_tok->decode_token(token);
                 bool stop_found = false;
                 for (const auto& stop : stop_sequences) {
                     auto pos = output_text.find(stop);
@@ -1522,16 +1585,16 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
         int n_output_tokens = static_cast<int>(output_ids.size());
         std::string content = !stop_sequences.empty()
-            ? output_text : state.tok->decode(output_ids);
+            ? output_text : snap_tok->decode(output_ids);
 
         // Extract reasoning content (DeepSeek format) or strip think blocks
         std::string reasoning_content;
-        if (state.is_think_model &&
+        if (snap_is_think_model &&
             state.default_args.reasoning_format == "deepseek") {
             auto [reasoning, cleaned] = extract_reasoning(content);
             reasoning_content = reasoning;
             content = cleaned;
-        } else if (state.is_think_model &&
+        } else if (snap_is_think_model &&
                    state.default_args.reasoning_format != "none") {
             strip_think_block(content);
         }
@@ -1619,7 +1682,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         if (!reasoning_content.empty()) {
             // Use actual tracked count if available, otherwise estimate
             int n_reasoning_tokens = (ns_think_tokens > 0) ? ns_think_tokens + 2
-                : static_cast<int>(state.tok->encode(reasoning_content).size()) + 2;
+                : static_cast<int>(snap_tok->encode(reasoning_content).size()) + 2;
             usage["completion_tokens_details"] = {
                 {"reasoning_tokens", n_reasoning_tokens}
             };
@@ -1629,7 +1692,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             {"id", comp_id},
             {"object", "chat.completion"},
             {"created", created},
-            {"model", state.model_name},
+            {"model", snap_model_name},
             {"choices", json::array({choice})},
             {"usage", usage}
         };
@@ -1719,54 +1782,68 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
 
     // Auto-load model if request specifies a different one (requires exclusive lock)
     std::string requested_model = body.value("model", "");
-    if (!requested_model.empty() && requested_model != state.model_name) {
-        std::string path = find_model_path(state, requested_model);
-        if (!path.empty()) {
-            std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(5));
-            if (!lock.owns_lock()) {
-                res.status = 503;
-                json err = {{"error", {{"message", "Server is busy loading a model. Please retry."},
-                                        {"type", "server_error"}}}};
-                res.set_content(err.dump(), "application/json");
-                return;
+    if (!requested_model.empty()) {
+        std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(5));
+        if (!lock.owns_lock()) {
+            res.status = 503;
+            json err = {{"error", {{"message", "Server is busy loading a model. Please retry."},
+                                    {"type", "server_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+        if (requested_model != state.model_name) {
+            std::string path = find_model_path(state, requested_model);
+            if (!path.empty()) {
+                fprintf(stderr, "[%s] auto-loading model: %s\n", req_id.c_str(), requested_model.c_str());
+                fflush(stderr);
+                std::string error = load_model_into_state(state, path);
+                if (!error.empty()) {
+                    res.status = 500;
+                    json err = {{"error", {{"message", error}, {"type", "server_error"}}}};
+                    res.set_content(err.dump(), "application/json");
+                    return;
+                }
+                fprintf(stderr, "[%s] model loaded: %s\n", req_id.c_str(), state.model_name.c_str());
+                fflush(stderr);
             }
-            fprintf(stderr, "[%s] auto-loading model: %s\n", req_id.c_str(), requested_model.c_str());
-            fflush(stderr);
-            std::string error = load_model_into_state(state, path);
-            if (!error.empty()) {
-                res.status = 500;
-                json err = {{"error", {{"message", error}, {"type", "server_error"}}}};
-                res.set_content(err.dump(), "application/json");
-                return;
-            }
-            fprintf(stderr, "[%s] model loaded: %s\n", req_id.c_str(), state.model_name.c_str());
-            fflush(stderr);
         }
     }
 
-    if (!state.model_loaded()) {
-        res.status = 503;
-        json err = {{"error", {{"message", "No model loaded. Use POST /v1/models to load one."},
-                                {"type", "server_error"}}}};
-        res.set_content(err.dump(), "application/json");
-        return;
+    // Snapshot state fields under lock for thread-safe access
+    imp::Tokenizer* snap_tok;
+    std::string snap_model_name;
+    bool snap_is_think_model;
+    int snap_max_seq_len;
+    {
+        std::lock_guard<std::timed_mutex> lock(state.mtx);
+        if (!state.model_loaded()) {
+            res.status = 503;
+            json err = {{"error", {{"message", "No model loaded. Use POST /v1/models to load one."},
+                                    {"type", "server_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+        snap_tok = state.tok;
+        snap_model_name = state.model_name;
+        snap_is_think_model = state.is_think_model;
+        snap_max_seq_len = state.max_seq_len;
     }
 
     // Tokenize raw prompt (no chat template)
-    std::vector<int32_t> tokens = state.tok->encode(prompt);
+    std::vector<int32_t> tokens = snap_tok->encode(prompt);
     int n_prompt_tokens = static_cast<int>(tokens.size());
 
-    if (n_prompt_tokens >= state.max_seq_len) {
+    if (n_prompt_tokens >= snap_max_seq_len) {
         res.status = 400;
         json error = {{"error", {{"message", "Prompt exceeds context window (" +
                                               std::to_string(n_prompt_tokens) + " tokens >= " +
-                                              std::to_string(state.max_seq_len) + " max)"},
+                                              std::to_string(snap_max_seq_len) + " max)"},
                                   {"type", "invalid_request_error"}}}};
         res.set_content(error.dump(), "application/json");
         return;
     }
 
-    int remaining = state.max_seq_len - n_prompt_tokens;
+    int remaining = snap_max_seq_len - n_prompt_tokens;
     if (max_tokens > remaining) max_tokens = remaining;
 
     auto t_start = std::chrono::high_resolution_clock::now();
@@ -1799,14 +1876,17 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
     auto server_req = std::make_shared<ServerRequest>();
     server_req->request = imp_req;
 
-    if (!state.batching || !state.batching->is_running()) {
-        res.status = 503;
-        json err = {{"error", {{"message", "Inference engine not ready. Please retry."},
-                                {"type", "server_error"}}}};
-        res.set_content(err.dump(), "application/json");
-        return;
+    {
+        std::lock_guard<std::timed_mutex> lock(state.mtx);
+        if (!state.batching || !state.batching->is_running()) {
+            res.status = 503;
+            json err = {{"error", {{"message", "Inference engine not ready. Please retry."},
+                                    {"type", "server_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+        state.batching->submit(server_req);
     }
-    state.batching->submit(server_req);
 
     std::string comp_id = req_id;
     int64_t created = unix_timestamp();
@@ -1818,7 +1898,8 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
         res.set_chunked_content_provider(
             "text/event-stream",
             [&state, server_req, comp_id, created, max_tokens, n_prompt_tokens, t_start,
-             stop_sequences, max_stop_len, echo, prompt, include_usage](
+             stop_sequences, max_stop_len, echo, prompt, include_usage,
+             snap_tok, snap_model_name, snap_is_think_model](
                 size_t /*offset*/, httplib::DataSink& sink) -> bool {
 
                 int n_output_tokens = 0;
@@ -1827,7 +1908,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                 // Echo prompt as first chunk if requested
                 if (echo && !prompt.empty()) {
                     std::string chunk = sse_completion_chunk(comp_id, created,
-                                                             state.model_name, prompt, nullptr);
+                                                             snap_model_name, prompt, nullptr);
                     sink.write(chunk.data(), chunk.size());
                 }
 
@@ -1836,7 +1917,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                 bool text_stop_matched = false;
 
                 // Strip <think> blocks for completions (no reasoning_content field)
-                bool think_strip = (state.is_think_model &&
+                bool think_strip = (snap_is_think_model &&
                                     state.default_args.reasoning_format != "none");
                 bool think_confirmed = think_strip;
                 std::string think_buf;
@@ -1848,7 +1929,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                     std::string to_send = pending_text.substr(0, up_to);
                     pending_text = pending_text.substr(up_to);
                     std::string sse = sse_completion_chunk(comp_id, created,
-                                                           state.model_name, to_send, nullptr);
+                                                           snap_model_name, to_send, nullptr);
                     return sink.write(sse.data(), sse.size());
                 };
 
@@ -1884,7 +1965,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                     int32_t token = evt.token_id;
 
                     if (evt.is_last) {
-                        if (token == state.tok->eos_id()) {
+                        if (token == snap_tok->eos_id()) {
                             finish = evt.finish_reason ? evt.finish_reason : "stop";
                             break;
                         }
@@ -1892,7 +1973,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                     }
 
                     n_output_tokens++;
-                    std::string piece = state.tok->decode_token(token);
+                    std::string piece = snap_tok->decode_token(token);
 
                     // Strip <think>...</think> block for text completions
                     if (think_strip) {
@@ -1932,7 +2013,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                             std::string to_emit = utf8_buf.substr(0, complete);
                             utf8_buf = utf8_buf.substr(complete);
                             std::string chunk = sse_completion_chunk(comp_id, created,
-                                                                      state.model_name,
+                                                                      snap_model_name,
                                                                       to_emit, nullptr);
                             if (!sink.write(chunk.data(), chunk.size())) return false;
                         }
@@ -1973,12 +2054,12 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                 // Flush remaining buffers
                 if (!utf8_buf.empty() && !text_stop_matched) {
                     std::string sse = sse_completion_chunk(comp_id, created,
-                                                           state.model_name, utf8_buf, nullptr);
+                                                           snap_model_name, utf8_buf, nullptr);
                     sink.write(sse.data(), sse.size());
                 }
                 if (!pending_text.empty() && !text_stop_matched) {
                     std::string sse = sse_completion_chunk(comp_id, created,
-                                                           state.model_name, pending_text, nullptr);
+                                                           snap_model_name, pending_text, nullptr);
                     sink.write(sse.data(), sse.size());
                 }
 
@@ -1986,7 +2067,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
 
                 // Final chunk with finish_reason
                 std::string final_chunk = sse_completion_chunk(comp_id, created,
-                                                                state.model_name, "", finish);
+                                                                snap_model_name, "", finish);
                 sink.write(final_chunk.data(), final_chunk.size());
 
                 // Usage chunk if requested
@@ -1995,7 +2076,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                         {"id", comp_id},
                         {"object", "text_completion"},
                         {"created", created},
-                        {"model", state.model_name},
+                        {"model", snap_model_name},
                         {"choices", json::array()},
                         {"usage", {
                             {"prompt_tokens", n_prompt_tokens},
@@ -2054,7 +2135,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
             int32_t token = evt.token_id;
 
             if (evt.is_last) {
-                if (token == state.tok->eos_id()) {
+                if (token == snap_tok->eos_id()) {
                     finish = evt.finish_reason ? evt.finish_reason : "stop";
                     break;
                 }
@@ -2064,7 +2145,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
             output_ids.push_back(token);
 
             if (!stop_sequences.empty()) {
-                output_text += state.tok->decode_token(token);
+                output_text += snap_tok->decode_token(token);
                 bool stop_found = false;
                 for (const auto& stop : stop_sequences) {
                     auto pos = output_text.find(stop);
@@ -2087,10 +2168,10 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
 
         int n_output_tokens = static_cast<int>(output_ids.size());
         std::string text = !stop_sequences.empty()
-            ? output_text : state.tok->decode(output_ids);
+            ? output_text : snap_tok->decode(output_ids);
 
         // Strip <think>...</think> for text completions (no reasoning_content field)
-        if (state.is_think_model && state.default_args.reasoning_format != "none") {
+        if (snap_is_think_model && state.default_args.reasoning_format != "none") {
             strip_think_block(text);
         }
 
@@ -2144,7 +2225,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
             {"id", comp_id},
             {"object", "text_completion"},
             {"created", created},
-            {"model", state.model_name},
+            {"model", snap_model_name},
             {"choices", json::array({choice})},
             {"usage", {
                 {"prompt_tokens", n_prompt_tokens},
@@ -2179,7 +2260,13 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res,
         return;
     }
 
-    if (!state.model) {
+    // Snapshot model pointer under lock
+    ImpModel snap_model;
+    {
+        std::lock_guard<std::timed_mutex> lock(state.mtx);
+        snap_model = state.model;
+    }
+    if (!snap_model) {
         res.status = 503;
         json err = {{"error", {{"message", "No model loaded"},
                                 {"type", "server_error"}}}};
@@ -2189,7 +2276,7 @@ void handle_tokenize(const httplib::Request& req, httplib::Response& res,
 
     std::vector<int32_t> tokens(32768);
     int n_tokens = 0;
-    ImpError err = imp_tokenize(state.model, content.c_str(), tokens.data(), &n_tokens, 32768);
+    ImpError err = imp_tokenize(snap_model, content.c_str(), tokens.data(), &n_tokens, 32768);
     if (err != IMP_SUCCESS) {
         res.status = 500;
         json error = {{"error", {{"message", std::string("Tokenize failed: ") + imp_error_string(err)},
@@ -2224,7 +2311,13 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res,
         return;
     }
 
-    if (!state.model) {
+    // Snapshot model pointer under lock
+    ImpModel snap_model;
+    {
+        std::lock_guard<std::timed_mutex> lock(state.mtx);
+        snap_model = state.model;
+    }
+    if (!snap_model) {
         res.status = 503;
         json err = {{"error", {{"message", "No model loaded"},
                                 {"type", "server_error"}}}};
@@ -2234,7 +2327,7 @@ void handle_detokenize(const httplib::Request& req, httplib::Response& res,
 
     std::vector<int32_t> tokens = body["tokens"].get<std::vector<int32_t>>();
     std::vector<char> buf(tokens.size() * 32 + 256);
-    ImpError err = imp_detokenize(state.model, tokens.data(), static_cast<int>(tokens.size()),
+    ImpError err = imp_detokenize(snap_model, tokens.data(), static_cast<int>(tokens.size()),
                                    buf.data(), buf.size());
     if (err != IMP_SUCCESS) {
         res.status = 500;
@@ -2357,10 +2450,17 @@ void handle_metrics(const httplib::Request& /*req*/, httplib::Response& res,
     out += "imp_last_ttft_ms " + std::to_string(m.last_ttft_ms.load()) + "\n";
     out += "# HELP imp_model_loaded Whether a model is currently loaded\n";
     out += "# TYPE imp_model_loaded gauge\n";
-    out += "imp_model_loaded " + std::string(state.model_loaded() ? "1" : "0") + "\n";
+    bool loaded;
+    int queue = 0;
+    {
+        std::lock_guard<std::timed_mutex> lock(state.mtx);
+        loaded = state.model_loaded();
+        if (state.batching) queue = state.batching->queue_depth();
+    }
+    out += "imp_model_loaded " + std::string(loaded ? "1" : "0") + "\n";
     out += "# HELP imp_queue_depth Current number of active and pending requests\n";
     out += "# TYPE imp_queue_depth gauge\n";
-    out += "imp_queue_depth " + std::to_string(state.batching ? state.batching->queue_depth() : 0) + "\n";
+    out += "imp_queue_depth " + std::to_string(queue) + "\n";
 
     res.set_content(out, "text/plain; version=0.0.4; charset=utf-8");
 }
@@ -2446,19 +2546,19 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res,
         return;
     }
 
-    if (!state.model_loaded()) {
-        res.status = 503;
-        json err = {{"error", {{"message", "No model loaded"},
-                                {"type", "server_error"}}}};
-        res.set_content(err.dump(), "application/json");
-        return;
-    }
-
     // Acquire inference lock and pause batching engine for exclusive access
     std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(1));
     if (!lock.owns_lock()) {
         res.status = 503;
         json err = {{"error", {{"message", "Server is busy processing another request. Please retry."},
+                                {"type", "server_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
+    if (!state.model_loaded()) {
+        res.status = 503;
+        json err = {{"error", {{"message", "No model loaded"},
                                 {"type", "server_error"}}}};
         res.set_content(err.dump(), "application/json");
         return;

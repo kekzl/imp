@@ -574,7 +574,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // Set IMP_NO_CUBLAS_ATTN=1 to force flash attention (for benchmarking).
         static bool no_cublas_attn = getenv("IMP_NO_CUBLAS_ATTN");
         if (!no_cublas_attn && attn_scores_buf_ && n <= static_cast<int>(attn_scores_.shape[1]) &&
-            !sliding_active) {
+            n <= 1024 && !sliding_active) {
             int64_t s_shape[3] = {static_cast<int64_t>(nh),
                                   static_cast<int64_t>(n),
                                   static_cast<int64_t>(n)};
@@ -1513,19 +1513,27 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                         expert_indices, norm_ptr, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*x_stride=*/0, top_k, stream);
-                } else {
+                } else if (up_qtype == GGMLQuantType::Q8_0) {
                     gemv_q8_0_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
                         expert_indices, norm_ptr, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*x_stride=*/0, top_k, stream);
+                } else {
+                    IMP_LOG_ERROR("MoE non-dp4a gate_up_fused: no kernel for qtype %d, skipping GEMV", (int)up_qtype);
                 }
             } else {
-                auto moe_gemv = (up_qtype == GGMLQuantType::Q6_K)
-                    ? gemv_q6k_moe_decode : gemv_q8_0_moe_decode;
-                moe_gemv(ly.expert_up_packed.data, expert_indices,
-                         norm_ptr, up_buf,
-                         eff, d, up_stride_bytes, /*x_stride=*/0, top_k, stream);
+                if (up_qtype == GGMLQuantType::Q6_K) {
+                    gemv_q6k_moe_decode(ly.expert_up_packed.data, expert_indices,
+                                        norm_ptr, up_buf,
+                                        eff, d, up_stride_bytes, /*x_stride=*/0, top_k, stream);
+                } else if (up_qtype == GGMLQuantType::Q8_0) {
+                    gemv_q8_0_moe_decode(ly.expert_up_packed.data, expert_indices,
+                                         norm_ptr, up_buf,
+                                         eff, d, up_stride_bytes, /*x_stride=*/0, top_k, stream);
+                } else {
+                    IMP_LOG_ERROR("MoE non-dp4a up projection: no kernel for qtype %d, skipping GEMV", (int)up_qtype);
+                }
             }
         }
 
@@ -1580,13 +1588,19 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 Tensor act_t(act_buf, compute_dtype_, 2, act_shape, true);
                 swiglu(gate_t, up_t, act_t, stream);
             }
-            auto moe_gemv = (up_qtype == GGMLQuantType::Q6_K)
-                ? gemv_q6k_moe_decode : gemv_q8_0_moe_decode;
             size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_qtype);
             half* down_input = non_gated_experts ? up_buf : act_buf;
-            moe_gemv(ly.expert_down_packed.data, expert_indices,
-                     down_input, down_buf,
-                     d, eff, down_stride, /*x_stride=*/eff, top_k, stream);
+            if (up_qtype == GGMLQuantType::Q6_K) {
+                gemv_q6k_moe_decode(ly.expert_down_packed.data, expert_indices,
+                                    down_input, down_buf,
+                                    d, eff, down_stride, /*x_stride=*/eff, top_k, stream);
+            } else if (up_qtype == GGMLQuantType::Q8_0) {
+                gemv_q8_0_moe_decode(ly.expert_down_packed.data, expert_indices,
+                                     down_input, down_buf,
+                                     d, eff, down_stride, /*x_stride=*/eff, top_k, stream);
+            } else {
+                IMP_LOG_ERROR("MoE non-dp4a down projection: no kernel for qtype %d, skipping GEMV", (int)up_qtype);
+            }
         }
 
         // 9'. Fused weighted sum + FP16 output (+ residual if no shared expert)
@@ -1625,7 +1639,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                          ly.expert_gate_packed.on_device &&
                          ly.expert_gate_qtype == GGMLQuantType::Q6_K);
 
-    bool use_tc = can_fused_q6k && (expanded > ne * 24);
+    bool use_tc = can_fused_q6k && (expanded > ne * 12);
     bool use_scalar = can_fused_q6k && !use_tc && (expanded <= ne * 12);
 
     if (use_tc || use_scalar) {
@@ -2707,7 +2721,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
 
     // Clear any stale CUDA error state before starting the forward pass.
     { cudaError_t e_ = cudaGetLastError();
-      if (e_ != cudaSuccess) IMP_LOG_DEBUG("Cleared stale error before forward: %s", cudaGetErrorString(e_)); }
+      if (e_ != cudaSuccess) IMP_LOG_WARN("Cleared stale error before forward: %s", cudaGetErrorString(e_)); }
 
     // ---- Optional per-component profiling (IMP_PROFILE=1) ----
     // Profiling disables CUDA graph capture (they are incompatible).
@@ -2720,9 +2734,28 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     // Skip first 2 decode steps (warmup / graph capture attempt)
     bool profile_active = profiling && (profile_idx >= 2);
 
-    cudaEvent_t ev_start, ev_emb, ev_lm;
-    std::vector<cudaEvent_t> ev_attn, ev_ffn;
+    // RAII guard: ensures cudaEventDestroy is called even on early return.
+    struct ProfileEvents {
+        cudaEvent_t ev_start = nullptr, ev_emb = nullptr, ev_lm = nullptr;
+        std::vector<cudaEvent_t> ev_attn, ev_ffn;
+        bool active = false;
+        ~ProfileEvents() {
+            if (!active) return;
+            if (ev_start) cudaEventDestroy(ev_start);
+            if (ev_emb) cudaEventDestroy(ev_emb);
+            if (ev_lm) cudaEventDestroy(ev_lm);
+            for (auto e : ev_attn) if (e) cudaEventDestroy(e);
+            for (auto e : ev_ffn) if (e) cudaEventDestroy(e);
+        }
+    } prof;
+    // Alias references for minimal churn in the rest of the function.
+    auto& ev_start = prof.ev_start;
+    auto& ev_emb   = prof.ev_emb;
+    auto& ev_lm    = prof.ev_lm;
+    auto& ev_attn  = prof.ev_attn;
+    auto& ev_ffn   = prof.ev_ffn;
     if (profile_active) {
+        prof.active = true;
         cudaEventCreate(&ev_start);
         cudaEventCreate(&ev_emb);
         cudaEventCreate(&ev_lm);
@@ -3099,14 +3132,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                          acc_ffn / steps_profiled / cfg.n_layers);
         }
 
-        // Cleanup events
-        cudaEventDestroy(ev_start);
-        cudaEventDestroy(ev_emb);
-        cudaEventDestroy(ev_lm);
-        for (int i = 0; i < cfg.n_layers; i++) {
-            cudaEventDestroy(ev_attn[i]);
-            cudaEventDestroy(ev_ffn[i]);
-        }
+        // Cleanup handled by ProfileEvents RAII destructor.
     }
 }
 

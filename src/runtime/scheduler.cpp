@@ -10,6 +10,7 @@ Scheduler::Scheduler(int max_batch_size)
 
 void Scheduler::add_request(std::shared_ptr<Request> req) {
     pending_.push_back(std::move(req));
+    pending_dirty_ = true;
 }
 
 void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
@@ -28,50 +29,61 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
 
     // 2. Sort pending by ascending input token count (shortest-first)
     //    to reduce head-of-line blocking in continuous batching.
-    std::sort(pending_.begin(), pending_.end(),
-              [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
-                  return a->input_tokens.size() < b->input_tokens.size();
-              });
+    if (pending_dirty_) {
+        std::sort(pending_.begin(), pending_.end(),
+                  [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
+                      return a->input_tokens.size() < b->input_tokens.size();
+                  });
+        pending_dirty_ = false;
+    }
 
     // 3. Promote pending requests to prefill (up to max_batch_size_ budget)
-    while (!pending_.empty() &&
-           static_cast<int>(active_.size()) < max_batch_size_) {
-        auto& req = pending_.front();
+    {
+        auto it = pending_.begin();
+        while (it != pending_.end() &&
+               static_cast<int>(active_.size()) < max_batch_size_) {
+            auto& req = *it;
 
-        // Memory-aware check: estimate KV blocks needed for this request
-        if (kv_manager_) {
-            int ctx_len = req->context_len();
-            int blocks_needed = (ctx_len + kKVBlockSize - 1) / kKVBlockSize;
-            if (!kv_manager_->can_allocate(blocks_needed)) {
-                // Not enough memory even with eviction -- stop admitting
-                break;
-            }
-            // Reserve blocks, using prefix caching when enabled.
-            if (kv_manager_->prefix_caching_enabled()) {
-                int reused = kv_manager_->allocate_blocks_with_prefix(
-                    req->id, req->input_tokens.data(),
-                    static_cast<int>(req->input_tokens.size()));
-                if (reused < 0) break;
-                // Skip prefill for tokens covered by reused blocks.
-                if (reused > 0) {
-                    int skip = reused * kKVBlockSize;
-                    int total = static_cast<int>(req->input_tokens.size());
-                    if (skip >= total) skip = (total / kKVBlockSize) * kKVBlockSize;
-                    if (skip >= total) skip = total - 1;
-                    req->prefill_offset = skip;
+            // Memory-aware check: estimate KV blocks needed for this request
+            if (kv_manager_) {
+                int ctx_len = req->context_len();
+                int blocks_needed = (ctx_len + kKVBlockSize - 1) / kKVBlockSize;
+                if (!kv_manager_->can_allocate(blocks_needed)) {
+                    // Not enough memory -- skip, try smaller requests
+                    ++it;
+                    continue;
                 }
-            } else {
-                if (!kv_manager_->allocate_blocks(req->id, blocks_needed)) {
-                    break;
+                // Reserve blocks, using prefix caching when enabled.
+                if (kv_manager_->prefix_caching_enabled()) {
+                    int reused = kv_manager_->allocate_blocks_with_prefix(
+                        req->id, req->input_tokens.data(),
+                        static_cast<int>(req->input_tokens.size()));
+                    if (reused < 0) {
+                        ++it;
+                        continue;
+                    }
+                    // Skip prefill for tokens covered by reused blocks.
+                    if (reused > 0) {
+                        int skip = reused * kKVBlockSize;
+                        int total = static_cast<int>(req->input_tokens.size());
+                        if (skip >= total) skip = (total / kKVBlockSize) * kKVBlockSize;
+                        if (skip >= total) skip = total - 1;
+                        req->prefill_offset = skip;
+                    }
+                } else {
+                    if (!kv_manager_->allocate_blocks(req->id, blocks_needed)) {
+                        ++it;
+                        continue;
+                    }
                 }
             }
+
+            auto r = *it;
+            it = pending_.erase(it);
+            r->status = RequestStatus::PREFILLING;
+            prefill_batch.push_back(r);
+            active_.push_back(r);
         }
-
-        auto r = pending_.front();
-        pending_.pop_front();
-        r->status = RequestStatus::PREFILLING;
-        prefill_batch.push_back(r);
-        active_.push_back(r);
     }
 
     // 3. Re-schedule incomplete PREFILLING requests (chunked prefill).

@@ -21,15 +21,14 @@ namespace imp {
 // on Linux silently succeeds by backing with system RAM (unified memory),
 // which causes cuBLASLt INTERNAL_ERROR on the resulting pointers.
 // ---------------------------------------------------------------------------
-static constexpr size_t kWeightReserveMiB = 256;  // reserve for KV cache, SSM state, misc
-
 // Cached VRAM state — refreshed once per upload pass instead of per-tensor.
 // Eliminates ~500+ cudaMemGetInfo roundtrips during weight upload.
 static size_t g_cached_free_mem = 0;
 static size_t g_total_allocated = 0;
+static size_t g_vram_reserve = 0;  // set from Engine's computed reserve
 
 static cudaError_t checked_cuda_malloc(void** ptr, size_t size) {
-    size_t reserve = kWeightReserveMiB << 20;
+    size_t reserve = g_vram_reserve;
     // Use cached free memory (updated at start of each upload pass)
     if (g_cached_free_mem > 0) {
         if (g_total_allocated + size + reserve > g_cached_free_mem) {
@@ -616,8 +615,13 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
             stager.destroy();
             g_cached_free_mem = 0;
             g_total_allocated = 0;
+            g_vram_reserve = 0;
         }
     } staging_guard;
+
+    // Use Engine's computed reserve (workspace + KV cache + SSM state + safety)
+    // directly — no additional margin needed here.
+    g_vram_reserve = expert_reserve_bytes;
 
     if (staging_guard.stager.init()) {
         g_stager = &staging_guard.stager;

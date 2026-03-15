@@ -872,27 +872,39 @@ void apply_dry_penalty(float* d_logits, int vocab_size,
         i++;
     }
 
-    // Upload to GPU and apply
-    int32_t* d_tokens = nullptr;
-    float* d_values = nullptr;
-    if (cudaMalloc(&d_tokens, n * sizeof(int32_t)) != cudaSuccess ||
-        cudaMalloc(&d_values, n * sizeof(float)) != cudaSuccess) {
-        IMP_LOG_ERROR("apply_dry_penalty: cudaMalloc failed");
-        if (d_tokens) cudaFree(d_tokens);
-        if (d_values) cudaFree(d_values);
-        return;
+    // Upload to GPU and apply — reuse persistent buffers to avoid per-call cudaMalloc
+    static int32_t* s_dry_tokens_buf = nullptr;
+    static float* s_dry_values_buf = nullptr;
+    static size_t s_dry_buf_cap = 0;
+
+    size_t needed = static_cast<size_t>(n);
+    if (needed > s_dry_buf_cap) {
+        // Grow buffers (sync stream first to ensure previous work is done)
+        cudaStreamSynchronize(stream);
+        if (s_dry_tokens_buf) cudaFree(s_dry_tokens_buf);
+        if (s_dry_values_buf) cudaFree(s_dry_values_buf);
+        // Over-allocate to reduce future reallocations
+        size_t new_cap = std::max(needed, s_dry_buf_cap * 2);
+        new_cap = std::max(new_cap, static_cast<size_t>(256));
+        if (cudaMalloc(&s_dry_tokens_buf, new_cap * sizeof(int32_t)) != cudaSuccess ||
+            cudaMalloc(&s_dry_values_buf, new_cap * sizeof(float)) != cudaSuccess) {
+            IMP_LOG_ERROR("apply_dry_penalty: cudaMalloc failed");
+            if (s_dry_tokens_buf) { cudaFree(s_dry_tokens_buf); s_dry_tokens_buf = nullptr; }
+            if (s_dry_values_buf) { cudaFree(s_dry_values_buf); s_dry_values_buf = nullptr; }
+            s_dry_buf_cap = 0;
+            return;
+        }
+        s_dry_buf_cap = new_cap;
     }
-    cudaMemcpyAsync(d_tokens, h_tokens.data(), n * sizeof(int32_t),
+
+    cudaMemcpyAsync(s_dry_tokens_buf, h_tokens.data(), n * sizeof(int32_t),
                     cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_values, h_values.data(), n * sizeof(float),
+    cudaMemcpyAsync(s_dry_values_buf, h_values.data(), n * sizeof(float),
                     cudaMemcpyHostToDevice, stream);
 
     int grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
     apply_dry_sparse_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
-        d_logits, d_tokens, d_values, n);
-
-    cudaFreeAsync(d_tokens, stream);
-    cudaFreeAsync(d_values, stream);
+        d_logits, s_dry_tokens_buf, s_dry_values_buf, n);
 }
 
 // ===========================================================================

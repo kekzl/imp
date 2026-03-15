@@ -498,3 +498,258 @@ Die GEMV-Infrastruktur wurde von 33 handgeschriebenen Kernels auf ein Template-S
 | Beam Search | Nur `temperature/top_p/top_k` in Sampling, kein `beam_size` |
 | JSON Schema / GBNF | JSON Mode (syntaktische Validität) implementiert, aber kein Schema-Constraining oder GBNF-Grammatik |
 | TCGEN05 Decode Attention | Prefill nutzt CUTLASS FMHA (WGMMA+TMA). Decode nutzt WMMA + cp.async Pipelining (Phase 7). WGMMA (min. M=64) ist inkompatibel mit M=1 Decode — kein weiterer Gewinn durch TCGEN05 auf Decode-Pfad. |
+
+---
+
+## 4. Deep Architecture Audit (2026-03-15)
+
+Systematische Analyse der gesamten Engine-Architektur auf wiederkehrende Anti-Patterns, Ressourcen-Allokation, Dispatch-Entscheidungen, Datenfluss, Fehlerbehandlung und Scheduling. Fünf parallele Audit-Achsen:
+
+1. **VRAM & Ressourcen-Allokation** — Wurde das VRAM-Budget-Problem (First-Come-First-Serve) auch anderswo gemacht?
+2. **Compute Dispatch** — Sind Kernel-Auswahl und Konfiguration modell-bewusst?
+3. **Datenfluss & Synchronisation** — Unnötige Host-Device Syncs, redundante Kopien, Pipeline-Stalls?
+4. **Fehlerbehandlung & Robustheit** — Silent Failures, State Corruption, Resource Leaks, Concurrency?
+5. **Scheduling & Batching** — Suboptimale Batching-Entscheidungen, Lifecycle-Issues?
+
+### Wiederkehrende Anti-Patterns
+
+Vier strukturelle Probleme ziehen sich durch die gesamte Codebase:
+
+**Pattern 1: "First Come First Serve" Allokation** (5 Instanzen)
+VRAM wird ad-hoc allokiert ohne globale Planung. Wer zuerst `cudaMalloc` ruft, bekommt den Platz — unabhängig davon, ob eine andere Komponente den VRAM besser nutzen könnte.
+- *Behoben*: FP8/NVFP4/KV Budget → `VRAMBudget` Planner
+- *Offen*: Expert LRU Cache, Attention S-Matrix, weight_upload Reserve, workspace_estimate
+
+**Pattern 2: "Hardcoded Magic Number" statt Modell-Awareness** (8 Instanzen)
+Konstanten die für ein Modell/GPU getunt wurden, aber bei anderen versagen.
+- 4096 max_tokens, 75% L2, 1 GiB Reserve, 256 MiB weight Reserve, 64 MiB auxiliary, kKVBlockSize=16, MoE TC Threshold `ne*24`, cuBLAS attention 256 MiB cap
+
+**Pattern 3: "Sync in Loop" im Hot Path** (4 Instanzen)
+Wiederholte Host-Device Synchronisation oder Allokation im Decode-Loop, wo pre-allokierte Buffers und append-only Updates reichen würden.
+- Penalty-Token re-upload, MoE FP8 batch 6×sync/layer, DRY malloc/free/O(n²), cuBLAS benchmark bei neuem M
+
+**Pattern 4: "Silent Degradation"** (6 Instanzen)
+Fehler die nicht crashen, sondern leise die Performance oder Korrektheit ruinieren — ohne dass der User es merkt.
+- Workspace nullptr → crash, Green Context failure → kein Log, Dequant scratch fail → leise langsam, CUTLASS FMHA fallback → kein Log, Schema Constrainer shared state, stale CUDA errors geschluckt
+
+---
+
+### 4.1 Kritisch — Sofort fixen
+
+#### F1: Workspace-Allokation: Crash bei cudaMalloc-Fehler
+
+**Dateien:** `executor_workspace.cu:320-325` (persistent), `executor_workspace.cu:371-377` (shared)
+**Problem:** `allocate_persistent_workspace()` und `allocate_shared_workspace()` loggen bei `cudaMalloc`-Fehler und returnen, aber der Caller `allocate_workspaces()` gibt `true` zurück. `hidden_`, `residual_`, `norm_out_`, `logits_` zeigen auf nullptr. Jeder Folge-Kernel crasht mit illegal memory access.
+**Fix:** Return bool propagieren bis `Engine::init()`.
+
+#### F2: JSON/Schema Constrainer ist Singleton — concurrent Requests korrumpieren FSM
+
+**Datei:** `engine.cpp:1179-1219`
+**Problem:** `json_constrainer_` und `schema_constrainer_` sind einzelne Instanzen auf der Engine. Im Server-Mode mit Continuous Batching teilen sich parallele JSON-mode Requests denselben FSM-State. Interleaved Tokens korrumpieren die Grammatik-Position.
+**Fix:** Constrainer pro Request statt pro Engine. Oder: JSON Mode auf Single-Sequence Batch limitieren.
+
+#### F3: ServerState ohne Lock — Race zwischen Auto-Load und Requests
+
+**Datei:** `handlers.cpp:508-552`
+**Problem:** `state.model_loaded()`, `state.tok`, `state.chat_tpl` werden aus HTTP-Handler-Threads ohne Lock gelesen. Wenn ein Request Auto-Load triggert während ein anderer tokenisiert, wird ein dangling Pointer dereferenziert.
+**Fix:** Shared Lock für Reads, oder atomarer Pointer für Tokenizer mit Read-Copy-Update.
+
+#### F4: MoE Non-dp4a Fallback: Q4_K Weights an Q8_0 Kernel
+
+**Datei:** `executor_forward.cu:1504-1529`
+**Problem:** Wenn `q8_1_buf_` null ist, dispatcht der non-dp4a Fallback nur `gemv_q6k_moe_decode` oder `gemv_q8_0_moe_decode`. Q4_K, Q5_K, Q2_K, Q3_K Weights werden fälschlich an den Q8_0 Kernel gegeben — falsches Block-Layout → Garbage Output.
+**Fix:** Q4_K/Q5_K/Q2_K/Q3_K Dispatch-Varianten analog zum dp4a-Pfad hinzufügen.
+
+#### F5: Expert LRU Cache umgeht VRAMBudget — selbes Anti-Pattern
+
+**Datei:** `executor_workspace.cu:631-645`
+**Problem:** Expert LRU Cache allokiert bis 2 GiB mit eigenem `cudaMemGetInfo` + 128 MiB Reserve — komplett unabhängig vom VRAMBudget. Selbes "First Come First Serve" wie der ursprüngliche VRAM-Bug.
+**Fix:** Expert Cache Budget als Feld in `VRAMBudget`. `plan_vram_budget()` entscheidet die Aufteilung.
+
+---
+
+### 4.2 Medium — Performance-Architektur
+
+#### F6: workspace_estimate() nutzt flat 64 MiB für Auxiliary
+
+**Datei:** `executor_workspace.cu:230`
+**Problem:** Die Schätzung für Expert-Upload-Reserve nutzt pauschal 64 MiB für alle Hilfs-Buffer. Die tatsächliche Auxiliary-Allokation (dequant scratch, sampling, MMVQ, split-K, S-Matrix, MoE, FP8, CUTLASS) kann deutlich mehr sein. Expert Upload über-committed VRAM, Features degradieren still.
+**Fix:** Echte Summe der Einzelpuffer berechnen statt flat 64 MiB.
+
+#### F7: weight_upload.cu hat eigene 256 MiB Reserve zusätzlich zu Engine's 1 GiB
+
+**Datei:** `weight_upload.cu:24`
+**Problem:** `kWeightReserveMiB = 256` wird auf Engine's `expert_reserve` (enthält bereits 768 MiB Safety) draufgerechnet. Kumulativ 1.75+ GiB Reserves auf 32 GB Karte. Letzte Dense-Layers fallen unnötig auf Host zurück.
+**Fix:** Engine übergibt berechneten Reserve-Wert direkt, `kWeightReserveMiB` eliminieren.
+
+#### F8: VRAMBudget Reserve ist flat 1 GiB
+
+**Datei:** `engine.cpp` (plan_vram_budget)
+**Problem:** 1 GiB Reserve ist nicht proportional zu GPU/Modell. 5% einer 32 GB Karte, 11% bei 16 GB Budget. Kleine Modelle ohne CUDA Graphs / Speculative brauchen weniger.
+**Fix:** Reserve berechnen basierend auf aktiven Features (CUDA Graphs: +256 MiB, cuBLAS: +128 MiB, etc.).
+
+#### F9: Scheduler bricht bei erster Admission-Failure ab statt zu skippen
+
+**Datei:** `scheduler.cpp:42-47`
+**Problem:** Wenn `kv_manager_->can_allocate(blocks_needed)` für eine Request fehlschlägt, macht der Scheduler `break` — blockiert ALLE nachfolgenden (möglicherweise kleineren) Requests. Eviction wird nicht versucht.
+**Fix:** `break` → `continue`. Oder: Eviction im Scheduler statt nur in Engine.
+
+#### F10: Scheduler sortiert std::deque jeden step(), keine Fairness
+
+**Datei:** `scheduler.cpp:29-34`
+**Problem:** O(n log n) Sort auf non-contiguous Memory pro Token-Generierung. Kein Aging — lange Prompts werden endlos von kürzeren verdrängt.
+**Fix:** Nur bei neuen Requests sortieren (dirty flag). Aging-Mechanismus für Starvation-Prevention.
+
+#### F11: Penalty-Tokens werden komplett re-uploaded pro Step
+
+**Datei:** `engine.cpp:1592-1616`
+**Problem:** Gesamter `output_tokens` Vektor wird jeden Decode-Step per `cudaMemcpyAsync` hochgeladen (wachsend). Bei 4096 Tokens: 16 KB/Step. Bei Realloc: synchroner `cudaMalloc` + `cudaFree` im Hot Path.
+**Fix:** Pre-allocate auf `max_tokens`, append-only (nur neues Token pro Step).
+
+#### F12: MoE TC/Scalar Threshold-Gap für Short Prefill
+
+**Datei:** `executor_forward.cu:1628-1629`
+**Problem:** TC-Pfad ab `expanded > ne*24`, Scalar ab `expanded <= ne*12`. Dazwischen (`ne*12 < expanded <= ne*24`) fällt alles auf FP16-Batch mit D2H Sync. Für Qwen3-Coder (128 Experts): 192-384 Tokens (top_k=8) treffen die Gap. Agentic Workloads haben typisch 100-300 Token Prefills.
+**Fix:** TC-Threshold senken — nach persistent work-queue Optimierung sollte der TC-Kernel auch bei kleinen Batches performen.
+
+#### F13: MoE FP8 Batch: 6 cudaStreamSynchronize pro Layer
+
+**Datei:** `executor_forward.cu:1906-1916`
+**Problem:** FP8 Batch-Path macht pro Projektion 2 D2H Syncs (Offsets + Scales). Bei 3 Projektionen pro Layer: 6 Syncs pro Layer, 192 für 32-Layer MoE Modell → ~1 ms Pipeline-Bubbles.
+**Fix:** Device-side Grouped GEMM API nutzen (existiert als `gemm_moe_device_grouped`), oder Scale-Arrays device-seitig halten.
+
+#### F14: GEMM Cache-Key mit exaktem M — Benchmark-Storm bei Variable-Length Prefill
+
+**Datei:** `gemm.cu:148-158`
+**Problem:** Jede neue Prefill-Länge (M) erzeugt Cold-Start mit cuBLASLt Benchmark (5 Iterationen, `cudaEventSynchronize`). Server mit diversen Prompt-Längen zahlt Multi-ms Stall pro neuem M.
+**Fix:** M auf Potenzen von 2 oder Vielfache von 64 bucketen.
+
+#### F15: FP8 GEMV: 16 skalare Operationen pro Vektor-Load
+
+**Datei:** `gemm.cu:822-851`
+**Problem:** `gemv_fp8_e4m3_kernel` lädt 16 FP8 Bytes via float4, verarbeitet sie aber in einer Schleife mit Per-Element Branching und skalarer Akkumulation. Kein vektorisiertes half2/float2 FMA.
+**Fix:** Unroll in 2×8 Gruppen, Branch eliminieren, half2-FMA wie im FP16 GEMV.
+
+#### F16: cuBLAS Attention ohne Crossover-Threshold
+
+**Datei:** `executor_forward.cu:570-599`
+**Problem:** cuBLAS QK^T Materialisierung wird bis zur Buffer-Kapazität genutzt (bis 2896 Tokens). Bei n=2048, nh=32 materialisiert das 256 MiB S-Matrix. Flash Attention braucht O(1) extra Memory und ist ab ~512-1024 Tokens schneller.
+**Fix:** Heuristik-Threshold (z.B. n <= 512 oder n <= 1024) statt Buffer-Kapazität.
+
+#### F17: INT4 GEMM Kernel ist rein skalar
+
+**Datei:** `quant_gemm.cu:41-169`
+**Problem:** Q4_1 GEMM nutzt 64×64×32 Tiles mit skalarem FP32 FMA. Kein WMMA/Tensor Core. Auf Blackwell mit 680 Tensor Cores ist das 8-16× langsamer als nötig.
+**Fix:** Q4_1 durch dp4a routen (Block-Reformat) oder WMMA 16×16×16 mit on-the-fly Dequant.
+
+#### F18: KV allocate_block_with_eviction() versucht nur 1 Block
+
+**Datei:** `kv_cache_manager.cpp:441-452`
+**Problem:** Bei leerem Free-Pool wird genau 1 Cached Block reclaimed. Wenn der pinned ist → sofortige Aufgabe. Engine's Decode-Path macht nur einen Eviction-Versuch (Zeile 1441-1444). Premature Request-Cancel bei KV-Druck mit Prefix Caching + Pinning.
+**Fix:** Loop über Cached Blocks. Retry-Loop im Decode-Path analog zum Prefill-Path.
+
+#### F19: apply_dry_penalty macht cudaMalloc/Free pro Token
+
+**Datei:** `sampling.cu:876-895`
+**Problem:** Jeder DRY-Penalty-Aufruf: cudaMalloc für d_tokens + d_values, Upload, Kernel, cudaFreeAsync. CPU Suffix-Matching ist O(n²) in Token-History.
+**Fix:** Pre-allocate Penalty-Buffer bei Init. Suffix-Matching cappen oder auf GPU verschieben.
+
+#### F20: KV Cache Save/Load: 6400 synchrone cudaMemcpy
+
+**Datei:** `kv_cache_manager.cpp:631-639, 718-724`
+**Problem:** Pro Block: n_layers × 2 synchrone `cudaMemcpy`. Bei 32 Layers, 100 Blocks: 6400 Calls.
+**Fix:** `cudaMemcpyAsync` mit Pipeline, oder Batch-Copy pro Block statt pro Layer.
+
+#### F21: Green Context SM-Split statisch, nie angepasst
+
+**Datei:** `engine.h:33`, `green_ctx.cu:35-37`
+**Problem:** 80/20 Prefill/Decode Split wird bei Init gesetzt und nie geändert. `reconfigure()` existiert aber wird nicht gerufen. Wenn kein Prefill anliegt: 80% der SMs idle.
+**Fix:** Dynamische Anpassung in `step()` basierend auf Queue-Depths.
+
+#### F22: kKVBlockSize=16 hardcoded
+
+**Datei:** `kv_cache.h:10`
+**Problem:** Compile-Time Konstante. Für GQA Modelle mit wenig KV Heads (Qwen3: 4 Heads) sind Blocks klein (16 KB/Layer) → hoher Block-Table Overhead, schlechte Coalescing. Prefix Cache Granularität (16 Tokens exact match) ist zu grob für kurze System-Prompts, zu fein für lange Prefixe.
+**Fix:** Konfigurierbar bei Init-Time. 16 für viele KV Heads, 32/64 für wenige.
+
+#### F23: Stale CUDA Errors still geschluckt
+
+**Datei:** `executor_forward.cu:2709-2710`
+**Problem:** `cudaGetLastError()` vor Forward Pass löscht Fehler auf DEBUG Level. Ein früherer Kernel-Fehler (z.B. aus Workspace-Allokation) wird verschluckt, Forward läuft auf korrupten Daten weiter.
+**Fix:** Mindestens WARN Level. Bei stale Error: Forward abbrechen.
+
+#### F24: Green Context Init-Failure: Kein Log
+
+**Datei:** `engine.cpp:597-599`
+**Problem:** `green_ctx_.init()` Failure hat Kommentar "Non-fatal" aber keinen Log. User aktiviert `--green-contexts` und bekommt keine Rückmeldung dass es nicht funktioniert.
+**Fix:** WARN Log bei Failure.
+
+#### F25: Batched Decode nutzt Request[0]'s Penalty-Tokens für alle
+
+**Datei:** `engine.cpp:1569-1589`
+**Problem:** `InferenceState` wird aus `valid_decode[0]` befüllt. `host_penalty_tokens` zeigt auf Request 0's Daten. `sample_per_request` Lambda overridet pro Request, aber Penalties bleiben von Request 0. Andere Requests bekommen falsche Penalty-Tokens.
+**Fix:** Penalty-Tokens per Request im Sampling-Loop behandeln.
+
+#### F26: KV Cache k_ptr/v_ptr ohne Bounds-Check
+
+**Datei:** `kv_cache.cu:134-146`
+**Problem:** `k_ptr(layer, block_id)` und `v_ptr(layer, block_id)` rechnen Offsets ohne Validierung von `layer < n_layers_` oder `block_id < max_blocks_`. Out-of-range block_id schreibt an beliebige GPU-Adresse.
+**Fix:** Bounds-Assert in Debug Builds. Release: block_id gegen max_blocks_ validieren.
+
+#### F27: Unchecked cudaMemcpy/fwrite in Prefix Cache Save/Load
+
+**Datei:** `kv_cache_manager.cpp:616-641, 718-724`
+**Problem:** `cudaMemcpy` und `fwrite` Return-Werte werden nicht geprüft. Volle Disk → truncated File. Device-Lost → korrupte Daten im Cache.
+**Fix:** Return-Werte prüfen, bei Fehler Save/Load abbrechen.
+
+#### F28: NVFP4 GEMM Fallback: statischer Dequant-Buffer, Thread-unsafe
+
+**Datei:** `nvfp4_gemm.cu:1286-1317`
+**Problem:** Wenn CUTLASS/cuBLASLt nicht verfügbar: Dequant ganzer Weight-Matrix [N, K] in statischen Buffer (z.B. 96 MiB für Qwen3-8B Gate/Up). Buffer per `cudaMalloc` bei Erstaufruf, nie freigegeben. Kein Mutex → Thread-unsafe bei Multi-Stream.
+**Fix:** Pre-allokierten `dequant_scratch_` aus Executor nutzen. Warn-Log bei Fallback.
+
+---
+
+### 4.3 Low — Edge Cases und bekannte Dead Ends
+
+| # | Bereich | Problem | Notiz |
+|---|---------|---------|-------|
+| F29 | Speculative | 8 sync mallocs + 15 sync memcpys + Host-Logits D2H pro Step | Dead End auf Single-GPU (MEMORY.md) |
+| F30 | Speculative | Approx. Draft-Probabilities (1/top_k), keine gecachten Logits | Reduziert Acceptance Rate bei non-greedy |
+| F31 | Speculative | Kein KV Rollback nach Rejection → stale Blocks belegt | `kv_manager_->rollback()` existiert, wird nie gerufen |
+| F32 | Vision | cudaMalloc/Free für Pixel-Buffer pro `set_image()` | Pre-allocate bei Init (4.6 MB fix) |
+| F33 | Activation | GeGLU FP32 nicht vektorisiert (kein vec4 wie SwiGLU) | FP32 Path selten genutzt |
+| F34 | Activation | FP16 blockDim=256 für alle Sizes → 12 Blocks auf 170 SMs bei MoE | ~1 μs Kernel, nicht auf Critical Path |
+| F35 | PDL | `gelu()` und FP32 Activation-Kernels nicht PDL-registriert | PDL hat 0% Impact (MEMORY.md) |
+| F36 | GEMM | FP8 Scale-Pointer Mutation auf cached opDesc ohne Lock (latent) | Nur bei Multi-Stream (Green Ctx) relevant |
+| F37 | GEMM | Redundante Q8_1 Quantisierung bei fallback QKV (3× statt 1×) | Fused QKV Path deckt Common Case ab |
+| F38 | Attention | CUTLASS FMHA Fallback auf WMMA ohne Log | Diagnostic-Lücke, kein Perf-Impact |
+| F39 | NVFP4 | Multi-row Threshold `n_mb<=512` nicht SM-adaptiv | Getunt für RTX 5090, ok für aktuelles Target |
+| F40 | Split-K | Scratch für max_splits=32 unabhängig von Context | ~17 MiB pro Batch, nicht KV-proportional |
+| F41 | Sampling | Fallback-Overloads ohne pre-allocted d_result machen sync malloc | Nur wenn d_sample_result_ null (Init-Fehler) |
+| F42 | Scheduler | Chunked Prefill: Linear Search für already-queued Requests | O(active × prefill_batch), negligible |
+| F43 | CUDA Graph | Invalidierung bei Batch-Size-Änderung → 2 Steps non-graphed | ~0.6 ms pro Transition |
+| F44 | Profiling | CUDA Events in Forward-Pass bei IMP_PROFILE=1 pro Call erstellt, nie RAII | Leak nur im Profiling-Mode |
+| F45 | L2 Cache | 75% L2 Reserve nicht model-aware (GQA mit wenig KV Heads braucht weniger) | Akzeptabel für RTX 5090 |
+| F46 | Mirostat | mu-Update erfordert Host-Sync pro Token | Fundamentales Feedback-Loop |
+| F47 | LongRoPE | Frequency-Buffer Allokation unchecked | Crash nur bei Phi-4 + OOM |
+| F48 | Prefix Cache | Legacy `register_prefix()` Block-IDs werden nie bereinigt → stale Pointers | Nur legacy API, content-addressed ist separat |
+
+---
+
+### 4.4 Priorisierte Reihenfolge
+
+**Phase 1 — Korrektheit (F1-F5)**
+Workspace nullptr-Crash, JSON Constrainer Race, ServerState Lock, MoE Q4_K Dispatch, Expert Cache Budget. Alle können Crashes oder korrupte Outputs verursachen.
+
+**Phase 2 — Hot-Path Performance (F11, F14, F9, F12, F13)**
+Penalty re-upload, GEMM benchmark storm, Scheduler break→continue, MoE threshold gap, MoE FP8 syncs. Direkt messbar in tok/s.
+
+**Phase 3 — VRAM Effizienz (F6, F7, F8)**
+workspace_estimate, weight_upload Reserve, Budget Reserve. Zusammen ~500 MiB+ verschwendet auf 32 GB.
+
+**Phase 4 — Server Robustheit (F10, F18, F23, F24, F25, F26, F27)**
+Scheduler Fairness, KV Eviction, Error Handling, Logging, Bounds Checks. Wichtig für Production Server.
+
+**Phase 5 — Kernel Optimierung (F15, F16, F17, F19, F28)**
+FP8 GEMV, cuBLAS Attention Crossover, INT4 TC, DRY Penalty, NVFP4 Fallback. Modell-spezifische Gewinne.

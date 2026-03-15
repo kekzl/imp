@@ -171,8 +171,15 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
             long_freqs[i]  = base_freq / cfg.rope_long_factor[i];
         }
 
-        cudaMalloc(&longrope_short_freqs_, pairs * sizeof(float));
-        cudaMalloc(&longrope_long_freqs_,  pairs * sizeof(float));
+        cudaError_t e1 = cudaMalloc(&longrope_short_freqs_, pairs * sizeof(float));
+        cudaError_t e2 = cudaMalloc(&longrope_long_freqs_,  pairs * sizeof(float));
+        if (e1 != cudaSuccess || e2 != cudaSuccess) {
+            IMP_LOG_ERROR("Failed to allocate LongRoPE frequency buffers: %s",
+                          cudaGetErrorString(e1 != cudaSuccess ? e1 : e2));
+            if (longrope_short_freqs_) { cudaFree(longrope_short_freqs_); longrope_short_freqs_ = nullptr; }
+            if (longrope_long_freqs_)  { cudaFree(longrope_long_freqs_);  longrope_long_freqs_ = nullptr; }
+            return false;
+        }
         cudaMemcpy(longrope_short_freqs_, short_freqs.data(), pairs * sizeof(float), cudaMemcpyHostToDevice);
         cudaMemcpy(longrope_long_freqs_,  long_freqs.data(),  pairs * sizeof(float), cudaMemcpyHostToDevice);
 
@@ -196,8 +203,14 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
 bool GraphExecutor::allocate_workspaces(bool experts_on_host) {
     if (!initialized_ || !model_) return false;
 
-    allocate_persistent_workspace(max_tokens_);
-    allocate_shared_workspace(max_tokens_);
+    if (!allocate_persistent_workspace(max_tokens_)) {
+        IMP_LOG_ERROR("Persistent workspace allocation failed — cannot run inference");
+        return false;
+    }
+    if (!allocate_shared_workspace(max_tokens_)) {
+        IMP_LOG_ERROR("Shared workspace allocation failed — cannot run inference");
+        return false;
+    }
     allocate_auxiliary_buffers(/*skip_batch_dequant=*/experts_on_host);
 
     return true;
@@ -226,8 +239,37 @@ size_t GraphExecutor::workspace_estimate() const {
     bool has_post_norms = (cfg.norm_placement == NormPlacement::POST_NORM);
     size_t fp32_accum = has_post_norms ? align256(static_cast<size_t>(max_tokens_) * d * sizeof(float)) : 0;
 
-    // Auxiliary: dequant scratch, MoE dequant/staging, sampling, split-K, etc.
-    size_t auxiliary = 64ULL << 20;  // conservative 64 MiB for misc buffers
+    // Auxiliary: compute real estimate from individual buffer sizes
+    size_t auxiliary = 0;
+
+    // Dequant scratch: max weight matrix elements × sizeof(half)
+    {
+        size_t max_elems = 0;
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo,
+                                   &L.w_gate, &L.w_up, &L.w_down,
+                                   &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared,
+                                   &L.ssm_in, &L.ssm_out}) {
+                if (w->data) max_elems = std::max(max_elems, static_cast<size_t>(w->numel()));
+            }
+        }
+        auxiliary += max_elems * sizeof(uint16_t);
+    }
+
+    // Sampling result (ARGMAX_SCRATCH_BYTES ~16 KiB) + MMVQ scratch + split-K scratch
+    int nh_est = cfg.n_heads;
+    int hd_est = cfg.head_dim > 0 ? cfg.head_dim : (d / nh_est);
+    auxiliary += 16 * 1024;  // sampling
+    auxiliary += 256 * 1024;  // MMVQ scratch (conservative)
+    auxiliary += static_cast<size_t>(max_logit_tokens_) * nh_est * 32 * (2 + hd_est) * sizeof(float);  // split-K
+
+    // S-matrix: capped at 256 MiB, but estimate conservatively
+    auxiliary += std::min(static_cast<size_t>(nh_est) * max_tokens_ * max_tokens_ * sizeof(half),
+                          static_cast<size_t>(256) << 20);
+
+    // Safety margin for FP8 act buffers, CUTLASS workspace, misc
+    auxiliary += 32ULL << 20;
 
 #ifdef IMP_USE_CUTLASS
     // CUTLASS FMHA workspace (LSE buffer + kernel cooperative workspace)
@@ -302,7 +344,7 @@ void GraphExecutor::compute_shared_sizes(int max_tokens) {
     }
 }
 
-void GraphExecutor::allocate_persistent_workspace(int max_tokens) {
+bool GraphExecutor::allocate_persistent_workspace(int max_tokens) {
     const auto& cfg = model_->config();
     int d = cfg.d_model;
     int v = cfg.vocab_size;
@@ -321,7 +363,8 @@ void GraphExecutor::allocate_persistent_workspace(int max_tokens) {
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("Failed to allocate persistent workspace (%zu bytes): %s",
                       total, cudaGetErrorString(err));
-        return;
+        persistent_workspace_ = nullptr;
+        return false;
     }
     persistent_workspace_size_ = total;
 
@@ -361,18 +404,20 @@ void GraphExecutor::allocate_persistent_workspace(int max_tokens) {
                          fp32_sz, cudaGetErrorString(e2));
         }
     }
+    return true;
 }
 
-void GraphExecutor::allocate_shared_workspace(int max_tokens) {
+bool GraphExecutor::allocate_shared_workspace(int max_tokens) {
     size_t max_shared = std::max({attn_shared_size_, ffn_shared_size_,
                                   moe_shared_size_, ssm_shared_size_});
-    if (max_shared == 0) return;
+    if (max_shared == 0) return true;  // no workspace needed
 
     cudaError_t err = cudaMalloc(&shared_workspace_, max_shared);
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("Failed to allocate shared workspace (%zu bytes): %s",
                       max_shared, cudaGetErrorString(err));
-        return;
+        shared_workspace_ = nullptr;
+        return false;
     }
     shared_workspace_size_ = max_shared;
     shared_workspace_max_tokens_ = max_tokens;
@@ -392,6 +437,7 @@ void GraphExecutor::allocate_shared_workspace(int max_tokens) {
         const auto& cfg = model_->config();
         moe_routing_buffers_.allocate(max_tokens, cfg.n_experts, cfg.n_experts_active);
     }
+    return true;
 }
 
 void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
@@ -492,7 +538,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     {
         int nh = cfg.n_heads;
         int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / nh);
-        int max_splits = 32;
+        // Size splits proportional to max context blocks, capped at 32
+        int max_context_blocks = (max_tokens_ + kKVBlockSize - 1) / kKVBlockSize;
+        int max_splits = std::min(32, std::max(1, max_context_blocks));
         int partial_stride = 2 + hd;
         int max_batch = max_logit_tokens_;  // = max_batch_size
         size_t sz = static_cast<size_t>(max_batch) * nh * max_splits * partial_stride * sizeof(float);
@@ -629,14 +677,14 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 }
             }
             if (has_host_experts) {
-                // Budget: use available VRAM minus a safety margin.
-                // Target: cache as many experts as possible.
+                // Budget: proportional to free VRAM (15%) instead of flat cap.
+                // KV cache + weight caches (FP8/NVFP4) need the remaining VRAM,
+                // so expert cache must not over-commit.
                 size_t free_mem = 0, total_mem = 0;
                 cudaMemGetInfo(&free_mem, &total_mem);
                 size_t safety = 128 << 20;  // 128 MiB reserve
                 size_t budget = (free_mem > safety) ? free_mem - safety : 0;
-                // Cap at 2 GiB to leave room for other allocations
-                budget = std::min(budget, static_cast<size_t>(2) << 30);
+                budget = static_cast<size_t>(budget * 0.15);  // 15% of available
                 if (expert_cache_.init(max_expert_raw, budget)) {
                     IMP_LOG_INFO("Expert LRU cache: %d slots (%.2f MiB / %.2f MiB budget)",
                                  expert_cache_.n_slots_,
@@ -1080,7 +1128,7 @@ void GraphExecutor::free_buffers() {
 // Pre-dequantize quantized weights to FP16 on GPU
 // ---------------------------------------------------------------------------
 
-void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget) {
+void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& budget) {
     if (!initialized_ || !model_) return;
 
     const auto& cfg = model_->config();
@@ -1088,9 +1136,13 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
     int cached_count = 0;
     bool budget_exhausted = false;
 
-    // Shared budget across all phases (FP16, FP8 overflow, NVFP4 decode).
-    // Computed by Engine from effective_free_vram() minus a runtime reserve.
-    size_t remaining_budget = cache_budget;
+    // Compute effective cache budget from free VRAM minus reserve.
+    // This preserves the existing per-phase budget tracking while the VRAMBudget
+    // struct controls strategy-level decisions (which phases to skip).
+    size_t free_vram = 0, total_vram = 0;
+    cudaMemGetInfo(&free_vram, &total_vram);
+    size_t remaining_budget = (free_vram > budget.reserve_bytes)
+                              ? (free_vram - budget.reserve_bytes) : 0;
 
     // Helper: does this qtype benefit from NVFP4 conversion? (> 4.5 bits/elem)
     auto nvfp4_beneficial = [](GGMLQuantType qt) -> bool {
@@ -1109,6 +1161,12 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
         // replaced by individual FP8 GEMMs with 2x throughput — net win.
         IMP_LOG_INFO("FP8 prefill: skipping FP16 cache (Phase 1), "
                      "all dense weights → FP8 cache (Phase 2)");
+    } else if (budget.strategy == VRAMBudget::NVFP4_DECODE_ONLY) {
+        // Skip Phase 1: sub-8-bit weights don't benefit from FP16 expansion.
+        // NVFP4 decode cache is the priority — all VRAM goes to Phase 3.
+        // Prefill uses CUTLASS NVFP4 GEMM (for eligible weights) or on-the-fly dequant.
+        IMP_LOG_INFO("NVFP4 decode only: skipping FP16 cache (Phase 1), "
+                     "VRAM reserved for NVFP4 decode cache");
     } else {
         // --- Phase 1: FP16 weight cache + fused KV + fused gate+up ---
         auto cache_weight = [&](const Tensor& w, GGMLQuantType qtype) {
@@ -1774,6 +1832,67 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, size_t cache_budget
             fp8_cache_bytes_ += migrated_bytes;
             IMP_LOG_INFO("NVFP4 only mode: freed FP16 cache (%.2f MiB), migrated %d weights to FP8 (%.2f MiB)",
                          freed / (1024.0 * 1024.0), migrated, migrated_bytes / (1024.0 * 1024.0));
+        }
+
+        // --- NVFP4 second pass: cache remaining tensors with freed VRAM ---
+        // After FP16-Free and FP8 migration, VRAM that was locked by FP16 cache is
+        // now available. Re-run NVFP4 for entries that were skipped due to VRAM pressure.
+        if (budget.nvfp4_second_pass && !nvfp4_entries.empty()) {
+            float* d_absmax_buf2 = nullptr;
+            float* d_tscale_buf2 = nullptr;
+            cudaMalloc(&d_absmax_buf2, sizeof(float));
+            cudaMalloc(&d_tscale_buf2, sizeof(float));
+
+            int second_count = 0;
+            size_t second_bytes = 0;
+
+            for (auto& e : nvfp4_entries) {
+                if (nvfp4_cache_.count(e.orig_ptr)) continue;  // already cached
+                int rows = static_cast<int>(e.weight.shape[0]);
+                int cols = static_cast<int>(e.weight.shape[1]);
+                size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 +
+                                     static_cast<size_t>(rows) * cols / 16 + 4;
+
+                size_t free_mem2 = 0, total_mem2 = 0;
+                cudaMemGetInfo(&free_mem2, &total_mem2);
+                if (free_mem2 < nvfp4_bytes + 1024 * 1024) break;
+
+                // Dequant from quantized weights via scratch buffer
+                size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
+                void* dq_buf = dequant_scratch_;
+                void* tmp_buf = nullptr;
+                if (!dequant_gpu_supported(e.qtype) || !dequant_scratch_) continue;
+                if (need > dequant_scratch_size_) {
+                    if (cudaMalloc(&tmp_buf, need) != cudaSuccess || !tmp_buf) continue;
+                    dq_buf = tmp_buf;
+                }
+                dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
+
+                Tensor fp16_view(reinterpret_cast<half*>(dq_buf), DType::FP16, 2,
+                                 e.weight.shape, true);
+                NvFP4QuantResult result;
+                quantize_fp16_to_nvfp4_async(fp16_view, result,
+                                              d_absmax_buf2, d_tscale_buf2, stream);
+                cudaStreamSynchronize(stream);
+
+                float h_tscale;
+                cudaMemcpy(&h_tscale, d_tscale_buf2, sizeof(float), cudaMemcpyDeviceToHost);
+                result.tensor_scale = h_tscale;
+                nvfp4_cache_[e.orig_ptr] = result;
+                second_bytes += nvfp4_bytes;
+                second_count++;
+
+                if (tmp_buf) cudaFree(tmp_buf);
+            }
+
+            cudaFree(d_absmax_buf2);
+            cudaFree(d_tscale_buf2);
+
+            if (second_count > 0) {
+                nvfp4_cache_bytes_ += second_bytes;
+                IMP_LOG_INFO("NVFP4 second pass: %d additional tensors, %.2f MiB",
+                             second_count, second_bytes / (1024.0 * 1024.0));
+            }
         }
 
         // --- Phase 3b: Convert NVFP4 weights to CUTLASS sm_120 block-scaled format ---

@@ -44,6 +44,10 @@ Engine::~Engine() {
         cudaFree(d_vision_embeddings_);
         d_vision_embeddings_ = nullptr;
     }
+    if (d_vision_pixels_) {
+        cudaFree(d_vision_pixels_);
+        d_vision_pixels_ = nullptr;
+    }
     if (h_sample_pinned_) {
         cudaFreeHost(h_sample_pinned_);
         h_sample_pinned_ = nullptr;
@@ -80,6 +84,181 @@ size_t Engine::effective_free_vram() const {
     return free_mem;
 }
 
+VRAMBudget Engine::plan_vram_budget(int n_kv_layers, int head_dim) const {
+    VRAMBudget budget;
+    const auto& mcfg = model_->config();
+
+    // --- 1. Classify model quantization ---
+    auto qtype = model_->layer(0).wq_qtype;
+    bool sub_8bit = (qtype == GGMLQuantType::Q4_0 || qtype == GGMLQuantType::Q4_K ||
+                     qtype == GGMLQuantType::Q5_0 || qtype == GGMLQuantType::Q5_K ||
+                     qtype == GGMLQuantType::Q3_K || qtype == GGMLQuantType::Q2_K ||
+                     qtype == GGMLQuantType::Q4_1 || qtype == GGMLQuantType::Q5_1);
+
+    // --- 2. Choose strategy ---
+    if (config_.use_nvfp4_decode == 0) {
+        budget.strategy = VRAMBudget::FP16_ONLY;
+    } else if (sub_8bit) {
+        budget.strategy = VRAMBudget::NVFP4_DECODE_ONLY;
+    } else {
+        budget.strategy = VRAMBudget::FP8_PREFILL_NVFP4_DECODE;
+    }
+
+    // --- 3. Compute available VRAM ---
+    size_t free_vram = effective_free_vram();
+
+    // Feature-aware reserve instead of flat 1 GiB.
+    // Base: 256 MiB for cuBLAS workspace + driver overhead.
+    // Add per-feature: CUDA graphs, speculative, green contexts each need headroom.
+    budget.reserve_bytes = 256ULL * 1024 * 1024;  // base: cuBLAS + driver
+    if (config_.use_cuda_graphs)       budget.reserve_bytes += 256ULL * 1024 * 1024;
+    if (config_.enable_speculative)    budget.reserve_bytes += 256ULL * 1024 * 1024;
+    if (config_.use_green_contexts)    budget.reserve_bytes += 128ULL * 1024 * 1024;
+    if (config_.use_fp8_prefill)       budget.reserve_bytes += 128ULL * 1024 * 1024;
+    // Minimum 512 MiB to handle cuBLAS autotuning growth + misc stream allocs
+    budget.reserve_bytes = std::max(budget.reserve_bytes, static_cast<size_t>(512ULL * 1024 * 1024));
+
+    // Estimate SSM footprint (not yet allocated at this point)
+    size_t ssm_footprint = 0;
+    if (mcfg.ssm_inner_size > 0) {
+        int n_ssm = 0;
+        for (int i = 0; i < mcfg.n_layers; i++)
+            if (model_->layer(i).ssm_in.data != nullptr) n_ssm++;
+        if (n_ssm > 0) {
+            int conv_ch = mcfg.ssm_inner_size + 2 * mcfg.ssm_group_count * mcfg.ssm_state_size;
+            int n_heads = mcfg.ssm_dt_rank;
+            int hd_ssm = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
+            ssm_footprint = static_cast<size_t>(n_ssm) * config_.max_batch_size *
+                (conv_ch * std::max(mcfg.ssm_conv_kernel - 1, 0) * sizeof(float) +
+                 n_heads * hd_ssm * mcfg.ssm_state_size * dtype_size(config_.ssm_state_dtype));
+        }
+    }
+
+    size_t available = free_vram;
+    size_t overhead = budget.reserve_bytes + ssm_footprint;
+    available = (available > overhead) ? (available - overhead) : 0;
+
+    // --- 4. Compute KV cache per-block cost ---
+    size_t single_block_bytes;
+    if (config_.kv_cache_dtype == DType::INT4) {
+        single_block_bytes = static_cast<size_t>(kKVBlockSize) *
+                             mcfg.n_kv_heads * head_dim / 2;
+    } else {
+        single_block_bytes = static_cast<size_t>(kKVBlockSize) *
+                             mcfg.n_kv_heads * head_dim * dtype_size(config_.kv_cache_dtype);
+    }
+    size_t per_block_total = single_block_bytes * 2 * n_kv_layers;
+    if (config_.kv_cache_dtype == DType::INT8 || config_.kv_cache_dtype == DType::INT4) {
+        size_t scale_per_block = static_cast<size_t>(kKVBlockSize) * mcfg.n_kv_heads * sizeof(half);
+        per_block_total += scale_per_block * 2 * n_kv_layers;
+    }
+
+    int blocks_per_seq = (config_.max_seq_len + kKVBlockSize - 1) / kKVBlockSize;
+    int needed_blocks = blocks_per_seq * config_.max_batch_size;
+
+    // --- 5. Estimate NVFP4-eligible weight cache size ---
+    auto nvfp4_beneficial = [](GGMLQuantType qt) -> bool {
+        switch (qt) {
+            case GGMLQuantType::Q8_0: case GGMLQuantType::Q8_K:
+            case GGMLQuantType::Q6_K: case GGMLQuantType::Q5_K:
+                return true;
+            default: return false;
+        }
+    };
+
+    size_t nvfp4_elems = 0;
+    auto count_nvfp4 = [&](const Tensor& w, GGMLQuantType qt) {
+        if (!w.data || !nvfp4_beneficial(qt)) return;
+        if (w.shape[1] % 16 != 0) return;
+        nvfp4_elems += static_cast<size_t>(w.shape[0]) * w.shape[1];
+    };
+
+    count_nvfp4(model_->output_proj(), model_->out_proj_qtype_);
+    for (int i = 0; i < mcfg.n_layers; i++) {
+        const auto& L = model_->layer(i);
+        count_nvfp4(L.wq, L.wq_qtype);
+        count_nvfp4(L.wk, L.wk_qtype);
+        count_nvfp4(L.wv, L.wv_qtype);
+        count_nvfp4(L.wo, L.wo_qtype);
+        count_nvfp4(L.w_gate, L.w_gate_qtype);
+        count_nvfp4(L.w_up, L.w_up_qtype);
+        count_nvfp4(L.w_down, L.w_down_qtype);
+        count_nvfp4(L.ssm_in, L.ssm_in_qtype);
+        count_nvfp4(L.ssm_out, L.ssm_out_qtype);
+        count_nvfp4(L.w_gate_shared, L.w_gate_shared_qtype);
+        count_nvfp4(L.w_up_shared, L.w_up_shared_qtype);
+        count_nvfp4(L.w_down_shared, L.w_down_shared_qtype);
+    }
+
+    // NVFP4: packed_data (N*K/2) + scale_factors (N*K/16) + ~4 bytes tensor_scale
+    size_t nvfp4_estimate = nvfp4_elems / 2 + nvfp4_elems / 16;
+    // CUTLASS scale factors add ~6.25% overhead (N*K/16)
+    size_t cutlass_sf_estimate = nvfp4_elems / 16;
+
+    // --- 6. Allocate based on strategy ---
+    switch (budget.strategy) {
+        case VRAMBudget::NVFP4_DECODE_ONLY: {
+            budget.fp8_cache_bytes = 0;
+            budget.nvfp4_cache_bytes = nvfp4_estimate;
+            size_t weight_total = nvfp4_estimate + cutlass_sf_estimate;
+            size_t kv_available = (available > weight_total) ? (available - weight_total) : 0;
+            budget.kv_cache_bytes = static_cast<size_t>(kv_available * 0.8);
+            budget.kv_max_blocks = (per_block_total > 0)
+                ? static_cast<int>(budget.kv_cache_bytes / per_block_total) : needed_blocks;
+            budget.kv_max_blocks = std::max(budget.kv_max_blocks, needed_blocks);
+            budget.nvfp4_second_pass = false;  // no FP16 to free
+            break;
+        }
+        case VRAMBudget::FP8_PREFILL_NVFP4_DECODE: {
+            budget.fp8_cache_bytes = nvfp4_elems;  // FP8 = 1 byte/elem, same eligible set
+            budget.nvfp4_cache_bytes = nvfp4_estimate;
+            // KV: 10% for mode 2 (NVFP4 needs VRAM), 80% otherwise
+            double kv_fraction = (config_.use_nvfp4_decode == 2) ? 0.1 : 0.8;
+            budget.kv_cache_bytes = static_cast<size_t>(available * kv_fraction);
+            budget.kv_max_blocks = (per_block_total > 0)
+                ? static_cast<int>(budget.kv_cache_bytes / per_block_total) : needed_blocks;
+            if (config_.use_nvfp4_decode != 2)
+                budget.kv_max_blocks = std::max(budget.kv_max_blocks, needed_blocks);
+            budget.nvfp4_second_pass = (config_.use_nvfp4_decode == 2);
+            break;
+        }
+        case VRAMBudget::FP16_ONLY: {
+            budget.fp8_cache_bytes = 0;
+            budget.nvfp4_cache_bytes = 0;
+            budget.kv_cache_bytes = static_cast<size_t>(available * 0.8);
+            budget.kv_max_blocks = (per_block_total > 0)
+                ? static_cast<int>(budget.kv_cache_bytes / per_block_total) : needed_blocks;
+            budget.kv_max_blocks = std::max(budget.kv_max_blocks, needed_blocks);
+            budget.nvfp4_second_pass = false;
+            break;
+        }
+    }
+    budget.kv_max_blocks = std::max(budget.kv_max_blocks, 16);
+
+    int target_blocks = (config_.use_nvfp4_decode == 2 ||
+                         budget.strategy == VRAMBudget::NVFP4_DECODE_ONLY)
+                        ? needed_blocks : needed_blocks * 2;
+    budget.kv_max_blocks = std::min(budget.kv_max_blocks, target_blocks);
+    budget.kv_max_blocks = std::max(budget.kv_max_blocks, 16);
+
+    const char* strat_name = (budget.strategy == VRAMBudget::FP8_PREFILL_NVFP4_DECODE)
+        ? "FP8_PREFILL_NVFP4_DECODE"
+        : (budget.strategy == VRAMBudget::NVFP4_DECODE_ONLY)
+        ? "NVFP4_DECODE_ONLY" : "FP16_ONLY";
+    IMP_LOG_INFO("VRAM budget: strategy=%s, available=%.1f MiB, "
+                 "kv=%d blocks (%.1f MiB), nvfp4=%.1f MiB, fp8=%.1f MiB, "
+                 "reserve=%.0f MiB, second_pass=%s",
+                 strat_name, available / (1024.0 * 1024.0),
+                 budget.kv_max_blocks,
+                 (per_block_total > 0 ? budget.kv_max_blocks * per_block_total : 0) / (1024.0 * 1024.0),
+                 nvfp4_estimate / (1024.0 * 1024.0),
+                 budget.fp8_cache_bytes / (1024.0 * 1024.0),
+                 budget.reserve_bytes / (1024.0 * 1024.0),
+                 budget.nvfp4_second_pass ? "yes" : "no");
+
+    return budget;
+}
+
 bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     if (!model) {
         return false;
@@ -110,6 +289,23 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         } else {
             config_.use_nvfp4_decode = 0;
             IMP_LOG_INFO("NVFP4 decode: auto → disabled (sm_%d < sm_90)", sm);
+        }
+    }
+
+    // Auto-disable FP8 prefill cache for sub-8-bit quantized models.
+    // FP8 (8 bits/param) is LARGER than Q4_K_M (~4.8 bits) or Q6_K (~6.5 bits),
+    // so the cache wastes VRAM without reducing memory traffic. The freed VRAM
+    // is better spent on NVFP4 decode cache and KV cache for longer context.
+    if (config_.use_fp8_prefill) {
+        auto qtype = model_->layer(0).wq_qtype;
+        bool sub_8bit = (qtype == GGMLQuantType::Q4_0 || qtype == GGMLQuantType::Q4_K ||
+                         qtype == GGMLQuantType::Q5_0 || qtype == GGMLQuantType::Q5_K ||
+                         qtype == GGMLQuantType::Q3_K || qtype == GGMLQuantType::Q2_K ||
+                         qtype == GGMLQuantType::Q4_1 || qtype == GGMLQuantType::Q5_1);
+        if (sub_8bit) {
+            config_.use_fp8_prefill = 0;
+            IMP_LOG_INFO("FP8 prefill cache: auto-disabled (model weights are sub-8-bit, "
+                         "FP8 cache would increase VRAM usage)");
         }
     }
 
@@ -176,6 +372,14 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         if (n_attn == 0) n_attn = mcfg.n_layers;
         size_t kv_block_bytes = static_cast<size_t>(kKVBlockSize) * mcfg.n_kv_heads * head_dim_est * elem_sz;
         size_t kv_est = static_cast<size_t>(blocks_per_seq * config_.max_batch_size) * 2 * n_attn * kv_block_bytes;
+        // Cap KV estimate to 20% of total VRAM — the theoretical max (all batch slots
+        // filled to max_seq_len) is unrealistic for large models on limited VRAM.
+        // The actual KV allocation is computed later by plan_vram_budget().
+        {
+            size_t total_vram = 0, free_vram_est = 0;
+            cudaMemGetInfo(&free_vram_est, &total_vram);
+            kv_est = std::min(kv_est, total_vram / 5);
+        }
         expert_reserve += kv_est;
 
         // SSM state estimate
@@ -192,11 +396,16 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             expert_reserve += ssm_est;
         }
 
-        // Safety margin for FP16 cache, CUDA graph driver memory, and runtime overhead.
+        // Safety margin for weight cache, CUDA graph driver memory, and runtime overhead.
         // On WSL2/WDDM, exceeding physical VRAM silently spills to shared system memory,
-        // causing massive slowdowns. 768 MiB covers driver internals + graph capture +
-        // cuBLAS growth + misc stream-ordered allocations during inference.
-        expert_reserve += 768ULL * 1024 * 1024;
+        // causing massive slowdowns. Feature-aware: more features = more headroom needed.
+        size_t safety = 256ULL * 1024 * 1024;  // base: cuBLAS + driver
+        if (config_.use_cuda_graphs)    safety += 256ULL * 1024 * 1024;
+        if (config_.enable_speculative) safety += 256ULL * 1024 * 1024;
+        if (config_.use_green_contexts) safety += 128ULL * 1024 * 1024;
+        if (config_.use_fp8_prefill)    safety += 128ULL * 1024 * 1024;
+        safety = std::max(safety, static_cast<size_t>(512ULL * 1024 * 1024));
+        expert_reserve += safety;
 
         IMP_LOG_INFO("Expert upload reserve: %.2f MiB (workspace=%.2f, kv=%.2f, ssm+safety=rest)",
                      expert_reserve / (1024.0 * 1024.0),
@@ -301,82 +510,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     int blocks_per_seq = (config_.max_seq_len + kKVBlockSize - 1) / kKVBlockSize;
     int needed_blocks = blocks_per_seq * config_.max_batch_size;
 
+    // Compute VRAM budget: unified planner for KV + weight cache allocation.
+    auto vram_budget = plan_vram_budget(n_kv_layers, head_dim);
+
     if (config_.kv_cache_max_blocks > 0) {
         max_blocks = config_.kv_cache_max_blocks;
     } else {
-        // Auto-size: allocate what's needed plus headroom, bounded by free VRAM.
-        // Pre-calculate SSM footprint so we don't starve SSM state allocation.
-        size_t single_block_bytes;
-        if (config_.kv_cache_dtype == DType::INT4) {
-            // INT4: 0.5 bytes per element (2 elements packed per byte)
-            single_block_bytes = static_cast<size_t>(kKVBlockSize) *
-                                 mcfg.n_kv_heads * head_dim / 2;
-        } else {
-            single_block_bytes = static_cast<size_t>(kKVBlockSize) *
-                                 mcfg.n_kv_heads * head_dim * dtype_size(config_.kv_cache_dtype);
-        }
-        size_t per_block_total = single_block_bytes * 2 * n_kv_layers;
-        // INT8/INT4 scale overhead: one half per head per token per block (K+V)
-        if (config_.kv_cache_dtype == DType::INT8 ||
-            config_.kv_cache_dtype == DType::INT4) {
-            size_t scale_per_block = static_cast<size_t>(kKVBlockSize) *
-                                     mcfg.n_kv_heads * sizeof(half);
-            per_block_total += scale_per_block * 2 * n_kv_layers;
-        }
-
-        // Estimate SSM state footprint for hybrid models
-        size_t ssm_footprint = 0;
-        if (mcfg.ssm_inner_size > 0) {
-            int n_ssm_layers = 0;
-            for (int i = 0; i < mcfg.n_layers; i++) {
-                if (model_->layer(i).ssm_in.data != nullptr) n_ssm_layers++;
-            }
-            if (n_ssm_layers > 0) {
-                int conv_channels = mcfg.ssm_inner_size + 2 * mcfg.ssm_group_count * mcfg.ssm_state_size;
-                int n_heads = mcfg.ssm_dt_rank;
-                int head_dim_ssm = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
-                size_t ssm_elem = dtype_size(config_.ssm_state_dtype);
-                // conv_state: [n_ssm_layers * max_batch * conv_channels * (kernel-1)]
-                ssm_footprint += static_cast<size_t>(n_ssm_layers) * config_.max_batch_size *
-                                 conv_channels * std::max(mcfg.ssm_conv_kernel - 1, 0) * sizeof(float);
-                // h_state: [n_ssm_layers * max_batch * n_heads * head_dim_ssm * state_size]
-                ssm_footprint += static_cast<size_t>(n_ssm_layers) * config_.max_batch_size *
-                                 n_heads * head_dim_ssm * mcfg.ssm_state_size * ssm_elem;
-            }
-        }
-
-        // Target: 2x headroom for batching / prefix caching.
-        // In NVFP4-only mode (2), skip headroom — every MiB freed goes to
-        // weight caching, which directly improves decode throughput.
-        int target_blocks = (config_.use_nvfp4_decode == 2)
-                            ? needed_blocks
-                            : needed_blocks * 2;
-
-        size_t free_mem = effective_free_vram();
-        if (free_mem == 0 || per_block_total == 0) {
-            max_blocks = needed_blocks;
-        } else {
-            // Reserve space for SSM state + 256 MiB safety margin, then cap KV
-            // at a fraction of what remains to leave room for weight caching.
-            // In NVFP4-only mode (2), use only 10% for KV — each extra MiB of
-            // NVFP4 weight cache directly improves decode tok/s, while excess
-            // KV blocks sit unused for typical context lengths.
-            constexpr size_t kSafetyMarginBytes = 256ULL * 1024 * 1024;
-            size_t reserved = ssm_footprint + kSafetyMarginBytes;
-            size_t available = (free_mem > reserved) ? (free_mem - reserved) : 0;
-            double kv_fraction = (config_.use_nvfp4_decode == 2) ? 0.1 : 0.8;
-            size_t kv_budget = static_cast<size_t>(available * kv_fraction);
-            int budget_blocks = static_cast<int>(kv_budget / per_block_total);
-            max_blocks = std::min(target_blocks, budget_blocks);
-        }
-
-        // In NVFP4-only mode, KV budget takes priority over needed_blocks —
-        // excess KV wastes VRAM that weight caching needs for decode throughput.
-        // Sequences exceeding the KV capacity will fail gracefully at runtime.
-        if (config_.use_nvfp4_decode != 2) {
-            max_blocks = std::max(max_blocks, needed_blocks);
-        }
-        max_blocks = std::max(max_blocks, 16);
+        max_blocks = vram_budget.kv_max_blocks;
     }
 
     {
@@ -451,17 +591,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
     }
 
-    // Pre-dequantize quantized weights to FP16 for fast prefill GEMM.
-    // Done eagerly at init time so the first real-world prefill isn't penalized
-    // by ~380ms of dequant overhead (previously this was lazy on first prefill).
-    // Decode (n=1) uses raw quantized dp4a GEMV and doesn't need FP16 cache.
-    // Compute weight cache budget: free VRAM minus runtime reserve.
-    // All fixed allocations (weights, KV, SSM, workspace) are done by now.
-    size_t cache_budget = effective_free_vram();
-    constexpr size_t kCacheReserveMiB = 1024;  // CUDA graphs + cuBLAS + driver
-    cache_budget = (cache_budget > kCacheReserveMiB * 1024ULL * 1024)
-                   ? (cache_budget - kCacheReserveMiB * 1024ULL * 1024) : 0;
-    executor_->pre_dequant_weights(stream_, cache_budget);
+    // Pre-dequantize quantized weights to FP16 on GPU for fast prefill GEMM.
+    // Uses the VRAM budget computed earlier to split VRAM between FP16/FP8/NVFP4 caches.
+    executor_->pre_dequant_weights(stream_, vram_budget);
     dequant_done_ = true;
     cudaStreamSynchronize(stream_);
 
@@ -473,6 +605,16 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     {
         int max_blocks_per_seq = blocks_per_seq;
         decode_batch_pool_.allocate(config_.max_batch_size, max_blocks_per_seq);
+    }
+
+    // --- Pre-allocate penalty token buffer to avoid sync cudaMalloc in decode hot path ---
+    {
+        d_penalty_tokens_capacity_ = static_cast<size_t>(config_.max_seq_len);
+        if (cudaMalloc(&d_penalty_tokens_, d_penalty_tokens_capacity_ * sizeof(int32_t)) != cudaSuccess) {
+            IMP_LOG_WARN("Failed to pre-allocate penalty token buffer (%zu tokens)", d_penalty_tokens_capacity_);
+            d_penalty_tokens_ = nullptr;
+            d_penalty_tokens_capacity_ = 0;
+        }
     }
 
     // --- Report total GPU memory usage ---
@@ -490,7 +632,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // --- Initialize green contexts if requested ---
     if (config_.use_green_contexts) {
         if (!green_ctx_.init(0, config_.green_ctx_prefill_ratio)) {
-            // Non-fatal: fall back to regular streams
+            IMP_LOG_WARN("Green context init failed — falling back to regular streams");
         }
         // Allocate decode workspace for concurrent prefill/decode overlap
         if (green_ctx_.is_available() && config_.prefill_chunk_size > 0) {
@@ -572,6 +714,16 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             vision_encoder_.reset();
             vision_model_.reset();
             return false;
+        }
+
+        // Pre-allocate pixel buffer to avoid per-image cudaMalloc/Free
+        int img_sz = vision_model_->config.image_size;
+        d_vision_pixels_size_ = static_cast<size_t>(3) * img_sz * img_sz * sizeof(half);
+        if (cudaMalloc(&d_vision_pixels_, d_vision_pixels_size_) != cudaSuccess) {
+            IMP_LOG_WARN("Failed to pre-allocate vision pixel buffer (%.1f MiB), will alloc per-image",
+                         d_vision_pixels_size_ / (1024.0 * 1024.0));
+            d_vision_pixels_ = nullptr;
+            d_vision_pixels_size_ = 0;
         }
 
         // Resolve vision special token IDs
@@ -741,20 +893,24 @@ bool Engine::set_image(const std::string& path) {
         return false;
     }
 
-    // Upload pixels to GPU
+    // Upload pixels to GPU (use pre-allocated buffer if available)
     int n_pixels = 3 * img.width * img.height;
-    half* d_pixels = nullptr;
-    if (cudaMalloc(&d_pixels, n_pixels * sizeof(half)) != cudaSuccess) {
-        IMP_LOG_ERROR("set_image: cudaMalloc failed for %d pixels", n_pixels);
-        return false;
+    size_t pixel_bytes = static_cast<size_t>(n_pixels) * sizeof(half);
+    half* d_pixels = d_vision_pixels_;
+    bool need_free = false;
+    if (!d_pixels || pixel_bytes > d_vision_pixels_size_) {
+        if (cudaMalloc(&d_pixels, pixel_bytes) != cudaSuccess) {
+            IMP_LOG_ERROR("set_image: cudaMalloc failed for %d pixels", n_pixels);
+            return false;
+        }
+        need_free = true;
     }
-    cudaMemcpyAsync(d_pixels, img.pixels.data(), n_pixels * sizeof(half),
+    cudaMemcpyAsync(d_pixels, img.pixels.data(), pixel_bytes,
                     cudaMemcpyHostToDevice, stream_);
 
-    // Encode — sync before freeing d_pixels (encode runs async on stream_)
     bool ok = vision_encoder_->encode(d_pixels, d_vision_embeddings_, stream_);
     cudaStreamSynchronize(stream_);
-    cudaFree(d_pixels);
+    if (need_free) cudaFree(d_pixels);
 
     if (ok) {
         has_vision_input_ = true;
@@ -778,17 +934,22 @@ bool Engine::set_image_from_memory(const uint8_t* data, size_t len) {
     }
 
     int n_pixels = 3 * img.width * img.height;
-    half* d_pixels = nullptr;
-    if (cudaMalloc(&d_pixels, n_pixels * sizeof(half)) != cudaSuccess) {
-        IMP_LOG_ERROR("set_image_from_memory: cudaMalloc failed for %d pixels", n_pixels);
-        return false;
+    size_t pixel_bytes = static_cast<size_t>(n_pixels) * sizeof(half);
+    half* d_pixels = d_vision_pixels_;
+    bool need_free = false;
+    if (!d_pixels || pixel_bytes > d_vision_pixels_size_) {
+        if (cudaMalloc(&d_pixels, pixel_bytes) != cudaSuccess) {
+            IMP_LOG_ERROR("set_image_from_memory: cudaMalloc failed for %d pixels", n_pixels);
+            return false;
+        }
+        need_free = true;
     }
-    cudaMemcpyAsync(d_pixels, img.pixels.data(), n_pixels * sizeof(half),
+    cudaMemcpyAsync(d_pixels, img.pixels.data(), pixel_bytes,
                     cudaMemcpyHostToDevice, stream_);
 
     bool ok = vision_encoder_->encode(d_pixels, d_vision_embeddings_, stream_);
     cudaStreamSynchronize(stream_);
-    cudaFree(d_pixels);
+    if (need_free) cudaFree(d_pixels);
 
     if (ok) {
         has_vision_input_ = true;
@@ -888,6 +1049,22 @@ bool Engine::step() {
 
     if (prefill_batch.empty() && decode_batch.empty()) {
         return false;
+    }
+
+    // Dynamic Green Context SM reconfiguration based on workload mix.
+    // When only one type of work is pending, give all SMs to that stream.
+    if (config_.use_green_contexts && green_ctx_.is_available() &&
+        green_ctx_.has_green_contexts()) {
+        float target_ratio = config_.green_ctx_prefill_ratio;  // default
+        if (prefill_batch.empty() && !decode_batch.empty()) {
+            target_ratio = 0.0f;  // all SMs to decode
+        } else if (!prefill_batch.empty() && decode_batch.empty()) {
+            target_ratio = 1.0f;  // all SMs to prefill
+        }
+        // Only reconfigure if ratio changed significantly (avoid churn)
+        if (std::abs(target_ratio - green_ctx_.prefill_ratio()) > 0.1f) {
+            green_ctx_.reconfigure(target_ratio);
+        }
     }
 
     // ====================================================================
@@ -1545,7 +1722,9 @@ bool Engine::step() {
                 }
             }
 
-            // Set JSON constrainer on InferenceState (single-sequence only)
+            // Set JSON constrainer on InferenceState (single-sequence only).
+            // The constrainer is a singleton on Engine — it tracks FSM state per
+            // token, so it MUST NOT be shared across concurrent sequences.
             if (needs_json_mode && json_constrainer_ &&
                 valid_decode.size() == 1 && valid_decode[0]->json_mode) {
                 state.json_constrainer = json_constrainer_.get();
@@ -1576,6 +1755,22 @@ bool Engine::step() {
                     per_state.dry_penalty_last_n = req->dry_penalty_last_n;
                     if (req->dry_multiplier > 0.0f && !req->output_tokens.empty())
                         per_state.host_penalty_tokens = req->output_tokens.data();
+                    // Per-request penalty tokens: each request has its own output history.
+                    // Without this, all requests in a batch use request[0]'s penalties.
+                    per_state.penalty_tokens = nullptr;
+                    per_state.n_penalty_tokens = 0;
+                    bool req_needs_pen = (req->repetition_penalty != 1.0f ||
+                                          req->frequency_penalty != 0.0f ||
+                                          req->presence_penalty != 0.0f);
+                    if (req_needs_pen && !req->output_tokens.empty() && d_penalty_tokens_) {
+                        size_t rn = req->output_tokens.size();
+                        if (rn <= d_penalty_tokens_capacity_) {
+                            cudaMemcpyAsync(d_penalty_tokens_, req->output_tokens.data(),
+                                            rn * sizeof(int32_t), cudaMemcpyHostToDevice, dec_stream);
+                            per_state.penalty_tokens = d_penalty_tokens_;
+                            per_state.n_penalty_tokens = static_cast<int>(rn);
+                        }
+                    }
                     per_state.mirostat = req->mirostat;
                     per_state.mirostat_tau = req->mirostat_tau;
                     per_state.mirostat_eta = req->mirostat_eta;

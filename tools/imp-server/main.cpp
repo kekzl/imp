@@ -118,9 +118,14 @@ int main(int argc, char** argv) {
         }
 
         // Max concurrent requests
-        if (state.max_concurrent > 0 && state.batching &&
+        if (state.max_concurrent > 0 &&
             (req.path == "/v1/chat/completions" || req.path == "/v1/completions")) {
-            if (state.batching->queue_depth() >= state.max_concurrent) {
+            int queue = 0;
+            {
+                std::lock_guard<std::timed_mutex> lock(state.mtx);
+                if (state.batching) queue = state.batching->queue_depth();
+            }
+            if (queue >= state.max_concurrent) {
                 res.status = 429;
                 json err = {{"error", {{"message", "Server overloaded, too many concurrent requests"},
                                         {"type", "rate_limit_error"}}}};

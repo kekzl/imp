@@ -456,18 +456,15 @@ std::vector<int32_t> SpeculativeDecoder::step(int32_t last_token, int position,
         output.push_back(vr.next_token);
     }
 
-    // 4. Roll back draft KV cache to only keep accepted positions.
-    //    The draft model wrote K entries starting at `position`.
-    //    We only need `n_accepted` of them. The remaining (K - n_accepted)
-    //    positions are stale and will be overwritten on the next step,
-    //    since the draft model will start from position + n_accepted + 1.
-    //    No explicit rollback needed for paged KV -- unused entries simply
-    //    get overwritten on the next call.
-
-    // 5. Similarly, the target model processed all K+1 tokens in pseudo-prefill,
-    //    but only the first (n_accepted + 1) positions' KV entries are valid.
-    //    Again, paged attention handles this naturally since subsequent writes
-    //    to the same positions overwrite stale data.
+    // 4. Roll back KV caches to discard stale entries from rejected tokens.
+    //    The draft model wrote K entries starting at `position`, and the target
+    //    model wrote K+1 entries in pseudo-prefill. Only the first n_accepted+1
+    //    positions are valid. Without rollback, rejected positions waste blocks
+    //    and leave stale KV data that could be read by paged attention if the
+    //    block is not fully overwritten on the next step.
+    int rollback_pos = position + vr.n_accepted + 1;
+    target_kv_manager_->rollback(seq_id, rollback_pos);
+    draft_kv_manager_->rollback(seq_id, rollback_pos);
 
     return output;
 }
