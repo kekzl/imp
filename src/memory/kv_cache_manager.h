@@ -7,6 +7,7 @@
 #include <list>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <memory>
 
@@ -98,6 +99,22 @@ public:
     // was evicted, false if no cached blocks remain.
     bool evict_cached_block();
 
+    // ── Prefix block pinning (agentic workloads) ────────────────────
+
+    // Pin the first `num_blocks` blocks of `seq_id`. Pinned blocks are
+    // never freed by evict_lru(), reclaim_cached_block(), or
+    // free_sequence(). After free_sequence(), pinned blocks stay in the
+    // cache pool with ref_count=1 for reuse by future sequences.
+    void pin_prefix(int seq_id, int num_blocks);
+
+    // Remove pinning for all blocks that were pinned via pin_prefix()
+    // for the given sequence. Does NOT free the blocks — they remain
+    // allocated as normal (or cached if the sequence was already freed).
+    void unpin_prefix(int seq_id);
+
+    // Number of blocks currently pinned across all sequences.
+    int num_pinned_blocks() const;
+
     // ── Speculative decoding rollback ────────────────────────────────
 
     // Truncate a sequence's block table to fit `new_seq_len` tokens.
@@ -171,6 +188,12 @@ private:
     // seq_id -> vector of block hashes (parallel to seq_blocks_).
     // Used to maintain hash chain state for append_block operations.
     std::unordered_map<int, std::vector<size_t>> seq_block_hashes_;
+
+    // ── Prefix pinning state ─────────────────────────────────────────
+    // Block IDs that are pinned and must never be evicted or freed.
+    std::unordered_set<int> pinned_blocks_;
+    // seq_id -> number of pinned blocks (for unpin_prefix to know which blocks).
+    std::unordered_map<int, int> pinned_seqs_;
 
     // Try to reclaim a cached block. Returns the block_id, or -1.
     int reclaim_cached_block();

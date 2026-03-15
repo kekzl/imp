@@ -790,5 +790,139 @@ TEST(KVCacheManagerTest, PrefixCachingWithPartialLastBlock) {
     mgr->free_sequence(1);
 }
 
+// ============================================================================
+// Prefix block pinning tests
+// ============================================================================
+
+// 27. PinnedBlocksSurviveEviction
+TEST(KVCacheManagerTest, PinnedBlocksSurviveEviction) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(8);
+
+    // Seq 0: 3 blocks, seq 1: 3 blocks, seq 2: 2 blocks.
+    mgr->allocate_blocks(0, 3);
+    mgr->allocate_blocks(1, 3);
+    mgr->allocate_blocks(2, 2);
+    EXPECT_EQ(mgr->num_free_blocks(), 0);
+
+    // Pin seq 0's first 2 blocks.
+    mgr->pin_prefix(0, 2);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 2);
+
+    // Evict LRU — seq 0 is at the front of LRU but it's pinned.
+    // So seq 1 should be evicted instead.
+    int victim = mgr->evict_lru();
+    EXPECT_EQ(victim, 1);
+    EXPECT_EQ(mgr->num_free_blocks(), 3);
+
+    // Seq 0 should still be intact.
+    EXPECT_EQ(static_cast<int>(mgr->block_table(0).size()), 3);
+
+    // Evict again — seq 2 should be evicted (seq 0 is still pinned).
+    victim = mgr->evict_lru();
+    EXPECT_EQ(victim, 2);
+    EXPECT_EQ(mgr->num_free_blocks(), 5);
+
+    // Evict again — only seq 0 remains but it's pinned. Should return -1.
+    victim = mgr->evict_lru();
+    EXPECT_EQ(victim, -1);
+
+    mgr->unpin_prefix(0);
+    mgr->free_sequence(0);
+}
+
+// 28. PinnedBlocksSurviveFreeSequence
+TEST(KVCacheManagerTest, PinnedBlocksSurviveFreeSequence) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(16);
+
+    mgr->allocate_blocks(0, 4);
+    const auto& table0 = mgr->block_table(0);
+    ASSERT_EQ(static_cast<int>(table0.size()), 4);
+
+    // Pin first 2 blocks.
+    mgr->pin_prefix(0, 2);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 2);
+
+    int free_before = mgr->num_free_blocks();
+    mgr->free_sequence(0);
+
+    // The sequence is gone from active tracking.
+    EXPECT_TRUE(mgr->block_table(0).empty());
+    EXPECT_EQ(mgr->num_active_sequences(), 0);
+
+    // Only 2 unpinned blocks should have been freed to the pool.
+    // The 2 pinned blocks stay in cached_blocks_lru_ with ref_count=1.
+    EXPECT_EQ(mgr->num_free_blocks(), free_before + 2);
+
+    // Pinned blocks should still be counted.
+    EXPECT_EQ(mgr->num_pinned_blocks(), 2);
+
+    // Unpin — now the cached blocks can be reclaimed.
+    mgr->unpin_prefix(0);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 0);
+}
+
+// 29. UnpinAllowsEviction
+TEST(KVCacheManagerTest, UnpinAllowsEviction) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(8);
+    mgr->set_prefix_caching_enabled(true);
+
+    // Seq 0: 4 blocks with prefix caching.
+    std::vector<int32_t> tokens(64);
+    std::iota(tokens.begin(), tokens.end(), 700);
+    int reused = mgr->allocate_blocks_with_prefix(0, tokens.data(), 64);
+    EXPECT_EQ(reused, 0);
+    mgr->register_block_hashes(0, tokens.data(), 64);
+
+    // Pin first 2 blocks.
+    mgr->pin_prefix(0, 2);
+
+    // Free seq 0 — all 4 blocks go to cached LRU, but 2 are pinned.
+    mgr->free_sequence(0);
+    EXPECT_EQ(mgr->num_cached_blocks(), 4);
+
+    // Try to evict cached blocks — only 2 non-pinned should be reclaimable.
+    EXPECT_TRUE(mgr->evict_cached_block());  // reclaims non-pinned
+    EXPECT_TRUE(mgr->evict_cached_block());  // reclaims non-pinned
+    EXPECT_FALSE(mgr->evict_cached_block()); // pinned blocks remain
+    EXPECT_EQ(mgr->num_cached_blocks(), 2);  // 2 pinned remain in LRU
+
+    // Unpin — now the remaining 2 can be evicted.
+    mgr->unpin_prefix(0);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 0);
+    EXPECT_TRUE(mgr->evict_cached_block());
+    EXPECT_TRUE(mgr->evict_cached_block());
+    EXPECT_EQ(mgr->num_cached_blocks(), 0);
+    EXPECT_EQ(mgr->num_free_blocks(), 8);
+}
+
+// 30. PinPrefixCanAllocateAccuracy
+TEST(KVCacheManagerTest, PinPrefixCanAllocateAccuracy) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(8);
+
+    mgr->allocate_blocks(0, 4);
+    mgr->allocate_blocks(1, 4);
+    EXPECT_EQ(mgr->num_free_blocks(), 0);
+
+    // Pin seq 0. Now only seq 1's 4 blocks are reclaimable via eviction.
+    mgr->pin_prefix(0, 4);
+
+    EXPECT_TRUE(mgr->can_allocate(4));   // Can evict seq 1.
+    EXPECT_FALSE(mgr->can_allocate(5));  // Seq 0 is pinned, can't reclaim its blocks.
+
+    mgr->unpin_prefix(0);
+    EXPECT_TRUE(mgr->can_allocate(8));   // Both sequences reclaimable now.
+
+    mgr->free_sequence(0);
+    mgr->free_sequence(1);
+}
+
 } // namespace
 } // namespace imp
