@@ -198,6 +198,11 @@ private:
     // seq_id -> number of pinned blocks (for unpin_prefix to know which blocks).
     std::unordered_map<int, int> pinned_seqs_;
 
+    // Incrementally maintained count of reclaimable cached blocks
+    // (cached_blocks_lru_.size() minus pinned cached blocks).
+    // Avoids O(C) linear scan in can_allocate().
+    int reclaimable_cached_count_ = 0;
+
     // Try to reclaim a cached block. Returns the block_id, or -1.
     int reclaim_cached_block();
 

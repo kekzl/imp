@@ -89,16 +89,14 @@ void KVCacheManager::free_sequence(int seq_id) {
         // cached LRU for reuse. They remain in pinned_blocks_ and cannot
         // be evicted until unpin_prefix() is called.
         if (pinned_blocks_.find(block_id) != pinned_blocks_.end()) {
-            // If ref_count > 1 (shared), just decrement.
+            // Pinned blocks: keep alive with ref_count=1 but do NOT add to
+            // cached_blocks_lru_ (pinned blocks are excluded from LRU to avoid
+            // O(P) scan in reclaim_cached_block). They'll be re-added to LRU
+            // when unpin_prefix() is called.
             if (cache_->ref_count(block_id) > 1) {
                 cache_->free_block(block_id);
-            } else {
-                // ref_count == 1 and pinned — keep alive in cached LRU.
-                if (cached_blocks_map_.find(block_id) == cached_blocks_map_.end()) {
-                    cached_blocks_lru_.push_back(block_id);
-                    cached_blocks_map_[block_id] = std::prev(cached_blocks_lru_.end());
-                }
             }
+            // ref_count == 1: just keep it alive, not in LRU
             continue;
         }
 
@@ -111,6 +109,7 @@ void KVCacheManager::free_sequence(int seq_id) {
                 if (cached_blocks_map_.find(block_id) == cached_blocks_map_.end()) {
                     cached_blocks_lru_.push_back(block_id);
                     cached_blocks_map_[block_id] = std::prev(cached_blocks_lru_.end());
+                    reclaimable_cached_count_++;
                 }
                 continue; // Skip cache_->free_block()
             }
@@ -172,21 +171,13 @@ int KVCacheManager::evict_lru() {
 
 bool KVCacheManager::can_allocate(int num_blocks) const {
     if (num_blocks <= 0) return true;
-    if (cache_->num_free_blocks() >= num_blocks) return true;
 
-    // Count how many blocks we *could* reclaim by evicting LRU sequences.
-    int reclaimable = cache_->num_free_blocks();
-
-    // Count cached (unreferenced) blocks that can be evicted, excluding pinned.
-    for (int block_id : cached_blocks_lru_) {
-        if (pinned_blocks_.find(block_id) == pinned_blocks_.end()) {
-            ++reclaimable;
-        }
-    }
+    // Fast path: free pool + reclaimable cached blocks (O(1) via counter)
+    int reclaimable = cache_->num_free_blocks() + reclaimable_cached_count_;
     if (reclaimable >= num_blocks) return true;
 
+    // Slow path: count blocks from evictable LRU sequences
     for (auto it = lru_order_.begin(); it != lru_order_.end(); ++it) {
-        // Skip pinned sequences — their blocks are not reclaimable.
         if (pinned_seqs_.find(*it) != pinned_seqs_.end()) continue;
         auto seq_it = seq_blocks_.find(*it);
         if (seq_it != seq_blocks_.end()) {
@@ -423,17 +414,12 @@ bool KVCacheManager::evict_cached_block() {
 int KVCacheManager::reclaim_cached_block() {
     if (cached_blocks_lru_.empty()) return -1;
 
-    // Find the first non-pinned cached block.
-    int block_id = -1;
-    for (auto it = cached_blocks_lru_.begin(); it != cached_blocks_lru_.end(); ++it) {
-        if (pinned_blocks_.find(*it) == pinned_blocks_.end()) {
-            block_id = *it;
-            cached_blocks_lru_.erase(it);
-            cached_blocks_map_.erase(block_id);
-            break;
-        }
-    }
-    if (block_id < 0) return -1;
+    // Pinned blocks are never in cached_blocks_lru_ (removed on pin),
+    // so we can always pop the front without scanning.
+    int block_id = cached_blocks_lru_.front();
+    cached_blocks_lru_.pop_front();
+    cached_blocks_map_.erase(block_id);
+    reclaimable_cached_count_--;
 
     // Remove from hash tables.
     auto hash_it = block_id_to_hash_.find(block_id);
@@ -474,7 +460,15 @@ void KVCacheManager::pin_prefix(int seq_id, int num_blocks) {
     if (to_pin <= 0) return;
 
     for (int i = 0; i < to_pin; ++i) {
-        pinned_blocks_.insert(blocks[i]);
+        int bid = blocks[i];
+        pinned_blocks_.insert(bid);
+        // Remove pinned block from cached LRU so reclaim never scans past it
+        auto lru_it = cached_blocks_map_.find(bid);
+        if (lru_it != cached_blocks_map_.end()) {
+            cached_blocks_lru_.erase(lru_it->second);
+            cached_blocks_map_.erase(lru_it);
+            reclaimable_cached_count_--;
+        }
     }
     pinned_seqs_[seq_id] = to_pin;
 
@@ -493,28 +487,21 @@ void KVCacheManager::unpin_prefix(int seq_id) {
         const auto& blocks = seq_it->second;
         int to_unpin = std::min(num_pinned, static_cast<int>(blocks.size()));
         for (int i = 0; i < to_unpin; ++i) {
-            pinned_blocks_.erase(blocks[i]);
+            int bid = blocks[i];
+            pinned_blocks_.erase(bid);
+            // Re-add to cached LRU if block is cached (ref_count > 0 but not in active seq)
+            if (block_id_to_hash_.count(bid) && !cached_blocks_map_.count(bid)) {
+                cached_blocks_lru_.push_back(bid);
+                cached_blocks_map_[bid] = std::prev(cached_blocks_lru_.end());
+                reclaimable_cached_count_++;
+            }
         }
     } else {
-        // Sequence was already freed — pinned blocks might be in the
-        // cached LRU or hash table. We stored block IDs in pinned_blocks_,
-        // but we don't know which ones belong to this seq_id anymore.
-        // Scan pinned_blocks_ for blocks that are in cached_blocks_map_.
-        // This is O(pinned) which is small for prefix pinning.
-        //
-        // Actually, we need a reverse mapping. Since pinned blocks survive
-        // free_sequence, they are in cached_blocks_lru_. We remove them
-        // from pinned_blocks_ by iterating cached blocks.
-        // Simpler: just remove ALL block IDs from pinned_blocks_ that are
-        // no longer in any active sequence. But that could unpin blocks
-        // from other sequences. Instead, we do nothing here — the blocks
-        // are already orphaned. They'll be in cached_blocks_lru_ and can
-        // now be evicted normally since we remove the seq from pinned_seqs_.
-        //
-        // The correct approach: iterate pinned_blocks_ and remove any that
-        // aren't in any active sequence's block table AND aren't pinned by
-        // another sequence. For simplicity and correctness, rebuild
-        // pinned_blocks_ from pinned_seqs_ (minus this one).
+        // Sequence was already freed — blocks are cached but not in any active seq.
+        // They were removed from cached_blocks_lru_ when pinned. Re-add them now.
+        // Rebuild pinned_blocks_ from remaining pinned seqs, then re-add any
+        // blocks that are no longer pinned to the cached LRU.
+        std::unordered_set<int> old_pinned = std::move(pinned_blocks_);
         pinned_blocks_.clear();
         for (const auto& [other_seq, other_count] : pinned_seqs_) {
             if (other_seq == seq_id) continue;
@@ -524,6 +511,15 @@ void KVCacheManager::unpin_prefix(int seq_id) {
             int n = std::min(other_count, static_cast<int>(other_blocks.size()));
             for (int i = 0; i < n; ++i) {
                 pinned_blocks_.insert(other_blocks[i]);
+            }
+        }
+        // Re-add previously-pinned blocks that are now unpinned to cached LRU
+        for (int bid : old_pinned) {
+            if (pinned_blocks_.count(bid)) continue;  // still pinned by another seq
+            if (block_id_to_hash_.count(bid) && !cached_blocks_map_.count(bid)) {
+                cached_blocks_lru_.push_back(bid);
+                cached_blocks_map_[bid] = std::prev(cached_blocks_lru_.end());
+                reclaimable_cached_count_++;
             }
         }
     }
@@ -844,6 +840,7 @@ int KVCacheManager::load_prefix_cache(const std::string& path, cudaStream_t stre
         block_id_to_hash_[entry.block_id] = entry.hash;
 
         cached_blocks_lru_.push_back(entry.block_id);
+        reclaimable_cached_count_++;
         cached_blocks_map_[entry.block_id] = std::prev(cached_blocks_lru_.end());
 
         actual_loaded++;
