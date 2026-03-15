@@ -662,7 +662,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                         state.block_tables, state.context_lens,
                                         kKVBlockSize, scale,
                                         state.max_context_len, layer_sliding_window,
-                                        cfg.attn_logit_softcap, stream);
+                                        cfg.attn_logit_softcap, stream,
+                                        state.max_blocks_per_seq);
         } else if (cache_dtype == DType::INT8) {
             // INT8 dp4a paged attention with per-head scales (Split-K enabled)
             paged_attention_set_splitk_scratch(splitk_scratch_, splitk_scratch_size_);
@@ -672,7 +673,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                         state.block_tables, state.context_lens,
                                         kKVBlockSize, scale,
                                         state.max_context_len, layer_sliding_window,
-                                        cfg.attn_logit_softcap, stream);
+                                        cfg.attn_logit_softcap, stream,
+                                        state.max_blocks_per_seq);
         } else if (cache_dtype == DType::FP8_E4M3) {
             // FP8 paged attention with on-the-fly dequant (Split-K enabled)
             float kv_scale = (!kv_scales_.empty() && kv_layer < static_cast<int>(kv_scales_.size()))
@@ -682,13 +684,15 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                         state.block_tables, state.context_lens,
                                         kKVBlockSize, scale, kv_scale,
                                         state.max_context_len, layer_sliding_window,
-                                        cfg.attn_logit_softcap, stream);
+                                        cfg.attn_logit_softcap, stream,
+                                        state.max_blocks_per_seq);
         } else {
             paged_attention_set_splitk_scratch(splitk_scratch_, splitk_scratch_size_);
             paged_attention_decode(q4, k_c, v_c, o4,
                                     state.block_tables, state.context_lens,
                                     kKVBlockSize, scale, state.max_context_len,
-                                    layer_sliding_window, cfg.attn_logit_softcap, stream);
+                                    layer_sliding_window, cfg.attn_logit_softcap, stream,
+                                    state.max_blocks_per_seq);
         }
     }
 
@@ -2958,9 +2962,29 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             else
                 gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-        } else if (cur_per_row_lm_ && use_dp4a_lm && n > 1) {
-            // Per-row Q8_1 GEMV LM head: avoids FP8 batch GEMM precision issues.
-            // Each row is processed independently with the same Q8_1 path as decode.
+        } else if (n > 1 && nvfp4_lm != nvfp4_cache_.end()) {
+            // Per-row NVFP4 GEMV LM head for batched decode.
+            // NVFP4 GEMV is M=1 only — loop over rows.
+            Tensor no_row = view_tokens(norm_out_, 1);
+            for (int row = 0; row < n; ++row) {
+                Tensor h_row = h_final.slice(row, row + 1);
+                Tensor lg_row = lg.slice(row, row + 1);
+                rmsnorm(h_row, model_->output_norm(), no_row, cfg.rms_norm_eps, stream, norm_w_off_);
+                gemv_nvfp4_kpar_fp32(nvfp4_lm->second,
+                                      static_cast<const half*>(no_row.data),
+                                      static_cast<float*>(lg_row.data),
+                                      cfg.vocab_size, cfg.d_model, stream);
+            }
+        } else if (use_dp4a_lm && n > 1) {
+            // Per-row Q8_1 GEMV LM head for batched decode.
+            // Quantized weights (Q8_0/Q6_K) can't be passed to cuBLAS directly.
+            // Check if FP16 cache has the output projection — use cuBLAS GEMM if so.
+            if (fp16_cache_.count(model_->output_proj().data)) {
+                Tensor no_final = view_tokens(norm_out_, n);
+                rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
+                gemm(no_final, fp16_cache_.at(model_->output_proj().data), lg, 1.0f, 0.0f, stream);
+                goto lm_head_done;
+            }
             auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
             for (int row = 0; row < n; ++row) {
                 Tensor h_row = h_final.slice(row, row + 1);
@@ -3014,6 +3038,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 gemm(no_final, model_->output_proj(), lg, 1.0f, 0.0f, stream);
             }
         }
+    lm_head_done:
         logits_out = lg;
         debug_top_logits(lg, stream);
     }

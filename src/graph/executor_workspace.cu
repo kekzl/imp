@@ -2078,16 +2078,18 @@ bool GraphExecutor::resize_workspace(int new_max_tokens, cudaStream_t stream) {
 // Dual workspace for concurrent prefill/decode overlap
 // ---------------------------------------------------------------------------
 
-bool GraphExecutor::allocate_decode_workspace(cudaStream_t stream) {
+bool GraphExecutor::allocate_decode_workspace(cudaStream_t stream, int max_batch) {
     if (decode_workspace_) return true;  // already allocated
+    if (max_batch <= 0) max_batch = 1;
 
     const auto& cfg = model_->config();
     int dm = cfg.d_model;
+    decode_max_batch_ = max_batch;
 
-    // Persistent workspace for n=1: hidden + residual + norm_out + logits
-    size_t persistent = static_cast<size_t>(dm) * sizeof(half) * 3  // hidden + residual + norm_out
-                      + static_cast<size_t>(cfg.vocab_size) * sizeof(float);  // logits
-    if (fp32_accum_buf_) persistent += static_cast<size_t>(dm) * sizeof(float);  // fp32_hidden
+    // Persistent workspace for max_batch tokens: hidden + residual + norm_out + logits
+    size_t persistent = static_cast<size_t>(dm) * sizeof(half) * 3 * max_batch  // hidden + residual + norm_out
+                      + static_cast<size_t>(cfg.vocab_size) * sizeof(float) * max_batch;  // logits
+    if (fp32_accum_buf_) persistent += static_cast<size_t>(dm) * sizeof(float) * max_batch;  // fp32_hidden
 
     cudaError_t err = cudaMalloc(&decode_workspace_, persistent);
     if (err != cudaSuccess) {
@@ -2096,10 +2098,10 @@ bool GraphExecutor::allocate_decode_workspace(cudaStream_t stream) {
     }
     decode_persistent_size_ = persistent;
 
-    // Shared workspace for n=1 (small)
+    // Shared workspace for max_batch tokens
     int saved = max_tokens_;
-    max_tokens_ = 1;
-    compute_shared_sizes(1);
+    max_tokens_ = max_batch;
+    compute_shared_sizes(max_batch);
     max_tokens_ = saved;
 
     size_t shared = std::max({attn_shared_size_, ffn_shared_size_,
@@ -2118,8 +2120,8 @@ bool GraphExecutor::allocate_decode_workspace(cudaStream_t stream) {
     // Recompute sizes for original max_tokens
     compute_shared_sizes(max_tokens_);
 
-    IMP_LOG_INFO("Decode overlap workspace: %.2f MiB (persistent=%.1f KB, shared=%.1f KB)",
-                 (persistent + shared) / (1024.0 * 1024.0),
+    IMP_LOG_INFO("Decode overlap workspace: %.2f MiB for max_batch=%d (persistent=%.1f KB, shared=%.1f KB)",
+                 (persistent + shared) / (1024.0 * 1024.0), max_batch,
                  persistent / 1024.0, shared / 1024.0);
     return true;
 }
@@ -2149,23 +2151,24 @@ void GraphExecutor::use_workspace(int slot) {
         persistent_workspace_size_ = decode_persistent_size_;
         shared_workspace_ = decode_shared_workspace_;
         shared_workspace_size_ = decode_shared_size_;
-        shared_workspace_max_tokens_ = 1;
+        shared_workspace_max_tokens_ = decode_max_batch_;
 
-        // Set up tensor views into decode workspace
+        // Set up tensor views into decode workspace (sized for decode_max_batch_)
+        int mb = decode_max_batch_;
         char* p = static_cast<char*>(decode_workspace_);
-        int64_t shape1[2] = {1, dm};
-        hidden_ = Tensor(p, DType::FP16, 2, shape1, true);
-        p += dm * sizeof(half);
-        residual_ = Tensor(p, DType::FP16, 2, shape1, true);
-        p += dm * sizeof(half);
-        norm_out_ = Tensor(p, DType::FP16, 2, shape1, true);
-        p += dm * sizeof(half);
-        int64_t shape_logits[2] = {1, cfg.vocab_size};
+        int64_t shape_mb[2] = {mb, dm};
+        hidden_ = Tensor(p, DType::FP16, 2, shape_mb, true);
+        p += static_cast<size_t>(dm) * sizeof(half) * mb;
+        residual_ = Tensor(p, DType::FP16, 2, shape_mb, true);
+        p += static_cast<size_t>(dm) * sizeof(half) * mb;
+        norm_out_ = Tensor(p, DType::FP16, 2, shape_mb, true);
+        p += static_cast<size_t>(dm) * sizeof(half) * mb;
+        int64_t shape_logits[2] = {mb, cfg.vocab_size};
         logits_ = Tensor(p, DType::FP32, 2, shape_logits, true);
-        p += cfg.vocab_size * sizeof(float);
+        p += static_cast<size_t>(cfg.vocab_size) * sizeof(float) * mb;
         if (saved_prefill_ws_.fp32_accum) {
             fp32_accum_buf_ = p;
-            int64_t shape_fp32[2] = {1, dm};
+            int64_t shape_fp32[2] = {mb, dm};
             fp32_hidden_ = Tensor(p, DType::FP32, 2, shape_fp32, true);
         }
 

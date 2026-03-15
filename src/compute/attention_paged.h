@@ -17,7 +17,8 @@ void paged_attention_decode(
     Tensor& O, const int* block_tables, const int* context_lens,
     int block_size, float scale, int max_context_len,
     int sliding_window = 0, float softcap = 0.0f,
-    cudaStream_t stream = nullptr);
+    cudaStream_t stream = nullptr,
+    int max_blocks_per_seq = 0);
 
 // Set split-K scratch buffer for paged attention. Must be called before
 // paged_attention_decode if split-K is desired. The scratch buffer holds
@@ -35,7 +36,8 @@ void paged_attention_decode_fp8(
     Tensor& O, const int* block_tables, const int* context_lens,
     int block_size, float scale, float kv_scale,
     int max_context_len, int sliding_window = 0,
-    float softcap = 0.0f, cudaStream_t stream = nullptr);
+    float softcap = 0.0f, cudaStream_t stream = nullptr,
+    int max_blocks_per_seq = 0);
 
 // INT8 dp4a Paged attention for decode: KV cache stored in INT8 with per-head scales.
 // Q: [batch, 1, n_heads, head_dim] FP16
@@ -49,7 +51,8 @@ void paged_attention_decode_int8(
     const int* block_tables, const int* context_lens,
     int block_size, float scale,
     int max_context_len, int sliding_window = 0,
-    float softcap = 0.0f, cudaStream_t stream = nullptr);
+    float softcap = 0.0f, cudaStream_t stream = nullptr,
+    int max_blocks_per_seq = 0);
 
 // INT4 Paged attention for decode: KV cache stored in packed INT4 with per-head scales.
 // Q: [batch, 1, n_heads, head_dim] FP16
@@ -63,7 +66,8 @@ void paged_attention_decode_int4(
     const int* block_tables, const int* context_lens,
     int block_size, float scale,
     int max_context_len, int sliding_window = 0,
-    float softcap = 0.0f, cudaStream_t stream = nullptr);
+    float softcap = 0.0f, cudaStream_t stream = nullptr,
+    int max_blocks_per_seq = 0);
 
 // Split-K scratch buffer accessor (for use by FP8/INT8 launcher TUs).
 // Returns pointer + size. Either can be nullptr/0 if unset.

@@ -1471,14 +1471,15 @@ void paged_attention_decode(
     const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache,
     Tensor& O, const int* block_tables, const int* context_lens,
     int block_size, float scale, int max_context_len,
-    int sliding_window, float softcap, cudaStream_t stream)
+    int sliding_window, float softcap, cudaStream_t stream,
+    int max_blocks_per_seq)
 {
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads    = static_cast<int>(Q.shape[2]);
     const int head_dim   = static_cast<int>(Q.shape[3]);
     const int n_kv_heads = static_cast<int>(K_cache.shape[2]);
 
-    const int max_num_blocks = (max_context_len + block_size - 1) / block_size;
+    const int max_num_blocks = (max_blocks_per_seq > 0) ? max_blocks_per_seq : (max_context_len + block_size - 1) / block_size;
 
     // Shared memory: warp_max[NW] + warp_l[NW] + warp_o[NW * head_dim]
     size_t smem_bytes = NUM_WARPS * sizeof(float)
