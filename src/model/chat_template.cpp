@@ -284,7 +284,7 @@ std::vector<int32_t> ChatTemplate::apply_chatml(
     auto asst_ids = tok.encode("assistant\n");
     tokens.insert(tokens.end(), asst_ids.begin(), asst_ids.end());
 
-    if (getenv("IMP_DEBUG_TEMPLATE")) {
+    if (static const bool dbg_tpl = (getenv("IMP_DEBUG_TEMPLATE") != nullptr); dbg_tpl) {
         fprintf(stderr, "[DEBUG_TPL] chatml %zu tokens:", tokens.size());
         for (size_t i = 0; i < tokens.size(); i++)
             fprintf(stderr, " %d", tokens[i]);
@@ -435,7 +435,7 @@ std::vector<int32_t> ChatTemplate::apply_gemma(
     tokens.insert(tokens.end(), model_ids.begin(), model_ids.end());
 
     // Debug: print template token IDs
-    if (getenv("IMP_DEBUG_TEMPLATE")) {
+    if (static const bool dbg_tpl = (getenv("IMP_DEBUG_TEMPLATE") != nullptr); dbg_tpl) {
         fprintf(stderr, "[DEBUG_TPL] %zu tokens:", tokens.size());
         for (size_t i = 0; i < tokens.size(); i++)
             fprintf(stderr, " %d", tokens[i]);
@@ -515,7 +515,7 @@ std::vector<int32_t> ChatTemplate::apply_phi(
     tokens.insert(tokens.end(), nl_ids.begin(), nl_ids.end());
 
     // Debug: print template token IDs
-    if (getenv("IMP_DEBUG_TEMPLATE")) {
+    if (static const bool dbg_tpl = (getenv("IMP_DEBUG_TEMPLATE") != nullptr); dbg_tpl) {
         fprintf(stderr, "[DEBUG_TPL] phi %zu tokens:", tokens.size());
         for (size_t i = 0; i < tokens.size(); i++)
             fprintf(stderr, " %d", tokens[i]);

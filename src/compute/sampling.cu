@@ -833,11 +833,17 @@ void apply_dry_penalty(float* d_logits, int vocab_size,
     int search_start = (penalty_last_n > 0)
         ? std::max(0, n_tokens - penalty_last_n) : 0;
 
-    // CPU: scan history for suffix matches, compute max match length per token
-    std::unordered_map<int32_t, int> max_match;
+    // CPU: scan history for suffix matches, compute max match length per token.
+    // Use a flat array indexed by token ID (no heap allocation) instead of unordered_map.
+    // Reuse a static buffer to avoid per-call allocation for large vocab.
+    static thread_local std::vector<int> match_buf;
+    if (static_cast<int>(match_buf.size()) < vocab_size) {
+        match_buf.assign(vocab_size, 0);
+    }
+    // Zero only entries we write (sparse clear is faster than memset for large vocab)
+    std::vector<int32_t> touched_tokens;
 
     for (int pos = search_start; pos < n_tokens; pos++) {
-        // Match suffix ending at (pos-1) with suffix ending at (n_tokens-1)
         int match_len = 0;
         int a = pos - 1;
         int b = n_tokens - 1;
@@ -851,25 +857,25 @@ void apply_dry_penalty(float* d_logits, int vocab_size,
         if (match_len > allowed_length) {
             int32_t token = host_token_ids[pos];
             if (token >= 0 && token < vocab_size) {
-                auto it = max_match.find(token);
-                if (it == max_match.end() || match_len > it->second)
-                    max_match[token] = match_len;
+                if (match_buf[token] == 0) touched_tokens.push_back(token);
+                if (match_len > match_buf[token])
+                    match_buf[token] = match_len;
             }
         }
     }
 
-    if (max_match.empty()) return;
+    if (touched_tokens.empty()) return;
 
     // Build sparse penalty arrays
-    int n = static_cast<int>(max_match.size());
+    int n = static_cast<int>(touched_tokens.size());
     std::vector<int32_t> h_tokens(n);
     std::vector<float> h_values(n);
-    int i = 0;
-    for (auto& [tok, ml] : max_match) {
+    for (int i = 0; i < n; i++) {
+        int32_t tok = touched_tokens[i];
         h_tokens[i] = tok;
         h_values[i] = multiplier * std::pow(base,
-            static_cast<float>(ml - allowed_length));
-        i++;
+            static_cast<float>(match_buf[tok] - allowed_length));
+        match_buf[tok] = 0;  // sparse clear
     }
 
     // Upload to GPU and apply — reuse persistent buffers to avoid per-call cudaMalloc

@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstdarg>
+#include <atomic>
 
 namespace imp {
 
@@ -14,7 +15,13 @@ enum class LogLevel : int {
 };
 
 void log_set_level(LogLevel level);
-LogLevel log_get_level();
+
+// Inline for zero-overhead log level check in hot paths.
+// The atomic is defined in logging.cpp; declared here for inlining.
+extern std::atomic<LogLevel> g_log_level;
+inline LogLevel log_get_level() {
+    return g_log_level.load(std::memory_order_relaxed);
+}
 
 void log_message(LogLevel level, const char* file, int line, const char* fmt, ...);
 

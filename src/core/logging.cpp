@@ -6,15 +6,12 @@
 
 namespace imp {
 
-static std::atomic<LogLevel> g_log_level{LogLevel::INFO};
+std::atomic<LogLevel> g_log_level{LogLevel::INFO};
 
 void log_set_level(LogLevel level) {
     g_log_level.store(level, std::memory_order_relaxed);
 }
 
-LogLevel log_get_level() {
-    return g_log_level.load(std::memory_order_relaxed);
-}
 
 static const char* level_str(LogLevel level) {
     switch (level) {
