@@ -80,23 +80,9 @@ top_k = 20
 
 # ── Qwen3-Coder dense variants ──────────────────────────────────────
 
-[qwen3-coder-32b]
-description = "Qwen3-Coder-32B (dense, code)"
-detect = ["*qwen3*coder*32b*"]
-max_seq_len = 131072
-max_batch_size = 4
-top_k = 20
-
 [qwen3-coder-14b]
 description = "Qwen3-Coder-14B (dense, code)"
 detect = ["*qwen3*coder*14b*"]
-max_seq_len = 131072
-max_batch_size = 8
-top_k = 20
-
-[qwen3-coder-7b]
-description = "Qwen3-Coder-7B (dense, code)"
-detect = ["*qwen3*coder*7b*"]
 max_seq_len = 131072
 max_batch_size = 8
 top_k = 20
@@ -124,21 +110,7 @@ max_seq_len = 131072
 max_batch_size = 8
 kv_cache_dtype = "fp8_e4m3"
 
-# ── LLaMA 3 ─────────────────────────────────────────────────────────
-
-[llama3-70b]
-description = "LLaMA-3-70B (dense)"
-detect = ["*llama*3*70b*"]
-max_seq_len = 32768
-max_batch_size = 1
-
-[llama3-8b]
-description = "LLaMA-3-8B (dense)"
-detect = ["*llama*3*8b*"]
-max_seq_len = 131072
-max_batch_size = 8
-
-# ── Mistral / Mixtral ────────────────────────────────────────────────
+# ── Mistral ──────────────────────────────────────────────────────────
 
 [mistral-24b]
 description = "Mistral Small 3.2 (24B dense)"
@@ -146,67 +118,13 @@ detect = ["*mistral*24b*", "*mistral*small*3*"]
 max_seq_len = 131072
 max_batch_size = 4
 
-[mistral-7b]
-description = "Mistral-7B (dense)"
-detect = ["*mistral*7b*"]
-max_seq_len = 131072
-max_batch_size = 8
-
-[mixtral-8x7b]
-description = "Mixtral-8x7B (MoE)"
-detect = ["*mixtral*7b*", "*mixtral*8x7*"]
-max_seq_len = 32768
-max_batch_size = 4
-
-[mixtral-8x22b]
-description = "Mixtral-8x22B (MoE)"
-detect = ["*mixtral*22b*", "*mixtral*8x22*"]
-max_seq_len = 32768
-max_batch_size = 1
-use_nvfp4_decode = -1
-
-# ── Coding models ────────────────────────────────────────────────────
-
 [devstral]
 description = "Devstral (24B dense, coding agent)"
 detect = ["*devstral*"]
 max_seq_len = 131072
 max_batch_size = 4
 
-[codestral-25b]
-description = "Codestral 25.01 (22B dense, code)"
-detect = ["*codestral*"]
-max_seq_len = 131072
-max_batch_size = 4
-
-[qwen2.5-coder-32b]
-description = "Qwen2.5-Coder-32B (dense, code)"
-detect = ["*qwen2.5*coder*32b*", "*qwen25*coder*32b*"]
-max_seq_len = 131072
-max_batch_size = 4
-top_k = 20
-
-[qwen2.5-coder-7b]
-description = "Qwen2.5-Coder-7B (dense, code)"
-detect = ["*qwen2.5*coder*", "*qwen25*coder*"]
-max_seq_len = 131072
-max_batch_size = 8
-top_k = 20
-
-[deepseek-coder]
-description = "DeepSeek-Coder-V2 (MoE, code)"
-detect = ["*deepseek*coder*"]
-max_seq_len = 65536
-max_batch_size = 1
-
 # ── Other ────────────────────────────────────────────────────────────
-
-[deepseek-v3]
-description = "DeepSeek-V3 (MoE, 37B active)"
-detect = ["*deepseek*v3*"]
-max_seq_len = 32768
-max_batch_size = 1
-use_nvfp4_decode = -1
 
 [nemotron-h]
 description = "Nemotron-H (Mamba2+Attn+MoE hybrid)"
