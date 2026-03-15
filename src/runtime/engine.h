@@ -162,6 +162,12 @@ private:
     // Pre-allocated block table padding buffer (reused across decode steps)
     std::vector<int> padded_block_table_;
 
+    // Reusable batch builder and batch vectors (avoids heap allocs per decode step)
+    BatchBuilder decode_builder_;
+    std::vector<std::shared_ptr<Request>> sched_prefill_batch_;
+    std::vector<std::shared_ptr<Request>> sched_decode_batch_;
+    std::vector<std::shared_ptr<Request>> valid_decode_;
+
     // SSM state (Mamba2 hybrid models)
     std::unique_ptr<SSMState> ssm_state_;
 

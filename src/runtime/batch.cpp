@@ -131,7 +131,7 @@ Batch BatchBuilder::build() {
         }
     }
 
-    return batch_;
+    return std::move(batch_);
 }
 
 // ---------------------------------------------------------------------------
