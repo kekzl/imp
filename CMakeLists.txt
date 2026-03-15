@@ -155,6 +155,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/pdl.cu
     src/runtime/speculative.cpp
     src/runtime/self_speculative.cpp
+    src/runtime/ngram_spec.cpp
     src/runtime/presets.cpp
 )
 
