@@ -9,6 +9,7 @@
 #include "runtime/cuda_graph.h"
 #include "runtime/speculative.h"
 #include "runtime/self_speculative.h"
+#include "runtime/ngram_spec.h"
 #include "vision/vision_model.h"
 #include "vision/vision_encoder.h"
 #include "memory/kv_cache.h"
@@ -83,6 +84,11 @@ struct EngineConfig {
     int self_spec_k = 2;              // draft tokens per step
     int self_spec_exit_layer = -1;    // layers to run in draft (-1 = auto)
     int self_spec_skip_n = -1;        // layers to skip in draft (-1 = auto)
+
+    // N-gram speculative decoding (zero-cost draft from token history)
+    bool enable_ngram_spec = false;  // experimental, disabled by default
+    int ngram_spec_k = 5;          // max draft tokens per step
+    int ngram_n = 3;               // n-gram context window
 
     // Vision (multimodal)
     std::string mmproj_path;  // path to mmproj GGUF, empty = text-only
@@ -189,6 +195,9 @@ private:
 
     // Self-speculative decoding (early-exit, same model)
     std::unique_ptr<SelfSpeculativeDecoder> self_spec_decoder_;
+
+    // N-gram speculative decoding (zero-cost draft from token history)
+    std::unique_ptr<NgramSpecDecoder> ngram_spec_decoder_;
 
     // Device buffer for penalty token history (reused across steps)
     int32_t* d_penalty_tokens_ = nullptr;

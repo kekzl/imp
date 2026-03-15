@@ -685,6 +685,18 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
     }
 
+    // --- Initialize N-gram speculative decoder (zero-cost, on by default) ---
+    if (config_.enable_ngram_spec && !config_.enable_speculative &&
+        !config_.enable_self_speculative) {
+        ngram_spec_decoder_ = std::make_unique<NgramSpecDecoder>();
+        if (!ngram_spec_decoder_->init(executor_.get(), kv_manager_.get(),
+                                        kv_cache_raw_, n_kv_layers,
+                                        config_.ngram_spec_k, config_.ngram_n)) {
+            IMP_LOG_WARN("N-gram speculative decoder init failed");
+            ngram_spec_decoder_.reset();
+        }
+    }
+
     // --- Initialize chat template from tokenizer metadata ---
     {
         Tokenizer* tok = model_->tokenizer();
@@ -1581,6 +1593,49 @@ bool Engine::step() {
 
                 // Skip normal batched decode
                 goto decode_done;
+            }
+
+            // ── N-gram speculative decode (single-sequence only) ──
+            if (ngram_spec_decoder_ && valid_decode.size() == 1) {
+                auto& req = valid_decode[0];
+                // Need at least ngram_n output tokens for lookup
+                if (static_cast<int>(req->output_tokens.size()) >= config_.ngram_n) {
+                    int32_t last_token = req->output_tokens.back();
+                    int position = req->context_len() - 1;
+
+                    auto sr = ngram_spec_decoder_->step(
+                        req, last_token, position, req->id, dec_stream);
+
+                    if (!sr.tokens.empty()) {
+                        Tokenizer* tok = model_->tokenizer();
+                        for (int32_t t : sr.tokens) {
+                            req->output_tokens.push_back(t);
+
+                            bool is_stop = false;
+                            if (!req->ignore_eos && tok) {
+                                is_stop = (t == tok->eos_id());
+                                for (int32_t stop_id : chat_template_.stop_token_ids()) {
+                                    if (t == stop_id) { is_stop = true; break; }
+                                }
+                            }
+                            if (is_stop ||
+                                static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
+                                req->status = RequestStatus::FINISHED;
+                                kv_manager_->free_sequence(req->id);
+                                break;
+                            }
+                        }
+                        kv_manager_->touch(req->id);
+
+                        IMP_LOG_DEBUG("N-gram spec: drafted=%d accepted=%d (rate=%.0f%%)",
+                                      sr.n_drafted, sr.n_accepted,
+                                      ngram_spec_decoder_->acceptance_rate() * 100.0f);
+
+                        // Skip normal batched decode
+                        goto decode_done;
+                    }
+                }
+                // No n-gram match — fall through to normal decode
             }
 
             // Switch workspace for decode.
