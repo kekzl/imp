@@ -1071,10 +1071,12 @@ bool Engine::step() {
         async_pending_tokens_.clear();
         async_pending_cursor_ = 0;
     }
-    // 1. Call scheduler to get prefill and decode batches
-    std::vector<std::shared_ptr<Request>> prefill_batch;
-    std::vector<std::shared_ptr<Request>> decode_batch;
-    scheduler_->schedule(prefill_batch, decode_batch);
+    // 1. Call scheduler to get prefill and decode batches (reuse member vectors)
+    sched_prefill_batch_.clear();
+    sched_decode_batch_.clear();
+    scheduler_->schedule(sched_prefill_batch_, sched_decode_batch_);
+    auto& prefill_batch = sched_prefill_batch_;
+    auto& decode_batch = sched_decode_batch_;
 
     if (prefill_batch.empty() && decode_batch.empty()) {
         return false;
@@ -1527,8 +1529,8 @@ bool Engine::step() {
         cudaStream_t dec_stream = decode_stream();
 
         // 3a. Pre-process: allocate new blocks where needed
-        std::vector<std::shared_ptr<Request>> valid_decode;
-        valid_decode.reserve(decode_batch.size());
+        valid_decode_.clear();
+        auto& valid_decode = valid_decode_;
 
         for (auto& req : decode_batch) {
             int ctx_len = req->context_len();
@@ -1649,9 +1651,8 @@ bool Engine::step() {
                 executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
             }
 
-            // 3b. Build batched decode using BatchBuilder
-            BatchBuilder builder;
-            builder.reset();
+            // 3b. Build batched decode using BatchBuilder (reuse Engine member)
+            decode_builder_.reset();
 
             int max_ctx = 0;
             for (auto& req : valid_decode) {
@@ -1664,12 +1665,12 @@ bool Engine::step() {
                 int position = ctx_len - 1;
 
                 const auto& bt = kv_manager_->block_table(req->id);
-                builder.add_decode_sequence(last_token, position,
-                                            bt.data(), static_cast<int>(bt.size()),
-                                            ctx_len);
+                decode_builder_.add_decode_sequence(last_token, position,
+                                                   bt.data(), static_cast<int>(bt.size()),
+                                                   ctx_len);
             }
 
-            Batch batch = builder.build();
+            Batch batch = decode_builder_.build();
 
             // 3c. Upload to GPU using pre-allocated pool (stable pointers for CUDA Graph)
             GPUBatch gpu_batch;
@@ -1690,7 +1691,7 @@ bool Engine::step() {
                             padded_block_table_[s * pool_max + b] = batch.block_tables[s * old_stride + b];
                         }
                     }
-                    batch.block_tables = padded_block_table_;
+                    batch.block_tables.swap(padded_block_table_);
                     batch.max_blocks_per_seq = pool_max;
                 }
                 gpu_batch = decode_batch_pool_.upload_into_pool(batch, dec_stream);
