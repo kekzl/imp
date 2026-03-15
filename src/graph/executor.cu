@@ -228,6 +228,69 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits,
     return tokens;
 }
 
+int32_t GraphExecutor::sample_single_from_logits(const Tensor& logits,
+                                                   const InferenceState& state,
+                                                   cudaStream_t stream) {
+    // Flatten [1, V] to [V]
+    int64_t vocab_shape[1] = {logits.shape[logits.ndim - 1]};
+    Tensor flat = logits.slice(0, 1).reshape(1, vocab_shape);
+
+    // Apply penalties + filters
+    float* lp = static_cast<float*>(flat.data);
+    int vocab = static_cast<int>(flat.shape[0]);
+
+    if (state.penalty_tokens != nullptr && state.n_penalty_tokens > 0) {
+        const int32_t* pen_ptr = state.penalty_tokens;
+        int pen_n = state.n_penalty_tokens;
+        if (state.repeat_last_n > 0 && pen_n > state.repeat_last_n) {
+            pen_ptr += (pen_n - state.repeat_last_n);
+            pen_n = state.repeat_last_n;
+        }
+        apply_penalties(lp, vocab, pen_ptr, pen_n,
+                        state.repetition_penalty, state.frequency_penalty,
+                        state.presence_penalty, stream);
+    }
+    if (state.dry_multiplier > 0.0f && state.host_penalty_tokens != nullptr &&
+        state.n_penalty_tokens > 0) {
+        apply_dry_penalty(lp, vocab, state.host_penalty_tokens, state.n_penalty_tokens,
+                          state.dry_multiplier, state.dry_base,
+                          state.dry_allowed_length, state.dry_penalty_last_n, stream);
+    }
+    if (state.schema_constrainer) {
+        state.schema_constrainer->apply_mask(lp, vocab, stream);
+    } else if (state.json_constrainer) {
+        state.json_constrainer->apply_mask(lp, vocab, stream);
+    }
+    if (state.min_p > 0.0f) apply_min_p(lp, vocab, state.min_p, stream);
+    if (state.typical_p > 0.0f && state.typical_p < 1.0f)
+        apply_typical_p(lp, vocab, state.typical_p, stream);
+
+    // Sample
+    if (state.mirostat == 2) {
+        unsigned int seed = state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u;
+        return d_sample_result_
+            ? sample_mirostat_v2(flat, state.temperature, state.mirostat_tau,
+                                 state.mirostat_eta, &state.mirostat_mu, seed,
+                                 d_sample_result_, stream)
+            : sample_mirostat_v2(flat, state.temperature, state.mirostat_tau,
+                                 state.mirostat_eta, &state.mirostat_mu, seed, stream);
+    }
+    return (state.temperature <= 0.0f || state.top_k == 1)
+        ? (d_sample_result_ ? sample_greedy(flat, d_sample_result_, stream)
+                            : sample_greedy(flat, stream))
+        : (d_sample_result_
+            ? sample_topk_topp(flat, state.top_k > 0 ? state.top_k : 50,
+                               state.top_p > 0.0f ? state.top_p : 1.0f,
+                               state.temperature,
+                               state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u,
+                               d_sample_result_, stream)
+            : sample_topk_topp(flat, state.top_k > 0 ? state.top_k : 50,
+                               state.top_p > 0.0f ? state.top_p : 1.0f,
+                               state.temperature,
+                               state.seed >= 0 ? static_cast<unsigned int>(state.seed) : 42u,
+                               stream));
+}
+
 std::vector<int32_t> GraphExecutor::forward_batch(const InferenceState& state,
                                                   cudaStream_t stream) {
     Tensor logits;

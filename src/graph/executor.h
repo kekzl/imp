@@ -237,6 +237,12 @@ public:
                                              const InferenceState& state,
                                              cudaStream_t stream = nullptr);
 
+    // Single-token sampling: returns one int32_t directly (avoids vector alloc).
+    // Use for single-sequence decode where only one token is sampled.
+    int32_t sample_single_from_logits(const Tensor& logits,
+                                       const InferenceState& state,
+                                       cudaStream_t stream = nullptr);
+
     // Async decode: runs forward pass reading token from device memory (d_token_id),
     // then samples and writes result back to d_token_id. No host-device sync.
     // h_mapped: mapped pinned memory for host-side token readback (polled async).
