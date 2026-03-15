@@ -86,6 +86,19 @@ struct ExpertLRUCache {
     }
 };
 
+// VRAM budget for weight cache allocation (computed by Engine::plan_vram_budget).
+// Replaces ad-hoc "remaining_budget" with per-phase caps computed upfront.
+struct VRAMBudget {
+    enum Strategy { FP8_PREFILL_NVFP4_DECODE, NVFP4_DECODE_ONLY, FP16_ONLY };
+    Strategy strategy = FP16_ONLY;
+    size_t kv_cache_bytes = 0;
+    size_t fp8_cache_bytes = 0;       // 0 for sub-8-bit models
+    size_t nvfp4_cache_bytes = 0;
+    size_t reserve_bytes = 1024ULL * 1024 * 1024;  // 1 GiB safety
+    int kv_max_blocks = 0;
+    bool nvfp4_second_pass = false;   // true → re-run NVFP4 after FP16-Free
+};
+
 // All the state needed for a single forward pass invocation.
 struct InferenceState {
     // Input tokens
@@ -234,8 +247,8 @@ public:
 
     // Pre-dequantize quantized weights to FP16 on GPU for fast prefill GEMM.
     // Must be called AFTER model weights are uploaded to GPU.
-    // cache_budget: max bytes available for weight caches (0 = unlimited).
-    void pre_dequant_weights(cudaStream_t stream = nullptr, size_t cache_budget = 0);
+    // budget: VRAM budget with per-phase caps computed by Engine::plan_vram_budget().
+    void pre_dequant_weights(cudaStream_t stream, const VRAMBudget& budget);
 
     // Set KV layer mapping (must be called before forward pass for hybrid models)
     void set_kv_layer_map(std::vector<int> map) {
@@ -567,8 +580,8 @@ private:
 
     // --- Allocation and configuration methods ---
 
-    void allocate_persistent_workspace(int max_tokens);
-    void allocate_shared_workspace(int max_tokens);
+    [[nodiscard]] bool allocate_persistent_workspace(int max_tokens);
+    [[nodiscard]] bool allocate_shared_workspace(int max_tokens);
     void allocate_auxiliary_buffers(bool skip_batch_dequant = false);  // dequant scratch, MoE staging, routing buffers
     void free_buffers();
 

@@ -1,4 +1,5 @@
 #include "memory/kv_cache.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <stdexcept>
@@ -132,6 +133,12 @@ void KVCache::inc_ref(int block_id) {
 // ---------------------------------------------------------------------------
 
 void* KVCache::k_ptr(int layer, int block_id) {
+#ifdef IMP_DEBUG
+    if (layer < 0 || layer >= n_layers_ || block_id < 0 || block_id >= max_blocks_) {
+        IMP_LOG_ERROR("KV cache k_ptr bounds violation: layer=%d/%d, block=%d/%d",
+                      layer, n_layers_, block_id, max_blocks_);
+    }
+#endif
     // K blocks: [layer * 2 * max_blocks + block_id] * block_bytes
     size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ +
                      static_cast<size_t>(block_id)) * block_bytes_;
@@ -139,6 +146,12 @@ void* KVCache::k_ptr(int layer, int block_id) {
 }
 
 void* KVCache::v_ptr(int layer, int block_id) {
+#ifdef IMP_DEBUG
+    if (layer < 0 || layer >= n_layers_ || block_id < 0 || block_id >= max_blocks_) {
+        IMP_LOG_ERROR("KV cache v_ptr bounds violation: layer=%d/%d, block=%d/%d",
+                      layer, n_layers_, block_id, max_blocks_);
+    }
+#endif
     // V blocks: [layer * 2 * max_blocks + max_blocks + block_id] * block_bytes
     size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ +
                      max_blocks_ + static_cast<size_t>(block_id)) * block_bytes_;
@@ -187,6 +200,12 @@ DType KVCache::dtype() const {
 
 void* KVCache::k_scale_ptr(int layer, int block_id) {
     if (!scale_pool_) return nullptr;
+#ifdef IMP_DEBUG
+    if (layer < 0 || layer >= n_layers_ || block_id < 0 || block_id >= max_blocks_) {
+        IMP_LOG_ERROR("KV cache k_scale_ptr bounds violation: layer=%d/%d, block=%d/%d",
+                      layer, n_layers_, block_id, max_blocks_);
+    }
+#endif
     // Same offset formula as k_ptr() but using scale_block_bytes_
     size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ +
                      static_cast<size_t>(block_id)) * scale_block_bytes_;
@@ -195,6 +214,12 @@ void* KVCache::k_scale_ptr(int layer, int block_id) {
 
 void* KVCache::v_scale_ptr(int layer, int block_id) {
     if (!scale_pool_) return nullptr;
+#ifdef IMP_DEBUG
+    if (layer < 0 || layer >= n_layers_ || block_id < 0 || block_id >= max_blocks_) {
+        IMP_LOG_ERROR("KV cache v_scale_ptr bounds violation: layer=%d/%d, block=%d/%d",
+                      layer, n_layers_, block_id, max_blocks_);
+    }
+#endif
     size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ +
                      max_blocks_ + static_cast<size_t>(block_id)) * scale_block_bytes_;
     return static_cast<char*>(scale_pool_) + offset;

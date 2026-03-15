@@ -137,6 +137,30 @@ __global__ void geglu_fp32_kernel(
     }
 }
 
+__global__ void geglu_fp32_vec4_kernel(
+    const float* __restrict__ gate,
+    const float* __restrict__ up,
+    float* __restrict__ out,
+    int64_t n)
+{
+    constexpr float SQRT_2_PI = 0.7978845608028654f;
+    constexpr float COEFF = 0.044715f;
+
+    const int64_t idx = (static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x) * 4;
+    if (idx + 3 < n) {
+        float4 g4 = reinterpret_cast<const float4*>(gate)[idx / 4];
+        float4 u4 = reinterpret_cast<const float4*>(up)[idx / 4];
+        float4 o4;
+        #pragma unroll
+        for (int i = 0; i < 4; i++) {
+            float g = (&g4.x)[i];
+            float gelu_g = g * 0.5f * (1.0f + tanhf(SQRT_2_PI * (g + COEFF * g * g * g)));
+            (&o4.x)[i] = gelu_g * (&u4.x)[i];
+        }
+        reinterpret_cast<float4*>(out)[idx / 4] = o4;
+    }
+}
+
 // --------------------------------------------------------------------------
 // GELU FP32 vectorized kernel
 // gelu(x) = x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
@@ -274,12 +298,21 @@ void geglu(const Tensor& gate, const Tensor& up, Tensor& out,
 
     switch (gate.dtype) {
         case DType::FP32: {
-            const int grid = static_cast<int>((n + block - 1) / block);
-            geglu_fp32_kernel<<<grid, block, 0, stream>>>(
-                static_cast<const float*>(gate.data),
-                static_cast<const float*>(up.data),
-                static_cast<float*>(out.data),
-                n);
+            if (n % 4 == 0 && n >= 4) {
+                const int grid = static_cast<int>((n / 4 + block - 1) / block);
+                geglu_fp32_vec4_kernel<<<grid, block, 0, stream>>>(
+                    static_cast<const float*>(gate.data),
+                    static_cast<const float*>(up.data),
+                    static_cast<float*>(out.data),
+                    n);
+            } else {
+                const int grid = static_cast<int>((n + block - 1) / block);
+                geglu_fp32_kernel<<<grid, block, 0, stream>>>(
+                    static_cast<const float*>(gate.data),
+                    static_cast<const float*>(up.data),
+                    static_cast<float*>(out.data),
+                    n);
+            }
             break;
         }
         case DType::FP16: {

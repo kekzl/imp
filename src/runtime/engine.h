@@ -171,6 +171,8 @@ private:
     std::unique_ptr<VisionModel> vision_model_;
     std::unique_ptr<VisionEncoder> vision_encoder_;
     half* d_vision_embeddings_ = nullptr;  // [num_image_tokens, d_model] on device
+    half* d_vision_pixels_ = nullptr;      // pre-allocated pixel buffer for vision encoding
+    size_t d_vision_pixels_size_ = 0;      // allocation size in bytes
     bool has_vision_input_ = false;        // true when an image is set for next generation
     int32_t vision_soft_token_id_ = -1;    // <image_soft_token> token ID
     int32_t vision_boi_id_ = -1;           // <start_of_image>
@@ -218,6 +220,10 @@ private:
 
     // Returns effective free VRAM, capped by vram_budget_mb if set
     size_t effective_free_vram() const;
+
+    // Compute VRAM budget: split available VRAM between KV cache and weight caches.
+    // Pure arithmetic — no GPU allocation. Called after workspace alloc, before KV init.
+    VRAMBudget plan_vram_budget(int n_kv_layers, int head_dim) const;
 
     // Initialize speculative decoding (called from init() if configured)
     bool init_speculative();

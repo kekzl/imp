@@ -142,6 +142,20 @@ static cublasComputeType_t dtype_to_compute(DType dt) {
 }
 
 // ---------------------------------------------------------------------------
+// Bucket M for cache key: exact for decode (M<=1), bucketed for prefill.
+// cuBLASLt algorithm selection is stable across nearby M values.
+// ---------------------------------------------------------------------------
+static int64_t bucket_m(int64_t m) {
+    if (m <= 1) return m;   // decode: exact
+    if (m <= 64) return 64;
+    if (m <= 128) return 128;
+    if (m <= 256) return 256;
+    if (m <= 512) return 512;
+    // For larger M, round up to next multiple of 128
+    return ((m + 127) / 128) * 128;
+}
+
+// ---------------------------------------------------------------------------
 // cuBLASLt descriptor + algorithm cache
 // ---------------------------------------------------------------------------
 struct GemmCacheKey {
@@ -179,6 +193,7 @@ struct GemmCacheEntry {
     cublasLtMatmulAlgo_t algo;
     size_t workspace_size;
     bool has_algo;
+    int64_t desc_M;  // M dimension baked into layout descriptors
 };
 
 static std::unordered_map<GemmCacheKey, GemmCacheEntry, GemmCacheKeyHash> s_gemm_cache;
@@ -351,7 +366,7 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C,
 
     cublasLtHandle_t lt = get_cublaslt_handle();
 
-    GemmCacheKey cache_key{cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, compute_type, M, K, N, false};
+    GemmCacheKey cache_key{cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, compute_type, bucket_m(M), K, N, false};
 
     GemmCacheEntry* entry = nullptr;
     {
@@ -361,6 +376,7 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C,
             entry = &it->second;
         } else {
             GemmCacheEntry new_entry{};
+            new_entry.desc_M = M;
             cudaDataType_t scale_type = (compute_type == CUBLAS_COMPUTE_32I)
                                             ? CUDA_R_32I : CUDA_R_32F;
 
@@ -384,6 +400,16 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C,
 
             auto [inserted_it, _] = s_gemm_cache.emplace(cache_key, new_entry);
             entry = &inserted_it->second;
+        }
+
+        // Rebuild layout descriptors if actual M differs from cached M
+        // (bucketed key matched but exact M changed). Cheap CPU-only operation.
+        if (entry->desc_M != M) {
+            cublasLtMatrixLayoutDestroy(entry->Adesc);
+            cublasLtMatrixLayoutDestroy(entry->Cdesc);
+            CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&entry->Adesc, cuda_dtype_A, (int)K, (int)M, (int)K));
+            CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&entry->Cdesc, cuda_dtype_C, (int)N, (int)M, (int)N));
+            entry->desc_M = M;
         }
     }
 
@@ -719,7 +745,7 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
     cudaDataType_t cuda_dtype_B = dtype_to_cuda(B.dtype);
     cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.dtype);
     GemmCacheKey cache_key{cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, CUBLAS_COMPUTE_32F,
-                           M, K, N, (aScale != nullptr)};
+                           bucket_m(M), K, N, (aScale != nullptr)};
 
     GemmCacheEntry* entry = nullptr;
     {
@@ -729,6 +755,7 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
             entry = &it->second;
         } else {
             GemmCacheEntry new_entry{};
+            new_entry.desc_M = M;
             cublasLtMatmulDescCreate(&new_entry.opDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F);
 
             cublasOperation_t transA = CUBLAS_OP_T;
@@ -759,9 +786,24 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
             auto [ins_it, _] = s_gemm_cache.emplace(cache_key, new_entry);
             entry = &ins_it->second;
         }
+
+        // Rebuild layout descriptors if actual M differs from cached M
+        // (bucketed key matched but exact M changed). Cheap CPU-only operation.
+        if (entry->desc_M != M) {
+            cublasLtMatrixLayoutDestroy(entry->Adesc);
+            cublasLtMatrixLayoutDestroy(entry->Cdesc);
+            CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&entry->Adesc, cuda_dtype_A, (int)K, (int)M, (int)K));
+            CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&entry->Cdesc, cuda_dtype_C, (int)N, (int)M, (int)N));
+            entry->desc_M = M;
+        }
     }
 
-    // Set per-call scale pointers (vary by weight tensor, not cached)
+    // Set per-call scale pointers (vary by weight tensor, not cached).
+    // SAFETY: This mutates the cached opDesc WITHOUT holding s_gemm_cache_mutex.
+    // This is safe because imp enforces single-stream GEMM execution — all GEMM
+    // calls are serialized on a single CUDA stream, so no two threads can race
+    // on the same opDesc concurrently. If multi-stream GEMM is ever added, this
+    // section must be protected by the mutex (or opDesc must be duplicated per-call).
     if (aScale) {
         cublasLtMatmulDescSetAttribute(entry->opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
                                         &aScale, sizeof(aScale));
@@ -820,15 +862,26 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A,
         const half* x_lo = reinterpret_cast<const half*>(&x_raw0);  // x[0..7]
         const half* x_hi = reinterpret_cast<const half*>(&x_raw1);  // x[8..15]
 
-        // Manually dequant and accumulate 16 FP8 values
-        for (int j = 0; j < 16; ++j) {
-            // Simple FP8 E4M3 dequant: interpret as native type if available
+        // Dequant and accumulate 16 FP8 values in two groups of 8,
+        // avoiding per-element j<8 branch for x_lo vs x_hi selection.
 #if defined(__CUDA_FP8_TYPES_EXIST__)
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
             __nv_fp8_e4m3 fp8_val;
             memcpy(&fp8_val, &a_bytes[j], 1);
             float a_val = (float)fp8_val * scale;
+            sum += a_val * __half2float(x_lo[j]);
+        }
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            __nv_fp8_e4m3 fp8_val;
+            memcpy(&fp8_val, &a_bytes[8 + j], 1);
+            float a_val = (float)fp8_val * scale;
+            sum += a_val * __half2float(x_hi[j]);
+        }
 #else
-            // Software fallback: quick dequant
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
             uint8_t bits = a_bytes[j];
             uint8_t sign = (bits >> 7) & 1;
             int exp = (int)((bits >> 3) & 0x0F);
@@ -845,10 +898,29 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A,
             }
             if (sign) a_val = -a_val;
             a_val *= scale;
-#endif
-            float x_val = (j < 8) ? __half2float(x_lo[j]) : __half2float(x_hi[j - 8]);
-            sum += a_val * x_val;
+            sum += a_val * __half2float(x_lo[j]);
         }
+        #pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            uint8_t bits = a_bytes[8 + j];
+            uint8_t sign = (bits >> 7) & 1;
+            int exp = (int)((bits >> 3) & 0x0F);
+            uint8_t man = bits & 0x07;
+            float a_val;
+            if (exp == 0 && man == 0) {
+                a_val = 0.0f;
+            } else if (exp == 0) {
+                a_val = ldexpf((float)man / 8.0f, -6);
+            } else if (exp == 15 && man != 0) {
+                a_val = 0.0f; // NaN -> 0
+            } else {
+                a_val = ldexpf(1.0f + (float)man / 8.0f, exp - 7);
+            }
+            if (sign) a_val = -a_val;
+            a_val *= scale;
+            sum += a_val * __half2float(x_hi[j]);
+        }
+#endif
     }
 
     // Handle remainder

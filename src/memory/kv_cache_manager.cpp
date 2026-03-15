@@ -210,6 +210,16 @@ void KVCacheManager::register_prefix(int seq_id, size_t prefix_hash) {
 std::vector<int> KVCacheManager::find_prefix(size_t prefix_hash) const {
     auto it = prefix_cache_.find(prefix_hash);
     if (it == prefix_cache_.end()) return {};
+    // Validate that cached block IDs are still allocated (not stale).
+    // Legacy prefix cache doesn't track block lifecycle, so blocks may
+    // have been freed and reused by other sequences since registration.
+    for (int bid : it->second) {
+        if (bid < 0 || bid >= cache_->total_blocks() || cache_->ref_count(bid) <= 0) {
+            IMP_LOG_WARN("find_prefix: stale block_id %d in legacy prefix cache (hash=%zu)",
+                         bid, prefix_hash);
+            return {};  // invalidate entire prefix — partial reuse is unsafe
+        }
+    }
     return it->second;
 }
 
@@ -442,8 +452,10 @@ int KVCacheManager::allocate_block_with_eviction() {
     int block_id = cache_->allocate_block();
     if (block_id >= 0) return block_id;
 
-    // Try reclaiming a cached block first (cheaper than evicting a sequence).
-    if (reclaim_cached_block() >= 0) {
+    // Try reclaiming cached blocks (cheaper than evicting a sequence).
+    // Loop until we get a usable block or exhaust all reclaimable cached blocks.
+    while (!cached_blocks_lru_.empty()) {
+        if (reclaim_cached_block() < 0) break;  // All remaining cached blocks are pinned.
         block_id = cache_->allocate_block();
         if (block_id >= 0) return block_id;
     }
@@ -613,32 +625,86 @@ int KVCacheManager::save_prefix_cache(const std::string& path, cudaStream_t stre
     hdr.dtype = static_cast<uint32_t>(cache_->dtype());
     hdr.block_bytes = bb;
 
-    fwrite(&hdr, sizeof(hdr), 1, f);
+    if (fwrite(&hdr, sizeof(hdr), 1, f) != 1) {
+        IMP_LOG_ERROR("Failed to write prefix cache header to %s", path.c_str());
+        fclose(f);
+        return -1;
+    }
 
-    // Allocate host buffer for one block's KV data (all layers, K+V)
+    // Allocate host buffer for ALL blocks' KV data so we can pipeline
+    // all D2H transfers with cudaMemcpyAsync and sync once.
     size_t per_block_total = static_cast<size_t>(nl) * 2 * bb;
-    std::vector<uint8_t> host_buf(per_block_total);
 
-    int saved = 0;
+    // First pass: collect valid block IDs and their hashes.
+    struct BlockEntry {
+        int block_id;
+        size_t hash;
+    };
+    std::vector<BlockEntry> entries;
+    entries.reserve(n_blocks);
     for (int block_id : cached_blocks_lru_) {
         auto hash_it = block_id_to_hash_.find(block_id);
         if (hash_it == block_id_to_hash_.end()) continue;
+        entries.push_back({block_id, hash_it->second});
+    }
 
-        size_t hash = hash_it->second;
-        fwrite(&hash, sizeof(hash), 1, f);
+    if (entries.empty()) {
+        fclose(f);
+        IMP_LOG_INFO("Prefix cache: nothing to save (0 valid cached blocks)");
+        return 0;
+    }
 
-        // Copy KV data from GPU to host
+    // Allocate a contiguous host buffer for all valid blocks.
+    std::vector<uint8_t> host_buf(entries.size() * per_block_total);
+
+    // Issue all D2H copies asynchronously.
+    std::vector<bool> block_ok(entries.size(), true);
+    for (size_t bi = 0; bi < entries.size(); ++bi) {
+        int block_id = entries[bi].block_id;
+        size_t buf_offset = bi * per_block_total;
         size_t offset = 0;
         for (int l = 0; l < nl; l++) {
-            cudaMemcpy(host_buf.data() + offset, cache_->k_ptr(l, block_id),
-                       bb, cudaMemcpyDeviceToHost);
+            cudaError_t err = cudaMemcpyAsync(host_buf.data() + buf_offset + offset,
+                                              cache_->k_ptr(l, block_id),
+                                              bb, cudaMemcpyDeviceToHost, stream);
+            if (err != cudaSuccess) {
+                IMP_LOG_ERROR("cudaMemcpyAsync failed for block %d layer %d K: %s",
+                              block_id, l, cudaGetErrorString(err));
+                block_ok[bi] = false;
+                break;
+            }
             offset += bb;
-            cudaMemcpy(host_buf.data() + offset, cache_->v_ptr(l, block_id),
-                       bb, cudaMemcpyDeviceToHost);
+            err = cudaMemcpyAsync(host_buf.data() + buf_offset + offset,
+                                  cache_->v_ptr(l, block_id),
+                                  bb, cudaMemcpyDeviceToHost, stream);
+            if (err != cudaSuccess) {
+                IMP_LOG_ERROR("cudaMemcpyAsync failed for block %d layer %d V: %s",
+                              block_id, l, cudaGetErrorString(err));
+                block_ok[bi] = false;
+                break;
+            }
             offset += bb;
         }
+    }
 
-        fwrite(host_buf.data(), per_block_total, 1, f);
+    // Single sync to wait for all D2H transfers before writing to disk.
+    cudaStreamSynchronize(stream);
+
+    int saved = 0;
+    for (size_t bi = 0; bi < entries.size(); ++bi) {
+        if (!block_ok[bi]) continue;  // Skip blocks with failed copies.
+
+        size_t hash = entries[bi].hash;
+        if (fwrite(&hash, sizeof(hash), 1, f) != 1) {
+            IMP_LOG_ERROR("Failed to write block hash to %s", path.c_str());
+            fclose(f);
+            return -1;
+        }
+        if (fwrite(host_buf.data() + bi * per_block_total, per_block_total, 1, f) != 1) {
+            IMP_LOG_ERROR("Failed to write block data to %s", path.c_str());
+            fclose(f);
+            return -1;
+        }
         saved++;
     }
 
@@ -692,15 +758,30 @@ int KVCacheManager::load_prefix_cache(const std::string& path, cudaStream_t stre
     int nl = cache_->n_layers();
     size_t bb = cache_->block_bytes();
     size_t per_block_total = static_cast<size_t>(nl) * 2 * bb;
-    std::vector<uint8_t> host_buf(per_block_total);
 
     int loaded = 0;
     int skipped = 0;
 
+    // Read all blocks from disk first, then issue all H2D copies asynchronously.
+    struct LoadEntry {
+        size_t hash;
+        int block_id;
+        size_t buf_offset;  // offset into host_buf for this block's data
+        bool copy_ok;
+    };
+    std::vector<LoadEntry> load_entries;
+    load_entries.reserve(n_blocks);
+
+    // We need separate host memory regions per block for async copies,
+    // so allocate a buffer large enough for all blocks we'll actually load.
+    std::vector<uint8_t> all_host_buf;
+    // Temporary buffer for reading + skipping
+    std::vector<uint8_t> read_buf(per_block_total);
+
     for (int i = 0; i < n_blocks; i++) {
         size_t hash;
         if (fread(&hash, sizeof(hash), 1, f) != 1) break;
-        if (fread(host_buf.data(), per_block_total, 1, f) != 1) break;
+        if (fread(read_buf.data(), per_block_total, 1, f) != 1) break;
 
         // Skip if hash already exists (shouldn't happen on fresh start)
         if (block_hash_to_id_.count(hash)) { skipped++; continue; }
@@ -712,29 +793,62 @@ int KVCacheManager::load_prefix_cache(const std::string& path, cudaStream_t stre
             break;
         }
 
-        // Upload KV data to GPU
-        size_t offset = 0;
-        for (int l = 0; l < nl; l++) {
-            cudaMemcpy(cache_->k_ptr(l, block_id), host_buf.data() + offset,
-                       bb, cudaMemcpyHostToDevice);
-            offset += bb;
-            cudaMemcpy(cache_->v_ptr(l, block_id), host_buf.data() + offset,
-                       bb, cudaMemcpyHostToDevice);
-            offset += bb;
-        }
-
-        // Register in hash maps
-        block_hash_to_id_[hash] = block_id;
-        block_id_to_hash_[block_id] = hash;
-
-        // Add to cached LRU (unreferenced, available for prefix matching)
-        cached_blocks_lru_.push_back(block_id);
-        cached_blocks_map_[block_id] = std::prev(cached_blocks_lru_.end());
-
+        // Append this block's data to the persistent host buffer
+        size_t buf_offset = all_host_buf.size();
+        all_host_buf.insert(all_host_buf.end(), read_buf.begin(), read_buf.end());
+        load_entries.push_back({hash, block_id, buf_offset, true});
         loaded++;
     }
 
     fclose(f);
+
+    // Issue all H2D copies asynchronously.
+    for (auto& entry : load_entries) {
+        size_t offset = 0;
+        for (int l = 0; l < nl; l++) {
+            cudaError_t err = cudaMemcpyAsync(cache_->k_ptr(l, entry.block_id),
+                                              all_host_buf.data() + entry.buf_offset + offset,
+                                              bb, cudaMemcpyHostToDevice, stream);
+            if (err != cudaSuccess) {
+                IMP_LOG_ERROR("cudaMemcpyAsync failed loading block %d layer %d K: %s",
+                              entry.block_id, l, cudaGetErrorString(err));
+                entry.copy_ok = false;
+                break;
+            }
+            offset += bb;
+            err = cudaMemcpyAsync(cache_->v_ptr(l, entry.block_id),
+                                  all_host_buf.data() + entry.buf_offset + offset,
+                                  bb, cudaMemcpyHostToDevice, stream);
+            if (err != cudaSuccess) {
+                IMP_LOG_ERROR("cudaMemcpyAsync failed loading block %d layer %d V: %s",
+                              entry.block_id, l, cudaGetErrorString(err));
+                entry.copy_ok = false;
+                break;
+            }
+            offset += bb;
+        }
+    }
+
+    // Single sync to wait for all H2D transfers.
+    cudaStreamSynchronize(stream);
+
+    // Register successfully loaded blocks. Free blocks with failed copies.
+    int actual_loaded = 0;
+    for (const auto& entry : load_entries) {
+        if (!entry.copy_ok) {
+            cache_->free_block(entry.block_id);
+            continue;
+        }
+
+        block_hash_to_id_[entry.hash] = entry.block_id;
+        block_id_to_hash_[entry.block_id] = entry.hash;
+
+        cached_blocks_lru_.push_back(entry.block_id);
+        cached_blocks_map_[entry.block_id] = std::prev(cached_blocks_lru_.end());
+
+        actual_loaded++;
+    }
+    loaded = actual_loaded;
     IMP_LOG_INFO("Prefix cache: restored %d blocks (%.1f MiB) from %s%s",
                  loaded, (loaded * per_block_total) / (1024.0 * 1024.0), path.c_str(),
                  skipped > 0 ? " (some skipped)" : "");

@@ -9,6 +9,7 @@
 #include <cublasLt.h>
 #include <cstdint>
 #include <cassert>
+#include <mutex>
 
 namespace imp {
 
@@ -1267,7 +1268,9 @@ void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y,
 
 static void* s_nvfp4_dequant_buf = nullptr;
 static size_t s_nvfp4_dequant_buf_size = 0;
+static std::mutex s_nvfp4_dequant_mtx;
 
+// Must be called with s_nvfp4_dequant_mtx held.
 static void* ensure_dequant_buffer(size_t needed) {
     if (needed <= s_nvfp4_dequant_buf_size) return s_nvfp4_dequant_buf;
     if (s_nvfp4_dequant_buf) cudaFree(s_nvfp4_dequant_buf);
@@ -1303,6 +1306,21 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C,
         gemv_nvfp4(A, B, C, stream);
         return;
     }
+
+    // Fallback path: dequantize full weight matrix to FP16 and use cuBLAS GEMM.
+    // This is slow and memory-heavy — warn on first use.
+    static bool s_warned = false;
+    if (!s_warned) {
+        IMP_LOG_WARN("gemm_nvfp4: using slow dequant-to-FP16 fallback for M=%lld "
+                     "(CUTLASS/cuBLASLt NVFP4 unavailable). "
+                     "Allocating %.1f MiB dequant buffer for [%lld, %lld] weight matrix",
+                     (long long)M,
+                     (double)((size_t)(N * K) * sizeof(half)) / (1024.0 * 1024.0),
+                     (long long)N, (long long)K);
+        s_warned = true;
+    }
+
+    std::lock_guard<std::mutex> lock(s_nvfp4_dequant_mtx);
 
     size_t A_fp16_bytes = (size_t)(N * K) * sizeof(half);
     void* dequant_buf = ensure_dequant_buffer(A_fp16_bytes);

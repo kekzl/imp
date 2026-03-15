@@ -41,6 +41,8 @@ void attention_prefill_dispatch(
             return;
         }
         // Fall through to hand-written kernels on failure
+        int hd = static_cast<int>(Q.shape[3]);
+        IMP_LOG_DEBUG("CUTLASS FMHA unavailable (hd=%d, softcap=%.1f), using WMMA fallback", hd, softcap);
     }
 #endif
 
