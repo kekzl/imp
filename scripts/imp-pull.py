@@ -51,17 +51,9 @@ MODEL_REGISTRY = {
         "file": "Qwen3-4B-Instruct-2507-Q8_0.gguf",
     },
     # ── Qwen3-Coder dense ──
-    "qwen3-coder-32b": {
-        "repo": "unsloth/Qwen3-Coder-32B-Instruct-GGUF",
-        "file": "Qwen3-Coder-32B-Instruct-Q4_K_M.gguf",
-    },
     "qwen3-coder-14b": {
         "repo": "unsloth/Qwen3-Coder-14B-Instruct-GGUF",
         "file": "Qwen3-Coder-14B-Instruct-Q8_0.gguf",
-    },
-    "qwen3-coder-7b": {
-        "repo": "unsloth/Qwen3-Coder-7B-Instruct-GGUF",
-        "file": "Qwen3-Coder-7B-Instruct-Q8_0.gguf",
     },
     # ── Gemma-3 ──
     "gemma3-27b": {
@@ -76,48 +68,15 @@ MODEL_REGISTRY = {
         "repo": "unsloth/gemma-3-4b-it-GGUF",
         "file": "gemma-3-4b-it-Q8_0.gguf",
     },
-    # ── LLaMA 3 ──
-    "llama3-70b": {
-        "repo": "unsloth/Meta-Llama-3.1-70B-Instruct-GGUF",
-        "file": "Meta-Llama-3.1-70B-Instruct-Q4_K_M.gguf",
-    },
-    "llama3-8b": {
-        "repo": "unsloth/Meta-Llama-3.1-8B-Instruct-GGUF",
-        "file": "Meta-Llama-3.1-8B-Instruct-Q8_0.gguf",
-    },
-    # ── Mistral / Mixtral ──
+    # ── Mistral ──
     "mistral-24b": {
         "repo": "unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF",
         "file": "Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf",
-    },
-    "mistral-7b": {
-        "repo": "unsloth/mistral-7b-instruct-v0.3-GGUF",
-        "file": "mistral-7b-instruct-v0.3-Q8_0.gguf",
-    },
-    "mixtral-8x7b": {
-        "repo": "unsloth/Mixtral-8x7B-Instruct-v0.1-GGUF",
-        "file": "Mixtral-8x7B-Instruct-v0.1-Q4_K_M.gguf",
     },
     # ── Coding ──
     "devstral": {
         "repo": "unsloth/Devstral-Small-2507-GGUF",
         "file": "Devstral-Small-2507-Q4_K_M.gguf",
-    },
-    "codestral-25b": {
-        "repo": "unsloth/Codestral-2501-GGUF",
-        "file": "Codestral-2501-Q4_K_M.gguf",
-    },
-    "qwen2.5-coder-32b": {
-        "repo": "unsloth/Qwen2.5-Coder-32B-Instruct-GGUF",
-        "file": "Qwen2.5-Coder-32B-Instruct-Q4_K_M.gguf",
-    },
-    "qwen2.5-coder-7b": {
-        "repo": "unsloth/Qwen2.5-Coder-7B-Instruct-GGUF",
-        "file": "Qwen2.5-Coder-7B-Instruct-Q8_0.gguf",
-    },
-    "deepseek-coder": {
-        "repo": "unsloth/DeepSeek-Coder-V2-Lite-Instruct-GGUF",
-        "file": "DeepSeek-Coder-V2-Lite-Instruct-Q6_K.gguf",
     },
     # ── Other ──
     "nemotron-h": {
