@@ -15,6 +15,8 @@ include(CompilerFlags)
 find_package(CUDAToolkit 13.1 REQUIRED)
 message(STATUS "CUDA ${CUDAToolkit_VERSION} detected")
 add_compile_definitions(IMP_CUDA_13_1=1)
+# When upgrading to CUDA 13.2: uncomment for MXFP8 Grouped GEMM + cub::DeviceTopK
+# add_compile_definitions(IMP_CUDA_13_2=1)
 
 # --- CUDA Architecture ---
 # sm_90a = Hopper, sm_100 = Blackwell B200, sm_120a = Blackwell B300/RTX 5090

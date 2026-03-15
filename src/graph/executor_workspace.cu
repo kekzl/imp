@@ -2056,7 +2056,9 @@ bool GraphExecutor::resize_workspace(int new_max_tokens, cudaStream_t stream) {
                                   moe_shared_size_, ssm_shared_size_});
     if (new_shared == 0) return true;
 
-    if (new_shared != shared_workspace_size_) {
+    if (new_shared > shared_workspace_size_) {
+        // Only reallocate when growing — reuse existing buffer if large enough.
+        // This avoids expensive cudaMallocAsync/cudaFreeAsync on every batch size change.
         if (shared_workspace_) {
             cudaFreeAsync(shared_workspace_, stream);
         }

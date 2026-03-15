@@ -90,11 +90,11 @@ int main(int argc, char** argv) {
         config.self_spec_skip_n = args.self_spec_skip_n;
     }
 
-    // In bench mode, cap KV cache to what the benchmark actually needs.
-    // Prevents OOM when presets specify large max_seq_len (e.g. 131072).
+    // In bench mode, ensure KV cache matches what the benchmark needs.
+    // Raises max_seq_len for long-context benchmarks, caps it for short ones.
     if (args.bench) {
         int bench_need = args.bench_pp + args.max_tokens + 256;  // +256 headroom
-        if (config.max_seq_len > bench_need) {
+        if (config.max_seq_len != bench_need) {
             config.max_seq_len = bench_need;
         }
         // Single-request benchmark — no batching needed
