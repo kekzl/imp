@@ -1803,11 +1803,21 @@ bool Engine::step() {
                 state.json_constrainer = json_constrainer_.get();
             }
 
-            // Per-request sampling: each request uses its own sampling params.
-            // The InferenceState 'state' carries valid_decode[0]'s params for the
-            // greedy_single check; the actual sampling overrides per request below.
+            // Per-request sampling. For single-sequence (the common case),
+            // use state directly + sample_single (no vector alloc, no state copy).
             auto sample_per_request = [&](const Tensor& logits) -> std::vector<int32_t> {
                 int n = static_cast<int>(valid_decode.size());
+
+                // Fast path: single sequence — state already has the right params
+                if (n == 1) {
+                    auto& req = valid_decode[0];
+                    int32_t tok = executor_->sample_single_from_logits(logits, state, dec_stream);
+                    if (state.mirostat == 2)
+                        req->mirostat_mu = state.mirostat_mu;
+                    return {tok};
+                }
+
+                // Multi-sequence: per-request overrides
                 std::vector<int32_t> result(n);
                 for (int i = 0; i < n; i++) {
                     auto& req = valid_decode[i];
@@ -1828,8 +1838,6 @@ bool Engine::step() {
                     per_state.dry_penalty_last_n = req->dry_penalty_last_n;
                     if (req->dry_multiplier > 0.0f && !req->output_tokens.empty())
                         per_state.host_penalty_tokens = req->output_tokens.data();
-                    // Per-request penalty tokens: each request has its own output history.
-                    // Without this, all requests in a batch use request[0]'s penalties.
                     per_state.penalty_tokens = nullptr;
                     per_state.n_penalty_tokens = 0;
                     bool req_needs_pen = (req->repetition_penalty != 1.0f ||
@@ -1850,8 +1858,7 @@ bool Engine::step() {
                     per_state.mirostat_mu = req->mirostat_mu;
                     per_state.n_sequences = 1;
                     Tensor seq_logits = logits.slice(i, i + 1);
-                    auto t = executor_->sample_from_logits(seq_logits, per_state, dec_stream);
-                    result[i] = t[0];
+                    result[i] = executor_->sample_single_from_logits(seq_logits, per_state, dec_stream);
                     if (per_state.mirostat == 2)
                         req->mirostat_mu = per_state.mirostat_mu;
                 }
