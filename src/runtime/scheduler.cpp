@@ -74,12 +74,19 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
         active_.push_back(r);
     }
 
-    // 3. Re-schedule incomplete PREFILLING requests (chunked prefill)
+    // 3. Re-schedule incomplete PREFILLING requests (chunked prefill).
+    //    Skip requests already in prefill_batch (just promoted from pending).
     for (auto& req : active_) {
         if (req->status == RequestStatus::PREFILLING &&
             req->prefill_offset > 0 &&
             req->prefill_offset < static_cast<int>(req->input_tokens.size())) {
-            prefill_batch.push_back(req);
+            bool already_queued = false;
+            for (const auto& pf : prefill_batch) {
+                if (pf.get() == req.get()) { already_queued = true; break; }
+            }
+            if (!already_queued) {
+                prefill_batch.push_back(req);
+            }
         }
     }
 

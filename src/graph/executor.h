@@ -263,6 +263,7 @@ public:
     void use_workspace(int slot);  // 0=prefill, 1=decode
     bool has_decode_workspace() const { return decode_workspace_ != nullptr; }
     int active_workspace() const { return active_workspace_; }
+    int max_tokens() const { return max_tokens_; }
 
     // Get a view of the logits buffer for n tokens (for CUDA graph replay,
     // where forward_logits isn't called but the graph writes to this buffer).

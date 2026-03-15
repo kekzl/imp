@@ -899,11 +899,15 @@ bool Engine::step() {
         int total_input = static_cast<int>(req->input_tokens.size());
         int offset = req->prefill_offset;
 
-        // Determine chunk boundaries
+        // Determine chunk boundaries.
+        // Auto-chunk when input exceeds workspace capacity (max_tokens_),
+        // even if prefill_chunk_size is 0 (not explicitly configured).
         int chunk_len = total_input - offset;
         bool is_last_chunk = true;
-        if (config_.prefill_chunk_size > 0 && chunk_len > config_.prefill_chunk_size) {
-            chunk_len = config_.prefill_chunk_size;
+        int effective_chunk = config_.prefill_chunk_size > 0
+            ? config_.prefill_chunk_size : executor_->max_tokens();
+        if (chunk_len > effective_chunk) {
+            chunk_len = effective_chunk;
             is_last_chunk = false;
         }
 
@@ -957,8 +961,8 @@ bool Engine::step() {
                     // Recalculate chunk boundaries with new offset.
                     chunk_len = total_input - offset;
                     is_last_chunk = true;
-                    if (config_.prefill_chunk_size > 0 && chunk_len > config_.prefill_chunk_size) {
-                        chunk_len = config_.prefill_chunk_size;
+                    if (chunk_len > effective_chunk) {
+                        chunk_len = effective_chunk;
                         is_last_chunk = false;
                     }
                     ctx_len = offset + chunk_len;
@@ -976,6 +980,7 @@ bool Engine::step() {
                         if (evicted < 0) break;
                     }
                     if (!kv_manager_->allocate_blocks(req->id, additional)) {
+                        kv_manager_->free_sequence(req->id);
                         req->status = RequestStatus::CANCELLED;
                         continue;
                     }
@@ -1012,6 +1017,8 @@ bool Engine::step() {
             if (d_positions) cudaFreeAsync(d_positions, pf_stream);
             if (d_block_tables) cudaFreeAsync(d_block_tables, pf_stream);
             if (d_context_lens) cudaFreeAsync(d_context_lens, pf_stream);
+            // Free KV blocks allocated earlier to avoid VRAM leak.
+            kv_manager_->free_sequence(req->id);
             continue;
         }
 
@@ -1319,6 +1326,7 @@ bool Engine::step() {
                         new_block = kv_manager_->append_block(req->id);
                     }
                     if (new_block < 0) {
+                        kv_manager_->free_sequence(req->id);
                         req->status = RequestStatus::CANCELLED;
                         continue;
                     }
@@ -1326,7 +1334,6 @@ bool Engine::step() {
             }
             valid_decode.push_back(req);
         }
-
         if (!valid_decode.empty()) {
             // ── Self-speculative decode shortcut (single-sequence only) ──
             if (self_spec_decoder_ && config_.enable_self_speculative &&
