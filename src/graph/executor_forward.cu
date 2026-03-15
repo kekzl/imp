@@ -58,8 +58,9 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
     int n        = state.n_tokens;
     int nkv      = cache->n_kv_heads();
     int hd       = cache->head_dim();
+    const int kv_block_size = cache->block_size();
     int row_elems    = nkv * hd;
-    int block_stride = kKVBlockSize * row_elems;
+    int block_stride = kv_block_size * row_elems;
 
     int threads = std::min(row_elems, 256);
     int nblocks = n;   // one CUDA block per token
@@ -72,8 +73,8 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
         // INT4 quantized KV cache write — 2 values packed per byte, per-head scales
         Tensor kv = view_tokens(k_, n);
         Tensor vv = view_tokens(v_, n);
-        int int4_block_stride = kKVBlockSize * nkv * hd / 2;  // bytes (half the INT8 stride)
-        int scale_block_stride = kKVBlockSize * nkv;
+        int int4_block_stride = kv_block_size * nkv * hd / 2;  // bytes (half the INT8 stride)
+        int scale_block_stride = kv_block_size * nkv;
         dim3 grid_int4(n, 2);
         write_kv_cache_int4_kernel<<<grid_int4, 256, 0, stream>>>(
             static_cast<const half*>(kv.data),
@@ -85,7 +86,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
             static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
             static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)),
             int4_block_stride, scale_block_stride, nkv, hd,
-            kKVBlockSize, n,
+            kv_block_size, n,
             state.max_blocks_per_seq, state.n_sequences);
     } else if (use_int8) {
         // INT8 quantized KV cache write path with per-head scales.
@@ -93,7 +94,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
         Tensor kv = view_tokens(k_, n);
         Tensor vv = view_tokens(v_, n);
 
-        int scale_block_stride = kKVBlockSize * nkv;  // half elems per scale block
+        int scale_block_stride = kv_block_size * nkv;  // half elems per scale block
         dim3 grid_int8(n, 2);  // blockIdx.y: 0=K, 1=V
         write_kv_cache_int8_kernel<<<grid_int8, 256, 0, stream>>>(
             static_cast<const half*>(kv.data),
@@ -105,7 +106,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
             static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
             static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)),
             block_stride, scale_block_stride, nkv, hd,
-            kKVBlockSize, n,
+            kv_block_size, n,
             state.max_blocks_per_seq, state.n_sequences);
     } else if (use_fp8) {
         // FP8 E4M3 quantized KV cache write path with online calibration.
@@ -141,7 +142,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
             static_cast<__nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
             static_cast<__nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)),
             inv_scale,
-            block_stride, row_elems, kKVBlockSize, n,
+            block_stride, row_elems, kv_block_size, n,
             state.max_blocks_per_seq, state.n_sequences);
     } else {
         // Standard FP16 KV cache write path — fused K+V in single launch
@@ -155,7 +156,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
             state.block_tables,
             static_cast<half*>(cache->k_ptr(kv_layer, 0)),
             static_cast<half*>(cache->v_ptr(kv_layer, 0)),
-            block_stride, row_elems, kKVBlockSize, n,
+            block_stride, row_elems, kv_block_size, n,
             state.max_blocks_per_seq, state.n_sequences);
     }
 }
@@ -608,8 +609,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             int kv_layer = layer;
             if (!kv_layer_map_.empty()) kv_layer = kv_layer_map_[layer];
             KVCache* cache = state.kv_cache;
+            const int kv_block_size_d = cache->block_size();
             int row_elems    = nkv * hd;
-            int block_stride = kKVBlockSize * row_elems;
+            int block_stride = kv_block_size_d * row_elems;
             int threads = std::min(row_elems, 256);
             const int effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
             const int pairs = effective_rope_dim / 2;
@@ -623,7 +625,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                 state.positions, state.block_tables,
                 static_cast<half*>(cache->k_ptr(kv_layer, 0)),
                 static_cast<half*>(cache->v_ptr(kv_layer, 0)),
-                block_stride, row_elems, kKVBlockSize, n,
+                block_stride, row_elems, kv_block_size_d, n,
                 state.max_blocks_per_seq, state.n_sequences,
                 nkv, hd, layer_rope_theta, inv_scaling, pairs, cfg.rope_neox,
                 longrope_freqs);
@@ -640,10 +642,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         Tensor o4 = ao.reshape(4, od);
 
         KVCache* cache = state.kv_cache;
+        const int kv_bs = cache->block_size();
         int total_blk  = cache->total_blocks();
         DType cache_dtype = cache->dtype();
         int64_t cs[4]  = {static_cast<int64_t>(total_blk),
-                          static_cast<int64_t>(kKVBlockSize),
+                          static_cast<int64_t>(kv_bs),
                           static_cast<int64_t>(nkv),
                           static_cast<int64_t>(hd)};
         // Use mapped KV layer index for hybrid models (attention layers only)
@@ -661,7 +664,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                         static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
                                         static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
                                         state.block_tables, state.context_lens,
-                                        kKVBlockSize, scale,
+                                        kv_bs, scale,
                                         state.max_context_len, layer_sliding_window,
                                         cfg.attn_logit_softcap, stream,
                                         state.max_blocks_per_seq);
@@ -672,7 +675,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                         static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
                                         static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
                                         state.block_tables, state.context_lens,
-                                        kKVBlockSize, scale,
+                                        kv_bs, scale,
                                         state.max_context_len, layer_sliding_window,
                                         cfg.attn_logit_softcap, stream,
                                         state.max_blocks_per_seq);
@@ -683,7 +686,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             paged_attention_set_splitk_scratch(splitk_scratch_, splitk_scratch_size_);
             paged_attention_decode_fp8(q4, k_c, v_c, o4,
                                         state.block_tables, state.context_lens,
-                                        kKVBlockSize, scale, kv_scale,
+                                        kv_bs, scale, kv_scale,
                                         state.max_context_len, layer_sliding_window,
                                         cfg.attn_logit_softcap, stream,
                                         state.max_blocks_per_seq);
@@ -691,7 +694,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             paged_attention_set_splitk_scratch(splitk_scratch_, splitk_scratch_size_);
             paged_attention_decode(q4, k_c, v_c, o4,
                                     state.block_tables, state.context_lens,
-                                    kKVBlockSize, scale, state.max_context_len,
+                                    kv_bs, scale, state.max_context_len,
                                     layer_sliding_window, cfg.attn_logit_softcap, stream,
                                     state.max_blocks_per_seq);
         }

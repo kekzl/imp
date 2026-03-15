@@ -139,7 +139,8 @@ void SelfSpeculativeDecoder::upload_block_table_replicated(
 // ─── Helper: ensure KV blocks ────────────────────────────────────────────────
 
 void SelfSpeculativeDecoder::ensure_kv_blocks(int seq_id, int ctx_len) {
-    int needed = (ctx_len + kKVBlockSize - 1) / kKVBlockSize;
+    const int bs = kv_cache_->block_size();
+    int needed = (ctx_len + bs - 1) / bs;
     int have = static_cast<int>(kv_manager_->block_table(seq_id).size());
     while (needed > have) {
         if (kv_manager_->append_block(seq_id) < 0) break;
@@ -283,7 +284,7 @@ SelfSpeculativeDecoder::verify(const std::vector<int32_t>& draft,
 
     // max_blocks_per_seq MUST match paged_attention's stride:
     //   max_num_blocks = (max_context_len + block_size - 1) / block_size
-    int max_blocks_per_seq = (max_ctx + kKVBlockSize - 1) / kKVBlockSize;
+    int max_blocks_per_seq = (max_ctx + kv_cache_->block_size() - 1) / kv_cache_->block_size();
 
     // Upload replicated block table: n_verify copies, each max_blocks_per_seq entries
     upload_block_table_replicated(seq_id, n_verify, max_blocks_per_seq, stream);

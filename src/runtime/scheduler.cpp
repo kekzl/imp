@@ -1,6 +1,6 @@
 #include "runtime/scheduler.h"
 #include "memory/kv_cache_manager.h"
-#include "memory/kv_cache.h"  // for kKVBlockSize
+#include "memory/kv_cache.h"
 #include <algorithm>
 
 namespace imp {
@@ -47,7 +47,8 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
             // Memory-aware check: estimate KV blocks needed for this request
             if (kv_manager_) {
                 int ctx_len = req->context_len();
-                int blocks_needed = (ctx_len + kKVBlockSize - 1) / kKVBlockSize;
+                const int bs = kv_manager_->kv_cache()->block_size();
+                int blocks_needed = (ctx_len + bs - 1) / bs;
                 if (!kv_manager_->can_allocate(blocks_needed)) {
                     // Not enough memory -- skip, try smaller requests
                     ++it;
@@ -64,9 +65,9 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                     }
                     // Skip prefill for tokens covered by reused blocks.
                     if (reused > 0) {
-                        int skip = reused * kKVBlockSize;
+                        int skip = reused * bs;
                         int total = static_cast<int>(req->input_tokens.size());
-                        if (skip >= total) skip = (total / kKVBlockSize) * kKVBlockSize;
+                        if (skip >= total) skip = (total / bs) * bs;
                         if (skip >= total) skip = total - 1;
                         req->prefill_offset = skip;
                     }

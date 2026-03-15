@@ -139,21 +139,22 @@ VRAMBudget Engine::plan_vram_budget(int n_kv_layers, int head_dim) const {
     available = (available > overhead) ? (available - overhead) : 0;
 
     // --- 4. Compute KV cache per-block cost ---
+    int bs = config_.kv_block_size > 0 ? config_.kv_block_size : kKVBlockSize;
     size_t single_block_bytes;
     if (config_.kv_cache_dtype == DType::INT4) {
-        single_block_bytes = static_cast<size_t>(kKVBlockSize) *
+        single_block_bytes = static_cast<size_t>(bs) *
                              mcfg.n_kv_heads * head_dim / 2;
     } else {
-        single_block_bytes = static_cast<size_t>(kKVBlockSize) *
+        single_block_bytes = static_cast<size_t>(bs) *
                              mcfg.n_kv_heads * head_dim * dtype_size(config_.kv_cache_dtype);
     }
     size_t per_block_total = single_block_bytes * 2 * n_kv_layers;
     if (config_.kv_cache_dtype == DType::INT8 || config_.kv_cache_dtype == DType::INT4) {
-        size_t scale_per_block = static_cast<size_t>(kKVBlockSize) * mcfg.n_kv_heads * sizeof(half);
+        size_t scale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * sizeof(half);
         per_block_total += scale_per_block * 2 * n_kv_layers;
     }
 
-    int blocks_per_seq = (config_.max_seq_len + kKVBlockSize - 1) / kKVBlockSize;
+    int blocks_per_seq = (config_.max_seq_len + bs - 1) / bs;
     int needed_blocks = blocks_per_seq * config_.max_batch_size;
 
     // --- 5. Estimate NVFP4-eligible weight cache size ---
@@ -365,12 +366,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         int head_dim_est = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
         size_t elem_sz = dtype_size(config_.kv_cache_dtype);
         // Minimum KV: enough for max_seq_len * max_batch_size
-        int blocks_per_seq = (config_.max_seq_len + kKVBlockSize - 1) / kKVBlockSize;
+        int est_bs = config_.kv_block_size > 0 ? config_.kv_block_size : kKVBlockSize;
+        int blocks_per_seq = (config_.max_seq_len + est_bs - 1) / est_bs;
         int n_attn = 0;
         for (int i = 0; i < mcfg.n_layers; i++)
             if (model_->layer(i).wq.data != nullptr) n_attn++;
         if (n_attn == 0) n_attn = mcfg.n_layers;
-        size_t kv_block_bytes = static_cast<size_t>(kKVBlockSize) * mcfg.n_kv_heads * head_dim_est * elem_sz;
+        size_t kv_block_bytes = static_cast<size_t>(est_bs) * mcfg.n_kv_heads * head_dim_est * elem_sz;
         size_t kv_est = static_cast<size_t>(blocks_per_seq * config_.max_batch_size) * 2 * n_attn * kv_block_bytes;
         // Cap KV estimate to 20% of total VRAM — the theoretical max (all batch slots
         // filled to max_seq_len) is unrealistic for large models on limited VRAM.
@@ -506,8 +508,21 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     int n_kv_layers = n_attn_layers;
     IMP_LOG_INFO("KV cache layers: %d attention out of %d total", n_kv_layers, mcfg.n_layers);
 
+    // Auto-select KV block size based on model characteristics.
+    // Larger blocks (32) improve coalescing for GQA models with few KV heads.
+    if (config_.kv_block_size <= 0) {
+        if (mcfg.n_kv_heads <= 4 && mcfg.n_kv_heads > 0) {
+            config_.kv_block_size = 32;  // Strong GQA (≤4 heads): larger blocks
+        } else {
+            config_.kv_block_size = kKVBlockSize;  // default 16
+        }
+        IMP_LOG_INFO("KV block size: auto → %d (n_kv_heads=%d)",
+                     config_.kv_block_size, mcfg.n_kv_heads);
+    }
+    const int kv_bs = config_.kv_block_size;
+
     // Calculate how many blocks are actually needed for the configured workload.
-    int blocks_per_seq = (config_.max_seq_len + kKVBlockSize - 1) / kKVBlockSize;
+    int blocks_per_seq = (config_.max_seq_len + kv_bs - 1) / kv_bs;
     int needed_blocks = blocks_per_seq * config_.max_batch_size;
 
     // Compute VRAM budget: unified planner for KV + weight cache allocation.
@@ -522,23 +537,23 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     {
         DType kv_dtype = config_.kv_cache_dtype;
         size_t elem_size = dtype_size(kv_dtype);
-        size_t block_bytes = static_cast<size_t>(kKVBlockSize) *
+        size_t block_bytes = static_cast<size_t>(kv_bs) *
                              mcfg.n_kv_heads * head_dim * elem_size;
         size_t total_kv = static_cast<size_t>(n_kv_layers) * max_blocks * 2 * block_bytes;
         IMP_LOG_INFO("KV cache: %d blocks (%.0f tokens), %.2f MiB, dtype=%s "
                      "(layers=%d/%d, kv_heads=%d, head_dim=%d, block_size=%d)",
                      max_blocks,
-                     static_cast<double>(max_blocks) * kKVBlockSize,
+                     static_cast<double>(max_blocks) * kv_bs,
                      static_cast<double>(total_kv) / (1024.0 * 1024.0),
                      kv_dtype == DType::FP8_E4M3 ? "FP8_E4M3" :
                      kv_dtype == DType::INT8 ? "INT8" :
                      kv_dtype == DType::INT4 ? "INT4" : "FP16",
-                     n_kv_layers, mcfg.n_layers, mcfg.n_kv_heads, head_dim, kKVBlockSize);
+                     n_kv_layers, mcfg.n_layers, mcfg.n_kv_heads, head_dim, kv_bs);
     }
 
     auto kv_cache = std::make_unique<KVCache>(
         n_kv_layers, mcfg.n_kv_heads, head_dim,
-        config_.kv_cache_dtype, max_blocks);
+        config_.kv_cache_dtype, max_blocks, kv_bs);
 
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
@@ -964,6 +979,8 @@ void Engine::clear_image() {
 }
 
 bool Engine::step() {
+    const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+
     // ====================================================================
     // Fast path: async conditional graph loop completed on GPU.
     // All tokens were generated at full GPU speed (no per-step host
@@ -1094,7 +1111,7 @@ bool Engine::step() {
         // Resize workspace for this chunk's token count
         executor_->resize_workspace(chunk_len, pf_stream);
 
-        int num_blocks = (ctx_len + kKVBlockSize - 1) / kKVBlockSize;
+        int num_blocks = (ctx_len + kv_bs - 1) / kv_bs;
 
         // Allocate KV cache blocks, using prefix caching when enabled.
         int prefix_reused = 0;
@@ -1103,7 +1120,7 @@ bool Engine::step() {
         if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0) {
             // First chunk of a fresh sequence — try content-addressed prefix match.
             // Allocate all blocks for the full input at once (not just this chunk).
-            int total_blocks_needed = (total_input + kKVBlockSize - 1) / kKVBlockSize;
+            int total_blocks_needed = (total_input + kv_bs - 1) / kv_bs;
             prefix_reused = kv_manager_->allocate_blocks_with_prefix(
                 req->id, req->input_tokens.data(), total_input);
             if (prefix_reused < 0) {
@@ -1122,10 +1139,10 @@ bool Engine::step() {
 
             // Skip prefill for tokens covered by reused blocks.
             if (prefix_reused > 0) {
-                int skip_tokens = prefix_reused * kKVBlockSize;
+                int skip_tokens = prefix_reused * kv_bs;
                 // Must keep at least 1 token for the forward pass.
                 if (skip_tokens >= total_input) {
-                    skip_tokens = (total_input / kKVBlockSize) * kKVBlockSize;
+                    skip_tokens = (total_input / kv_bs) * kv_bs;
                     if (skip_tokens >= total_input) {
                         skip_tokens = total_input - 1;
                     }
@@ -1503,7 +1520,7 @@ bool Engine::step() {
 
         for (auto& req : decode_batch) {
             int ctx_len = req->context_len();
-            int blocks_needed = (ctx_len + kKVBlockSize - 1) / kKVBlockSize;
+            int blocks_needed = (ctx_len + kv_bs - 1) / kv_bs;
             const auto& block_table = kv_manager_->block_table(req->id);
             int blocks_have = static_cast<int>(block_table.size());
 
@@ -1986,6 +2003,7 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
                               float repetition_penalty,
                               float frequency_penalty,
                               float presence_penalty) {
+    const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     Tokenizer* tok = model_->tokenizer();
     if (!tok) {
         return "";
@@ -2110,6 +2128,7 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
 
 std::vector<int32_t> Engine::try_graph_loop_decode(
         std::shared_ptr<Request> req, int32_t first_token, cudaStream_t stream) {
+    const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     // Only attempt for single-sequence decode
     Tokenizer* tok = model_->tokenizer();
     if (!tok) return {};
@@ -2154,7 +2173,7 @@ std::vector<int32_t> Engine::try_graph_loop_decode(
     // sequence in single-sequence chat mode, destroying its block table.
     {
         int final_ctx = ctx_len + remaining;
-        int blocks_needed = (final_ctx + kKVBlockSize - 1) / kKVBlockSize;
+        int blocks_needed = (final_ctx + kv_bs - 1) / kv_bs;
         int blocks_have = static_cast<int>(kv_manager_->block_table(req->id).size());
 
         for (int b = blocks_have; b < blocks_needed; b++) {
@@ -2163,7 +2182,7 @@ std::vector<int32_t> Engine::try_graph_loop_decode(
         }
 
         int blocks_got = static_cast<int>(kv_manager_->block_table(req->id).size());
-        int max_ctx = blocks_got * kKVBlockSize;
+        int max_ctx = blocks_got * kv_bs;
         int capped = max_ctx - ctx_len;
         if (capped <= 0) {
             IMP_LOG_WARN("ConditionalGraph: no KV capacity for new tokens, "
@@ -2244,6 +2263,7 @@ std::vector<int32_t> Engine::try_graph_loop_decode(
 
 bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
                                           int32_t first_token, cudaStream_t stream) {
+    const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     Tokenizer* tok = model_->tokenizer();
     if (!tok) return false;
 
@@ -2281,7 +2301,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
     // sequence in single-sequence chat mode, destroying its block table.
     {
         int final_ctx = ctx_len + remaining;
-        int blocks_needed = (final_ctx + kKVBlockSize - 1) / kKVBlockSize;
+        int blocks_needed = (final_ctx + kv_bs - 1) / kv_bs;
         int blocks_have = static_cast<int>(kv_manager_->block_table(req->id).size());
 
         for (int b = blocks_have; b < blocks_needed; b++) {
@@ -2290,7 +2310,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
         }
 
         int blocks_got = static_cast<int>(kv_manager_->block_table(req->id).size());
-        int max_ctx = blocks_got * kKVBlockSize;
+        int max_ctx = blocks_got * kv_bs;
         int capped = max_ctx - ctx_len;
         if (capped <= 0) {
             IMP_LOG_WARN("AsyncGraphLoop: no KV capacity for new tokens");

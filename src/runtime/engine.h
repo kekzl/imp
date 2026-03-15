@@ -53,6 +53,10 @@ struct EngineConfig {
     // Layer offloading: number of layers to keep on GPU (-1 = all on GPU, 0 = all offloaded)
     int gpu_layers = -1;
 
+    // KV cache block size (tokens per block). 0 = auto-select based on model.
+    // Larger blocks (32, 64) improve coalescing for GQA models with few KV heads.
+    int kv_block_size = 0;
+
     // Chunked prefill
     int prefill_chunk_size = 0;  // 0 = no chunking
 

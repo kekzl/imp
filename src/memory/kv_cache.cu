@@ -25,15 +25,16 @@ namespace imp {
 // ---------------------------------------------------------------------------
 
 KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
-                 int max_blocks)
+                 int max_blocks, int block_size)
     : n_layers_(n_layers)
     , n_kv_heads_(n_kv_heads)
     , head_dim_(head_dim)
     , max_blocks_(max_blocks)
+    , block_size_(block_size)
     , dtype_(dtype)
     , block_bytes_((dtype == DType::INT4)
-                   ? (static_cast<size_t>(kKVBlockSize) * n_kv_heads * head_dim / 2)
-                   : (static_cast<size_t>(kKVBlockSize) * n_kv_heads * head_dim *
+                   ? (static_cast<size_t>(block_size_) * n_kv_heads * head_dim / 2)
+                   : (static_cast<size_t>(block_size_) * n_kv_heads * head_dim *
                       dtype_size(dtype))) {
 
     // Allocate contiguous GPU pool
@@ -53,7 +54,7 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
 
     // Allocate separate scale buffer for INT8/INT4 KV cache (per-head-per-token scales)
     if (dtype == DType::INT8 || dtype == DType::INT4) {
-        scale_block_bytes_ = static_cast<size_t>(kKVBlockSize) * n_kv_heads * sizeof(half);
+        scale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * sizeof(half);
         size_t scale_total = static_cast<size_t>(n_layers_) * max_blocks_ * 2 * scale_block_bytes_;
         cudaError_t serr = cudaMalloc(&scale_pool_, scale_total);
         if (serr != cudaSuccess) {

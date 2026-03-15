@@ -7,12 +7,12 @@
 
 namespace imp {
 
-static constexpr int kKVBlockSize = 16; // tokens per block
+static constexpr int kKVBlockSize = 16; // default tokens per block
 
 class KVCache {
 public:
     KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
-            int max_blocks);
+            int max_blocks, int block_size = kKVBlockSize);
     ~KVCache();
 
     // Block allocation / deallocation
@@ -38,6 +38,7 @@ public:
 
     // Accessors
     size_t block_bytes() const;
+    int block_size() const { return block_size_; }
     int n_layers() const;
     int n_kv_heads() const;
     int head_dim() const;
@@ -48,8 +49,9 @@ private:
     int n_kv_heads_;
     int head_dim_;
     int max_blocks_;
+    int block_size_;                // tokens per block (default 16)
     DType dtype_;
-    size_t block_bytes_;            // cached: kKVBlockSize * n_kv_heads * head_dim * dtype_size(dtype)
+    size_t block_bytes_;            // cached: block_size * n_kv_heads * head_dim * dtype_size(dtype)
 
     std::vector<int> ref_counts_;   // per-block reference count
     std::vector<int> free_list_;
@@ -58,7 +60,7 @@ private:
     // INT8 per-head scales: one half per head per token slot.
     // Layout mirrors pool_ but with scale_block_bytes_ per block.
     void* scale_pool_ = nullptr;
-    size_t scale_block_bytes_ = 0;  // kKVBlockSize * n_kv_heads * sizeof(half)
+    size_t scale_block_bytes_ = 0;  // block_size * n_kv_heads * sizeof(half)
 };
 
 } // namespace imp

@@ -39,6 +39,9 @@ public:
     // Return the block table for a sequence (empty vector if unknown).
     const std::vector<int>& block_table(int seq_id) const;
 
+    // Access the underlying KV cache (for runtime block_size, dtype, etc.).
+    KVCache* kv_cache() const { return cache_.get(); }
+
     // Number of free blocks in the underlying cache.
     int num_free_blocks() const;
 
