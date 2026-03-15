@@ -26,7 +26,9 @@ struct ServerMetrics {
     std::atomic<int64_t> requests_failed{0};
     std::atomic<int64_t> tokens_prompt_total{0};
     std::atomic<int64_t> tokens_completion_total{0};
+    std::atomic<int64_t> tokens_cached_total{0};      // Prefix cache hits
     std::atomic<int64_t> last_request_duration_ms{0};
+    std::atomic<int64_t> last_ttft_ms{0};              // Time to first token (ms)
     std::atomic<int64_t> model_loads_total{0};
     std::chrono::steady_clock::time_point start_time = std::chrono::steady_clock::now();
 };
