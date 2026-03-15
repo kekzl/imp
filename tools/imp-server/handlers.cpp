@@ -1374,6 +1374,12 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                         {"completion_tokens", n_output_tokens},
                         {"total_tokens", n_prompt_tokens + n_output_tokens}
                     };
+                    // Report prefix cache hit (OpenAI-compatible prompt_tokens_details)
+                    if (active_req && active_req->cached_tokens > 0) {
+                        usage["prompt_tokens_details"] = {
+                            {"cached_tokens", active_req->cached_tokens}
+                        };
+                    }
                     if (n_reasoning_tokens > 0) {
                         usage["completion_tokens_details"] = {
                             {"reasoning_tokens", n_reasoning_tokens}

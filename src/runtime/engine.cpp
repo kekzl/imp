@@ -956,6 +956,7 @@ bool Engine::step() {
                 if (skip_tokens > offset) {
                     IMP_LOG_INFO("PrefixCache: seq %d skipping %d/%d prefill tokens (%d blocks reused)",
                                  req->id, skip_tokens, total_input, prefix_reused);
+                    req->cached_tokens = skip_tokens;
                     offset = skip_tokens;
                     req->prefill_offset = offset;
                     // Recalculate chunk boundaries with new offset.
@@ -1084,20 +1085,31 @@ bool Engine::step() {
             }
         }
 
-        // Schema-constrained JSON mode
+        // Schema-constrained JSON mode.
+        // Cache the constrainer across requests with identical schemas to avoid
+        // re-parsing and re-classifying ~151k tokens on every agentic tool call.
         if (!req->json_schema.empty()) {
-            auto schema = parse_json_schema(req->json_schema);
-            if (schema) {
-                schema_constrainer_ = std::make_unique<SchemaConstrainer>();
-                Tokenizer* stok = model_->tokenizer();
-                if (schema_constrainer_->init(*stok, std::move(schema))) {
-                    state.schema_constrainer = schema_constrainer_.get();
-                } else {
-                    IMP_LOG_ERROR("Failed to initialize schema constrainer");
-                    schema_constrainer_.reset();
-                }
+            if (schema_constrainer_ && schema_constrainer_->is_initialized() &&
+                req->json_schema == cached_schema_string_) {
+                // Reuse cached constrainer — just reset FSM state.
+                schema_constrainer_->reset();
+                state.schema_constrainer = schema_constrainer_.get();
             } else {
-                IMP_LOG_ERROR("Failed to parse JSON schema");
+                auto schema = parse_json_schema(req->json_schema);
+                if (schema) {
+                    schema_constrainer_ = std::make_unique<SchemaConstrainer>();
+                    Tokenizer* stok = model_->tokenizer();
+                    if (schema_constrainer_->init(*stok, std::move(schema))) {
+                        cached_schema_string_ = req->json_schema;
+                        state.schema_constrainer = schema_constrainer_.get();
+                    } else {
+                        IMP_LOG_ERROR("Failed to initialize schema constrainer");
+                        schema_constrainer_.reset();
+                        cached_schema_string_.clear();
+                    }
+                } else {
+                    IMP_LOG_ERROR("Failed to parse JSON schema");
+                }
             }
         }
 

@@ -57,6 +57,7 @@ struct Request {
     float mirostat_mu = 0.0f;         // Running variable (persists across tokens, init = 2*tau)
     bool ignore_eos = false;   // Don't stop on EOS (benchmark mode)
     int prefill_offset = 0;    // Chunked prefill: tokens processed so far
+    int cached_tokens = 0;     // Tokens served from prefix cache (skipped in prefill)
 
     // Logprobs
     bool logprobs = false;                          // Return logprobs for sampled tokens

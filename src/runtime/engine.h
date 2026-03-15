@@ -191,8 +191,11 @@ private:
     // JSON constrainer (lazily initialized on first json_mode request)
     std::unique_ptr<JsonConstrainer> json_constrainer_;
 
-    // Schema constrainer (created per-request when json_schema is set)
+    // Schema constrainer (cached across requests with identical schemas).
+    // Agentic tool calls reuse the same schema — avoid re-parsing and
+    // re-classifying ~151k tokens on every request.
     std::unique_ptr<SchemaConstrainer> schema_constrainer_;
+    std::string cached_schema_string_;
 
     // Pinned host buffer for graph-captured greedy sampling results.
     // When sampling is included in the CUDA graph, the argmax kernel writes
