@@ -30,7 +30,7 @@ struct ServerRequest {
     std::mutex token_mutex;
     std::condition_variable token_cv;
     std::deque<TokenEvent> token_queue;
-    bool cancelled = false;  // set by HTTP handler to cancel
+    std::atomic<bool> cancelled{false};  // set by HTTP handler to cancel
 
     // Track how many output tokens we have already delivered
     size_t notified_count = 0;
@@ -64,13 +64,11 @@ struct ServerRequest {
 
     // Cancel the request (called from HTTP handler if client disconnects)
     void cancel() {
-        std::lock_guard<std::mutex> lock(token_mutex);
-        cancelled = true;
+        cancelled.store(true, std::memory_order_release);
     }
 
-    bool is_cancelled() {
-        std::lock_guard<std::mutex> lock(token_mutex);
-        return cancelled;
+    bool is_cancelled() const {
+        return cancelled.load(std::memory_order_acquire);
     }
 };
 

@@ -381,18 +381,27 @@ void KVCacheManager::register_block_hashes(int seq_id,
 
         if (block_tokens < cache_->block_size()) break; // Only full blocks are cacheable.
 
+        // Skip recomputation if hash was already computed during allocate_blocks_with_prefix
+        int block_id = blocks[b];
+        if (b < static_cast<int>(hashes.size()) && hashes[b] != 0) {
+            size_t existing_hash = hashes[b];
+            if (block_hash_to_id_.find(existing_hash) == block_hash_to_id_.end()) {
+                block_hash_to_id_[existing_hash] = block_id;
+                block_id_to_hash_[block_id] = existing_hash;
+            }
+            parent_hash = existing_hash;
+            continue;
+        }
+
         size_t block_hash = compute_block_hash(tokens + block_start,
                                                 block_tokens, parent_hash);
 
-        // Ensure hash vector is populated.
         if (b < static_cast<int>(hashes.size())) {
             hashes[b] = block_hash;
         } else {
             hashes.push_back(block_hash);
         }
 
-        // Register in hash table if not already there.
-        int block_id = blocks[b];
         if (block_hash_to_id_.find(block_hash) == block_hash_to_id_.end()) {
             block_hash_to_id_[block_hash] = block_id;
             block_id_to_hash_[block_id] = block_hash;
