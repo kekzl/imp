@@ -257,9 +257,9 @@ public:
     [[nodiscard]] bool resize_workspace(int new_max_tokens, cudaStream_t stream);
 
     // Dual workspace for concurrent prefill/decode overlap.
-    // allocate_decode_workspace: creates a second tiny workspace for n=1 decode.
+    // allocate_decode_workspace: creates a second workspace for decode (up to max_batch tokens).
     // use_workspace(0) = prefill (default), use_workspace(1) = decode.
-    bool allocate_decode_workspace(cudaStream_t stream);
+    bool allocate_decode_workspace(cudaStream_t stream, int max_batch = 1);
     void use_workspace(int slot);  // 0=prefill, 1=decode
     bool has_decode_workspace() const { return decode_workspace_ != nullptr; }
     int active_workspace() const { return active_workspace_; }
@@ -540,11 +540,12 @@ private:
 
     // --- Dual workspace for concurrent prefill/decode overlap ---
     // Slot 0 (default): main workspace (prefill, sized for max_tokens)
-    // Slot 1: decode workspace (tiny, sized for n=1)
+    // Slot 1: decode workspace (sized for up to decode_max_batch_ tokens)
     void* decode_workspace_ = nullptr;         // persistent buf for decode
     void* decode_shared_workspace_ = nullptr;   // shared buf for decode
     size_t decode_persistent_size_ = 0;
     size_t decode_shared_size_ = 0;
+    int decode_max_batch_ = 1;                  // max decode batch size this workspace supports
     int active_workspace_ = 0;
 
     // Saved prefill workspace pointers (restored when switching back)

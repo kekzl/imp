@@ -494,7 +494,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
         // Allocate decode workspace for concurrent prefill/decode overlap
         if (green_ctx_.is_available() && config_.prefill_chunk_size > 0) {
-            if (executor_->allocate_decode_workspace(stream_)) {
+            if (executor_->allocate_decode_workspace(stream_, config_.max_batch_size)) {
                 IMP_LOG_INFO("Concurrent prefill/decode overlap enabled");
             }
         }
@@ -1370,11 +1370,14 @@ bool Engine::step() {
                 goto decode_done;
             }
 
-            // Switch to decode workspace for concurrent overlap (if available)
-            if (executor_->has_decode_workspace()) {
+            // Switch workspace for decode.
+            // Single-sequence: use decode workspace (slot 1) for concurrent prefill/decode overlap.
+            // Multi-sequence: resize main workspace — the decode workspace's shared buffer
+            // is pre-allocated at init and may have stale tensor configurations.
+            if (executor_->has_decode_workspace() && valid_decode.size() == 1) {
                 executor_->use_workspace(1);
             } else {
-                // Resize workspace for decode batch size (much smaller than prefill)
+                if (executor_->active_workspace() == 1) executor_->use_workspace(0);
                 executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
             }
 

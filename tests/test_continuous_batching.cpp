@@ -691,5 +691,169 @@ TEST(GPUBatchTest, EmptyBatch) {
     gpu_batch.free();  // should be safe
 }
 
+// ============================================================================
+// Batched Decode Tests (Phase 3A: multi-sequence decode)
+// ============================================================================
+
+// 21. Scheduler: batched decode with mid-batch completion
+TEST(SchedulerTest, BatchedDecodeWithMidBatchCompletion) {
+    Scheduler sched(8);
+
+    // Create 6 requests, prefill all
+    std::vector<std::shared_ptr<Request>> reqs(6);
+    for (int i = 0; i < 6; i++) {
+        reqs[i] = std::make_shared<Request>();
+        reqs[i]->input_tokens = {1, 2, 3, 4};
+        sched.add_request(reqs[i]);
+    }
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+    EXPECT_EQ(prefill.size(), 6u);
+    EXPECT_EQ(decode.size(), 0u);
+
+    // All transition to DECODING
+    for (auto& r : reqs) r->status = RequestStatus::DECODING;
+
+    // Step 1: All 6 in batched decode
+    sched.schedule(prefill, decode);
+    EXPECT_EQ(decode.size(), 6u);
+
+    // Simulate: reqs[1] and reqs[4] finish mid-batch
+    reqs[1]->status = RequestStatus::FINISHED;
+    reqs[4]->status = RequestStatus::FINISHED;
+
+    // Step 2: Only 4 remain in decode
+    sched.schedule(prefill, decode);
+    EXPECT_EQ(decode.size(), 4u);
+    EXPECT_EQ(sched.active_count(), 4);
+
+    // Add 3 new requests while 4 are decoding
+    for (int i = 0; i < 3; i++) {
+        auto req = std::make_shared<Request>();
+        req->input_tokens = {10, 20, 30};
+        sched.add_request(req);
+    }
+
+    // Step 3: 3 new prefill + 4 decode (total 7 within max_batch=8)
+    sched.schedule(prefill, decode);
+    EXPECT_EQ(prefill.size(), 3u);
+    EXPECT_EQ(decode.size(), 4u);
+    EXPECT_EQ(sched.active_count(), 7);
+}
+
+// 22. BatchBuilder: batched decode GPU upload with varying context lengths
+TEST(GPUBatchTest, BatchedDecodeVaryingContextLens) {
+    SKIP_IF_NO_CUDA();
+
+    BatchBuilder builder;
+    builder.reset();
+
+    // Simulate 4 concurrent decode sequences with different progress
+    struct SeqInfo { int32_t token; int position; int n_blocks; int ctx_len; };
+    SeqInfo seqs[] = {
+        {100, 63,  4, 64},   // long context
+        {200, 15,  1, 16},   // short context
+        {300, 127, 8, 128},  // very long context
+        {400, 31,  2, 32},   // medium context
+    };
+
+    std::vector<std::vector<int>> block_tables(4);
+    for (int i = 0; i < 4; i++) {
+        block_tables[i].resize(seqs[i].n_blocks);
+        for (int b = 0; b < seqs[i].n_blocks; b++) {
+            block_tables[i][b] = i * 100 + b;
+        }
+        builder.add_decode_sequence(seqs[i].token, seqs[i].position,
+                                    block_tables[i].data(), seqs[i].n_blocks,
+                                    seqs[i].ctx_len);
+    }
+
+    Batch batch = builder.build();
+    EXPECT_EQ(batch.n_sequences, 4);
+    EXPECT_EQ(batch.total_tokens, 4);
+    EXPECT_EQ(batch.max_blocks_per_seq, 8);  // max of {4, 1, 8, 2}
+
+    GPUBatch gpu_batch;
+    gpu_batch.upload(batch);
+    cudaStreamSynchronize(nullptr);
+
+    EXPECT_TRUE(gpu_batch.is_valid());
+    EXPECT_EQ(gpu_batch.n_sequences, 4);
+    EXPECT_EQ(gpu_batch.total_tokens, 4);
+
+    // Verify context lengths readback (crucial for paged attention dispatch)
+    std::vector<int> ctx(4);
+    cudaMemcpy(ctx.data(), gpu_batch.d_context_lens,
+               4 * sizeof(int), cudaMemcpyDeviceToHost);
+    EXPECT_EQ(ctx[0], 64);
+    EXPECT_EQ(ctx[1], 16);
+    EXPECT_EQ(ctx[2], 128);
+    EXPECT_EQ(ctx[3], 32);
+
+    // Verify block tables are correctly padded to max_blocks_per_seq=8
+    std::vector<int> bt(4 * 8);
+    cudaMemcpy(bt.data(), gpu_batch.d_block_tables,
+               4 * 8 * sizeof(int), cudaMemcpyDeviceToHost);
+    // Row 2 (longest): blocks 200..207
+    for (int b = 0; b < 8; b++) {
+        EXPECT_EQ(bt[2 * 8 + b], 200 + b);
+    }
+    // Row 1 (shortest, 1 block): block 100, rest padding
+    EXPECT_EQ(bt[1 * 8 + 0], 100);
+    for (int b = 1; b < 8; b++) {
+        EXPECT_EQ(bt[1 * 8 + b], 0) << "padding at seq=1 block=" << b;
+    }
+
+    // Verify seq_offsets for multi-sequence decode
+    EXPECT_NE(gpu_batch.d_seq_offsets, nullptr);
+    std::vector<int> offsets(5);
+    cudaMemcpy(offsets.data(), gpu_batch.d_seq_offsets,
+               5 * sizeof(int), cudaMemcpyDeviceToHost);
+    for (int i = 0; i <= 4; i++) {
+        EXPECT_EQ(offsets[i], i);
+    }
+
+    gpu_batch.free();
+}
+
+// 23. Scheduler: decode batch size respects max_batch_size
+TEST(SchedulerTest, DecodeBatchSizeLimit) {
+    Scheduler sched(4);  // max batch = 4
+
+    // Create 6 requests, prefill 4 (max)
+    std::vector<std::shared_ptr<Request>> reqs(6);
+    for (int i = 0; i < 6; i++) {
+        reqs[i] = std::make_shared<Request>();
+        reqs[i]->input_tokens = {1};
+        sched.add_request(reqs[i]);
+    }
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+    EXPECT_EQ(prefill.size(), 4u);  // max_batch=4
+    EXPECT_TRUE(sched.has_pending());
+
+    // Transition first 4 to DECODING
+    for (int i = 0; i < 4; i++) reqs[i]->status = RequestStatus::DECODING;
+
+    // Schedule: 4 decoding, 2 pending — pending cannot enter because batch is full
+    sched.schedule(prefill, decode);
+    EXPECT_EQ(decode.size(), 4u);
+    // Pending requests admitted depends on scheduler policy (some schedulers
+    // reserve slots for prefill). Check total active <= max_batch.
+    EXPECT_LE(sched.active_count(), 4);
+
+    // Finish 2, freeing slots
+    reqs[0]->status = RequestStatus::FINISHED;
+    reqs[1]->status = RequestStatus::FINISHED;
+
+    // Now pending requests should be admitted
+    sched.schedule(prefill, decode);
+    EXPECT_EQ(decode.size(), 2u);  // reqs[2] + reqs[3]
+    EXPECT_GE(prefill.size(), 1u); // at least 1 pending admitted
+    EXPECT_LE(sched.active_count(), 4);
+}
+
 } // namespace
 } // namespace imp
