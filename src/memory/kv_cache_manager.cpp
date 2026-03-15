@@ -254,7 +254,7 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id,
                                                  int num_tokens) {
     if (num_tokens <= 0) return 0;
 
-    int total_blocks = (num_tokens + kKVBlockSize - 1) / kKVBlockSize;
+    int total_blocks = (num_tokens + cache_->block_size() - 1) / cache_->block_size();
     auto& blocks = seq_blocks_[seq_id];
     const size_t original_size = blocks.size();
 
@@ -274,11 +274,11 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id,
     size_t parent_hash = 0;
 
     for (int b = 0; b < total_blocks; ++b) {
-        int block_start = b * kKVBlockSize;
-        int block_tokens = std::min(kKVBlockSize, num_tokens - block_start);
+        int block_start = b * cache_->block_size();
+        int block_tokens = std::min(cache_->block_size(), num_tokens - block_start);
 
         // Only full blocks are cacheable.
-        bool is_full_block = (block_tokens == kKVBlockSize);
+        bool is_full_block = (block_tokens == cache_->block_size());
 
         if (prefix_caching_enabled_ && is_full_block) {
             size_t block_hash = compute_block_hash(tokens + block_start,
@@ -365,7 +365,7 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id,
     if (reused_blocks > 0) {
         IMP_LOG_DEBUG("PrefixCache: seq %d reused %d/%d blocks (%d tokens skippable)",
                       seq_id, reused_blocks, total_blocks,
-                      reused_blocks * kKVBlockSize);
+                      reused_blocks * cache_->block_size());
     }
     return reused_blocks;
 }
@@ -385,10 +385,10 @@ void KVCacheManager::register_block_hashes(int seq_id,
     size_t parent_hash = 0;
 
     for (int b = 0; b < total_blocks; ++b) {
-        int block_start = b * kKVBlockSize;
-        int block_tokens = std::min(kKVBlockSize, num_tokens - block_start);
+        int block_start = b * cache_->block_size();
+        int block_tokens = std::min(cache_->block_size(), num_tokens - block_start);
 
-        if (block_tokens < kKVBlockSize) break; // Only full blocks are cacheable.
+        if (block_tokens < cache_->block_size()) break; // Only full blocks are cacheable.
 
         size_t block_hash = compute_block_hash(tokens + block_start,
                                                 block_tokens, parent_hash);
@@ -545,10 +545,10 @@ void KVCacheManager::rollback(int seq_id, int new_seq_len) {
     auto& blocks = it->second;
     if (blocks.empty() || new_seq_len < 0) return;
 
-    // Keep exactly ceil(new_seq_len / kKVBlockSize) blocks.
+    // Keep exactly ceil(new_seq_len / cache_->block_size()) blocks.
     // A partially-filled last block is retained (its stale slots
     // will be overwritten on subsequent writes).
-    int blocks_needed = (new_seq_len + kKVBlockSize - 1) / kKVBlockSize;
+    int blocks_needed = (new_seq_len + cache_->block_size() - 1) / cache_->block_size();
     while (static_cast<int>(blocks.size()) > blocks_needed) {
         cache_->free_block(blocks.back());
         blocks.pop_back();
