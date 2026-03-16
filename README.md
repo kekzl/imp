@@ -27,42 +27,71 @@ This is not a wrapper. imp implements its own GGUF parser, tokenizer, KV cache, 
 
 ## Performance
 
-**RTX 5090** (Blackwell, sm_120, 32 GB) &mdash; decode tok/s, same machine, back-to-back.
+**RTX 5090** (Blackwell, sm_120, 32 GB GDDR7) &mdash; CUDA 13.1.1, NVFP4 decode + FP8 prefill.
 
-| Model | Quant | imp | llama.cpp | &Delta; |
+| Model | Quant | imp (tok/s) | llama.cpp | &Delta; |
 |---|---|---:|---:|---:|
-| Qwen3-8B | Q8_0 | **262** | 157 | **+67%** |
-| Qwen3-4B | Q8_0 | **393** | 244 | **+61%** |
-| Llama 3.1 8B | Q8_0 | **262** | 165 | **+59%** |
-| Gemma-3-12B | Q8_0 | **146** | 98 | **+49%** |
-| Qwen3-Coder-30B (MoE) | Q6_K | **293** | 251 | **+17%** |
+| Qwen3-4B | Q8_0 | **390** | 244 | **+60%** |
+| Qwen3-8B | Q8_0 | **264** | 157 | **+68%** |
+| Gemma-3-12B | Q8_0 | **139** | 98 | **+42%** |
+| Qwen3-Coder-30B (MoE) | Q6_K | **265** | 251 | **+6%** |
 
-<sub>Wins on 9/10 comparable models. Full results with 12 models + prefill: **[BENCHMARKS.md](BENCHMARKS.md)**</sub>
+<sub>Prefill: 5.6k&ndash;25.8k tok/s. Full results with 12 models: **[BENCHMARKS.md](BENCHMARKS.md)**</sub>
 
-## Quickstart (Docker)
+## Quickstart
 
-No local CUDA toolkit needed.
+No local CUDA toolkit needed &mdash; everything runs in Docker.
 
 ```bash
-# Build the server image
+# 1. Clone and enter the repo
+git clone https://github.com/kekzl/imp.git && cd imp
+
+# 2. Download a model (any GGUF from Hugging Face)
+mkdir -p models
+# Example: Qwen3-8B Q8_0 (~8.6 GB)
+
+# 3. Build
 docker compose build imp-server
 
-# Run with a GGUF model
+# 4. Run the server
 docker run --gpus all -v ./models:/models -p 8080:8080 \
-  imp-server --model /models/Qwen3-8B-Q8_0.gguf --port 8080
+  imp:latest --model /models/Qwen3-8B-Q8_0.gguf
 
-# Chat
+# 5. Chat (OpenAI-compatible API)
 curl -s http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"Hello!"}],"max_tokens":64}'
 ```
 
-Works with the OpenAI Python SDK, any OpenAI-compatible client, or the CLI:
+**Works with any OpenAI-compatible client:**
+
+```python
+# pip install openai
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="none")
+r = client.chat.completions.create(
+    model="default", messages=[{"role": "user", "content": "Hello!"}],
+    max_tokens=64, stream=True)
+for chunk in r:
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+**Or use the CLI directly:**
 
 ```bash
-# Interactive chat via Docker
-docker run --gpus all -v ./models:/models imp-server \
-  imp-cli --model /models/Qwen3-8B-Q8_0.gguf --interactive
+# Interactive chat
+docker run -it --gpus all -v ./models:/models \
+  imp:latest imp-cli --model /models/Qwen3-8B-Q8_0.gguf --interactive
+
+# Single prompt
+docker run --gpus all -v ./models:/models \
+  imp:latest imp-cli --model /models/Qwen3-8B-Q8_0.gguf \
+  --prompt "Explain quantum computing in 3 sentences."
+
+# Benchmark (compare with llama-bench)
+docker run --gpus all -v ./models:/models \
+  imp:latest imp-cli --model /models/Qwen3-8B-Q8_0.gguf \
+  --bench --bench-pp 512 --max-tokens 128 --bench-reps 5
 ```
 
 ## CLI
@@ -148,14 +177,15 @@ Benchmark:
 - **Quantization:** Q2_K, Q3_K, Q4_0, Q4_K_M, Q5_K, Q6_K, Q8_0, FP8 E4M3, NVFP4 (FP4 E2M1), INT8
 - **Vision:** Gemma-3 SigLIP encoder (896x896, 256 image tokens) via separate mmproj.gguf
 - **Attention:** scalar Flash Attention 2 &rarr; WMMA tensor-core (sm_90+) &rarr; WMMA 8-warp (sm_120+); CUTLASS Hopper FMHA for prefill (WGMMA + TMA)
-- **KV cache:** paged blocks (size 16), LRU eviction, prefix caching, FP16/FP8/INT8
-- **Decode:** CUDA Graphs, PDL, fused RMSNorm+Q8_1, fused QKV GEMV (dp4a), NVFP4 decode cache, multi-block argmax
-- **Prefill:** CUTLASS FMHA, CUTLASS NVFP4 GEMM (sm_120), FP16/FP8 weight cache, batched K/V GEMM, fused O-proj+residual
+- **KV cache:** paged blocks (configurable 16/32/64), LRU eviction, prefix caching with block pinning, FP16/FP8/INT8/INT4
+- **Decode:** CUDA Graphs (conditional WHILE loop), PDL, fused RMSNorm+Q8_1, fused QKV/gate+up GEMV, NVFP4 decode cache with prmt register LUT, multi-block argmax
+- **Prefill:** CUTLASS FMHA (WGMMA + TMA), CUTLASS NVFP4 GEMM (sm_120), FP8 cuBLASLt, FP16/FP8 weight cache, batched K/V GEMM
 - **Sampling:** temperature, top-p, top-k, min-p, typical-p, repetition/frequency/presence penalties (windowed), DRY, Mirostat v2
-- **Runtime:** continuous batching, speculative decoding, Green Context SM partitioning
-- **API:** C library, OpenAI-compatible HTTP server (SSE streaming, tool calling, logprobs, JSON mode)
+- **Runtime:** continuous batching, speculative decoding, Green Context SM partitioning, upfront VRAM budget planner
+- **Agentic:** prefix cache block pinning, JSON schema constraining, tool calling (ChatML + Llama3), thinking/reasoning budgets, TTFT metrics
+- **API:** C library, OpenAI-compatible HTTP server (SSE streaming, tool calling, logprobs, JSON mode, concurrent requests, rate limiting)
 
-> **Note:** imp currently only runs reliably with the models it has been tested on: Qwen3-1.7B, Qwen3-4B, Qwen3-8B, Llama 3.1 8B, Mistral 7B v0.3, Mixtral 8x7B, DeepSeek-R1-7B, DeepSeek-R1-14B, Qwen3-Coder-30B-A3B, Phi-4-Mini, Gemma-3-12B (text + vision), and Nemotron-3-Nano-30B-A3B. Other models sharing the same architectures may work but are untested.
+> **Tested models:** Qwen3-4B, Qwen3-8B, Qwen3-32B (Q4_K_M), Qwen3-Coder-30B (MoE), Gemma-3-12B/27B, DeepSeek-R1-7B/14B, Nemotron-3-Nano-30B (Mamba2+MoE), Phi-4-Mini, Llama 3.1 8B, Mistral 7B, Mixtral 8x7B, Devstral. Other models sharing the same architectures (LLaMA, Mistral, Qwen3, Gemma-3, DeepSeek, Nemotron-H) should work.
 
 ## Documentation
 
