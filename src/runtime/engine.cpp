@@ -608,27 +608,18 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
     }
 
-    // --- Initialize GDN state for Gated DeltaNet hybrid models (Qwen3.5) ---
-    if (mcfg.ssm_inner_size > 0 && mcfg.ssm_dt_rank > 0) {
+    // --- GDN (Gated DeltaNet) model detection (Qwen3.5) ---
+    // GDN layers use the SSM pipeline (same state management). The GDNState is
+    // NOT allocated — SSMState's h_state serves as the delta rule state.
+    // Just disable CUDA graphs for GDN models (recurrent state not capturable).
+    {
         int n_gdn_layers = 0;
         for (int i = 0; i < mcfg.n_layers; i++) {
             if (model_->layer(i).gdn_gate.data != nullptr) n_gdn_layers++;
         }
         if (n_gdn_layers > 0) {
-            // GDN state uses KV head structure: S[n_kv_heads, head_dim, head_dim]
-            int n_state_heads = mcfg.n_kv_heads;
-            int attn_hd = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
-
-            gdn_state_ = std::make_unique<GDNState>();
-            if (!gdn_state_->init(n_gdn_layers, config_.max_batch_size,
-                                   n_state_heads, attn_hd, attn_hd)) {
-                IMP_LOG_WARN("Failed to init GDN state, continuing without it");
-                gdn_state_.reset();
-            } else {
-                // Disable CUDA graphs for GDN models (recurrent state not graph-capturable)
-                config_.use_cuda_graphs = false;
-                IMP_LOG_INFO("CUDA graphs disabled (GDN recurrent state)");
-            }
+            config_.use_cuda_graphs = false;
+            IMP_LOG_INFO("GDN model: %d layers, CUDA graphs disabled", n_gdn_layers);
         }
     }
 
