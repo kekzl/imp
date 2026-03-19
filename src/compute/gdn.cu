@@ -53,53 +53,69 @@ __global__ void gdn_scan_decode_kernel(
     // V (value) for this head's d-th dimension
     float v_d = __half2float(x[h * head_dim_ssm + d]);
 
-    // Compute decay and learning rate for delta rule
-    float alpha_h = __half2float(alpha_raw[h]);
-    float a_log_h = A_log[h];
-
-    // Decay: a_bar = exp(A_log * softplus(alpha + dt_bias))
+    // Compute decay gate: a_bar = exp(A_log * softplus(alpha + dt_bias))
     // A_log is typically negative → a_bar ∈ (0, 1]
-    // Clamp the exponent to prevent overflow
+    float alpha_h = __half2float(alpha_raw[h]);
     float dt_val = alpha_h + dt_bias[h];
     dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));  // softplus
-    float exponent = dt_val * a_log_h;
+    float exponent = dt_val * A_log[h];
     exponent = fmaxf(fminf(exponent, 0.0f), -20.0f);  // clamp to [-20, 0]
     float a_bar = expf(exponent);
 
     // Learning rate: beta ∈ (0, 1)
     float beta_h = __half2float(beta_raw[h]);
-    beta_h = 1.0f / (1.0f + expf(-fmaxf(fminf(beta_h, 20.0f), -20.0f)));  // clamped sigmoid
+    beta_h = 1.0f / (1.0f + expf(-fmaxf(fminf(beta_h, 20.0f), -20.0f)));
 
-    // Step 1: Predict — predicted[d] = sum_s(h[s,d] * K[s])
+    // L2-normalize K (critical for delta rule stability)
+    // Each thread computes partial norm, then warp-reduce
+    float k_norm_sq = 0.0f;
+    // Note: all threads in the block share the same K_g (per group).
+    // Thread 0 computes the norm, others read it.
+    __shared__ float s_k_norm_inv;
+    if (d == 0) {
+        for (int s = 0; s < state_size; s++) {
+            float ks = __half2float(K_g[s]);
+            k_norm_sq += ks * ks;
+        }
+        s_k_norm_inv = (k_norm_sq > 1e-12f) ? rsqrtf(k_norm_sq) : 1.0f;
+    }
+    __syncthreads();
+    float k_inv = s_k_norm_inv;
+
+    // Step 1: Predict — predicted[d] = sum_s(h[s,d] * K_norm[s])
     float predicted = 0.0f;
     for (int s = 0; s < state_size; s++) {
-        predicted += H[s * head_dim_ssm + d] * __half2float(K_g[s]);
+        float k_s = __half2float(K_g[s]) * k_inv;
+        predicted += H[s * head_dim_ssm + d] * k_s;
     }
 
-    // Step 2: Error
-    float error_d = v_d - a_bar * predicted;
+    // Step 2: Error (no a_bar on prediction — a_bar only decays the state)
+    float error_d = v_d - predicted;
 
     // Step 3 + 4: Update state + compute output
     float y_partial = 0.0f;
     for (int s = 0; s < state_size; s++) {
-        // Update: h[s,d] = a_bar * h[s,d] + beta * K[s] * error[d]
+        float k_s = __half2float(K_g[s]) * k_inv;  // normalized key
+        float q_s = __half2float(Q_g[s]);
         float h_old = H[s * head_dim_ssm + d];
-        float k_s = __half2float(K_g[s]);
+
+        // Delta rule: S = decay * S + lr * outer(K_norm, error)
         float h_new = a_bar * h_old + beta_h * k_s * error_d;
-        // Clamp state to prevent numerical explosion
-        h_new = fmaxf(fminf(h_new, 1e6f), -1e6f);
         H[s * head_dim_ssm + d] = h_new;
 
         // Output: y[d] += h[s,d] * Q[s]
-        y_partial += h_new * __half2float(Q_g[s]);
+        y_partial += h_new * q_s;
     }
 
-    // Gating: y *= sigmoid(z) if z is provided
+    // Gating: y *= SiLU(z) if z is provided
     int out_idx = h * head_dim_ssm + d;
     if (z) {
         float z_val = __half2float(z[out_idx]);
-        y_partial *= z_val / (1.0f + expf(-z_val));  // SiLU = x * sigmoid(x)
+        float silu = z_val / (1.0f + expf(-z_val));
+        y_partial *= silu;
     }
+    // TODO: remove debug — test without gate
+    // y_partial *= 10.0f;  // amplify for testing
 
     y[out_idx] = __float2half(y_partial);
 }

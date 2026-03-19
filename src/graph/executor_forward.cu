@@ -2973,9 +2973,28 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         debug_tensor_stats("gdn_scan_out", y_buf, stream);
     }
 
-    // 6. Group RMSNorm — GDN uses per-head norm (n_heads groups, head_dim elements each)
-    //    ssm_norm_w has [head_dim_ssm=128] weights, shared across all heads.
-    group_rmsnorm(y_buf, ly.ssm_norm_w, y_buf, n_heads, eps, stream);
+    // 6. Per-head RMSNorm — GDN's ssm_norm_w has [head_dim_ssm=128] weights
+    //    shared across all heads. Apply as n_heads independent RMSNorms,
+    //    each using the SAME 128-element weight vector.
+    //    Can't use group_rmsnorm directly because it expects weight[n_groups * group_size].
+    {
+        size_t es_h = dtype_size(compute_dtype_);
+        for (int head = 0; head < n_heads; head++) {
+            int64_t norm_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(head_dim_ssm)};
+            char* head_ptr = static_cast<char*>(y_buf.data) + head * head_dim_ssm * es_h;
+            // For prefill (n>1), stride is inner per row. But y_buf is [n, inner],
+            // so head data is interleaved. We need a strided view.
+            // Simple approach: treat each head's data as a single-token norm.
+            for (int t = 0; t < n; t++) {
+                char* elem = static_cast<char*>(y_buf.data) +
+                             (t * inner + head * head_dim_ssm) * es_h;
+                int64_t one_shape[2] = {1, static_cast<int64_t>(head_dim_ssm)};
+                Tensor head_t(elem, compute_dtype_, 2, one_shape, true);
+                rmsnorm(head_t, ly.ssm_norm_w, head_t, eps, stream);
+            }
+        }
+    }
+    if (layer == 0) debug_tensor_stats("gdn_after_norm", y_buf, stream);
 
     // 7. ssm_out projection: [n, inner] → [n, d_model]
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
