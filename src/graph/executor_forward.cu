@@ -2873,13 +2873,23 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     // TODO: allocate a proper zero-filled D tensor for GDN layers.
     const Tensor& ssm_d_ref = (ly.ssm_d.data != nullptr) ? ly.ssm_d : ly.ssm_a;
 
+    // Gate projection — computed before scan, used after in RMSNormGated
+    int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
+    Tensor gate_out(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
+    gemm_dispatch(no, ly.gdn_gate, Tensor(), ly.gdn_gate_qtype, gate_out,
+                  dequant_scratch_, stream,
+                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
+                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr,
+                  fp8_act_buf_, d_act_scale_, d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
+                  nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_,
+                  cutlass_workspace_, cutlass_workspace_size_,
+                  mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+
     if (h_st) {
         DType h_dtype = state.ssm_state ? state.ssm_state->h_dtype() : DType::FP32;
         size_t es = dtype_size(compute_dtype_);
 
         // Compute alpha/beta projections from norm_out (input to this layer)
-        // Alpha/beta: [n, n_heads] — decay gate and learning rate for delta rule
-        // These replace Mamba2's dt (which comes from the ssm_in projection)
         Tensor alpha_proj_out, beta_proj_out;
         {
             int64_t ab_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(n_heads)};
@@ -2894,77 +2904,65 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
             gemm(no, ly.gdn_beta, beta_proj_out, 1.0f, 0.0f, stream);
         }
 
-        // GDN Delta Rule scan: replaces Mamba2 selective scan.
-        // Gate projection computed first, then fused into scan output.
-        int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
-        Tensor gate_out(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
-        gemm_dispatch(no, ly.gdn_gate, Tensor(), ly.gdn_gate_qtype, gate_out,
-                      dequant_scratch_, stream,
-                      static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                      (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr,
-                      fp8_act_buf_, d_act_scale_, d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                      nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_,
-                      cutlass_workspace_, cutlass_workspace_size_,
-                      mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
-
         if (n == 1) {
-            // Decode: pointers directly into xBC_out row
+            // Decode: conv output split is [Q(key_dim), K(key_dim), V(value_dim)]
+            // NOT Mamba2's [x(inner), B, C] — the order is different for GDN!
+            // key_dim = n_groups * state_size = BC_size
+            // value_dim = inner
             char* row = static_cast<char*>(xBC_out.data);
-            const half* x_ptr = reinterpret_cast<const half*>(row);
-            const half* B_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(inner) * es);
-            const half* C_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(inner + BC_size) * es);
+            const half* Q_ptr = reinterpret_cast<const half*>(row);                                         // [0, BC_size)
+            const half* K_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(BC_size) * es);     // [BC_size, 2*BC_size)
+            const half* V_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(2 * BC_size) * es); // [2*BC_size, conv_channels)
 
+            // gdn_scan_decode expects (x=V, B=K, C=Q) mapping
+            // Gate NOT fused here — applied later in RMSNormGated step
             gdn_scan_decode(
-                x_ptr, B_ptr, C_ptr,
+                V_ptr, K_ptr, Q_ptr,
                 static_cast<const half*>(alpha_proj_out.data),
                 static_cast<const half*>(beta_proj_out.data),
                 static_cast<const float*>(ly.ssm_a.data),
                 static_cast<const float*>(ly.ssm_dt_b.data),
                 static_cast<float*>(h_st),
                 static_cast<half*>(y_buf.data),
-                static_cast<const half*>(gate_out.data),
+                nullptr,  // no fused gate — done in RMSNormGated below
                 n_heads, head_dim_ssm, ssize, n_groups, stream);
         } else {
-            // Prefill: de-interleave x/B/C from xBC_out
-            char* x_contig = static_cast<char*>(y_buf.data);
-            cudaMemcpy2DAsync(x_contig, static_cast<size_t>(inner) * es,
+            // Prefill: de-interleave Q/K/V from xBC_out
+            // GDN split order: [Q(key_dim=BC_size), K(key_dim=BC_size), V(value_dim=inner)]
+            // Extract Q
+            char* Q_contig = static_cast<char*>(ssm_xBC_buf_.data) +
+                             static_cast<size_t>(n) * conv_channels * es;
+            cudaMemcpy2DAsync(Q_contig, static_cast<size_t>(BC_size) * es,
                               xBC_out.data, static_cast<size_t>(conv_channels) * es,
+                              static_cast<size_t>(BC_size) * es, n,
+                              cudaMemcpyDeviceToDevice, stream);
+            // Extract K
+            char* K_contig = Q_contig + static_cast<size_t>(n) * BC_size * es;
+            char* K_src = static_cast<char*>(xBC_out.data) + static_cast<size_t>(BC_size) * es;
+            cudaMemcpy2DAsync(K_contig, static_cast<size_t>(BC_size) * es,
+                              K_src, static_cast<size_t>(conv_channels) * es,
+                              static_cast<size_t>(BC_size) * es, n,
+                              cudaMemcpyDeviceToDevice, stream);
+            // Extract V
+            char* V_contig = static_cast<char*>(y_buf.data);  // y_buf will be overwritten by scan
+            char* V_src = static_cast<char*>(xBC_out.data) + static_cast<size_t>(2 * BC_size) * es;
+            cudaMemcpy2DAsync(V_contig, static_cast<size_t>(inner) * es,
+                              V_src, static_cast<size_t>(conv_channels) * es,
                               static_cast<size_t>(inner) * es, n,
                               cudaMemcpyDeviceToDevice, stream);
 
-            char* B_contig = static_cast<char*>(ssm_xBC_buf_.data) +
-                             static_cast<size_t>(n) * conv_channels * es;
-            char* B_src = static_cast<char*>(xBC_out.data) + static_cast<size_t>(inner) * es;
-            cudaMemcpy2DAsync(B_contig, static_cast<size_t>(BC_size) * es,
-                              B_src, static_cast<size_t>(conv_channels) * es,
-                              static_cast<size_t>(BC_size) * es, n,
-                              cudaMemcpyDeviceToDevice, stream);
-
-            char* C_contig = B_contig + static_cast<size_t>(n) * BC_size * es;
-            char* C_src = static_cast<char*>(xBC_out.data) + static_cast<size_t>(inner + BC_size) * es;
-            cudaMemcpy2DAsync(C_contig, static_cast<size_t>(BC_size) * es,
-                              C_src, static_cast<size_t>(conv_channels) * es,
-                              static_cast<size_t>(BC_size) * es, n,
-                              cudaMemcpyDeviceToDevice, stream);
-
-            int64_t x_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
-            Tensor x_all(x_contig, compute_dtype_, 2, x_shape, true);
-            int64_t bc_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(BC_size)};
-            Tensor B_all(B_contig, compute_dtype_, 2, bc_shape, true);
-            Tensor C_all(C_contig, compute_dtype_, 2, bc_shape, true);
-
-            // GDN delta rule prefill scan
+            // GDN delta rule prefill scan — V=x, K=B, Q=C in kernel terms
             gdn_scan_prefill(
-                reinterpret_cast<const half*>(x_contig),
-                reinterpret_cast<const half*>(B_contig),
-                reinterpret_cast<const half*>(C_contig),
+                reinterpret_cast<const half*>(V_contig),   // x = V
+                reinterpret_cast<const half*>(K_contig),   // B = K
+                reinterpret_cast<const half*>(Q_contig),   // C = Q
                 static_cast<const half*>(alpha_proj_out.data),
                 static_cast<const half*>(beta_proj_out.data),
                 static_cast<const float*>(ly.ssm_a.data),
                 static_cast<const float*>(ly.ssm_dt_b.data),
                 static_cast<float*>(h_st),
                 static_cast<half*>(y_buf.data),
-                static_cast<const half*>(gate_out.data),
+                nullptr,  // no fused gate — done in RMSNormGated below
                 n, n_heads, head_dim_ssm, ssize, n_groups, stream);
         }
     }
@@ -2973,28 +2971,31 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         debug_tensor_stats("gdn_scan_out", y_buf, stream);
     }
 
-    // 6. Per-head RMSNorm — GDN's ssm_norm_w has [head_dim_ssm=128] weights
-    //    shared across all heads. Apply as n_heads independent RMSNorms,
-    //    each using the SAME 128-element weight vector.
-    //    Can't use group_rmsnorm directly because it expects weight[n_groups * group_size].
+    // 6. Fused RMSNormGated: y = norm(y) * SiLU(gate)
+    //    Per-head norm with shared weight [head_dim_ssm], fused with SiLU gating.
+    //    This matches HuggingFace's Qwen3_5RMSNormGated: norm(x) * silu(z)
     {
         size_t es_h = dtype_size(compute_dtype_);
-        for (int head = 0; head < n_heads; head++) {
-            int64_t norm_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(head_dim_ssm)};
-            char* head_ptr = static_cast<char*>(y_buf.data) + head * head_dim_ssm * es_h;
-            // For prefill (n>1), stride is inner per row. But y_buf is [n, inner],
-            // so head data is interleaved. We need a strided view.
-            // Simple approach: treat each head's data as a single-token norm.
-            for (int t = 0; t < n; t++) {
-                char* elem = static_cast<char*>(y_buf.data) +
-                             (t * inner + head * head_dim_ssm) * es_h;
+        for (int t = 0; t < n; t++) {
+            for (int head = 0; head < n_heads; head++) {
+                size_t offset = (t * inner + head * head_dim_ssm) * es_h;
+                char* y_elem = static_cast<char*>(y_buf.data) + offset;
+                char* g_elem = static_cast<char*>(gate_out.data) + offset;
                 int64_t one_shape[2] = {1, static_cast<int64_t>(head_dim_ssm)};
-                Tensor head_t(elem, compute_dtype_, 2, one_shape, true);
-                rmsnorm(head_t, ly.ssm_norm_w, head_t, eps, stream);
+                Tensor head_y(y_elem, compute_dtype_, 2, one_shape, true);
+
+                // Step 1: RMSNorm on y (in-place)
+                rmsnorm(head_y, ly.ssm_norm_w, head_y, eps, stream);
+
+                // Step 2: y *= SiLU(gate) — element-wise
+                int64_t flat_shape[1] = {static_cast<int64_t>(head_dim_ssm)};
+                Tensor gate_t(g_elem, compute_dtype_, 1, flat_shape, true);
+                silu_inplace(gate_t, stream);
+                elementwise_mul(head_y, gate_t, head_y, stream);
             }
         }
     }
-    if (layer == 0) debug_tensor_stats("gdn_after_norm", y_buf, stream);
+    if (layer == 0) debug_tensor_stats("gdn_after_norm_gate", y_buf, stream);
 
     // 7. ssm_out projection: [n, inner] → [n, d_model]
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
