@@ -119,6 +119,14 @@ struct TransformerLayer {
     GGMLQuantType ssm_in_qtype = GGMLQuantType::NONE;
     GGMLQuantType ssm_out_qtype = GGMLQuantType::NONE;
 
+    // Gated DeltaNet (GDN) weights (Qwen3.5 hybrid)
+    Tensor gdn_gate;     // [d_model, inner_size] output gating projection
+    Tensor gdn_alpha;    // [d_model, n_gdn_heads] delta rule decay
+    Tensor gdn_beta;     // [d_model, n_gdn_heads] delta rule learning rate
+    GGMLQuantType gdn_gate_qtype  = GGMLQuantType::NONE;
+    GGMLQuantType gdn_alpha_qtype = GGMLQuantType::NONE;
+    GGMLQuantType gdn_beta_qtype  = GGMLQuantType::NONE;
+
     // Router bias (Nemotron MoE)
     Tensor moe_router_bias;
 };
@@ -148,6 +156,10 @@ public:
                             size_t expert_reserve_bytes = 1ULL << 30);
 
     bool gpu_weights_ready() const { return gpu_weights_ready_; }
+
+    // Release a specific GPU allocation (removes from gpu_allocations_ and calls cudaFree).
+    // Used when NVFP4 MoE replaces Q6K expert data to reclaim VRAM.
+    void release_gpu_allocation(void* ptr);
 
     // Estimate total raw bytes for all expert packed tensors (for VRAM budget decisions).
     size_t estimate_expert_bytes() const;

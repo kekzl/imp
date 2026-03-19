@@ -436,6 +436,10 @@ static bool assign_tensor(Model& model, const std::string& name,
             else if (suffix == "bias")  layer.ssm_conv1d_b = tensor;
             else return false;
         }
+        // Gated DeltaNet (GDN) weights (Qwen3.5)
+        else if (field == "attn_gate")  { layer.gdn_gate  = tensor; layer.gdn_gate_qtype  = qtype; }
+        else if (field == "ssm_alpha")  { layer.gdn_alpha = tensor; layer.gdn_alpha_qtype = qtype; }
+        else if (field == "ssm_beta")   { layer.gdn_beta  = tensor; layer.gdn_beta_qtype  = qtype; }
         // Router bias (Nemotron MoE)
         else if (field == "exp_probs_b") layer.moe_router_bias = tensor;
         else return false;
@@ -1011,7 +1015,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     //     experts stored as regular FFN tensors, and warn about mismatches.
     {
         int n_attn = 0, n_moe = 0, n_dense_ffn = 0, n_shared_exp = 0;
-        int n_qk_norm = 0, n_ssm = 0, n_remapped = 0;
+        int n_qk_norm = 0, n_ssm = 0, n_gdn = 0, n_remapped = 0;
 
         for (int i = 0; i < cfg.n_layers; i++) {
             auto& ly = model->layers_[i];
@@ -1023,6 +1027,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             if (has_moe) n_moe++;
             if (ly.attn_q_norm.data != nullptr) n_qk_norm++;
             if (ly.ssm_in.data != nullptr) n_ssm++;
+            if (ly.gdn_gate.data != nullptr) n_gdn++;
 
             // Detect shared expert: MoE layer with dense FFN tensors loaded
             // alongside expert tensors → remap dense FFN to shared expert.
@@ -1042,9 +1047,9 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             if (has_dense && !has_moe) n_dense_ffn++;
         }
 
-        IMP_LOG_INFO("Layer census: %d attn, %d MoE, %d dense FFN, %d shared expert, "
+        IMP_LOG_INFO("Layer census: %d attn, %d GDN, %d MoE, %d dense FFN, %d shared expert, "
                      "%d QK-norm, %d SSM  (of %d layers)",
-                     n_attn, n_moe, n_dense_ffn, n_shared_exp, n_qk_norm, n_ssm,
+                     n_attn, n_gdn, n_moe, n_dense_ffn, n_shared_exp, n_qk_norm, n_ssm,
                      cfg.n_layers);
 
         if (n_remapped > 0) {

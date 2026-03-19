@@ -1123,25 +1123,163 @@ gemv_nvfp4_moe_gate_up_fused_kernel(
 }
 
 // ---------------------------------------------------------------------------
+// Multi-row MoE NVFP4 kernels: 8 warps (256 threads), NR rows per block.
+// Truly fused gate+up: one block computes both gate and up dot products.
+// Dramatically reduces block count for small K (e.g., d_model=2048).
+// ---------------------------------------------------------------------------
+
+// Multi-row MoE gate+up with blockIdx.y split (gate=0, up=1).
+// Same approach as original but NR rows per block for reduced launch count.
+template<int NR>
+__global__ void __launch_bounds__(kMRThreads, 8)
+gemv_nvfp4_moe_gate_up_mr_kernel(
+    const uint8_t* __restrict__ gate_packed,
+    const uint8_t* __restrict__ gate_ms,
+    const float*   __restrict__ gate_ts,
+    const uint8_t* __restrict__ up_packed,
+    const uint8_t* __restrict__ up_ms,
+    const float*   __restrict__ up_ts,
+    const int32_t* __restrict__ expert_indices,
+    const half*    __restrict__ x,
+    half*          __restrict__ y_gate,
+    half*          __restrict__ y_up,
+    int rows, int K,
+    size_t expert_stride_packed,
+    size_t expert_stride_ms,
+    int blocks_per_expert)
+{
+    const int expert_slot = blockIdx.x / blocks_per_expert;
+    const int local_block = blockIdx.x % blocks_per_expert;
+    const int warp_id = threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+
+    const int row = local_block * NR + warp_id;
+    if (row >= rows || warp_id >= NR) return;
+
+    const int n_mb = K / kMicroBlockSize;
+    const int expert_id = expert_indices[expert_slot];
+    const bool is_up = (blockIdx.y == 1);
+
+    const uint8_t* W = is_up
+        ? (up_packed + (size_t)expert_id * expert_stride_packed)
+        : (gate_packed + (size_t)expert_id * expert_stride_packed);
+    const uint8_t* MS = is_up
+        ? (up_ms + (size_t)expert_id * expert_stride_ms)
+        : (gate_ms + (size_t)expert_id * expert_stride_ms);
+    float ts = is_up ? up_ts[expert_id] : gate_ts[expert_id];
+    half* out = is_up ? y_up : y_gate;
+
+    const uint8_t* row_packed = W + (size_t)row * (K / 2);
+    const uint8_t* row_ms = MS + (size_t)row * n_mb;
+
+    float acc = 0.0f;
+    for (int mi = lane; mi < n_mb; mi += 32) {
+        int byte_off = mi * 8;
+        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
+        float cs = ts * fp8_e4m3_to_float_fast(row_ms[mi]);
+        acc = __fmaf_rn(dot_micro_block(
+            reinterpret_cast<const uint8_t*>(&packed2), x, byte_off * 2), cs, acc);
+    }
+
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, off);
+
+    if (lane == 0) out[(size_t)expert_slot * rows + row] = __float2half(acc);
+}
+
+// Multi-row MoE NVFP4 decode (single weight matrix, e.g., non-gated up or down).
+template<int NR>
+__global__ void __launch_bounds__(kMRThreads, 8)
+gemv_nvfp4_moe_decode_mr_kernel(
+    const uint8_t* __restrict__ packed_data,
+    const uint8_t* __restrict__ micro_scales,
+    const float*   __restrict__ tensor_scales,
+    const int32_t* __restrict__ expert_indices,
+    const half*    __restrict__ x,
+    half*          __restrict__ y,
+    int rows, int K,
+    size_t expert_stride_packed,
+    size_t expert_stride_ms,
+    int x_stride,
+    int blocks_per_expert)
+{
+    const int expert_slot = blockIdx.x / blocks_per_expert;
+    const int local_block = blockIdx.x % blocks_per_expert;
+    const int warp_id = threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+
+    const int row = local_block * NR + warp_id;
+    if (row >= rows || warp_id >= NR) return;
+
+    const int n_mb = K / kMicroBlockSize;
+    const int expert_id = expert_indices[expert_slot];
+
+    const uint8_t* W = packed_data + (size_t)expert_id * expert_stride_packed
+                     + (size_t)row * (K / 2);
+    const uint8_t* MS = micro_scales + (size_t)expert_id * expert_stride_ms
+                      + (size_t)row * n_mb;
+    float ts = tensor_scales[expert_id];
+    const half* xi = x + (size_t)expert_slot * x_stride;
+
+    float acc = 0.0f;
+    for (int mi = lane; mi < n_mb; mi += 32) {
+        int byte_off = mi * 8;
+        uint2 packed2 = *reinterpret_cast<const uint2*>(W + byte_off);
+        float cs = ts * fp8_e4m3_to_float_fast(MS[mi]);
+        acc = __fmaf_rn(dot_micro_block(
+            reinterpret_cast<const uint8_t*>(&packed2), xi, byte_off * 2), cs, acc);
+    }
+
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, off);
+
+    if (lane == 0) y[(size_t)expert_slot * rows + row] = __float2half(acc);
+}
+
+// ---------------------------------------------------------------------------
 // MoE NVFP4 host launchers
 // ---------------------------------------------------------------------------
+
+// Multi-row dispatch: use MR kernel when K is small enough for warp-level
+// reduction (n_mb <= 512, i.e., K <= 8192).
+static bool use_moe_multirow(int K) {
+    return (K / kMicroBlockSize) <= 512;
+}
 
 void gemv_nvfp4_moe_decode(const NvFP4MoEQuantResult& w,
                             const int32_t* expert_indices, const half* x, half* y,
                             int rows, int K, int x_stride, int top_k,
                             cudaStream_t stream)
 {
-    int total_blocks = top_k * rows;
-    pdl::launch(gemv_nvfp4_moe_decode_kernel,
-        dim3(total_blocks), dim3(kKparThreads), size_t(0), stream,
-        reinterpret_cast<const uint8_t*>(w.packed_data),
-        reinterpret_cast<const uint8_t*>(w.micro_scales),
-        w.tensor_scales,
-        expert_indices, x, y,
-        rows, K,
-        w.expert_stride_packed,
-        w.expert_stride_ms,
-        x_stride, rows);
+    if (use_moe_multirow(K)) {
+        constexpr int NR = 8;
+        int blocks_per_expert = (rows + NR - 1) / NR;
+        int total_blocks = top_k * blocks_per_expert;
+        pdl::launch(gemv_nvfp4_moe_decode_mr_kernel<NR>,
+            dim3(total_blocks), dim3(kMRThreads), size_t(0), stream,
+            reinterpret_cast<const uint8_t*>(w.packed_data),
+            reinterpret_cast<const uint8_t*>(w.micro_scales),
+            w.tensor_scales,
+            expert_indices, x, y,
+            rows, K,
+            w.expert_stride_packed,
+            w.expert_stride_ms,
+            x_stride, blocks_per_expert);
+    } else {
+        int total_blocks = top_k * rows;
+        pdl::launch(gemv_nvfp4_moe_decode_kernel,
+            dim3(total_blocks), dim3(kKparThreads), size_t(0), stream,
+            reinterpret_cast<const uint8_t*>(w.packed_data),
+            reinterpret_cast<const uint8_t*>(w.micro_scales),
+            w.tensor_scales,
+            expert_indices, x, y,
+            rows, K,
+            w.expert_stride_packed,
+            w.expert_stride_ms,
+            x_stride, rows);
+    }
 }
 
 void gemv_nvfp4_moe_gate_up_fused(const NvFP4MoEQuantResult& gate,
@@ -1151,21 +1289,41 @@ void gemv_nvfp4_moe_gate_up_fused(const NvFP4MoEQuantResult& gate,
                                     int rows, int K, int top_k,
                                     cudaStream_t stream)
 {
-    dim3 grid(top_k * rows, 2);
-    pdl::launch(gemv_nvfp4_moe_gate_up_fused_kernel,
-        grid, dim3(kKparThreads), size_t(0), stream,
-        reinterpret_cast<const uint8_t*>(gate.packed_data),
-        reinterpret_cast<const uint8_t*>(gate.micro_scales),
-        gate.tensor_scales,
-        reinterpret_cast<const uint8_t*>(up.packed_data),
-        reinterpret_cast<const uint8_t*>(up.micro_scales),
-        up.tensor_scales,
-        expert_indices, x,
-        y_gate, y_up,
-        rows, K,
-        gate.expert_stride_packed,
-        gate.expert_stride_ms,
-        rows);
+    if (use_moe_multirow(K)) {
+        constexpr int NR = 8;
+        int blocks_per_expert = (rows + NR - 1) / NR;
+        dim3 grid(top_k * blocks_per_expert, 2);
+        pdl::launch(gemv_nvfp4_moe_gate_up_mr_kernel<NR>,
+            grid, dim3(kMRThreads), size_t(0), stream,
+            reinterpret_cast<const uint8_t*>(gate.packed_data),
+            reinterpret_cast<const uint8_t*>(gate.micro_scales),
+            gate.tensor_scales,
+            reinterpret_cast<const uint8_t*>(up.packed_data),
+            reinterpret_cast<const uint8_t*>(up.micro_scales),
+            up.tensor_scales,
+            expert_indices, x,
+            y_gate, y_up,
+            rows, K,
+            gate.expert_stride_packed,
+            gate.expert_stride_ms,
+            blocks_per_expert);
+    } else {
+        dim3 grid(top_k * rows, 2);
+        pdl::launch(gemv_nvfp4_moe_gate_up_fused_kernel,
+            grid, dim3(kKparThreads), size_t(0), stream,
+            reinterpret_cast<const uint8_t*>(gate.packed_data),
+            reinterpret_cast<const uint8_t*>(gate.micro_scales),
+            gate.tensor_scales,
+            reinterpret_cast<const uint8_t*>(up.packed_data),
+            reinterpret_cast<const uint8_t*>(up.micro_scales),
+            up.tensor_scales,
+            expert_indices, x,
+            y_gate, y_up,
+            rows, K,
+            gate.expert_stride_packed,
+            gate.expert_stride_ms,
+            rows);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1216,23 +1374,101 @@ gemv_nvfp4_moe_swiglu_decode_kernel(
     if (tid == 0) y[(size_t)expert_slot * rows + row] = __float2half(total);
 }
 
+// Multi-row SwiGLU + MoE NVFP4 GEMV for down projection.
+// NR rows per block, 256 threads (8 warps).
+template<int NR>
+__global__ void __launch_bounds__(kMRThreads, 8)
+gemv_nvfp4_moe_swiglu_mr_kernel(
+    const uint8_t* __restrict__ packed_data,
+    const uint8_t* __restrict__ micro_scales,
+    const float*   __restrict__ tensor_scales,
+    const int32_t* __restrict__ expert_indices,
+    const half*    __restrict__ gate,
+    const half*    __restrict__ up,
+    half*          __restrict__ y,
+    int rows, int K,
+    size_t expert_stride_packed,
+    size_t expert_stride_ms,
+    int x_stride,
+    int blocks_per_expert)
+{
+    const int expert_slot = blockIdx.x / blocks_per_expert;
+    const int local_block = blockIdx.x % blocks_per_expert;
+    const int warp_id = threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+
+    const int row = local_block * NR + warp_id;
+    if (row >= rows || warp_id >= NR) return;
+
+    const int n_mb = K / kMicroBlockSize;
+    const int expert_id = expert_indices[expert_slot];
+
+    const uint8_t* W = packed_data + (size_t)expert_id * expert_stride_packed
+                     + (size_t)row * (K / 2);
+    const uint8_t* MS = micro_scales + (size_t)expert_id * expert_stride_ms
+                      + (size_t)row * n_mb;
+    float ts = tensor_scales[expert_id];
+    const half* gi = gate + (size_t)expert_slot * x_stride;
+    const half* ui = up   + (size_t)expert_slot * x_stride;
+
+    __shared__ float s_lut[16];
+    if (threadIdx.x < 16) {
+        constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+        s_lut[threadIdx.x] = (threadIdx.x < 8) ? kMag[threadIdx.x] : -kMag[threadIdx.x & 7];
+    }
+    __syncthreads();
+
+    float acc = 0.0f;
+    for (int mi = lane; mi < n_mb; mi += 32) {
+        int byte_off = mi * 8;
+        uint2 packed2 = *reinterpret_cast<const uint2*>(W + byte_off);
+        float cs = ts * fp8_e4m3_to_float_fast(MS[mi]);
+        acc = __fmaf_rn(dot_micro_block_swiglu(
+            reinterpret_cast<const uint8_t*>(&packed2), gi, ui,
+            byte_off * 2, s_lut), cs, acc);
+    }
+
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, off);
+
+    if (lane == 0) y[(size_t)expert_slot * rows + row] = __float2half(acc);
+}
+
 void gemv_nvfp4_moe_swiglu_decode(const NvFP4MoEQuantResult& w,
                                     const int32_t* expert_indices,
                                     const half* gate, const half* up, half* y,
                                     int rows, int K, int x_stride, int top_k,
                                     cudaStream_t stream)
 {
-    int total_blocks = top_k * rows;
-    pdl::launch(gemv_nvfp4_moe_swiglu_decode_kernel,
-        dim3(total_blocks), dim3(kKparThreads), size_t(0), stream,
-        reinterpret_cast<const uint8_t*>(w.packed_data),
-        reinterpret_cast<const uint8_t*>(w.micro_scales),
-        w.tensor_scales,
-        expert_indices, gate, up, y,
-        rows, K,
-        w.expert_stride_packed,
-        w.expert_stride_ms,
-        x_stride, rows);
+    if (use_moe_multirow(K)) {
+        constexpr int NR = 8;
+        int blocks_per_expert = (rows + NR - 1) / NR;
+        int total_blocks = top_k * blocks_per_expert;
+        pdl::launch(gemv_nvfp4_moe_swiglu_mr_kernel<NR>,
+            dim3(total_blocks), dim3(kMRThreads),
+            size_t(0), stream,
+            reinterpret_cast<const uint8_t*>(w.packed_data),
+            reinterpret_cast<const uint8_t*>(w.micro_scales),
+            w.tensor_scales,
+            expert_indices, gate, up, y,
+            rows, K,
+            w.expert_stride_packed,
+            w.expert_stride_ms,
+            x_stride, blocks_per_expert);
+    } else {
+        int total_blocks = top_k * rows;
+        pdl::launch(gemv_nvfp4_moe_swiglu_decode_kernel,
+            dim3(total_blocks), dim3(kKparThreads), size_t(0), stream,
+            reinterpret_cast<const uint8_t*>(w.packed_data),
+            reinterpret_cast<const uint8_t*>(w.micro_scales),
+            w.tensor_scales,
+            expert_indices, gate, up, y,
+            rows, K,
+            w.expert_stride_packed,
+            w.expert_stride_ms,
+            x_stride, rows);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -61,6 +61,7 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
     // Detect model features for workspace sizing
     has_moe_ = (cfg.n_experts > 0 && cfg.n_experts_active > 0);
     has_ssm_ = (cfg.ssm_inner_size > 0);
+    has_gdn_ = false;  // detected from tensor presence below
     has_dense_ffn_ = (cfg.d_ff > 0);
 
     // Compute max expert FFN hidden dim from actual packed tensor shapes.
@@ -121,6 +122,21 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
             }
         }
         IMP_LOG_INFO("SSM layers: %d out of %d total", ssm_idx, cfg.n_layers);
+    }
+
+    // Build GDN layer index mapping (Gated DeltaNet, e.g., Qwen3.5)
+    {
+        gdn_layer_map_.resize(cfg.n_layers, -1);
+        int gdn_idx = 0;
+        for (int i = 0; i < cfg.n_layers; i++) {
+            if (model_->layer(i).gdn_gate.data != nullptr) {
+                gdn_layer_map_[i] = gdn_idx++;
+            }
+        }
+        if (gdn_idx > 0) {
+            has_gdn_ = true;
+            IMP_LOG_INFO("GDN layers: %d out of %d total", gdn_idx, cfg.n_layers);
+        }
     }
 
     // Enable Programmatic Dependent Launch on custom kernels if requested.
@@ -2317,6 +2333,10 @@ bool GraphExecutor::layer_has_attention(int layer) const {
 
 bool GraphExecutor::layer_has_ssm(int layer) const {
     return model_->layer(layer).ssm_in.data != nullptr;
+}
+
+bool GraphExecutor::layer_has_gdn(int layer) const {
+    return model_->layer(layer).gdn_gate.data != nullptr;
 }
 
 bool GraphExecutor::layer_has_moe(int layer) const {

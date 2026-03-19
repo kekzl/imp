@@ -75,6 +75,12 @@ void quantize_packed_experts_to_nvfp4(
     NvFP4MoEQuantResult& result,
     cudaStream_t stream);
 
+// Dequantize all experts from NVFP4 MoE back to FP16.
+// Output layout: [n_experts, N, K] contiguous FP16 (same as dequant_gpu output).
+void dequantize_nvfp4_moe_to_fp16(const NvFP4MoEQuantResult& result,
+                                   void* output_fp16,
+                                   cudaStream_t stream = nullptr);
+
 // Free NvFP4MoEQuantResult device memory.
 void free_nvfp4_moe_result(NvFP4MoEQuantResult& result);
 
