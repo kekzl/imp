@@ -386,27 +386,38 @@ static bool assign_tensor(Model& model, const std::string& name,
         else if (field == "attn_norm")     layer.attn_norm = tensor;
         else if (field == "attn_q_norm") layer.attn_q_norm = tensor;
         else if (field == "attn_k_norm") layer.attn_k_norm = tensor;
-        // Fused QKV (Phi-4/phi3): split into separate Q, K, V
+        // Fused QKV: either standard attention (Phi-4) or GDN (Qwen3.5)
         else if (field == "attn_qkv") {
             const auto& cfg = model.config();
-            int q_rows = cfg.n_heads * cfg.head_dim;
-            int k_rows = cfg.n_kv_heads * cfg.head_dim;
-            int v_rows = cfg.n_kv_heads * cfg.head_dim;
-            int64_t d_model = tensor.shape[1];  // inner dim after our reversal
-            size_t row_bytes = ggml_quant_row_bytes(qtype, d_model);
+            int64_t total_rows = tensor.shape[0];  // outermost dim after reversal
+            int64_t d_model = tensor.shape[1];     // inner dim
 
-            uint8_t* base = static_cast<uint8_t*>(tensor.data);
-            int64_t q_shape[4] = {q_rows, d_model, 1, 1};
-            int64_t kv_shape[4] = {k_rows, d_model, 1, 1};
+            // Check if this is a GDN layer (total rows match SSM conv_channels)
+            int ssm_conv_channels = cfg.ssm_inner_size +
+                                    2 * cfg.ssm_group_count * cfg.ssm_state_size;
+            if (cfg.ssm_inner_size > 0 && total_rows == ssm_conv_channels) {
+                // GDN layer: treat attn_qkv as ssm_in (fused projection → conv1d input)
+                layer.ssm_in = tensor;
+                layer.ssm_in_qtype = qtype;
+            } else {
+                // Standard fused QKV: split into separate Q, K, V
+                int q_rows = cfg.n_heads * cfg.head_dim;
+                int k_rows = cfg.n_kv_heads * cfg.head_dim;
+                size_t row_bytes = ggml_quant_row_bytes(qtype, d_model);
 
-            layer.wq = Tensor(base, tensor.dtype, 2, q_shape, tensor.on_device);
-            layer.wq_qtype = qtype;
-            layer.wk = Tensor(base + static_cast<size_t>(q_rows) * row_bytes,
-                               tensor.dtype, 2, kv_shape, tensor.on_device);
-            layer.wk_qtype = qtype;
-            layer.wv = Tensor(base + static_cast<size_t>(q_rows + k_rows) * row_bytes,
-                               tensor.dtype, 2, kv_shape, tensor.on_device);
-            layer.wv_qtype = qtype;
+                uint8_t* base = static_cast<uint8_t*>(tensor.data);
+                int64_t q_shape[4] = {q_rows, d_model, 1, 1};
+                int64_t kv_shape[4] = {k_rows, d_model, 1, 1};
+
+                layer.wq = Tensor(base, tensor.dtype, 2, q_shape, tensor.on_device);
+                layer.wq_qtype = qtype;
+                layer.wk = Tensor(base + static_cast<size_t>(q_rows) * row_bytes,
+                                   tensor.dtype, 2, kv_shape, tensor.on_device);
+                layer.wk_qtype = qtype;
+                layer.wv = Tensor(base + static_cast<size_t>(q_rows + k_rows) * row_bytes,
+                                   tensor.dtype, 2, kv_shape, tensor.on_device);
+                layer.wv_qtype = qtype;
+            }
         }
         // Post-layer norms (Gemma-3)
         else if (field == "post_attention_norm") layer.post_attn_norm = tensor;

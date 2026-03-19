@@ -3130,9 +3130,11 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         }
 
         // Attention, GDN, or SSM (mutually exclusive per layer).
-        // GDN check BEFORE attention: GDN layers also have wq/wk/wv tensors.
-        if (layer_has_gdn(i)) {
-            run_gdn(i, state, stream);
+        // GDN layers use the SSM pipeline (same structure: proj→conv→scan→norm→out).
+        // GDN has ssm_in (from attn_qkv), ssm_conv1d, ssm_out, etc. — identical to Mamba2.
+        // The Delta Rule scan replaces Mamba2's selective scan, but the rest is shared.
+        if (layer_has_gdn(i) || layer_has_ssm(i)) {
+            run_ssm(i, state, stream);
         } else if (layer_has_attention(i)) {
             run_attention(i, state, stream);
         } else if (layer_has_ssm(i)) {

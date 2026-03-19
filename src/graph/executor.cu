@@ -352,9 +352,8 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
             if (i + 1 < cfg.n_layers) offload_mgr_->prefetch_layer(i + 1);
         }
 
-        if (layer_has_gdn(i))            run_gdn(i, state, stream);
-        else if (layer_has_attention(i)) run_attention(i, state, stream);
-        else if (layer_has_ssm(i))       run_ssm(i, state, stream);
+        if (layer_has_gdn(i) || layer_has_ssm(i))  run_ssm(i, state, stream);
+        else if (layer_has_attention(i))           run_attention(i, state, stream);
 
         if (layer_has_moe(i))            run_moe_ffn(i, stream);
         else if (layer_has_dense_ffn(i)) run_ffn(i, stream);
