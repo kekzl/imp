@@ -2894,43 +2894,36 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
             gemm(no, ly.gdn_beta, beta_proj_out, 1.0f, 0.0f, stream);
         }
 
-        // For now: use Mamba2 selective scan as approximation.
-        // The alpha projection serves as dt (time-step), beta is unused.
-        // This produces approximate (not exact) GDN output.
-        // TODO: implement proper delta rule scan kernel.
+        // GDN Delta Rule scan: replaces Mamba2 selective scan.
+        // Gate projection computed first, then fused into scan output.
+        int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
+        Tensor gate_out(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
+        gemm_dispatch(no, ly.gdn_gate, Tensor(), ly.gdn_gate_qtype, gate_out,
+                      dequant_scratch_, stream,
+                      static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
+                      (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr,
+                      fp8_act_buf_, d_act_scale_, d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
+                      nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_,
+                      cutlass_workspace_, cutlass_workspace_size_,
+                      mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+
         if (n == 1) {
+            // Decode: pointers directly into xBC_out row
             char* row = static_cast<char*>(xBC_out.data);
-            int64_t x_shape[1] = {static_cast<int64_t>(inner)};
-            Tensor x_t(row, compute_dtype_, 1, x_shape, true);
+            const half* x_ptr = reinterpret_cast<const half*>(row);
+            const half* B_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(inner) * es);
+            const half* C_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(inner + BC_size) * es);
 
-            int64_t bc_shape[1] = {static_cast<int64_t>(BC_size)};
-            Tensor B_t(row + static_cast<size_t>(inner) * es, compute_dtype_, 1, bc_shape, true);
-            Tensor C_t(row + static_cast<size_t>(inner + BC_size) * es, compute_dtype_, 1, bc_shape, true);
-
-            // Use alpha as dt for Mamba2 scan (approximation)
-            int64_t dt_shape[1] = {static_cast<int64_t>(n_heads)};
-            Tensor dt_t(alpha_proj_out.data, compute_dtype_, 1, dt_shape, true);
-
-            int64_t y_shape[1] = {static_cast<int64_t>(inner)};
-            Tensor y_t(y_buf.data, compute_dtype_, 1, y_shape, true);
-
-            // Gate: compute gate_proj and pass as z for fused gating (y *= sigmoid(z))
-            // Use ssm_z_buf_ [max_tokens, inner] — fits perfectly since it's sized for inner
-            int64_t gate_shape[2] = {1, static_cast<int64_t>(inner)};
-            Tensor gate_out(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
-            gemm_dispatch(no, ly.gdn_gate, Tensor(), ly.gdn_gate_qtype, gate_out,
-                          dequant_scratch_, stream,
-                          static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                          (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr,
-                          fp8_act_buf_, d_act_scale_, d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                          nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_,
-                          cutlass_workspace_, cutlass_workspace_size_,
-                          mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
-
-            ssm_scan_decode(x_t, B_t, C_t, dt_t,
-                            ly.ssm_a, ssm_d_ref, ly.ssm_dt_b, h_st,
-                            y_t, static_cast<const half*>(gate_out.data),
-                            n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
+            gdn_scan_decode(
+                x_ptr, B_ptr, C_ptr,
+                static_cast<const half*>(alpha_proj_out.data),
+                static_cast<const half*>(beta_proj_out.data),
+                static_cast<const float*>(ly.ssm_a.data),
+                static_cast<const float*>(ly.ssm_dt_b.data),
+                static_cast<float*>(h_st),
+                static_cast<half*>(y_buf.data),
+                static_cast<const half*>(gate_out.data),
+                n_heads, head_dim_ssm, ssize, n_groups, stream);
         } else {
             // Prefill: de-interleave x/B/C from xBC_out
             char* x_contig = static_cast<char*>(y_buf.data);
@@ -2960,27 +2953,29 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
             Tensor B_all(B_contig, compute_dtype_, 2, bc_shape, true);
             Tensor C_all(C_contig, compute_dtype_, 2, bc_shape, true);
 
-            // Gate projection — use ssm_z_buf_ [max_tokens, inner]
-            Tensor gate_out = view_tokens(ssm_z_buf_, n);
-            gemm_dispatch(no, ly.gdn_gate, Tensor(), ly.gdn_gate_qtype, gate_out,
-                          dequant_scratch_, stream,
-                          static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                          (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr,
-                          fp8_act_buf_, d_act_scale_, d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                          nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_,
-                          cutlass_workspace_, cutlass_workspace_size_,
-                          mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
-
-            Tensor y_all(y_buf.data, compute_dtype_, 2, x_shape, true);
-            ssm_scan_prefill(x_all, B_all, C_all, alpha_proj_out,
-                             ly.ssm_a, ssm_d_ref, ly.ssm_dt_b, h_st,
-                             y_all, static_cast<const half*>(gate_out.data),
-                             n, n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
+            // GDN delta rule prefill scan
+            gdn_scan_prefill(
+                reinterpret_cast<const half*>(x_contig),
+                reinterpret_cast<const half*>(B_contig),
+                reinterpret_cast<const half*>(C_contig),
+                static_cast<const half*>(alpha_proj_out.data),
+                static_cast<const half*>(beta_proj_out.data),
+                static_cast<const float*>(ly.ssm_a.data),
+                static_cast<const float*>(ly.ssm_dt_b.data),
+                static_cast<float*>(h_st),
+                static_cast<half*>(y_buf.data),
+                static_cast<const half*>(gate_out.data),
+                n, n_heads, head_dim_ssm, ssize, n_groups, stream);
         }
     }
 
-    // 6. Group RMSNorm
-    group_rmsnorm(y_buf, ly.ssm_norm_w, y_buf, n_groups, eps, stream);
+    if (layer == 0) {
+        debug_tensor_stats("gdn_scan_out", y_buf, stream);
+    }
+
+    // 6. Group RMSNorm — GDN uses per-head norm (n_heads groups, head_dim elements each)
+    //    ssm_norm_w has [head_dim_ssm=128] weights, shared across all heads.
+    group_rmsnorm(y_buf, ly.ssm_norm_w, y_buf, n_heads, eps, stream);
 
     // 7. ssm_out projection: [n, inner] → [n, d_model]
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
