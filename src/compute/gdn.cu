@@ -78,8 +78,9 @@ __global__ void gdn_scan_decode_kernel(
             k_sq += ks * ks;
             q_sq += qs * qs;
         }
-        s_k_inv = (k_sq > 1e-12f) ? rsqrtf(k_sq) : 0.0f;
-        s_q_inv = (q_sq > 1e-12f) ? rsqrtf(q_sq) : 0.0f;
+        // L2-normalize K and Q (use_qk_l2norm_in_kernel=True in HF)
+        s_k_inv = (k_sq > 1e-8f) ? rsqrtf(k_sq) : 0.0f;
+        s_q_inv = (q_sq > 1e-8f) ? rsqrtf(q_sq) : 0.0f;
     }
     __syncthreads();
 
@@ -108,8 +109,8 @@ __global__ void gdn_scan_decode_kernel(
         y_partial += h_new * q_s;
     }
 
-    // Note: output scaling by 1/√head_dim is NOT applied here.
-    // The GroupNorm + output projection handle the scaling implicitly.
+    // Note: no 1/√d scaling here — llama.cpp applies this in the op wrapper,
+    // but our GroupNorm + output projection handle the scaling implicitly.
 
     // Gating: y *= SiLU(z) if z is provided
     int out_idx = h * head_dim_ssm + d;
