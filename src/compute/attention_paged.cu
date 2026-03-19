@@ -1652,6 +1652,17 @@ void paged_attention_decode(
             dim3 grid(batch_size, n_kv_heads);
             dim3 block(gqa_threads);
 
+            // Opt-in to extended shared memory for large head_dim (e.g., 256)
+            if (gqa_smem > 48 * 1024) {
+                static bool smem_set = false;
+                if (!smem_set) {
+                    cudaFuncSetAttribute(paged_attention_gqa_kernel,
+                                         cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                         static_cast<int>(gqa_smem));
+                    smem_set = true;
+                }
+            }
+
             paged_attention_gqa_kernel<<<grid, block, gqa_smem, stream>>>(
                 reinterpret_cast<const half*>(Q.data),
                 reinterpret_cast<const half*>(K_cache.data),

@@ -2825,6 +2825,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     Tensor v_out = view_tokens(v_, n);
 
     // Dispatch GEMM for Q/K/V projections
+    cudaGetLastError();  // clear before QKV
     gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, q_out, dequant_scratch_, stream,
                   static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
                   (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr,
@@ -2898,6 +2899,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     }
 
     // Alpha/Beta projections
+    cudaGetLastError();  // clear before
     gemm(no, ly.gdn_alpha, alpha_out, 1.0f, 0.0f, stream);
     gemm(no, ly.gdn_beta, beta_out, 1.0f, 0.0f, stream);
 
@@ -2969,6 +2971,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                       cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
                       (!cutlass_mxfp4_cache_.empty() && !cur_force_fp16_) ? &cutlass_mxfp4_cache_ : nullptr,
                       mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+
 
         // 8. Residual add
         elementwise_add(out_buf, r, stream);
