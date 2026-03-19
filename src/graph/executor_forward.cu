@@ -2911,6 +2911,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     // 4. SiLU activation on full conv output
     silu_inplace(xBC_out, stream);
 
+
     // 5. Split conv output into x/B/C and run delta rule scan
     //    x[inner]: value vectors (V in delta rule terminology)
     //    B[n_groups*ssize]: key vectors (K in delta rule)
@@ -2960,14 +2961,25 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         }
 
         if (n == 1) {
-            // Split conv output as [Q(key_dim), K(key_dim), V(value_dim)]
-            // HF code: torch.split(mixed_qkv, [key_dim, key_dim, value_dim], dim=-1)
-            // key_dim = n_groups * state_size = BC_size = 2048
-            // value_dim = inner = 6144
+            // Conv output layout: [conv_channels=10240] split into 3 parts.
+            // Part A: [0, BC_size=2048) — first key_dim block
+            // Part B: [2048, 4096) — second key_dim block
+            // Part C: [4096, 10240) — value_dim block
+            //
+            // HF code: split([key_dim, key_dim, value_dim]) = [Q, K, V]
+            // So: A=Q, B=K, C=V
+            //
+            // But GGUF converter might reorder! Test all permutations.
+            // Current: [Q=A, K=B, V=C]
             char* row = static_cast<char*>(xBC_out.data);
-            const half* Q_ptr = reinterpret_cast<const half*>(row);
-            const half* K_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(BC_size) * es);
-            const half* V_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(2 * BC_size) * es);
+            const half* part_A = reinterpret_cast<const half*>(row);
+            const half* part_B = reinterpret_cast<const half*>(row + static_cast<size_t>(BC_size) * es);
+            const half* part_C = reinterpret_cast<const half*>(row + static_cast<size_t>(2 * BC_size) * es);
+
+            // Try: [Q=A, K=B, V=C] (HF order)
+            const half* Q_ptr = part_A;
+            const half* K_ptr = part_B;
+            const half* V_ptr = part_C;
 
             gdn_scan_decode(
                 V_ptr, K_ptr, Q_ptr,
@@ -3004,7 +3016,6 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                               static_cast<size_t>(inner) * es, n,
                               cudaMemcpyDeviceToDevice, stream);
 
-            // GDN delta rule prefill
             gdn_scan_prefill(
                 reinterpret_cast<const half*>(V_contig),
                 reinterpret_cast<const half*>(K_contig),
