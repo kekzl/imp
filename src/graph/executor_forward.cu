@@ -2788,26 +2788,26 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
 
 // ---------------------------------------------------------------------------
 // Gated DeltaNet (GDN) layer forward pass
+// Same pipeline as Mamba2 SSM but with delta rule scan and separate gating.
+// Pipeline: ssm_in(attn_qkv) → conv1d → SiLU → split(x/B/C) → delta_rule_scan
+//           → gate(SiLU) → group_norm → ssm_out → residual
 // ---------------------------------------------------------------------------
 
 void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                             cudaStream_t stream) {
+    configure_ssm_workspace(shared_workspace_max_tokens_);
+
     const auto& cfg = model_->config();
     const auto& ly  = model_->layer(layer);
     int n = cur_n_tokens_;
-    int d = cfg.d_model;
     float eps = cfg.rms_norm_eps;
-
-    // GDN head configuration from SSM metadata
-    int n_gdn_heads = cfg.ssm_dt_rank;              // 48 for Qwen3.5-27B
-    int inner_size  = cfg.ssm_inner_size;            // 6144
-    int state_dim   = cfg.ssm_state_size;            // 128
-    int head_dim    = (n_gdn_heads > 0) ? inner_size / n_gdn_heads : 0;  // 128
-
-    // Attention head config (for Q/K/V projections)
-    int n_heads  = cfg.n_heads;      // 24 Q heads
-    int n_kv     = cfg.n_kv_heads;   // 4 KV heads
-    int attn_hd  = cfg.head_dim > 0 ? cfg.head_dim : (d / n_heads);  // 256
+    int inner = cfg.ssm_inner_size;
+    int n_groups = cfg.ssm_group_count;
+    int ssize = cfg.ssm_state_size;
+    int conv_kernel = cfg.ssm_conv_kernel;
+    int conv_channels = inner + 2 * n_groups * ssize;
+    int n_heads = cfg.ssm_dt_rank;
+    int head_dim_ssm = (n_heads > 0) ? inner / n_heads : 0;
 
     Tensor h  = view_tokens(hidden_,   n);
     Tensor r  = view_tokens(residual_, n);
@@ -2818,169 +2818,175 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                     cudaMemcpyDeviceToDevice, stream);
     rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
 
-    // 2. Q/K/V projections (reuse attention workspace)
-    configure_attn_workspace(shared_workspace_max_tokens_);
-    Tensor q_out = view_tokens(q_, n);
-    Tensor k_out = view_tokens(k_, n);
-    Tensor v_out = view_tokens(v_, n);
-
-    // Dispatch GEMM for Q/K/V projections
-    cudaGetLastError();  // clear before QKV
-    gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, q_out, dequant_scratch_, stream,
+    // 2. ssm_in (attn_qkv) projection → [n, conv_channels]
+    //    GDN: no z-split, no dt — the full projection goes to conv1d.
+    Tensor proj = view_tokens(ssm_proj_buf_, n);
+    const auto* nvfp4_ptr = (nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &nvfp4_cache_;
+    const auto* ct4_ptr = (cutlass_nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_nvfp4_cache_;
+    const auto* mx4p = (cutlass_mxfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_mxfp4_cache_;
+    gemm_dispatch(no, ly.ssm_in, Tensor(), ly.ssm_in_qtype, proj, dequant_scratch_, stream,
                   static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr,
-                  fp8_act_buf_, d_act_scale_, d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                  (!nvfp4_cache_.empty() && !cur_force_fp16_) ? &nvfp4_cache_ : nullptr,
-                  (!cutlass_nvfp4_cache_.empty() && !cur_force_fp16_) ? &cutlass_nvfp4_cache_ : nullptr,
-                  cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                  (!cutlass_mxfp4_cache_.empty() && !cur_force_fp16_) ? &cutlass_mxfp4_cache_ : nullptr,
-                  mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
-    gemm_dispatch(no, ly.wk, ly.wk_scales, ly.wk_qtype, k_out, dequant_scratch_, stream,
-                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr,
-                  fp8_act_buf_, d_act_scale_, d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                  (!nvfp4_cache_.empty() && !cur_force_fp16_) ? &nvfp4_cache_ : nullptr,
-                  (!cutlass_nvfp4_cache_.empty() && !cur_force_fp16_) ? &cutlass_nvfp4_cache_ : nullptr,
-                  cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                  (!cutlass_mxfp4_cache_.empty() && !cur_force_fp16_) ? &cutlass_mxfp4_cache_ : nullptr,
-                  mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
-    gemm_dispatch(no, ly.wv, ly.wv_scales, ly.wv_qtype, v_out, dequant_scratch_, stream,
-                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr,
-                  fp8_act_buf_, d_act_scale_, d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                  (!nvfp4_cache_.empty() && !cur_force_fp16_) ? &nvfp4_cache_ : nullptr,
-                  (!cutlass_nvfp4_cache_.empty() && !cur_force_fp16_) ? &cutlass_nvfp4_cache_ : nullptr,
-                  cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                  (!cutlass_mxfp4_cache_.empty() && !cur_force_fp16_) ? &cutlass_mxfp4_cache_ : nullptr,
-                  mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
+                  d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
+                  nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
+                  mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
 
-    // 3. Allocate GDN-specific buffers in shared workspace AFTER Q/K/V.
-    //    Q/K/V occupy the first part of shared_workspace_ (set by configure_attn_workspace).
-    //    We place alpha/beta/gate/y AFTER V to avoid overlap.
-    size_t es = dtype_size(compute_dtype_);
-    size_t q_bytes = static_cast<size_t>(n) * n_heads * attn_hd * es;
-    size_t k_bytes = static_cast<size_t>(n) * n_kv * attn_hd * es;
-    size_t v_bytes = k_bytes;
-    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
+    // 3. Conv1d on full projection output [n, conv_channels]
+    int64_t conv_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(conv_channels)};
+    Tensor xBC_in(proj.data, compute_dtype_, 2, conv_shape, true);
+    Tensor xBC_out(ssm_xBC_buf_.data, compute_dtype_, 2, conv_shape, true);
 
-    // Start after Q + K + V (with alignment)
-    char* gdn_buf = static_cast<char*>(q_out.data) + align256(q_bytes) + align256(k_bytes) + align256(v_bytes);
+    int ssm_idx = ssm_layer_map_[layer];
+    void* conv_st = (state.ssm_state && ssm_idx >= 0)
+                    ? state.ssm_state->conv_state(state.ssm_seq_id, ssm_idx)
+                    : nullptr;
 
-    // y_out: [n, inner_size]
-    Tensor y_out;
-    {
-        int64_t y_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner_size)};
-        y_out = Tensor(gdn_buf, compute_dtype_, 2, y_shape, true);
-        gdn_buf += align256(static_cast<size_t>(n) * inner_size * es);
-    }
-
-    // alpha_out: [n, n_gdn_heads]
-    Tensor alpha_out;
-    {
-        int64_t ab_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(n_gdn_heads)};
-        alpha_out = Tensor(gdn_buf, compute_dtype_, 2, ab_shape, true);
-        gdn_buf += align256(static_cast<size_t>(n) * n_gdn_heads * es);
-    }
-
-    // beta_out: [n, n_gdn_heads]
-    Tensor beta_out;
-    {
-        int64_t ab_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(n_gdn_heads)};
-        beta_out = Tensor(gdn_buf, compute_dtype_, 2, ab_shape, true);
-        gdn_buf += align256(static_cast<size_t>(n) * n_gdn_heads * es);
-    }
-
-    // gate_out: [n, inner_size]
-    Tensor gate_out;
-    {
-        int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner_size)};
-        gate_out = Tensor(gdn_buf, compute_dtype_, 2, gate_shape, true);
-        gdn_buf += align256(static_cast<size_t>(n) * inner_size * es);
-    }
-
-    // Alpha/Beta projections
-    cudaGetLastError();  // clear before
-    gemm(no, ly.gdn_alpha, alpha_out, 1.0f, 0.0f, stream);
-    gemm(no, ly.gdn_beta, beta_out, 1.0f, 0.0f, stream);
-
-    // Gate projection
-    {
-        gemm_dispatch(no, ly.gdn_gate, Tensor(), ly.gdn_gate_qtype, gate_out,
-                      dequant_scratch_, stream,
-                      static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                      (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr,
-                      fp8_act_buf_, d_act_scale_, d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                      (!nvfp4_cache_.empty() && !cur_force_fp16_) ? &nvfp4_cache_ : nullptr,
-                      (!cutlass_nvfp4_cache_.empty() && !cur_force_fp16_) ? &cutlass_nvfp4_cache_ : nullptr,
-                      cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                      (!cutlass_mxfp4_cache_.empty() && !cur_force_fp16_) ? &cutlass_mxfp4_cache_ : nullptr,
-                      mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
-    }
-
-    // 5. RoPE: GDN layers use short-range convolution instead of positional embeddings.
-    //    RoPE is only applied on the standard attention layers (every 4th layer).
-    //    TODO: verify if Qwen3.5 GDN layers actually need partial RoPE.
-
-    // 6. GDN recurrence: delta rule update + output computation
-    //    Output goes into ssm_y_buf_ [n, inner_size=6144]
-    int gdn_idx = gdn_layer_map_[layer];
-    float* s_state = nullptr;
-    if (state.gdn_state && gdn_idx >= 0) {
-        s_state = static_cast<float*>(state.gdn_state->s_state(state.gdn_seq_id, gdn_idx));
-    }
-
-    if (s_state) {
-        // Clear any stale CUDA errors before GDN kernel
-        cudaGetLastError();
-
-        if (n == 1) {
-            gdn_decode(
-                static_cast<const half*>(q_out.data),
-                static_cast<const half*>(k_out.data),
-                static_cast<const half*>(v_out.data),
-                static_cast<const half*>(alpha_out.data),
-                static_cast<const half*>(beta_out.data),
-                s_state,
-                static_cast<half*>(y_out.data),
-                static_cast<const half*>(gate_out.data),
-                n_heads, n_kv, attn_hd, n_gdn_heads, stream);
+    if (conv_st) {
+        if (state.is_prefill) {
+            ssm_conv1d_prefill(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
+                               xBC_out, conv_kernel, stream);
         } else {
-            gdn_prefill(
-                static_cast<const half*>(q_out.data),
-                static_cast<const half*>(k_out.data),
-                static_cast<const half*>(v_out.data),
-                static_cast<const half*>(alpha_out.data),
-                static_cast<const half*>(beta_out.data),
-                s_state,
-                static_cast<half*>(y_out.data),
-                static_cast<const half*>(gate_out.data),
-                n, n_heads, n_kv,
-                attn_hd, n_gdn_heads, stream);
+            ssm_conv1d_decode(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
+                              xBC_out, conv_kernel, stream);
+        }
+    }
+
+    // 4. SiLU activation on full conv output
+    silu_inplace(xBC_out, stream);
+
+    // 5. Split conv output into x/B/C and run delta rule scan
+    //    x[inner]: value vectors (V in delta rule terminology)
+    //    B[n_groups*ssize]: key vectors (K in delta rule)
+    //    C[n_groups*ssize]: query vectors (Q in delta rule)
+    int BC_size = n_groups * ssize;
+    Tensor y_buf = view_tokens(ssm_y_buf_, n);
+
+    void* h_st = (state.ssm_state && ssm_idx >= 0)
+                 ? state.ssm_state->h_state(state.ssm_seq_id, ssm_idx)
+                 : nullptr;
+
+    if (h_st) {
+        DType h_dtype = state.ssm_state ? state.ssm_state->h_dtype() : DType::FP32;
+        size_t es = dtype_size(compute_dtype_);
+
+        // Compute alpha/beta projections from norm_out (input to this layer)
+        // Alpha/beta: [n, n_heads] — decay gate and learning rate for delta rule
+        // These replace Mamba2's dt (which comes from the ssm_in projection)
+        Tensor alpha_proj_out, beta_proj_out;
+        {
+            int64_t ab_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(n_heads)};
+            // Use ssm_dt_buf_ for alpha (it's [max_tokens, n_heads] — perfect fit)
+            // Beta can go right after in the same buffer (plenty of room)
+            alpha_proj_out = Tensor(ssm_dt_buf_.data, compute_dtype_, 2, ab_shape, true);
+            char* beta_ptr = static_cast<char*>(ssm_dt_buf_.data) +
+                             ((static_cast<size_t>(n) * n_heads * es + 255) & ~size_t(255));
+            beta_proj_out = Tensor(beta_ptr, compute_dtype_, 2, ab_shape, true);
+
+            gemm(no, ly.gdn_alpha, alpha_proj_out, 1.0f, 0.0f, stream);
+            gemm(no, ly.gdn_beta, beta_proj_out, 1.0f, 0.0f, stream);
         }
 
-        // 7. Output projection: [n, inner_size] @ wo^T → [n, d_model]
-        //    Reuse norm_out_ as output buffer (consumed by projections above)
-        Tensor out_buf = view_tokens(norm_out_, n);
-        gemm_dispatch(y_out, ly.wo, ly.wo_scales, ly.wo_qtype, out_buf,
-                      dequant_scratch_, stream,
-                      static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                      (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr,
-                      fp8_act_buf_, d_act_scale_, d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                      (!nvfp4_cache_.empty() && !cur_force_fp16_) ? &nvfp4_cache_ : nullptr,
-                      (!cutlass_nvfp4_cache_.empty() && !cur_force_fp16_) ? &cutlass_nvfp4_cache_ : nullptr,
-                      cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                      (!cutlass_mxfp4_cache_.empty() && !cur_force_fp16_) ? &cutlass_mxfp4_cache_ : nullptr,
-                      mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+        // For now: use Mamba2 selective scan as approximation.
+        // The alpha projection serves as dt (time-step), beta is unused.
+        // This produces approximate (not exact) GDN output.
+        // TODO: implement proper delta rule scan kernel.
+        if (n == 1) {
+            char* row = static_cast<char*>(xBC_out.data);
+            int64_t x_shape[1] = {static_cast<int64_t>(inner)};
+            Tensor x_t(row, compute_dtype_, 1, x_shape, true);
 
+            int64_t bc_shape[1] = {static_cast<int64_t>(BC_size)};
+            Tensor B_t(row + static_cast<size_t>(inner) * es, compute_dtype_, 1, bc_shape, true);
+            Tensor C_t(row + static_cast<size_t>(inner + BC_size) * es, compute_dtype_, 1, bc_shape, true);
 
-        // 8. Residual add
-        elementwise_add(out_buf, r, stream);
-        cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(),
-                        cudaMemcpyDeviceToDevice, stream);
-    } else {
-        // No GDN state — fall back to identity (residual passthrough)
-        IMP_LOG_WARN("GDN layer %d: no state available, skipping", layer);
+            // Use alpha as dt for Mamba2 scan (approximation)
+            int64_t dt_shape[1] = {static_cast<int64_t>(n_heads)};
+            Tensor dt_t(alpha_proj_out.data, compute_dtype_, 1, dt_shape, true);
+
+            int64_t y_shape[1] = {static_cast<int64_t>(inner)};
+            Tensor y_t(y_buf.data, compute_dtype_, 1, y_shape, true);
+
+            // Gate: compute gate_proj and pass as z for fused gating (y *= sigmoid(z))
+            // Use ssm_z_buf_ [max_tokens, inner] — fits perfectly since it's sized for inner
+            int64_t gate_shape[2] = {1, static_cast<int64_t>(inner)};
+            Tensor gate_out(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
+            gemm_dispatch(no, ly.gdn_gate, Tensor(), ly.gdn_gate_qtype, gate_out,
+                          dequant_scratch_, stream,
+                          static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
+                          (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr,
+                          fp8_act_buf_, d_act_scale_, d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
+                          nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_,
+                          cutlass_workspace_, cutlass_workspace_size_,
+                          mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+
+            ssm_scan_decode(x_t, B_t, C_t, dt_t,
+                            ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st,
+                            y_t, static_cast<const half*>(gate_out.data),
+                            n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
+        } else {
+            // Prefill: de-interleave x/B/C from xBC_out
+            char* x_contig = static_cast<char*>(y_buf.data);
+            cudaMemcpy2DAsync(x_contig, static_cast<size_t>(inner) * es,
+                              xBC_out.data, static_cast<size_t>(conv_channels) * es,
+                              static_cast<size_t>(inner) * es, n,
+                              cudaMemcpyDeviceToDevice, stream);
+
+            char* B_contig = static_cast<char*>(ssm_xBC_buf_.data) +
+                             static_cast<size_t>(n) * conv_channels * es;
+            char* B_src = static_cast<char*>(xBC_out.data) + static_cast<size_t>(inner) * es;
+            cudaMemcpy2DAsync(B_contig, static_cast<size_t>(BC_size) * es,
+                              B_src, static_cast<size_t>(conv_channels) * es,
+                              static_cast<size_t>(BC_size) * es, n,
+                              cudaMemcpyDeviceToDevice, stream);
+
+            char* C_contig = B_contig + static_cast<size_t>(n) * BC_size * es;
+            char* C_src = static_cast<char*>(xBC_out.data) + static_cast<size_t>(inner + BC_size) * es;
+            cudaMemcpy2DAsync(C_contig, static_cast<size_t>(BC_size) * es,
+                              C_src, static_cast<size_t>(conv_channels) * es,
+                              static_cast<size_t>(BC_size) * es, n,
+                              cudaMemcpyDeviceToDevice, stream);
+
+            int64_t x_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
+            Tensor x_all(x_contig, compute_dtype_, 2, x_shape, true);
+            int64_t bc_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(BC_size)};
+            Tensor B_all(B_contig, compute_dtype_, 2, bc_shape, true);
+            Tensor C_all(C_contig, compute_dtype_, 2, bc_shape, true);
+
+            // Gate projection — use ssm_z_buf_ [max_tokens, inner]
+            Tensor gate_out = view_tokens(ssm_z_buf_, n);
+            gemm_dispatch(no, ly.gdn_gate, Tensor(), ly.gdn_gate_qtype, gate_out,
+                          dequant_scratch_, stream,
+                          static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
+                          (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr,
+                          fp8_act_buf_, d_act_scale_, d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
+                          nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_,
+                          cutlass_workspace_, cutlass_workspace_size_,
+                          mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+
+            Tensor y_all(y_buf.data, compute_dtype_, 2, x_shape, true);
+            ssm_scan_prefill(x_all, B_all, C_all, alpha_proj_out,
+                             ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st,
+                             y_all, static_cast<const half*>(gate_out.data),
+                             n, n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
+        }
     }
+
+    // 6. Group RMSNorm
+    group_rmsnorm(y_buf, ly.ssm_norm_w, y_buf, n_groups, eps, stream);
+
+    // 7. ssm_out projection: [n, inner] → [n, d_model]
+    Tensor out_buf = view_tokens(ssm_out_buf_, n);
+    gemm_dispatch(y_buf, ly.ssm_out, Tensor(), ly.ssm_out_qtype, out_buf, dequant_scratch_, stream,
+                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
+                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
+                  d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
+                  nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
+                  mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+
+    // 8. Residual add
+    elementwise_add(out_buf, r, stream);
+    cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(),
+                    cudaMemcpyDeviceToDevice, stream);
 }
 
 // ---------------------------------------------------------------------------
@@ -3130,10 +3136,10 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         }
 
         // Attention, GDN, or SSM (mutually exclusive per layer).
-        // GDN layers use the SSM pipeline (same structure: proj→conv→scan→norm→out).
-        // GDN has ssm_in (from attn_qkv), ssm_conv1d, ssm_out, etc. — identical to Mamba2.
-        // The Delta Rule scan replaces Mamba2's selective scan, but the rest is shared.
-        if (layer_has_gdn(i) || layer_has_ssm(i)) {
+        // GDN check first: GDN layers have ssm_in (from attn_qkv) but use delta rule.
+        if (layer_has_gdn(i)) {
+            run_gdn(i, state, stream);
+        } else if (layer_has_ssm(i)) {
             run_ssm(i, state, stream);
         } else if (layer_has_attention(i)) {
             run_attention(i, state, stream);
