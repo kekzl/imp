@@ -2960,7 +2960,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         }
 
         if (n == 1) {
-            // Decode: split conv output [Q(BC_size), K(BC_size), V(inner)]
+            // Split conv output as [Q(key_dim), K(key_dim), V(value_dim)]
+            // HF code: torch.split(mixed_qkv, [key_dim, key_dim, value_dim], dim=-1)
+            // key_dim = n_groups * state_size = BC_size = 2048
+            // value_dim = inner = 6144
             char* row = static_cast<char*>(xBC_out.data);
             const half* Q_ptr = reinterpret_cast<const half*>(row);
             const half* K_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(BC_size) * es);
