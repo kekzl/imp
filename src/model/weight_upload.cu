@@ -868,10 +868,13 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
                 return false;
             }
         }
+        // GDN alpha/beta: used in direct gemm() for small projections.
+        // Must be FP16 on device (NOT raw quantized) for cuBLAS GEMM.
         if (L.gdn_alpha.data && !L.gdn_alpha.on_device) {
             Tensor dummy_scales;
             if (!upload_weight(L.gdn_alpha, L.gdn_alpha_qtype, dummy_scales,
-                               compute_dtype, stream, gpu_allocations_)) {
+                               compute_dtype, stream, gpu_allocations_,
+                               /*raw_quant=*/false)) {
                 IMP_LOG_ERROR("Failed to upload gdn_alpha for layer %d", i);
                 return false;
             }
@@ -879,7 +882,8 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
         if (L.gdn_beta.data && !L.gdn_beta.on_device) {
             Tensor dummy_scales;
             if (!upload_weight(L.gdn_beta, L.gdn_beta_qtype, dummy_scales,
-                               compute_dtype, stream, gpu_allocations_)) {
+                               compute_dtype, stream, gpu_allocations_,
+                               /*raw_quant=*/false)) {
                 IMP_LOG_ERROR("Failed to upload gdn_beta for layer %d", i);
                 return false;
             }
