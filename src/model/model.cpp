@@ -1,6 +1,7 @@
 #include "model/model.h"
 #include "model/model_arch.h"
 #include <cuda_runtime.h>
+#include <algorithm>
 #include <cmath>
 
 #ifdef __linux__
@@ -51,6 +52,14 @@ Model::~Model() {
 #endif
 }
 
+void Model::release_gpu_allocation(void* ptr) {
+    if (!ptr) return;
+    auto it = std::find(gpu_allocations_.begin(), gpu_allocations_.end(), ptr);
+    if (it != gpu_allocations_.end()) {
+        gpu_allocations_.erase(it);
+    }
+}
+
 const char* model_arch_name(ModelArch arch) {
     switch (arch) {
         case ModelArch::LLAMA:    return "llama";
@@ -60,6 +69,8 @@ const char* model_arch_name(ModelArch arch) {
         case ModelArch::NEMOTRON_H_MOE: return "nemotron_h_moe";
         case ModelArch::QWEN3:          return "qwen3";
         case ModelArch::QWEN3_MOE:      return "qwen3moe";
+        case ModelArch::QWEN35:         return "qwen35";
+        case ModelArch::QWEN35_MOE:     return "qwen35moe";
         case ModelArch::GEMMA3:         return "gemma3";
         case ModelArch::LLAMA4:         return "llama4";
         case ModelArch::GENERIC:        return "generic";
@@ -75,6 +86,8 @@ ModelArch parse_model_arch(const std::string& s) {
     if (s == "nemotron_h_moe")               return ModelArch::NEMOTRON_H_MOE;
     if (s == "qwen3")                        return ModelArch::QWEN3;
     if (s == "qwen3moe")                     return ModelArch::QWEN3_MOE;
+    if (s == "qwen35")                       return ModelArch::QWEN35;
+    if (s == "qwen35moe")                    return ModelArch::QWEN35_MOE;
     if (s == "gemma3")                       return ModelArch::GEMMA3;
     if (s == "gemma" || s == "gemma2")       return ModelArch::GEMMA3;  // treat all gemma as gemma3
     if (s == "llama4")                       return ModelArch::LLAMA4;

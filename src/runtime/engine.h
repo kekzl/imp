@@ -15,6 +15,7 @@
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/ssm_state.h"
+#include "memory/gdn_state.h"
 #include "memory/layer_offload.h"
 #include "graph/executor.h"
 #include "compute/json_constrain.h"
@@ -170,6 +171,9 @@ private:
 
     // SSM state (Mamba2 hybrid models)
     std::unique_ptr<SSMState> ssm_state_;
+
+    // GDN state (Gated DeltaNet, e.g. Qwen3.5)
+    std::unique_ptr<GDNState> gdn_state_;
 
     // Layer weight offloading
     std::unique_ptr<LayerOffloadManager> offload_mgr_;

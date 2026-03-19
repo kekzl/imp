@@ -497,7 +497,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     int n_attn_layers = 0;
     std::vector<int> kv_layer_map(mcfg.n_layers, -1);
     for (int i = 0; i < mcfg.n_layers; i++) {
-        if (model_->layer(i).wq.data != nullptr) {
+        // GDN layers have wq but use recurrent state, not KV cache
+        if (model_->layer(i).wq.data != nullptr &&
+            model_->layer(i).gdn_gate.data == nullptr) {
             kv_layer_map[i] = n_attn_layers++;
         }
     }
@@ -602,6 +604,30 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                                    config_.ssm_state_dtype)) {
                 IMP_LOG_WARN("Failed to init SSM state, continuing without it");
                 ssm_state_.reset();
+            }
+        }
+    }
+
+    // --- Initialize GDN state for Gated DeltaNet hybrid models (Qwen3.5) ---
+    if (mcfg.ssm_inner_size > 0 && mcfg.ssm_dt_rank > 0) {
+        int n_gdn_layers = 0;
+        for (int i = 0; i < mcfg.n_layers; i++) {
+            if (model_->layer(i).gdn_gate.data != nullptr) n_gdn_layers++;
+        }
+        if (n_gdn_layers > 0) {
+            // GDN state uses KV head structure: S[n_kv_heads, head_dim, head_dim]
+            int n_state_heads = mcfg.n_kv_heads;
+            int attn_hd = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
+
+            gdn_state_ = std::make_unique<GDNState>();
+            if (!gdn_state_->init(n_gdn_layers, config_.max_batch_size,
+                                   n_state_heads, attn_hd, attn_hd)) {
+                IMP_LOG_WARN("Failed to init GDN state, continuing without it");
+                gdn_state_.reset();
+            } else {
+                // Disable CUDA graphs for GDN models (recurrent state not graph-capturable)
+                config_.use_cuda_graphs = false;
+                IMP_LOG_INFO("CUDA graphs disabled (GDN recurrent state)");
             }
         }
     }
@@ -1355,6 +1381,15 @@ bool Engine::step() {
             }
         }
 
+        // GDN state for Gated DeltaNet hybrid models (Qwen3.5)
+        if (gdn_state_) {
+            state.gdn_state = gdn_state_.get();
+            state.gdn_seq_id = req->id % gdn_state_->max_sequences();
+            if (offset == 0) {
+                gdn_state_->reset_sequence(state.gdn_seq_id, pf_stream);
+            }
+        }
+
         // Vision embeddings: set on first chunk only (image tokens are at the start)
         if (has_vision_input_ && vision_encoder_ && offset == 0) {
             state.vision_embeddings = d_vision_embeddings_;
@@ -1765,6 +1800,10 @@ bool Engine::step() {
                 state.ssm_state = ssm_state_.get();
                 state.ssm_seq_id = valid_decode[0]->id % ssm_state_->max_sequences();
             }
+            if (gdn_state_) {
+                state.gdn_state = gdn_state_.get();
+                state.gdn_seq_id = valid_decode[0]->id % gdn_state_->max_sequences();
+            }
 
             // Check if any request needs logprobs or json/schema mode
             bool needs_logprobs = false;
@@ -2137,7 +2176,7 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
                               req->frequency_penalty != 0.0f ||
                               req->presence_penalty != 0.0f);
     if (req->status == RequestStatus::DECODING && !req->output_tokens.empty() &&
-        config_.use_cuda_graphs && !offload_mgr_ && !ssm_state_ &&
+        config_.use_cuda_graphs && !offload_mgr_ && !ssm_state_ && !gdn_state_ &&
         !config_.enable_speculative && !req->ignore_eos && !req_has_penalties) {
         int32_t first_token = req->output_tokens.back();
         Tokenizer* gtok = model_->tokenizer();

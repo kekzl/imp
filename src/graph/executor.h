@@ -116,6 +116,10 @@ struct InferenceState {
     SSMState* ssm_state = nullptr;
     int ssm_seq_id = 0;  // sequence ID for SSM state access
 
+    // GDN state for Gated DeltaNet layers (Qwen3.5, nullptr for non-GDN models)
+    class GDNState* gdn_state = nullptr;
+    int gdn_seq_id = 0;
+
     // Batching
     int n_sequences = 1;                   // number of sequences in the batch
     int max_blocks_per_seq = 0;            // max blocks per sequence (for 2D block_table indexing)
@@ -532,6 +536,9 @@ private:
     // Mapping from global layer index to SSM layer index (for SSMState access)
     std::vector<int> ssm_layer_map_;  // ssm_layer_map_[global_idx] = ssm_idx, or -1
 
+    // Mapping from global layer index to GDN layer index (for GDNState access)
+    std::vector<int> gdn_layer_map_;  // gdn_layer_map_[global_idx] = gdn_idx, or -1
+
     // Mapping from global layer index to KV cache layer index (for attention layers only)
     std::vector<int> kv_layer_map_;   // kv_layer_map_[global_idx] = kv_idx, or -1
 
@@ -553,6 +560,7 @@ private:
     // --- Model feature flags (set during init for workspace computation) ---
     bool has_moe_ = false;
     bool has_ssm_ = false;
+    bool has_gdn_ = false;
     bool has_dense_ffn_ = false;
 
     // Max expert FFN hidden dim from actual packed tensor shapes (may differ from cfg.expert_d_ff)
@@ -606,10 +614,12 @@ private:
     void run_ffn(int layer, cudaStream_t stream);
     void run_moe_ffn(int layer, cudaStream_t stream);
     void run_ssm(int layer, const InferenceState& state, cudaStream_t stream);
+    void run_gdn(int layer, const InferenceState& state, cudaStream_t stream);
 
     // Layer type detection (based on tensor presence)
     bool layer_has_attention(int layer) const;
     bool layer_has_ssm(int layer) const;
+    bool layer_has_gdn(int layer) const;
     bool layer_has_moe(int layer) const;
     bool layer_has_dense_ffn(int layer) const;
 

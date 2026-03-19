@@ -82,6 +82,7 @@ set(IMP_MEMORY_SOURCES
     src/memory/kv_cache.cu
     src/memory/kv_cache_manager.cpp
     src/memory/ssm_state.cu
+    src/memory/gdn_state.cu
     src/memory/layer_offload.cu
 )
 
@@ -134,6 +135,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/moe_routing.cu
     src/compute/reduce.cu
     src/compute/ssm.cu
+    src/compute/gdn.cu
     src/compute/gemm_cublaslt_nvfp4.cu
     src/compute/hadamard.cu
 )

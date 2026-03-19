@@ -859,6 +859,32 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
             }
         }
 
+        // Gated DeltaNet (GDN) weights (Qwen3.5)
+        if (L.gdn_gate.data && !L.gdn_gate.on_device) {
+            Tensor dummy_scales;
+            if (!upload_weight(L.gdn_gate, L.gdn_gate_qtype, dummy_scales,
+                               compute_dtype, stream, gpu_allocations_)) {
+                IMP_LOG_ERROR("Failed to upload gdn_gate for layer %d", i);
+                return false;
+            }
+        }
+        if (L.gdn_alpha.data && !L.gdn_alpha.on_device) {
+            Tensor dummy_scales;
+            if (!upload_weight(L.gdn_alpha, L.gdn_alpha_qtype, dummy_scales,
+                               compute_dtype, stream, gpu_allocations_)) {
+                IMP_LOG_ERROR("Failed to upload gdn_alpha for layer %d", i);
+                return false;
+            }
+        }
+        if (L.gdn_beta.data && !L.gdn_beta.on_device) {
+            Tensor dummy_scales;
+            if (!upload_weight(L.gdn_beta, L.gdn_beta_qtype, dummy_scales,
+                               compute_dtype, stream, gpu_allocations_)) {
+                IMP_LOG_ERROR("Failed to upload gdn_beta for layer %d", i);
+                return false;
+            }
+        }
+
         // Router bias (Nemotron MoE)
         if (L.moe_router_bias.data && !L.moe_router_bias.on_device) {
             if (!upload_unquantized_weight(L.moe_router_bias, GGMLQuantType::NONE, compute_dtype,

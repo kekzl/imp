@@ -575,6 +575,78 @@ void dequantize_nvfp4_to_fp16(const NvFP4QuantResult& quant,
     );
 }
 
+// ---------------------------------------------------------------------------
+// Kernel: dequantize NVFP4 MoE -> FP16 (per-expert tensor scales).
+// Same as dequantize_nvfp4_kernel but reads tensor_scale from device array.
+// ---------------------------------------------------------------------------
+__global__ void dequantize_nvfp4_moe_kernel(
+    const uint8_t* __restrict__ packed_data,
+    const uint8_t* __restrict__ micro_scales,
+    const float*   __restrict__ tensor_scales,   // [n_experts] on device
+    half*          __restrict__ output,           // [n_experts, N, K] FP16
+    int n_experts, int64_t N, int64_t K,
+    size_t expert_stride_packed, size_t expert_stride_ms)
+{
+    const int64_t num_mb_per_row = K / kMicroBlockSize;
+    const int64_t mb_per_expert = N * num_mb_per_row;
+    const int64_t total_mb = static_cast<int64_t>(n_experts) * mb_per_expert;
+
+    int64_t mb_idx = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (mb_idx >= total_mb) return;
+
+    int expert = static_cast<int>(mb_idx / mb_per_expert);
+    int64_t local_mb = mb_idx % mb_per_expert;
+    int64_t row    = local_mb / num_mb_per_row;
+    int64_t col_mb = local_mb % num_mb_per_row;
+
+    float ts = tensor_scales[expert];
+    uint8_t ms_fp8 = micro_scales[expert * expert_stride_ms + row * num_mb_per_row + col_mb];
+    float combined_scale = ts * fp8_e4m3_to_float(ms_fp8);
+
+    int64_t out_base    = static_cast<int64_t>(expert) * (N * K) + row * K + col_mb * kMicroBlockSize;
+    int64_t packed_base = static_cast<int64_t>(expert) * expert_stride_packed + row * (K / 2) + col_mb * (kMicroBlockSize / 2);
+
+    #pragma unroll
+    for (int i = 0; i < kMicroBlockSize; i += 2) {
+        uint8_t byte = packed_data[packed_base + i / 2];
+
+        uint8_t fp4_lo = byte & 0x0F;
+        uint8_t sign_lo = (fp4_lo >> 3) & 1;
+        float val_lo = kFP4E2M1Dequant[fp4_lo & 0x07] * combined_scale;
+        if (sign_lo) val_lo = -val_lo;
+
+        uint8_t fp4_hi = (byte >> 4) & 0x0F;
+        uint8_t sign_hi = (fp4_hi >> 3) & 1;
+        float val_hi = kFP4E2M1Dequant[fp4_hi & 0x07] * combined_scale;
+        if (sign_hi) val_hi = -val_hi;
+
+        output[out_base + i]     = __float2half(val_lo);
+        output[out_base + i + 1] = __float2half(val_hi);
+    }
+}
+
+void dequantize_nvfp4_moe_to_fp16(const NvFP4MoEQuantResult& result,
+                                   void* output_fp16,
+                                   cudaStream_t stream)
+{
+    assert(result.packed_data != nullptr);
+    assert(result.micro_scales != nullptr);
+    assert(result.tensor_scales != nullptr);
+    assert(output_fp16 != nullptr);
+
+    int64_t mb_per_expert = result.N * (result.K / kMicroBlockSize);
+    int64_t total_mb = static_cast<int64_t>(result.n_experts) * mb_per_expert;
+    int num_blocks = static_cast<int>((total_mb + kBlockSize - 1) / kBlockSize);
+
+    dequantize_nvfp4_moe_kernel<<<num_blocks, kBlockSize, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(result.packed_data),
+        reinterpret_cast<const uint8_t*>(result.micro_scales),
+        result.tensor_scales,
+        reinterpret_cast<half*>(output_fp16),
+        result.n_experts, result.N, result.K,
+        result.expert_stride_packed, result.expert_stride_ms);
+}
+
 void free_nvfp4_result(NvFP4QuantResult& result)
 {
     if (result.packed_data) {
