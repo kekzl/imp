@@ -92,13 +92,13 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
         max_tokens_ = 4096;
     }
 
-    // Cap max_tokens for hybrid MoE+SSM models (e.g. Nemotron-H) to limit workspace.
-    // MoE workspace scales as max_tokens * top_k * d * 7, which can exhaust 32 GB VRAM.
-    if (has_moe_ && has_ssm_ && cfg.n_experts_active >= 4) {
-        int capped = 256;
+    // Cap max_tokens for hybrid MoE+SSM/GDN models to limit workspace.
+    // SSM state + cuBLAS S-matrix + workspace can exhaust 32 GB VRAM.
+    if (has_ssm_ && (has_moe_ || has_gdn_)) {
+        int capped = has_moe_ ? 256 : 512;  // MoE tighter, dense GDN can afford more
         if (max_tokens_ > capped) {
-            IMP_LOG_INFO("executor_workspace.cu:%d: Capping max_tokens %d → %d for MoE+SSM hybrid (top_k=%d)",
-                         __LINE__, max_tokens_, capped, cfg.n_experts_active);
+            IMP_LOG_INFO("executor_workspace.cu:%d: Capping max_tokens %d → %d for SSM/GDN hybrid",
+                         __LINE__, max_tokens_, capped);
             max_tokens_ = capped;
         }
     }
