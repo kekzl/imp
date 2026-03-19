@@ -2953,30 +2953,22 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         }
 
         if (n == 1) {
-            // Split: [Q(BC_size), K(BC_size), V(inner)]
+            // Decode: split conv output [Q(BC_size), K(BC_size), V(inner)]
             char* row = static_cast<char*>(xBC_out.data);
+            const half* Q_ptr = reinterpret_cast<const half*>(row);
+            const half* K_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(BC_size) * es);
+            const half* V_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(2 * BC_size) * es);
 
-            // TEST: Use Mamba2-style split [x=V(inner), B=K(BC), C=Q(BC)]
-            // with Mamba2 scan to test if the pipeline (conv→scan→norm→out) works
-            // when using the same scan kernel as the working Nemotron-H path.
-            int64_t x_shape[1] = {static_cast<int64_t>(inner)};
-            Tensor x_t(row + 2*BC_size*es, compute_dtype_, 1, x_shape, true);
-
-            int64_t bc_shape[1] = {static_cast<int64_t>(BC_size)};
-            Tensor B_t(row + BC_size*es, compute_dtype_, 1, bc_shape, true);
-            Tensor C_t(row, compute_dtype_, 1, bc_shape, true);
-
-            int64_t dt_shape[1] = {static_cast<int64_t>(n_heads)};
-            Tensor dt_t(alpha_proj_out.data, compute_dtype_, 1, dt_shape, true);
-
-            int64_t y_shape[1] = {static_cast<int64_t>(inner)};
-            Tensor y_t(y_buf.data, compute_dtype_, 1, y_shape, true);
-
-            // Use Mamba2 scan with gate fusion
-            ssm_scan_decode(x_t, B_t, C_t, dt_t,
-                            ly.ssm_a, ssm_d_ref, ly.ssm_dt_b, h_st,
-                            y_t, static_cast<const half*>(gate_out.data),
-                            n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
+            gdn_scan_decode(
+                V_ptr, K_ptr, Q_ptr,
+                static_cast<const half*>(alpha_proj_out.data),
+                static_cast<const half*>(beta_proj_out.data),
+                static_cast<const float*>(ly.ssm_a.data),
+                static_cast<const float*>(ly.ssm_dt_b.data),
+                static_cast<float*>(h_st),
+                static_cast<half*>(y_buf.data),
+                nullptr,  // no fused gate — done in RMSNormGated
+                n_heads, head_dim_ssm, ssize, n_groups, stream);
         } else {
             // Prefill: de-interleave Q/K/V from xBC_out
             // GDN split order: [Q(key_dim=BC_size), K(key_dim=BC_size), V(value_dim=inner)]
@@ -3002,24 +2994,26 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                               static_cast<size_t>(inner) * es, n,
                               cudaMemcpyDeviceToDevice, stream);
 
-            // Use Mamba2 prefill scan as A/B test
-            int64_t x_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
-            Tensor x_all(V_contig, compute_dtype_, 2, x_shape, true);
-            int64_t bc_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(BC_size)};
-            Tensor B_all(K_contig, compute_dtype_, 2, bc_shape, true);
-            Tensor C_all(Q_contig, compute_dtype_, 2, bc_shape, true);
-
-            Tensor y_all(y_buf.data, compute_dtype_, 2, x_shape, true);
-            ssm_scan_prefill(x_all, B_all, C_all, alpha_proj_out,
-                             ly.ssm_a, ssm_d_ref, ly.ssm_dt_b, h_st,
-                             y_all, static_cast<const half*>(gate_out.data),
-                             n, n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
+            // GDN delta rule prefill
+            gdn_scan_prefill(
+                reinterpret_cast<const half*>(V_contig),
+                reinterpret_cast<const half*>(K_contig),
+                reinterpret_cast<const half*>(Q_contig),
+                static_cast<const half*>(alpha_proj_out.data),
+                static_cast<const half*>(beta_proj_out.data),
+                static_cast<const float*>(ly.ssm_a.data),
+                static_cast<const float*>(ly.ssm_dt_b.data),
+                static_cast<float*>(h_st),
+                static_cast<half*>(y_buf.data),
+                nullptr,  // no fused gate
+                n, n_heads, head_dim_ssm, ssize, n_groups, stream);
         }
     }
 
 
-    // 6. Per-head RMSNorm (Mamba2 scan already fused the gate via z parameter)
+    // 6. Fused RMSNormGated: y = norm(y) * SiLU(gate)
     {
+        silu_inplace(gate_out, stream);
         size_t es_h = dtype_size(compute_dtype_);
         for (int t = 0; t < n; t++) {
             for (int head = 0; head < n_heads; head++) {
@@ -3027,7 +3021,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                 int64_t one_shape[2] = {1, static_cast<int64_t>(head_dim_ssm)};
                 Tensor head_y(static_cast<char*>(y_buf.data) + offset,
                               compute_dtype_, 2, one_shape, true);
+                Tensor head_g(static_cast<char*>(gate_out.data) + offset,
+                              compute_dtype_, 2, one_shape, true);
                 rmsnorm(head_y, ly.ssm_norm_w, head_y, eps, stream);
+                elementwise_mul(head_y, head_g, head_y, stream);
             }
         }
     }
