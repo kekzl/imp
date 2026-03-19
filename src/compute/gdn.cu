@@ -32,7 +32,11 @@ __global__ void gdn_scan_decode_kernel(
     const int d = threadIdx.x;
     if (d >= head_dim_ssm) return;
 
-    const int g = h / (n_heads / n_groups);
+    // V-heads are stored in TILED order (from GGUF converter _LinearAttentionVReorderBase):
+    //   Grouped (HF): [G0_v0, G0_v1, G0_v2, G1_v0, G1_v1, G1_v2, ...]
+    //   Tiled (GGUF):  [G0_v0, G1_v0, ..., G0_v1, G1_v1, ..., G0_v2, G1_v2, ...]
+    // For tiled layout: V-head h maps to K-group g = h % n_groups (not h / ratio).
+    const int g = h % n_groups;
 
     float* H = h_state + static_cast<size_t>(h) * state_size * head_dim_ssm;
     const half* K_g = B_in + g * state_size;
