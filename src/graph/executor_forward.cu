@@ -276,18 +276,25 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     bool has_attn_output_gate = (q_out_dim > nh * hd);
     int q_actual_dim = nh * hd;  // actual Q dimension (without gate)
 
-    // Use larger buffer for Q projection if needed (includes gate)
-    Tensor qv_full;
-    if (has_attn_output_gate) {
-        // Allocate from ssm_proj_buf_ (large enough for [n, q_out_dim])
-        int64_t qfull_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(q_out_dim)};
-        qv_full = Tensor(ssm_proj_buf_.data, compute_dtype_, 2, qfull_shape, true);
-    }
     Tensor qv = view_tokens(q_,        n);
     Tensor kk = view_tokens(k_,        n);
     Tensor vv = view_tokens(v_,        n);
     Tensor ao = view_tokens(attn_out_, n);
     Tensor po = view_tokens(proj_out_, n);
+
+    // For Qwen3.5 attention output gate: allocate larger Q buffer AFTER all
+    // standard attention buffers to avoid overlap (q_/k_/v_/attn_out_/proj_out_
+    // all share the same shared_workspace_ memory).
+    Tensor qv_full;
+    if (has_attn_output_gate) {
+        auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
+        size_t es_a = dtype_size(compute_dtype_);
+        // Place after proj_out_ (last standard buffer)
+        char* after_proj = static_cast<char*>(po.data) +
+                           align256(static_cast<size_t>(n) * cfg.d_model * es_a);
+        int64_t qfull_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(q_out_dim)};
+        qv_full = Tensor(after_proj, compute_dtype_, 2, qfull_shape, true);
+    }
 
     // Per-step diagnostics for n>1 decode debugging (layer 0 only)
     bool debug_attn_steps = (layer == 0 && n > 1 && debug_forward_enabled());
