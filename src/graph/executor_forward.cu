@@ -2820,7 +2820,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
 
     // 2. ssm_in (attn_qkv) projection → [n, conv_channels]
     //    GDN: no z-split, no dt — the full projection goes to conv1d.
-    Tensor proj = view_tokens(ssm_proj_buf_, n);
+    //    ssm_proj_buf_ is [max_tokens, ssm_in_dim] but we only need [n, conv_channels].
+    int64_t proj_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(conv_channels)};
+    Tensor proj(ssm_proj_buf_.data, compute_dtype_, 2, proj_shape, true);
     const auto* nvfp4_ptr = (nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &nvfp4_cache_;
     const auto* ct4_ptr = (cutlass_nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_nvfp4_cache_;
     const auto* mx4p = (cutlass_mxfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_mxfp4_cache_;
@@ -2864,6 +2866,12 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     void* h_st = (state.ssm_state && ssm_idx >= 0)
                  ? state.ssm_state->h_state(state.ssm_seq_id, ssm_idx)
                  : nullptr;
+
+    // GDN layers lack ssm_d (D skip connection). Use ssm_a as dummy (same shape [n_heads]).
+    // The ssm_scan kernel reads D[h] for skip connections — when using A_log values as D,
+    // the skip contribution is non-zero but small (A_log are typically negative).
+    // TODO: allocate a proper zero-filled D tensor for GDN layers.
+    const Tensor& ssm_d_ref = (ly.ssm_d.data != nullptr) ? ly.ssm_d : ly.ssm_a;
 
     if (h_st) {
         DType h_dtype = state.ssm_state ? state.ssm_state->h_dtype() : DType::FP32;
@@ -2920,7 +2928,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                           mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
 
             ssm_scan_decode(x_t, B_t, C_t, dt_t,
-                            ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st,
+                            ly.ssm_a, ssm_d_ref, ly.ssm_dt_b, h_st,
                             y_t, static_cast<const half*>(gate_out.data),
                             n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
         } else {
@@ -2965,7 +2973,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
 
             Tensor y_all(y_buf.data, compute_dtype_, 2, x_shape, true);
             ssm_scan_prefill(x_all, B_all, C_all, alpha_proj_out,
-                             ly.ssm_a, ly.ssm_d, ly.ssm_dt_b, h_st,
+                             ly.ssm_a, ssm_d_ref, ly.ssm_dt_b, h_st,
                              y_all, static_cast<const half*>(gate_out.data),
                              n, n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
         }
