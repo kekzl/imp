@@ -2967,35 +2967,30 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         }
     }
 
-    if (layer == 0) {
-        debug_tensor_stats("gdn_scan_out", y_buf, stream);
-    }
 
     // 6. Fused RMSNormGated: y = norm(y) * SiLU(gate)
-    //    Per-head norm with shared weight [head_dim_ssm], fused with SiLU gating.
-    //    This matches HuggingFace's Qwen3_5RMSNormGated: norm(x) * silu(z)
+    //    Matches HuggingFace's Qwen3_5RMSNormGated: norm(x) * silu(z)
     {
+        // Step 1: Apply SiLU to entire gate_out at once (before per-head loop)
+        silu_inplace(gate_out, stream);
+
+        // Step 2: Per-head RMSNorm on y, then multiply with SiLU'd gate
         size_t es_h = dtype_size(compute_dtype_);
         for (int t = 0; t < n; t++) {
             for (int head = 0; head < n_heads; head++) {
                 size_t offset = (t * inner + head * head_dim_ssm) * es_h;
-                char* y_elem = static_cast<char*>(y_buf.data) + offset;
-                char* g_elem = static_cast<char*>(gate_out.data) + offset;
                 int64_t one_shape[2] = {1, static_cast<int64_t>(head_dim_ssm)};
-                Tensor head_y(y_elem, compute_dtype_, 2, one_shape, true);
 
-                // Step 1: RMSNorm on y (in-place)
+                Tensor head_y(static_cast<char*>(y_buf.data) + offset,
+                              compute_dtype_, 2, one_shape, true);
+                Tensor head_g(static_cast<char*>(gate_out.data) + offset,
+                              compute_dtype_, 2, one_shape, true);
+
                 rmsnorm(head_y, ly.ssm_norm_w, head_y, eps, stream);
-
-                // Step 2: y *= SiLU(gate) — element-wise
-                int64_t flat_shape[1] = {static_cast<int64_t>(head_dim_ssm)};
-                Tensor gate_t(g_elem, compute_dtype_, 1, flat_shape, true);
-                silu_inplace(gate_t, stream);
-                elementwise_mul(head_y, gate_t, head_y, stream);
+                elementwise_mul(head_y, head_g, head_y, stream);
             }
         }
     }
-    if (layer == 0) debug_tensor_stats("gdn_after_norm_gate", y_buf, stream);
 
     // 7. ssm_out projection: [n, inner] → [n, d_model]
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
