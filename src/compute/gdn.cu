@@ -5,109 +5,108 @@
 namespace imp {
 
 // ---------------------------------------------------------------------------
-// GDN decode kernel: one block per KV head, all Q heads in GQA group.
+// GDN Delta Rule Scan — decode kernel (single token per head)
 //
-// Delta rule with error correction:
-//   g = sigmoid(avg_alpha)                    // decay
-//   b = sigmoid(avg_beta)                     // learning rate
-//   error = v - S @ k                         // prediction error [hd]
-//   S = g * S + b * outer(k, error)           // state update [hd, hd]
-//   y[q_head] = S @ q[q_head]                 // output [hd]
+// One block per head. Each thread handles one d ∈ [0, head_dim_ssm).
+// State h[state_size, head_dim_ssm] stored in global memory (FP32).
 //
-// Gate applied as SiLU (Mamba-style): y *= gate * sigmoid(gate)
+// Mapping from Mamba2 terminology to Delta Rule:
+//   x → V (value to store), B → K (key for addressing), C → Q (query for readout)
+//
+// Delta rule per head h:
+//   a_bar = exp(A_log[h] * softplus(alpha[h] + dt_bias[h]))  // decay
+//   beta_h = sigmoid(beta[h])                                  // learning rate
+//   predicted[d] = sum_s(h[s,d] * K[s])                       // predict from state
+//   error[d] = V[d] - a_bar * predicted[d]                    // prediction error
+//   h[s,d] = a_bar * h[s,d] + beta_h * K[s] * error[d]       // rank-1 update
+//   y[d] = sum_s(h[s,d] * Q[s])                               // readout
+//   if z: y[d] *= sigmoid(z[d])                                // gating
 // ---------------------------------------------------------------------------
 
-// Shared memory layout: float error[head_dim] + float s_k[head_dim] + float s_v[head_dim]
-__global__ void gdn_decode_kernel(
-    const half* __restrict__ q,        // [n_q_heads * head_dim]
-    const half* __restrict__ k,        // [n_kv_heads * head_dim]
-    const half* __restrict__ v,        // [n_kv_heads * head_dim]
-    const half* __restrict__ alpha,    // [n_alpha_heads]
-    const half* __restrict__ beta,     // [n_alpha_heads]
-    float*      __restrict__ s_state,  // [n_kv_heads, head_dim, head_dim]
-    half*       __restrict__ y,        // [n_q_heads * head_dim]
-    const half* __restrict__ gate,     // [n_q_heads * head_dim] or nullptr
-    int n_q_heads, int n_kv_heads, int n_alpha_heads, int head_dim)
+__global__ void gdn_scan_decode_kernel(
+    const half* __restrict__ x,          // [inner_size] = V
+    const half* __restrict__ B_in,       // [n_groups * state_size] = K
+    const half* __restrict__ C_in,       // [n_groups * state_size] = Q
+    const half* __restrict__ alpha_raw,  // [n_heads] decay gate (pre-softplus)
+    const half* __restrict__ beta_raw,   // [n_heads] learning rate (pre-sigmoid)
+    const float* __restrict__ A_log,     // [n_heads]
+    const float* __restrict__ dt_bias,   // [n_heads]
+    float*       __restrict__ h_state,   // [n_heads, state_size, head_dim_ssm]
+    half*        __restrict__ y,         // [inner_size]
+    const half*  __restrict__ z,         // [inner_size] gate (nullptr = no fusion)
+    int n_heads, int head_dim_ssm, int state_size, int n_groups)
 {
-    extern __shared__ float smem[];
-    float* s_error = smem;                        // [head_dim]
-    float* s_k_vec = smem + head_dim;             // [head_dim]
+    const int h = blockIdx.x;
+    if (h >= n_heads) return;
 
-    const int kv_head = blockIdx.x;
-    if (kv_head >= n_kv_heads) return;
+    const int d = threadIdx.x;
+    if (d >= head_dim_ssm) return;
 
-    const int tid = threadIdx.x;
-    const int n_threads = blockDim.x;
-    const int q_per_kv = n_q_heads / n_kv_heads;
-    const int alpha_per_kv = n_alpha_heads / n_kv_heads;
+    const int g = h / (n_heads / n_groups);  // group for this head
+    const int heads_per_group = n_heads / n_groups;
 
-    const int state_elems = head_dim * head_dim;
-    float* S = s_state + kv_head * state_elems;
+    // Pointers for this head
+    float* H = h_state + static_cast<size_t>(h) * state_size * head_dim_ssm;
+    const half* K_g = B_in + g * state_size;   // key [state_size]
+    const half* Q_g = C_in + g * state_size;   // query [state_size]
 
-    const half* k_h = k + kv_head * head_dim;
-    const half* v_h = v + kv_head * head_dim;
+    // V (value) for this head's d-th dimension
+    float v_d = __half2float(x[h * head_dim_ssm + d]);
 
-    // Load k vector to shared memory
-    for (int i = tid; i < head_dim; i += n_threads) {
-        s_k_vec[i] = __half2float(k_h[i]);
+    // Compute decay and learning rate for delta rule
+    float alpha_h = __half2float(alpha_raw[h]);
+    float a_log_h = A_log[h];
+
+    // Decay: a_bar = exp(A_log * softplus(alpha + dt_bias))
+    // A_log is typically negative → a_bar ∈ (0, 1]
+    // Clamp the exponent to prevent overflow
+    float dt_val = alpha_h + dt_bias[h];
+    dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));  // softplus
+    float exponent = dt_val * a_log_h;
+    exponent = fmaxf(fminf(exponent, 0.0f), -20.0f);  // clamp to [-20, 0]
+    float a_bar = expf(exponent);
+
+    // Learning rate: beta ∈ (0, 1)
+    float beta_h = __half2float(beta_raw[h]);
+    beta_h = 1.0f / (1.0f + expf(-fmaxf(fminf(beta_h, 20.0f), -20.0f)));  // clamped sigmoid
+
+    // Step 1: Predict — predicted[d] = sum_s(h[s,d] * K[s])
+    float predicted = 0.0f;
+    for (int s = 0; s < state_size; s++) {
+        predicted += H[s * head_dim_ssm + d] * __half2float(K_g[s]);
     }
-    __syncthreads();
 
-    // Average alpha/beta across mapped heads
-    float g = 0.0f, b = 0.0f;
-    int alpha_base = kv_head * alpha_per_kv;
-    for (int ai = 0; ai < alpha_per_kv; ai++) {
-        g += 1.0f / (1.0f + expf(-__half2float(alpha[alpha_base + ai])));
-        b += 1.0f / (1.0f + expf(-__half2float(beta[alpha_base + ai])));
+    // Step 2: Error
+    float error_d = v_d - a_bar * predicted;
+
+    // Step 3 + 4: Update state + compute output
+    float y_partial = 0.0f;
+    for (int s = 0; s < state_size; s++) {
+        // Update: h[s,d] = a_bar * h[s,d] + beta * K[s] * error[d]
+        float h_old = H[s * head_dim_ssm + d];
+        float k_s = __half2float(K_g[s]);
+        float h_new = a_bar * h_old + beta_h * k_s * error_d;
+        // Clamp state to prevent numerical explosion
+        h_new = fmaxf(fminf(h_new, 1e6f), -1e6f);
+        H[s * head_dim_ssm + d] = h_new;
+
+        // Output: y[d] += h[s,d] * Q[s]
+        y_partial += h_new * __half2float(Q_g[s]);
     }
-    g /= alpha_per_kv;
-    b /= alpha_per_kv;
 
-    // Step 1: Compute error = v - S @ k (where S @ k = matrix-vector product)
-    // error[j] = v[j] - sum_i(S[j * head_dim + i] * k[i])
-    // Note: S is stored row-major as [head_dim, head_dim], S[row=j, col=i]
-    // But for delta rule, S maps k->v, so S @ k means: for each output dim j,
-    // predicted_v[j] = sum_i S[j,i] * k[i]
-    for (int j = tid; j < head_dim; j += n_threads) {
-        float predicted = 0.0f;
-        for (int i = 0; i < head_dim; i++) {
-            predicted += S[j * head_dim + i] * s_k_vec[i];
-        }
-        s_error[j] = __half2float(v_h[j]) - predicted;
+    // Gating: y *= sigmoid(z) if z is provided
+    int out_idx = h * head_dim_ssm + d;
+    if (z) {
+        float z_val = __half2float(z[out_idx]);
+        y_partial *= z_val / (1.0f + expf(-z_val));  // SiLU = x * sigmoid(x)
     }
-    __syncthreads();
 
-    // Step 2: Update S[j,i] = g * S[j,i] + b * k[i] * error[j]
-    for (int idx = tid; idx < state_elems; idx += n_threads) {
-        int j = idx / head_dim;  // output (value) dim
-        int i = idx % head_dim;  // input (key) dim
-        S[idx] = g * S[idx] + b * s_k_vec[i] * s_error[j];
-    }
-    __syncthreads();
-
-    // Step 3: Output y[q_head] = S @ q[q_head]
-    // y[q_head, j] = sum_i(S[j, i] * q[i])
-    for (int qi = 0; qi < q_per_kv; qi++) {
-        int q_idx = kv_head * q_per_kv + qi;
-        const half* q_h = q + q_idx * head_dim;
-
-        for (int j = tid; j < head_dim; j += n_threads) {
-            float sum = 0.0f;
-            for (int i = 0; i < head_dim; i++) {
-                sum += S[j * head_dim + i] * __half2float(q_h[i]);
-            }
-
-            int out_idx = q_idx * head_dim + j;
-            // SiLU gating: y * gate * sigmoid(gate) = y * SiLU(gate)
-            if (gate) {
-                float g_val = __half2float(gate[out_idx]);
-                float silu = g_val / (1.0f + expf(-g_val));  // x * sigmoid(x)
-                sum *= silu;
-            }
-            y[out_idx] = __float2half(sum);
-        }
-    }
+    y[out_idx] = __float2half(y_partial);
 }
+
+// ---------------------------------------------------------------------------
+// Host launchers
+// ---------------------------------------------------------------------------
 
 void gdn_decode(const half* q, const half* k, const half* v,
                 const half* alpha, const half* beta,
@@ -115,17 +114,18 @@ void gdn_decode(const half* q, const half* k, const half* v,
                 int n_q_heads, int n_kv_heads, int head_dim, int n_alpha_heads,
                 cudaStream_t stream)
 {
-    // Shared memory for error vector + k vector
-    size_t smem = 2 * head_dim * sizeof(float);
-    int threads = 256;
-    gdn_decode_kernel<<<n_kv_heads, threads, smem, stream>>>(
-        q, k, v, alpha, beta, s_state, y, gate,
-        n_q_heads, n_kv_heads, n_alpha_heads, head_dim);
+    // For GDN scan: use Mamba2-compatible interface
+    // n_q_heads here is actually n_heads (from ssm_dt_rank)
+    // head_dim is head_dim_ssm (inner_size / n_heads)
+    // n_alpha_heads = n_heads (same as n_q_heads for GDN)
+    // This function is kept for API compatibility but is NOT used by run_gdn.
+    // run_gdn calls gdn_scan_decode directly.
+    (void)q; (void)k; (void)v; (void)alpha; (void)beta;
+    (void)s_state; (void)y; (void)gate;
+    (void)n_q_heads; (void)n_kv_heads; (void)head_dim; (void)n_alpha_heads;
+    (void)stream;
 }
 
-// ---------------------------------------------------------------------------
-// GDN prefill: iterate decode over all tokens sequentially.
-// ---------------------------------------------------------------------------
 void gdn_prefill(const half* q, const half* k, const half* v,
                  const half* alpha, const half* beta,
                  float* s_state, half* y, const half* gate,
@@ -133,23 +133,58 @@ void gdn_prefill(const half* q, const half* k, const half* v,
                  int head_dim, int n_alpha_heads,
                  cudaStream_t stream)
 {
-    int q_stride = n_q_heads * head_dim;
-    int k_stride = n_kv_heads * head_dim;
-    int alpha_stride = n_alpha_heads;
+    (void)q; (void)k; (void)v; (void)alpha; (void)beta;
+    (void)s_state; (void)y; (void)gate;
+    (void)n_tokens; (void)n_q_heads; (void)n_kv_heads;
+    (void)head_dim; (void)n_alpha_heads;
+    (void)stream;
+}
 
-    size_t smem = 2 * head_dim * sizeof(float);
+// ---------------------------------------------------------------------------
+// GDN scan decode: called from run_gdn() as replacement for ssm_scan_decode.
+// Same parameter layout as ssm_scan_decode but uses delta rule math.
+// ---------------------------------------------------------------------------
+void gdn_scan_decode(const half* x, const half* B, const half* C,
+                     const half* alpha, const half* beta,
+                     const float* A_log, const float* dt_bias,
+                     float* h_state, half* y, const half* z,
+                     int n_heads, int head_dim_ssm,
+                     int state_size, int n_groups,
+                     cudaStream_t stream)
+{
+    // One block per head, head_dim_ssm threads per block
+    gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, 0, stream>>>(
+        x, B, C, alpha, beta, A_log, dt_bias,
+        h_state, y, z,
+        n_heads, head_dim_ssm, state_size, n_groups);
+}
+
+// ---------------------------------------------------------------------------
+// GDN scan prefill: sequential per-token, same kernel.
+// ---------------------------------------------------------------------------
+void gdn_scan_prefill(const half* x, const half* B, const half* C,
+                      const half* alpha, const half* beta,
+                      const float* A_log, const float* dt_bias,
+                      float* h_state, half* y, const half* z,
+                      int n_tokens, int n_heads, int head_dim_ssm,
+                      int state_size, int n_groups,
+                      cudaStream_t stream)
+{
+    int inner = n_heads * head_dim_ssm;
+    int BC_size = n_groups * state_size;
 
     for (int t = 0; t < n_tokens; t++) {
-        gdn_decode_kernel<<<n_kv_heads, 256, smem, stream>>>(
-            q + t * q_stride,
-            k + t * k_stride,
-            v + t * k_stride,
-            alpha + t * alpha_stride,
-            beta + t * alpha_stride,
-            s_state,
-            y + t * q_stride,
-            gate ? gate + t * q_stride : nullptr,
-            n_q_heads, n_kv_heads, n_alpha_heads, head_dim);
+        gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, 0, stream>>>(
+            x + t * inner,
+            B + t * BC_size,
+            C + t * BC_size,
+            alpha + t * n_heads,
+            beta + t * n_heads,
+            A_log, dt_bias,
+            h_state,
+            y + t * inner,
+            z ? z + t * inner : nullptr,
+            n_heads, head_dim_ssm, state_size, n_groups);
     }
 }
 
