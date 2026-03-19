@@ -269,6 +269,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     Tensor h  = view_tokens(hidden_,   n);
     Tensor r  = view_tokens(residual_, n);
     Tensor no = view_tokens(norm_out_, n);
+
+    // Qwen3.5 attention: Q projection has ×2 output (Q + output_gate fused).
+    // Detect by checking if wq output dim > n_heads * head_dim.
+    int q_out_dim = static_cast<int>(ly.wq.shape[0]);
+    bool has_attn_output_gate = (q_out_dim > nh * hd);
+    int q_actual_dim = nh * hd;  // actual Q dimension (without gate)
+
+    // Use larger buffer for Q projection if needed (includes gate)
+    Tensor qv_full;
+    if (has_attn_output_gate) {
+        // Allocate from ssm_proj_buf_ (large enough for [n, q_out_dim])
+        int64_t qfull_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(q_out_dim)};
+        qv_full = Tensor(ssm_proj_buf_.data, compute_dtype_, 2, qfull_shape, true);
+    }
     Tensor qv = view_tokens(q_,        n);
     Tensor kk = view_tokens(k_,        n);
     Tensor vv = view_tokens(v_,        n);
@@ -311,6 +325,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                         cudaMemcpyDeviceToDevice, stream);
     }
 
+    // For Qwen3.5: Q projection writes to larger buffer (includes gate), then split
+    Tensor q_target = has_attn_output_gate ? qv_full : qv;
+
     // 3. QKV projections:  [n, d] @ W^T -> [n, proj_dim]
     //    For decode (n=1) with matching quant types: fused RMSNorm→Q8_1→QKV GEMV.
     //    This skips the intermediate norm_out FP16 buffer entirely.
@@ -321,9 +338,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         auto nvfp4_wq = nvfp4_cache_.find(ly.wq.data);
         auto nvfp4_wk = nvfp4_cache_.find(ly.wk.data);
         auto nvfp4_wv = nvfp4_cache_.find(ly.wv.data);
-        bool nvfp4_qkv = (n == 1 && nvfp4_wq != nvfp4_cache_.end() &&
+        bool nvfp4_qkv = (!has_attn_output_gate && n == 1 && nvfp4_wq != nvfp4_cache_.end() &&
                           nvfp4_wk != nvfp4_cache_.end() && nvfp4_wv != nvfp4_cache_.end());
-        bool fused_qkv = (n == 1 && q8 != nullptr && d8_buf_ != nullptr &&
+        bool fused_qkv = (!has_attn_output_gate && n == 1 && q8 != nullptr && d8_buf_ != nullptr &&
                           no.dtype == DType::FP16 &&
                           ly.wq_qtype == ly.wk_qtype && ly.wk_qtype == ly.wv_qtype &&
                           (ly.wq_qtype == GGMLQuantType::Q6_K ||
@@ -421,7 +438,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                 Tensor fp8_no(fp8_act_buf_, DType::FP8_E4M3, no.ndim, no.shape, true);
                 quantize_fp16_to_fp8_e4m3(no, fp8_no, d_act_scale_, stream,
                                           d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_);
-                gemm_cublaslt(fp8_no, fp8_wq->second.weight, qv, 1.0f, 0.0f,
+                gemm_cublaslt(fp8_no, fp8_wq->second.weight, q_target, 1.0f, 0.0f,
                               d_act_scale_, fp8_wq->second.d_scale, stream);
                 gemm_cublaslt(fp8_no, fp8_wk->second.weight, kk, 1.0f, 0.0f,
                               d_act_scale_, fp8_wk->second.d_scale, stream);
@@ -432,7 +449,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                 auto fused_kv_it = fused_kv_cache_.find(layer);
                 if (n > 1 && fused_kv_it != fused_kv_cache_.end()) {
                     // Q: still separate (different output dim with GQA)
-                    gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, qv,
+                    gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, q_target,
                                   dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
                                   (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
                                   d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
@@ -447,7 +464,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                     const auto* nv4p = (nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &nvfp4_cache_;
                     const auto* ct4p = (cutlass_nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_nvfp4_cache_;
                     const auto* mx4p = (cutlass_mxfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_mxfp4_cache_;
-                    gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, qv, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
+                    gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, q_target, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
                                   (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
                                   d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
                                   nv4p, ct4p, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
@@ -498,6 +515,32 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     if (longrope_short_freqs_) {
         longrope_freqs = (state.max_context_len <= longrope_orig_max_pos_)
                          ? longrope_short_freqs_ : longrope_long_freqs_;
+    }
+
+    // Qwen3.5 attention output gate: split Q projection [12288] → Q[6144] + gate[6144]
+    Tensor attn_gate_buf;
+    if (has_attn_output_gate) {
+        size_t es_q = dtype_size(compute_dtype_);
+        // Copy first half (Q) from q_target to qv
+        cudaMemcpy2DAsync(qv.data, static_cast<size_t>(q_actual_dim) * es_q,
+                          q_target.data, static_cast<size_t>(q_out_dim) * es_q,
+                          static_cast<size_t>(q_actual_dim) * es_q, n,
+                          cudaMemcpyDeviceToDevice, stream);
+        // Gate is second half — create view
+        int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(q_actual_dim)};
+        char* gate_ptr = static_cast<char*>(q_target.data) + q_actual_dim * es_q;
+        // For n>1, gate data is strided (q_out_dim per row, need q_actual_dim).
+        // For n=1, it's contiguous:
+        if (n == 1) {
+            attn_gate_buf = Tensor(gate_ptr, compute_dtype_, 2, gate_shape, true);
+        } else {
+            // Strided copy for prefill
+            attn_gate_buf = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
+            cudaMemcpy2DAsync(attn_gate_buf.data, static_cast<size_t>(q_actual_dim) * es_q,
+                              gate_ptr, static_cast<size_t>(q_out_dim) * es_q,
+                              static_cast<size_t>(q_actual_dim) * es_q, n,
+                              cudaMemcpyDeviceToDevice, stream);
+        }
     }
 
     // 4+5+6. QK-norm + RoPE: fused into single kernel for decode (n=1)
@@ -706,6 +749,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     if (debug_attn_steps) {
         debug_tensor_stats("L0_step3_after_paged_attn", ao, stream);
         debug_tensor_stats("L0_step3_h_before_oproj", h, stream);
+    }
+
+    // Qwen3.5 attention output gate: ao[i] *= sigmoid(gate[i])
+    if (has_attn_output_gate) {
+        sigmoid_mul(ao, attn_gate_buf, ao, stream);
     }
 
     // 8+9. O projection + residual connection.
@@ -2905,23 +2953,30 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         }
 
         if (n == 1) {
+            // Split: [Q(BC_size), K(BC_size), V(inner)]
             char* row = static_cast<char*>(xBC_out.data);
-            const half* Q_ptr = reinterpret_cast<const half*>(row);
-            const half* K_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(BC_size) * es);
-            const half* V_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(2 * BC_size) * es);
 
-            // gdn_scan_decode expects (x=V, B=K, C=Q) mapping
-            // Gate NOT fused here — applied later in RMSNormGated step
-            gdn_scan_decode(
-                V_ptr, K_ptr, Q_ptr,
-                static_cast<const half*>(alpha_proj_out.data),
-                static_cast<const half*>(beta_proj_out.data),
-                static_cast<const float*>(ly.ssm_a.data),
-                static_cast<const float*>(ly.ssm_dt_b.data),
-                static_cast<float*>(h_st),
-                static_cast<half*>(y_buf.data),
-                nullptr,  // no fused gate — done in RMSNormGated below
-                n_heads, head_dim_ssm, ssize, n_groups, stream);
+            // TEST: Use Mamba2-style split [x=V(inner), B=K(BC), C=Q(BC)]
+            // with Mamba2 scan to test if the pipeline (conv→scan→norm→out) works
+            // when using the same scan kernel as the working Nemotron-H path.
+            int64_t x_shape[1] = {static_cast<int64_t>(inner)};
+            Tensor x_t(row + 2*BC_size*es, compute_dtype_, 1, x_shape, true);
+
+            int64_t bc_shape[1] = {static_cast<int64_t>(BC_size)};
+            Tensor B_t(row + BC_size*es, compute_dtype_, 1, bc_shape, true);
+            Tensor C_t(row, compute_dtype_, 1, bc_shape, true);
+
+            int64_t dt_shape[1] = {static_cast<int64_t>(n_heads)};
+            Tensor dt_t(alpha_proj_out.data, compute_dtype_, 1, dt_shape, true);
+
+            int64_t y_shape[1] = {static_cast<int64_t>(inner)};
+            Tensor y_t(y_buf.data, compute_dtype_, 1, y_shape, true);
+
+            // Use Mamba2 scan with gate fusion
+            ssm_scan_decode(x_t, B_t, C_t, dt_t,
+                            ly.ssm_a, ssm_d_ref, ly.ssm_dt_b, h_st,
+                            y_t, static_cast<const half*>(gate_out.data),
+                            n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
         } else {
             // Prefill: de-interleave Q/K/V from xBC_out
             // GDN split order: [Q(key_dim=BC_size), K(key_dim=BC_size), V(value_dim=inner)]
@@ -2947,43 +3002,32 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                               static_cast<size_t>(inner) * es, n,
                               cudaMemcpyDeviceToDevice, stream);
 
-            // GDN delta rule prefill scan — V=x, K=B, Q=C in kernel terms
-            gdn_scan_prefill(
-                reinterpret_cast<const half*>(V_contig),   // x = V
-                reinterpret_cast<const half*>(K_contig),   // B = K
-                reinterpret_cast<const half*>(Q_contig),   // C = Q
-                static_cast<const half*>(alpha_proj_out.data),
-                static_cast<const half*>(beta_proj_out.data),
-                static_cast<const float*>(ly.ssm_a.data),
-                static_cast<const float*>(ly.ssm_dt_b.data),
-                static_cast<float*>(h_st),
-                static_cast<half*>(y_buf.data),
-                nullptr,  // no fused gate — done in RMSNormGated below
-                n, n_heads, head_dim_ssm, ssize, n_groups, stream);
+            // Use Mamba2 prefill scan as A/B test
+            int64_t x_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
+            Tensor x_all(V_contig, compute_dtype_, 2, x_shape, true);
+            int64_t bc_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(BC_size)};
+            Tensor B_all(K_contig, compute_dtype_, 2, bc_shape, true);
+            Tensor C_all(Q_contig, compute_dtype_, 2, bc_shape, true);
+
+            Tensor y_all(y_buf.data, compute_dtype_, 2, x_shape, true);
+            ssm_scan_prefill(x_all, B_all, C_all, alpha_proj_out,
+                             ly.ssm_a, ssm_d_ref, ly.ssm_dt_b, h_st,
+                             y_all, static_cast<const half*>(gate_out.data),
+                             n, n_heads, head_dim_ssm, ssize, n_groups, h_dtype, stream);
         }
     }
 
 
-    // 6. Fused RMSNormGated: y = norm(y) * SiLU(gate)
-    //    Matches HuggingFace's Qwen3_5RMSNormGated: norm(x) * silu(z)
+    // 6. Per-head RMSNorm (Mamba2 scan already fused the gate via z parameter)
     {
-        // Step 1: Apply SiLU to entire gate_out at once (before per-head loop)
-        silu_inplace(gate_out, stream);
-
-        // Step 2: Per-head RMSNorm on y, then multiply with SiLU'd gate
         size_t es_h = dtype_size(compute_dtype_);
         for (int t = 0; t < n; t++) {
             for (int head = 0; head < n_heads; head++) {
                 size_t offset = (t * inner + head * head_dim_ssm) * es_h;
                 int64_t one_shape[2] = {1, static_cast<int64_t>(head_dim_ssm)};
-
                 Tensor head_y(static_cast<char*>(y_buf.data) + offset,
                               compute_dtype_, 2, one_shape, true);
-                Tensor head_g(static_cast<char*>(gate_out.data) + offset,
-                              compute_dtype_, 2, one_shape, true);
-
                 rmsnorm(head_y, ly.ssm_norm_w, head_y, eps, stream);
-                elementwise_mul(head_y, head_g, head_y, stream);
             }
         }
     }

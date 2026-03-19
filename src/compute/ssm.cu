@@ -55,6 +55,35 @@ void relu_sqr_inplace(Tensor& x, cudaStream_t stream) {
 // ---------------------------------------------------------------------------
 // Element-wise multiply kernel
 // ---------------------------------------------------------------------------
+// Sigmoid multiply: out[i] = a[i] * sigmoid(b[i])
+// Used by Qwen3.5 attention output gate.
+__global__ void sigmoid_mul_fp16_kernel(const half* __restrict__ a,
+                                         const half* __restrict__ b,
+                                         half* __restrict__ out,
+                                         int64_t n) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float val_a = __half2float(a[idx]);
+        float val_b = __half2float(b[idx]);
+        float sig = 1.0f / (1.0f + expf(-val_b));
+        out[idx] = __float2half(val_a * sig);
+    }
+}
+
+void sigmoid_mul(const Tensor& a, const Tensor& b, Tensor& out,
+                 cudaStream_t stream) {
+    int64_t n = a.numel();
+    int threads = 256;
+    int blocks = static_cast<int>((n + threads - 1) / threads);
+    if (a.dtype == DType::FP16) {
+        sigmoid_mul_fp16_kernel<<<blocks, threads, 0, stream>>>(
+            static_cast<const half*>(a.data),
+            static_cast<const half*>(b.data),
+            static_cast<half*>(out.data), n);
+    }
+}
+
+// ---------------------------------------------------------------------------
 __global__ void elementwise_mul_fp16_kernel(const half* __restrict__ a,
                                              const half* __restrict__ b,
                                              half* __restrict__ out,

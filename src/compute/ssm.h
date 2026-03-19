@@ -80,4 +80,8 @@ void relu_sqr_inplace(Tensor& x, cudaStream_t stream);
 void elementwise_mul(const Tensor& a, const Tensor& b, Tensor& out,
                      cudaStream_t stream);
 
+// Sigmoid multiply: out[i] = a[i] * sigmoid(b[i])
+void sigmoid_mul(const Tensor& a, const Tensor& b, Tensor& out,
+                 cudaStream_t stream);
+
 } // namespace imp
