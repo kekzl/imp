@@ -53,69 +53,70 @@ __global__ void gdn_scan_decode_kernel(
     // V (value) for this head's d-th dimension
     float v_d = __half2float(x[h * head_dim_ssm + d]);
 
-    // Compute decay gate: a_bar = exp(A_log * softplus(alpha + dt_bias))
-    // A_log is typically negative → a_bar ∈ (0, 1]
+    // Decay gate: g = exp(-exp(A_log) * softplus(alpha + dt_bias))
+    // exp(A_log) converts from log-space → linear decay rate
+    // The negative sign ensures g ∈ (0, 1]
     float alpha_h = __half2float(alpha_raw[h]);
     float dt_val = alpha_h + dt_bias[h];
     dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));  // softplus
-    float exponent = dt_val * A_log[h];
-    exponent = fmaxf(fminf(exponent, 0.0f), -20.0f);  // clamp to [-20, 0]
-    float a_bar = expf(exponent);
+    float decay_rate = expf(A_log[h]);  // A_log → linear (typically A_log < 0 → rate < 1)
+    float exponent = -decay_rate * dt_val;
+    exponent = fmaxf(exponent, -20.0f);  // clamp to prevent underflow
+    float g_t = expf(exponent);  // decay gate ∈ (0, 1]
 
-    // Learning rate: beta ∈ (0, 1)
+    // Learning rate: beta = sigmoid(beta_raw) ∈ (0, 1)
     float beta_h = __half2float(beta_raw[h]);
     beta_h = 1.0f / (1.0f + expf(-fmaxf(fminf(beta_h, 20.0f), -20.0f)));
 
-    // L2-normalize K (critical for delta rule stability)
-    // Each thread computes partial norm, then warp-reduce
-    float k_norm_sq = 0.0f;
-    // Note: all threads in the block share the same K_g (per group).
-    // Thread 0 computes the norm, others read it.
-    __shared__ float s_k_norm_inv;
+    // L2-normalize K and Q (critical for delta rule stability and correctness)
+    __shared__ float s_k_inv, s_q_inv;
     if (d == 0) {
+        float k_sq = 0.0f, q_sq = 0.0f;
         for (int s = 0; s < state_size; s++) {
             float ks = __half2float(K_g[s]);
-            k_norm_sq += ks * ks;
+            float qs = __half2float(Q_g[s]);
+            k_sq += ks * ks;
+            q_sq += qs * qs;
         }
-        s_k_norm_inv = (k_norm_sq > 1e-12f) ? rsqrtf(k_norm_sq) : 1.0f;
+        s_k_inv = (k_sq > 1e-12f) ? rsqrtf(k_sq) : 0.0f;
+        s_q_inv = (q_sq > 1e-12f) ? rsqrtf(q_sq) : 0.0f;
     }
     __syncthreads();
-    float k_inv = s_k_norm_inv;
 
-    // Step 1: Predict — predicted[d] = sum_s(h[s,d] * K_norm[s])
-    float predicted = 0.0f;
+    // Step 1: Predict — kv[d] = (g * S)^T @ k_norm = g * sum_s(S[s,d] * k_norm[s])
+    float kv_d = 0.0f;
     for (int s = 0; s < state_size; s++) {
-        float k_s = __half2float(K_g[s]) * k_inv;
-        predicted += H[s * head_dim_ssm + d] * k_s;
+        float k_s = __half2float(K_g[s]) * s_k_inv;
+        kv_d += H[s * head_dim_ssm + d] * k_s;
     }
+    kv_d *= g_t;  // prediction from decayed state
 
-    // Step 2: Error (no a_bar on prediction — a_bar only decays the state)
-    float error_d = v_d - predicted;
+    // Step 2: Delta = (v - kv) * beta
+    float delta_d = (v_d - kv_d) * beta_h;
 
-    // Step 3 + 4: Update state + compute output
+    // Step 3: Update state + compute output
+    //   S[s,d] = g * S[s,d] + k_norm[s] * delta[d]
+    //   y[d] = sum_s(S[s,d] * q_norm[s])
     float y_partial = 0.0f;
     for (int s = 0; s < state_size; s++) {
-        float k_s = __half2float(K_g[s]) * k_inv;  // normalized key
-        float q_s = __half2float(Q_g[s]);
-        float h_old = H[s * head_dim_ssm + d];
+        float k_s = __half2float(K_g[s]) * s_k_inv;
+        float q_s = __half2float(Q_g[s]) * s_q_inv;
 
-        // Delta rule: S = decay * S + lr * outer(K_norm, error)
-        float h_new = a_bar * h_old + beta_h * k_s * error_d;
+        float h_new = g_t * H[s * head_dim_ssm + d] + k_s * delta_d;
         H[s * head_dim_ssm + d] = h_new;
 
-        // Output: y[d] += h[s,d] * Q[s]
         y_partial += h_new * q_s;
     }
+
+    // Note: output scaling by 1/√head_dim is NOT applied here.
+    // The GroupNorm + output projection handle the scaling implicitly.
 
     // Gating: y *= SiLU(z) if z is provided
     int out_idx = h * head_dim_ssm + d;
     if (z) {
         float z_val = __half2float(z[out_idx]);
-        float silu = z_val / (1.0f + expf(-z_val));
-        y_partial *= silu;
+        y_partial *= z_val / (1.0f + expf(-z_val));  // SiLU
     }
-    // TODO: remove debug — test without gate
-    // y_partial *= 10.0f;  // amplify for testing
 
     y[out_idx] = __float2half(y_partial);
 }
