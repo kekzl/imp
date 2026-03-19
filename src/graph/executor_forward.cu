@@ -2905,14 +2905,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         }
 
         if (n == 1) {
-            // Decode: conv output split is [Q(key_dim), K(key_dim), V(value_dim)]
-            // NOT Mamba2's [x(inner), B, C] — the order is different for GDN!
-            // key_dim = n_groups * state_size = BC_size
-            // value_dim = inner
             char* row = static_cast<char*>(xBC_out.data);
-            const half* Q_ptr = reinterpret_cast<const half*>(row);                                         // [0, BC_size)
-            const half* K_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(BC_size) * es);     // [BC_size, 2*BC_size)
-            const half* V_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(2 * BC_size) * es); // [2*BC_size, conv_channels)
+            const half* Q_ptr = reinterpret_cast<const half*>(row);
+            const half* K_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(BC_size) * es);
+            const half* V_ptr = reinterpret_cast<const half*>(row + static_cast<size_t>(2 * BC_size) * es);
 
             // gdn_scan_decode expects (x=V, B=K, C=Q) mapping
             // Gate NOT fused here — applied later in RMSNormGated step
