@@ -1067,6 +1067,12 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             IMP_LOG_INFO("Remapped %d layers: dense FFN tensors -> shared expert", n_remapped);
         }
 
+        // Qwen3.5: GGUF converter adds +1 to non-GDN norm weights.
+        // imp's RMSNorm expects raw weights (w, not w+1). Subtract 1 back.
+        // Qwen3.5: GGUF converter adds +1 to norm weights (same as Gemma).
+        // imp's rmsnorm uses weight directly, which is correct since the +1 is
+        // already baked into the stored weights. No adjustment needed.
+
         // Update config from actual tensor presence
         if (n_shared_exp > 0 && cfg.n_experts_shared == 0) {
             cfg.n_experts_shared = 1;
