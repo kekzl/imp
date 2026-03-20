@@ -44,11 +44,13 @@ __global__ void gdn_scan_decode_kernel(
 
     float v_d = __half2float(x[h * head_dim_ssm + d]);
 
-    // Decay gate: g_t = exp(-exp(A_log) * softplus(alpha + dt_bias))
+    // Decay gate: g_t = exp(A_gguf * softplus(alpha + dt_bias))
+    // GGUF stores A as -exp(A_log_original), NOT A_log itself!
+    // So A_gguf is already the negative decay rate. No exp() needed.
     float alpha_h = __half2float(alpha_raw[h]);
     float dt_val = alpha_h + dt_bias[h];
     dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
-    float g_t = expf(fmaxf(-expf(A_log[h]) * dt_val, -20.0f));
+    float g_t = expf(fmaxf(A_log[h] * dt_val, -20.0f));
 
     // Beta = sigmoid(beta_raw)
     float beta_h = __half2float(beta_raw[h]);
