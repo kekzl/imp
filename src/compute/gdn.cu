@@ -98,7 +98,10 @@ __global__ void gdn_scan_decode_kernel(
         y_partial += h_new * q_s;
     }
 
-    y[h * head_dim_ssm + d] = __float2half(y_partial);
+    // Output scale matching llama.cpp: attn_data[col] = attn_col * (1/√S_v)
+    // The model was TRAINED with this scale — ssm_norm and ssm_out weights
+    // expect 1/√128-scaled inputs. Without it, magnitudes are 11.3x too large.
+    y[h * head_dim_ssm + d] = __float2half(y_partial * rsqrtf(static_cast<float>(head_dim_ssm)));
 }
 
 // Host launchers
