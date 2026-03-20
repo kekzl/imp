@@ -91,8 +91,8 @@ __global__ void gdn_scan_decode_kernel(
     // Step 3: Update S + compute output
     float y_partial = 0.0f;
     for (int s = 0; s < state_size; s++) {
-        float k_s = __half2float(K_g[s]) * s_k_inv;  // K L2-normalized
-        float q_s = __half2float(Q_g[s]) * s_q_inv;  // Q L2-normalized
+        float k_s = __half2float(K_g[s]) * s_k_inv;
+        float q_s = __half2float(Q_g[s]) * s_q_inv;
         float h_new = g_t * H[s * head_dim_ssm + d] + k_s * delta_d;
         H[s * head_dim_ssm + d] = h_new;
         y_partial += h_new * q_s;
