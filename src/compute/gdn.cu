@@ -56,7 +56,10 @@ __global__ void gdn_scan_decode_kernel(
     float beta_h = __half2float(beta_raw[h]);
     beta_h = 1.0f / (1.0f + expf(-fmaxf(fminf(beta_h, 20.0f), -20.0f)));
 
-    // L2-normalize K and Q per group
+    // K and Q are used WITHOUT normalization here.
+    // L2-norm is applied as a separate graph op in llama.cpp.
+    // We apply it here for stability, matching llama.cpp's pre-kernel norm.
+    // NOTE: removing normalization causes NaN explosion (tested).
     __shared__ float s_k_inv, s_q_inv;
     if (d == 0) {
         float k_sq = 0.0f, q_sq = 0.0f;
