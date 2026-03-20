@@ -3044,6 +3044,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
 
 
     // 6. Fused RMSNormGated: y = norm(y) * SiLU(gate)
+    // Fused RMSNormGated: norm(y) * SiLU(gate)
+    // TODO: optimize — currently O(n_heads * n) separate kernel launches
     {
         silu_inplace(gate_out, stream);
         size_t es_h = dtype_size(compute_dtype_);

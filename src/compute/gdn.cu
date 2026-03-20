@@ -69,8 +69,10 @@ __global__ void gdn_scan_decode_kernel(
             k_sq += ks * ks;
             q_sq += qs * qs;
         }
-        s_k_inv = (k_sq > 1e-8f) ? rsqrtf(k_sq) : 0.0f;
-        s_q_inv = (q_sq > 1e-8f) ? rsqrtf(q_sq) : 0.0f;
+        // Match llama.cpp's ggml_l2_norm: 1/sqrt(sum + eps)
+        const float eps_l2 = 1e-6f;
+        s_k_inv = rsqrtf(k_sq + eps_l2);
+        s_q_inv = rsqrtf(q_sq + eps_l2);
     }
     __syncthreads();
 
