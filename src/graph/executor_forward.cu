@@ -2917,6 +2917,11 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
             ssm_conv1d_decode(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
                               xBC_out, conv_kernel, stream);
         }
+    } else {
+        // Fallback: copy input to output (no conv state available)
+        cudaMemcpyAsync(xBC_out.data, xBC_in.data,
+                        static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_),
+                        cudaMemcpyDeviceToDevice, stream);
     }
     // 4. SiLU activation on full conv output
     silu_inplace(xBC_out, stream);

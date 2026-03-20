@@ -88,17 +88,11 @@ __global__ void gdn_scan_decode_kernel(
     // Step 2: delta[d] = (v[d] - g * kv[d]) * beta
     float delta_d = (v_d - g_t * kv_d) * beta_h;
 
-    // Q output scale: apply 1/√S_k AFTER L2 normalization.
-    // llama.cpp: q_scaled = l2_norm(q) * (1/√S_k)
-    // Since l2_norm makes ||q||=1, the scale is always 1/√S_k regardless of input magnitude.
-    float q_scale_factor = rsqrtf(static_cast<float>(state_size));
-    // NOTE: s_q_inv already does L2 norm. The scale is INDEPENDENT of Q magnitude.
-
     // Step 3: Update S + compute output
     float y_partial = 0.0f;
     for (int s = 0; s < state_size; s++) {
-        float k_s = __half2float(K_g[s]) * s_k_inv;
-        float q_s = __half2float(Q_g[s]) * s_q_inv;  // L2-norm only
+        float k_s = __half2float(K_g[s]) * s_k_inv;  // K L2-normalized
+        float q_s = __half2float(Q_g[s]) * s_q_inv;  // Q L2-normalized
         float h_new = g_t * H[s * head_dim_ssm + d] + k_s * delta_d;
         H[s * head_dim_ssm + d] = h_new;
         y_partial += h_new * q_s;
