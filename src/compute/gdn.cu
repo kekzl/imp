@@ -62,43 +62,52 @@ __global__ void gdn_scan_decode_kernel(
     float beta_h = __half2float(beta_raw[h]);
     beta_h = 1.0f / (1.0f + expf(-fmaxf(fminf(beta_h, 20.0f), -20.0f)));
 
-    // L2-normalize K and Q (fused into kernel, matching pre-kernel l2_norm)
+    // Cache K and Q in shared memory as FP32 (converted from FP16 once).
+    // This matches llama.cpp which receives FP32 Q/K from the graph.
+    // Also compute L2-norms for normalization.
+    extern __shared__ float smem[];
+    float* s_k = smem;                    // [state_size]
+    float* s_q = smem + state_size;       // [state_size]
+    // Thread 0 loads and normalizes K/Q
     __shared__ float s_k_inv, s_q_inv;
     if (d == 0) {
         float k_sq = 0.0f, q_sq = 0.0f;
         for (int s = 0; s < state_size; s++) {
             float ks = __half2float(K_g[s]);
             float qs = __half2float(Q_g[s]);
+            s_k[s] = ks;
+            s_q[s] = qs;
             k_sq += ks * ks;
             q_sq += qs * qs;
         }
         s_k_inv = rsqrtf(k_sq + 1e-6f);
         s_q_inv = rsqrtf(q_sq + 1e-6f);
+        // Normalize in-place in smem
+        for (int s = 0; s < state_size; s++) {
+            s_k[s] *= s_k_inv;
+            s_q[s] *= s_q_inv;
+        }
     }
     __syncthreads();
 
     // Scale factor for output (matching llama.cpp: scale = 1/√S_v)
     const float scale = rsqrtf(static_cast<float>(head_dim_ssm));
 
-    // Step 1: kv[d] = sum_s(S[s,d] * k_norm[s])
+    // Step 1: kv[d] = sum_s(S[s,d] * k_norm[s]) — using cached FP32 K
     float kv_d = 0.0f;
     for (int s = 0; s < state_size; s++) {
-        kv_d += H[s * head_dim_ssm + d] * __half2float(K_g[s]) * s_k_inv;
+        kv_d += H[s * head_dim_ssm + d] * s_k[s];
     }
 
     // Step 2: delta[d] = (v[d] - g * kv[d]) * beta
     float delta_d = (v_d - g_t * kv_d) * beta_h;
 
-    // Step 3: Update state + compute output
+    // Step 3: Update state + compute output — using cached FP32 K/Q
     float y_partial = 0.0f;
     for (int s = 0; s < state_size; s++) {
-        float k_s = __half2float(K_g[s]) * s_k_inv;
-        float q_s = __half2float(Q_g[s]) * s_q_inv;
-
-        float h_new = g_t * H[s * head_dim_ssm + d] + k_s * delta_d;
+        float h_new = g_t * H[s * head_dim_ssm + d] + s_k[s] * delta_d;
         H[s * head_dim_ssm + d] = h_new;
-
-        y_partial += h_new * q_s;
+        y_partial += h_new * s_q[s];
     }
 
     // Apply scale and write output
@@ -113,7 +122,8 @@ void gdn_scan_decode(const half* x, const half* B, const half* C,
                      int n_heads, int head_dim_ssm,
                      int state_size, int n_groups,
                      cudaStream_t stream) {
-    gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, 2 * sizeof(float), stream>>>(
+    size_t smem_sz = 2 * state_size * sizeof(float) + 2 * sizeof(float);
+    gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem_sz, stream>>>(
         x, B, C, alpha, beta, A_log, dt_bias, h_state, y, z,
         n_heads, head_dim_ssm, state_size, n_groups);
 }
@@ -128,7 +138,8 @@ void gdn_scan_prefill(const half* x, const half* B, const half* C,
     int inner = n_heads * head_dim_ssm;
     int BC_size = n_groups * state_size;
     for (int t = 0; t < n_tokens; t++) {
-        gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, 2 * sizeof(float), stream>>>(
+        size_t smem_sz = 2 * state_size * sizeof(float) + 2 * sizeof(float);
+    gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem_sz, stream>>>(
             x + t * inner, B + t * BC_size, C + t * BC_size,
             alpha + t * n_heads, beta + t * n_heads,
             A_log, dt_bias, h_state,
