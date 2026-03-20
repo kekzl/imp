@@ -524,29 +524,38 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                          ? longrope_short_freqs_ : longrope_long_freqs_;
     }
 
-    // Qwen3.5 attention output gate: split Q projection [12288] → Q[6144] + gate[6144]
+    // Qwen3.5 attention output gate: Q projection is INTERLEAVED per head:
+    //   [Q_h0(hd), Gate_h0(hd), Q_h1(hd), Gate_h1(hd), ...]
+    // NOT [Q_all, Gate_all]. De-interleave Q and gate.
     Tensor attn_gate_buf;
     if (has_attn_output_gate) {
         size_t es_q = dtype_size(compute_dtype_);
-        // Copy first half (Q) from q_target to qv
-        cudaMemcpy2DAsync(qv.data, static_cast<size_t>(q_actual_dim) * es_q,
-                          q_target.data, static_cast<size_t>(q_out_dim) * es_q,
-                          static_cast<size_t>(q_actual_dim) * es_q, n,
-                          cudaMemcpyDeviceToDevice, stream);
-        // Gate is second half — create view
         int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(q_actual_dim)};
-        char* gate_ptr = static_cast<char*>(q_target.data) + q_actual_dim * es_q;
-        // For n>1, gate data is strided (q_out_dim per row, need q_actual_dim).
-        // For n=1, it's contiguous:
-        if (n == 1) {
-            attn_gate_buf = Tensor(gate_ptr, compute_dtype_, 2, gate_shape, true);
-        } else {
-            // Strided copy for prefill
-            attn_gate_buf = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
-            cudaMemcpy2DAsync(attn_gate_buf.data, static_cast<size_t>(q_actual_dim) * es_q,
-                              gate_ptr, static_cast<size_t>(q_out_dim) * es_q,
-                              static_cast<size_t>(q_actual_dim) * es_q, n,
-                              cudaMemcpyDeviceToDevice, stream);
+        attn_gate_buf = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
+
+        // De-interleave: src has stride 2*hd per head, dst has stride hd per head
+        // For each token t, for each head h:
+        //   Q[t, h*hd : (h+1)*hd] = src[t, h*2*hd : h*2*hd + hd]
+        //   Gate[t, h*hd : (h+1)*hd] = src[t, h*2*hd + hd : (h+1)*2*hd]
+        for (int h_idx = 0; h_idx < nh; h_idx++) {
+            // Q: copy hd elements per head per token
+            cudaMemcpy2DAsync(
+                static_cast<char*>(qv.data) + h_idx * hd * es_q,          // dst: Q head h
+                static_cast<size_t>(q_actual_dim) * es_q,                  // dst pitch (full Q row)
+                static_cast<char*>(q_target.data) + h_idx * 2 * hd * es_q, // src: interleaved Q_h
+                static_cast<size_t>(q_out_dim) * es_q,                     // src pitch (full QG row)
+                static_cast<size_t>(hd) * es_q,                            // width (one head)
+                n,                                                          // height (n tokens)
+                cudaMemcpyDeviceToDevice, stream);
+            // Gate: copy hd elements per head per token
+            cudaMemcpy2DAsync(
+                static_cast<char*>(attn_gate_buf.data) + h_idx * hd * es_q,
+                static_cast<size_t>(q_actual_dim) * es_q,
+                static_cast<char*>(q_target.data) + (h_idx * 2 + 1) * hd * es_q,
+                static_cast<size_t>(q_out_dim) * es_q,
+                static_cast<size_t>(hd) * es_q,
+                n,
+                cudaMemcpyDeviceToDevice, stream);
         }
     }
 
@@ -901,7 +910,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
 
     // 1. Save residual (skip if fused down-proj+residual will handle it).
     //    For FP32 accumulator path: residual is kept in fp32_hidden_, skip FP16 copy.
-    const Tensor& ffn_norm_w = (ly.ffn_norm.data != nullptr) ? ly.ffn_norm : ly.attn_norm;
+    // Qwen3.5: uses post_attn_norm instead of ffn_norm (ffn_norm is null)
+    const Tensor& ffn_norm_w = (ly.ffn_norm.data != nullptr) ? ly.ffn_norm :
+                                (ly.post_attn_norm.data != nullptr) ? ly.post_attn_norm : ly.attn_norm;
     const bool has_post_ffn_norm = (ly.post_ffn_norm.data != nullptr);
     const bool using_fp32_accum = (fp32_accum_buf_ != nullptr && has_post_ffn_norm);
     bool will_fuse_down_nvfp4 = (!has_post_ffn_norm && n == 1 && h.dtype == DType::FP16 &&
