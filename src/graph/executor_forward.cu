@@ -2918,7 +2918,6 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                               xBC_out, conv_kernel, stream);
         }
     }
-
     // 4. SiLU activation on full conv output
     silu_inplace(xBC_out, stream);
 
