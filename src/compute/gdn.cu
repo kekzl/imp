@@ -69,7 +69,11 @@ __global__ void gdn_scan_decode_kernel(
             k_sq += ks * ks;
             q_sq += qs * qs;
         }
-        // Match llama.cpp's ggml_l2_norm: 1/sqrt(sum + eps)
+        // Option: L2-normalize K and Q (matching llama.cpp pre-kernel l2_norm)
+        // TEST: try WITHOUT normalization — llama.cpp normalizes BEFORE kernel
+        // but the normalization might be interacting badly with our kernel's
+        // different state layout or timing.
+        // L2-normalize K and Q (matching llama.cpp ggml_l2_norm)
         const float eps_l2 = 1e-6f;
         s_k_inv = rsqrtf(k_sq + eps_l2);
         s_q_inv = rsqrtf(q_sq + eps_l2);
@@ -94,7 +98,7 @@ __global__ void gdn_scan_decode_kernel(
     float y_partial = 0.0f;
     for (int s = 0; s < state_size; s++) {
         float k_s = __half2float(K_g[s]) * s_k_inv;
-        float q_s = __half2float(Q_g[s]) * s_q_inv;  // L2-norm only, no scale
+        float q_s = __half2float(Q_g[s]) * s_q_inv;  // L2-norm only
         float h_new = g_t * H[s * head_dim_ssm + d] + k_s * delta_d;
         H[s * head_dim_ssm + d] = h_new;
         y_partial += h_new * q_s;
