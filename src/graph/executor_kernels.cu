@@ -736,7 +736,7 @@ __global__ void write_kv_cache_rope_fused_kernel(
             if (longrope_inv_freqs) {
                 freq = longrope_inv_freqs[pair_idx];
             } else {
-                freq = 1.0f / (powf(theta, (2.0f * pair_idx) / static_cast<float>(head_dim)));
+                freq = 1.0f / (powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs)));
                 freq *= inv_scaling;
             }
             float angle = static_cast<float>(pos) * freq;
@@ -841,7 +841,7 @@ __global__ void rope_q_only_fp16_kernel(
     if (longrope_inv_freqs) {
         freq = longrope_inv_freqs[pair_idx];
     } else {
-        freq = 1.0f / (powf(theta, (2.0f * pair_idx) / static_cast<float>(head_dim)));
+        freq = 1.0f / (powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs)));
         freq *= inv_scaling;
     }
     float angle = static_cast<float>(pos) * freq;

@@ -77,12 +77,15 @@ __global__ void rope_forward_fp32_kernel(
         sin_val = __sinf(angle);
     } else if (ext_factor != 0.0f) {
         // YaRN mode: per-dimension frequency blending
-        float theta_extrap = static_cast<float>(pos) / powf(theta, (2.0f * pair_idx) / static_cast<float>(head_dim));
+        float theta_extrap = static_cast<float>(pos) / powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs));
         rope_yarn(theta_extrap, inv_scaling, corr_dim_0, corr_dim_1,
                   2 * pair_idx, ext_factor, attn_factor, cos_val, sin_val);
     } else {
         // Linear mode: simple frequency * inv_scaling
-        float freq = 1.0f / powf(theta, (2.0f * pair_idx) / static_cast<float>(head_dim));
+        // Use rope_pairs*2 (=rope_dim) as denominator, not head_dim.
+        // For partial RoPE (rope_dim < head_dim), the base frequency spacing
+        // is determined by rope_dim, not the full head dimension.
+        float freq = 1.0f / powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs));
         freq *= inv_scaling;
         float angle = static_cast<float>(pos) * freq;
         cos_val = __cosf(angle);
@@ -148,11 +151,11 @@ __global__ void rope_forward_fp16_kernel(
         cos_val = __cosf(angle);
         sin_val = __sinf(angle);
     } else if (ext_factor != 0.0f) {
-        float theta_extrap = static_cast<float>(pos) / powf(theta, (2.0f * pair_idx) / static_cast<float>(head_dim));
+        float theta_extrap = static_cast<float>(pos) / powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs));
         rope_yarn(theta_extrap, inv_scaling, corr_dim_0, corr_dim_1,
                   2 * pair_idx, ext_factor, attn_factor, cos_val, sin_val);
     } else {
-        float freq = 1.0f / powf(theta, (2.0f * pair_idx) / static_cast<float>(head_dim));
+        float freq = 1.0f / powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs));
         freq *= inv_scaling;
         float angle = static_cast<float>(pos) * freq;
         cos_val = __cosf(angle);
@@ -328,11 +331,11 @@ __global__ void qknorm_rope_fused_fp16_kernel(
                 cos_val = __cosf(angle);
                 sin_val = __sinf(angle);
             } else if (ext_factor != 0.0f) {
-                float theta_extrap = (float)pos / powf(theta, (2.0f * pair) / (float)head_dim);
+                float theta_extrap = (float)pos / powf(theta, (2.0f * pair) / (float)(2 * rope_pairs));
                 rope_yarn(theta_extrap, inv_scaling, corr_dim_0, corr_dim_1,
                           2 * pair, ext_factor, attn_factor, cos_val, sin_val);
             } else {
-                float freq = 1.0f / powf(theta, (2.0f * pair) / (float)head_dim) * inv_scaling;
+                float freq = 1.0f / powf(theta, (2.0f * pair) / (float)(2 * rope_pairs)) * inv_scaling;
                 float angle = (float)pos * freq;
                 cos_val = __cosf(angle);
                 sin_val = __sinf(angle);
@@ -387,11 +390,11 @@ __global__ void qknorm_rope_fused_fp16_kernel(
                 cos_val = __cosf(angle);
                 sin_val = __sinf(angle);
             } else if (ext_factor != 0.0f) {
-                float theta_extrap = (float)pos / powf(theta, (2.0f * pair) / (float)head_dim);
+                float theta_extrap = (float)pos / powf(theta, (2.0f * pair) / (float)(2 * rope_pairs));
                 rope_yarn(theta_extrap, inv_scaling, corr_dim_0, corr_dim_1,
                           2 * pair, ext_factor, attn_factor, cos_val, sin_val);
             } else {
-                float freq = 1.0f / powf(theta, (2.0f * pair) / (float)head_dim) * inv_scaling;
+                float freq = 1.0f / powf(theta, (2.0f * pair) / (float)(2 * rope_pairs)) * inv_scaling;
                 float angle = (float)pos * freq;
                 cos_val = __cosf(angle);
                 sin_val = __sinf(angle);

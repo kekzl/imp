@@ -146,6 +146,49 @@ __global__ void ssm_conv1d_decode_kernel(
     x_out[ch] = __float2half(sum);
 }
 
+// FP32-output conv1d decode: reads FP16 input, produces FP32 output with fused SiLU.
+// Used by GDN layers for full FP32 pipeline (matching llama.cpp precision).
+__global__ void ssm_conv1d_decode_f32_silu_kernel(
+    float* __restrict__ conv_state,       // [channels, kernel_size]
+    const half* __restrict__ x_in,        // [channels] FP16
+    const half* __restrict__ weight,      // [channels, kernel_size] FP16
+    const half* __restrict__ bias,        // [channels] or nullptr
+    float* __restrict__ x_out,            // [channels] FP32
+    int channels, int kernel_size)
+{
+    int ch = blockIdx.x * blockDim.x + threadIdx.x;
+    if (ch >= channels) return;
+
+    float* state = conv_state + ch * kernel_size;
+    for (int k = 0; k < kernel_size - 1; k++)
+        state[k] = state[k + 1];
+    state[kernel_size - 1] = __half2float(x_in[ch]);
+
+    float sum = 0.0f;
+    for (int k = 0; k < kernel_size; k++)
+        sum += state[k] * __half2float(weight[ch * kernel_size + k]);
+    if (bias)
+        sum += __half2float(bias[ch]);
+
+    // Fused SiLU: x / (1 + exp(-x))
+    x_out[ch] = sum / (1.0f + expf(-sum));
+}
+
+void ssm_conv1d_decode_f32_silu(void* conv_state, const Tensor& x_in,
+                                 const Tensor& weight, const Tensor& bias,
+                                 float* x_out_f32, int conv_kernel,
+                                 cudaStream_t stream) {
+    int channels = static_cast<int>(x_in.shape[x_in.ndim - 1]);
+    int threads = 256;
+    int blocks = (channels + threads - 1) / threads;
+    ssm_conv1d_decode_f32_silu_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<float*>(conv_state),
+        static_cast<const half*>(x_in.data),
+        static_cast<const half*>(weight.data),
+        bias.data ? static_cast<const half*>(bias.data) : nullptr,
+        x_out_f32, channels, conv_kernel);
+}
+
 void ssm_conv1d_decode(void* conv_state, const Tensor& x_in,
                        const Tensor& weight, const Tensor& bias,
                        Tensor& x_out, int conv_kernel,
@@ -222,6 +265,58 @@ void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in,
         bias.data ? static_cast<const half*>(bias.data) : nullptr,
         static_cast<half*>(x_out.data),
         n_tokens, channels, conv_kernel);
+}
+
+// ---------------------------------------------------------------------------
+// Fused conv1d + SiLU + FP32 output for prefill.
+// Replaces 3 separate kernels (conv → SiLU → FP16→FP32) with one.
+// ---------------------------------------------------------------------------
+__global__ void ssm_conv1d_prefill_f32_silu_kernel(
+    float* __restrict__ conv_state,
+    const half* __restrict__ x_in,
+    const half* __restrict__ weight,
+    const half* __restrict__ bias,
+    float* __restrict__ x_out_f32,
+    int n_tokens, int channels, int kernel_size)
+{
+    int token = blockIdx.x;
+    if (token >= n_tokens) return;
+
+    for (int ch = threadIdx.x; ch < channels; ch += blockDim.x) {
+        float sum = 0.0f;
+        for (int k = 0; k < kernel_size; k++) {
+            int src_t = token - (kernel_size - 1) + k;
+            float val = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch]) : 0.0f;
+            sum += val * __half2float(weight[ch * kernel_size + k]);
+        }
+        if (bias) sum += __half2float(bias[ch]);
+
+        // Fused SiLU + FP32 output
+        x_out_f32[token * channels + ch] = sum / (1.0f + expf(-sum));
+
+        // Update conv_state for last token
+        if (token == n_tokens - 1) {
+            float* state = conv_state + ch * kernel_size;
+            for (int k = 0; k < kernel_size; k++) {
+                int src_t = n_tokens - kernel_size + k;
+                state[k] = (src_t >= 0) ? __half2float(x_in[src_t * channels + ch]) : 0.0f;
+            }
+        }
+    }
+}
+
+void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in,
+                                   const Tensor& weight, const Tensor& bias,
+                                   float* x_out_f32, int conv_kernel,
+                                   cudaStream_t stream) {
+    int n_tokens = static_cast<int>(x_in.shape[0]);
+    int channels = static_cast<int>(x_in.shape[1]);
+    ssm_conv1d_prefill_f32_silu_kernel<<<n_tokens, 256, 0, stream>>>(
+        static_cast<float*>(conv_state),
+        static_cast<const half*>(x_in.data),
+        static_cast<const half*>(weight.data),
+        bias.data ? static_cast<const half*>(bias.data) : nullptr,
+        x_out_f32, n_tokens, channels, conv_kernel);
 }
 
 // ---------------------------------------------------------------------------

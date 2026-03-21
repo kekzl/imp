@@ -401,6 +401,8 @@ static bool assign_tensor(Model& model, const std::string& name,
                 layer.ssm_in_qtype = qtype;
             } else {
                 // Standard fused QKV: split into separate Q, K, V
+                // For Qwen3.5 attention: Q has 2× output (Q + gate interleaved),
+                // so q_rows = total_rows - k_rows - v_rows (not just n_heads * head_dim).
                 int q_rows = cfg.n_heads * cfg.head_dim;
                 int k_rows = cfg.n_kv_heads * cfg.head_dim;
                 size_t row_bytes = ggml_quant_row_bytes(qtype, d_model);
@@ -1119,6 +1121,10 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     auto it_add_bos = metadata.find("tokenizer.ggml.add_bos_token");
     if (it_add_bos != metadata.end()) {
         tokenizer->set_add_bos(val_uint(it_add_bos->second) != 0);
+    } else if (tok_type == "gpt2") {
+        // GPT2/BPE tokenizers (Qwen, etc.) typically don't use BOS.
+        // Default to false when metadata is absent.
+        tokenizer->set_add_bos(false);
     }
 
     // add_space_prefix flag (Gemma: false, LLaMA: true/default)

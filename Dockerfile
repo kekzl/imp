@@ -35,7 +35,8 @@ RUN --mount=type=cache,target=/src/build \
     && cmake --build build -j$(nproc) \
     && cp build/imp-server build/imp-cli /tmp/ \
     && ([ -f build/imp-tests ] && cp build/imp-tests /tmp/ || true) \
-    && ([ -f build/imp-bench ] && cp build/imp-bench /tmp/ || true)
+    && ([ -f build/imp-bench ] && cp build/imp-bench /tmp/ || true) \
+    && ([ -f build/test-gdn ] && cp build/test-gdn /tmp/ || true)
 
 # =============================================================================
 # Stage 2: Minimal runtime image
@@ -52,6 +53,7 @@ COPY --from=builder /tmp/imp-server /usr/local/bin/imp-server
 COPY --from=builder /tmp/imp-cli /usr/local/bin/imp-cli
 COPY --from=builder /tmp/imp-test[s] /usr/local/bin/
 COPY --from=builder /tmp/imp-benc[h] /usr/local/bin/
+COPY --from=builder /tmp/test-gd[n] /usr/local/bin/
 
 # Copy presets and entrypoint
 COPY presets.toml /usr/local/bin/presets.toml

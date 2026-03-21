@@ -355,3 +355,8 @@ endif()
 if(IMP_BUILD_SERVER)
     install(TARGETS imp-server RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
+
+# Standalone GDN kernel test (always built)
+add_executable(test-gdn tests/test_gdn_kernel.cu)
+target_link_libraries(test-gdn PRIVATE imp)
+target_include_directories(test-gdn PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)

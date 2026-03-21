@@ -11,6 +11,12 @@ namespace imp {
 // weight:     [conv_channels, conv_kernel] float (or FP16)
 // bias:       [conv_channels] float (or FP16), can be nullptr
 // x_out:      [n_tokens, conv_channels] compute_dtype (output)
+// FP32-output conv1d decode with fused SiLU (for GDN FP32 pipeline)
+void ssm_conv1d_decode_f32_silu(void* conv_state, const Tensor& x_in,
+                                 const Tensor& weight, const Tensor& bias,
+                                 float* x_out_f32, int conv_kernel,
+                                 cudaStream_t stream);
+
 // For decode: n_tokens = 1 per sequence
 void ssm_conv1d_decode(void* conv_state, const Tensor& x_in,
                        const Tensor& weight, const Tensor& bias,
@@ -28,6 +34,13 @@ void ssm_conv1d_prefill(void* conv_state, const Tensor& x_in,
                         const Tensor& weight, const Tensor& bias,
                         Tensor& x_out, int conv_kernel,
                         cudaStream_t stream);
+
+// Fused conv1d + SiLU + FP32 output for prefill (GDN layers).
+// Replaces 3 separate kernels (conv → SiLU → FP16→FP32) with one launch.
+void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in,
+                                   const Tensor& weight, const Tensor& bias,
+                                   float* x_out_f32, int conv_kernel,
+                                   cudaStream_t stream);
 
 // Mamba2 SSM scan decode (single step per sequence).
 // x:        [inner_size] compute_dtype — input after conv + SiLU
