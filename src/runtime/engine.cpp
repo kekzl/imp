@@ -276,9 +276,22 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // (small models are already memory-bandwidth-light).
     // Exception: MoE models benefit regardless of d_model — expert weights dominate VRAM
     // and sparse activation limits error accumulation.
+    // Count GDN layers for auto-detection decisions below.
+    int n_gdn_auto = 0;
+    for (int i = 0; i < mcfg.n_layers; i++) {
+        if (model_->layer(i).gdn_gate.data != nullptr) n_gdn_auto++;
+    }
+
     if (config_.use_nvfp4_decode < 0) {
         int sm = get_device_sm_version();
-        if (mcfg.d_model < 4096 && mcfg.n_experts == 0) {
+        if (n_gdn_auto > 0) {
+            // GDN (Gated DeltaNet) models: the delta rule scan accumulates
+            // quantization error in the recurrent state H across tokens.
+            // NVFP4 (4-bit) causes visible quality degradation on 9B+ models.
+            // FP8 prefill + dp4a decode preserves enough precision.
+            config_.use_nvfp4_decode = 0;
+            IMP_LOG_INFO("NVFP4 decode: auto → disabled (GDN model, %d recurrent layers — precision risk)", n_gdn_auto);
+        } else if (mcfg.d_model < 4096 && mcfg.n_experts == 0) {
             config_.use_nvfp4_decode = 0;
             IMP_LOG_INFO("NVFP4 decode: auto → disabled (d_model=%d < 4096, precision risk)", mcfg.d_model);
         } else if (sm >= 120) {
