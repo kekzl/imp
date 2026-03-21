@@ -302,8 +302,9 @@ public:
     // Pinned host buffer for logprobs extraction.
     float* h_logits_pinned() const { return h_logits_pinned_; }
 
-    // Ensure pinned logits buffer is allocated for the given vocab size.
-    void ensure_logits_pinned(int vocab_size);
+    // Ensure pinned logits buffer is allocated for the given number of floats.
+    // For single sequence: pass vocab_size. For batched logprobs: pass vocab_size * n_sequences.
+    void ensure_logits_pinned(int total_floats);
 
     // Access the hidden state buffer after forward_logits().
     // Returns [max_tokens, d_model] FP16 on device. Use view_tokens() to get [n, d_model].
@@ -515,6 +516,7 @@ private:
 
     // Pre-allocated sampling result buffers (avoids cudaMalloc/cudaFree per token).
     int32_t* d_sample_result_ = nullptr;  // device buffer for argmax/sample kernel output
+    int32_t* h_sample_pinned_ = nullptr;  // pinned host buffer for async D2H sample result
 
     // Pinned host buffer for logprobs extraction (D2H copy of logits)
     float* h_logits_pinned_ = nullptr;  // [vocab_size] pinned host memory

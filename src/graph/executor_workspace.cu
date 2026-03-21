@@ -512,6 +512,16 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     }
 
+    // Pinned host buffer for async sampling D2H copy (avoids stack-variable sync)
+    if (!h_sample_pinned_ && d_sample_result_) {
+        cudaError_t err = cudaHostAlloc(&h_sample_pinned_, sizeof(int32_t), cudaHostAllocDefault);
+        if (err != cudaSuccess) {
+            IMP_LOG_WARN("cudaHostAlloc for sample pinned buffer failed: %s",
+                         cudaGetErrorString(err));
+            h_sample_pinned_ = nullptr;
+        }
+    }
+
     // MMVQ (dp4a) scratch buffers for quantized input vectors.
     // Find the max Q8_1 block count needed across all uses:
     //   1. Dense GEMV: max_k / 32 blocks (one input vector)
@@ -1108,6 +1118,10 @@ void GraphExecutor::free_buffers() {
     if (d_sample_result_) {
         cudaFree(d_sample_result_);
         d_sample_result_ = nullptr;
+    }
+    if (h_sample_pinned_) {
+        cudaFreeHost(h_sample_pinned_);
+        h_sample_pinned_ = nullptr;
     }
     if (h_logits_pinned_) {
         cudaFreeHost(h_logits_pinned_);
@@ -2373,11 +2387,11 @@ Tensor GraphExecutor::view_tokens(const Tensor& buf, int n_tokens) const {
 }
 
 
-void GraphExecutor::ensure_logits_pinned(int vocab_size) {
-    if (h_logits_pinned_ && h_logits_pinned_size_ >= vocab_size) return;
+void GraphExecutor::ensure_logits_pinned(int total_floats) {
+    if (h_logits_pinned_ && h_logits_pinned_size_ >= total_floats) return;
     if (h_logits_pinned_) cudaFreeHost(h_logits_pinned_);
-    cudaHostAlloc(&h_logits_pinned_, vocab_size * sizeof(float), cudaHostAllocDefault);
-    h_logits_pinned_size_ = vocab_size;
+    cudaHostAlloc(&h_logits_pinned_, total_floats * sizeof(float), cudaHostAllocDefault);
+    h_logits_pinned_size_ = total_floats;
 }
 
 } // namespace imp
