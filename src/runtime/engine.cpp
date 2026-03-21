@@ -1979,31 +1979,42 @@ bool Engine::step() {
 
             Tokenizer* tok = model_->tokenizer();
 
-            // 3f. Extract logprobs (D2H copy + CPU computation) before distributing tokens
+            // 3f. Extract logprobs (batched D2H copy + CPU computation)
             if (needs_logprobs && decode_logits_out.data != nullptr) {
                 int vocab_size = static_cast<int>(decode_logits_out.shape[decode_logits_out.ndim - 1]);
-                executor_->ensure_logits_pinned(vocab_size);
 
+                // Count sequences needing logprobs for batch allocation
+                int n_lp = 0;
+                for (const auto& r : valid_decode) if (r->logprobs) n_lp++;
+
+                // Allocate pinned buffer for all logprob sequences at once
+                executor_->ensure_logits_pinned(vocab_size * n_lp);
+                float* h_base = executor_->h_logits_pinned();
+
+                // Batch all D2H copies before syncing
+                int slot = 0;
+                for (int i = 0; i < static_cast<int>(valid_decode.size()); i++) {
+                    if (!valid_decode[i]->logprobs) continue;
+                    const float* d_logits = static_cast<const float*>(decode_logits_out.data)
+                        + static_cast<size_t>(i) * vocab_size;
+                    cudaMemcpyAsync(h_base + static_cast<size_t>(slot) * vocab_size,
+                                    d_logits, vocab_size * sizeof(float),
+                                    cudaMemcpyDeviceToHost, dec_stream);
+                    slot++;
+                }
+                cudaStreamSynchronize(dec_stream);  // single sync for all copies
+
+                // CPU logprobs computation (no more GPU sync needed)
+                slot = 0;
                 for (int i = 0; i < static_cast<int>(valid_decode.size()); i++) {
                     auto& req = valid_decode[i];
                     if (!req->logprobs) continue;
 
-                    // Get pointer to this sequence's logits row
-                    const float* d_logits = static_cast<const float*>(decode_logits_out.data)
-                        + static_cast<size_t>(i) * vocab_size;
-
-                    // D2H copy
-                    cudaMemcpyAsync(executor_->h_logits_pinned(), d_logits,
-                                    vocab_size * sizeof(float),
-                                    cudaMemcpyDeviceToHost, dec_stream);
-                    cudaStreamSynchronize(dec_stream);
-
-                    // CPU logprobs computation
+                    float* h_logits = h_base + static_cast<size_t>(slot) * vocab_size;
                     LogprobResult lp_result;
-                    compute_logprobs_cpu(executor_->h_logits_pinned(), vocab_size,
+                    compute_logprobs_cpu(h_logits, vocab_size,
                                          tokens[i], req->top_logprobs, &lp_result);
 
-                    // Store in request
                     TokenLogprobInfo info;
                     info.logprob = lp_result.sampled_logprob;
                     info.text = tok->decode_token(tokens[i]);
@@ -2012,6 +2023,7 @@ bool Engine::step() {
                         info.top.push_back({tid, tlp, tok->decode_token(tid)});
                     }
                     req->output_logprobs.push_back(std::move(info));
+                    slot++;
                 }
             }
 

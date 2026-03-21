@@ -97,20 +97,34 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
         }
 
         if (state.temperature <= 0.0f || state.top_k == 1) {
-            token = d_sample_result_
-                ? sample_greedy(last_logits, d_sample_result_, stream)
-                : sample_greedy(last_logits, stream);
+            if (d_sample_result_ && h_sample_pinned_) {
+                sample_greedy_device(last_logits, d_sample_result_, h_sample_pinned_, stream);
+                cudaStreamSynchronize(stream);
+                token = *h_sample_pinned_;
+            } else if (d_sample_result_) {
+                token = sample_greedy(last_logits, d_sample_result_, stream);
+            } else {
+                token = sample_greedy(last_logits, stream);
+            }
         } else {
             int top_k  = state.top_k > 0  ? state.top_k  : 50;
             float top_p = state.top_p > 0.0f ? state.top_p : 1.0f;
             unsigned int seed = state.seed >= 0
                                     ? static_cast<unsigned int>(state.seed)
                                     : 42u;
-            token = d_sample_result_
-                ? sample_topk_topp(last_logits, top_k, top_p,
-                                   state.temperature, seed, d_sample_result_, stream)
-                : sample_topk_topp(last_logits, top_k, top_p,
+            if (d_sample_result_ && h_sample_pinned_) {
+                sample_topk_topp_device(last_logits, top_k, top_p,
+                                         state.temperature, seed,
+                                         d_sample_result_, h_sample_pinned_, stream);
+                cudaStreamSynchronize(stream);
+                token = *h_sample_pinned_;
+            } else if (d_sample_result_) {
+                token = sample_topk_topp(last_logits, top_k, top_p,
+                                   state.temperature, seed, d_sample_result_, stream);
+            } else {
+                token = sample_topk_topp(last_logits, top_k, top_p,
                                    state.temperature, seed, stream);
+            }
         }
     }
 
@@ -369,7 +383,6 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
     const auto out_qtype = model_->out_proj_qtype_;
     auto nvfp4_lm = nvfp4_cache_.find(model_->output_proj().data);
     if (nvfp4_lm != nvfp4_cache_.end()) {
-        // NVFP4 LM head: ~43% less memory traffic than Q8_0 dp4a path
         Tensor no_final = view_tokens(norm_out_, n);
         rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
         gemv_nvfp4_kpar_fp32(nvfp4_lm->second,
