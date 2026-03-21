@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**imp** is a high-performance LLM inference engine written in C++20 and CUDA. It targets NVIDIA Hopper (sm_90a) and Blackwell (sm_100, sm_120) GPUs, leveraging CUDA 13.1+ features such as Green Contexts, Programmatic Dependent Launch (PDL), and CUDA Graphs. The engine supports GGUF and SafeTensors model formats, multiple quantization schemes (FP8, INT8, INT4, NVFP4), and architectures including LLaMA, Mistral, Mixtral, DeepSeek, Qwen3, Gemma-3 (text + vision), and Nemotron-H. Vision support uses a SigLIP encoder for Gemma-3 multimodal via separate mmproj.gguf files.
+**imp** is a high-performance LLM inference engine written in C++20 and CUDA. It targets NVIDIA Hopper (sm_90a) and Blackwell (sm_100, sm_120) GPUs, leveraging CUDA 13.2+ features such as Green Contexts, Programmatic Dependent Launch (PDL), and CUDA Graphs. The engine supports GGUF and SafeTensors model formats, multiple quantization schemes (FP8, INT8, INT4, NVFP4), and architectures including LLaMA, Mistral, Mixtral, DeepSeek, Qwen3, Qwen3.5 (Gated DeltaNet), Gemma-3 (text + vision), and Nemotron-H. Vision support uses a SigLIP encoder for Gemma-3 multimodal via separate mmproj.gguf files.
 
 ## Repository Structure
 
@@ -71,7 +71,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 
 ### Dependencies
 
-- **CUDA Toolkit 13.1+** (required) — cudart, cuda_driver, cublas, cublasLt
+- **CUDA Toolkit 13.2+** (required) — cudart, cuda_driver, cublas, cublasLt
 - **CUTLASS v4.4.1** (fetched via FetchContent) — Hopper FMHA (Example 88), MoE Grouped GEMM
 - **Google Test v1.14.0** (fetched via FetchContent when tests enabled)
 - **stb_image / stb_image_resize2** (vendored in `third_party/stb/`) — image loading for vision
@@ -168,6 +168,7 @@ Tests require an NVIDIA GPU with the appropriate compute capability. Test files 
 | `test_e2e.cpp` | End-to-end generation pipeline |
 | `test_continuous_batching.cpp` | Continuous batching scheduler |
 | `test_speculative.cpp` | Speculative decoding (draft + verify) |
+| `test_gdn_kernel.cu` | GDN delta rule scan (single + multi-token) |
 
 ## Tools
 
@@ -190,25 +191,27 @@ Benchmarks for GEMM, attention, and end-to-end inference.
 ./build/imp-bench
 ```
 
-## Benchmark Results (v0.3, RTX 5090, 2026-03-16)
+## Benchmark Results (v0.4, RTX 5090, 2026-03-21)
 
-All benchmarks on a single NVIDIA RTX 5090 (32 GB GDDR7, Blackwell sm_120). CUDA 13.1.1. Models loaded from GGUF. imp uses NVFP4 decode cache + FP8 prefill cache + upfront VRAM budget planner. llama.cpp b5285 with flash attention enabled (`-fa 1`).
+All benchmarks on a single NVIDIA RTX 5090 (32 GB GDDR7, Blackwell sm_120). CUDA 13.2. Models loaded from GGUF. imp uses NVFP4 decode cache + FP8 prefill cache + upfront VRAM budget planner. llama.cpp b8445 with flash attention enabled.
 
 ### Decode Throughput (tg128, tok/s)
 
-| Model | Quant | imp v0.3 | llama.cpp | Speedup |
+| Model | Quant | imp v0.4 | llama.cpp | Speedup |
 |-------|-------|----------|-----------|---------|
 | Qwen3-4B | Q8_0 | **390** | 244 | **+60%** |
 | Qwen3-8B | Q8_0 | **264** | 157 | **+68%** |
+| Qwen3.5-4B (GDN) | Q8_0 | **327** | 180 | **+82%** |
 | Gemma-3-12B | Q8_0 | **139** | 98 | **+42%** |
 | Qwen3-Coder-30B MoE | Q6_K | **265** | 251 | **+6%** |
 
 ### Prefill Throughput (pp512, tok/s)
 
-| Model | Quant | imp v0.3 | llama.cpp | Speedup |
+| Model | Quant | imp v0.4 | llama.cpp | Speedup |
 |-------|-------|----------|-----------|---------|
 | Qwen3-4B | Q8_0 | **25801** | 21337 | **+21%** |
 | Qwen3-8B | Q8_0 | **15819** | 14172 | **+12%** |
+| Qwen3.5-4B (GDN) | Q8_0 | **16017** | 11149 | **+44%** |
 | Gemma-3-12B | Q8_0 | **8479** | 9269 | -9% |
 | Qwen3-Coder-30B MoE | Q6_K | 5645 | **6090** | -7% |
 
@@ -280,7 +283,16 @@ Runtime dispatch based on GPU compute capability:
 - **INT4 (Q4_0, Q4_K_M)**: GGML-compatible block formats
 - **NVFP4 (FP4_E2M1)**: Blackwell-native, two-level micro-scale + tensor-scale
 
-### CUDA 13.1 Features
+### Gated DeltaNet (GDN) — Qwen3.5
+Hybrid architecture: 24 GDN layers (recurrent) + 8 attention layers + 32 dense FFN layers.
+- **Delta rule scan**: Recurrent state `H[n_heads, state_size, head_dim]` updated via `H = g*H + k*(v - g*H@k)*beta`. State cached in registers during fused multi-token kernel.
+- **Fused scan kernel**: Single launch processes all prefill tokens. Register-cached state eliminates per-token global memory round-trips (125x less state traffic).
+- **Fused RMSNormGated+SiLU**: `y = rmsnorm(y) * silu(gate)` in one kernel for all tokens × heads.
+- **Attention output gate**: Q+Gate interleaved projection, de-interleaved before attention, sigmoid gate applied before Wo projection.
+- **Partial RoPE**: Only first `rope_dim` (64) of `head_dim` (256) dimensions get rotary encoding.
+- **CUDA Graphs**: Enabled for GDN decode (recurrent state updated in-place with fixed pointers).
+
+### CUDA 13.2 Features
 - **Green Contexts**: SM partitioning for concurrent prefill/decode (`green_ctx.cu`)
 - **PDL (Programmatic Dependent Launch)**: Overlaps kernel tails with next kernel heads (`pdl.cu`)
 - **CUDA Graphs**: Captured decode iterations for reduced launch overhead (`cuda_graph.cu`)
@@ -291,6 +303,7 @@ Runtime dispatch based on GPU compute capability:
 - Mixtral (Mixture-of-Experts)
 - DeepSeek (MoE)
 - Qwen3 / Qwen3-MoE
+- Qwen3.5 / Qwen3.5-MoE (Gated DeltaNet hybrid — GDN + Attention + dense FFN)
 - Gemma-3 (text + vision via SigLIP encoder)
 - Nemotron-H (Mamba2 + Attention + MoE hybrid)
 - Generic fallback
