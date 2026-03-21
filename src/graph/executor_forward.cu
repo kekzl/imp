@@ -860,20 +860,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                       cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
                       (cutlass_mxfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_mxfp4_cache_,
                       mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
-        if (has_post_attn_norm && using_fp32_accum) {
-            // Fused: RMSNorm + FP32 accum add + FP32→FP16 in one kernel.
-            // Saves 2 kernel launches + 2 DRAM round-trips per layer.
-            Tensor fp32_h = view_tokens(fp32_hidden_, n);
-            rmsnorm_fp32_accum_to_fp16_kernel<<<n, 512, 0, stream>>>(
-                static_cast<const half*>(po.data),
-                static_cast<const half*>(ly.post_attn_norm.data),
-                static_cast<float*>(fp32_h.data),
-                static_cast<half*>(h.data),
-                cfg.d_model, eps, norm_w_off_);
-        } else if (has_post_attn_norm) {
-            // Post-attn norm → residual add (norm directly to h, no copies)
-            rmsnorm(po, ly.post_attn_norm, h, eps, stream, norm_w_off_);
-            elementwise_add(h, r, stream);
+        if (has_post_attn_norm) {
+            // post_attn_norm is the pre-FFN norm, NOT an attention output norm.
+            // Just add the O-projection to the residual. The norm is applied
+            // later in run_ffn() where post_attn_norm serves as ffn_norm_w.
+            elementwise_add_store(po, r, h, stream);
         } else {
             // No post-norm: h = po + residual (fused add-store, no copy)
             elementwise_add_store(po, r, h, stream);
@@ -2909,23 +2900,40 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                     ? state.ssm_state->conv_state(state.ssm_seq_id, ssm_idx)
                     : nullptr;
 
+    // conv_f32 destination for FP32 pipeline (conv+SiLU output)
+    float* conv_f32 = static_cast<float*>(ssm_proj_buf_.data);
+
     if (conv_st) {
         if (state.is_prefill) {
-            ssm_conv1d_prefill(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
-                               xBC_out, conv_kernel, stream);
+            // Fused: conv1d + SiLU + FP32 output in one kernel (saves 2 launches).
+            // Copy FP16 input to xBC_out first to avoid aliasing (conv_f32 = ssm_proj_buf_ = xBC_in).
+            cudaMemcpyAsync(xBC_out.data, xBC_in.data,
+                            static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_),
+                            cudaMemcpyDeviceToDevice, stream);
+            ssm_conv1d_prefill_f32_silu(conv_st, xBC_out, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
+                                         conv_f32, conv_kernel, stream);
         } else {
-            ssm_conv1d_decode(conv_st, xBC_in, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
-                              xBC_out, conv_kernel, stream);
+            // Decode: FP32 fused conv+SiLU (matching llama.cpp precision).
+            // Copy FP16 input to xBC_out first to avoid aliasing: conv_f32
+            // writes FP32 back into ssm_proj_buf_ which overlaps xBC_in.
+            cudaMemcpyAsync(xBC_out.data, xBC_in.data,
+                            static_cast<size_t>(conv_channels) * dtype_size(compute_dtype_),
+                            cudaMemcpyDeviceToDevice, stream);
+            ssm_conv1d_decode_f32_silu(conv_st, xBC_out, ly.ssm_conv1d_w, ly.ssm_conv1d_b,
+                                       conv_f32, conv_kernel, stream);
         }
     } else {
-        // Fallback: copy input to output (no conv state available)
+        // Fallback: copy input to output + SiLU + FP32 conversion
         cudaMemcpyAsync(xBC_out.data, xBC_in.data,
                         static_cast<size_t>(n) * conv_channels * dtype_size(compute_dtype_),
                         cudaMemcpyDeviceToDevice, stream);
+        silu_inplace(xBC_out, stream);
+        int64_t total = static_cast<int64_t>(n) * conv_channels;
+        int threads = 256;
+        int blocks = static_cast<int>((total + threads - 1) / threads);
+        fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(
+            static_cast<const half*>(xBC_out.data), conv_f32, total);
     }
-    // 4. SiLU activation on full conv output
-    silu_inplace(xBC_out, stream);
-
 
     // 5. Split conv output into x/B/C and run delta rule scan
     //    x[inner]: value vectors (V in delta rule terminology)
@@ -2957,7 +2965,6 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                   mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
 
     if (h_st) {
-        DType h_dtype = state.ssm_state ? state.ssm_state->h_dtype() : DType::FP32;
         size_t es = dtype_size(compute_dtype_);
 
         // Compute alpha/beta projections from norm_out (input to this layer)
@@ -2971,101 +2978,35 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                              ((static_cast<size_t>(n) * n_heads * es + 255) & ~size_t(255));
             beta_proj_out = Tensor(beta_ptr, compute_dtype_, 2, ab_shape, true);
 
+            // Alpha/beta weights are already dequantized to FP16 during weight upload.
+            // Use gemm() (not gemm_dispatch with qtype) to avoid re-interpreting FP16 as Q8_0.
             gemm(no, ly.gdn_alpha, alpha_proj_out, 1.0f, 0.0f, stream);
             gemm(no, ly.gdn_beta, beta_proj_out, 1.0f, 0.0f, stream);
         }
 
-        if (n == 1) {
-            // Conv output layout: [conv_channels=10240] split into 3 parts.
-            // Part A: [0, BC_size=2048) — first key_dim block
-            // Part B: [2048, 4096) — second key_dim block
-            // Part C: [4096, 10240) — value_dim block
-            //
-            // HF code: split([key_dim, key_dim, value_dim]) = [Q, K, V]
-            // So: A=Q, B=K, C=V
-            //
-            // But GGUF converter might reorder! Test all permutations.
-            // Current: [Q=A, K=B, V=C]
-            char* row = static_cast<char*>(xBC_out.data);
-            const half* part_A = reinterpret_cast<const half*>(row);
-            const half* part_B = reinterpret_cast<const half*>(row + static_cast<size_t>(BC_size) * es);
-            const half* part_C = reinterpret_cast<const half*>(row + static_cast<size_t>(2 * BC_size) * es);
-
-            // Try: [Q=A, K=B, V=C] (HF order)
-            const half* Q_ptr = part_A;
-            const half* K_ptr = part_B;
-            const half* V_ptr = part_C;
-
-            gdn_scan_decode(
-                V_ptr, K_ptr, Q_ptr,
-                static_cast<const half*>(alpha_proj_out.data),
-                static_cast<const half*>(beta_proj_out.data),
-                static_cast<const float*>(ly.ssm_a.data),
-                static_cast<const float*>(ly.ssm_dt_b.data),
-                static_cast<float*>(h_st),
-                static_cast<half*>(y_buf.data),
-                nullptr,  // no fused gate — done in RMSNormGated
-                n_heads, head_dim_ssm, ssize, n_groups, stream);
-        } else {
-            // Prefill: de-interleave Q/K/V from xBC_out
-            // GDN split order: [Q(key_dim=BC_size), K(key_dim=BC_size), V(value_dim=inner)]
-            // Extract Q
-            char* Q_contig = static_cast<char*>(ssm_xBC_buf_.data) +
-                             static_cast<size_t>(n) * conv_channels * es;
-            cudaMemcpy2DAsync(Q_contig, static_cast<size_t>(BC_size) * es,
-                              xBC_out.data, static_cast<size_t>(conv_channels) * es,
-                              static_cast<size_t>(BC_size) * es, n,
-                              cudaMemcpyDeviceToDevice, stream);
-            // Extract K
-            char* K_contig = Q_contig + static_cast<size_t>(n) * BC_size * es;
-            char* K_src = static_cast<char*>(xBC_out.data) + static_cast<size_t>(BC_size) * es;
-            cudaMemcpy2DAsync(K_contig, static_cast<size_t>(BC_size) * es,
-                              K_src, static_cast<size_t>(conv_channels) * es,
-                              static_cast<size_t>(BC_size) * es, n,
-                              cudaMemcpyDeviceToDevice, stream);
-            // Extract V
-            char* V_contig = static_cast<char*>(y_buf.data);  // y_buf will be overwritten by scan
-            char* V_src = static_cast<char*>(xBC_out.data) + static_cast<size_t>(2 * BC_size) * es;
-            cudaMemcpy2DAsync(V_contig, static_cast<size_t>(inner) * es,
-                              V_src, static_cast<size_t>(conv_channels) * es,
-                              static_cast<size_t>(inner) * es, n,
-                              cudaMemcpyDeviceToDevice, stream);
-
-            gdn_scan_prefill(
-                reinterpret_cast<const half*>(V_contig),
-                reinterpret_cast<const half*>(K_contig),
-                reinterpret_cast<const half*>(Q_contig),
-                static_cast<const half*>(alpha_proj_out.data),
-                static_cast<const half*>(beta_proj_out.data),
-                static_cast<const float*>(ly.ssm_a.data),
-                static_cast<const float*>(ly.ssm_dt_b.data),
-                static_cast<float*>(h_st),
-                static_cast<half*>(y_buf.data),
-                nullptr,  // no fused gate
-                n, n_heads, head_dim_ssm, ssize, n_groups, stream);
-        }
+        // 5b. Fused multi-token delta rule scan.
+        // Single kernel launch processes ALL tokens with register-cached state.
+        // Eliminates n×32 kernel launches and 125x state memory traffic.
+        gdn_scan_fused_f32(conv_f32, conv_channels,
+                            static_cast<const half*>(alpha_proj_out.data),
+                            static_cast<const half*>(beta_proj_out.data),
+                            static_cast<const float*>(ly.ssm_a.data),
+                            static_cast<const float*>(ly.ssm_dt_b.data),
+                            static_cast<float*>(h_st),
+                            static_cast<half*>(y_buf.data),
+                            n, n_heads, head_dim_ssm, ssize, n_groups, stream);
     }
 
+    debug_tensor_stats("gdn_after_scan_y", y_buf, stream);
+    debug_tensor_stats("gdn_gate_out", gate_out, stream);
 
-    // 6. Fused RMSNormGated: y = norm(y) * SiLU(gate)
-    // Fused RMSNormGated: norm(y) * SiLU(gate)
-    // TODO: optimize — currently O(n_heads * n) separate kernel launches
-    {
-        silu_inplace(gate_out, stream);
-        size_t es_h = dtype_size(compute_dtype_);
-        for (int t = 0; t < n; t++) {
-            for (int head = 0; head < n_heads; head++) {
-                size_t offset = (t * inner + head * head_dim_ssm) * es_h;
-                int64_t one_shape[2] = {1, static_cast<int64_t>(head_dim_ssm)};
-                Tensor head_y(static_cast<char*>(y_buf.data) + offset,
-                              compute_dtype_, 2, one_shape, true);
-                Tensor head_g(static_cast<char*>(gate_out.data) + offset,
-                              compute_dtype_, 2, one_shape, true);
-                rmsnorm(head_y, ly.ssm_norm_w, head_y, eps, stream);
-                elementwise_mul(head_y, head_g, head_y, stream);
-            }
-        }
-    }
+    // 6. Fused RMSNormGated + SiLU: y = rmsnorm(y) * silu(gate)
+    // Single kernel launch for all tokens × heads (replaces n×32×2 launches).
+    gdn_rmsnorm_gated_silu(static_cast<half*>(y_buf.data),
+                            static_cast<const half*>(gate_out.data),
+                            static_cast<const half*>(ly.ssm_norm_w.data),
+                            eps, n, n_heads, head_dim_ssm, stream);
+
 
     // 7. ssm_out projection: [n, inner] → [n, d_model]
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
@@ -3080,6 +3021,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     elementwise_add(out_buf, r, stream);
     cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(),
                     cudaMemcpyDeviceToDevice, stream);
+
 }
 
 // ---------------------------------------------------------------------------

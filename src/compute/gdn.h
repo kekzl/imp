@@ -5,49 +5,64 @@
 
 namespace imp {
 
-// GDN Delta Rule scan — decode (single token).
-// Replaces ssm_scan_decode for GDN layers.
-// Same parameter layout but uses delta rule instead of selective scan.
-//
-// x (V):   [inner_size] FP16 — value to store
-// B (K):   [n_groups * state_size] FP16 — key for addressing
-// C (Q):   [n_groups * state_size] FP16 — query for readout
-// alpha:   [n_heads] FP16 — decay gate (pre-softplus, combined with A_log/dt_bias)
-// beta:    [n_heads] FP16 — learning rate (pre-sigmoid)
-// A_log:   [n_heads] FP32 — log decay parameter
-// dt_bias: [n_heads] FP32 — bias for alpha
-// h_state: [n_heads, state_size, head_dim_ssm] FP32 — recurrent state
-// y:       [inner_size] FP16 — output
-// z:       [inner_size] FP16 — gate (nullptr = no fusion, otherwise y *= SiLU(z))
-void gdn_scan_decode(const half* x, const half* B, const half* C,
-                     const half* alpha, const half* beta,
-                     const float* A_log, const float* dt_bias,
-                     float* h_state, half* y, const half* z,
-                     int n_heads, int head_dim_ssm,
-                     int state_size, int n_groups,
-                     cudaStream_t stream);
+// ---------------------------------------------------------------------------
+// Fused multi-token GDN scan.
+// Processes all tokens in a SINGLE kernel launch with register-cached state.
+// conv_f32: [n_tokens, conv_channels] FP32 — full conv+SiLU output per token
+//           layout per token: [Q(BC_size), K(BC_size), V(inner)]
+// ---------------------------------------------------------------------------
+void gdn_scan_fused_f32(const float* conv_f32, int conv_channels,
+                         const half* alpha, const half* beta,
+                         const float* A_log, const float* dt_bias,
+                         float* h_state, half* y,
+                         int n_tokens, int n_heads, int head_dim_ssm,
+                         int state_size, int n_groups,
+                         cudaStream_t stream);
 
-// GDN Delta Rule scan — prefill (sequential per-token).
-void gdn_scan_prefill(const half* x, const half* B, const half* C,
-                      const half* alpha, const half* beta,
-                      const float* A_log, const float* dt_bias,
-                      float* h_state, half* y, const half* z,
-                      int n_tokens, int n_heads, int head_dim_ssm,
-                      int state_size, int n_groups,
-                      cudaStream_t stream);
+// Fused RMSNormGated + SiLU: y = rmsnorm(y) * silu(gate)
+// Processes all tokens × heads in one launch.
+void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight,
+                              float eps, int n_tokens, int n_heads, int head_dim,
+                              cudaStream_t stream);
 
-// Legacy API stubs (kept for compatibility, not used by run_gdn)
-void gdn_decode(const half* q, const half* k, const half* v,
-                const half* alpha, const half* beta,
-                float* s_state, half* y, const half* gate,
-                int n_q_heads, int n_kv_heads, int head_dim, int n_alpha_heads,
-                cudaStream_t stream);
+// ---------------------------------------------------------------------------
+// Legacy per-token interfaces (kept for fallback / testing)
+// ---------------------------------------------------------------------------
+void gdn_scan_decode_f32(const float* x, const float* B, const float* C,
+                         const half* alpha, const half* beta,
+                         const float* A_log, const float* dt_bias,
+                         float* h_state, half* y, const half* z,
+                         int n_heads, int head_dim_ssm,
+                         int state_size, int n_groups,
+                         cudaStream_t stream);
 
-void gdn_prefill(const half* q, const half* k, const half* v,
-                 const half* alpha, const half* beta,
-                 float* s_state, half* y, const half* gate,
-                 int n_tokens, int n_q_heads, int n_kv_heads,
-                 int head_dim, int n_alpha_heads,
-                 cudaStream_t stream);
+void gdn_scan_prefill_f32(const float* x, const float* B, const float* C,
+                          const half* alpha, const half* beta,
+                          const float* A_log, const float* dt_bias,
+                          float* h_state, half* y, const half* z,
+                          int n_tokens, int n_heads, int head_dim_ssm,
+                          int state_size, int n_groups,
+                          cudaStream_t stream);
+
+// V-head reorder: tiled → grouped
+void vhead_tiled_to_grouped(const half* src, half* dst,
+                             int n_tokens, int n_heads, int head_dim, int n_groups,
+                             cudaStream_t stream);
+
+// Legacy stubs
+void gdn_scan_decode(const half*, const half*, const half*,
+                     const half*, const half*, const float*, const float*,
+                     float*, half*, const half*,
+                     int, int, int, int, cudaStream_t);
+void gdn_scan_prefill(const half*, const half*, const half*,
+                      const half*, const half*, const float*, const float*,
+                      float*, half*, const half*,
+                      int, int, int, int, int, cudaStream_t);
+void gdn_decode(const half*, const half*, const half*,
+                const half*, const half*, float*, half*, const half*,
+                int, int, int, int, cudaStream_t);
+void gdn_prefill(const half*, const half*, const half*,
+                 const half*, const half*, float*, half*, const half*,
+                 int, int, int, int, int, cudaStream_t);
 
 } // namespace imp

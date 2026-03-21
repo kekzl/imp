@@ -618,8 +618,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             if (model_->layer(i).gdn_gate.data != nullptr) n_gdn_layers++;
         }
         if (n_gdn_layers > 0) {
-            config_.use_cuda_graphs = false;
-            IMP_LOG_INFO("GDN model: %d layers, CUDA graphs disabled", n_gdn_layers);
+            // GDN recurrent state is updated in-place with fixed pointers —
+            // compatible with CUDA graph replay. Keep graphs enabled.
+            IMP_LOG_INFO("GDN model: %d layers, CUDA graphs enabled (recurrent state in-place)", n_gdn_layers);
         }
     }
 

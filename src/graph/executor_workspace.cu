@@ -312,11 +312,24 @@ void GraphExecutor::compute_shared_sizes(int max_tokens) {
     auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
 
     // Attention phase: q, k+v (contiguous for batched GEMM), attn_out, proj_out
+    // Check for Q+Gate interleaving (Qwen3.5): Q projection output is 2x larger
+    // than standard Q when an attention output gate is present.
+    int max_q_out = nh * hd;
+    for (int i = 0; i < cfg.n_layers; i++) {
+        const auto& ly = model_->layer(i);
+        if (ly.wq.data) {
+            int q_dim = static_cast<int>(ly.wq.shape[0]);
+            if (q_dim > max_q_out) max_q_out = q_dim;
+        }
+    }
     size_t kv_raw = static_cast<size_t>(max_tokens) * nkv * hd * es;
-    attn_shared_size_ = align256(static_cast<size_t>(max_tokens) * nh * hd * es)    // q
+    attn_shared_size_ = align256(static_cast<size_t>(max_tokens) * nh * hd * es)    // q (de-interleaved)
                        + align256(2 * kv_raw)                                       // k+v contiguous
                        + align256(static_cast<size_t>(max_tokens) * nh * hd * es)   // attn_out
-                       + align256(static_cast<size_t>(max_tokens) * d * es);        // proj_out
+                       + align256(static_cast<size_t>(max_tokens) * d * es)         // proj_out
+                       + (max_q_out > nh * hd
+                          ? align256(static_cast<size_t>(max_tokens) * max_q_out * es)  // qv_full (Q+Gate)
+                          : 0);
 
     // Dense FFN phase: gate, up, swiglu, ffn_out
     if (has_dense_ffn_ && ff > 0) {
@@ -351,7 +364,8 @@ void GraphExecutor::compute_shared_sizes(int max_tokens) {
         int conv_channels = inner + 2 * n_groups * state_size;
         int ssm_in_dim = inner + conv_channels + n_heads;
 
-        ssm_shared_size_ = align256(static_cast<size_t>(max_tokens) * ssm_in_dim * es)       // proj
+        size_t proj_elem_size = has_gdn_ ? sizeof(float) : es;
+        ssm_shared_size_ = align256(static_cast<size_t>(max_tokens) * ssm_in_dim * proj_elem_size) // proj (FP32 for GDN)
                           + align256(static_cast<size_t>(max_tokens) * conv_channels * es)   // xBC
                           + align256(static_cast<size_t>(max_tokens) * inner * es)           // y
                           + align256(static_cast<size_t>(max_tokens) * inner * es)           // z
@@ -2169,7 +2183,10 @@ void GraphExecutor::configure_ssm_workspace(int max_tokens) {
         return t;
     };
 
-    ssm_proj_buf_ = make(ssm_in_dim,    align256(static_cast<size_t>(max_tokens) * ssm_in_dim * es));
+    // GDN layers need FP32 intermediate (4 bytes/elem) for numerical precision.
+    // Non-GDN SSM layers only need FP16 (es bytes/elem).
+    size_t proj_elem_size = has_gdn_ ? sizeof(float) : es;
+    ssm_proj_buf_ = make(ssm_in_dim,    align256(static_cast<size_t>(max_tokens) * ssm_in_dim * proj_elem_size));
     ssm_xBC_buf_  = make(conv_channels,  align256(static_cast<size_t>(max_tokens) * conv_channels * es));
     ssm_y_buf_    = make(inner,          align256(static_cast<size_t>(max_tokens) * inner * es));
     ssm_z_buf_    = make(inner,          align256(static_cast<size_t>(max_tokens) * inner * es));
