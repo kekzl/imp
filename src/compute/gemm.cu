@@ -1,4 +1,5 @@
 #include "compute/gemm.h"
+#include "core/logging.h"
 #include "runtime/pdl.h"
 
 #include <cublas_v2.h>
@@ -422,7 +423,19 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C,
             entry->has_algo ? &entry->algo : nullptr,
             s_workspace, entry->workspace_size, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            fprintf(stderr, "imp::gemm: cublasLtMatmul (INT) failed (status %d)\n", (int)st);
+            IMP_LOG_WARN("gemm: cublasLtMatmul (INT) failed (status %d) M=%ld K=%ld N=%ld, "
+                         "falling back to cublasGemmEx",
+                         (int)st, (long)M, (long)K, (long)N);
+            cublasHandle_t fb_handle = get_cublas_handle();
+            cublasSetStream(fb_handle, stream);
+            cublasGemmEx(fb_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+                (int)N, (int)M, (int)K,
+                &ialpha,
+                B.data, cuda_dtype_B, (int)K,
+                A.data, cuda_dtype_A, (int)K,
+                &ibeta,
+                C.data, cuda_dtype_C, (int)N,
+                CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT);
         }
     } else {
         cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc,
@@ -431,14 +444,27 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C,
             entry->has_algo ? &entry->algo : nullptr,
             s_workspace, entry->workspace_size, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            static int err_count = 0;
-            if (++err_count <= 10) {
-                fprintf(stderr, "imp::gemm: cublasLtMatmul failed (status %d) "
-                        "M=%ld K=%ld N=%ld has_algo=%d ws=%zu/%zu "
-                        "dtA=%d dtB=%d dtC=%d\n",
-                        (int)st, (long)M, (long)K, (long)N,
-                        entry->has_algo, entry->workspace_size, s_workspace_size,
-                        (int)cuda_dtype_A, (int)cuda_dtype_B, (int)cuda_dtype_C);
+            // cuBLASLt failed (e.g. CUDA 13.2 status 7 for certain M/K/N on sm_120).
+            // Fall back to cublasGemmEx which uses a different algorithm path.
+            static int fallback_count = 0;
+            if (++fallback_count <= 10) {
+                IMP_LOG_WARN("gemm: cublasLtMatmul failed (status %d) M=%ld K=%ld N=%ld, "
+                             "falling back to cublasGemmEx",
+                             (int)st, (long)M, (long)K, (long)N);
+            }
+            cublasHandle_t fb_handle = get_cublas_handle();
+            cublasSetStream(fb_handle, stream);
+            cublasStatus_t fb_st = cublasGemmEx(fb_handle,
+                CUBLAS_OP_T, CUBLAS_OP_N,
+                (int)N, (int)M, (int)K,
+                &alpha,
+                B.data, cuda_dtype_B, (int)K,
+                A.data, cuda_dtype_A, (int)K,
+                &beta,
+                C.data, cuda_dtype_C, (int)N,
+                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+            if (fb_st != CUBLAS_STATUS_SUCCESS) {
+                IMP_LOG_ERROR("gemm: cublasGemmEx fallback also failed (status %d)", (int)fb_st);
             }
         }
     }
@@ -820,7 +846,28 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
         s_workspace, entry->workspace_size, stream);
 
     if (st != CUBLAS_STATUS_SUCCESS) {
-        fprintf(stderr, "imp::gemm_cublaslt: cublasLtMatmul failed (status %d)\n", (int)st);
+        static int fallback_count = 0;
+        if (++fallback_count <= 10) {
+            IMP_LOG_WARN("gemm_cublaslt: cublasLtMatmul failed (status %d) M=%ld K=%ld N=%ld, "
+                         "falling back to cublasGemmEx",
+                         (int)st, (long)M, (long)K, (long)N);
+        }
+        // Fall back to cublasGemmEx (no scale pointers — FP8 scales not supported,
+        // but better than silently returning corrupted data).
+        cublasHandle_t fb_handle = get_cublas_handle();
+        cublasSetStream(fb_handle, stream);
+        cublasStatus_t fb_st = cublasGemmEx(fb_handle,
+            CUBLAS_OP_T, CUBLAS_OP_N,
+            (int)N, (int)M, (int)K,
+            &alpha,
+            B.data, cuda_dtype_B, (int)K,
+            A.data, cuda_dtype_A, (int)K,
+            &beta,
+            C.data, cuda_dtype_C, (int)N,
+            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        if (fb_st != CUBLAS_STATUS_SUCCESS) {
+            IMP_LOG_ERROR("gemm_cublaslt: cublasGemmEx fallback also failed (status %d)", (int)fb_st);
+        }
     }
 }
 
