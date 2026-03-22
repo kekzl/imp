@@ -542,39 +542,14 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     fprintf(stderr, "[%s] chat/completions: prompt_msgs=%zu stream=%s max_tokens=%d temp=%.2f\n",
             req_id.c_str(), messages.size(), stream ? "true" : "false", max_tokens, temperature);
 
-    // Auto-load model if request specifies a different one (requires exclusive lock)
+    // Validate model field (required per OpenAI spec)
     std::string requested_model = body.value("model", "");
-    if (!requested_model.empty()) {
-        std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(5));
-        if (!lock.owns_lock()) {
-            res.status = 503;
-            json err = {{"error", {{"message", "Server is busy loading a model. Please retry."},
-                                    {"type", "server_error"}}}};
-            res.set_content(err.dump(), "application/json");
-            return;
-        }
-        if (requested_model != state.model_name) {
-            std::string path = find_model_path(state, requested_model);
-            if (!path.empty()) {
-                fprintf(stderr, "[%s] auto-loading model: %s\n", req_id.c_str(), requested_model.c_str());
-                fflush(stderr);
-                std::string error = load_model_into_state(state, path);
-                if (!error.empty()) {
-                    res.status = 500;
-                    json err = {{"error", {{"message", error}, {"type", "server_error"}}}};
-                    res.set_content(err.dump(), "application/json");
-                    return;
-                }
-                fprintf(stderr, "[%s] model loaded: %s\n", req_id.c_str(), state.model_name.c_str());
-                fflush(stderr);
-            } else {
-                res.status = 404;
-                json err = {{"error", {{"message", "Model '" + requested_model + "' not found"},
-                                        {"type", "invalid_request_error"}}}};
-                res.set_content(err.dump(), "application/json");
-                return;
-            }
-        }
+    if (requested_model.empty()) {
+        res.status = 400;
+        json err = {{"error", {{"message", "\"model\" is required"},
+                                {"type", "invalid_request_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
     }
 
     // Snapshot all state fields needed for request processing under lock.
@@ -595,8 +570,15 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         snap_model_loaded = state.model_loaded();
         if (!snap_model_loaded) {
             res.status = 503;
-            json err = {{"error", {{"message", "No model loaded. Use POST /v1/models to load one."},
+            json err = {{"error", {{"message", "No model loaded"},
                                     {"type", "server_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+        if (requested_model != state.model_name) {
+            res.status = 404;
+            json err = {{"error", {{"message", "Model '" + requested_model + "' not found. Loaded: " + state.model_name},
+                                    {"type", "invalid_request_error"}}}};
             res.set_content(err.dump(), "application/json");
             return;
         }
@@ -1852,39 +1834,14 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
     fprintf(stderr, "[%s] completions: prompt_len=%zu stream=%s max_tokens=%d temp=%.2f\n",
             req_id.c_str(), prompt.size(), stream ? "true" : "false", max_tokens, temperature);
 
-    // Auto-load model if request specifies a different one (requires exclusive lock)
+    // Validate model field (required per OpenAI spec)
     std::string requested_model = body.value("model", "");
-    if (!requested_model.empty()) {
-        std::unique_lock<std::timed_mutex> lock(state.mtx, std::chrono::minutes(5));
-        if (!lock.owns_lock()) {
-            res.status = 503;
-            json err = {{"error", {{"message", "Server is busy loading a model. Please retry."},
-                                    {"type", "server_error"}}}};
-            res.set_content(err.dump(), "application/json");
-            return;
-        }
-        if (requested_model != state.model_name) {
-            std::string path = find_model_path(state, requested_model);
-            if (!path.empty()) {
-                fprintf(stderr, "[%s] auto-loading model: %s\n", req_id.c_str(), requested_model.c_str());
-                fflush(stderr);
-                std::string error = load_model_into_state(state, path);
-                if (!error.empty()) {
-                    res.status = 500;
-                    json err = {{"error", {{"message", error}, {"type", "server_error"}}}};
-                    res.set_content(err.dump(), "application/json");
-                    return;
-                }
-                fprintf(stderr, "[%s] model loaded: %s\n", req_id.c_str(), state.model_name.c_str());
-                fflush(stderr);
-            } else {
-                res.status = 404;
-                json err = {{"error", {{"message", "Model '" + requested_model + "' not found"},
-                                        {"type", "invalid_request_error"}}}};
-                res.set_content(err.dump(), "application/json");
-                return;
-            }
-        }
+    if (requested_model.empty()) {
+        res.status = 400;
+        json err = {{"error", {{"message", "\"model\" is required"},
+                                {"type", "invalid_request_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
     }
 
     // Snapshot state fields under lock for thread-safe access
@@ -1896,8 +1853,15 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
         std::lock_guard<std::timed_mutex> lock(state.mtx);
         if (!state.model_loaded()) {
             res.status = 503;
-            json err = {{"error", {{"message", "No model loaded. Use POST /v1/models to load one."},
+            json err = {{"error", {{"message", "No model loaded"},
                                     {"type", "server_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return;
+        }
+        if (requested_model != state.model_name) {
+            res.status = 404;
+            json err = {{"error", {{"message", "Model '" + requested_model + "' not found. Loaded: " + state.model_name},
+                                    {"type", "invalid_request_error"}}}};
             res.set_content(err.dump(), "application/json");
             return;
         }

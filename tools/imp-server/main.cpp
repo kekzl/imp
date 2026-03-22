@@ -163,14 +163,6 @@ int main(int argc, char** argv) {
         handle_models(req, res, state);
     });
 
-    svr.Post("/v1/models", [&state](const httplib::Request& req, httplib::Response& res) {
-        handle_load_model(req, res, state);
-    });
-
-    svr.Delete("/v1/models", [&state](const httplib::Request& req, httplib::Response& res) {
-        handle_unload_model(req, res, state);
-    });
-
     svr.Post("/v1/chat/completions",
         [&state](const httplib::Request& req, httplib::Response& res) {
             handle_chat_completions(req, res, state);
