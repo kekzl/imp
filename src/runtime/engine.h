@@ -10,8 +10,8 @@
 #include "runtime/speculative.h"
 #include "runtime/self_speculative.h"
 #include "runtime/ngram_spec.h"
-#include "vision/vision_model.h"
-#include "vision/vision_encoder.h"
+#include "runtime/vision_pipeline.h"
+#include "runtime/constraint_manager.h"
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
 #include "memory/ssm_state.h"
@@ -19,8 +19,6 @@
 #include "memory/layer_offload.h"
 #include "memory/vram_allocator.h"
 #include "graph/executor.h"
-#include "compute/json_constrain.h"
-#include "compute/schema_constrain.h"
 #include "core/cuda_raii.h"
 #include <memory>
 #include <string>
@@ -129,8 +127,8 @@ public:
     [[nodiscard]] bool set_image(const std::string& path);
     [[nodiscard]] bool set_image_from_memory(const uint8_t* data, size_t len);
     void clear_image();
-    bool has_vision() const noexcept { return vision_encoder_ != nullptr; }
-    bool has_vision_input() const noexcept { return has_vision_input_; }
+    bool has_vision() const noexcept { return vision_.is_available(); }
+    bool has_vision_input() const noexcept { return vision_.has_input(); }
 
     // Accessors for C API
     Scheduler* scheduler() const noexcept { return scheduler_.get(); }
@@ -142,6 +140,7 @@ public:
     VRAMAllocator& vram_allocator() noexcept { return vram_alloc_; }
 
 private:
+    // ── Core components ──────────────────────────────────────────────
     VRAMAllocator vram_alloc_;
     std::shared_ptr<Model> model_;
     EngineConfig config_;
@@ -155,112 +154,97 @@ private:
     CudaEvent decode_done_;
     int next_request_id_ = 0;
 
-    // Pre-allocated GPU batch pool for decode (stable pointers for CUDA Graphs)
+    // ── Decode batching ──────────────────────────────────────────────
     GPUBatchPool decode_batch_pool_;
-
-    // CUDA Graph support for decode iterations.
-    CudaGraphRunner decode_graph_runner_;
-    int last_decode_batch_size_ = -1;
-    int last_decode_max_blocks_ = -1;
-
-    // Pre-allocated block table padding buffer (reused across decode steps)
-    std::vector<int> padded_block_table_;
-
-    // Reusable batch builder and batch vectors (avoids heap allocs per decode step)
     BatchBuilder decode_builder_;
+    std::vector<int> padded_block_table_;
     std::vector<std::shared_ptr<Request>> sched_prefill_batch_;
     std::vector<std::shared_ptr<Request>> sched_decode_batch_;
     std::vector<std::shared_ptr<Request>> valid_decode_;
 
-    // SSM state (Mamba2 hybrid models)
+    // ── CUDA Graphs ──────────────────────────────────────────────────
+    CudaGraphRunner decode_graph_runner_;
+    int last_decode_batch_size_ = -1;
+    int last_decode_max_blocks_ = -1;
+    int32_t* h_sample_pinned_ = nullptr;
+    bool graph_includes_sampling_ = false;
+
+    // Async conditional graph loop
+    CudaGraphConditionalRunner async_graph_runner_;
+    std::shared_ptr<Request> async_graph_req_;
+    int* async_d_block_tables_ = nullptr;
+    std::vector<int32_t> async_pending_tokens_;
+    int async_pending_cursor_ = 0;
+
+    // ── Model-specific state ─────────────────────────────────────────
     std::unique_ptr<SSMState> ssm_state_;
-
-    // GDN state (Gated DeltaNet, e.g. Qwen3.5)
     std::unique_ptr<GDNState> gdn_state_;
-
-    // Layer weight offloading
     std::unique_ptr<LayerOffloadManager> offload_mgr_;
-
-    // True when MoE expert weights are on host (not graph-capturable)
     bool experts_on_host_ = false;
-
-    // FP16 weight dequant completed (set in init after pre_dequant_weights)
     bool dequant_done_ = false;
-
-    // Chat template for formatting prompts
     ChatTemplate chat_template_;
 
-    // Vision encoder (multimodal)
-    std::unique_ptr<VisionModel> vision_model_;
-    std::unique_ptr<VisionEncoder> vision_encoder_;
-    half* d_vision_embeddings_ = nullptr;  // [num_image_tokens, d_model] on device
-    half* d_vision_pixels_ = nullptr;      // pre-allocated pixel buffer for vision encoding
-    size_t d_vision_pixels_size_ = 0;      // allocation size in bytes
-    bool has_vision_input_ = false;        // true when an image is set for next generation
-    int32_t vision_soft_token_id_ = -1;    // <image_soft_token> token ID
-    int32_t vision_boi_id_ = -1;           // <start_of_image>
-    int32_t vision_eoi_id_ = -1;           // <end_of_image>
+    // ── Extracted subsystems ─────────────────────────────────────────
+    VisionPipeline vision_;
+    ConstraintManager constraints_;
 
-    // Speculative decoding
+    // ── Speculative decoding ─────────────────────────────────────────
     std::shared_ptr<Model> draft_model_;
     std::unique_ptr<KVCacheManager> draft_kv_manager_;
     std::unique_ptr<SpeculativeDecoder> spec_decoder_;
-
-    // Self-speculative decoding (early-exit, same model)
     std::unique_ptr<SelfSpeculativeDecoder> self_spec_decoder_;
-
-    // N-gram speculative decoding (zero-cost draft from token history)
     std::unique_ptr<NgramSpecDecoder> ngram_spec_decoder_;
 
-    // Device buffer for penalty token history (reused across steps)
+    // ── Pre-allocated prefill metadata (eliminates per-request cudaMalloc) ──
+    void* prefill_pool_ = nullptr;
+    size_t prefill_pool_size_ = 0;
+    int32_t* d_pf_token_ids_ = nullptr;
+    int* d_pf_positions_ = nullptr;
+    int* d_pf_block_tables_ = nullptr;
+    int* d_pf_context_lens_ = nullptr;
+    int* h_pf_positions_ = nullptr;       // pinned host staging
+    int32_t* h_pf_token_ids_ = nullptr;   // pinned host staging
+
+    // ── Penalty token buffer ─────────────────────────────────────────
     int32_t* d_penalty_tokens_ = nullptr;
-    size_t d_penalty_tokens_capacity_ = 0;  // current allocation capacity in tokens
+    size_t d_penalty_tokens_capacity_ = 0;
 
-    // JSON constrainer (lazily initialized on first json_mode request)
-    std::unique_ptr<JsonConstrainer> json_constrainer_;
-
-    // Schema constrainer (cached across requests with identical schemas).
-    // Agentic tool calls reuse the same schema — avoid re-parsing and
-    // re-classifying ~151k tokens on every request.
-    std::unique_ptr<SchemaConstrainer> schema_constrainer_;
-    std::string cached_schema_string_;
-
-    // Pinned host buffer for graph-captured greedy sampling results.
-    // When sampling is included in the CUDA graph, the argmax kernel writes
-    // to d_sample_result_ (in executor) and a D2H memcpy copies to this
-    // pinned buffer — all inside the graph. After replay, just sync + read.
-    int32_t* h_sample_pinned_ = nullptr;
-    bool graph_includes_sampling_ = false;  // true when graph was captured with sampling
-
-    // Async conditional graph loop: runs the entire decode autonomously on GPU.
-    // Tokens are polled from a ring buffer and delivered one per step() call.
-    CudaGraphConditionalRunner async_graph_runner_;
-    std::shared_ptr<Request> async_graph_req_;
-    int* async_d_block_tables_ = nullptr;  // device memory for async graph loop
-    std::vector<int32_t> async_pending_tokens_;  // polled but not yet delivered
-    int async_pending_cursor_ = 0;
-
-    // Stream helpers: return green context stream or default stream
+    // ── Stream helpers ───────────────────────────────────────────────
     cudaStream_t prefill_stream() const;
     cudaStream_t decode_stream() const;
-
-    // Returns effective free VRAM, capped by vram_budget_mb if set
     size_t effective_free_vram() const;
 
-    // Compute VRAM budget: split available VRAM between KV cache and weight caches.
-    // Pure arithmetic — no GPU allocation. Called after workspace alloc, before KV init.
-    VRAMBudget plan_vram_budget(int n_kv_layers, int head_dim) const;
-
-    // Initialize speculative decoding (called from init() if configured)
+    // ── Init sub-phases ────────────────────────────────────────────
+    bool init_weights();
+    bool init_kv_cache();
+    bool init_features();
+    void warmup();
     bool init_speculative();
 
-    // GPU-autonomous decode loop using conditional CUDA graph.
-    // Returns generated tokens (empty if graph setup failed → caller falls back).
+    // ── Inference helpers ────────────────────────────────────────────
+    bool is_stop_token(int32_t token) const;
+    void upload_penalties(const Request& req, InferenceState& state,
+                          cudaStream_t stream);
+    void fill_sampling_params(const Request& req, InferenceState& state) const;
+    void fill_recurrent_state(const Request& req, InferenceState& state,
+                               bool reset, cudaStream_t stream);
+    void finish_request(std::shared_ptr<Request>& req);
+
+    // Speculative decode shortcuts (self-spec, n-gram). Returns true if handled.
+    bool try_speculative_decode(std::vector<std::shared_ptr<Request>>& valid_decode,
+                                 cudaStream_t stream);
+
+    // ── CUDA graph helpers ───────────────────────────────────────────
+    // Pre-allocate KV blocks and check preconditions for graph loop.
+    // Returns remaining tokens (>0 = ok, <=0 = cannot use graph).
+    int prepare_graph_loop(std::shared_ptr<Request>& req);
+
+    // Build InferenceState + CudaGraphConditionalRunner::Config for graph loop.
+    CudaGraphConditionalRunner::Config build_graph_config(
+        const Request& req, int remaining) const;
+
     std::vector<int32_t> try_graph_loop_decode(
         std::shared_ptr<Request> req, int32_t first_token, cudaStream_t stream);
-
-    // Launch async conditional graph loop for single-sequence decode.
-    // Returns true if successfully launched; subsequent step() calls poll from ring buffer.
     bool try_launch_async_graph_loop(std::shared_ptr<Request> req,
                                      int32_t first_token, cudaStream_t stream);
 };

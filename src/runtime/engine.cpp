@@ -1,4 +1,5 @@
 #include "runtime/engine.h"
+#include "runtime/vram_budget.h"
 #include "runtime/speculative.h"
 #include "runtime/self_speculative.h"
 #include "runtime/batch.h"
@@ -9,8 +10,6 @@
 #include "compute/gemm_grouped.h"
 #include "compute/sampling.h"
 #include "compute/attention.h"
-#include "vision/vision_loader.h"
-#include "vision/image_processor.h"
 #include "core/logging.h"
 
 #include <cstring>
@@ -29,6 +28,7 @@ Engine::~Engine() {
 
     gemm_cleanup();
     gemm_grouped_cleanup();
+    sampling_cleanup();
     if (async_graph_runner_.is_setup()) {
         async_graph_runner_.cleanup();
     }
@@ -40,20 +40,29 @@ Engine::~Engine() {
         vram_alloc_.free(d_penalty_tokens_);
         d_penalty_tokens_ = nullptr;
     }
-    if (d_vision_embeddings_) {
-        vram_alloc_.free(d_vision_embeddings_);
-        d_vision_embeddings_ = nullptr;
-    }
-    if (d_vision_pixels_) {
-        vram_alloc_.free(d_vision_pixels_);
-        d_vision_pixels_ = nullptr;
-    }
     if (h_sample_pinned_) {
         cudaFreeHost(h_sample_pinned_);
         h_sample_pinned_ = nullptr;
     }
+    if (prefill_pool_) {
+        vram_alloc_.free(prefill_pool_);
+        prefill_pool_ = nullptr;
+    }
+    if (h_pf_positions_) {
+        cudaFreeHost(h_pf_positions_);
+        h_pf_positions_ = nullptr;
+    }
+    if (h_pf_token_ids_) {
+        cudaFreeHost(h_pf_token_ids_);
+        h_pf_token_ids_ = nullptr;
+    }
     // stream_, prefill_done_, decode_done_ cleaned up by CudaStream/CudaEvent RAII
+    // vision_ cleaned up by VisionPipeline RAII
 }
+
+// =====================================================================
+// Helper methods
+// =====================================================================
 
 cudaStream_t Engine::prefill_stream() const {
     return (config_.use_green_contexts && green_ctx_.is_available())
@@ -84,220 +93,128 @@ size_t Engine::effective_free_vram() const {
     return free_mem;
 }
 
-VRAMBudget Engine::plan_vram_budget(int n_kv_layers, int head_dim) const {
-    VRAMBudget budget;
-    const auto& mcfg = model_->config();
-
-    // --- 1. Classify model quantization ---
-    auto qtype = model_->layer(0).wq_qtype;
-    bool sub_8bit = (qtype == GGMLQuantType::Q4_0 || qtype == GGMLQuantType::Q4_K ||
-                     qtype == GGMLQuantType::Q5_0 || qtype == GGMLQuantType::Q5_K ||
-                     qtype == GGMLQuantType::Q3_K || qtype == GGMLQuantType::Q2_K ||
-                     qtype == GGMLQuantType::Q4_1 || qtype == GGMLQuantType::Q5_1);
-
-    // --- 2. Choose strategy ---
-    if (config_.use_nvfp4_decode == 0) {
-        budget.strategy = VRAMBudget::FP16_ONLY;
-    } else if (sub_8bit) {
-        budget.strategy = VRAMBudget::NVFP4_DECODE_ONLY;
-    } else {
-        budget.strategy = VRAMBudget::FP8_PREFILL_NVFP4_DECODE;
+bool Engine::is_stop_token(int32_t token) const {
+    Tokenizer* tok = model_->tokenizer();
+    if (tok && token == tok->eos_id()) return true;
+    for (int32_t stop_id : chat_template_.stop_token_ids()) {
+        if (token == stop_id) return true;
     }
-
-    // --- 3. Compute available VRAM ---
-    size_t free_vram = effective_free_vram();
-
-    // Feature-aware reserve instead of flat 1 GiB.
-    // Base: 256 MiB for cuBLAS workspace + driver overhead.
-    // Add per-feature: CUDA graphs, speculative, green contexts each need headroom.
-    budget.reserve_bytes = 256ULL * 1024 * 1024;  // base: cuBLAS + driver
-    if (config_.use_cuda_graphs)       budget.reserve_bytes += 256ULL * 1024 * 1024;
-    if (config_.enable_speculative)    budget.reserve_bytes += 256ULL * 1024 * 1024;
-    if (config_.use_green_contexts)    budget.reserve_bytes += 128ULL * 1024 * 1024;
-    if (config_.use_fp8_prefill)       budget.reserve_bytes += 128ULL * 1024 * 1024;
-    // Minimum 512 MiB to handle cuBLAS autotuning growth + misc stream allocs
-    budget.reserve_bytes = std::max(budget.reserve_bytes, static_cast<size_t>(512ULL * 1024 * 1024));
-    // At least 10% of total VRAM as headroom to avoid shared/system memory fallback
-    size_t total_vram = 0;
-    { size_t f; cudaMemGetInfo(&f, &total_vram); }
-    budget.reserve_bytes = std::max(budget.reserve_bytes, total_vram / 10);
-
-    // Estimate SSM footprint (not yet allocated at this point)
-    size_t ssm_footprint = 0;
-    if (mcfg.ssm_inner_size > 0) {
-        int n_ssm = 0;
-        for (int i = 0; i < mcfg.n_layers; i++)
-            if (model_->layer(i).ssm_in.data != nullptr) n_ssm++;
-        if (n_ssm > 0) {
-            int conv_ch = mcfg.ssm_inner_size + 2 * mcfg.ssm_group_count * mcfg.ssm_state_size;
-            int n_heads = mcfg.ssm_dt_rank;
-            int hd_ssm = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
-            ssm_footprint = static_cast<size_t>(n_ssm) * config_.max_batch_size *
-                (conv_ch * std::max(mcfg.ssm_conv_kernel - 1, 0) * sizeof(float) +
-                 n_heads * hd_ssm * mcfg.ssm_state_size * dtype_size(config_.ssm_state_dtype));
-        }
-    }
-
-    // Reduce available VRAM by reserve + 10% total VRAM headroom to prevent
-    // shared/system memory fallback on WSL2 (not visible via nvidia-smi).
-    size_t available = free_vram;
-    size_t overhead = budget.reserve_bytes + ssm_footprint;
-    available = (available > overhead) ? (available - overhead) : 0;
-
-    // --- 4. Compute KV cache per-block cost ---
-    int bs = config_.kv_block_size > 0 ? config_.kv_block_size : kKVBlockSize;
-    size_t single_block_bytes;
-    if (config_.kv_cache_dtype == DType::INT4) {
-        single_block_bytes = static_cast<size_t>(bs) *
-                             mcfg.n_kv_heads * head_dim / 2;
-    } else {
-        single_block_bytes = static_cast<size_t>(bs) *
-                             mcfg.n_kv_heads * head_dim * dtype_size(config_.kv_cache_dtype);
-    }
-    size_t per_block_total = single_block_bytes * 2 * n_kv_layers;
-    if (config_.kv_cache_dtype == DType::INT8 || config_.kv_cache_dtype == DType::INT4) {
-        size_t scale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * sizeof(half);
-        per_block_total += scale_per_block * 2 * n_kv_layers;
-    }
-
-    int blocks_per_seq = (config_.max_seq_len + bs - 1) / bs;
-    int needed_blocks = blocks_per_seq * config_.max_batch_size;
-
-    // --- 5. Estimate NVFP4-eligible weight cache size ---
-    auto nvfp4_beneficial = [](GGMLQuantType qt) -> bool {
-        switch (qt) {
-            case GGMLQuantType::Q8_0: case GGMLQuantType::Q8_K:
-            case GGMLQuantType::Q6_K: case GGMLQuantType::Q5_K:
-                return true;
-            default: return false;
-        }
-    };
-
-    size_t nvfp4_elems = 0;
-    auto count_nvfp4 = [&](const Tensor& w, GGMLQuantType qt) {
-        if (!w.data || !nvfp4_beneficial(qt)) return;
-        if (w.shape[1] % 16 != 0) return;
-        nvfp4_elems += static_cast<size_t>(w.shape[0]) * w.shape[1];
-    };
-
-    count_nvfp4(model_->output_proj(), model_->out_proj_qtype_);
-    for (int i = 0; i < mcfg.n_layers; i++) {
-        const auto& L = model_->layer(i);
-        count_nvfp4(L.wq, L.wq_qtype);
-        count_nvfp4(L.wk, L.wk_qtype);
-        count_nvfp4(L.wv, L.wv_qtype);
-        count_nvfp4(L.wo, L.wo_qtype);
-        count_nvfp4(L.w_gate, L.w_gate_qtype);
-        count_nvfp4(L.w_up, L.w_up_qtype);
-        count_nvfp4(L.w_down, L.w_down_qtype);
-        count_nvfp4(L.ssm_in, L.ssm_in_qtype);
-        count_nvfp4(L.ssm_out, L.ssm_out_qtype);
-        count_nvfp4(L.w_gate_shared, L.w_gate_shared_qtype);
-        count_nvfp4(L.w_up_shared, L.w_up_shared_qtype);
-        count_nvfp4(L.w_down_shared, L.w_down_shared_qtype);
-    }
-
-    // NVFP4: packed_data (N*K/2) + scale_factors (N*K/16) + ~4 bytes tensor_scale
-    size_t nvfp4_estimate = nvfp4_elems / 2 + nvfp4_elems / 16;
-    // CUTLASS scale factors add ~6.25% overhead (N*K/16)
-    size_t cutlass_sf_estimate = nvfp4_elems / 16;
-
-    // --- 6. Allocate based on strategy ---
-    switch (budget.strategy) {
-        case VRAMBudget::NVFP4_DECODE_ONLY: {
-            budget.fp8_cache_bytes = 0;
-            budget.nvfp4_cache_bytes = nvfp4_estimate;
-            size_t weight_total = nvfp4_estimate + cutlass_sf_estimate;
-            size_t kv_available = (available > weight_total) ? (available - weight_total) : 0;
-            budget.kv_cache_bytes = static_cast<size_t>(kv_available * 0.8);
-            budget.kv_max_blocks = (per_block_total > 0)
-                ? static_cast<int>(budget.kv_cache_bytes / per_block_total) : needed_blocks;
-            budget.nvfp4_second_pass = false;  // no FP16 to free
-            break;
-        }
-        case VRAMBudget::FP8_PREFILL_NVFP4_DECODE: {
-            budget.fp8_cache_bytes = nvfp4_elems;  // FP8 = 1 byte/elem, same eligible set
-            budget.nvfp4_cache_bytes = nvfp4_estimate;
-            // KV: 10% for mode 2 (NVFP4 needs VRAM), 80% otherwise
-            double kv_fraction = (config_.use_nvfp4_decode == 2) ? 0.1 : 0.8;
-            budget.kv_cache_bytes = static_cast<size_t>(available * kv_fraction);
-            budget.kv_max_blocks = (per_block_total > 0)
-                ? static_cast<int>(budget.kv_cache_bytes / per_block_total) : needed_blocks;
-            if (config_.use_nvfp4_decode != 2)
-                budget.kv_max_blocks = std::max(budget.kv_max_blocks, needed_blocks);
-            budget.nvfp4_second_pass = (config_.use_nvfp4_decode == 2);
-            break;
-        }
-        case VRAMBudget::FP16_ONLY: {
-            budget.fp8_cache_bytes = 0;
-            budget.nvfp4_cache_bytes = 0;
-            budget.kv_cache_bytes = static_cast<size_t>(available * 0.8);
-            budget.kv_max_blocks = (per_block_total > 0)
-                ? static_cast<int>(budget.kv_cache_bytes / per_block_total) : needed_blocks;
-            budget.nvfp4_second_pass = false;
-            break;
-        }
-    }
-    budget.kv_max_blocks = std::max(budget.kv_max_blocks, 16);
-
-    int target_blocks = (config_.use_nvfp4_decode == 2 ||
-                         budget.strategy == VRAMBudget::NVFP4_DECODE_ONLY)
-                        ? needed_blocks : needed_blocks * 2;
-    budget.kv_max_blocks = std::min(budget.kv_max_blocks, target_blocks);
-    budget.kv_max_blocks = std::max(budget.kv_max_blocks, 16);
-
-    const char* strat_name = (budget.strategy == VRAMBudget::FP8_PREFILL_NVFP4_DECODE)
-        ? "FP8_PREFILL_NVFP4_DECODE"
-        : (budget.strategy == VRAMBudget::NVFP4_DECODE_ONLY)
-        ? "NVFP4_DECODE_ONLY" : "FP16_ONLY";
-    IMP_LOG_INFO("VRAM budget: strategy=%s, available=%.1f MiB, "
-                 "kv=%d blocks (%.1f MiB), nvfp4=%.1f MiB, fp8=%.1f MiB, "
-                 "reserve=%.0f MiB, second_pass=%s",
-                 strat_name, available / (1024.0 * 1024.0),
-                 budget.kv_max_blocks,
-                 (per_block_total > 0 ? budget.kv_max_blocks * per_block_total : 0) / (1024.0 * 1024.0),
-                 nvfp4_estimate / (1024.0 * 1024.0),
-                 budget.fp8_cache_bytes / (1024.0 * 1024.0),
-                 budget.reserve_bytes / (1024.0 * 1024.0),
-                 budget.nvfp4_second_pass ? "yes" : "no");
-
-    return budget;
+    return false;
 }
 
-bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
-    if (!model) {
-        return false;
+void Engine::fill_sampling_params(const Request& req, InferenceState& state) const {
+    state.temperature = req.temperature;
+    state.top_p = req.top_p;
+    state.top_k = req.top_k;
+    state.seed = req.seed;
+    state.min_p = req.min_p;
+    state.typical_p = req.typical_p;
+    state.repetition_penalty = req.repetition_penalty;
+    state.frequency_penalty = req.frequency_penalty;
+    state.presence_penalty = req.presence_penalty;
+    state.repeat_last_n = req.repeat_last_n;
+    state.dry_multiplier = req.dry_multiplier;
+    state.dry_base = req.dry_base;
+    state.dry_allowed_length = req.dry_allowed_length;
+    state.dry_penalty_last_n = req.dry_penalty_last_n;
+    if (req.dry_multiplier > 0.0f && !req.output_tokens.empty())
+        state.host_penalty_tokens = req.output_tokens.data();
+    state.mirostat = req.mirostat;
+    state.mirostat_tau = req.mirostat_tau;
+    state.mirostat_eta = req.mirostat_eta;
+    state.mirostat_mu = req.mirostat_mu;
+}
+
+void Engine::upload_penalties(const Request& req, InferenceState& state,
+                               cudaStream_t stream) {
+    bool needs_penalties = (req.repetition_penalty != 1.0f ||
+                            req.frequency_penalty != 0.0f ||
+                            req.presence_penalty != 0.0f);
+    if (!needs_penalties || req.output_tokens.empty()) return;
+
+    size_t n = req.output_tokens.size();
+    if (n > d_penalty_tokens_capacity_) {
+        if (d_penalty_tokens_) vram_alloc_.free(d_penalty_tokens_);
+        d_penalty_tokens_capacity_ = std::max(n, (size_t)256);
+        d_penalty_tokens_ = static_cast<int32_t*>(
+            vram_alloc_.allocate(d_penalty_tokens_capacity_ * sizeof(int32_t), "penalty_tokens"));
+        if (!d_penalty_tokens_) {
+            IMP_LOG_ERROR("VRAMAllocator failed for penalty tokens (%zu)", d_penalty_tokens_capacity_);
+            d_penalty_tokens_capacity_ = 0;
+            return;
+        }
     }
+    cudaMemcpyAsync(d_penalty_tokens_, req.output_tokens.data(),
+                    n * sizeof(int32_t), cudaMemcpyHostToDevice, stream);
+    state.penalty_tokens = d_penalty_tokens_;
+    state.n_penalty_tokens = static_cast<int>(n);
+}
+
+void Engine::fill_recurrent_state(const Request& req, InferenceState& state,
+                                    bool reset, cudaStream_t stream) {
+    if (ssm_state_) {
+        state.ssm_state = ssm_state_.get();
+        state.ssm_seq_id = req.id % ssm_state_->max_sequences();
+        if (reset) ssm_state_->reset_sequence(state.ssm_seq_id, stream);
+    }
+    if (gdn_state_) {
+        state.gdn_state = gdn_state_.get();
+        state.gdn_seq_id = req.id % gdn_state_->max_sequences();
+        if (reset) gdn_state_->reset_sequence(state.gdn_seq_id, stream);
+    }
+}
+
+void Engine::finish_request(std::shared_ptr<Request>& req) {
+    req->status = RequestStatus::FINISHED;
+    if (kv_manager_->prefix_caching_enabled()) {
+        kv_manager_->register_block_hashes(req->id, req->input_tokens);
+    }
+    kv_manager_->free_sequence(req->id);
+    constraints_.reset();
+}
+
+// =====================================================================
+// Vision delegation
+// =====================================================================
+
+bool Engine::set_image(const std::string& path) {
+    return vision_.set_image(path, stream_);
+}
+
+bool Engine::set_image_from_memory(const uint8_t* data, size_t len) {
+    return vision_.set_image_from_memory(data, len, stream_);
+}
+
+void Engine::clear_image() {
+    vision_.clear_image();
+}
+
+// =====================================================================
+// Initialization — decomposed into sub-phases
+// =====================================================================
+
+bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
+    if (!model) return false;
 
     model_ = std::move(model);
     config_ = config;
 
     const auto& mcfg = model_->config();
 
-    // Resolve NVFP4 decode auto mode based on GPU compute capability.
-    // Skip for small dense models (d_model < 4096): FP4 quantization error accumulates
-    // over layers and degrades output quality, while the decode speed gain is negligible
-    // (small models are already memory-bandwidth-light).
-    // Exception: MoE models benefit regardless of d_model — expert weights dominate VRAM
-    // and sparse activation limits error accumulation.
-    // Count GDN layers for auto-detection decisions below.
+    // --- Resolve auto-detection flags ---
+    // NVFP4 decode mode
     int n_gdn_auto = 0;
-    for (int i = 0; i < mcfg.n_layers; i++) {
+    for (int i = 0; i < mcfg.n_layers; i++)
         if (model_->layer(i).gdn_gate.data != nullptr) n_gdn_auto++;
-    }
 
     if (config_.use_nvfp4_decode < 0) {
         int sm = get_device_sm_version();
         if (n_gdn_auto > 0) {
-            // GDN (Gated DeltaNet) models: the delta rule scan accumulates
-            // quantization error in the recurrent state H across tokens.
-            // NVFP4 (4-bit) causes visible quality degradation on 9B+ models.
-            // FP8 prefill + dp4a decode preserves enough precision.
             config_.use_nvfp4_decode = 0;
-            IMP_LOG_INFO("NVFP4 decode: auto → disabled (GDN model, %d recurrent layers — precision risk)", n_gdn_auto);
+            IMP_LOG_INFO("NVFP4 decode: auto → disabled (GDN model, %d recurrent layers)", n_gdn_auto);
         } else if (mcfg.d_model < 4096 && mcfg.n_experts == 0) {
             config_.use_nvfp4_decode = 0;
-            IMP_LOG_INFO("NVFP4 decode: auto → disabled (d_model=%d < 4096, precision risk)", mcfg.d_model);
+            IMP_LOG_INFO("NVFP4 decode: auto → disabled (d_model=%d < 4096)", mcfg.d_model);
         } else if (sm >= 120) {
             config_.use_nvfp4_decode = 2;
             IMP_LOG_INFO("NVFP4 decode: auto → mode %d (sm_%d)", config_.use_nvfp4_decode, sm);
@@ -310,10 +227,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
     }
 
-    // Auto-disable FP8 prefill cache for sub-8-bit quantized models.
-    // FP8 (8 bits/param) is LARGER than Q4_K_M (~4.8 bits) or Q6_K (~6.5 bits),
-    // so the cache wastes VRAM without reducing memory traffic. The freed VRAM
-    // is better spent on NVFP4 decode cache and KV cache for longer context.
+    // FP8 prefill auto-disable for sub-8-bit models
     if (config_.use_fp8_prefill) {
         auto qtype = model_->layer(0).wq_qtype;
         bool sub_8bit = (qtype == GGMLQuantType::Q4_0 || qtype == GGMLQuantType::Q4_K ||
@@ -322,74 +236,63 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                          qtype == GGMLQuantType::Q4_1 || qtype == GGMLQuantType::Q5_1);
         if (sub_8bit) {
             config_.use_fp8_prefill = 0;
-            IMP_LOG_INFO("FP8 prefill cache: auto-disabled (model weights are sub-8-bit, "
-                         "FP8 cache would increase VRAM usage)");
+            IMP_LOG_INFO("FP8 prefill cache: auto-disabled (sub-8-bit weights)");
         }
     }
 
-    // --- Initialize centralized VRAM allocator (10% headroom for WSL2 safety) ---
+    // --- Core initialization ---
     if (!vram_alloc_.init(0.10f)) {
         IMP_LOG_ERROR("Failed to initialize VRAM allocator");
         return false;
     }
-
-    // --- Pre-allocate cuBLAS/cuBLASLt workspace while GPU memory is plentiful ---
     gemm_init();
-
-    // --- Initialize scheduler ---
     scheduler_ = std::make_unique<Scheduler>(config_.max_batch_size);
+    stream_.create(cudaStreamNonBlocking);
 
-    // --- Initialize graph executor (Phase 1: compute sizes, no GPU allocation) ---
-    // GPU workspace allocation is deferred to AFTER weight upload to maximize
-    // VRAM available for expert layers during upload.
+    // --- Sub-phases ---
+    if (!init_weights()) return false;
+    if (!init_kv_cache()) return false;
+    if (!init_features()) return false;
+    warmup();
+
+    return true;
+}
+
+bool Engine::init_weights() {
+    const auto& mcfg = model_->config();
+
+    // Initialize graph executor (Phase 1: compute sizes, no GPU allocation)
     executor_ = std::make_unique<GraphExecutor>();
     executor_->set_vram_allocator(&vram_alloc_);
     {
-        // Self-speculative verify needs logits for K+1 tokens in one pass.
-        // Ensure max_batch_size (which sizes the logits buffer) is large enough.
         int eff_batch = config_.max_batch_size;
-        if (config_.enable_self_speculative) {
+        if (config_.enable_self_speculative)
             eff_batch = std::max(eff_batch, config_.self_spec_k + 1);
-        }
         if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl,
                              eff_batch, config_.max_seq_len,
                              config_.use_fp8_prefill, config_.use_nvfp4_decode,
-                             config_.use_mxfp4_prefill)) {
+                             config_.use_mxfp4_prefill))
             return false;
-        }
     }
 
-    // --- Reserve L2 persisting cache for decode GEMV ---
-    // KV cache reads use streaming loads (__ldcs / cp.async.cg) that hint L2 to
-    // evict those lines first. Without a persisting reservation, the hardware has
-    // no set-aside region — this call enables the streaming/persisting distinction.
+    // Reserve L2 persisting cache for decode GEMV
     {
         cudaDeviceProp prop;
         cudaGetDeviceProperties(&prop, 0);
         size_t max_persist = prop.persistingL2CacheMaxSize;
         if (max_persist > 0) {
-            size_t reserve = max_persist * 3 / 4;  // 75% of L2 (72 MB on RTX 5090)
+            size_t reserve = max_persist * 3 / 4;
             cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, reserve);
             IMP_LOG_INFO("L2 persisting cache: reserved %zu MB / %zu MB total",
                          reserve >> 20, max_persist >> 20);
         }
     }
 
-    // --- Create CUDA stream ---
-    // Non-blocking stream avoids implicit synchronization with the default stream,
-    // preventing hidden stalls when other CUDA work is in flight.
-    stream_.create(cudaStreamNonBlocking);
-
-    // --- Upload model weights to GPU ---
-    // Compute dynamic reserve: workspace + KV cache + SSM state + safety margin.
-    // The workspace is not allocated yet, so all VRAM above this reserve is
-    // available for expert weight upload — fitting more layers on GPU.
+    // Compute VRAM reserve for expert weight upload
     size_t expert_reserve = executor_->workspace_estimate();
     {
-        // Add estimated KV cache + SSM state footprint
         int head_dim_est = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
         size_t elem_sz = dtype_size(config_.kv_cache_dtype);
-        // Minimum KV: enough for max_seq_len * max_batch_size
         int est_bs = config_.kv_block_size > 0 ? config_.kv_block_size : kKVBlockSize;
         int blocks_per_seq = (config_.max_seq_len + est_bs - 1) / est_bs;
         int n_attn = 0;
@@ -398,17 +301,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         if (n_attn == 0) n_attn = mcfg.n_layers;
         size_t kv_block_bytes = static_cast<size_t>(est_bs) * mcfg.n_kv_heads * head_dim_est * elem_sz;
         size_t kv_est = static_cast<size_t>(blocks_per_seq * config_.max_batch_size) * 2 * n_attn * kv_block_bytes;
-        // Cap KV estimate to 20% of total VRAM — the theoretical max (all batch slots
-        // filled to max_seq_len) is unrealistic for large models on limited VRAM.
-        // The actual KV allocation is computed later by plan_vram_budget().
-        {
-            size_t total_vram = 0, free_vram_est = 0;
-            cudaMemGetInfo(&free_vram_est, &total_vram);
-            kv_est = std::min(kv_est, total_vram / 5);
-        }
+        { size_t total_vram = 0, f = 0; cudaMemGetInfo(&f, &total_vram); kv_est = std::min(kv_est, total_vram / 5); }
         expert_reserve += kv_est;
 
-        // SSM state estimate
         if (mcfg.ssm_inner_size > 0) {
             int conv_ch = mcfg.ssm_inner_size + 2 * mcfg.ssm_group_count * mcfg.ssm_state_size;
             int n_heads = mcfg.ssm_dt_rank;
@@ -416,16 +311,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             int n_ssm = 0;
             for (int i = 0; i < mcfg.n_layers; i++)
                 if (model_->layer(i).ssm_in.data != nullptr) n_ssm++;
-            size_t ssm_est = static_cast<size_t>(n_ssm) * config_.max_batch_size *
-                             (conv_ch * std::max(mcfg.ssm_conv_kernel - 1, 0) * sizeof(float) +
-                              n_heads * hd_ssm * mcfg.ssm_state_size * dtype_size(config_.ssm_state_dtype));
-            expert_reserve += ssm_est;
+            expert_reserve += static_cast<size_t>(n_ssm) * config_.max_batch_size *
+                (conv_ch * std::max(mcfg.ssm_conv_kernel - 1, 0) * sizeof(float) +
+                 n_heads * hd_ssm * mcfg.ssm_state_size * dtype_size(config_.ssm_state_dtype));
         }
 
-        // Safety margin for weight cache, CUDA graph driver memory, and runtime overhead.
-        // On WSL2/WDDM, exceeding physical VRAM silently spills to shared system memory,
-        // causing massive slowdowns. Feature-aware: more features = more headroom needed.
-        size_t safety = 256ULL * 1024 * 1024;  // base: cuBLAS + driver
+        size_t safety = 256ULL * 1024 * 1024;
         if (config_.use_cuda_graphs)    safety += 256ULL * 1024 * 1024;
         if (config_.enable_speculative) safety += 256ULL * 1024 * 1024;
         if (config_.use_green_contexts) safety += 128ULL * 1024 * 1024;
@@ -439,71 +330,56 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                      kv_est / (1024.0 * 1024.0));
     }
 
-    {
-        size_t free_before = 0, total_before = 0;
-        cudaMemGetInfo(&free_before, &total_before);
-        IMP_LOG_INFO("GPU memory before weight upload: %zu MiB free / %zu MiB total",
-                     free_before / (1024 * 1024), total_before / (1024 * 1024));
+    // Upload weights
+    size_t free_before = 0, total_before = 0;
+    cudaMemGetInfo(&free_before, &total_before);
+    IMP_LOG_INFO("GPU memory before weight upload: %zu MiB free / %zu MiB total",
+                 free_before / (1024 * 1024), total_before / (1024 * 1024));
 
-        // Use a separate upload stream so H2D transfers can overlap with
-        // workspace allocation and other init work on stream_.
-        cudaStream_t upload_stream = nullptr;
-        cudaStreamCreateWithFlags(&upload_stream, cudaStreamNonBlocking);
+    cudaStream_t upload_stream = nullptr;
+    cudaStreamCreateWithFlags(&upload_stream, cudaStreamNonBlocking);
 
-        if (!model_->upload_weights_gpu(config_.compute_dtype,
-                                         upload_stream ? upload_stream : stream_,
-                                         expert_reserve)) {
-            IMP_LOG_ERROR("Weight upload failed. Model may be too large for GPU. "
-                          "Try a smaller quantization (e.g. Q4_K_M instead of Q6_K).");
-            if (upload_stream) cudaStreamDestroy(upload_stream);
-            return false;
-        }
-
-        // Record event on upload stream so main stream can wait before using weights
-        cudaEvent_t upload_done = nullptr;
-        if (upload_stream) {
-            cudaEventCreate(&upload_done);
-            cudaEventRecord(upload_done, upload_stream);
-        }
-
-        size_t free_after = 0, total_after = 0;
-        cudaMemGetInfo(&free_after, &total_after);
-        IMP_LOG_INFO("GPU memory after weight upload: %zu MiB free / %zu MiB total "
-                     "(weights used ~%zu MiB)",
-                     free_after / (1024 * 1024), total_after / (1024 * 1024),
-                     (free_before - free_after) / (1024 * 1024));
-
-        // Ensure upload completes before any weight access on main stream
-        if (upload_done) {
-            cudaStreamWaitEvent(stream_, upload_done);
-            cudaEventDestroy(upload_done);
-        }
+    if (!model_->upload_weights_gpu(config_.compute_dtype,
+                                     upload_stream ? upload_stream : stream_,
+                                     expert_reserve)) {
+        IMP_LOG_ERROR("Weight upload failed. Try a smaller quantization.");
         if (upload_stream) cudaStreamDestroy(upload_stream);
+        return false;
     }
 
-    // --- Check if any expert weights ended up on host ---
-    bool experts_on_host = false;
+    if (upload_stream) {
+        cudaEvent_t upload_done;
+        cudaEventCreate(&upload_done);
+        cudaEventRecord(upload_done, upload_stream);
+        cudaStreamWaitEvent(stream_, upload_done);
+        cudaEventDestroy(upload_done);
+        cudaStreamDestroy(upload_stream);
+    }
+
+    size_t free_after = 0, total_after = 0;
+    cudaMemGetInfo(&free_after, &total_after);
+    IMP_LOG_INFO("GPU memory after weight upload: %zu MiB free / %zu MiB total (weights ~%zu MiB)",
+                 free_after / (1024 * 1024), total_after / (1024 * 1024),
+                 (free_before - free_after) / (1024 * 1024));
+
+    // Check for host-resident expert weights
     if (mcfg.n_experts > 0) {
         for (int i = 0; i < mcfg.n_layers; i++) {
-            const auto& ly = model_->layer(i);
-            if (ly.expert_up_packed.data && !ly.expert_up_packed.on_device) {
-                experts_on_host = true;
+            if (model_->layer(i).expert_up_packed.data && !model_->layer(i).expert_up_packed.on_device) {
+                experts_on_host_ = true;
                 break;
             }
         }
-        if (experts_on_host) {
-            experts_on_host_ = true;
-            if (config_.use_cuda_graphs) {
-                IMP_LOG_INFO("Disabling CUDA graphs: expert weights on host (H2D not graph-capturable)");
-                config_.use_cuda_graphs = false;
-            }
+        if (experts_on_host_ && config_.use_cuda_graphs) {
+            IMP_LOG_INFO("Disabling CUDA graphs: expert weights on host");
+            config_.use_cuda_graphs = false;
         }
     }
 
-    // --- Initialize graph executor (Phase 2: allocate GPU workspace) ---
-    executor_->allocate_workspaces(experts_on_host);
+    // Phase 2: allocate GPU workspace
+    executor_->allocate_workspaces(experts_on_host_);
 
-    // --- Initialize layer offloading if configured ---
+    // Layer offloading
     if (config_.gpu_layers >= 0) {
         offload_mgr_ = std::make_unique<LayerOffloadManager>();
         if (!offload_mgr_->init(model_.get(), config_.gpu_layers)) {
@@ -512,206 +388,181 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
     }
 
-    // --- Initialize KV cache (AFTER weights + workspace so cudaMemGetInfo is accurate) ---
-    int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
-    int max_blocks = 0;
+    return true;
+}
 
-    // Count attention layers and build KV layer mapping for hybrid models.
-    // Only attention layers need KV cache entries — SSM/MoE-only layers don't.
+bool Engine::init_kv_cache() {
+    const auto& mcfg = model_->config();
+    int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
+
+    // Build KV layer mapping for hybrid models
     int n_attn_layers = 0;
     std::vector<int> kv_layer_map(mcfg.n_layers, -1);
     for (int i = 0; i < mcfg.n_layers; i++) {
-        // GDN layers have wq but use recurrent state, not KV cache
         if (model_->layer(i).wq.data != nullptr &&
-            model_->layer(i).gdn_gate.data == nullptr) {
+            model_->layer(i).gdn_gate.data == nullptr)
             kv_layer_map[i] = n_attn_layers++;
-        }
     }
     if (n_attn_layers == 0) {
-        n_attn_layers = mcfg.n_layers;  // fallback: all layers have attention
+        n_attn_layers = mcfg.n_layers;
         for (int i = 0; i < mcfg.n_layers; i++) kv_layer_map[i] = i;
     }
     int n_kv_layers = n_attn_layers;
     IMP_LOG_INFO("KV cache layers: %d attention out of %d total", n_kv_layers, mcfg.n_layers);
 
-    // Auto-select KV block size based on model characteristics.
-    // Larger blocks (32) improve coalescing for GQA models with few KV heads.
+    // Auto-select block size
     if (config_.kv_block_size <= 0) {
-        if (mcfg.n_kv_heads <= 4 && mcfg.n_kv_heads > 0) {
-            config_.kv_block_size = 32;  // Strong GQA (≤4 heads): larger blocks
-        } else {
-            config_.kv_block_size = kKVBlockSize;  // default 16
-        }
-        IMP_LOG_INFO("KV block size: auto → %d (n_kv_heads=%d)",
-                     config_.kv_block_size, mcfg.n_kv_heads);
+        config_.kv_block_size = (mcfg.n_kv_heads <= 4 && mcfg.n_kv_heads > 0) ? 32 : kKVBlockSize;
+        IMP_LOG_INFO("KV block size: auto → %d (n_kv_heads=%d)", config_.kv_block_size, mcfg.n_kv_heads);
     }
     const int kv_bs = config_.kv_block_size;
-
-    // Calculate how many blocks are actually needed for the configured workload.
     int blocks_per_seq = (config_.max_seq_len + kv_bs - 1) / kv_bs;
-    int needed_blocks = blocks_per_seq * config_.max_batch_size;
 
-    // Compute VRAM budget: unified planner for KV + weight cache allocation.
-    auto vram_budget = plan_vram_budget(n_kv_layers, head_dim);
-
-    if (config_.kv_cache_max_blocks > 0) {
-        max_blocks = config_.kv_cache_max_blocks;
-    } else {
-        max_blocks = vram_budget.kv_max_blocks;
-    }
+    // VRAM budget
+    auto vram_budget = compute_vram_budget(*model_, config_, n_kv_layers,
+                                            head_dim, effective_free_vram());
+    int max_blocks = config_.kv_cache_max_blocks > 0
+        ? config_.kv_cache_max_blocks : vram_budget.kv_max_blocks;
 
     {
         DType kv_dtype = config_.kv_cache_dtype;
-        size_t elem_size = dtype_size(kv_dtype);
-        size_t block_bytes = static_cast<size_t>(kv_bs) *
-                             mcfg.n_kv_heads * head_dim * elem_size;
+        size_t block_bytes = static_cast<size_t>(kv_bs) * mcfg.n_kv_heads * head_dim * dtype_size(kv_dtype);
         size_t total_kv = static_cast<size_t>(n_kv_layers) * max_blocks * 2 * block_bytes;
         IMP_LOG_INFO("KV cache: %d blocks (%.0f tokens), %.2f MiB, dtype=%s "
                      "(layers=%d/%d, kv_heads=%d, head_dim=%d, block_size=%d)",
-                     max_blocks,
-                     static_cast<double>(max_blocks) * kv_bs,
+                     max_blocks, static_cast<double>(max_blocks) * kv_bs,
                      static_cast<double>(total_kv) / (1024.0 * 1024.0),
                      kv_dtype == DType::FP8_E4M3 ? "FP8_E4M3" :
-                     kv_dtype == DType::INT8 ? "INT8" :
-                     kv_dtype == DType::INT4 ? "INT4" : "FP16",
+                     kv_dtype == DType::INT8 ? "INT8" : kv_dtype == DType::INT4 ? "INT4" : "FP16",
                      n_kv_layers, mcfg.n_layers, mcfg.n_kv_heads, head_dim, kv_bs);
     }
 
     auto kv_cache = std::make_unique<KVCache>(
         n_kv_layers, mcfg.n_kv_heads, head_dim,
         config_.kv_cache_dtype, max_blocks, kv_bs, &vram_alloc_);
-
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
 
     if (config_.use_prefix_caching) {
         kv_manager_->set_prefix_caching_enabled(true);
         IMP_LOG_INFO("Prefix caching enabled");
-
-        // Restore prefix cache from disk if available
         if (!config_.prefix_cache_path.empty()) {
             int restored = kv_manager_->load_prefix_cache(config_.prefix_cache_path, stream_);
-            if (restored > 0) {
-                IMP_LOG_INFO("Restored %d prefix cache blocks from %s",
-                             restored, config_.prefix_cache_path.c_str());
-            }
+            if (restored > 0)
+                IMP_LOG_INFO("Restored %d prefix cache blocks from %s", restored, config_.prefix_cache_path.c_str());
         }
     }
 
-    // Pass KV layer mapping to executor for correct cache indexing
     executor_->set_kv_layer_map(std::move(kv_layer_map));
-
-    // Pass layer offload manager to executor (if enabled)
-    if (offload_mgr_) {
-        executor_->set_offload_manager(offload_mgr_.get());
-    }
-
-    // Wire up scheduler with KV cache manager for memory-aware scheduling
+    if (offload_mgr_) executor_->set_offload_manager(offload_mgr_.get());
     scheduler_->set_kv_manager(kv_manager_.get());
 
-    // --- Initialize SSM state for Mamba2 hybrid models ---
+    // SSM state
     if (mcfg.ssm_inner_size > 0) {
-        // Count SSM layers
-        int n_ssm_layers = 0;
-        for (int i = 0; i < mcfg.n_layers; i++) {
-            if (model_->layer(i).ssm_in.data != nullptr) n_ssm_layers++;
-        }
-        if (n_ssm_layers > 0) {
-            int conv_channels = mcfg.ssm_inner_size + 2 * mcfg.ssm_group_count * mcfg.ssm_state_size;
+        int n_ssm = 0;
+        for (int i = 0; i < mcfg.n_layers; i++)
+            if (model_->layer(i).ssm_in.data != nullptr) n_ssm++;
+        if (n_ssm > 0) {
+            int conv_ch = mcfg.ssm_inner_size + 2 * mcfg.ssm_group_count * mcfg.ssm_state_size;
             int n_heads = mcfg.ssm_dt_rank;
-            int head_dim_ssm = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
-
+            int hd = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
             ssm_state_ = std::make_unique<SSMState>();
-            if (!ssm_state_->init(n_ssm_layers, config_.max_batch_size,
-                                   conv_channels, mcfg.ssm_conv_kernel,
-                                   n_heads, head_dim_ssm, mcfg.ssm_state_size,
-                                   config_.ssm_state_dtype, &vram_alloc_)) {
+            if (!ssm_state_->init(n_ssm, config_.max_batch_size, conv_ch, mcfg.ssm_conv_kernel,
+                                   n_heads, hd, mcfg.ssm_state_size, config_.ssm_state_dtype, &vram_alloc_)) {
                 IMP_LOG_WARN("Failed to init SSM state, continuing without it");
                 ssm_state_.reset();
             }
         }
     }
 
-    // --- GDN (Gated DeltaNet) model detection (Qwen3.5) ---
-    // GDN layers use the SSM pipeline (same state management). The GDNState is
-    // NOT allocated — SSMState's h_state serves as the delta rule state.
-    // Just disable CUDA graphs for GDN models (recurrent state not capturable).
+    // GDN detection
     {
-        int n_gdn_layers = 0;
-        for (int i = 0; i < mcfg.n_layers; i++) {
-            if (model_->layer(i).gdn_gate.data != nullptr) n_gdn_layers++;
-        }
-        if (n_gdn_layers > 0) {
-            // GDN recurrent state is updated in-place with fixed pointers —
-            // compatible with CUDA graph replay. Keep graphs enabled.
-            IMP_LOG_INFO("GDN model: %d layers, CUDA graphs enabled (recurrent state in-place)", n_gdn_layers);
-        }
+        int n_gdn = 0;
+        for (int i = 0; i < mcfg.n_layers; i++)
+            if (model_->layer(i).gdn_gate.data != nullptr) n_gdn++;
+        if (n_gdn > 0)
+            IMP_LOG_INFO("GDN model: %d layers, CUDA graphs enabled (recurrent state in-place)", n_gdn);
     }
 
-    // Pre-dequantize quantized weights to FP16 on GPU for fast prefill GEMM.
-    // Uses the VRAM budget computed earlier to split VRAM between FP16/FP8/NVFP4 caches.
+    // Dequant weights → FP16/FP8/NVFP4 caches
     executor_->pre_dequant_weights(stream_, vram_budget);
     dequant_done_ = true;
     cudaStreamSynchronize(stream_);
-
-    if (config_.use_fp8_prefill) {
+    if (config_.use_fp8_prefill)
         IMP_LOG_INFO("Weight cache: FP8 E4M3 (2x prefill throughput on sm_120)");
-    }
 
-    // --- Pre-allocate decode batch pool for stable CUDA Graph pointers ---
-    {
-        int max_blocks_per_seq = blocks_per_seq;
-        decode_batch_pool_.allocate(config_.max_batch_size, max_blocks_per_seq, &vram_alloc_);
-    }
-
-    // --- Pre-allocate penalty token buffer to avoid sync cudaMalloc in decode hot path ---
+    // Pre-allocate decode batch pool + penalty buffer
+    decode_batch_pool_.allocate(config_.max_batch_size, blocks_per_seq, &vram_alloc_);
     {
         d_penalty_tokens_capacity_ = static_cast<size_t>(config_.max_seq_len);
-        size_t pt_bytes = d_penalty_tokens_capacity_ * sizeof(int32_t);
-        d_penalty_tokens_ = static_cast<int32_t*>(vram_alloc_.allocate(pt_bytes, "penalty_tokens"));
+        d_penalty_tokens_ = static_cast<int32_t*>(
+            vram_alloc_.allocate(d_penalty_tokens_capacity_ * sizeof(int32_t), "penalty_tokens"));
         if (!d_penalty_tokens_) {
-            IMP_LOG_WARN("Failed to pre-allocate penalty token buffer (%zu tokens)", d_penalty_tokens_capacity_);
+            IMP_LOG_WARN("Failed to pre-allocate penalty token buffer");
             d_penalty_tokens_capacity_ = 0;
         }
     }
 
-    // --- Report total GPU memory usage ---
+    // Pre-allocate prefill metadata pool (avoids per-request cudaMallocAsync)
+    {
+        size_t tok_bytes = config_.max_seq_len * sizeof(int32_t);
+        size_t pos_bytes = config_.max_seq_len * sizeof(int);
+        size_t bt_bytes  = blocks_per_seq * sizeof(int);
+        size_t cl_bytes  = sizeof(int);
+        prefill_pool_size_ = tok_bytes + pos_bytes + bt_bytes + cl_bytes;
+        prefill_pool_ = vram_alloc_.allocate(prefill_pool_size_, "prefill_pool");
+        if (prefill_pool_) {
+            auto* base = static_cast<char*>(prefill_pool_);
+            d_pf_token_ids_   = reinterpret_cast<int32_t*>(base);
+            d_pf_positions_   = reinterpret_cast<int*>(base + tok_bytes);
+            d_pf_block_tables_ = reinterpret_cast<int*>(base + tok_bytes + pos_bytes);
+            d_pf_context_lens_ = reinterpret_cast<int*>(base + tok_bytes + pos_bytes + bt_bytes);
+        } else {
+            IMP_LOG_WARN("Failed to pre-allocate prefill pool, will use per-request malloc");
+        }
+
+        // Pinned host staging buffers for prefill
+        if (cudaHostAlloc(&h_pf_positions_, config_.max_seq_len * sizeof(int),
+                          cudaHostAllocDefault) != cudaSuccess)
+            h_pf_positions_ = nullptr;
+        if (cudaHostAlloc(&h_pf_token_ids_, config_.max_seq_len * sizeof(int32_t),
+                          cudaHostAllocDefault) != cudaSuccess)
+            h_pf_token_ids_ = nullptr;
+    }
+
+    // Report memory
     {
         size_t free_mem = 0, total_mem = 0;
-        if (cudaMemGetInfo(&free_mem, &total_mem) == cudaSuccess) {
-            size_t used = total_mem - free_mem;
+        if (cudaMemGetInfo(&free_mem, &total_mem) == cudaSuccess)
             IMP_LOG_INFO("GPU memory: %.0f MiB used / %.0f MiB total (%.0f MiB free)",
-                         used / (1024.0 * 1024.0),
-                         total_mem / (1024.0 * 1024.0),
-                         free_mem / (1024.0 * 1024.0));
-        }
+                         (total_mem - free_mem) / (1024.0 * 1024.0),
+                         total_mem / (1024.0 * 1024.0), free_mem / (1024.0 * 1024.0));
         vram_alloc_.report();
     }
 
-    // --- Initialize green contexts if requested ---
+    return true;
+}
+
+bool Engine::init_features() {
+    const auto& mcfg = model_->config();
+
+    // Green contexts
     if (config_.use_green_contexts) {
-        if (!green_ctx_.init(0, config_.green_ctx_prefill_ratio)) {
+        if (!green_ctx_.init(0, config_.green_ctx_prefill_ratio))
             IMP_LOG_WARN("Green context init failed — falling back to regular streams");
-        }
-        // Allocate decode workspace for concurrent prefill/decode overlap
-        if (green_ctx_.is_available() && config_.prefill_chunk_size > 0) {
-            if (executor_->allocate_decode_workspace(stream_, config_.max_batch_size)) {
+        if (green_ctx_.is_available() && config_.prefill_chunk_size > 0)
+            if (executor_->allocate_decode_workspace(stream_, config_.max_batch_size))
                 IMP_LOG_INFO("Concurrent prefill/decode overlap enabled");
-            }
-        }
     }
 
-    // --- Initialize speculative decoding if configured ---
+    // Speculative decoding variants
     if (config_.enable_speculative) {
         if (!init_speculative()) {
             IMP_LOG_WARN("Speculative decoding init failed, continuing without it");
             config_.enable_speculative = false;
         }
     }
-
-    // --- Initialize self-speculative decoding if configured ---
     if (config_.enable_self_speculative) {
-        // Self-spec is incompatible with CUDA graphs (batch shape changes between draft/verify)
         if (config_.use_cuda_graphs) {
             IMP_LOG_INFO("Disabling CUDA graphs: self-speculative decoding active");
             config_.use_cuda_graphs = false;
@@ -721,6 +572,10 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         ssc.spec_k = config_.self_spec_k;
         ssc.exit_layer = config_.self_spec_exit_layer;
         ssc.skip_n = config_.self_spec_skip_n;
+        int n_kv = 0;
+        for (int i = 0; i < mcfg.n_layers; i++)
+            if (model_->layer(i).wq.data && !model_->layer(i).gdn_gate.data) n_kv++;
+        if (n_kv == 0) n_kv = mcfg.n_layers;
         if (!self_spec_decoder_->init(executor_.get(), kv_manager_.get(),
                                        kv_cache_raw_, mcfg.n_layers, ssc)) {
             IMP_LOG_WARN("Self-speculative init failed, continuing without it");
@@ -728,167 +583,87 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             config_.enable_self_speculative = false;
         }
     }
-
-    // --- Initialize N-gram speculative decoder (zero-cost, on by default) ---
-    if (config_.enable_ngram_spec && !config_.enable_speculative &&
-        !config_.enable_self_speculative) {
+    if (config_.enable_ngram_spec && !config_.enable_speculative && !config_.enable_self_speculative) {
+        int n_kv = 0;
+        for (int i = 0; i < mcfg.n_layers; i++)
+            if (model_->layer(i).wq.data && !model_->layer(i).gdn_gate.data) n_kv++;
+        if (n_kv == 0) n_kv = mcfg.n_layers;
         ngram_spec_decoder_ = std::make_unique<NgramSpecDecoder>();
         if (!ngram_spec_decoder_->init(executor_.get(), kv_manager_.get(),
-                                        kv_cache_raw_, n_kv_layers,
-                                        config_.ngram_spec_k, config_.ngram_n)) {
-            IMP_LOG_WARN("N-gram speculative decoder init failed");
+                                        kv_cache_raw_, n_kv, config_.ngram_spec_k, config_.ngram_n))
             ngram_spec_decoder_.reset();
-        }
     }
 
-    // --- Initialize chat template from tokenizer metadata ---
-    {
-        Tokenizer* tok = model_->tokenizer();
-        if (tok) {
-            auto family = ChatTemplate::detect_family(tok->chat_template_str());
-            if (family == ChatTemplateFamily::RAW) {
-                family = ChatTemplate::default_family_for_arch(model_->config().arch);
-                if (family != ChatTemplateFamily::RAW) {
-                    IMP_LOG_INFO("No chat template in metadata, using %s default for %s",
-                                 chat_template_family_name(family),
-                                 model_arch_name(model_->config().arch));
-                }
-            }
-            if (family != ChatTemplateFamily::RAW) {
-                chat_template_.init(family, *tok);
-            }
+    // Chat template
+    if (Tokenizer* tok = model_->tokenizer()) {
+        auto family = ChatTemplate::detect_family(tok->chat_template_str());
+        if (family == ChatTemplateFamily::RAW) {
+            family = ChatTemplate::default_family_for_arch(mcfg.arch);
+            if (family != ChatTemplateFamily::RAW)
+                IMP_LOG_INFO("No chat template in metadata, using %s default for %s",
+                             chat_template_family_name(family), model_arch_name(mcfg.arch));
         }
+        if (family != ChatTemplateFamily::RAW)
+            chat_template_.init(family, *tok);
     }
 
-    // --- Initialize vision encoder if mmproj path provided ---
+    // Vision
     if (!config_.mmproj_path.empty()) {
-        vision_model_ = load_vision_gguf(config_.mmproj_path);
-        if (!vision_model_) {
-            IMP_LOG_ERROR("Failed to load vision model: %s", config_.mmproj_path.c_str());
+        if (!vision_.init(config_.mmproj_path, mcfg.d_model, model_.get(), vram_alloc_, stream_))
             return false;
-        }
-
-        int lm_d = vision_model_->lm_d_model > 0 ? vision_model_->lm_d_model : mcfg.d_model;
-        vision_encoder_ = std::make_unique<VisionEncoder>();
-        if (!vision_encoder_->init(*vision_model_, lm_d, stream_, &vram_alloc_)) {
-            IMP_LOG_ERROR("Failed to init vision encoder");
-            vision_encoder_.reset();
-            vision_model_.reset();
-            return false;
-        }
-
-        // Allocate device buffer for vision embeddings
-        int n_img_tokens = vision_model_->config.num_image_tokens;
-        size_t emb_bytes = static_cast<size_t>(n_img_tokens) * lm_d * sizeof(half);
-        d_vision_embeddings_ = static_cast<half*>(vram_alloc_.allocate(emb_bytes, "vision_embeddings"));
-        if (!d_vision_embeddings_) {
-            IMP_LOG_ERROR("Failed to allocate vision embedding buffer (%zu bytes)", emb_bytes);
-            vision_encoder_.reset();
-            vision_model_.reset();
-            return false;
-        }
-
-        // Pre-allocate pixel buffer to avoid per-image cudaMalloc/Free
-        int img_sz = vision_model_->config.image_size;
-        d_vision_pixels_size_ = static_cast<size_t>(3) * img_sz * img_sz * sizeof(half);
-        d_vision_pixels_ = static_cast<half*>(vram_alloc_.allocate(d_vision_pixels_size_, "vision_pixels"));
-        if (!d_vision_pixels_) {
-            IMP_LOG_WARN("Failed to pre-allocate vision pixel buffer (%.1f MiB), will alloc per-image",
-                         d_vision_pixels_size_ / (1024.0 * 1024.0));
-            d_vision_pixels_size_ = 0;
-        }
-
-        // Resolve vision special token IDs
-        Tokenizer* tok = model_->tokenizer();
-        if (tok) {
-            // Try well-known IDs first, fall back to vocab search
-            vision_soft_token_id_ = tok->find_token("<image_soft_token>");
-            if (vision_soft_token_id_ < 0) {
-                // Gemma-3: <image_soft_token> is token 262144
-                if (mcfg.vocab_size > 262144) {
-                    vision_soft_token_id_ = 262144;
-                }
-            }
-            vision_boi_id_ = tok->find_token("<start_of_image>");
-            if (vision_boi_id_ < 0 && mcfg.vocab_size > 255999)
-                vision_boi_id_ = 255999;
-            vision_eoi_id_ = tok->find_token("<end_of_image>");
-            if (vision_eoi_id_ < 0 && mcfg.vocab_size > 256000)
-                vision_eoi_id_ = 256000;
-            IMP_LOG_INFO("Vision tokens: soft=%d, boi=%d, eoi=%d",
-                         vision_soft_token_id_, vision_boi_id_, vision_eoi_id_);
-        }
-
-        IMP_LOG_INFO("Vision encoder ready: %d image tokens -> %d-dim embeddings",
-                     n_img_tokens, lm_d);
     }
 
-    // Allocate pinned host buffer for graph-captured sampling and prefill event sync
+    // Pinned sample buffer for CUDA graphs
     if (!h_sample_pinned_) {
         cudaError_t err = cudaHostAlloc(&h_sample_pinned_, sizeof(int32_t), cudaHostAllocDefault);
         if (err != cudaSuccess) {
-            IMP_LOG_WARN("cudaHostAlloc for sample buffer failed: %s",
-                         cudaGetErrorString(err));
+            IMP_LOG_WARN("cudaHostAlloc for sample buffer failed: %s", cudaGetErrorString(err));
             if (config_.use_cuda_graphs) config_.use_cuda_graphs = false;
             h_sample_pinned_ = nullptr;
         }
     }
-
-    // Lightweight event for decode spin-poll sync (no timing overhead)
-    if (!decode_done_) {
+    if (!decode_done_)
         decode_done_.create(cudaEventDisableTiming);
-    }
-
-    // Warmup: run one prefill+decode step to prime cuBLAS algorithm selection,
-    // NVFP4 kernels, and attention dispatch.  Without this, the first real
-    // request on some models (Qwen3) produces incorrect output due to
-    // non-deterministic kernel state on first invocation.
-    {
-        Tokenizer* tok = model_->tokenizer();
-        int32_t warmup_id = tok ? tok->bos_id() : 1;
-        if (warmup_id < 0) warmup_id = 1;
-
-        // Run multiple warmup requests with different prompt lengths to prime
-        // cuBLAS autotuning for all common GEMM shapes. Without this, the first
-        // real request triggers autotuning and produces subtly different results
-        // than subsequent identical requests (different cuBLAS algorithm choice).
-        for (int prompt_len : {16, 32}) {
-            auto req = std::make_shared<Request>();
-            req->id = next_request_id_++;
-            req->input_tokens.resize(prompt_len, warmup_id);
-            req->max_tokens = 2;
-            req->temperature = 0.0f;
-            req->ignore_eos = true;
-            scheduler_->add_request(req);
-
-            for (int i = 0; i < 8 && req->status != RequestStatus::FINISHED; i++) {
-                step();
-            }
-
-            kv_manager_->free_sequence(req->id);
-            while (kv_manager_->evict_cached_block()) {}
-            req->status = RequestStatus::CANCELLED;
-        }
-
-        // Clean up warmup state
-        decode_graph_runner_.invalidate();
-        decode_batch_pool_.reset_upload_cache();
-        if (async_graph_runner_.is_setup()) {
-            async_graph_runner_.cleanup();
-        }
-        if (async_d_block_tables_) {
-            cudaFree(async_d_block_tables_);
-            async_d_block_tables_ = nullptr;
-        }
-        async_graph_req_ = nullptr;
-        async_pending_tokens_.clear();
-        async_pending_cursor_ = 0;
-        cudaStreamSynchronize(stream_);
-        IMP_LOG_INFO("Warmup complete");
-    }
 
     return true;
 }
+
+void Engine::warmup() {
+    Tokenizer* tok = model_->tokenizer();
+    int32_t warmup_id = tok ? tok->bos_id() : 1;
+    if (warmup_id < 0) warmup_id = 1;
+
+    for (int prompt_len : {16, 32}) {
+        auto req = std::make_shared<Request>();
+        req->id = next_request_id_++;
+        req->input_tokens.resize(prompt_len, warmup_id);
+        req->max_tokens = 2;
+        req->temperature = 0.0f;
+        req->ignore_eos = true;
+        scheduler_->add_request(req);
+
+        for (int i = 0; i < 8 && req->status != RequestStatus::FINISHED; i++)
+            step();
+
+        kv_manager_->free_sequence(req->id);
+        while (kv_manager_->evict_cached_block()) {}
+        req->status = RequestStatus::CANCELLED;
+    }
+
+    decode_graph_runner_.invalidate();
+    decode_batch_pool_.reset_upload_cache();
+    if (async_graph_runner_.is_setup()) async_graph_runner_.cleanup();
+    if (async_d_block_tables_) { cudaFree(async_d_block_tables_); async_d_block_tables_ = nullptr; }
+    async_graph_req_ = nullptr;
+    async_pending_tokens_.clear();
+    async_pending_cursor_ = 0;
+    cudaStreamSynchronize(stream_);
+    IMP_LOG_INFO("Warmup complete");
+}
+
+// =====================================================================
+// Speculative decoding init
+// =====================================================================
 
 bool Engine::init_speculative() {
     if (config_.draft_model_path.empty()) {
@@ -896,7 +671,6 @@ bool Engine::init_speculative() {
         return false;
     }
 
-    // Load draft model via GGUF loader (returns unique_ptr, convert to shared)
     auto draft_unique = load_gguf(config_.draft_model_path);
     if (!draft_unique) {
         IMP_LOG_ERROR("Failed to load draft model: %s", config_.draft_model_path.c_str());
@@ -904,29 +678,25 @@ bool Engine::init_speculative() {
     }
     draft_model_ = std::move(draft_unique);
 
-    // Upload draft model weights
     if (!draft_model_->upload_weights_gpu(config_.compute_dtype, stream_)) {
         IMP_LOG_ERROR("Failed to upload draft model weights");
         return false;
     }
 
-    // Create draft KV cache (smaller, matching draft model dimensions)
     const auto& dcfg = draft_model_->config();
-    int head_dim = dcfg.head_dim > 0 ? dcfg.head_dim : (dcfg.d_model / dcfg.n_heads);
+    int hd = dcfg.head_dim > 0 ? dcfg.head_dim : (dcfg.d_model / dcfg.n_heads);
     int draft_max_blocks = std::max(kv_cache_raw_->total_blocks() / 4, 64);
     auto draft_kv = std::make_unique<KVCache>(
-        dcfg.n_layers, dcfg.n_kv_heads, head_dim,
+        dcfg.n_layers, dcfg.n_kv_heads, hd,
         config_.compute_dtype, draft_max_blocks);
     draft_kv_manager_ = std::make_unique<KVCacheManager>(std::move(draft_kv));
 
-    // Create draft executor
     auto draft_exec = std::make_unique<GraphExecutor>();
     if (!draft_exec->init(*draft_model_, config_.compute_dtype, config_.use_pdl)) {
         IMP_LOG_ERROR("Failed to init draft executor");
         return false;
     }
 
-    // Create speculative decoder
     spec_decoder_ = std::make_unique<SpeculativeDecoder>();
     SpeculativeConfig spec_cfg;
     spec_cfg.spec_k = config_.spec_k;
@@ -956,109 +726,24 @@ bool Engine::set_draft_model(const std::string& path, int spec_k) {
     return init_speculative();
 }
 
-bool Engine::set_image(const std::string& path) {
-    if (!vision_encoder_) {
-        IMP_LOG_ERROR("set_image: no vision model loaded (missing --mmproj)");
-        return false;
-    }
-
-    ImageData img;
-    if (!load_and_preprocess_image(path, vision_model_->config.image_size,
-                                    vision_model_->config.image_mean,
-                                    vision_model_->config.image_std, img)) {
-        return false;
-    }
-
-    // Upload pixels to GPU (use pre-allocated buffer if available)
-    int n_pixels = 3 * img.width * img.height;
-    size_t pixel_bytes = static_cast<size_t>(n_pixels) * sizeof(half);
-    half* d_pixels = d_vision_pixels_;
-    bool need_free = false;
-    if (!d_pixels || pixel_bytes > d_vision_pixels_size_) {
-        if (cudaMalloc(&d_pixels, pixel_bytes) != cudaSuccess) {
-            IMP_LOG_ERROR("set_image: cudaMalloc failed for %d pixels", n_pixels);
-            return false;
-        }
-        need_free = true;
-    }
-    cudaMemcpyAsync(d_pixels, img.pixels.data(), pixel_bytes,
-                    cudaMemcpyHostToDevice, stream_);
-
-    bool ok = vision_encoder_->encode(d_pixels, d_vision_embeddings_, stream_);
-    cudaStreamSynchronize(stream_);
-    if (need_free) cudaFree(d_pixels);
-
-    if (ok) {
-        has_vision_input_ = true;
-        IMP_LOG_INFO("Vision: encoded image -> %d tokens", vision_model_->config.num_image_tokens);
-    }
-    return ok;
-}
-
-bool Engine::set_image_from_memory(const uint8_t* data, size_t len) {
-    if (!vision_encoder_) {
-        IMP_LOG_ERROR("set_image_from_memory: no vision model loaded");
-        return false;
-    }
-
-    ImageData img;
-    if (!load_and_preprocess_image_from_memory(data, len,
-                                                vision_model_->config.image_size,
-                                                vision_model_->config.image_mean,
-                                                vision_model_->config.image_std, img)) {
-        return false;
-    }
-
-    int n_pixels = 3 * img.width * img.height;
-    size_t pixel_bytes = static_cast<size_t>(n_pixels) * sizeof(half);
-    half* d_pixels = d_vision_pixels_;
-    bool need_free = false;
-    if (!d_pixels || pixel_bytes > d_vision_pixels_size_) {
-        if (cudaMalloc(&d_pixels, pixel_bytes) != cudaSuccess) {
-            IMP_LOG_ERROR("set_image_from_memory: cudaMalloc failed for %d pixels", n_pixels);
-            return false;
-        }
-        need_free = true;
-    }
-    cudaMemcpyAsync(d_pixels, img.pixels.data(), pixel_bytes,
-                    cudaMemcpyHostToDevice, stream_);
-
-    bool ok = vision_encoder_->encode(d_pixels, d_vision_embeddings_, stream_);
-    cudaStreamSynchronize(stream_);
-    if (need_free) cudaFree(d_pixels);
-
-    if (ok) {
-        has_vision_input_ = true;
-        IMP_LOG_INFO("Vision: encoded image from memory -> %d tokens",
-                     vision_model_->config.num_image_tokens);
-    }
-    return ok;
-}
-
-void Engine::clear_image() {
-    has_vision_input_ = false;
-}
+// =====================================================================
+// step() — main inference loop
+// =====================================================================
 
 bool Engine::step() {
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
 
     // ====================================================================
     // Fast path: async conditional graph loop completed on GPU.
-    // All tokens were generated at full GPU speed (no per-step host
-    // overhead). We deliver them one per step() call from the buffer.
     // ====================================================================
     if (async_graph_runner_.is_setup() && async_graph_req_) {
         auto& req = async_graph_req_;
 
-        // First entry: sync on GPU completion and collect all tokens.
-        // WSL2's GPU-PV delays mapped memory writes, so we must sync
-        // before reading the ring buffer (polling without sync is unreliable).
         if (async_pending_tokens_.empty() && async_pending_cursor_ == 0) {
             cudaStream_t dec_stream = decode_stream();
             async_pending_tokens_ = async_graph_runner_.wait_and_get_tokens(dec_stream);
         }
 
-        // Deliver one token per step() call
         int32_t token = -1;
         if (async_pending_cursor_ < static_cast<int>(async_pending_tokens_.size())) {
             token = async_pending_tokens_[async_pending_cursor_++];
@@ -1067,26 +752,14 @@ bool Engine::step() {
         bool generation_done = false;
         if (token >= 0) {
             req->output_tokens.push_back(token);
-
-            // Check stop conditions (respect ignore_eos for bench mode)
-            Tokenizer* tok = model_->tokenizer();
-            bool is_stop = false;
-            if (!req->ignore_eos) {
-                is_stop = (token == tok->eos_id());
-                for (int32_t stop_id : chat_template_.stop_token_ids()) {
-                    if (token == stop_id) { is_stop = true; break; }
-                }
-            }
+            bool is_stop = !req->ignore_eos && is_stop_token(token);
             generation_done = is_stop ||
                 static_cast<int>(req->output_tokens.size()) >= req->max_tokens;
-            if (!generation_done) return true;  // more graph tokens to deliver
+            if (!generation_done) return true;
         }
 
-        // Save request before clearing async state (req is a reference to
-        // async_graph_req_ which we're about to null).
         auto saved_req = async_graph_req_;
 
-        // Clean up async graph state
         async_graph_runner_.cleanup();
         if (async_d_block_tables_) {
             cudaFree(async_d_block_tables_);
@@ -1097,20 +770,10 @@ bool Engine::step() {
         async_pending_cursor_ = 0;
 
         if (generation_done) {
-            // Stop/max_tokens reached — request is truly finished
-            saved_req->status = RequestStatus::FINISHED;
-            // Register block hashes for prefix caching before freeing.
-            if (kv_manager_->prefix_caching_enabled()) {
-                kv_manager_->register_block_hashes(
-                    saved_req->id, saved_req->input_tokens.data(),
-                    static_cast<int>(saved_req->input_tokens.size()));
-            }
-            kv_manager_->free_sequence(saved_req->id);
+            finish_request(saved_req);
             return scheduler_->has_pending() || scheduler_->active_count() > 0;
         }
 
-        // Graph exhausted its pre-allocated tokens but generation isn't done.
-        // Fall through to regular per-step decode below.
         IMP_LOG_DEBUG("AsyncGraphLoop: graph tokens exhausted, continuing with step decode");
     }
 
@@ -1120,7 +783,8 @@ bool Engine::step() {
         async_pending_tokens_.clear();
         async_pending_cursor_ = 0;
     }
-    // 1. Call scheduler to get prefill and decode batches (reuse member vectors)
+
+    // 1. Call scheduler
     sched_prefill_batch_.clear();
     sched_decode_batch_.clear();
     scheduler_->schedule(sched_prefill_batch_, sched_decode_batch_);
@@ -1131,24 +795,22 @@ bool Engine::step() {
         return false;
     }
 
-    // Dynamic Green Context SM reconfiguration based on workload mix.
-    // When only one type of work is pending, give all SMs to that stream.
+    // Dynamic Green Context SM reconfiguration
     if (config_.use_green_contexts && green_ctx_.is_available() &&
         green_ctx_.has_green_contexts()) {
-        float target_ratio = config_.green_ctx_prefill_ratio;  // default
+        float target_ratio = config_.green_ctx_prefill_ratio;
         if (prefill_batch.empty() && !decode_batch.empty()) {
-            target_ratio = 0.0f;  // all SMs to decode
+            target_ratio = 0.0f;
         } else if (!prefill_batch.empty() && decode_batch.empty()) {
-            target_ratio = 1.0f;  // all SMs to prefill
+            target_ratio = 1.0f;
         }
-        // Only reconfigure if ratio changed significantly (avoid churn)
         if (std::abs(target_ratio - green_ctx_.prefill_ratio()) > 0.1f) {
             green_ctx_.reconfigure(target_ratio);
         }
     }
 
     // ====================================================================
-    // 2. Process prefill requests (per-request, no cross-sequence batching)
+    // 2. Process prefill requests
     // ====================================================================
     cudaStream_t pf_stream = prefill_stream();
 
@@ -1156,61 +818,50 @@ bool Engine::step() {
         int total_input = static_cast<int>(req->input_tokens.size());
         int offset = req->prefill_offset;
 
-        // Determine chunk boundaries.
-        // Auto-chunk when input exceeds workspace capacity (max_tokens_),
-        // even if prefill_chunk_size is 0 (not explicitly configured).
+        // Determine chunk boundaries
         int chunk_len = total_input - offset;
         bool is_last_chunk = true;
         int effective_chunk = config_.prefill_chunk_size > 0
             ? config_.prefill_chunk_size : executor_->max_tokens();
+        if (kv_manager_) {
+            int bs = kv_manager_->kv_cache()->block_size();
+            if (effective_chunk > bs)
+                effective_chunk = (effective_chunk / bs) * bs;
+        }
         if (chunk_len > effective_chunk) {
             chunk_len = effective_chunk;
             is_last_chunk = false;
         }
 
-        // Context length covers all tokens up to end of this chunk
         int ctx_len = offset + chunk_len;
-
-        // Resize workspace for this chunk's token count
         executor_->resize_workspace(chunk_len, pf_stream);
 
         int num_blocks = (ctx_len + kv_bs - 1) / kv_bs;
 
-        // Allocate KV cache blocks, using prefix caching when enabled.
+        // Allocate KV cache blocks
         int prefix_reused = 0;
         int existing = static_cast<int>(kv_manager_->block_table(req->id).size());
 
         if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0) {
-            // First chunk of a fresh sequence — try content-addressed prefix match.
-            // Allocate all blocks for the full input at once (not just this chunk).
             int total_blocks_needed = (total_input + kv_bs - 1) / kv_bs;
             prefix_reused = kv_manager_->allocate_blocks_with_prefix(
-                req->id, req->input_tokens.data(), total_input);
+                req->id, req->input_tokens);
             if (prefix_reused < 0) {
-                // Allocation failed — try eviction.
                 while (kv_manager_->num_free_blocks() < total_blocks_needed) {
                     int evicted = kv_manager_->evict_lru();
                     if (evicted < 0) break;
                 }
                 prefix_reused = kv_manager_->allocate_blocks_with_prefix(
-                    req->id, req->input_tokens.data(), total_input);
+                    req->id, req->input_tokens);
                 if (prefix_reused < 0) {
                     req->status = RequestStatus::CANCELLED;
                     continue;
                 }
             }
 
-            // Skip prefill for tokens covered by reused blocks.
-            // Recompute at least the last cached block so that the prefill
-            // attention kernel (flash attention) covers the boundary between
-            // cached and fresh tokens. Without this, the fresh-token prefill
-            // reads cached KV via paged attention, which produces slightly
-            // different floating-point results than flash attention, breaking
-            // determinism for identical consecutive requests.
             if (prefix_reused > 0) {
                 int effective_reused = (prefix_reused > 1) ? prefix_reused - 1 : 0;
                 int skip_tokens = effective_reused * kv_bs;
-                // Must keep at least 1 token for the forward pass.
                 if (skip_tokens >= total_input) {
                     skip_tokens = (total_input / kv_bs) * kv_bs;
                     if (skip_tokens >= total_input) {
@@ -1223,7 +874,6 @@ bool Engine::step() {
                     req->cached_tokens = skip_tokens;
                     offset = skip_tokens;
                     req->prefill_offset = offset;
-                    // Recalculate chunk boundaries with new offset.
                     chunk_len = total_input - offset;
                     is_last_chunk = true;
                     if (chunk_len > effective_chunk) {
@@ -1231,12 +881,10 @@ bool Engine::step() {
                         is_last_chunk = false;
                     }
                     ctx_len = offset + chunk_len;
-                    // Re-resize workspace for the smaller chunk.
                     executor_->resize_workspace(chunk_len, pf_stream);
                 }
             }
         } else {
-            // Normal incremental allocation.
             int additional = num_blocks - existing;
             if (additional > 0) {
                 if (!kv_manager_->allocate_blocks(req->id, additional)) {
@@ -1255,17 +903,12 @@ bool Engine::step() {
 
         const auto& block_table = kv_manager_->block_table(req->id);
 
-        // Positions for this chunk start at offset
-        std::vector<int> positions(chunk_len);
-        for (int i = 0; i < chunk_len; i++) {
-            positions[i] = offset + i;
-        }
-
-        // Upload to device
+        // Upload prefill metadata to device (pre-allocated pool or fallback malloc)
         int32_t* d_token_ids = nullptr;
         int* d_positions = nullptr;
         int* d_block_tables = nullptr;
         int* d_context_lens = nullptr;
+        bool pf_pool_used = false;
 
         auto check = [&req](cudaError_t err, const char* op) {
             if (err != cudaSuccess) {
@@ -1274,33 +917,62 @@ bool Engine::step() {
             }
             return err == cudaSuccess;
         };
-        if (!check(cudaMallocAsync(&d_token_ids, chunk_len * sizeof(int32_t), pf_stream), "malloc token_ids") ||
-            !check(cudaMallocAsync(&d_positions, chunk_len * sizeof(int), pf_stream), "malloc positions") ||
-            !check(cudaMallocAsync(&d_block_tables, block_table.size() * sizeof(int), pf_stream), "malloc block_tables") ||
-            !check(cudaMallocAsync(&d_context_lens, sizeof(int), pf_stream), "malloc context_lens")) {
-            if (d_token_ids) cudaFreeAsync(d_token_ids, pf_stream);
-            if (d_positions) cudaFreeAsync(d_positions, pf_stream);
-            if (d_block_tables) cudaFreeAsync(d_block_tables, pf_stream);
-            if (d_context_lens) cudaFreeAsync(d_context_lens, pf_stream);
-            // Free KV blocks allocated earlier to avoid VRAM leak.
-            kv_manager_->free_sequence(req->id);
-            continue;
+
+        if (prefill_pool_ && chunk_len <= config_.max_seq_len) {
+            d_token_ids   = d_pf_token_ids_;
+            d_positions   = d_pf_positions_;
+            d_block_tables = d_pf_block_tables_;
+            d_context_lens = d_pf_context_lens_;
+            pf_pool_used = true;
+        } else {
+            if (!check(cudaMallocAsync(&d_token_ids, chunk_len * sizeof(int32_t), pf_stream), "malloc token_ids") ||
+                !check(cudaMallocAsync(&d_positions, chunk_len * sizeof(int), pf_stream), "malloc positions") ||
+                !check(cudaMallocAsync(&d_block_tables, block_table.size() * sizeof(int), pf_stream), "malloc block_tables") ||
+                !check(cudaMallocAsync(&d_context_lens, sizeof(int), pf_stream), "malloc context_lens")) {
+                if (d_token_ids) cudaFreeAsync(d_token_ids, pf_stream);
+                if (d_positions) cudaFreeAsync(d_positions, pf_stream);
+                if (d_block_tables) cudaFreeAsync(d_block_tables, pf_stream);
+                if (d_context_lens) cudaFreeAsync(d_context_lens, pf_stream);
+                kv_manager_->free_sequence(req->id);
+                continue;
+            }
         }
 
-        // Upload chunk tokens (starting from offset)
-        check(cudaMemcpyAsync(d_token_ids, req->input_tokens.data() + offset,
-                        chunk_len * sizeof(int32_t),
-                        cudaMemcpyHostToDevice, pf_stream), "memcpy token_ids");
-        check(cudaMemcpyAsync(d_positions, positions.data(),
-                        chunk_len * sizeof(int),
-                        cudaMemcpyHostToDevice, pf_stream), "memcpy positions");
+        // Use pinned staging buffers when available (avoids internal pageable→pinned copy)
+        if (h_pf_token_ids_ && chunk_len <= config_.max_seq_len) {
+            memcpy(h_pf_token_ids_, req->input_tokens.data() + offset,
+                   chunk_len * sizeof(int32_t));
+            check(cudaMemcpyAsync(d_token_ids, h_pf_token_ids_,
+                            chunk_len * sizeof(int32_t),
+                            cudaMemcpyHostToDevice, pf_stream), "memcpy token_ids");
+        } else {
+            check(cudaMemcpyAsync(d_token_ids, req->input_tokens.data() + offset,
+                            chunk_len * sizeof(int32_t),
+                            cudaMemcpyHostToDevice, pf_stream), "memcpy token_ids");
+        }
+
+        if (h_pf_positions_ && chunk_len <= config_.max_seq_len) {
+            for (int i = 0; i < chunk_len; i++)
+                h_pf_positions_[i] = offset + i;
+            check(cudaMemcpyAsync(d_positions, h_pf_positions_,
+                            chunk_len * sizeof(int),
+                            cudaMemcpyHostToDevice, pf_stream), "memcpy positions");
+        } else {
+            std::vector<int> positions(chunk_len);
+            for (int i = 0; i < chunk_len; i++)
+                positions[i] = offset + i;
+            check(cudaMemcpyAsync(d_positions, positions.data(),
+                            chunk_len * sizeof(int),
+                            cudaMemcpyHostToDevice, pf_stream), "memcpy positions");
+        }
+
         check(cudaMemcpyAsync(d_block_tables, block_table.data(),
                         block_table.size() * sizeof(int),
                         cudaMemcpyHostToDevice, pf_stream), "memcpy block_tables");
         check(cudaMemcpyAsync(d_context_lens, &ctx_len, sizeof(int),
                         cudaMemcpyHostToDevice, pf_stream), "memcpy context_lens");
 
-        // Build InferenceState (single-sequence prefill)
+        // Build InferenceState
         InferenceState state;
         state.token_ids = d_token_ids;
         state.positions = d_positions;
@@ -1310,148 +982,47 @@ bool Engine::step() {
         state.context_lens = d_context_lens;
         state.max_context_len = ctx_len;
         state.n_sequences = 1;
-        state.max_blocks_per_seq = 0;  // flat single-seq block table
+        state.max_blocks_per_seq = 0;
         state.is_prefill = true;
-        state.temperature = req->temperature;
-        state.top_p = req->top_p;
-        state.top_k = req->top_k;
-        state.seed = req->seed;
-        state.min_p = req->min_p;
-        state.typical_p = req->typical_p;
-        state.repetition_penalty = req->repetition_penalty;
-        state.frequency_penalty = req->frequency_penalty;
-        state.presence_penalty = req->presence_penalty;
-        state.repeat_last_n = req->repeat_last_n;
-        state.dry_multiplier = req->dry_multiplier;
-        state.dry_base = req->dry_base;
-        state.dry_allowed_length = req->dry_allowed_length;
-        state.dry_penalty_last_n = req->dry_penalty_last_n;
-        if (req->dry_multiplier > 0.0f && !req->output_tokens.empty())
-            state.host_penalty_tokens = req->output_tokens.data();
-        state.mirostat = req->mirostat;
-        state.mirostat_tau = req->mirostat_tau;
-        state.mirostat_eta = req->mirostat_eta;
-        state.mirostat_mu = req->mirostat_mu;
+        fill_sampling_params(*req, state);
 
-        // JSON mode: lazily init constrainer and set on state
-        if (req->json_mode && req->json_schema.empty()) {
-            if (!json_constrainer_) {
-                json_constrainer_ = std::make_unique<JsonConstrainer>();
-                Tokenizer* jtok = model_->tokenizer();
-                if (!json_constrainer_->init(*jtok)) {
-                    IMP_LOG_ERROR("Failed to initialize JSON constrainer");
-                    json_constrainer_.reset();
-                }
-            }
-            if (json_constrainer_) {
-                json_constrainer_->reset();
-                state.json_constrainer = json_constrainer_.get();
-            }
-        }
+        // Constraints via ConstraintManager
+        constraints_.prepare(req->json_mode, req->json_schema, model_->tokenizer());
+        state.json_constrainer = constraints_.json_constrainer();
+        state.schema_constrainer = constraints_.schema_constrainer();
 
-        // Schema-constrained JSON mode.
-        // Cache the constrainer across requests with identical schemas to avoid
-        // re-parsing and re-classifying ~151k tokens on every agentic tool call.
-        if (!req->json_schema.empty()) {
-            if (schema_constrainer_ && schema_constrainer_->is_initialized() &&
-                req->json_schema == cached_schema_string_) {
-                // Reuse cached constrainer — just reset FSM state.
-                schema_constrainer_->reset();
-                state.schema_constrainer = schema_constrainer_.get();
-            } else {
-                auto schema = parse_json_schema(req->json_schema);
-                if (schema) {
-                    schema_constrainer_ = std::make_unique<SchemaConstrainer>();
-                    Tokenizer* stok = model_->tokenizer();
-                    if (schema_constrainer_->init(*stok, std::move(schema))) {
-                        cached_schema_string_ = req->json_schema;
-                        state.schema_constrainer = schema_constrainer_.get();
-                    } else {
-                        IMP_LOG_ERROR("Failed to initialize schema constrainer");
-                        schema_constrainer_.reset();
-                        cached_schema_string_.clear();
-                    }
-                } else {
-                    IMP_LOG_ERROR("Failed to parse JSON schema");
-                }
-            }
-        }
+        // Penalties
+        upload_penalties(*req, state, pf_stream);
 
-        // Upload penalty token history if penalties are active
-        bool needs_penalties = (req->repetition_penalty != 1.0f ||
-                                req->frequency_penalty != 0.0f ||
-                                req->presence_penalty != 0.0f);
-        if (needs_penalties && !req->output_tokens.empty()) {
-            size_t n = req->output_tokens.size();
-            if (n > d_penalty_tokens_capacity_) {
-                if (d_penalty_tokens_) vram_alloc_.free(d_penalty_tokens_);
-                d_penalty_tokens_capacity_ = std::max(n, (size_t)256);
-                d_penalty_tokens_ = static_cast<int32_t*>(
-                    vram_alloc_.allocate(d_penalty_tokens_capacity_ * sizeof(int32_t), "penalty_tokens"));
-                if (!d_penalty_tokens_) {
-                    IMP_LOG_ERROR("VRAMAllocator failed for penalty tokens (%zu)", d_penalty_tokens_capacity_);
-                    d_penalty_tokens_capacity_ = 0;
-                }
-            }
-            if (d_penalty_tokens_) {
-                cudaMemcpyAsync(d_penalty_tokens_, req->output_tokens.data(),
-                                n * sizeof(int32_t), cudaMemcpyHostToDevice, pf_stream);
-                state.penalty_tokens = d_penalty_tokens_;
-                state.n_penalty_tokens = static_cast<int>(n);
-            }
-        }
+        // Recurrent state (SSM/GDN)
+        fill_recurrent_state(*req, state, offset == 0, pf_stream);
 
-        // SSM state for hybrid models
-        if (ssm_state_) {
-            state.ssm_state = ssm_state_.get();
-            // Use request ID mod max_sequences as SSM sequence slot
-            state.ssm_seq_id = req->id % ssm_state_->max_sequences();
-            // Only reset on first chunk
-            if (offset == 0) {
-                ssm_state_->reset_sequence(state.ssm_seq_id, pf_stream);
-            }
-        }
-
-        // GDN state for Gated DeltaNet hybrid models (Qwen3.5)
-        if (gdn_state_) {
-            state.gdn_state = gdn_state_.get();
-            state.gdn_seq_id = req->id % gdn_state_->max_sequences();
-            if (offset == 0) {
-                gdn_state_->reset_sequence(state.gdn_seq_id, pf_stream);
-            }
-        }
-
-        // Vision embeddings: set on first chunk only (image tokens are at the start)
-        if (has_vision_input_ && vision_encoder_ && offset == 0) {
-            state.vision_embeddings = d_vision_embeddings_;
-            state.vision_token_id = vision_soft_token_id_;
-            state.n_vision_tokens = vision_model_->config.num_image_tokens;
+        // Vision embeddings on first chunk
+        if (vision_.has_input() && vision_.is_available() && offset == 0) {
+            state.vision_embeddings = vision_.embeddings();
+            state.vision_token_id = vision_.soft_token_id();
+            state.n_vision_tokens = vision_.num_image_tokens();
         }
 
         if (!is_last_chunk) {
-            // Intermediate chunk: run forward to fill KV cache, discard logits.
-            // With decode workspace available, use workspace 0 (prefill) and
-            // DON'T sync — decode can overlap on dec_stream with workspace 1.
             if (executor_->has_decode_workspace()) {
                 executor_->use_workspace(0);
             }
             Tensor logits_out;
             executor_->forward_logits(state, logits_out, pf_stream);
 
-            cudaFreeAsync(d_token_ids, pf_stream);
-            cudaFreeAsync(d_positions, pf_stream);
-            cudaFreeAsync(d_block_tables, pf_stream);
-            cudaFreeAsync(d_context_lens, pf_stream);
+            if (!pf_pool_used) {
+                cudaFreeAsync(d_token_ids, pf_stream);
+                cudaFreeAsync(d_positions, pf_stream);
+                cudaFreeAsync(d_block_tables, pf_stream);
+                cudaFreeAsync(d_context_lens, pf_stream);
+            }
 
-            // DON'T sync pf_stream here — let it overlap with decode
-            // (prefill writes to NEW KV blocks, decode reads from EXISTING blocks)
-
-            // Advance offset, stay in PREFILLING
             req->prefill_offset = offset + chunk_len;
             IMP_LOG_DEBUG("Chunked prefill: req %d chunk [%d, %d) of %d",
                           req->id, offset, offset + chunk_len, total_input);
         } else {
-            // Last chunk: run forward + sample
+            // Last chunk: forward + sample
             int32_t next_token;
             bool use_event_sync = (h_sample_pinned_ != nullptr &&
                                    executor_->d_sample_result() != nullptr &&
@@ -1460,7 +1031,7 @@ bool Engine::step() {
                                    !state.json_constrainer &&
                                    !state.schema_constrainer);
 
-            Tensor prefill_logits_out;  // retained for logprobs extraction
+            Tensor prefill_logits_out;
 
             if (use_event_sync) {
                 Tensor logits_out;
@@ -1474,44 +1045,46 @@ bool Engine::step() {
                 if (!prefill_done_) prefill_done_.create();
                 cudaEventRecord(prefill_done_, pf_stream);
 
-                cudaFreeAsync(d_token_ids, pf_stream);
-                cudaFreeAsync(d_positions, pf_stream);
-                cudaFreeAsync(d_block_tables, pf_stream);
-                cudaFreeAsync(d_context_lens, pf_stream);
+                if (!pf_pool_used) {
+                    cudaFreeAsync(d_token_ids, pf_stream);
+                    cudaFreeAsync(d_positions, pf_stream);
+                    cudaFreeAsync(d_block_tables, pf_stream);
+                    cudaFreeAsync(d_context_lens, pf_stream);
+                }
 
                 cudaEventSynchronize(prefill_done_);
                 next_token = *h_sample_pinned_;
             } else if (req->logprobs) {
-                // forward_logits + sample separately to retain logits access
                 executor_->forward_logits(state, prefill_logits_out, pf_stream);
                 auto sampled = executor_->sample_from_logits(prefill_logits_out, state, pf_stream);
                 next_token = sampled[0];
 
-                cudaFreeAsync(d_token_ids, pf_stream);
-                cudaFreeAsync(d_positions, pf_stream);
-                cudaFreeAsync(d_block_tables, pf_stream);
-                cudaFreeAsync(d_context_lens, pf_stream);
+                if (!pf_pool_used) {
+                    cudaFreeAsync(d_token_ids, pf_stream);
+                    cudaFreeAsync(d_positions, pf_stream);
+                    cudaFreeAsync(d_block_tables, pf_stream);
+                    cudaFreeAsync(d_context_lens, pf_stream);
+                }
             } else {
                 next_token = executor_->forward(state, pf_stream);
 
-                cudaFreeAsync(d_token_ids, pf_stream);
-                cudaFreeAsync(d_positions, pf_stream);
-                cudaFreeAsync(d_block_tables, pf_stream);
-                cudaFreeAsync(d_context_lens, pf_stream);
+                if (!pf_pool_used) {
+                    cudaFreeAsync(d_token_ids, pf_stream);
+                    cudaFreeAsync(d_positions, pf_stream);
+                    cudaFreeAsync(d_block_tables, pf_stream);
+                    cudaFreeAsync(d_context_lens, pf_stream);
+                }
             }
 
-            // Mirostat v2: write back updated mu to request
             if (req->mirostat == 2)
                 req->mirostat_mu = state.mirostat_mu;
 
-            // Extract logprobs for first token if requested
+            // Extract logprobs
             if (req->logprobs && prefill_logits_out.data != nullptr) {
                 int vocab_size = static_cast<int>(prefill_logits_out.shape[prefill_logits_out.ndim - 1]);
                 executor_->ensure_logits_pinned(vocab_size);
 
-                // Get last row (for prefill, forward_logits returns last token's logits)
                 const float* d_logits = static_cast<const float*>(prefill_logits_out.data);
-
                 cudaMemcpyAsync(executor_->h_logits_pinned(), d_logits,
                                 vocab_size * sizeof(float),
                                 cudaMemcpyDeviceToHost, pf_stream);
@@ -1539,40 +1112,16 @@ bool Engine::step() {
                           (int)req->output_tokens.size(), req->context_len(),
                           next_token, tok->decode_token(next_token).c_str());
 
-            // Check EOS and chat template stop tokens
-            bool is_stop = false;
-            if (!req->ignore_eos) {
-                is_stop = (next_token == tok->eos_id());
-                for (int32_t stop_id : chat_template_.stop_token_ids()) {
-                    if (next_token == stop_id) { is_stop = true; break; }
-                }
-            }
+            // Update constraint FSM
+            constraints_.update(next_token);
 
-            // Update JSON/schema constrainer FSM with the first token
-            if (schema_constrainer_) {
-                schema_constrainer_->update(next_token);
-            } else if (req->json_mode && json_constrainer_) {
-                json_constrainer_->update(next_token);
-            }
-
-            if (is_stop ||
+            if ((!req->ignore_eos && is_stop_token(next_token)) ||
                 static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
-                req->status = RequestStatus::FINISHED;
-                // Register block hashes before freeing so blocks can be cached.
-                if (kv_manager_->prefix_caching_enabled()) {
-                    kv_manager_->register_block_hashes(
-                        req->id, req->input_tokens.data(),
-                        static_cast<int>(req->input_tokens.size()));
-                }
-                kv_manager_->free_sequence(req->id);
-                if (req->json_mode && json_constrainer_) json_constrainer_->reset();
+                finish_request(req);
             } else {
                 req->status = RequestStatus::DECODING;
-                // Register block hashes so future sequences can reuse prefix blocks.
                 if (kv_manager_->prefix_caching_enabled()) {
-                    kv_manager_->register_block_hashes(
-                        req->id, req->input_tokens.data(),
-                        static_cast<int>(req->input_tokens.size()));
+                    kv_manager_->register_block_hashes(req->id, req->input_tokens);
                 }
             }
         }
@@ -1581,8 +1130,7 @@ bool Engine::step() {
     }
 
     // ====================================================================
-    // 2b. Overlap: if we had intermediate prefill chunks (no sampling needed)
-    //     AND decode workspace is available, switch workspace back for decode.
+    // 2b. Restore workspace
     // ====================================================================
     if (executor_->has_decode_workspace() && executor_->active_workspace() != 0) {
         executor_->use_workspace(0);
@@ -1594,11 +1142,8 @@ bool Engine::step() {
     if (!decode_batch.empty()) {
         cudaStream_t dec_stream = decode_stream();
 
-        // SSM/GDN models: recurrent state is per-sequence and the forward pass
-        // only supports a single gdn_seq_id/ssm_seq_id. Limit decode batch to 1
-        // sequence at a time to prevent state corruption between concurrent requests.
+        // SSM/GDN: limit decode batch to 1 sequence
         if ((ssm_state_ || gdn_state_) && decode_batch.size() > 1) {
-            // Keep only the first request; others stay in the scheduler for the next step.
             decode_batch.resize(1);
         }
 
@@ -1629,95 +1174,11 @@ bool Engine::step() {
             valid_decode.push_back(req);
         }
         if (!valid_decode.empty()) {
-            // ── Self-speculative decode shortcut (single-sequence only) ──
-            if (self_spec_decoder_ && config_.enable_self_speculative &&
-                valid_decode.size() == 1) {
-                auto& req = valid_decode[0];
-                int32_t last_token = req->output_tokens.empty()
-                    ? req->input_tokens.back()
-                    : req->output_tokens.back();
-                int position = req->context_len() - 1;
-
-                auto spec_tokens = self_spec_decoder_->step(
-                    last_token, position, req->id,
-                    req->temperature, req->top_p, req->top_k, req->seed,
-                    dec_stream);
-
-                Tokenizer* tok = model_->tokenizer();
-                for (int32_t t : spec_tokens) {
-                    req->output_tokens.push_back(t);
-
-                    IMP_LOG_DEBUG("SelfSpec decode (ctx=%d): id=%d [%s]",
-                                  req->context_len(), t,
-                                  tok ? tok->decode_token(t).c_str() : "?");
-
-                    bool is_stop = false;
-                    if (!req->ignore_eos && tok) {
-                        is_stop = (t == tok->eos_id());
-                        for (int32_t stop_id : chat_template_.stop_token_ids()) {
-                            if (t == stop_id) { is_stop = true; break; }
-                        }
-                    }
-                    if (is_stop ||
-                        static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
-                        req->status = RequestStatus::FINISHED;
-                        kv_manager_->free_sequence(req->id);
-                        break;
-                    }
-                }
-                kv_manager_->touch(req->id);
-
-                // Skip normal batched decode
+            // Speculative decode shortcut (self-spec, n-gram)
+            if (try_speculative_decode(valid_decode, dec_stream))
                 goto decode_done;
-            }
 
-            // ── N-gram speculative decode (single-sequence only) ──
-            if (ngram_spec_decoder_ && valid_decode.size() == 1) {
-                auto& req = valid_decode[0];
-                // Need at least ngram_n output tokens for lookup
-                if (static_cast<int>(req->output_tokens.size()) >= config_.ngram_n) {
-                    int32_t last_token = req->output_tokens.back();
-                    int position = req->context_len() - 1;
-
-                    auto sr = ngram_spec_decoder_->step(
-                        req, last_token, position, req->id, dec_stream);
-
-                    if (!sr.tokens.empty()) {
-                        Tokenizer* tok = model_->tokenizer();
-                        for (int32_t t : sr.tokens) {
-                            req->output_tokens.push_back(t);
-
-                            bool is_stop = false;
-                            if (!req->ignore_eos && tok) {
-                                is_stop = (t == tok->eos_id());
-                                for (int32_t stop_id : chat_template_.stop_token_ids()) {
-                                    if (t == stop_id) { is_stop = true; break; }
-                                }
-                            }
-                            if (is_stop ||
-                                static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
-                                req->status = RequestStatus::FINISHED;
-                                kv_manager_->free_sequence(req->id);
-                                break;
-                            }
-                        }
-                        kv_manager_->touch(req->id);
-
-                        IMP_LOG_DEBUG("N-gram spec: drafted=%d accepted=%d (rate=%.0f%%)",
-                                      sr.n_drafted, sr.n_accepted,
-                                      ngram_spec_decoder_->acceptance_rate() * 100.0f);
-
-                        // Skip normal batched decode
-                        goto decode_done;
-                    }
-                }
-                // No n-gram match — fall through to normal decode
-            }
-
-            // Switch workspace for decode.
-            // Single-sequence: use decode workspace (slot 1) for concurrent prefill/decode overlap.
-            // Multi-sequence: resize main workspace — the decode workspace's shared buffer
-            // is pre-allocated at init and may have stale tensor configurations.
+            // Switch workspace for decode
             if (executor_->has_decode_workspace() && valid_decode.size() == 1) {
                 executor_->use_workspace(1);
             } else {
@@ -1725,7 +1186,7 @@ bool Engine::step() {
                 executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
             }
 
-            // 3b. Build batched decode using BatchBuilder (reuse Engine member)
+            // 3b. Build batched decode
             decode_builder_.reset();
 
             int max_ctx = 0;
@@ -1746,15 +1207,11 @@ bool Engine::step() {
 
             Batch batch = decode_builder_.build();
 
-            // 3c. Upload to GPU using pre-allocated pool (stable pointers for CUDA Graph)
+            // 3c. Upload to GPU using pre-allocated pool
             GPUBatch gpu_batch;
             if (decode_batch_pool_.is_allocated()) {
-                // Pad max_blocks_per_seq to pool capacity so the block_table
-                // stride is stable across tokens. This prevents CUDA graph
-                // invalidation every time a new KV cache block is allocated.
                 int pool_max = decode_batch_pool_.max_blocks_per_seq();
                 if (batch.max_blocks_per_seq < pool_max) {
-                    // Re-pad the 2D block_table to the pool's stride (reuse member buffer)
                     int n_seq = batch.n_sequences;
                     int old_stride = batch.max_blocks_per_seq;
                     size_t needed = static_cast<size_t>(n_seq) * pool_max;
@@ -1773,11 +1230,11 @@ bool Engine::step() {
                 gpu_batch.upload(batch, dec_stream);
             }
 
-            // 3d. Build batched InferenceState
+            // 3d. Build InferenceState
             InferenceState state;
             state.token_ids = gpu_batch.d_token_ids;
             state.positions = gpu_batch.d_positions;
-            state.n_tokens = gpu_batch.total_tokens;  // = n_sequences for decode
+            state.n_tokens = gpu_batch.total_tokens;
             state.n_sequences = gpu_batch.n_sequences;
             state.max_blocks_per_seq = gpu_batch.max_blocks_per_seq;
             state.kv_cache = kv_cache_raw_;
@@ -1785,67 +1242,18 @@ bool Engine::step() {
             state.context_lens = gpu_batch.d_context_lens;
             state.max_context_len = max_ctx;
             state.is_prefill = false;
-            state.temperature = valid_decode[0]->temperature;
-            state.top_p = valid_decode[0]->top_p;
-            state.top_k = valid_decode[0]->top_k;
-            state.seed = -1;
-            state.min_p = valid_decode[0]->min_p;
-            state.typical_p = valid_decode[0]->typical_p;
-            state.repetition_penalty = valid_decode[0]->repetition_penalty;
-            state.frequency_penalty = valid_decode[0]->frequency_penalty;
-            state.presence_penalty = valid_decode[0]->presence_penalty;
-            state.repeat_last_n = valid_decode[0]->repeat_last_n;
-            state.dry_multiplier = valid_decode[0]->dry_multiplier;
-            state.dry_base = valid_decode[0]->dry_base;
-            state.dry_allowed_length = valid_decode[0]->dry_allowed_length;
-            state.dry_penalty_last_n = valid_decode[0]->dry_penalty_last_n;
-            if (valid_decode[0]->dry_multiplier > 0.0f &&
-                !valid_decode[0]->output_tokens.empty())
-                state.host_penalty_tokens = valid_decode[0]->output_tokens.data();
-            state.mirostat = valid_decode[0]->mirostat;
-            state.mirostat_tau = valid_decode[0]->mirostat_tau;
-            state.mirostat_eta = valid_decode[0]->mirostat_eta;
-            state.mirostat_mu = valid_decode[0]->mirostat_mu;
+            fill_sampling_params(*valid_decode[0], state);
+            state.seed = -1;  // decode uses per-request seeds
 
-            // Upload penalty token history for decode (single-sequence only)
-            {
-                auto* req0 = valid_decode[0].get();
-                bool needs_penalties = (req0->repetition_penalty != 1.0f ||
-                                        req0->frequency_penalty != 0.0f ||
-                                        req0->presence_penalty != 0.0f);
-                if (needs_penalties && !req0->output_tokens.empty() &&
-                    gpu_batch.n_sequences == 1) {
-                    size_t n = req0->output_tokens.size();
-                    if (n > d_penalty_tokens_capacity_) {
-                        if (d_penalty_tokens_) vram_alloc_.free(d_penalty_tokens_);
-                        d_penalty_tokens_capacity_ = std::max(n, (size_t)256);
-                        d_penalty_tokens_ = static_cast<int32_t*>(
-                            vram_alloc_.allocate(d_penalty_tokens_capacity_ * sizeof(int32_t), "penalty_tokens"));
-                        if (!d_penalty_tokens_) {
-                            IMP_LOG_ERROR("VRAMAllocator failed for penalty tokens (%zu)", d_penalty_tokens_capacity_);
-                            d_penalty_tokens_capacity_ = 0;
-                        }
-                    }
-                    if (d_penalty_tokens_) {
-                        cudaMemcpyAsync(d_penalty_tokens_, req0->output_tokens.data(),
-                                        n * sizeof(int32_t), cudaMemcpyHostToDevice, dec_stream);
-                        state.penalty_tokens = d_penalty_tokens_;
-                        state.n_penalty_tokens = static_cast<int>(n);
-                    }
-                }
+            // Penalties (single-sequence only)
+            if (gpu_batch.n_sequences == 1) {
+                upload_penalties(*valid_decode[0], state, dec_stream);
             }
 
-            // SSM state for hybrid models (decode uses first sequence's slot)
-            if (ssm_state_) {
-                state.ssm_state = ssm_state_.get();
-                state.ssm_seq_id = valid_decode[0]->id % ssm_state_->max_sequences();
-            }
-            if (gdn_state_) {
-                state.gdn_state = gdn_state_.get();
-                state.gdn_seq_id = valid_decode[0]->id % gdn_state_->max_sequences();
-            }
+            // Recurrent state
+            fill_recurrent_state(*valid_decode[0], state, false, dec_stream);
 
-            // Check if any request needs logprobs or json/schema mode
+            // Check if any request needs logprobs or constrained mode
             bool needs_logprobs = false;
             bool needs_json_mode = false;
             bool needs_schema_mode = false;
@@ -1855,39 +1263,25 @@ bool Engine::step() {
                 if (!r->json_schema.empty()) needs_schema_mode = true;
             }
 
-            // Lazily initialize JSON constrainer on first json_mode request
-            if (needs_json_mode && !json_constrainer_) {
-                json_constrainer_ = std::make_unique<JsonConstrainer>();
-                Tokenizer* jtok = model_->tokenizer();
-                if (!json_constrainer_->init(*jtok)) {
-                    IMP_LOG_ERROR("Failed to initialize JSON constrainer");
-                    json_constrainer_.reset();
-                    needs_json_mode = false;
-                }
-            }
-
-            // Schema constrainer: reuse existing (state persists across decode steps)
+            // Schema/JSON constraints for decode (reuse state from prefill)
             if (needs_schema_mode && valid_decode.size() == 1 &&
                 !valid_decode[0]->json_schema.empty()) {
-                if (schema_constrainer_ && schema_constrainer_->is_initialized()) {
-                    state.schema_constrainer = schema_constrainer_.get();
+                if (constraints_.has_schema()) {
+                    state.schema_constrainer = constraints_.schema_constrainer();
                 }
             }
-
-            // Set JSON constrainer on InferenceState (single-sequence only).
-            // The constrainer is a singleton on Engine — it tracks FSM state per
-            // token, so it MUST NOT be shared across concurrent sequences.
-            if (needs_json_mode && json_constrainer_ &&
-                valid_decode.size() == 1 && valid_decode[0]->json_mode) {
-                state.json_constrainer = json_constrainer_.get();
+            if (needs_json_mode && valid_decode.size() == 1 && valid_decode[0]->json_mode) {
+                // Lazily init if needed (decode might be first step with json_mode)
+                if (!constraints_.has_json() && !constraints_.has_schema()) {
+                    constraints_.prepare(true, "", model_->tokenizer());
+                }
+                state.json_constrainer = constraints_.json_constrainer();
             }
 
-            // Per-request sampling. For single-sequence (the common case),
-            // use state directly + sample_single (no vector alloc, no state copy).
+            // Per-request sampling
             auto sample_per_request = [&](const Tensor& logits) -> std::vector<int32_t> {
                 int n = static_cast<int>(valid_decode.size());
 
-                // Fast path: single sequence — state already has the right params
                 if (n == 1) {
                     auto& req = valid_decode[0];
                     int32_t tok = executor_->sample_single_from_logits(logits, state, dec_stream);
@@ -1896,27 +1290,11 @@ bool Engine::step() {
                     return {tok};
                 }
 
-                // Multi-sequence: per-request overrides
                 std::vector<int32_t> result(n);
                 for (int i = 0; i < n; i++) {
                     auto& req = valid_decode[i];
                     InferenceState per_state = state;
-                    per_state.temperature = req->temperature;
-                    per_state.top_p = req->top_p;
-                    per_state.top_k = req->top_k;
-                    per_state.min_p = req->min_p;
-                    per_state.typical_p = req->typical_p;
-                    per_state.seed = req->seed;
-                    per_state.repetition_penalty = req->repetition_penalty;
-                    per_state.frequency_penalty = req->frequency_penalty;
-                    per_state.presence_penalty = req->presence_penalty;
-                    per_state.repeat_last_n = req->repeat_last_n;
-                    per_state.dry_multiplier = req->dry_multiplier;
-                    per_state.dry_base = req->dry_base;
-                    per_state.dry_allowed_length = req->dry_allowed_length;
-                    per_state.dry_penalty_last_n = req->dry_penalty_last_n;
-                    if (req->dry_multiplier > 0.0f && !req->output_tokens.empty())
-                        per_state.host_penalty_tokens = req->output_tokens.data();
+                    fill_sampling_params(*req, per_state);
                     per_state.penalty_tokens = nullptr;
                     per_state.n_penalty_tokens = 0;
                     bool req_needs_pen = (req->repetition_penalty != 1.0f ||
@@ -1931,10 +1309,6 @@ bool Engine::step() {
                             per_state.n_penalty_tokens = static_cast<int>(rn);
                         }
                     }
-                    per_state.mirostat = req->mirostat;
-                    per_state.mirostat_tau = req->mirostat_tau;
-                    per_state.mirostat_eta = req->mirostat_eta;
-                    per_state.mirostat_mu = req->mirostat_mu;
                     per_state.n_sequences = 1;
                     Tensor seq_logits = logits.slice(i, i + 1);
                     result[i] = executor_->sample_single_from_logits(seq_logits, per_state, dec_stream);
@@ -1944,15 +1318,14 @@ bool Engine::step() {
                 return result;
             };
 
-            // 3e. Execute batched forward pass (with CUDA Graph when enabled)
+            // 3e. Execute forward pass (with CUDA Graph when enabled)
             std::vector<int32_t> tokens;
-            Tensor decode_logits_out;  // needed when logprobs are requested
+            Tensor decode_logits_out;
 
             static const bool profiling = (std::getenv("IMP_PROFILE") != nullptr);
             if (config_.use_cuda_graphs && !profiling &&
                 gpu_batch.n_sequences > 0 &&
                 decode_batch_pool_.is_allocated()) {
-                // Invalidate graph when batch config changes
                 if (gpu_batch.n_sequences != last_decode_batch_size_ ||
                     gpu_batch.max_blocks_per_seq != last_decode_max_blocks_) {
                     decode_graph_runner_.invalidate();
@@ -1960,11 +1333,6 @@ bool Engine::step() {
                     last_decode_max_blocks_ = gpu_batch.max_blocks_per_seq;
                 }
 
-                // Check if we can include greedy sampling in the graph.
-                // This captures argmax + D2H memcpy inside the graph, eliminating
-                // separate kernel launch + sync overhead per step.
-                // Disable when logprobs, json_mode, or penalties are active
-                // (penalties modify logits each step with changing token history).
                 bool has_penalties = (state.penalty_tokens != nullptr &&
                                      state.n_penalty_tokens > 0 &&
                                      (state.repetition_penalty != 1.0f ||
@@ -1977,14 +1345,12 @@ bool Engine::step() {
                                      !needs_logprobs && !needs_json_mode &&
                                      !needs_schema_mode && !has_penalties;
 
-                // Invalidate graph if sampling mode changed
                 if (greedy_single != graph_includes_sampling_) {
                     decode_graph_runner_.invalidate();
                     graph_includes_sampling_ = greedy_single;
                 }
 
                 if (greedy_single) {
-                    // Graph captures: forward_logits + argmax + D2H copy
                     decode_graph_runner_.set_decode_fn(
                         [this, &state](cudaStream_t s) {
                             Tensor logits_out;
@@ -2001,7 +1367,6 @@ bool Engine::step() {
                     cudaEventSynchronize(decode_done_);
                     tokens = {*h_sample_pinned_};
                 } else {
-                    // Forward-only graph + sample outside
                     Tensor logits_out;
                     decode_graph_runner_.set_decode_fn(
                         [this, &state, &logits_out](cudaStream_t s) {
@@ -2020,26 +1385,20 @@ bool Engine::step() {
                 tokens = sample_per_request(decode_logits_out);
             }
 
-            // Only free if not using pool (pool memory is reused)
             if (!decode_batch_pool_.is_allocated()) {
                 gpu_batch.free();
             }
 
             Tokenizer* tok = model_->tokenizer();
 
-            // 3f. Extract logprobs (batched D2H copy + CPU computation)
+            // 3f. Extract logprobs
             if (needs_logprobs && decode_logits_out.data != nullptr) {
                 int vocab_size = static_cast<int>(decode_logits_out.shape[decode_logits_out.ndim - 1]);
-
-                // Count sequences needing logprobs for batch allocation
                 int n_lp = 0;
                 for (const auto& r : valid_decode) if (r->logprobs) n_lp++;
-
-                // Allocate pinned buffer for all logprob sequences at once
                 executor_->ensure_logits_pinned(vocab_size * n_lp);
                 float* h_base = executor_->h_logits_pinned();
 
-                // Batch all D2H copies before syncing
                 int slot = 0;
                 for (int i = 0; i < static_cast<int>(valid_decode.size()); i++) {
                     if (!valid_decode[i]->logprobs) continue;
@@ -2050,9 +1409,8 @@ bool Engine::step() {
                                     cudaMemcpyDeviceToHost, dec_stream);
                     slot++;
                 }
-                cudaStreamSynchronize(dec_stream);  // single sync for all copies
+                cudaStreamSynchronize(dec_stream);
 
-                // CPU logprobs computation (no more GPU sync needed)
                 slot = 0;
                 for (int i = 0; i < static_cast<int>(valid_decode.size()); i++) {
                     auto& req = valid_decode[i];
@@ -2087,41 +1445,16 @@ bool Engine::step() {
                               req->context_len() - 1,
                               next_token, tok->decode_token(next_token).c_str());
 
-                // Check EOS and chat template stop tokens
-                bool is_stop = false;
-                if (!req->ignore_eos) {
-                    is_stop = (next_token == tok->eos_id());
-                    for (int32_t stop_id : chat_template_.stop_token_ids()) {
-                        if (next_token == stop_id) { is_stop = true; break; }
-                    }
-                }
-
-                if (is_stop ||
+                if ((!req->ignore_eos && is_stop_token(next_token)) ||
                     static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
-                    req->status = RequestStatus::FINISHED;
-                    kv_manager_->free_sequence(req->id);
-                    // Reset constrainer when request finishes
-                    if (schema_constrainer_) {
-                        schema_constrainer_->reset();
-                    } else if (req->json_mode && json_constrainer_) {
-                        json_constrainer_->reset();
-                    }
+                    finish_request(req);
                 }
 
-                // Update constrainer FSM with the sampled token
-                if (schema_constrainer_) {
-                    schema_constrainer_->update(next_token);
-                } else if (req->json_mode && json_constrainer_) {
-                    json_constrainer_->update(next_token);
-                }
-
+                constraints_.update(next_token);
                 kv_manager_->touch(req->id);
             }
 
-            // After first decode with graph ready, launch the async
-            // conditional graph loop for all remaining tokens. This runs the
-            // entire decode on GPU autonomously — subsequent step() calls just
-            // poll from the ring buffer at full GPU speed.
+            // Try async graph loop after first decode step
             if (decode_graph_runner_.is_ready() && valid_decode.size() == 1 &&
                 !offload_mgr_ && !ssm_state_ && !config_.enable_speculative &&
                 config_.use_cuda_graphs && !async_graph_runner_.is_setup() &&
@@ -2141,13 +1474,17 @@ bool Engine::step() {
     }
 decode_done:
 
-    // Restore prefill workspace for next step
+    // Restore prefill workspace
     if (executor_->has_decode_workspace() && executor_->active_workspace() != 0) {
         executor_->use_workspace(0);
     }
 
     return scheduler_->has_pending() || scheduler_->active_count() > 0;
 }
+
+// =====================================================================
+// generate()
+// =====================================================================
 
 std::string Engine::generate(const std::string& prompt, int max_tokens,
                               float temperature, float top_p,
@@ -2166,20 +1503,18 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     std::vector<int32_t> tokens;
 
     if (apply_chat_template && !chat_template_.is_raw()) {
-        // Apply detected chat template (with image tokens if vision active)
         std::vector<ChatMessage> messages = {{"user", prompt}};
-        if (has_vision_input_ && vision_encoder_) {
+        if (vision_.has_input() && vision_.is_available()) {
             tokens = chat_template_.apply_with_image(*tok, messages,
-                                                      vision_model_->config.num_image_tokens);
+                                                      vision_.num_image_tokens());
         } else {
             tokens = chat_template_.apply(*tok, messages);
         }
         IMP_LOG_INFO("Applied %s chat template (%zu tokens%s)",
                      chat_template_family_name(chat_template_.family()),
                      tokens.size(),
-                     has_vision_input_ ? ", with image" : "");
+                     vision_.has_input() ? ", with image" : "");
     } else {
-        // Raw encoding
         tokens = tok->encode(prompt);
         if (tok->add_bos() && (tokens.empty() || tokens[0] != tok->bos_id())) {
             tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
@@ -2187,7 +1522,6 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     }
 
     IMP_LOG_INFO("Encoded %zu tokens", tokens.size());
-    // Debug: dump token IDs and their text for verification
     {
         std::string dump;
         for (size_t i = 0; i < tokens.size() && i < 64; ++i) {
@@ -2216,14 +1550,14 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
 
     scheduler_->add_request(req);
 
-    // ---- Step 1: Prefill (always via step()) ----
+    // Prefill
     while (req->status == RequestStatus::PENDING ||
            req->status == RequestStatus::PREFILLING) {
         bool has_work = step();
         if (!has_work) break;
     }
 
-    // ---- Step 2: Decode — try conditional graph loop, fall back to step() ----
+    // Decode — try conditional graph loop, fall back to step()
     bool req_has_penalties = (req->repetition_penalty != 1.0f ||
                               req->frequency_penalty != 0.0f ||
                               req->presence_penalty != 0.0f);
@@ -2234,15 +1568,9 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
         Tokenizer* gtok = model_->tokenizer();
         auto graph_tokens = try_graph_loop_decode(req, first_token, decode_stream());
         if (!graph_tokens.empty()) {
-            // Check if the graph completed naturally (last token is EOS/stop)
             int32_t last = graph_tokens.back();
-            bool hit_stop = (gtok && last == gtok->eos_id());
-            if (!hit_stop) {
-                for (int32_t stop_id : chat_template_.stop_token_ids()) {
-                    if (last == stop_id) { hit_stop = true; break; }
-                }
-            }
-            if (hit_stop) graph_tokens.pop_back();  // strip stop token
+            bool hit_stop = is_stop_token(last);
+            if (hit_stop) graph_tokens.pop_back();
 
             for (int32_t t : graph_tokens) {
                 req->output_tokens.push_back(t);
@@ -2254,12 +1582,10 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
                 req->status = RequestStatus::FINISHED;
                 kv_manager_->free_sequence(req->id);
             }
-            // else: graph was capped, fall through to step() loop
         }
-        // If graph_tokens is empty, also fall through to step() loop
     }
 
-    // ---- Step 3: Fallback — per-step decode ----
+    // Fallback — per-step decode
     while (req->status != RequestStatus::FINISHED &&
            req->status != RequestStatus::CANCELLED) {
         bool has_work = step();
@@ -2273,102 +1599,126 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
         return "";
     }
 
-    // Clear vision state after generation completes
-    has_vision_input_ = false;
+    vision_.clear_image();
 
     std::string result = tok->decode(req->output_tokens);
     return result;
 }
 
-std::vector<int32_t> Engine::try_graph_loop_decode(
-        std::shared_ptr<Request> req, int32_t first_token, cudaStream_t stream) {
+// =====================================================================
+// Speculative decode shortcut
+// =====================================================================
+
+bool Engine::try_speculative_decode(
+        std::vector<std::shared_ptr<Request>>& valid_decode, cudaStream_t stream) {
+    if (valid_decode.size() != 1) return false;
+    auto& req = valid_decode[0];
+
+    auto accept_tokens = [&](const std::vector<int32_t>& tokens) {
+        for (int32_t t : tokens) {
+            req->output_tokens.push_back(t);
+            if ((!req->ignore_eos && is_stop_token(t)) ||
+                static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
+                finish_request(req);
+                break;
+            }
+        }
+        kv_manager_->touch(req->id);
+    };
+
+    // Self-speculative
+    if (self_spec_decoder_ && config_.enable_self_speculative) {
+        int32_t last_token = req->output_tokens.empty()
+            ? req->input_tokens.back() : req->output_tokens.back();
+        auto tokens = self_spec_decoder_->step(
+            last_token, req->context_len() - 1, req->id,
+            req->temperature, req->top_p, req->top_k, req->seed, stream);
+        accept_tokens(tokens);
+        return true;
+    }
+
+    // N-gram speculative
+    if (ngram_spec_decoder_ &&
+        static_cast<int>(req->output_tokens.size()) >= config_.ngram_n) {
+        int32_t last_token = req->output_tokens.back();
+        auto sr = ngram_spec_decoder_->step(
+            req, last_token, req->context_len() - 1, req->id, stream);
+        if (!sr.tokens.empty()) {
+            accept_tokens(sr.tokens);
+            IMP_LOG_DEBUG("N-gram spec: drafted=%d accepted=%d (rate=%.0f%%)",
+                          sr.n_drafted, sr.n_accepted,
+                          ngram_spec_decoder_->acceptance_rate() * 100.0f);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// =====================================================================
+// CUDA Graph decode helpers
+// =====================================================================
+
+int Engine::prepare_graph_loop(std::shared_ptr<Request>& req) {
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
-    // Only attempt for single-sequence decode
-    Tokenizer* tok = model_->tokenizer();
-    if (!tok) return {};
 
     int remaining = req->max_tokens - static_cast<int>(req->output_tokens.size());
+    if (remaining <= 0) return 0;
+
+    constexpr int kMaxLayersForConditionalGraph = 40;
+    if (model_->config().n_layers > kMaxLayersForConditionalGraph) return 0;
+
+    { size_t f = 0, t = 0; cudaMemGetInfo(&f, &t);
+      if (f < 256ULL * 1024 * 1024) return 0; }
+
+    // Pre-allocate KV blocks
+    int ctx_len = req->context_len();
+    int final_ctx = ctx_len + remaining;
+    int blocks_needed = (final_ctx + kv_bs - 1) / kv_bs;
+    int blocks_have = static_cast<int>(kv_manager_->block_table(req->id).size());
+
+    for (int b = blocks_have; b < blocks_needed; b++) {
+        if (kv_manager_->append_block(req->id) < 0) break;
+    }
+
+    int blocks_got = static_cast<int>(kv_manager_->block_table(req->id).size());
+    int capped = blocks_got * kv_bs - ctx_len;
+    if (capped <= 0) return 0;
+    return std::min(capped, remaining);
+}
+
+CudaGraphConditionalRunner::Config Engine::build_graph_config(
+        const Request& req, int remaining) const {
+    Tokenizer* tok = model_->tokenizer();
+    CudaGraphConditionalRunner::Config gcfg;
+    gcfg.max_steps = remaining;
+    gcfg.initial_context_len = req.context_len();
+    gcfg.initial_position = req.context_len() - 1;
+    gcfg.eos_id = tok ? tok->eos_id() : -1;
+    gcfg.stop_ids = chat_template_.stop_token_ids();
+    gcfg.temperature = req.temperature;
+    gcfg.top_p = req.top_p;
+    gcfg.top_k = req.top_k;
+    gcfg.seed = req.seed;
+    return gcfg;
+}
+
+std::vector<int32_t> Engine::try_graph_loop_decode(
+        std::shared_ptr<Request> req, int32_t first_token, cudaStream_t stream) {
+    int remaining = prepare_graph_loop(req);
     if (remaining <= 0) return {};
 
-    // Skip conditional graph for large models — the WHILE body has ~600 nodes
-    // (48 layers × ~12 kernels) and per-iteration scheduling overhead dominates.
-    // Fall back to per-step CudaGraphRunner which captures a flat graph.
-    constexpr int kMaxLayersForConditionalGraph = 40;
-    if (model_->config().n_layers > kMaxLayersForConditionalGraph) {
-        IMP_LOG_INFO("ConditionalGraph: skipping — %d layers exceeds threshold (%d), "
-                     "using per-step graph instead",
-                     model_->config().n_layers, kMaxLayersForConditionalGraph);
-        return {};
-    }
-
-    // Skip conditional graph when VRAM is constrained — graph instantiation
-    // needs driver-internal memory for the execution plan. With 0 MiB free,
-    // the driver uses slow allocation paths that hurt every replay iteration.
-    {
-        size_t free_mem = 0, total_mem = 0;
-        cudaMemGetInfo(&free_mem, &total_mem);
-        constexpr size_t kMinVramForGraphMiB = 256;
-        if (free_mem < kMinVramForGraphMiB * 1024ULL * 1024) {
-            IMP_LOG_INFO("ConditionalGraph: skipping — only %zu MiB VRAM free (need %zu), "
-                         "using per-step graph instead",
-                         free_mem / (1024 * 1024), kMinVramForGraphMiB);
-            return {};
-        }
-    }
-
-    int ctx_len = req->context_len();
-    int position = ctx_len - 1;
-    IMP_LOG_DEBUG("try_graph_loop_decode: first_token=%d ctx_len=%d position=%d remaining=%d",
-                  first_token, ctx_len, position, remaining);
-
-    // Pre-allocate KV blocks for the full generation — allocate as many as
-    // possible and cap max_steps if the cache is too small for the full run.
-    // NOTE: no LRU eviction here — evict_lru() could evict the *current*
-    // sequence in single-sequence chat mode, destroying its block table.
-    {
-        int final_ctx = ctx_len + remaining;
-        int blocks_needed = (final_ctx + kv_bs - 1) / kv_bs;
-        int blocks_have = static_cast<int>(kv_manager_->block_table(req->id).size());
-
-        for (int b = blocks_have; b < blocks_needed; b++) {
-            int new_block = kv_manager_->append_block(req->id);
-            if (new_block < 0) break;  // pool exhausted, use what we have
-        }
-
-        int blocks_got = static_cast<int>(kv_manager_->block_table(req->id).size());
-        int max_ctx = blocks_got * kv_bs;
-        int capped = max_ctx - ctx_len;
-        if (capped <= 0) {
-            IMP_LOG_WARN("ConditionalGraph: no KV capacity for new tokens, "
-                         "falling back to step() loop");
-            return {};
-        }
-        if (capped < remaining) {
-            IMP_LOG_INFO("ConditionalGraph: capping to %d tokens (KV capacity)", capped);
-            remaining = capped;
-        }
-    }
-
-    // Upload full block table
     const auto& full_bt = kv_manager_->block_table(req->id);
     int max_blocks_per_seq = static_cast<int>(full_bt.size());
 
     int* d_block_tables = nullptr;
-    {
-        cudaError_t err = cudaMallocAsync(&d_block_tables, max_blocks_per_seq * sizeof(int), stream);
-        if (err != cudaSuccess) {
-            IMP_LOG_ERROR("ConditionalGraph: cudaMallocAsync failed: %s", cudaGetErrorString(err));
-            return {};
-        }
-    }
+    if (cudaMallocAsync(&d_block_tables, max_blocks_per_seq * sizeof(int), stream) != cudaSuccess)
+        return {};
     cudaMemcpyAsync(d_block_tables, full_bt.data(),
-                     max_blocks_per_seq * sizeof(int),
-                     cudaMemcpyHostToDevice, stream);
+                     max_blocks_per_seq * sizeof(int), cudaMemcpyHostToDevice, stream);
 
-    // Resize workspace for decode (1 token)
     executor_->resize_workspace(1, stream);
 
-    // Build the state template — all pointers are device memory
     InferenceState state_template;
     state_template.kv_cache = kv_cache_raw_;
     state_template.block_tables = d_block_tables;
@@ -2376,126 +1726,41 @@ std::vector<int32_t> Engine::try_graph_loop_decode(
     state_template.max_blocks_per_seq = max_blocks_per_seq;
     state_template.is_prefill = false;
 
-    // Configure the conditional runner
-    CudaGraphConditionalRunner::Config gcfg;
-    gcfg.max_steps = remaining;
-    gcfg.initial_context_len = ctx_len;
-    gcfg.initial_position = position;
-    gcfg.eos_id = tok->eos_id();
-    gcfg.stop_ids = chat_template_.stop_token_ids();
-    gcfg.temperature = req->temperature;
-    gcfg.top_p = req->top_p;
-    gcfg.top_k = req->top_k;
-    gcfg.seed = req->seed;
+    auto gcfg = build_graph_config(*req, remaining);
 
     CudaGraphConditionalRunner runner;
     if (!runner.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
         cudaFreeAsync(d_block_tables, stream);
-        return {};  // setup failed, fall back
+        return {};
     }
-
-    // Launch the graph
     if (!runner.launch(stream)) {
         cudaFreeAsync(d_block_tables, stream);
         return {};
     }
 
-    // Wait for completion and get tokens
     auto tokens = runner.wait_and_get_tokens(stream);
-
     cudaFreeAsync(d_block_tables, stream);
-
-    // NOTE: EOS/stop tokens are NOT stripped here — the caller checks
-    // the last token to distinguish "generation done" from "graph capped".
-
-    IMP_LOG_INFO("ConditionalGraph: generated %zu tokens in graph loop",
-                 tokens.size());
-
+    IMP_LOG_INFO("ConditionalGraph: generated %zu tokens in graph loop", tokens.size());
     runner.cleanup();
     return tokens;
 }
 
 bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
                                           int32_t first_token, cudaStream_t stream) {
-    const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
-    Tokenizer* tok = model_->tokenizer();
-    if (!tok) return false;
-
-    int remaining = req->max_tokens - static_cast<int>(req->output_tokens.size());
+    int remaining = prepare_graph_loop(req);
     if (remaining <= 0) return false;
 
-    // Skip conditional graph for large models (same rationale as try_graph_loop_decode)
-    constexpr int kMaxLayersForConditionalGraph = 40;
-    if (model_->config().n_layers > kMaxLayersForConditionalGraph) {
-        IMP_LOG_DEBUG("AsyncGraphLoop: skipping — %d layers exceeds threshold (%d)",
-                      model_->config().n_layers, kMaxLayersForConditionalGraph);
-        return false;
-    }
-
-    // Skip when VRAM is constrained
-    {
-        size_t free_mem = 0, total_mem = 0;
-        cudaMemGetInfo(&free_mem, &total_mem);
-        constexpr size_t kMinVramForGraphMiB = 256;
-        if (free_mem < kMinVramForGraphMiB * 1024ULL * 1024) {
-            IMP_LOG_DEBUG("AsyncGraphLoop: skipping — only %zu MiB VRAM free (need %zu)",
-                          free_mem / (1024 * 1024), kMinVramForGraphMiB);
-            return false;
-        }
-    }
-
-    int ctx_len = req->context_len();
-    int position = ctx_len - 1;
-    IMP_LOG_DEBUG("try_launch_async: first_token=%d ctx_len=%d position=%d remaining=%d",
-                  first_token, ctx_len, position, remaining);
-
-    // Pre-allocate KV blocks for the full generation — allocate as many as
-    // possible and cap max_steps if the cache is too small for the full run.
-    // NOTE: no LRU eviction here — evict_lru() could evict the *current*
-    // sequence in single-sequence chat mode, destroying its block table.
-    {
-        int final_ctx = ctx_len + remaining;
-        int blocks_needed = (final_ctx + kv_bs - 1) / kv_bs;
-        int blocks_have = static_cast<int>(kv_manager_->block_table(req->id).size());
-
-        for (int b = blocks_have; b < blocks_needed; b++) {
-            int new_block = kv_manager_->append_block(req->id);
-            if (new_block < 0) break;  // pool exhausted, use what we have
-        }
-
-        int blocks_got = static_cast<int>(kv_manager_->block_table(req->id).size());
-        int max_ctx = blocks_got * kv_bs;
-        int capped = max_ctx - ctx_len;
-        if (capped <= 0) {
-            IMP_LOG_WARN("AsyncGraphLoop: no KV capacity for new tokens");
-            return false;
-        }
-        if (capped < remaining) {
-            IMP_LOG_INFO("AsyncGraphLoop: capping to %d tokens (KV capacity)", capped);
-            remaining = capped;
-        }
-    }
-
-    // Upload full block table
     const auto& full_bt = kv_manager_->block_table(req->id);
     int max_blocks_per_seq = static_cast<int>(full_bt.size());
 
     int* d_bt = nullptr;
-    {
-        cudaError_t err = cudaMalloc(&d_bt, max_blocks_per_seq * sizeof(int));
-        if (err != cudaSuccess) {
-            IMP_LOG_ERROR("AsyncGraphLoop: cudaMalloc failed: %s", cudaGetErrorString(err));
-            return false;
-        }
-    }
+    if (cudaMalloc(&d_bt, max_blocks_per_seq * sizeof(int)) != cudaSuccess)
+        return false;
     cudaMemcpyAsync(d_bt, full_bt.data(),
-                     max_blocks_per_seq * sizeof(int),
-                     cudaMemcpyHostToDevice, stream);
+                     max_blocks_per_seq * sizeof(int), cudaMemcpyHostToDevice, stream);
 
-    // Resize workspace for decode (1 token)
     executor_->resize_workspace(1, stream);
 
-    // Build state template
     InferenceState state_template;
     state_template.kv_cache = kv_cache_raw_;
     state_template.block_tables = d_bt;
@@ -2503,37 +1768,22 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
     state_template.max_blocks_per_seq = max_blocks_per_seq;
     state_template.is_prefill = false;
 
-    // Configure
-    CudaGraphConditionalRunner::Config gcfg;
-    gcfg.max_steps = remaining;
-    gcfg.initial_context_len = ctx_len;
-    gcfg.initial_position = position;
-    gcfg.eos_id = tok->eos_id();
-    gcfg.stop_ids = chat_template_.stop_token_ids();
-    gcfg.temperature = req->temperature;
-    gcfg.top_p = req->top_p;
-    gcfg.top_k = req->top_k;
-    gcfg.seed = req->seed;
+    auto gcfg = build_graph_config(*req, remaining);
 
     if (!async_graph_runner_.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
         cudaFree(d_bt);
-        IMP_LOG_WARN("AsyncGraphLoop: setup failed, falling back to per-step decode");
         return false;
     }
-
     if (!async_graph_runner_.launch(stream)) {
         async_graph_runner_.cleanup();
         cudaFree(d_bt);
-        IMP_LOG_WARN("AsyncGraphLoop: launch failed, falling back to per-step decode");
         return false;
     }
 
-    // Store state for step() polling
     async_graph_req_ = req;
     async_d_block_tables_ = d_bt;
     async_pending_tokens_.clear();
     async_pending_cursor_ = 0;
-
     IMP_LOG_INFO("AsyncGraphLoop: launched for %d remaining tokens", remaining);
     return true;
 }
