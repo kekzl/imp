@@ -644,12 +644,22 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         }
     }
 
+    // Determine thinking mode before tokenization (needed for /no_think injection)
+    bool enable_thinking = false;
+    if (snap_is_think_model && state.default_args.reasoning_format == "deepseek" &&
+        snap_think_start_id >= 0) {
+        if (body.contains("enable_thinking")) {
+            enable_thinking = body.value("enable_thinking", false);
+        }
+    }
+    bool suppress_thinking = snap_is_think_model && !enable_thinking && think_budget <= 0.0f;
+
     // Tokenize with chat template (with image tokens if vision is active)
     std::vector<int32_t> tokens;
     if (snap_have_template && has_vision_request) {
-        tokens = snap_chat_tpl.apply_with_image(*snap_tok, chat_msgs, 256);
+        tokens = snap_chat_tpl.apply_with_image(*snap_tok, chat_msgs, 256, suppress_thinking);
     } else if (snap_have_template) {
-        tokens = snap_chat_tpl.apply(*snap_tok, chat_msgs);
+        tokens = snap_chat_tpl.apply(*snap_tok, chat_msgs, suppress_thinking);
     } else {
         // Concatenate all message content as raw text
         std::string raw;
@@ -658,15 +668,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     }
 
     // Optionally append <think> token to trigger reasoning mode.
-    bool enable_thinking = false;
-    if (snap_is_think_model && state.default_args.reasoning_format == "deepseek" &&
-        snap_think_start_id >= 0) {
-        if (body.contains("enable_thinking")) {
-            enable_thinking = body.value("enable_thinking", false);
-        }
-        if (enable_thinking) {
-            tokens.push_back(snap_think_start_id);
-        }
+    if (enable_thinking && snap_think_start_id >= 0) {
+        tokens.push_back(snap_think_start_id);
     }
 
     int n_prompt_tokens = static_cast<int>(tokens.size());
@@ -914,7 +917,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 ThinkPhase think_phase;
                 if (enable_thinking) {
                     think_phase = ThinkPhase::REASONING;  // <think> in prefill -> start reasoning
-                } else if (use_reasoning) {
+                } else if (use_reasoning && think_budget > 0.0f) {
                     think_phase = ThinkPhase::SCAN;       // model decides whether to think
                 } else {
                     think_phase = ThinkPhase::CONTENT;    // no reasoning extraction
@@ -923,6 +926,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 std::string think_scan_buf;
                 int think_scan_count = 0;
                 int n_reasoning_tokens = 0;
+                int think_reentries = 0;
+                const int kMaxThinkReentries = 1;
                 const int kThinkScanLimit = 8;
 
                 // Helper: emit reasoning_content SSE chunk
@@ -1038,7 +1043,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                         n_reasoning_tokens++;
                         // Think budget: cap reasoning at configured fraction of max_tokens
                         int think_limit = (think_budget > 0.0f)
-                            ? static_cast<int>(max_tokens * think_budget) : max_tokens;
+                            ? static_cast<int>(max_tokens * think_budget) : 0;
                         if (snap_think_end_id >= 0 &&
                             n_reasoning_tokens >= think_limit &&
                             token != snap_think_end_id) {
@@ -1087,9 +1092,12 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     // CONTENT phase: handle stray think tokens from confused models
                     if (use_reasoning) {
                         if (token == snap_think_start_id) {
-                            think_phase = ThinkPhase::REASONING;
-                            n_reasoning_tokens++;
-                            continue;
+                            if (think_reentries < kMaxThinkReentries) {
+                                think_phase = ThinkPhase::REASONING;
+                                n_reasoning_tokens++;
+                                think_reentries++;
+                            }
+                            continue;  // always strip <think> from content
                         }
                         if (token == snap_think_end_id) {
                             n_reasoning_tokens++;
@@ -1592,15 +1600,15 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
             // Think budget: cap reasoning at configured fraction of max_tokens (non-streaming)
             if (snap_is_think_model && snap_think_end_id >= 0 &&
-                state.default_args.reasoning_format == "deepseek" &&
-                think_budget > 0.0f) {
+                state.default_args.reasoning_format == "deepseek") {
                 if (token == snap_think_start_id) {
                     ns_in_think = true;
                 } else if (token == snap_think_end_id) {
                     ns_in_think = false;
                 } else if (ns_in_think) {
                     ns_think_tokens++;
-                    int think_limit = static_cast<int>(max_tokens * think_budget);
+                    int think_limit = (think_budget > 0.0f)
+                        ? static_cast<int>(max_tokens * think_budget) : 0;
                     if (ns_think_tokens >= think_limit) {
                         token = snap_think_end_id;
                         ns_in_think = false;

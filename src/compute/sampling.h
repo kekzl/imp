@@ -108,4 +108,7 @@ void compute_logprobs_cpu(const float* logits, int vocab_size,
                           int32_t sampled_token, int top_n,
                           LogprobResult* out);
 
+// Free persistent CUB sort scratch (call at engine shutdown).
+void sampling_cleanup();
+
 } // namespace imp

@@ -154,6 +154,9 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/request.cpp
     src/runtime/batch.cpp
     src/runtime/engine.cpp
+    src/runtime/vision_pipeline.cpp
+    src/runtime/constraint_manager.cpp
+    src/runtime/vram_budget.cpp
     src/runtime/cuda_graph.cu
     src/runtime/pdl.cu
     src/runtime/speculative.cpp
@@ -170,6 +173,9 @@ set(IMP_GRAPH_SOURCES
     src/graph/executor_workspace.cu
     src/graph/executor_forward.cu
     src/graph/expert_cache.cu
+    src/graph/weight_cache_manager.cu
+    src/graph/moe_workspace.cu
+    src/graph/quant_scratch.cu
 )
 
 set(IMP_VISION_SOURCES

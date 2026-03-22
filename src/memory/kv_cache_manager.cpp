@@ -19,14 +19,14 @@ KVCacheManager::~KVCacheManager() = default;
 
 // ─── Hashing utility ─────────────────────────────────────────────────
 
-size_t KVCacheManager::compute_block_hash(const int32_t* tokens, int count,
+size_t KVCacheManager::compute_block_hash(std::span<const int32_t> tokens,
                                            size_t parent_hash) {
     // FNV-1a inspired hash that chains with the parent block's hash.
     // This ensures that block N's hash depends on all preceding blocks,
     // so two sequences must share an identical prefix to match.
     size_t hash = parent_hash ^ 0xcbf29ce484222325ULL;
-    for (int i = 0; i < count; ++i) {
-        hash ^= static_cast<size_t>(static_cast<uint32_t>(tokens[i]));
+    for (int32_t tok : tokens) {
+        hash ^= static_cast<size_t>(static_cast<uint32_t>(tok));
         hash *= 0x100000001b3ULL;
     }
     return hash;
@@ -89,14 +89,17 @@ void KVCacheManager::free_sequence(int seq_id) {
         // cached LRU for reuse. They remain in pinned_blocks_ and cannot
         // be evicted until unpin_prefix() is called.
         if (pinned_blocks_.find(block_id) != pinned_blocks_.end()) {
-            // Pinned blocks: keep alive with ref_count=1 but do NOT add to
-            // cached_blocks_lru_ (pinned blocks are excluded from LRU to avoid
-            // O(P) scan in reclaim_cached_block). They'll be re-added to LRU
-            // when unpin_prefix() is called.
+            // Pinned blocks: keep alive with ref_count=1, add to cached LRU
+            // so num_cached_blocks() reports them, but do NOT count as
+            // reclaimable (pinned blocks cannot be evicted until unpinned).
             if (cache_->ref_count(block_id) > 1) {
                 cache_->free_block(block_id);
             }
-            // ref_count == 1: just keep it alive, not in LRU
+            if (cached_blocks_map_.find(block_id) == cached_blocks_map_.end()) {
+                cached_blocks_lru_.push_back(block_id);
+                cached_blocks_map_[block_id] = std::prev(cached_blocks_lru_.end());
+                // NOT incrementing reclaimable_cached_count_ — pinned blocks excluded
+            }
             continue;
         }
 
@@ -188,61 +191,11 @@ bool KVCacheManager::can_allocate(int num_blocks) const {
     return false;
 }
 
-// ─── Prefix caching (legacy) ─────────────────────────────────────────
-
-void KVCacheManager::register_prefix(int seq_id, size_t prefix_hash) {
-    auto it = seq_blocks_.find(seq_id);
-    if (it == seq_blocks_.end()) return;
-
-    // Store a copy of the sequence's current block table under this hash.
-    prefix_cache_[prefix_hash] = it->second;
-}
-
-std::vector<int> KVCacheManager::find_prefix(size_t prefix_hash) const {
-    auto it = prefix_cache_.find(prefix_hash);
-    if (it == prefix_cache_.end()) return {};
-    // Validate that cached block IDs are still allocated (not stale).
-    // Legacy prefix cache doesn't track block lifecycle, so blocks may
-    // have been freed and reused by other sequences since registration.
-    for (int bid : it->second) {
-        if (bid < 0 || bid >= cache_->total_blocks() || cache_->ref_count(bid) <= 0) {
-            IMP_LOG_WARN("find_prefix: stale block_id %d in legacy prefix cache (hash=%zu)",
-                         bid, prefix_hash);
-            return {};  // invalidate entire prefix — partial reuse is unsafe
-        }
-    }
-    return it->second;
-}
-
-void KVCacheManager::share_prefix(int source_seq_id, int target_seq_id,
-                                  int num_blocks) {
-    auto src_it = seq_blocks_.find(source_seq_id);
-    if (src_it == seq_blocks_.end()) return;
-
-    const auto& src_blocks = src_it->second;
-    int to_share = std::min(num_blocks, static_cast<int>(src_blocks.size()));
-    if (to_share <= 0) return;
-
-    auto& tgt_blocks = seq_blocks_[target_seq_id];
-
-    for (int i = 0; i < to_share; ++i) {
-        int block_id = src_blocks[i];
-        cache_->inc_ref(block_id);
-        tgt_blocks.push_back(block_id);
-    }
-
-    // Make sure the target sequence is in the LRU list.
-    if (lru_map_.find(target_seq_id) == lru_map_.end()) {
-        lru_order_.push_back(target_seq_id);
-        lru_map_[target_seq_id] = std::prev(lru_order_.end());
-    }
-}
-
 // ─── Content-addressed prefix caching ────────────────────────────────
 
 int KVCacheManager::allocate_blocks_with_prefix(int seq_id,
-                                                 const int32_t* tokens,
-                                                 int num_tokens) {
+                                                 std::span<const int32_t> tokens) {
+    const int num_tokens = static_cast<int>(tokens.size());
     if (num_tokens <= 0) return 0;
 
     int total_blocks = (num_tokens + cache_->block_size() - 1) / cache_->block_size();
@@ -272,8 +225,8 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id,
         bool is_full_block = (block_tokens == cache_->block_size());
 
         if (prefix_caching_enabled_ && is_full_block) {
-            size_t block_hash = compute_block_hash(tokens + block_start,
-                                                    block_tokens, parent_hash);
+            size_t block_hash = compute_block_hash(
+                tokens.subspan(block_start, block_tokens), parent_hash);
 
             // Check if this block already exists in the hash table.
             auto hit = block_hash_to_id_.find(block_hash);
@@ -337,8 +290,8 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id,
 
             blocks.push_back(block_id);
             if (is_full_block) {
-                size_t block_hash = compute_block_hash(tokens + block_start,
-                                                        block_tokens, parent_hash);
+                size_t block_hash = compute_block_hash(
+                    tokens.subspan(block_start, block_tokens), parent_hash);
                 hashes.push_back(block_hash);
                 parent_hash = block_hash;
             } else {
@@ -362,8 +315,8 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id,
 }
 
 void KVCacheManager::register_block_hashes(int seq_id,
-                                            const int32_t* tokens,
-                                            int num_tokens) {
+                                            std::span<const int32_t> tokens) {
+    const int num_tokens = static_cast<int>(tokens.size());
     if (!prefix_caching_enabled_) return;
 
     auto blocks_it = seq_blocks_.find(seq_id);
@@ -393,8 +346,8 @@ void KVCacheManager::register_block_hashes(int seq_id,
             continue;
         }
 
-        size_t block_hash = compute_block_hash(tokens + block_start,
-                                                block_tokens, parent_hash);
+        size_t block_hash = compute_block_hash(
+            tokens.subspan(block_start, block_tokens), parent_hash);
 
         if (b < static_cast<int>(hashes.size())) {
             hashes[b] = block_hash;
@@ -421,10 +374,18 @@ bool KVCacheManager::evict_cached_block() {
 }
 
 int KVCacheManager::reclaim_cached_block() {
+    if (reclaimable_cached_count_ <= 0) return -1;
+
+    // Skip pinned blocks at the front of the LRU.
+    while (!cached_blocks_lru_.empty()) {
+        int front = cached_blocks_lru_.front();
+        if (pinned_blocks_.find(front) == pinned_blocks_.end()) break;
+        // Move pinned block to the back so we don't re-scan it
+        cached_blocks_lru_.splice(cached_blocks_lru_.end(), cached_blocks_lru_,
+                                   cached_blocks_lru_.begin());
+    }
     if (cached_blocks_lru_.empty()) return -1;
 
-    // Pinned blocks are never in cached_blocks_lru_ (removed on pin),
-    // so we can always pop the front without scanning.
     int block_id = cached_blocks_lru_.front();
     cached_blocks_lru_.pop_front();
     cached_blocks_map_.erase(block_id);
@@ -498,10 +459,12 @@ void KVCacheManager::unpin_prefix(int seq_id) {
         for (int i = 0; i < to_unpin; ++i) {
             int bid = blocks[i];
             pinned_blocks_.erase(bid);
-            // Re-add to cached LRU if block is cached (ref_count > 0 but not in active seq)
-            if (block_id_to_hash_.count(bid) && !cached_blocks_map_.count(bid)) {
-                cached_blocks_lru_.push_back(bid);
-                cached_blocks_map_[bid] = std::prev(cached_blocks_lru_.end());
+            // Mark as reclaimable if block is in cached LRU or add it
+            if (block_id_to_hash_.count(bid)) {
+                if (!cached_blocks_map_.count(bid)) {
+                    cached_blocks_lru_.push_back(bid);
+                    cached_blocks_map_[bid] = std::prev(cached_blocks_lru_.end());
+                }
                 reclaimable_cached_count_++;
             }
         }
@@ -522,12 +485,16 @@ void KVCacheManager::unpin_prefix(int seq_id) {
                 pinned_blocks_.insert(other_blocks[i]);
             }
         }
-        // Re-add previously-pinned blocks that are now unpinned to cached LRU
+        // Mark previously-pinned blocks that are now unpinned as reclaimable
         for (int bid : old_pinned) {
             if (pinned_blocks_.count(bid)) continue;  // still pinned by another seq
-            if (block_id_to_hash_.count(bid) && !cached_blocks_map_.count(bid)) {
-                cached_blocks_lru_.push_back(bid);
-                cached_blocks_map_[bid] = std::prev(cached_blocks_lru_.end());
+            if (block_id_to_hash_.count(bid)) {
+                if (!cached_blocks_map_.count(bid)) {
+                    // Not in LRU yet — add it
+                    cached_blocks_lru_.push_back(bid);
+                    cached_blocks_map_[bid] = std::prev(cached_blocks_lru_.end());
+                }
+                // Now reclaimable (was pinned, no longer)
                 reclaimable_cached_count_++;
             }
         }
@@ -570,6 +537,18 @@ void KVCacheManager::rollback(int seq_id, int new_seq_len) {
 }
 
 // ─── Stats ───────────────────────────────────────────────────────────
+
+KVCacheStats KVCacheManager::stats() const {
+    KVCacheStats s;
+    s.active_sequences = static_cast<int>(seq_blocks_.size());
+    for (const auto& [seq_id, blocks] : seq_blocks_) {
+        s.total_blocks += static_cast<int>(blocks.size());
+    }
+    s.free_blocks = cache_->num_free_blocks();
+    s.cached_blocks = static_cast<int>(cached_blocks_lru_.size());
+    s.pinned_blocks = static_cast<int>(pinned_blocks_.size());
+    return s;
+}
 
 int KVCacheManager::num_active_sequences() const {
     return static_cast<int>(seq_blocks_.size());

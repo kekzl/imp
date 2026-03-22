@@ -855,5 +855,199 @@ TEST(SchedulerTest, DecodeBatchSizeLimit) {
     EXPECT_LE(sched.active_count(), 4);
 }
 
+// ============================================================================
+// Scheduler Edge Case Tests
+// ============================================================================
+
+// 24. Shortest-input-first (SIF) ordering
+TEST(SchedulerTest, ShortestInputFirst) {
+    Scheduler sched(2);  // admit only 2 at a time
+
+    // Add requests in descending size order
+    auto long_req = std::make_shared<Request>();
+    long_req->id = 1;
+    long_req->input_tokens.resize(100, 0);  // 100 tokens
+
+    auto medium_req = std::make_shared<Request>();
+    medium_req->id = 2;
+    medium_req->input_tokens.resize(50, 0);  // 50 tokens
+
+    auto short_req = std::make_shared<Request>();
+    short_req->id = 3;
+    short_req->input_tokens.resize(10, 0);  // 10 tokens
+
+    sched.add_request(long_req);
+    sched.add_request(medium_req);
+    sched.add_request(short_req);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+
+    // SIF: shortest two should be admitted first
+    ASSERT_EQ(prefill.size(), 2u);
+    EXPECT_EQ(prefill[0]->id, 3);  // 10 tokens (shortest)
+    EXPECT_EQ(prefill[1]->id, 2);  // 50 tokens (second shortest)
+    EXPECT_TRUE(sched.has_pending());  // 100-token request still pending
+}
+
+// 25. Chunked prefill re-scheduling
+TEST(SchedulerTest, ChunkedPrefillRescheduling) {
+    Scheduler sched(4);
+
+    auto req = std::make_shared<Request>();
+    req->id = 1;
+    req->input_tokens.resize(64, 0);
+    sched.add_request(req);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+
+    // First schedule: promotes to prefill
+    sched.schedule(prefill, decode);
+    ASSERT_EQ(prefill.size(), 1u);
+    EXPECT_EQ(prefill[0]->status, RequestStatus::PREFILLING);
+
+    // Simulate partial prefill: only processed first 32 tokens
+    req->prefill_offset = 32;
+
+    // Second schedule: should re-appear in prefill batch for remaining chunk
+    sched.schedule(prefill, decode);
+    ASSERT_EQ(prefill.size(), 1u);
+    EXPECT_EQ(prefill[0]->id, 1);
+    EXPECT_EQ(prefill[0]->prefill_offset, 32);
+}
+
+// 26. Chunked prefill completes — transitions to decode
+TEST(SchedulerTest, ChunkedPrefillCompleteThenDecode) {
+    Scheduler sched(4);
+
+    auto req = std::make_shared<Request>();
+    req->input_tokens.resize(64, 0);
+    sched.add_request(req);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+    ASSERT_EQ(prefill.size(), 1u);
+
+    // Simulate: prefill fully completed, transition to decoding
+    req->prefill_offset = 64;
+    req->status = RequestStatus::DECODING;
+
+    sched.schedule(prefill, decode);
+    EXPECT_EQ(prefill.size(), 0u);
+    EXPECT_EQ(decode.size(), 1u);
+}
+
+// 27. Empty scheduler returns empty batches
+TEST(SchedulerTest, EmptyScheduler) {
+    Scheduler sched(4);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+
+    EXPECT_EQ(prefill.size(), 0u);
+    EXPECT_EQ(decode.size(), 0u);
+    EXPECT_EQ(sched.active_count(), 0);
+    EXPECT_FALSE(sched.has_pending());
+}
+
+// 28. Memory-aware scheduling skips large requests, admits smaller ones
+TEST(SchedulerTest, MemoryAwareSkipsLargeAdmitsSmall) {
+    SKIP_IF_NO_CUDA();
+
+    // 4 blocks total, block_size=16
+    auto cache = std::make_unique<KVCache>(
+        /*n_layers=*/1, /*n_kv_heads=*/1, /*head_dim=*/64,
+        DType::FP16, /*max_blocks=*/4);
+    auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
+
+    Scheduler sched(16);
+    sched.set_kv_manager(mgr.get());
+
+    // Large request: 80 tokens = 5 blocks (exceeds 4 total)
+    auto large = std::make_shared<Request>();
+    large->id = 1;
+    large->input_tokens.resize(80, 0);
+    sched.add_request(large);
+
+    // Small request: 16 tokens = 1 block (fits)
+    auto small_req = std::make_shared<Request>();
+    small_req->id = 2;
+    small_req->input_tokens.resize(16, 0);
+    sched.add_request(small_req);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+
+    // Small request admitted, large request skipped (still pending)
+    ASSERT_EQ(prefill.size(), 1u);
+    EXPECT_EQ(prefill[0]->id, 2);
+    EXPECT_TRUE(sched.has_pending());
+}
+
+// 29. All requests too large for memory — nothing admitted
+TEST(SchedulerTest, AllRequestsTooLargeForMemory) {
+    SKIP_IF_NO_CUDA();
+
+    auto cache = std::make_unique<KVCache>(
+        /*n_layers=*/1, /*n_kv_heads=*/1, /*head_dim=*/64,
+        DType::FP16, /*max_blocks=*/2);
+    auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
+
+    Scheduler sched(16);
+    sched.set_kv_manager(mgr.get());
+
+    // 3 requests each needing 3+ blocks but only 2 available
+    for (int i = 0; i < 3; i++) {
+        auto req = std::make_shared<Request>();
+        req->input_tokens.resize(48, 0);  // 48 tokens = 3 blocks
+        sched.add_request(req);
+    }
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+
+    EXPECT_EQ(prefill.size(), 0u);
+    EXPECT_EQ(decode.size(), 0u);
+    EXPECT_TRUE(sched.has_pending());
+}
+
+// 30. Concurrent new prefill while others decoding
+TEST(SchedulerTest, NewPrefillWhileDecoding) {
+    Scheduler sched(8);
+
+    // Start 3 requests decoding
+    std::vector<std::shared_ptr<Request>> existing(3);
+    for (int i = 0; i < 3; i++) {
+        existing[i] = std::make_shared<Request>();
+        existing[i]->id = i;
+        existing[i]->input_tokens = {1, 2};
+        sched.add_request(existing[i]);
+    }
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+    for (auto& r : existing) r->status = RequestStatus::DECODING;
+
+    // Add 2 new requests while 3 are decoding
+    auto new1 = std::make_shared<Request>();
+    new1->id = 10;
+    new1->input_tokens = {5, 6, 7};
+    auto new2 = std::make_shared<Request>();
+    new2->id = 11;
+    new2->input_tokens = {8};
+
+    sched.add_request(new1);
+    sched.add_request(new2);
+
+    sched.schedule(prefill, decode);
+
+    // SIF: new2 (1 token) before new1 (3 tokens)
+    ASSERT_EQ(prefill.size(), 2u);
+    EXPECT_EQ(prefill[0]->id, 11);  // shorter first
+    EXPECT_EQ(prefill[1]->id, 10);
+    EXPECT_EQ(decode.size(), 3u);
+    EXPECT_EQ(sched.active_count(), 5);
+}
+
 } // namespace
 } // namespace imp

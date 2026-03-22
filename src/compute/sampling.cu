@@ -2,6 +2,7 @@
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cub/cub.cuh>
 #include <cmath>
 #include <cstdio>
 #include <cfloat>
@@ -556,6 +557,238 @@ __global__ void topk_topp_sample_kernel(
     }
 }
 
+// ============================================================================
+// CUB-based top-k sampling for k > MAX_TOP_K (128).
+//
+// Strategy:
+//   1. Compute softmax probabilities with temperature scaling.
+//   2. Sort (probability, vocab_index) pairs descending via CUB RadixSort.
+//   3. Take first k elements, apply top-p cutoff, sample.
+//
+// This path is NOT used inside CUDA graph capture (CUB launches internal
+// kernels). The single-block kernel above handles the graph-captured path.
+// ============================================================================
+
+// Kernel: compute softmax probabilities with temperature into key/value arrays
+__global__ void softmax_to_pairs_kernel(
+        const float* __restrict__ logits, int vocab_size,
+        float inv_temperature, float global_max, float inv_sum,
+        float* __restrict__ d_keys, int32_t* __restrict__ d_values) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= vocab_size) return;
+    float prob = expf((logits[idx] - global_max) * inv_temperature) * inv_sum;
+    d_keys[idx] = prob;
+    d_values[idx] = idx;
+}
+
+// Kernel: find global max of logits (Phase 1)
+__global__ void softmax_max_kernel(
+        const float* __restrict__ logits, int vocab_size,
+        float* __restrict__ d_max) {
+    __shared__ float s_max[BLOCK_SIZE / WARP_SIZE];
+
+    float local_max = -FLT_MAX;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < vocab_size;
+         i += blockDim.x * gridDim.x) {
+        float v = logits[i];
+        if (v > local_max) local_max = v;
+    }
+    for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
+        float o = __shfl_xor_sync(0xFFFFFFFF, local_max, off);
+        if (o > local_max) local_max = o;
+    }
+    int warp_id = threadIdx.x / WARP_SIZE;
+    int lane_id = threadIdx.x % WARP_SIZE;
+    if (lane_id == 0) s_max[warp_id] = local_max;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float mx = -FLT_MAX;
+        for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; w++)
+            if (s_max[w] > mx) mx = s_max[w];
+        atomicMax(reinterpret_cast<int*>(d_max), __float_as_int(mx));
+    }
+}
+
+// Kernel: compute sum of exp(logits - max) (Phase 2, launched after max is known)
+__global__ void softmax_sum_kernel(
+        const float* __restrict__ logits, int vocab_size,
+        float inv_temperature, float global_max,
+        float* __restrict__ d_sum) {
+    __shared__ float s_sum[BLOCK_SIZE / WARP_SIZE];
+
+    float local_sum = 0.0f;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < vocab_size;
+         i += blockDim.x * gridDim.x) {
+        local_sum += expf((logits[i] - global_max) * inv_temperature);
+    }
+    for (int off = WARP_SIZE / 2; off > 0; off >>= 1)
+        local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, off);
+    int warp_id = threadIdx.x / WARP_SIZE;
+    int lane_id = threadIdx.x % WARP_SIZE;
+    if (lane_id == 0) s_sum[warp_id] = local_sum;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float sm = 0.0f;
+        for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; w++) sm += s_sum[w];
+        atomicAdd(d_sum, sm);
+    }
+}
+
+// Kernel: top-p filter + sample from the first k sorted candidates
+__global__ void topp_sample_from_sorted_kernel(
+        const float* __restrict__ sorted_probs,
+        const int32_t* __restrict__ sorted_indices,
+        int top_k, float top_p, unsigned int seed,
+        int32_t* __restrict__ d_result) {
+    if (threadIdx.x != 0) return;
+
+    float cumsum = 0.0f;
+    int cutoff = top_k;
+    for (int i = 0; i < top_k; i++) {
+        cumsum += sorted_probs[i];
+        if (cumsum >= top_p) { cutoff = i + 1; break; }
+    }
+
+    float norm = 0.0f;
+    for (int i = 0; i < cutoff; i++) norm += sorted_probs[i];
+    float inv_norm = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
+
+    unsigned int rng_state = seed;
+    float r = lcg_rand_float(rng_state);
+
+    float acc = 0.0f;
+    int32_t chosen = sorted_indices[0];
+    for (int i = 0; i < cutoff; i++) {
+        acc += sorted_probs[i] * inv_norm;
+        if (r < acc) { chosen = sorted_indices[i]; break; }
+    }
+    d_result[0] = chosen;
+}
+
+// Persistent scratch for CUB sort (lazily allocated, grows only)
+struct CubSortScratch {
+    float*   d_keys_in   = nullptr;
+    float*   d_keys_out  = nullptr;
+    int32_t* d_vals_in   = nullptr;
+    int32_t* d_vals_out  = nullptr;
+    float*   d_max_sum   = nullptr;
+    void*    d_temp      = nullptr;
+    size_t   temp_bytes  = 0;
+    int      capacity    = 0;  // max vocab_size allocated for
+
+    bool ensure(int vocab_size, cudaStream_t stream) {
+        if (vocab_size <= capacity) return true;
+        free();
+        size_t elem_bytes = static_cast<size_t>(vocab_size) * sizeof(float);
+        size_t idx_bytes  = static_cast<size_t>(vocab_size) * sizeof(int32_t);
+        if (cudaMalloc(&d_keys_in,  elem_bytes) != cudaSuccess ||
+            cudaMalloc(&d_keys_out, elem_bytes) != cudaSuccess ||
+            cudaMalloc(&d_vals_in,  idx_bytes)  != cudaSuccess ||
+            cudaMalloc(&d_vals_out, idx_bytes)  != cudaSuccess ||
+            cudaMalloc(&d_max_sum,  2 * sizeof(float)) != cudaSuccess) {
+            free();
+            return false;
+        }
+        // Query CUB temp storage requirement
+        temp_bytes = 0;
+        cub::DeviceRadixSort::SortPairsDescending(
+            nullptr, temp_bytes,
+            d_keys_in, d_keys_out, d_vals_in, d_vals_out,
+            vocab_size, 0, 32, stream);
+        if (cudaMalloc(&d_temp, temp_bytes) != cudaSuccess) {
+            free();
+            return false;
+        }
+        capacity = vocab_size;
+        return true;
+    }
+
+    void free() {
+        if (d_keys_in)  { cudaFree(d_keys_in);  d_keys_in  = nullptr; }
+        if (d_keys_out) { cudaFree(d_keys_out); d_keys_out = nullptr; }
+        if (d_vals_in)  { cudaFree(d_vals_in);  d_vals_in  = nullptr; }
+        if (d_vals_out) { cudaFree(d_vals_out); d_vals_out = nullptr; }
+        if (d_max_sum)  { cudaFree(d_max_sum);  d_max_sum  = nullptr; }
+        if (d_temp)     { cudaFree(d_temp);     d_temp     = nullptr; }
+        temp_bytes = 0;
+        capacity = 0;
+    }
+};
+
+static CubSortScratch s_cub_scratch;
+
+// CUB-based top-k sampling for k > MAX_TOP_K.
+static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size,
+                                     int top_k, float top_p,
+                                     float inv_temperature, unsigned int seed,
+                                     int32_t* d_result, cudaStream_t stream) {
+    if (!s_cub_scratch.ensure(vocab_size, stream)) {
+        IMP_LOG_ERROR("CUB sort scratch allocation failed for vocab_size=%d", vocab_size);
+        return 0;
+    }
+
+    auto& sc = s_cub_scratch;
+
+    // Step 1: Compute softmax stats (max, then sum) using two separate kernels
+    // to avoid a race between the max reduction and the sum computation.
+    float neg_inf_val = -FLT_MAX;
+    int neg_inf_bits;
+    std::memcpy(&neg_inf_bits, &neg_inf_val, sizeof(int));
+    cudaMemcpyAsync(sc.d_max_sum, &neg_inf_bits, sizeof(int),
+                    cudaMemcpyHostToDevice, stream);
+    float zero = 0.0f;
+    cudaMemcpyAsync(sc.d_max_sum + 1, &zero, sizeof(float),
+                    cudaMemcpyHostToDevice, stream);
+
+    int stats_blocks = std::min((vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE, 128);
+
+    // Phase 1: global max
+    softmax_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(
+        d_logits, vocab_size, sc.d_max_sum);
+
+    // Read back max (need sync before phase 2)
+    float gmax;
+    cudaMemcpyAsync(&gmax, sc.d_max_sum, sizeof(float),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    // Phase 2: sum of exp (uses host-side gmax as kernel arg — no race)
+    softmax_sum_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(
+        d_logits, vocab_size, inv_temperature, gmax, sc.d_max_sum + 1);
+
+    float h_sum;
+    cudaMemcpyAsync(&h_sum, sc.d_max_sum + 1, sizeof(float),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    float inv_sum = 1.0f / h_sum;
+
+    // Step 2: Compute probabilities into key/value arrays
+    int pair_blocks = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    softmax_to_pairs_kernel<<<pair_blocks, BLOCK_SIZE, 0, stream>>>(
+        d_logits, vocab_size, inv_temperature, gmax, inv_sum,
+        sc.d_keys_in, sc.d_vals_in);
+
+    // Step 3: CUB radix sort descending
+    cub::DeviceRadixSort::SortPairsDescending(
+        sc.d_temp, sc.temp_bytes,
+        sc.d_keys_in, sc.d_keys_out,
+        sc.d_vals_in, sc.d_vals_out,
+        vocab_size, 0, 32, stream);
+
+    // Step 4: Top-p filter + sample from sorted top-k
+    topp_sample_from_sorted_kernel<<<1, 1, 0, stream>>>(
+        sc.d_keys_out, sc.d_vals_out,
+        top_k, top_p, seed, d_result);
+
+    int32_t h_result = 0;
+    cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    return h_result;
+}
+
 int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
                          float temperature, unsigned int seed,
                          cudaStream_t stream) {
@@ -563,15 +796,25 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
     const float* d_logits = static_cast<const float*>(logits.data);
 
     if (top_k <= 0 || top_k > vocab_size) top_k = vocab_size;
-    if (top_k > MAX_TOP_K) {
-        IMP_LOG_WARN("top_k=%d exceeds MAX_TOP_K=%d, clamping", top_k, MAX_TOP_K);
-        top_k = MAX_TOP_K;
-    }
     if (temperature <= 0.0f) temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
 
-    int32_t* d_result = nullptr;
-    if (cudaMalloc(&d_result, sizeof(int32_t)) != cudaSuccess) {
+    // For large top_k, use CUB radix sort path (no MAX_TOP_K limit)
+    if (top_k > MAX_TOP_K) {
+        int32_t* d_result = nullptr;
+        if (cudaMalloc(&d_result, sizeof(int32_t)) != cudaSuccess) {
+            IMP_LOG_ERROR("sample_topk_topp: cudaMalloc failed");
+            return 0;
+        }
+        int32_t result = sample_topk_topp_cub(
+            d_logits, vocab_size, top_k, top_p, inv_temperature, seed,
+            d_result, stream);
+        cudaFree(d_result);
+        return result;
+    }
+
+    int32_t* d_result_alloc = nullptr;
+    if (cudaMalloc(&d_result_alloc, sizeof(int32_t)) != cudaSuccess) {
         IMP_LOG_ERROR("sample_topk_topp: cudaMalloc failed");
         return 0;
     }
@@ -586,14 +829,14 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
                       + NUM_WARPS * top_k * sizeof(int);
 
     topk_topp_sample_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(
-        d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result);
+        d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result_alloc);
 
     int32_t h_result = 0;
-    cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
+    cudaMemcpyAsync(&h_result, d_result_alloc, sizeof(int32_t),
                     cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
 
-    cudaFree(d_result);
+    cudaFree(d_result_alloc);
     return h_result;
 }
 
@@ -605,12 +848,15 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
     const float* d_logits = static_cast<const float*>(logits.data);
 
     if (top_k <= 0 || top_k > vocab_size) top_k = vocab_size;
-    if (top_k > MAX_TOP_K) {
-        IMP_LOG_WARN("top_k=%d exceeds MAX_TOP_K=%d, clamping", top_k, MAX_TOP_K);
-        top_k = MAX_TOP_K;
-    }
     if (temperature <= 0.0f) temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
+
+    // For large top_k, use CUB radix sort path (no MAX_TOP_K limit)
+    if (top_k > MAX_TOP_K) {
+        return sample_topk_topp_cub(
+            d_logits, vocab_size, top_k, top_p, inv_temperature, seed,
+            d_result, stream);
+    }
 
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     size_t smem_bytes = static_cast<size_t>(top_k) * sizeof(float)
@@ -1322,6 +1568,10 @@ void compute_logprobs_cpu(const float* logits, int vocab_size,
     for (const auto& e : heap) {
         out->top.push_back({e.token, e.logprob});
     }
+}
+
+void sampling_cleanup() {
+    s_cub_scratch.free();
 }
 
 } // namespace imp

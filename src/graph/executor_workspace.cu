@@ -69,9 +69,9 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
     compute_dtype_ = compute_dtype;
     norm_w_off_ = model.config().norm_weight_offset;
     use_pdl_ = use_pdl;
-    use_fp8_cache_ = use_fp8_prefill;
-    use_nvfp4_decode_ = use_nvfp4_decode;
-    use_mxfp4_prefill_ = use_mxfp4_prefill;
+    wcache_.use_fp8 = use_fp8_prefill;
+    wcache_.nvfp4_decode_mode = use_nvfp4_decode;
+    wcache_.use_mxfp4 = use_mxfp4_prefill;
 
     const auto& cfg = model.config();
 
@@ -480,7 +480,7 @@ bool GraphExecutor::allocate_shared_workspace(int max_tokens) {
     // Pre-allocate MoE routing buffers (separate from shared workspace)
     if (has_moe_) {
         const auto& cfg = model_->config();
-        moe_routing_buffers_.allocate(max_tokens, cfg.n_experts, cfg.n_experts_active);
+        moe_.routing_buffers.allocate(max_tokens, cfg.n_experts, cfg.n_experts_active);
     }
     return true;
 }
@@ -502,15 +502,15 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             }
         }
         if (max_weight_elems > 0) {
-            dequant_scratch_size_ = max_weight_elems * sizeof(uint16_t);
-            dequant_scratch_ = vram_alloc(vram_alloc_, dequant_scratch_size_, "dequant_scratch");
-            if (!dequant_scratch_) {
+            qscratch_.dequant_size = max_weight_elems * sizeof(uint16_t);
+            qscratch_.dequant = vram_alloc(vram_alloc_, qscratch_.dequant_size, "dequant_scratch");
+            if (!qscratch_.dequant) {
                 IMP_LOG_ERROR("Failed to allocate dequant scratch (%.1f MiB)",
-                              dequant_scratch_size_ / (1024.0 * 1024.0));
-                dequant_scratch_size_ = 0;
+                              qscratch_.dequant_size / (1024.0 * 1024.0));
+                qscratch_.dequant_size = 0;
             } else {
                 IMP_LOG_INFO("Dequant scratch buffer: %.2f MiB",
-                             dequant_scratch_size_ / (1024.0 * 1024.0));
+                             qscratch_.dequant_size / (1024.0 * 1024.0));
             }
         }
     }
@@ -570,16 +570,16 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
         int max_blocks = std::max(max_k / 32, max_moe_down_blocks);
         if (max_blocks > 0) {
-            q8_1_max_blocks_ = max_blocks;
-            size_t q8_1_sz = static_cast<size_t>(q8_1_max_blocks_) * sizeof(block_q8_1);
-            size_t d8_sz = static_cast<size_t>(q8_1_max_blocks_) * sizeof(float);
-            cudaError_t err1 = cudaMalloc(&q8_1_buf_, q8_1_sz);
-            cudaError_t err2 = cudaMalloc(reinterpret_cast<void**>(&d8_buf_), d8_sz);
+            qscratch_.q8_1_max_blocks = max_blocks;
+            size_t q8_1_sz = static_cast<size_t>(qscratch_.q8_1_max_blocks) * sizeof(block_q8_1);
+            size_t d8_sz = static_cast<size_t>(qscratch_.q8_1_max_blocks) * sizeof(float);
+            cudaError_t err1 = cudaMalloc(&qscratch_.q8_1_buf, q8_1_sz);
+            cudaError_t err2 = cudaMalloc(reinterpret_cast<void**>(&qscratch_.d8_buf), d8_sz);
             if (err1 != cudaSuccess || err2 != cudaSuccess) {
                 IMP_LOG_WARN("Failed to allocate MMVQ scratch buffers, dp4a path disabled");
-                if (q8_1_buf_) { cudaFree(q8_1_buf_); q8_1_buf_ = nullptr; }
-                if (d8_buf_) { cudaFree(d8_buf_); d8_buf_ = nullptr; }
-                q8_1_max_blocks_ = 0;
+                if (qscratch_.q8_1_buf) { cudaFree(qscratch_.q8_1_buf); qscratch_.q8_1_buf = nullptr; }
+                if (qscratch_.d8_buf) { cudaFree(qscratch_.d8_buf); qscratch_.d8_buf = nullptr; }
+                qscratch_.q8_1_max_blocks = 0;
             } else {
                 IMP_LOG_INFO("MMVQ scratch buffers: %.2f KiB (q8_1) + %.2f KiB (d8), max_blocks=%d (max_k=%d, moe_down=%d)",
                              q8_1_sz / 1024.0, d8_sz / 1024.0, max_blocks, max_k, max_moe_down_blocks);
@@ -598,13 +598,13 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         int partial_stride = 2 + hd;
         int max_batch = max_logit_tokens_;  // = max_batch_size
         size_t sz = static_cast<size_t>(max_batch) * nh * max_splits * partial_stride * sizeof(float);
-        cudaError_t err = cudaMalloc(&splitk_scratch_, sz);
+        cudaError_t err = cudaMalloc(&qscratch_.splitk, sz);
         if (err != cudaSuccess) {
             IMP_LOG_WARN("Failed to allocate split-K scratch (%zu bytes), split-K disabled", sz);
-            splitk_scratch_ = nullptr;
-            splitk_scratch_size_ = 0;
+            qscratch_.splitk = nullptr;
+            qscratch_.splitk_size = 0;
         } else {
-            splitk_scratch_size_ = sz;
+            qscratch_.splitk_size = sz;
             IMP_LOG_INFO("Split-K paged attention scratch: %.2f KiB", sz / 1024.0);
         }
     }
@@ -630,10 +630,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         if (attn_seq > 0) {
             attn_scores_buf_ = vram_alloc(vram_alloc_, s_sz, "attn_scores");
             if (!attn_scores_buf_) {
-                cudaGetLastError();
-                IMP_LOG_WARN("Failed to allocate cuBLAS attention S-matrix (%.1f MiB), "
+                cudaError_t e = cudaGetLastError();
+                IMP_LOG_WARN("Failed to allocate cuBLAS attention S-matrix (%.1f MiB): %s — "
                              "will fall back to WMMA attention for prefill",
-                             s_sz / (1024.0 * 1024.0));
+                             s_sz / (1024.0 * 1024.0), cudaGetErrorString(e));
                 attn_scores_buf_size_ = 0;
             } else {
                 attn_scores_buf_size_ = s_sz;
@@ -673,12 +673,12 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         {
             size_t expert_fp16_elems = static_cast<size_t>(eff) * d;
             size_t dequant_sz = expert_fp16_elems * sizeof(uint16_t);
-            moe_dequant_buf_ = vram_alloc(vram_alloc_, dequant_sz, "moe_dequant");
-            if (!moe_dequant_buf_) {
+            moe_.dequant_buf = vram_alloc(vram_alloc_, dequant_sz, "moe_dequant");
+            if (!moe_.dequant_buf) {
                 IMP_LOG_ERROR("Failed to allocate MoE dequant buffer (%zu bytes)", dequant_sz);
-                moe_dequant_buf_size_ = 0;
+                moe_.dequant_buf_size = 0;
             } else {
-                moe_dequant_buf_size_ = dequant_sz;
+                moe_.dequant_buf_size = dequant_sz;
                 IMP_LOG_INFO("MoE dequant buffer: %.2f MiB (1 expert slot)",
                              dequant_sz / (1024.0 * 1024.0));
             }
@@ -700,12 +700,12 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 check(L.expert_gate_packed, L.expert_gate_qtype);
             }
             if (max_expert_raw > 0) {
-                moe_raw_staging_buf_ = vram_alloc(vram_alloc_, max_expert_raw, "moe_staging");
-                if (!moe_raw_staging_buf_) {
+                moe_.raw_staging_buf = vram_alloc(vram_alloc_, max_expert_raw, "moe_staging");
+                if (!moe_.raw_staging_buf) {
                     IMP_LOG_ERROR("Failed to allocate MoE staging buffer (%zu bytes)", max_expert_raw);
-                    moe_raw_staging_size_ = 0;
+                    moe_.raw_staging_size = 0;
                 } else {
-                    moe_raw_staging_size_ = max_expert_raw;
+                    moe_.raw_staging_size = max_expert_raw;
                     IMP_LOG_INFO("MoE staging buffer: %.2f MiB (1 expert raw)",
                                  max_expert_raw / (1024.0 * 1024.0));
                 }
@@ -755,12 +755,12 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 if (ne_try <= 0) continue;
                 ne_try = std::min(ne_try, cfg.n_experts);
                 size_t sz = static_cast<size_t>(ne_try) * eff * d * sizeof(half);
-                moe_batch_dequant_buf_ = vram_alloc(vram_alloc_, sz, "moe_batch_dequant");
-                if (!moe_batch_dequant_buf_) {
+                moe_.batch_dequant_buf = vram_alloc(vram_alloc_, sz, "moe_batch_dequant");
+                if (!moe_.batch_dequant_buf) {
                     IMP_LOG_DEBUG("MoE dequant buf alloc failed for %d experts", ne_try);
                     continue;
                 }
-                moe_batch_dequant_buf_size_ = sz;
+                moe_.batch_dequant_buf_size = sz;
                 allocated = true;
                 IMP_LOG_INFO("MoE batch dequant buffer: %.2f MiB (%d experts)",
                              sz / (1024.0 * 1024.0), ne_try);
@@ -768,13 +768,13 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             }
             if (!allocated) {
                 IMP_LOG_INFO("MoE batch dequant buffer: skipped (VRAM insufficient)");
-                moe_batch_dequant_buf_ = nullptr;
-                moe_batch_dequant_buf_size_ = 0;
+                moe_.batch_dequant_buf = nullptr;
+                moe_.batch_dequant_buf_size = 0;
             }
         } else {
             IMP_LOG_INFO("MoE batch dequant buffer: skipped (experts on host)");
-            moe_batch_dequant_buf_ = nullptr;
-            moe_batch_dequant_buf_size_ = 0;
+            moe_.batch_dequant_buf = nullptr;
+            moe_.batch_dequant_buf_size = 0;
         }
 
         // Pre-allocated device pointer arrays for batched MoE GEMM.
@@ -782,38 +782,38 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         // Eliminates cudaMallocAsync/FreeAsync from the hot path.
         if (cfg.n_experts > 0) {
             size_t ptr_bytes = 3 * static_cast<size_t>(cfg.n_experts) * sizeof(void*);
-            cudaError_t err = cudaMalloc(&d_moe_work_ptrs_, ptr_bytes);
+            cudaError_t err = cudaMalloc(&moe_.d_work_ptrs, ptr_bytes);
             if (err == cudaSuccess) {
-                d_moe_work_ptrs_count_ = cfg.n_experts;
+                moe_.d_work_ptrs_count = cfg.n_experts;
             } else {
-                IMP_LOG_DEBUG("Cleared optional MoE work ptrs alloc error: %s", cudaGetErrorString(cudaGetLastError()));
-                d_moe_work_ptrs_ = nullptr;
-                d_moe_work_ptrs_count_ = 0;
+                IMP_LOG_DEBUG("Optional MoE work ptrs alloc failed: %s", cudaGetErrorString(err));
+                moe_.d_work_ptrs = nullptr;
+                moe_.d_work_ptrs_count = 0;
             }
 
             // Per-expert FP8 scale buffer (trivial: 128 experts × 4 bytes = 512 bytes).
             size_t scale_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(float);
-            err = cudaMalloc(&d_moe_fp8_scales_, scale_bytes);
+            err = cudaMalloc(&moe_.d_fp8_scales, scale_bytes);
             if (err != cudaSuccess) {
-                IMP_LOG_DEBUG("Cleared optional MoE FP8 scales alloc error: %s", cudaGetErrorString(cudaGetLastError()));
-                d_moe_fp8_scales_ = nullptr;
+                IMP_LOG_DEBUG("Optional MoE FP8 scales alloc failed: %s", cudaGetErrorString(err));
+                moe_.d_fp8_scales = nullptr;
             }
 
             // Device-side weight pointer array for device-grouped GEMM.
             size_t wptr_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(void*);
-            err = cudaMalloc(&d_moe_weight_ptrs_, wptr_bytes);
+            err = cudaMalloc(&moe_.d_weight_ptrs, wptr_bytes);
             if (err == cudaSuccess) {
-                d_moe_weight_ptrs_count_ = cfg.n_experts;
+                moe_.d_weight_ptrs_count = cfg.n_experts;
             } else {
-                IMP_LOG_DEBUG("Cleared optional MoE weight ptrs alloc error: %s", cudaGetErrorString(cudaGetLastError()));
-                d_moe_weight_ptrs_ = nullptr;
-                d_moe_weight_ptrs_count_ = 0;
+                IMP_LOG_DEBUG("Optional MoE weight ptrs alloc failed: %s", cudaGetErrorString(err));
+                moe_.d_weight_ptrs = nullptr;
+                moe_.d_weight_ptrs_count = 0;
             }
         }
     }
 
     // FP8 activation scratch buffers (for FP8 prefill weight cache)
-    if (use_fp8_cache_) {
+    if (wcache_.use_fp8) {
         int max_dim = cfg.d_model;
         if (cfg.d_ff > 0) max_dim = std::max(max_dim, cfg.d_ff);
         max_dim = std::max(max_dim, cfg.n_heads * (cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads)));
@@ -824,42 +824,42 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             max_dim = std::max(max_dim, ssm_in_dim);
             max_dim = std::max(max_dim, cfg.ssm_inner_size);
         }
-        fp8_act_buf_size_ = static_cast<size_t>(max_tokens_) * max_dim;
-        fp8_act_buf_ = vram_alloc(vram_alloc_, fp8_act_buf_size_, "fp8_activation");
-        if (!fp8_act_buf_) {
+        qscratch_.fp8_act_size = static_cast<size_t>(max_tokens_) * max_dim;
+        qscratch_.fp8_act = vram_alloc(vram_alloc_, qscratch_.fp8_act_size, "fp8_activation");
+        if (!qscratch_.fp8_act) {
             IMP_LOG_WARN("Failed to allocate FP8 activation buffer (%.1f MiB)",
-                         fp8_act_buf_size_ / (1024.0 * 1024.0));
-            fp8_act_buf_size_ = 0;
+                         qscratch_.fp8_act_size / (1024.0 * 1024.0));
+            qscratch_.fp8_act_size = 0;
         }
         {
-            cudaError_t serr = cudaMalloc(reinterpret_cast<void**>(&d_act_scale_), sizeof(float));
+            cudaError_t serr = cudaMalloc(reinterpret_cast<void**>(&qscratch_.d_act_scale), sizeof(float));
             if (serr != cudaSuccess) {
                 IMP_LOG_WARN("Failed to allocate FP8 act scale: %s", cudaGetErrorString(serr));
-                d_act_scale_ = nullptr;
+                qscratch_.d_act_scale = nullptr;
             }
         }
         // Pre-allocate reduction buffers for async FP8 activation quantization.
         // Eliminates per-call cudaMalloc + cudaStreamSynchronize from the hot path.
-        if (fp8_act_buf_ && d_act_scale_) {
-            int max_n = static_cast<int>(fp8_act_buf_size_);  // max elements
+        if (qscratch_.fp8_act && qscratch_.d_act_scale) {
+            int max_n = static_cast<int>(qscratch_.fp8_act_size);  // max elements
             int threads_needed = (max_n + 3) / 4;  // kElemsPerThread=4
-            fp8_max_grid_ = (threads_needed + 255) / 256;  // kBlockSize=256
-            cudaMalloc(&d_fp8_block_maxes_, static_cast<size_t>(fp8_max_grid_) * sizeof(float));
-            cudaMalloc(&d_fp8_absmax_, sizeof(float));
-            if (!d_fp8_block_maxes_ || !d_fp8_absmax_) {
+            qscratch_.fp8_max_grid = (threads_needed + 255) / 256;  // kBlockSize=256
+            cudaError_t e1 = cudaMalloc(&qscratch_.d_fp8_block_maxes, static_cast<size_t>(qscratch_.fp8_max_grid) * sizeof(float));
+            cudaError_t e2 = cudaMalloc(&qscratch_.d_fp8_absmax, sizeof(float));
+            if (e1 != cudaSuccess || e2 != cudaSuccess || !qscratch_.d_fp8_block_maxes || !qscratch_.d_fp8_absmax) {
                 IMP_LOG_WARN("Failed to allocate FP8 reduction buffers — will use sync path");
-                if (d_fp8_block_maxes_) { cudaFree(d_fp8_block_maxes_); d_fp8_block_maxes_ = nullptr; }
-                if (d_fp8_absmax_) { cudaFree(d_fp8_absmax_); d_fp8_absmax_ = nullptr; }
-                fp8_max_grid_ = 0;
+                if (qscratch_.d_fp8_block_maxes) { cudaFree(qscratch_.d_fp8_block_maxes); qscratch_.d_fp8_block_maxes = nullptr; }
+                if (qscratch_.d_fp8_absmax) { cudaFree(qscratch_.d_fp8_absmax); qscratch_.d_fp8_absmax = nullptr; }
+                qscratch_.fp8_max_grid = 0;
             }
             IMP_LOG_INFO("FP8 activation scratch: %.2f MiB (max_tokens=%d, max_dim=%d, async reduction grid=%d)",
-                         fp8_act_buf_size_ / (1024.0 * 1024.0), max_tokens_, max_dim, fp8_max_grid_);
+                         qscratch_.fp8_act_size / (1024.0 * 1024.0), max_tokens_, max_dim, qscratch_.fp8_max_grid);
         }
     }
 
     // CUTLASS sm_120 NVFP4 activation buffers: pre-allocate for max prefill dimensions.
     // Only needed when NVFP4 decode is active and sm_120 is available.
-    if (use_nvfp4_decode_ > 0 && cutlass_sm120_nvfp4_available()) {
+    if (wcache_.nvfp4_decode_mode > 0 && cutlass_sm120_nvfp4_available()) {
         int max_k = 0;
         int max_n = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
@@ -876,53 +876,53 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
         if (max_k > 0) {
             // Activation packed data: [max_tokens, max_K/2]
-            cutlass_act_data_size_ = static_cast<size_t>(max_tokens_) * max_k / 2;
+            qscratch_.cutlass_act_data_size = static_cast<size_t>(max_tokens_) * max_k / 2;
             // SfAtom scale factors for activation
-            cutlass_act_sf_size_ = cutlass_nvfp4_sf_size(max_tokens_, max_k);
+            qscratch_.cutlass_act_sf_size = cutlass_nvfp4_sf_size(max_tokens_, max_k);
             // CUTLASS GEMM workspace
-            cutlass_workspace_size_ = gemm_nvfp4_cutlass_sm120_workspace(max_tokens_, max_n, max_k);
+            qscratch_.cutlass_workspace_size = gemm_nvfp4_cutlass_sm120_workspace(max_tokens_, max_n, max_k);
 
-            cutlass_act_data_ = vram_alloc(vram_alloc_, cutlass_act_data_size_, "cutlass_act_data");
-            cutlass_act_sf_ = vram_alloc(vram_alloc_, cutlass_act_sf_size_, "cutlass_act_sf");
-            cutlass_workspace_ = (cutlass_workspace_size_ > 0)
-                               ? vram_alloc(vram_alloc_, cutlass_workspace_size_, "cutlass_workspace")
+            qscratch_.cutlass_act_data = vram_alloc(vram_alloc_, qscratch_.cutlass_act_data_size, "cutlass_act_data");
+            qscratch_.cutlass_act_sf = vram_alloc(vram_alloc_, qscratch_.cutlass_act_sf_size, "cutlass_act_sf");
+            qscratch_.cutlass_workspace = (qscratch_.cutlass_workspace_size > 0)
+                               ? vram_alloc(vram_alloc_, qscratch_.cutlass_workspace_size, "cutlass_workspace")
                                : nullptr;
-            if (!cutlass_act_data_ || !cutlass_act_sf_ ||
-                (cutlass_workspace_size_ > 0 && !cutlass_workspace_)) {
+            if (!qscratch_.cutlass_act_data || !qscratch_.cutlass_act_sf ||
+                (qscratch_.cutlass_workspace_size > 0 && !qscratch_.cutlass_workspace)) {
                 IMP_LOG_WARN("Failed to allocate CUTLASS NVFP4 activation buffers, native FP4 prefill disabled");
-                if (cutlass_act_data_) { vram_free(vram_alloc_, cutlass_act_data_); cutlass_act_data_ = nullptr; }
-                if (cutlass_act_sf_) { vram_free(vram_alloc_, cutlass_act_sf_); cutlass_act_sf_ = nullptr; }
-                if (cutlass_workspace_) { vram_free(vram_alloc_, cutlass_workspace_); cutlass_workspace_ = nullptr; }
-                cutlass_act_data_size_ = 0;
-                cutlass_act_sf_size_ = 0;
-                cutlass_workspace_size_ = 0;
+                if (qscratch_.cutlass_act_data) { vram_free(vram_alloc_, qscratch_.cutlass_act_data); qscratch_.cutlass_act_data = nullptr; }
+                if (qscratch_.cutlass_act_sf) { vram_free(vram_alloc_, qscratch_.cutlass_act_sf); qscratch_.cutlass_act_sf = nullptr; }
+                if (qscratch_.cutlass_workspace) { vram_free(vram_alloc_, qscratch_.cutlass_workspace); qscratch_.cutlass_workspace = nullptr; }
+                qscratch_.cutlass_act_data_size = 0;
+                qscratch_.cutlass_act_sf_size = 0;
+                qscratch_.cutlass_workspace_size = 0;
             } else {
                 IMP_LOG_INFO("CUTLASS NVFP4 activation scratch: %.2f MiB (data=%.2f, sf=%.2f, ws=%.2f)",
-                             (cutlass_act_data_size_ + cutlass_act_sf_size_ + cutlass_workspace_size_) / (1024.0 * 1024.0),
-                             cutlass_act_data_size_ / (1024.0 * 1024.0),
-                             cutlass_act_sf_size_ / (1024.0 * 1024.0),
-                             cutlass_workspace_size_ / (1024.0 * 1024.0));
+                             (qscratch_.cutlass_act_data_size + qscratch_.cutlass_act_sf_size + qscratch_.cutlass_workspace_size) / (1024.0 * 1024.0),
+                             qscratch_.cutlass_act_data_size / (1024.0 * 1024.0),
+                             qscratch_.cutlass_act_sf_size / (1024.0 * 1024.0),
+                             qscratch_.cutlass_workspace_size / (1024.0 * 1024.0));
 
                 // MXFP4 activation buffers: shares packed data with NVFP4, only needs
                 // separate UE8M0 scale factors (SFVecSize=32 vs NVFP4's 16).
                 if (cutlass_sm120_mxfp4_available()) {
-                    mxfp4_act_sf_size_ = cutlass_mxfp4_sf_size(max_tokens_, max_k);
-                    mxfp4_workspace_size_ = gemm_mxfp4_cutlass_sm120_workspace(max_tokens_, max_n, max_k);
-                    mxfp4_act_sf_ = vram_alloc(vram_alloc_, mxfp4_act_sf_size_, "mxfp4_act_sf");
-                    mxfp4_workspace_ = (mxfp4_workspace_size_ > 0)
-                                     ? vram_alloc(vram_alloc_, mxfp4_workspace_size_, "mxfp4_workspace")
+                    qscratch_.mxfp4_act_sf_size = cutlass_mxfp4_sf_size(max_tokens_, max_k);
+                    qscratch_.mxfp4_workspace_size = gemm_mxfp4_cutlass_sm120_workspace(max_tokens_, max_n, max_k);
+                    qscratch_.mxfp4_act_sf = vram_alloc(vram_alloc_, qscratch_.mxfp4_act_sf_size, "mxfp4_act_sf");
+                    qscratch_.mxfp4_workspace = (qscratch_.mxfp4_workspace_size > 0)
+                                     ? vram_alloc(vram_alloc_, qscratch_.mxfp4_workspace_size, "mxfp4_workspace")
                                      : nullptr;
-                    if (!mxfp4_act_sf_ ||
-                        (mxfp4_workspace_size_ > 0 && !mxfp4_workspace_)) {
+                    if (!qscratch_.mxfp4_act_sf ||
+                        (qscratch_.mxfp4_workspace_size > 0 && !qscratch_.mxfp4_workspace)) {
                         IMP_LOG_WARN("Failed to allocate MXFP4 activation buffers, MXFP4 prefill disabled");
-                        if (mxfp4_act_sf_) { vram_free(vram_alloc_, mxfp4_act_sf_); mxfp4_act_sf_ = nullptr; }
-                        if (mxfp4_workspace_) { vram_free(vram_alloc_, mxfp4_workspace_); mxfp4_workspace_ = nullptr; }
-                        mxfp4_act_sf_size_ = 0;
-                        mxfp4_workspace_size_ = 0;
+                        if (qscratch_.mxfp4_act_sf) { vram_free(vram_alloc_, qscratch_.mxfp4_act_sf); qscratch_.mxfp4_act_sf = nullptr; }
+                        if (qscratch_.mxfp4_workspace) { vram_free(vram_alloc_, qscratch_.mxfp4_workspace); qscratch_.mxfp4_workspace = nullptr; }
+                        qscratch_.mxfp4_act_sf_size = 0;
+                        qscratch_.mxfp4_workspace_size = 0;
                     } else {
                         IMP_LOG_INFO("CUTLASS MXFP4 activation scratch: sf=%.2f MiB, ws=%.2f MiB",
-                                     mxfp4_act_sf_size_ / (1024.0 * 1024.0),
-                                     mxfp4_workspace_size_ / (1024.0 * 1024.0));
+                                     qscratch_.mxfp4_act_sf_size / (1024.0 * 1024.0),
+                                     qscratch_.mxfp4_workspace_size / (1024.0 * 1024.0));
                     }
                 }
             }
@@ -931,11 +931,11 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
 }
 
 void GraphExecutor::release_moe_batch_buf() {
-    if (moe_batch_dequant_buf_) {
-        size_t freed = moe_batch_dequant_buf_size_;
-        vram_free(vram_alloc_, moe_batch_dequant_buf_);
-        moe_batch_dequant_buf_ = nullptr;
-        moe_batch_dequant_buf_size_ = 0;
+    if (moe_.batch_dequant_buf) {
+        size_t freed = moe_.batch_dequant_buf_size;
+        vram_free(vram_alloc_, moe_.batch_dequant_buf);
+        moe_.batch_dequant_buf = nullptr;
+        moe_.batch_dequant_buf_size = 0;
         IMP_LOG_INFO("Released MoE batch dequant buffer: %.2f MiB (experts on host)",
                      freed / (1024.0 * 1024.0));
     }
@@ -953,170 +953,13 @@ void GraphExecutor::free_buffers() {
     longrope_n_pairs_ = 0;
     longrope_orig_max_pos_ = 0;
 
-    // Free fused KV weight cache
-    for (auto& [idx, tensor] : fused_kv_cache_) {
-        if (tensor.data) vram_free(vram_alloc_, tensor.data);
-    }
-    fused_kv_cache_.clear();
+    // Free all weight caches (FP16, FP8, NVFP4, CUTLASS, fused KV/gate+up, migrated/overflow)
+    wcache_.free(vram_alloc_);
 
-    // Free fused gate+up weight cache
-    for (auto& [idx, tensor] : fused_gate_up_cache_) {
-        if (tensor.data) vram_free(vram_alloc_, tensor.data);
-    }
-    fused_gate_up_cache_.clear();
+    qscratch_.free(vram_alloc_);
 
-    // Free FP16 weight cache
-    for (auto& [ptr, tensor] : fp16_cache_) {
-        vram_free(vram_alloc_, tensor.data);
-    }
-    fp16_cache_.clear();
-    fp16_cache_bytes_ = 0;
-
-    // Free NVFP4 decode weight cache
-    for (auto& [ptr, result] : nvfp4_cache_) {
-        free_nvfp4_result(result);
-    }
-    nvfp4_cache_.clear();
-    nvfp4_cache_bytes_ = 0;
-
-    // Free NVFP4 MoE expert weight cache
-    for (auto& [ptr, result] : nvfp4_moe_cache_) {
-        free_nvfp4_moe_result(result);
-    }
-    nvfp4_moe_cache_.clear();
-    nvfp4_moe_cache_bytes_ = 0;
-
-    // Free CUTLASS sm_120 NVFP4 weight cache
-    for (auto& [ptr, cw] : cutlass_nvfp4_cache_) {
-        free_cutlass_nvfp4_weight(cw);
-    }
-    cutlass_nvfp4_cache_.clear();
-    cutlass_nvfp4_cache_bytes_ = 0;
-
-    // Free CUTLASS NVFP4 activation buffers
-    if (cutlass_act_data_) {
-        vram_free(vram_alloc_, cutlass_act_data_);
-        cutlass_act_data_ = nullptr;
-        cutlass_act_data_size_ = 0;
-    }
-    if (cutlass_act_sf_) {
-        vram_free(vram_alloc_, cutlass_act_sf_);
-        cutlass_act_sf_ = nullptr;
-        cutlass_act_sf_size_ = 0;
-    }
-    if (cutlass_workspace_) {
-        vram_free(vram_alloc_, cutlass_workspace_);
-        cutlass_workspace_ = nullptr;
-        cutlass_workspace_size_ = 0;
-    }
-
-    // Free CUTLASS MXFP4 weight cache
-    for (auto& [ptr, mw] : cutlass_mxfp4_cache_) {
-        free_cutlass_mxfp4_weight(mw);
-    }
-    cutlass_mxfp4_cache_.clear();
-    cutlass_mxfp4_cache_bytes_ = 0;
-
-    // Free MXFP4 activation buffers
-    if (mxfp4_act_sf_) {
-        vram_free(vram_alloc_, mxfp4_act_sf_);
-        mxfp4_act_sf_ = nullptr;
-        mxfp4_act_sf_size_ = 0;
-    }
-    if (mxfp4_workspace_) {
-        vram_free(vram_alloc_, mxfp4_workspace_);
-        mxfp4_workspace_ = nullptr;
-        mxfp4_workspace_size_ = 0;
-    }
-
-    // Free FP8 weight cache
-    for (auto& [ptr, entry] : fp8_cache_) {
-        if (entry.weight.data) {
-            // Check if data pointer is inside a bulk buffer
-            bool in_migrated_data = fp8_migrated_data_ &&
-                reinterpret_cast<uintptr_t>(entry.weight.data) >= reinterpret_cast<uintptr_t>(fp8_migrated_data_) &&
-                reinterpret_cast<uintptr_t>(entry.weight.data) < reinterpret_cast<uintptr_t>(fp8_migrated_data_) + fp8_migrated_data_size_;
-            bool in_overflow_data = fp8_overflow_data_ &&
-                reinterpret_cast<uintptr_t>(entry.weight.data) >= reinterpret_cast<uintptr_t>(fp8_overflow_data_) &&
-                reinterpret_cast<uintptr_t>(entry.weight.data) < reinterpret_cast<uintptr_t>(fp8_overflow_data_) + fp8_overflow_data_size_;
-            if (!in_migrated_data && !in_overflow_data) cudaFree(entry.weight.data);
-        }
-        // d_scale pointers from batched paths point into bulk buffers (freed below)
-        if (entry.d_scale) {
-            bool in_migrated = fp8_migrated_scales_ &&
-                               entry.d_scale >= fp8_migrated_scales_ &&
-                               entry.d_scale < fp8_migrated_scales_ + fp8_migrated_count_;
-            bool in_overflow = fp8_overflow_scales_ &&
-                               entry.d_scale >= fp8_overflow_scales_ &&
-                               entry.d_scale < fp8_overflow_scales_ + fp8_overflow_count_;
-            if (!in_migrated && !in_overflow) cudaFree(entry.d_scale);
-        }
-    }
-    fp8_cache_.clear();
-    fp8_cache_bytes_ = 0;
-    if (fp8_migrated_scales_) {
-        cudaFree(fp8_migrated_scales_);
-        fp8_migrated_scales_ = nullptr;
-        fp8_migrated_count_ = 0;
-    }
-    vfree(fp8_migrated_data_);
-    fp8_migrated_data_size_ = 0;
-    if (fp8_overflow_scales_) {
-        cudaFree(fp8_overflow_scales_);
-        fp8_overflow_scales_ = nullptr;
-        fp8_overflow_count_ = 0;
-    }
-    vfree(fp8_overflow_data_);
-    fp8_overflow_data_size_ = 0;
-    vfree(fp8_act_buf_);
-    fp8_act_buf_size_ = 0;
-    if (d_act_scale_) {
-        cudaFree(d_act_scale_);
-        d_act_scale_ = nullptr;
-    }
-    if (d_fp8_block_maxes_) {
-        cudaFree(d_fp8_block_maxes_);
-        d_fp8_block_maxes_ = nullptr;
-    }
-    if (d_fp8_absmax_) {
-        cudaFree(d_fp8_absmax_);
-        d_fp8_absmax_ = nullptr;
-    }
-    fp8_max_grid_ = 0;
-
-    moe_routing_buffers_.free();
-    if (moe_dequant_buf_) {
-        vram_free(vram_alloc_, moe_dequant_buf_);
-        moe_dequant_buf_ = nullptr;
-        moe_dequant_buf_size_ = 0;
-    }
-    if (moe_raw_staging_buf_) {
-        vram_free(vram_alloc_, moe_raw_staging_buf_);
-        moe_raw_staging_buf_ = nullptr;
-        moe_raw_staging_size_ = 0;
-    }
+    moe_.free(vram_alloc_);
     expert_cache_.destroy();
-    if (moe_batch_dequant_buf_) {
-        vram_free(vram_alloc_, moe_batch_dequant_buf_);
-        moe_batch_dequant_buf_ = nullptr;
-    }
-    moe_batch_dequant_buf_size_ = 0;
-    if (d_moe_work_ptrs_) {
-        cudaFree(d_moe_work_ptrs_);
-        d_moe_work_ptrs_ = nullptr;
-        d_moe_work_ptrs_count_ = 0;
-    }
-    if (d_moe_fp8_scales_) {
-        cudaFree(d_moe_fp8_scales_);
-        d_moe_fp8_scales_ = nullptr;
-    }
-    if (d_moe_weight_ptrs_) {
-        cudaFree(d_moe_weight_ptrs_);
-        d_moe_weight_ptrs_ = nullptr;
-        d_moe_weight_ptrs_count_ = 0;
-    }
-    vfree(dequant_scratch_);
-    dequant_scratch_size_ = 0;
     if (d_sample_result_) {
         cudaFree(d_sample_result_);
         d_sample_result_ = nullptr;
@@ -1129,20 +972,6 @@ void GraphExecutor::free_buffers() {
         cudaFreeHost(h_logits_pinned_);
         h_logits_pinned_ = nullptr;
         h_logits_pinned_size_ = 0;
-    }
-    if (q8_1_buf_) {
-        cudaFree(q8_1_buf_);
-        q8_1_buf_ = nullptr;
-    }
-    if (d8_buf_) {
-        cudaFree(d8_buf_);
-        d8_buf_ = nullptr;
-    }
-    q8_1_max_blocks_ = 0;
-    if (splitk_scratch_) {
-        cudaFree(splitk_scratch_);
-        splitk_scratch_ = nullptr;
-        splitk_scratch_size_ = 0;
     }
     vfree(attn_scores_buf_);
     attn_scores_buf_size_ = 0;
@@ -1191,7 +1020,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         }
     };
 
-    if (use_fp8_cache_) {
+    if (wcache_.use_fp8) {
         // Skip Phase 1 entirely: FP8 cache (Phase 2) is the primary path.
         // FP8 is 50% smaller than FP16 and uses FP8×FP8 cuBLASLt (2x throughput
         // on sm_120 tensor cores).  Fused KV/gate+up (saving 1 launch each) are
@@ -1208,7 +1037,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         // --- Phase 1: FP16 weight cache + fused KV + fused gate+up ---
         auto cache_weight = [&](const Tensor& w, GGMLQuantType qtype) {
             if (!w.data || !dequant_gpu_supported(qtype)) return;
-            if (fp16_cache_.count(w.data)) return;  // already cached
+            if (wcache_.fp16.count(w.data)) return;  // already cached
             if (budget_exhausted) return;
 
             int rows = static_cast<int>(w.shape[0]);
@@ -1235,7 +1064,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             dequant_gpu(w.data, fp16_buf, qtype, rows, cols, stream);
 
             Tensor fp16_tensor(fp16_buf, DType::FP16, w.ndim, w.shape, true);
-            fp16_cache_[w.data] = fp16_tensor;
+            wcache_.fp16[w.data] = fp16_tensor;
             total_cache_bytes += fp16_bytes;
             cached_count++;
         };
@@ -1262,11 +1091,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             // weights.  Decode benefits more from NVFP4 (~47% BW reduction) than
             // prefill loses from on-the-fly dequant.  NVFP4 is also ~3.5x smaller
             // per tensor, so skipping FFN FP16 frees massive VRAM for full NVFP4.
-            if (use_nvfp4_decode_ == 0 || !nvfp4_beneficial(L.w_gate_qtype))
+            if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_gate_qtype))
                 cache_weight(L.w_gate, L.w_gate_qtype);
-            if (use_nvfp4_decode_ == 0 || !nvfp4_beneficial(L.w_up_qtype))
+            if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_up_qtype))
                 cache_weight(L.w_up, L.w_up_qtype);
-            if (use_nvfp4_decode_ == 0 || !nvfp4_beneficial(L.w_down_qtype))
+            if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_down_qtype))
                 cache_weight(L.w_down, L.w_down_qtype);
         }
 
@@ -1276,9 +1105,9 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
             if (!L.wk.data || !L.wv.data) continue;
-            auto wk_it = fp16_cache_.find(L.wk.data);
-            auto wv_it = fp16_cache_.find(L.wv.data);
-            if (wk_it == fp16_cache_.end() || wv_it == fp16_cache_.end()) continue;
+            auto wk_it = wcache_.fp16.find(L.wk.data);
+            auto wv_it = wcache_.fp16.find(L.wv.data);
+            if (wk_it == wcache_.fp16.end() || wv_it == wcache_.fp16.end()) continue;
 
             int k_rows = static_cast<int>(L.wk.shape[0]);  // nkv * hd
             int K = static_cast<int>(L.wk.shape[1]);        // d_model
@@ -1300,7 +1129,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                              cudaMemcpyDeviceToDevice, stream);
 
             int64_t shape[2] = {2 * k_rows, static_cast<int64_t>(K)};
-            fused_kv_cache_[i] = Tensor(fused_buf, DType::FP16, 2, shape, true);
+            wcache_.fused_kv[i] = Tensor(fused_buf, DType::FP16, 2, shape, true);
             total_cache_bytes += 2 * one_sz;
             fused_kv_count++;
         }
@@ -1314,9 +1143,9 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             // Both must be the same shape (d_ff x d_model)
             if (L.w_gate.shape[0] != L.w_up.shape[0] ||
                 L.w_gate.shape[1] != L.w_up.shape[1]) continue;
-            auto wg_it = fp16_cache_.find(L.w_gate.data);
-            auto wu_it = fp16_cache_.find(L.w_up.data);
-            if (wg_it == fp16_cache_.end() || wu_it == fp16_cache_.end()) continue;
+            auto wg_it = wcache_.fp16.find(L.w_gate.data);
+            auto wu_it = wcache_.fp16.find(L.w_up.data);
+            if (wg_it == wcache_.fp16.end() || wu_it == wcache_.fp16.end()) continue;
 
             int g_rows = static_cast<int>(L.w_gate.shape[0]);  // d_ff
             int K = static_cast<int>(L.w_gate.shape[1]);        // d_model
@@ -1337,14 +1166,14 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                              cudaMemcpyDeviceToDevice, stream);
 
             int64_t shape[2] = {2 * g_rows, static_cast<int64_t>(K)};
-            fused_gate_up_cache_[i] = Tensor(fused_buf, DType::FP16, 2, shape, true);
+            wcache_.fused_gate_up[i] = Tensor(fused_buf, DType::FP16, 2, shape, true);
             total_cache_bytes += 2 * one_sz;
             fused_gu_count++;
         }
 
         if (cached_count > 0) {
             cudaStreamSynchronize(stream);
-            fp16_cache_bytes_ = total_cache_bytes;
+            wcache_.fp16_bytes = total_cache_bytes;
             IMP_LOG_INFO("FP16 weight cache: %d tensors, %.2f MiB (incl. %d fused KV, %d fused gate+up)",
                          cached_count, total_cache_bytes / (1024.0 * 1024.0),
                          fused_kv_count, fused_gu_count);
@@ -1355,12 +1184,12 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     remaining_budget = (remaining_budget > total_cache_bytes)
                        ? (remaining_budget - total_cache_bytes) : 0;
 
-    // --- Phase 2: FP8 cache for uncached weights (primary when use_fp8_cache_) ---
-    // When use_fp8_cache_ is true and Phase 1 was skipped, this is the primary path
+    // --- Phase 2: FP8 cache for uncached weights (primary when wcache_.use_fp8) ---
+    // When wcache_.use_fp8 is true and Phase 1 was skipped, this is the primary path
     // for ALL dense projection weights.  FP8 is 50% smaller than FP16 and uses
     // FP8×FP8 cuBLASLt with 2x tensor core throughput on sm_120.
-    // Uses dequant_scratch_ as FP16 staging buffer (stream ordering ensures safety).
-    if (use_fp8_cache_) {
+    // Uses qscratch_.dequant as FP16 staging buffer (stream ordering ensures safety).
+    if (wcache_.use_fp8) {
         size_t fp8_total = 0;
         int fp8_count = 0;
         bool fp8_exhausted = false;
@@ -1376,8 +1205,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
         auto collect_weight_fp8 = [&](const Tensor& w, GGMLQuantType qtype) {
             if (!w.data || !dequant_gpu_supported(qtype)) return;
-            if (fp16_cache_.count(w.data)) return;
-            if (fp8_cache_.count(w.data)) return;
+            if (wcache_.fp16.count(w.data)) return;
+            if (wcache_.fp8.count(w.data)) return;
             if (fp8_exhausted) return;
 
             size_t n_elems = static_cast<size_t>(w.shape[0]) * w.shape[1];
@@ -1416,7 +1245,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             collect_weight_fp8(L.w_down, L.w_down_qtype);
         }
 
-        if (!fp8_entries.empty() && dequant_scratch_) {
+        if (!fp8_entries.empty() && qscratch_.dequant) {
             // Pre-allocate reusable calibration temp buffers
             int max_grid = 0;
             size_t total_fp8_bytes = 0;
@@ -1437,7 +1266,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             // Bulk-allocate all FP8 data
             uint8_t* d_fp8_bulk = static_cast<uint8_t*>(
                 vram_alloc(vram_alloc_, total_fp8_bytes, "fp8_weight_cache"));
-            if (!d_fp8_bulk) cudaGetLastError();
+            if (!d_fp8_bulk) {
+                cudaError_t e = cudaGetLastError();
+                IMP_LOG_WARN("FP8 weight cache bulk alloc failed (%.1f MiB): %s",
+                             total_fp8_bytes / (1024.0 * 1024.0), cudaGetErrorString(e));
+            }
 
             int actual_count = 0;
             size_t fp8_offset = 0;
@@ -1446,20 +1279,20 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 int rows = static_cast<int>(e.weight.shape[0]);
                 int cols = static_cast<int>(e.weight.shape[1]);
 
-                // Dequant to dequant_scratch_ (reused each iteration, stream-ordered)
-                dequant_gpu(e.weight.data, dequant_scratch_, e.qtype, rows, cols, stream);
+                // Dequant to qscratch_.dequant (reused each iteration, stream-ordered)
+                dequant_gpu(e.weight.data, qscratch_.dequant, e.qtype, rows, cols, stream);
 
                 void* fp8_buf = d_fp8_bulk + fp8_offset;
                 fp8_offset += e.n_elems;
 
                 // Async calibrate + quantize (no host sync)
                 calibrate_and_quantize_fp8_async(
-                    dequant_scratch_, fp8_buf, static_cast<int>(e.n_elems),
+                    qscratch_.dequant, fp8_buf, static_cast<int>(e.n_elems),
                     d_block_maxes, max_grid,
                     d_absmax, d_scales_all + static_cast<ptrdiff_t>(i), stream);
 
                 Tensor fp8_t(fp8_buf, DType::FP8_E4M3, e.weight.ndim, e.weight.shape, true);
-                fp8_cache_[e.orig_ptr] = {fp8_t, 0.0f, d_scales_all + static_cast<ptrdiff_t>(i)};
+                wcache_.fp8[e.orig_ptr] = {fp8_t, 0.0f, d_scales_all + static_cast<ptrdiff_t>(i)};
                 actual_count++;
             }
 
@@ -1470,8 +1303,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 cudaMemcpy(h_scales.data(), d_scales_all, actual_count * sizeof(float),
                            cudaMemcpyDeviceToHost);
                 for (int i = 0; i < actual_count; i++) {
-                    auto it = fp8_cache_.find(fp8_entries[i].orig_ptr);
-                    if (it != fp8_cache_.end()) {
+                    auto it = wcache_.fp8.find(fp8_entries[i].orig_ptr);
+                    if (it != wcache_.fp8.end()) {
                         it->second.host_scale = h_scales[i];
                     }
                 }
@@ -1480,17 +1313,17 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             cudaFree(d_block_maxes);
             cudaFree(d_absmax);
             // Track bulk buffers for cleanup
-            fp8_overflow_scales_ = d_scales_all;
-            fp8_overflow_count_ = actual_count;
-            fp8_overflow_data_ = d_fp8_bulk;
-            fp8_overflow_data_size_ = total_fp8_bytes;
+            wcache_.fp8_overflow_scales = d_scales_all;
+            wcache_.fp8_overflow_count = actual_count;
+            wcache_.fp8_overflow_data = d_fp8_bulk;
+            wcache_.fp8_overflow_data_size = total_fp8_bytes;
             fp8_count = actual_count;
         }
 
         if (fp8_count > 0) {
-            fp8_cache_bytes_ = fp8_total;
+            wcache_.fp8_bytes = fp8_total;
             size_t fp16_equivalent = 0;
-            for (auto& [ptr, entry] : fp8_cache_) {
+            for (auto& [ptr, entry] : wcache_.fp8) {
                 fp16_equivalent += entry.weight.numel() * sizeof(half);
             }
             IMP_LOG_INFO("FP8 weight cache: %d tensors, %.2f MiB (%.2f MiB saved vs FP16)",
@@ -1502,8 +1335,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     }
 
     // Deduct Phase 2 allocation from shared budget
-    remaining_budget = (remaining_budget > fp8_cache_bytes_)
-                       ? (remaining_budget - fp8_cache_bytes_) : 0;
+    remaining_budget = (remaining_budget > wcache_.fp8_bytes)
+                       ? (remaining_budget - wcache_.fp8_bytes) : 0;
 
     // --- Phase 3: NVFP4 decode weight cache ---
     // Converts eligible weights (> 4.5 bits/elem) to NVFP4 format for faster
@@ -1511,8 +1344,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     // FP16 cache and free each entry immediately (NVFP4 ≈ 28% of FP16 size, so
     // each conversion is net VRAM-negative, bootstrapping space for more tensors).
     // Mode 1 ("additive") uses standard batch processing with FP16 cache intact.
-    if (use_nvfp4_decode_ > 0) {
-        const char* mode_str = (use_nvfp4_decode_ == 1) ? "additive" : "only";
+    if (wcache_.nvfp4_decode_mode > 0) {
+        const char* mode_str = (wcache_.nvfp4_decode_mode == 1) ? "additive" : "only";
 
         // Collect eligible weights first, then process.
         struct NvFP4Entry {
@@ -1526,13 +1359,13 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         auto collect_weight_nvfp4 = [&](const Tensor& w, GGMLQuantType qtype) {
             if (!w.data) return;
             if (!nvfp4_beneficial(qtype)) return;
-            if (nvfp4_cache_.count(w.data)) return;
+            if (wcache_.nvfp4.count(w.data)) return;
 
             int cols = static_cast<int>(w.shape[1]);
             if (cols % 16 != 0) return;
 
-            bool from_scratch = (fp16_cache_.find(w.data) == fp16_cache_.end());
-            if (from_scratch && (!dequant_gpu_supported(qtype) || !dequant_scratch_)) return;
+            bool from_scratch = (wcache_.fp16.find(w.data) == wcache_.fp16.end());
+            if (from_scratch && (!dequant_gpu_supported(qtype) || !qscratch_.dequant)) return;
             nvfp4_entries.push_back({w.data, w, qtype, from_scratch});
         };
 
@@ -1559,7 +1392,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             collect_weight_nvfp4(L.w_down, L.w_down_qtype);
         }
 
-        if (use_nvfp4_decode_ == 2 && !nvfp4_entries.empty()) {
+        if (wcache_.nvfp4_decode_mode == 2 && !nvfp4_entries.empty()) {
             // Mode 2 incremental: process FP16-cached entries first (each conversion
             // frees net VRAM since NVFP4 ≈ 28% of FP16), then from-scratch entries.
             // Sort: FP16-cached first (smallest first to bootstrap), then from-scratch.
@@ -1603,15 +1436,15 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
                 if (e.from_scratch) {
                     size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
-                    void* dq_buf = dequant_scratch_;
-                    if (need > dequant_scratch_size_) {
+                    void* dq_buf = qscratch_.dequant;
+                    if (need > qscratch_.dequant_size) {
                         if (cudaMalloc(&tmp_buf, need) != cudaSuccess || !tmp_buf) continue;
                         dq_buf = tmp_buf;
                     }
                     dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
                     fp16_ptr = reinterpret_cast<const half*>(dq_buf);
                 } else {
-                    auto it = fp16_cache_.find(e.orig_ptr);
+                    auto it = wcache_.fp16.find(e.orig_ptr);
                     fp16_ptr = reinterpret_cast<const half*>(it->second.data);
                 }
 
@@ -1628,7 +1461,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 float h_tscale;
                 cudaMemcpy(&h_tscale, d_tscale_buf, sizeof(float), cudaMemcpyDeviceToHost);
                 result.tensor_scale = h_tscale;
-                nvfp4_cache_[e.orig_ptr] = result;
+                wcache_.nvfp4[e.orig_ptr] = result;
                 actual_bytes += nvfp4_bytes;
                 actual_count++;
 
@@ -1636,12 +1469,12 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
                 // Free FP16 cache entry to reclaim VRAM for next weight
                 if (!e.from_scratch) {
-                    auto it = fp16_cache_.find(e.orig_ptr);
-                    if (it != fp16_cache_.end()) {
+                    auto it = wcache_.fp16.find(e.orig_ptr);
+                    if (it != wcache_.fp16.end()) {
                         size_t freed = it->second.nbytes();
                         vram_free(vram_alloc_, it->second.data);
-                        fp16_cache_.erase(it);
-                        fp16_cache_bytes_ -= freed;
+                        wcache_.fp16.erase(it);
+                        wcache_.fp16_bytes -= freed;
                         actual_from_fp16++;
                     }
                 } else {
@@ -1652,7 +1485,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             cudaFree(d_absmax_buf);
             cudaFree(d_tscale_buf);
 
-            nvfp4_cache_bytes_ = actual_bytes;
+            wcache_.nvfp4_bytes = actual_bytes;
             IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB "
                          "(%d from FP16, %d from scratch, mode: %s)",
                          actual_count, actual_bytes / (1024.0 * 1024.0),
@@ -1700,8 +1533,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
                 if (e.from_scratch) {
                     size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
-                    void* dq_buf = dequant_scratch_;
-                    if (need > dequant_scratch_size_) {
+                    void* dq_buf = qscratch_.dequant;
+                    if (need > qscratch_.dequant_size) {
                         void* tmp = nullptr;
                         if (cudaMalloc(&tmp, need) != cudaSuccess || !tmp) continue;
                         dq_buf = tmp;
@@ -1710,7 +1543,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
                     fp16_ptr = reinterpret_cast<const half*>(dq_buf);
                 } else {
-                    auto it = fp16_cache_.find(e.orig_ptr);
+                    auto it = wcache_.fp16.find(e.orig_ptr);
                     fp16_ptr = reinterpret_cast<const half*>(it->second.data);
                 }
 
@@ -1722,7 +1555,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                                               d_absmax_buf,
                                               d_tscales_all + i,
                                               stream);
-                nvfp4_cache_[e.orig_ptr] = result;
+                wcache_.nvfp4[e.orig_ptr] = result;
             }
 
             cudaStreamSynchronize(stream);
@@ -1733,8 +1566,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                        budgeted.size() * sizeof(float),
                        cudaMemcpyDeviceToHost);
             for (size_t i = 0; i < budgeted.size(); i++) {
-                auto it = nvfp4_cache_.find(budgeted[i].orig_ptr);
-                if (it != nvfp4_cache_.end()) {
+                auto it = wcache_.nvfp4.find(budgeted[i].orig_ptr);
+                if (it != wcache_.nvfp4.end()) {
                     it->second.tensor_scale = h_tscales[i];
                 }
             }
@@ -1742,7 +1575,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             cudaFree(d_absmax_buf);
             cudaFree(d_tscales_all);
 
-            nvfp4_cache_bytes_ = budget_used;
+            wcache_.nvfp4_bytes = budget_used;
             if (nvfp4_from_scratch > 0) {
                 IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB (%d from FP16 cache, %d via dequant scratch, mode: %s)",
                              nvfp4_count, budget_used / (1024.0 * 1024.0),
@@ -1756,18 +1589,18 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         // In "only" mode (2), release remaining FP16 cache.
         // Before freeing, migrate FP16 weights to FP8 cache so prefill retains
         // fast FP8 GEMM.  FP8 = half the size of FP16, net 50% VRAM savings.
-        if (use_nvfp4_decode_ == 2 && !fp16_cache_.empty()) {
+        if (wcache_.nvfp4_decode_mode == 2 && !wcache_.fp16.empty()) {
             int migrated = 0;
             size_t migrated_bytes = 0;
-            if (use_fp8_cache_) {
+            if (wcache_.use_fp8) {
                 struct MigrateEntry {
                     const void* orig_ptr;
                     Tensor fp16_tensor;
                     size_t n_elems;
                 };
                 std::vector<MigrateEntry> to_migrate;
-                for (auto& [orig_ptr, fp16_tensor] : fp16_cache_) {
-                    if (fp8_cache_.count(orig_ptr)) continue;
+                for (auto& [orig_ptr, fp16_tensor] : wcache_.fp16) {
+                    if (wcache_.fp8.count(orig_ptr)) continue;
                     size_t n = static_cast<size_t>(fp16_tensor.shape[0]) * fp16_tensor.shape[1];
                     to_migrate.push_back({orig_ptr, fp16_tensor, n});
                 }
@@ -1793,7 +1626,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     uint8_t* d_fp8_bulk = nullptr;
                     d_fp8_bulk = static_cast<uint8_t*>(
                         vram_alloc(vram_alloc_, total_fp8_bytes, "fp8_migration_cache"));
-                    if (!d_fp8_bulk) cudaGetLastError();
+                    if (!d_fp8_bulk) {
+                        cudaError_t e = cudaGetLastError();
+                        IMP_LOG_WARN("FP8 migration cache alloc failed (%.1f MiB): %s",
+                                     total_fp8_bytes / (1024.0 * 1024.0), cudaGetErrorString(e));
+                    }
 
                     size_t fp8_offset = 0;
                     for (size_t i = 0; i < to_migrate.size() && d_fp8_bulk; i++) {
@@ -1808,13 +1645,13 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
                         Tensor fp8_t(fp8_buf, DType::FP8_E4M3, e.fp16_tensor.ndim,
                                      e.fp16_tensor.shape, true);
-                        fp8_cache_[e.orig_ptr] = {fp8_t, 0.0f, d_scales_all + static_cast<ptrdiff_t>(i)};
+                        wcache_.fp8[e.orig_ptr] = {fp8_t, 0.0f, d_scales_all + static_cast<ptrdiff_t>(i)};
                         migrated++;
                         migrated_bytes += e.n_elems + sizeof(float);
                     }
 
-                    fp8_migrated_data_ = d_fp8_bulk;
-                    fp8_migrated_data_size_ = total_fp8_bytes;
+                    wcache_.fp8_migrated_data = d_fp8_bulk;
+                    wcache_.fp8_migrated_data_size = total_fp8_bytes;
 
                     if (migrated > 0) {
                         cudaStreamSynchronize(stream);
@@ -1823,8 +1660,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                                    cudaMemcpyDeviceToHost);
                         int idx = 0;
                         for (size_t i = 0; i < to_migrate.size() && idx < migrated; i++, idx++) {
-                            auto it = fp8_cache_.find(to_migrate[i].orig_ptr);
-                            if (it != fp8_cache_.end()) {
+                            auto it = wcache_.fp8.find(to_migrate[i].orig_ptr);
+                            if (it != wcache_.fp8.end()) {
                                 it->second.host_scale = h_scales[idx];
                             }
                         }
@@ -1832,31 +1669,31 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
                     cudaFree(d_block_maxes);
                     cudaFree(d_absmax);
-                    fp8_migrated_scales_ = d_scales_all;
-                    fp8_migrated_count_ = migrated;
+                    wcache_.fp8_migrated_scales = d_scales_all;
+                    wcache_.fp8_migrated_count = migrated;
                 }
             }
 
             // Free remaining FP16 cache
-            for (auto& [ptr, tensor] : fp16_cache_) {
+            for (auto& [ptr, tensor] : wcache_.fp16) {
                 vram_free(vram_alloc_, tensor.data);
             }
-            size_t freed = fp16_cache_bytes_;
-            fp16_cache_.clear();
-            fp16_cache_bytes_ = 0;
+            size_t freed = wcache_.fp16_bytes;
+            wcache_.fp16.clear();
+            wcache_.fp16_bytes = 0;
 
             // Free fused caches (prefill uses individual FP8 weights)
-            for (auto& [idx, tensor] : fused_kv_cache_) {
+            for (auto& [idx, tensor] : wcache_.fused_kv) {
                 if (tensor.data) vram_free(vram_alloc_, tensor.data);
             }
-            fused_kv_cache_.clear();
-            for (auto& [idx, tensor] : fused_gate_up_cache_) {
+            wcache_.fused_kv.clear();
+            for (auto& [idx, tensor] : wcache_.fused_gate_up) {
                 if (tensor.data) vram_free(vram_alloc_, tensor.data);
             }
-            fused_gate_up_cache_.clear();
+            wcache_.fused_gate_up.clear();
 
             remaining_budget += freed;
-            fp8_cache_bytes_ += migrated_bytes;
+            wcache_.fp8_bytes += migrated_bytes;
             IMP_LOG_INFO("NVFP4 only mode: freed FP16 cache (%.2f MiB), migrated %d weights to FP8 (%.2f MiB)",
                          freed / (1024.0 * 1024.0), migrated, migrated_bytes / (1024.0 * 1024.0));
         }
@@ -1874,7 +1711,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             size_t second_bytes = 0;
 
             for (auto& e : nvfp4_entries) {
-                if (nvfp4_cache_.count(e.orig_ptr)) continue;  // already cached
+                if (wcache_.nvfp4.count(e.orig_ptr)) continue;  // already cached
                 int rows = static_cast<int>(e.weight.shape[0]);
                 int cols = static_cast<int>(e.weight.shape[1]);
                 size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 +
@@ -1887,10 +1724,10 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
                 // Dequant from quantized weights via scratch buffer
                 size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
-                void* dq_buf = dequant_scratch_;
+                void* dq_buf = qscratch_.dequant;
                 void* tmp_buf = nullptr;
-                if (!dequant_gpu_supported(e.qtype) || !dequant_scratch_) continue;
-                if (need > dequant_scratch_size_) {
+                if (!dequant_gpu_supported(e.qtype) || !qscratch_.dequant) continue;
+                if (need > qscratch_.dequant_size) {
                     if (cudaMalloc(&tmp_buf, need) != cudaSuccess || !tmp_buf) continue;
                     dq_buf = tmp_buf;
                 }
@@ -1906,7 +1743,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 float h_tscale;
                 cudaMemcpy(&h_tscale, d_tscale_buf2, sizeof(float), cudaMemcpyDeviceToHost);
                 result.tensor_scale = h_tscale;
-                nvfp4_cache_[e.orig_ptr] = result;
+                wcache_.nvfp4[e.orig_ptr] = result;
                 second_bytes += nvfp4_bytes;
                 second_count++;
 
@@ -1917,7 +1754,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             cudaFree(d_tscale_buf2);
 
             if (second_count > 0) {
-                nvfp4_cache_bytes_ += second_bytes;
+                wcache_.nvfp4_bytes += second_bytes;
                 IMP_LOG_INFO("NVFP4 second pass: %d additional tensors, %.2f MiB",
                              second_count, second_bytes / (1024.0 * 1024.0));
             }
@@ -1927,23 +1764,23 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         // Must be AFTER FP16 free to avoid peak VRAM exceeding physical memory.
         // The CUTLASS cache is a full copy (repacked data + SfAtom scales), so it
         // approximately doubles the NVFP4 cache VRAM.  Budget-aware: stop if VRAM runs out.
-        if (!nvfp4_cache_.empty() && cutlass_sm120_nvfp4_available()) {
+        if (!wcache_.nvfp4.empty() && cutlass_sm120_nvfp4_available()) {
             // After incremental mode, remaining_budget is stale.  Use actual free VRAM.
             size_t ct_budget;
-            if (use_nvfp4_decode_ == 2) {
+            if (wcache_.nvfp4_decode_mode == 2) {
                 cudaStreamSynchronize(stream);
                 size_t free_mem = 0, total_mem = 0;
                 cudaMemGetInfo(&free_mem, &total_mem);
                 size_t kCtReserve = std::max(total_mem / 10, static_cast<size_t>(256ULL * 1024 * 1024));
                 ct_budget = (free_mem > kCtReserve) ? (free_mem - kCtReserve) : 0;
             } else {
-                ct_budget = (remaining_budget > nvfp4_cache_bytes_)
-                            ? (remaining_budget - nvfp4_cache_bytes_) : 0;
+                ct_budget = (remaining_budget > wcache_.nvfp4_bytes)
+                            ? (remaining_budget - wcache_.nvfp4_bytes) : 0;
             }
             int ct_count = 0;
             size_t ct_total = 0;
             bool ct_exhausted = false;
-            for (auto& [ptr, nvfp4] : nvfp4_cache_) {
+            for (auto& [ptr, nvfp4] : wcache_.nvfp4) {
                 if (ct_exhausted) break;
                 // Estimate CUTLASS allocation (only scale factors — data is borrowed)
                 size_t est = cutlass_nvfp4_sf_size(static_cast<int>(nvfp4.N),
@@ -1959,16 +1796,16 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 CutlassNvFP4Weight cw;
                 convert_nvfp4_to_cutlass(nvfp4, cw, stream);
                 if (cw.data) {
-                    cutlass_nvfp4_cache_[ptr] = cw;
+                    wcache_.cutlass_nvfp4[ptr] = cw;
                     ct_total += cw.sf_bytes;
                     ct_count++;
                 }
             }
             if (ct_count > 0) {
                 cudaStreamSynchronize(stream);
-                cutlass_nvfp4_cache_bytes_ = ct_total;
-                remaining_budget = (remaining_budget > ct_total + nvfp4_cache_bytes_)
-                                   ? (remaining_budget - ct_total - nvfp4_cache_bytes_) : 0;
+                wcache_.cutlass_nvfp4_bytes = ct_total;
+                remaining_budget = (remaining_budget > ct_total + wcache_.nvfp4_bytes)
+                                   ? (remaining_budget - ct_total - wcache_.nvfp4_bytes) : 0;
                 IMP_LOG_INFO("CUTLASS sm_120 NVFP4 weight cache: %d tensors, %.2f MiB",
                              ct_count, ct_total / (1024.0 * 1024.0));
             }
@@ -1977,23 +1814,23 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             // Same packed FP4 data (borrowed), only allocates new scale factor buffers.
             // Note: Hadamard rotation requires MR-GPTQ pre-rotated weights (SafeTensors).
             // For GGUF models, we use direct scale conversion (no rotation).
-            if (use_mxfp4_prefill_ && mxfp4_act_sf_ != nullptr && cutlass_sm120_mxfp4_available()) {
+            if (wcache_.use_mxfp4 && qscratch_.mxfp4_act_sf != nullptr && cutlass_sm120_mxfp4_available()) {
                 int mx_count = 0;
                 size_t mx_total = 0;
-                for (auto& [ptr, nvfp4] : nvfp4_cache_) {
+                for (auto& [ptr, nvfp4] : wcache_.nvfp4) {
                     // Only convert weights where K is multiple of 32 (MXFP4 requirement)
                     if (nvfp4.K % 32 != 0) continue;
                     CutlassMxFP4Weight mw;
                     convert_nvfp4_to_mxfp4_cutlass(nvfp4, mw, stream);
                     if (mw.data) {
-                        cutlass_mxfp4_cache_[ptr] = mw;
+                        wcache_.cutlass_mxfp4[ptr] = mw;
                         mx_total += mw.sf_bytes;
                         mx_count++;
                     }
                 }
                 if (mx_count > 0) {
                     cudaStreamSynchronize(stream);
-                    cutlass_mxfp4_cache_bytes_ = mx_total;
+                    wcache_.cutlass_mxfp4_bytes = mx_total;
                     IMP_LOG_INFO("CUTLASS sm_120 MXFP4 weight cache: %d tensors, %.2f MiB",
                                  mx_count, mx_total / (1024.0 * 1024.0));
                 }
@@ -2004,21 +1841,21 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         int nvfp4_moe_count = 0;
         size_t nvfp4_moe_total = 0;
         size_t moe_budget;
-        if (use_nvfp4_decode_ == 2) {
+        if (wcache_.nvfp4_decode_mode == 2) {
             size_t free_mem = 0, total_mem = 0;
             cudaMemGetInfo(&free_mem, &total_mem);
             constexpr size_t kMoeReserve = 128ULL * 1024 * 1024;
             moe_budget = (free_mem > kMoeReserve) ? (free_mem - kMoeReserve) : 0;
         } else {
-            moe_budget = (remaining_budget > nvfp4_cache_bytes_)
-                         ? (remaining_budget - nvfp4_cache_bytes_) : 0;
+            moe_budget = (remaining_budget > wcache_.nvfp4_bytes)
+                         ? (remaining_budget - wcache_.nvfp4_bytes) : 0;
         }
         bool moe_budget_exhausted = false;
 
         auto cache_moe_expert_nvfp4 = [&](const Tensor& packed, GGMLQuantType qtype) {
             if (!packed.data) return;
             if (!nvfp4_beneficial(qtype)) return;
-            if (nvfp4_moe_cache_.count(packed.data)) return;
+            if (wcache_.nvfp4_moe.count(packed.data)) return;
             if (moe_budget_exhausted) return;
             if (!packed.on_device) return;
             if (packed.ndim < 3) return;
@@ -2027,7 +1864,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             int rows = static_cast<int>(packed.shape[1]);
             int cols = static_cast<int>(packed.shape[2]);
             if (cols % 16 != 0) return;
-            if (!dequant_gpu_supported(qtype) || !dequant_scratch_) return;
+            if (!dequant_gpu_supported(qtype) || !qscratch_.dequant) return;
 
             size_t nvfp4_bytes = static_cast<size_t>(ne) * rows * cols / 2 +
                                  static_cast<size_t>(ne) * rows * cols / 16 +
@@ -2045,9 +1882,9 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             NvFP4MoEQuantResult result;
             quantize_packed_experts_to_nvfp4(
                 packed.data, qtype, ne, rows, cols,
-                dequant_scratch_, result, stream);
+                qscratch_.dequant, result, stream);
 
-            nvfp4_moe_cache_[packed.data] = result;
+            wcache_.nvfp4_moe[packed.data] = result;
             nvfp4_moe_total += nvfp4_bytes;
             nvfp4_moe_count++;
         };
@@ -2060,10 +1897,10 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         }
 
         if (nvfp4_moe_count > 0) {
-            nvfp4_moe_cache_bytes_ = nvfp4_moe_total;
+            wcache_.nvfp4_moe_bytes = nvfp4_moe_total;
             IMP_LOG_INFO("NVFP4 MoE cache: %d tensors, %.2f MiB",
                          nvfp4_moe_count, nvfp4_moe_total / (1024.0 * 1024.0));
-        } else if (nvfp4_cache_.empty()) {
+        } else if (wcache_.nvfp4.empty()) {
             IMP_LOG_INFO("NVFP4 decode: no eligible weights found (all ≤ 4.5 bits/elem)");
         }
     }
@@ -2142,7 +1979,7 @@ void GraphExecutor::configure_moe_workspace(int max_tokens) {
     // gate_logits: FP32
     {
         int64_t shape[2] = {static_cast<int64_t>(max_tokens), static_cast<int64_t>(ne)};
-        moe_gate_logits_ = Tensor(ptr, DType::FP32, 2, shape, true);
+        moe_.gate_logits = Tensor(ptr, DType::FP32, 2, shape, true);
         ptr += align256(static_cast<size_t>(max_tokens) * ne * sizeof(float));
     }
 
@@ -2152,12 +1989,12 @@ void GraphExecutor::configure_moe_workspace(int max_tokens) {
         ptr += aligned_sz;
     };
 
-    make_moe(moe_gathered_,      expanded, d,   align256(static_cast<size_t>(expanded) * d * es),   compute_dtype_);
-    make_moe(moe_expert_gate_,   expanded, eff, align256(static_cast<size_t>(expanded) * eff * es), compute_dtype_);
-    make_moe(moe_expert_up_,     expanded, eff, align256(static_cast<size_t>(expanded) * eff * es), compute_dtype_);
-    make_moe(moe_expert_swiglu_, expanded, eff, align256(static_cast<size_t>(expanded) * eff * es), compute_dtype_);
-    make_moe(moe_expert_down_,   expanded, d,   align256(static_cast<size_t>(expanded) * d * es),   compute_dtype_);
-    make_moe(moe_scatter_out_,   max_tokens, d, align256(static_cast<size_t>(max_tokens) * d * sizeof(float)), DType::FP32);
+    make_moe(moe_.gathered,      expanded, d,   align256(static_cast<size_t>(expanded) * d * es),   compute_dtype_);
+    make_moe(moe_.expert_gate,   expanded, eff, align256(static_cast<size_t>(expanded) * eff * es), compute_dtype_);
+    make_moe(moe_.expert_up,     expanded, eff, align256(static_cast<size_t>(expanded) * eff * es), compute_dtype_);
+    make_moe(moe_.expert_swiglu, expanded, eff, align256(static_cast<size_t>(expanded) * eff * es), compute_dtype_);
+    make_moe(moe_.expert_down,   expanded, d,   align256(static_cast<size_t>(expanded) * d * es),   compute_dtype_);
+    make_moe(moe_.scatter_out,   max_tokens, d, align256(static_cast<size_t>(max_tokens) * d * sizeof(float)), DType::FP32);
 }
 
 void GraphExecutor::configure_ssm_workspace(int max_tokens) {

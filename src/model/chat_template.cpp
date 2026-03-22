@@ -224,10 +224,11 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer) {
 
 std::vector<int32_t> ChatTemplate::apply(
     const Tokenizer& tok,
-    const std::vector<ChatMessage>& messages) const
+    const std::vector<ChatMessage>& messages,
+    bool suppress_thinking) const
 {
     switch (family_) {
-        case ChatTemplateFamily::CHATML:   return apply_chatml(tok, messages);
+        case ChatTemplateFamily::CHATML:   return apply_chatml(tok, messages, suppress_thinking);
         case ChatTemplateFamily::LLAMA3:   return apply_llama3(tok, messages);
         case ChatTemplateFamily::LLAMA2:   return apply_llama2(tok, messages);
         case ChatTemplateFamily::NEMOTRON:    return apply_nemotron(tok, messages);
@@ -243,7 +244,8 @@ std::vector<int32_t> ChatTemplate::apply(
 // ChatML: <|im_start|>role\ncontent<|im_end|>\n ... <|im_start|>assistant\n
 std::vector<int32_t> ChatTemplate::apply_chatml(
     const Tokenizer& tok,
-    const std::vector<ChatMessage>& msgs) const
+    const std::vector<ChatMessage>& msgs,
+    bool suppress_thinking) const
 {
     std::vector<int32_t> tokens;
 
@@ -252,22 +254,47 @@ std::vector<int32_t> ChatTemplate::apply_chatml(
         tokens.push_back(bos_id_);
     }
 
+    // When suppress_thinking is set, inject /no_think into the system message.
+    // Qwen3 models respect this directive to skip the thinking phase entirely.
+    // Build effective messages with /no_think appended to system message.
+    std::vector<ChatMessage> effective_msgs;
+    const std::vector<ChatMessage>* msgs_ptr = &msgs;
+    if (suppress_thinking) {
+        effective_msgs = msgs;
+        bool found_system = false;
+        for (auto& m : effective_msgs) {
+            if (m.role == "system") {
+                m.content += " /no_think";
+                found_system = true;
+                break;
+            }
+        }
+        if (!found_system) {
+            effective_msgs.insert(effective_msgs.begin(),
+                ChatMessage{"system", "/no_think"});
+        }
+        msgs_ptr = &effective_msgs;
+    }
+    const auto& messages = *msgs_ptr;
+
     // Inject default system message if the model has one and the user didn't provide one
     bool has_system = false;
-    for (const auto& m : msgs) {
+    for (const auto& m : messages) {
         if (m.role == "system") { has_system = true; break; }
     }
     if (!has_system && !default_system_message_.empty()) {
+        std::string sys_content = default_system_message_;
+        if (suppress_thinking) sys_content += " /no_think";
         tokens.push_back(im_start_id_);
         // Encode role+content as one piece to match reference tokenization
-        auto sys_ids = tok.encode("system\n" + default_system_message_);
+        auto sys_ids = tok.encode("system\n" + sys_content);
         tokens.insert(tokens.end(), sys_ids.begin(), sys_ids.end());
         tokens.push_back(im_end_id_);
         auto nl_ids = tok.encode("\n");
         tokens.insert(tokens.end(), nl_ids.begin(), nl_ids.end());
     }
 
-    for (const auto& msg : msgs) {
+    for (const auto& msg : messages) {
         tokens.push_back(im_start_id_);
         auto role_ids = tok.encode(msg.role + "\n");
         tokens.insert(tokens.end(), role_ids.begin(), role_ids.end());
@@ -541,13 +568,14 @@ std::vector<int32_t> ChatTemplate::apply_phi(
 std::vector<int32_t> ChatTemplate::apply_with_image(
     const Tokenizer& tok,
     const std::vector<ChatMessage>& messages,
-    int n_image_tokens) const
+    int n_image_tokens,
+    bool suppress_thinking) const
 {
     // Currently only Gemma family supports vision tokens.
     // For other families, fall back to text-only apply.
     if (family_ != ChatTemplateFamily::GEMMA ||
         boi_id_ < 0 || eoi_id_ < 0 || img_soft_token_id_ < 0) {
-        return apply(tok, messages);
+        return apply(tok, messages, suppress_thinking);
     }
 
     // Gemma vision format:

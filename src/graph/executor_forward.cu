@@ -310,9 +310,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     const bool has_post_attn_norm = (ly.post_attn_norm.data != nullptr);
     const bool using_fp32_accum = (fp32_accum_buf_ != nullptr && has_post_attn_norm);
     bool will_fuse_o_nvfp4 = (!has_post_attn_norm && n == 1 && h.dtype == DType::FP16 &&
-                               nvfp4_cache_.count(ly.wo.data));
+                               wcache_.nvfp4.count(ly.wo.data));
     bool will_fuse_o_residual = (!has_post_attn_norm && !will_fuse_o_nvfp4 &&
-                                  n == 1 && q8_1_buf_ != nullptr && d8_buf_ != nullptr &&
+                                  n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
                                   h.dtype == DType::FP16 &&
                                   (ly.wo_qtype == GGMLQuantType::Q6_K || ly.wo_qtype == GGMLQuantType::Q8_0 ||
                                    ly.wo_qtype == GGMLQuantType::Q4_0 || ly.wo_qtype == GGMLQuantType::Q4_K ||
@@ -320,11 +320,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                    ly.wo_qtype == GGMLQuantType::Q2_K || ly.wo_qtype == GGMLQuantType::Q3_K));
     bool will_fuse_o_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 &&
                                n > 1 &&
-                               (fp16_cache_.count(ly.wo.data) || fp8_cache_.count(ly.wo.data)));
+                               (wcache_.fp16.count(ly.wo.data) || wcache_.fp8.count(ly.wo.data)));
     // Dequant beta=1 path: when force_fp16_gemm bypasses FP8, dequant weights on-the-fly
     bool will_fuse_o_dequant_beta1 = (!has_post_attn_norm && !will_fuse_o_residual &&
                                       !will_fuse_o_nvfp4 && !will_fuse_o_beta1 &&
-                                      n > 1 && dequant_scratch_ != nullptr &&
+                                      n > 1 && qscratch_.dequant != nullptr &&
                                       dequant_gpu_supported(ly.wo_qtype));
     if (!will_fuse_o_residual && !will_fuse_o_beta1 && !will_fuse_o_dequant_beta1 &&
         !will_fuse_o_nvfp4 && !using_fp32_accum) {
@@ -340,14 +340,14 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     //    This skips the intermediate norm_out FP16 buffer entirely.
     //    Otherwise falls back to separate RMSNorm + 3 dp4a/cuBLAS dispatches.
     {
-        auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
+        auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
         // NVFP4 decode path: uses FP16 input (no Q8_1 quantization needed)
-        auto nvfp4_wq = nvfp4_cache_.find(ly.wq.data);
-        auto nvfp4_wk = nvfp4_cache_.find(ly.wk.data);
-        auto nvfp4_wv = nvfp4_cache_.find(ly.wv.data);
-        bool nvfp4_qkv = (!has_attn_output_gate && n == 1 && nvfp4_wq != nvfp4_cache_.end() &&
-                          nvfp4_wk != nvfp4_cache_.end() && nvfp4_wv != nvfp4_cache_.end());
-        bool fused_qkv = (!has_attn_output_gate && n == 1 && q8 != nullptr && d8_buf_ != nullptr &&
+        auto nvfp4_wq = wcache_.nvfp4.find(ly.wq.data);
+        auto nvfp4_wk = wcache_.nvfp4.find(ly.wk.data);
+        auto nvfp4_wv = wcache_.nvfp4.find(ly.wv.data);
+        bool nvfp4_qkv = (!has_attn_output_gate && n == 1 && nvfp4_wq != wcache_.nvfp4.end() &&
+                          nvfp4_wk != wcache_.nvfp4.end() && nvfp4_wv != wcache_.nvfp4.end());
+        bool fused_qkv = (!has_attn_output_gate && n == 1 && q8 != nullptr && qscratch_.d8_buf != nullptr &&
                           no.dtype == DType::FP16 &&
                           ly.wq_qtype == ly.wk_qtype && ly.wk_qtype == ly.wv_qtype &&
                           (ly.wq_qtype == GGMLQuantType::Q6_K ||
@@ -375,56 +375,56 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             int K = static_cast<int>(ly.wq.shape[1]);
             rmsnorm_quantize_q8_1(static_cast<const half*>(h.data),
                                     static_cast<const half*>(ly.attn_norm.data),
-                                    q8, d8_buf_, nullptr /*skip norm_out*/,
+                                    q8, qscratch_.d8_buf, nullptr /*skip norm_out*/,
                                     K, eps, stream, norm_w_off_);
             int q_rows = static_cast<int>(ly.wq.shape[0]);
             int k_rows = static_cast<int>(ly.wk.shape[0]);
             int v_rows = static_cast<int>(ly.wv.shape[0]);
             if (ly.wq_qtype == GGMLQuantType::Q6_K) {
                 gemv_qkv_fused_q6k_q8_1(ly.wq.data, ly.wk.data, ly.wv.data,
-                                          q8, d8_buf_,
+                                          q8, qscratch_.d8_buf,
                                           static_cast<half*>(qv.data),
                                           static_cast<half*>(kk.data),
                                           static_cast<half*>(vv.data),
                                           q_rows, k_rows, v_rows, K, stream);
             } else if (ly.wq_qtype == GGMLQuantType::Q4_0) {
                 gemv_qkv_fused_q4_0_q8_1(ly.wq.data, ly.wk.data, ly.wv.data,
-                                           q8, d8_buf_,
+                                           q8, qscratch_.d8_buf,
                                            static_cast<half*>(qv.data),
                                            static_cast<half*>(kk.data),
                                            static_cast<half*>(vv.data),
                                            q_rows, k_rows, v_rows, K, stream);
             } else if (ly.wq_qtype == GGMLQuantType::Q4_K) {
                 gemv_qkv_fused_q4_k_q8_1(ly.wq.data, ly.wk.data, ly.wv.data,
-                                           q8, d8_buf_,
+                                           q8, qscratch_.d8_buf,
                                            static_cast<half*>(qv.data),
                                            static_cast<half*>(kk.data),
                                            static_cast<half*>(vv.data),
                                            q_rows, k_rows, v_rows, K, stream);
             } else if (ly.wq_qtype == GGMLQuantType::Q5_K) {
                 gemv_qkv_fused_q5_k_q8_1(ly.wq.data, ly.wk.data, ly.wv.data,
-                                           q8, d8_buf_,
+                                           q8, qscratch_.d8_buf,
                                            static_cast<half*>(qv.data),
                                            static_cast<half*>(kk.data),
                                            static_cast<half*>(vv.data),
                                            q_rows, k_rows, v_rows, K, stream);
             } else if (ly.wq_qtype == GGMLQuantType::Q2_K) {
                 gemv_qkv_fused_q2_k_q8_1(ly.wq.data, ly.wk.data, ly.wv.data,
-                                           q8, d8_buf_,
+                                           q8, qscratch_.d8_buf,
                                            static_cast<half*>(qv.data),
                                            static_cast<half*>(kk.data),
                                            static_cast<half*>(vv.data),
                                            q_rows, k_rows, v_rows, K, stream);
             } else if (ly.wq_qtype == GGMLQuantType::Q3_K) {
                 gemv_qkv_fused_q3_k_q8_1(ly.wq.data, ly.wk.data, ly.wv.data,
-                                           q8, d8_buf_,
+                                           q8, qscratch_.d8_buf,
                                            static_cast<half*>(qv.data),
                                            static_cast<half*>(kk.data),
                                            static_cast<half*>(vv.data),
                                            q_rows, k_rows, v_rows, K, stream);
             } else {
                 gemv_qkv_fused_q8_0_q8_1(ly.wq.data, ly.wk.data, ly.wv.data,
-                                           q8, d8_buf_,
+                                           q8, qscratch_.d8_buf,
                                            static_cast<half*>(qv.data),
                                            static_cast<half*>(kk.data),
                                            static_cast<half*>(vv.data),
@@ -435,57 +435,57 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
 
             // FP8 prefill path: quantize norm_out→FP8 once, 3 separate FP8 GEMMs
-            auto fp8_wq = fp8_cache_.find(ly.wq.data);
-            auto fp8_wk = fp8_cache_.find(ly.wk.data);
-            auto fp8_wv = fp8_cache_.find(ly.wv.data);
+            auto fp8_wq = wcache_.fp8.find(ly.wq.data);
+            auto fp8_wk = wcache_.fp8.find(ly.wk.data);
+            auto fp8_wv = wcache_.fp8.find(ly.wv.data);
             if (n > 1 && !state.force_fp16_gemm &&
-                fp8_wq != fp8_cache_.end() &&
-                fp8_wk != fp8_cache_.end() && fp8_wv != fp8_cache_.end() &&
-                fp8_act_buf_ != nullptr && d_act_scale_ != nullptr) {
-                Tensor fp8_no(fp8_act_buf_, DType::FP8_E4M3, no.ndim, no.shape, true);
-                quantize_fp16_to_fp8_e4m3(no, fp8_no, d_act_scale_, stream,
-                                          d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_);
+                fp8_wq != wcache_.fp8.end() &&
+                fp8_wk != wcache_.fp8.end() && fp8_wv != wcache_.fp8.end() &&
+                qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
+                Tensor fp8_no(qscratch_.fp8_act, DType::FP8_E4M3, no.ndim, no.shape, true);
+                quantize_fp16_to_fp8_e4m3(no, fp8_no, qscratch_.d_act_scale, stream,
+                                          qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
                 gemm_cublaslt(fp8_no, fp8_wq->second.weight, q_target, 1.0f, 0.0f,
-                              d_act_scale_, fp8_wq->second.d_scale, stream);
+                              qscratch_.d_act_scale, fp8_wq->second.d_scale, stream);
                 gemm_cublaslt(fp8_no, fp8_wk->second.weight, kk, 1.0f, 0.0f,
-                              d_act_scale_, fp8_wk->second.d_scale, stream);
+                              qscratch_.d_act_scale, fp8_wk->second.d_scale, stream);
                 gemm_cublaslt(fp8_no, fp8_wv->second.weight, vv, 1.0f, 0.0f,
-                              d_act_scale_, fp8_wv->second.d_scale, stream);
+                              qscratch_.d_act_scale, fp8_wv->second.d_scale, stream);
             } else {
                 // Try fused K+V path: single strided batched GEMM for both projections
-                auto fused_kv_it = fused_kv_cache_.find(layer);
-                if (n > 1 && fused_kv_it != fused_kv_cache_.end()) {
+                auto fused_kv_it = wcache_.fused_kv.find(layer);
+                if (n > 1 && fused_kv_it != wcache_.fused_kv.end()) {
                     // Q: still separate (different output dim with GQA)
                     gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, q_target,
-                                  dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                                  d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                                  (nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &nvfp4_cache_,
-                                  (cutlass_nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_nvfp4_cache_,
-                                  cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                                  (cutlass_mxfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_mxfp4_cache_,
-                                  mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+                                  qscratch_.dequant, stream, q8, qscratch_.d8_buf, &wcache_.fp16,
+                                  (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
+                                  qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                                  (wcache_.nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.nvfp4,
+                                  (wcache_.cutlass_nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_nvfp4,
+                                  qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
+                                  (wcache_.cutlass_mxfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_mxfp4,
+                                  qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
                     // K+V: one batched cuBLAS call
                     gemm_kv_batched(no, fused_kv_it->second, kk, vv, stream);
                 } else {
-                    const auto* nv4p = (nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &nvfp4_cache_;
-                    const auto* ct4p = (cutlass_nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_nvfp4_cache_;
-                    const auto* mx4p = (cutlass_mxfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_mxfp4_cache_;
-                    gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, q_target, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                                  d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                                  nv4p, ct4p, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                                  mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
-                    gemm_dispatch(no, ly.wk, ly.wk_scales, ly.wk_qtype, kk, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                                  d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                                  nv4p, ct4p, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                                  mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
-                    gemm_dispatch(no, ly.wv, ly.wv_scales, ly.wv_qtype, vv, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                                  d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                                  nv4p, ct4p, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                                  mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+                    const auto* nv4p = (wcache_.nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.nvfp4;
+                    const auto* ct4p = (wcache_.cutlass_nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_nvfp4;
+                    const auto* mx4p = (wcache_.cutlass_mxfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_mxfp4;
+                    gemm_dispatch(no, ly.wq, ly.wq_scales, ly.wq_qtype, q_target, qscratch_.dequant, stream, q8, qscratch_.d8_buf, &wcache_.fp16,
+                                  (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
+                                  qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                                  nv4p, ct4p, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
+                                  mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
+                    gemm_dispatch(no, ly.wk, ly.wk_scales, ly.wk_qtype, kk, qscratch_.dequant, stream, q8, qscratch_.d8_buf, &wcache_.fp16,
+                                  (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
+                                  qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                                  nv4p, ct4p, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
+                                  mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
+                    gemm_dispatch(no, ly.wv, ly.wv_scales, ly.wv_qtype, vv, qscratch_.dequant, stream, q8, qscratch_.d8_buf, &wcache_.fp16,
+                                  (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
+                                  qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                                  nv4p, ct4p, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
+                                  mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
                 }
             }
         }
@@ -720,7 +720,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
 
         if (cache_dtype == DType::INT4) {
             // INT4 paged attention with per-head scales and INT4 unpack (Split-K enabled)
-            paged_attention_set_splitk_scratch(splitk_scratch_, splitk_scratch_size_);
+            paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             paged_attention_decode_int4(q4, k_c, v_c, o4,
                                         static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
                                         static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
@@ -731,7 +731,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                         state.max_blocks_per_seq);
         } else if (cache_dtype == DType::INT8) {
             // INT8 dp4a paged attention with per-head scales (Split-K enabled)
-            paged_attention_set_splitk_scratch(splitk_scratch_, splitk_scratch_size_);
+            paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             paged_attention_decode_int8(q4, k_c, v_c, o4,
                                         static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
                                         static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
@@ -744,7 +744,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             // FP8 paged attention with on-the-fly dequant (Split-K enabled)
             float kv_scale = (!kv_scales_.empty() && kv_layer < static_cast<int>(kv_scales_.size()))
                              ? kv_scales_[kv_layer] : 1.0f;
-            paged_attention_set_splitk_scratch(splitk_scratch_, splitk_scratch_size_);
+            paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             paged_attention_decode_fp8(q4, k_c, v_c, o4,
                                         state.block_tables, state.context_lens,
                                         kv_bs, scale, kv_scale,
@@ -752,7 +752,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                         cfg.attn_logit_softcap, stream,
                                         state.max_blocks_per_seq);
         } else {
-            paged_attention_set_splitk_scratch(splitk_scratch_, splitk_scratch_size_);
+            paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             paged_attention_decode(q4, k_c, v_c, o4,
                                     state.block_tables, state.context_lens,
                                     kv_bs, scale, state.max_context_len,
@@ -780,7 +780,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     //    start of run_attention and this point.
     if (will_fuse_o_nvfp4) {
         // NVFP4 Wo + residual: attn_out (FP16) @ wo_nvfp4^T + residual → hidden
-        auto& wo_nvfp4 = nvfp4_cache_.at(ly.wo.data);
+        auto& wo_nvfp4 = wcache_.nvfp4.at(ly.wo.data);
         int M_o = static_cast<int>(ly.wo.shape[0]);
         int K_o = static_cast<int>(ly.wo.shape[1]);
         gemv_nvfp4_residual(wo_nvfp4,
@@ -796,70 +796,70 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // The K-parallel GEMV achieves 48 warps/SM vs inline_quant's ~8 warps/SM.
         const half* attn_fp16 = static_cast<const half*>(ao.data);
         const half* residual_ptr = static_cast<const half*>(h.data);
-        quantize_fp16_to_q8_1(attn_fp16, static_cast<block_q8_1*>(q8_1_buf_),
-                               d8_buf_, K_o, stream);
+        quantize_fp16_to_q8_1(attn_fp16, static_cast<block_q8_1*>(qscratch_.q8_1_buf),
+                               qscratch_.d8_buf, K_o, stream);
         if (ly.wo_qtype == GGMLQuantType::Q6_K) {
-            gemv_q6k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
-                                    d8_buf_, static_cast<half*>(h.data), residual_ptr,
+            gemv_q6k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(qscratch_.q8_1_buf),
+                                    qscratch_.d8_buf, static_cast<half*>(h.data), residual_ptr,
                                     M_o, K_o, stream);
         } else if (ly.wo_qtype == GGMLQuantType::Q4_0) {
-            gemv_q4_0_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
-                                      d8_buf_, static_cast<half*>(h.data), residual_ptr,
+            gemv_q4_0_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(qscratch_.q8_1_buf),
+                                      qscratch_.d8_buf, static_cast<half*>(h.data), residual_ptr,
                                       M_o, K_o, stream);
         } else if (ly.wo_qtype == GGMLQuantType::Q4_K) {
-            gemv_q4_k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
-                                      d8_buf_, static_cast<half*>(h.data), residual_ptr,
+            gemv_q4_k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(qscratch_.q8_1_buf),
+                                      qscratch_.d8_buf, static_cast<half*>(h.data), residual_ptr,
                                       M_o, K_o, stream);
         } else if (ly.wo_qtype == GGMLQuantType::Q5_K) {
-            gemv_q5_k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
-                                      d8_buf_, static_cast<half*>(h.data), residual_ptr,
+            gemv_q5_k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(qscratch_.q8_1_buf),
+                                      qscratch_.d8_buf, static_cast<half*>(h.data), residual_ptr,
                                       M_o, K_o, stream);
         } else if (ly.wo_qtype == GGMLQuantType::Q2_K) {
-            gemv_q2_k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
-                                      d8_buf_, static_cast<half*>(h.data), residual_ptr,
+            gemv_q2_k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(qscratch_.q8_1_buf),
+                                      qscratch_.d8_buf, static_cast<half*>(h.data), residual_ptr,
                                       M_o, K_o, stream);
         } else if (ly.wo_qtype == GGMLQuantType::Q3_K) {
-            gemv_q3_k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
-                                      d8_buf_, static_cast<half*>(h.data), residual_ptr,
+            gemv_q3_k_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(qscratch_.q8_1_buf),
+                                      qscratch_.d8_buf, static_cast<half*>(h.data), residual_ptr,
                                       M_o, K_o, stream);
         } else {
-            gemv_q8_0_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(q8_1_buf_),
-                                      d8_buf_, static_cast<half*>(h.data), residual_ptr,
+            gemv_q8_0_q8_1_residual(ly.wo.data, static_cast<block_q8_1*>(qscratch_.q8_1_buf),
+                                      qscratch_.d8_buf, static_cast<half*>(h.data), residual_ptr,
                                       M_o, K_o, stream);
         }
     } else if (will_fuse_o_beta1 && !cur_force_fp16_ &&
-               fp8_cache_.count(ly.wo.data) &&
-               fp8_act_buf_ != nullptr && d_act_scale_ != nullptr) {
+               wcache_.fp8.count(ly.wo.data) &&
+               qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
         // FP8 beta=1: hidden = fp8(attn_out) @ fp8(wo)^T + hidden
-        auto& e = fp8_cache_.at(ly.wo.data);
-        Tensor fp8_ao(fp8_act_buf_, DType::FP8_E4M3, ao.ndim, ao.shape, true);
-        quantize_fp16_to_fp8_e4m3(ao, fp8_ao, d_act_scale_, stream,
-                                  d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_);
-        gemm_cublaslt(fp8_ao, e.weight, h, 1.0f, 1.0f, d_act_scale_, e.d_scale, stream);
-    } else if (will_fuse_o_beta1 && fp16_cache_.count(ly.wo.data)) {
+        auto& e = wcache_.fp8.at(ly.wo.data);
+        Tensor fp8_ao(qscratch_.fp8_act, DType::FP8_E4M3, ao.ndim, ao.shape, true);
+        quantize_fp16_to_fp8_e4m3(ao, fp8_ao, qscratch_.d_act_scale, stream,
+                                  qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
+        gemm_cublaslt(fp8_ao, e.weight, h, 1.0f, 1.0f, qscratch_.d_act_scale, e.d_scale, stream);
+    } else if (will_fuse_o_beta1 && wcache_.fp16.count(ly.wo.data)) {
         // Fused: hidden = attn_out @ wo^T + hidden (cuBLAS beta=1).
         // Safe: hidden is only READ (never written) between attn_norm and here.
-        const Tensor& wo_fp16 = fp16_cache_.at(ly.wo.data);
+        const Tensor& wo_fp16 = wcache_.fp16.at(ly.wo.data);
         gemm(ao, wo_fp16, h, 1.0f, 1.0f, stream);
     } else if ((will_fuse_o_beta1 || will_fuse_o_dequant_beta1) &&
-               dequant_scratch_ != nullptr && dequant_gpu_supported(ly.wo_qtype)) {
+               qscratch_.dequant != nullptr && dequant_gpu_supported(ly.wo_qtype)) {
         // Dequant beta=1: dequant weights on-the-fly, then FP16 GEMM + residual
         int rows = static_cast<int>(ly.wo.shape[0]);
         int cols = static_cast<int>(ly.wo.shape[1]);
-        dequant_gpu(ly.wo.data, dequant_scratch_, ly.wo_qtype, rows, cols, stream);
-        Tensor w_fp16(dequant_scratch_, DType::FP16, ly.wo.ndim, ly.wo.shape, true);
+        dequant_gpu(ly.wo.data, qscratch_.dequant, ly.wo_qtype, rows, cols, stream);
+        Tensor w_fp16(qscratch_.dequant, DType::FP16, ly.wo.ndim, ly.wo.shape, true);
         gemm(ao, w_fp16, h, 1.0f, 1.0f, stream);
     } else {
         // Fallback: separate O-projection + optional post-norm + residual add
-        gemm_dispatch(ao, ly.wo, ly.wo_scales, ly.wo_qtype, po, dequant_scratch_, stream,
-                      static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                      (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                      d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                      (nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &nvfp4_cache_,
-                      (cutlass_nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_nvfp4_cache_,
-                      cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                      (cutlass_mxfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_mxfp4_cache_,
-                      mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+        gemm_dispatch(ao, ly.wo, ly.wo_scales, ly.wo_qtype, po, qscratch_.dequant, stream,
+                      static_cast<block_q8_1*>(qscratch_.q8_1_buf), qscratch_.d8_buf, &wcache_.fp16,
+                      (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
+                      qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                      (wcache_.nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.nvfp4,
+                      (wcache_.cutlass_nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_nvfp4,
+                      qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
+                      (wcache_.cutlass_mxfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_mxfp4,
+                      qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
         if (has_post_attn_norm) {
             // post_attn_norm is the pre-FFN norm, NOT an attention output norm.
             // Just add the O-projection to the residual. The norm is applied
@@ -907,9 +907,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     const bool has_post_ffn_norm = (ly.post_ffn_norm.data != nullptr);
     const bool using_fp32_accum = (fp32_accum_buf_ != nullptr && has_post_ffn_norm);
     bool will_fuse_down_nvfp4 = (!has_post_ffn_norm && n == 1 && h.dtype == DType::FP16 &&
-                                  nvfp4_cache_.count(ly.w_down.data));
+                                  wcache_.nvfp4.count(ly.w_down.data));
     bool will_fuse_down_residual = (!has_post_ffn_norm && !will_fuse_down_nvfp4 &&
-                                     n == 1 && q8_1_buf_ != nullptr && d8_buf_ != nullptr &&
+                                     n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
                                      h.dtype == DType::FP16 &&
                                      (ly.w_down_qtype == GGMLQuantType::Q6_K ||
                                       ly.w_down_qtype == GGMLQuantType::Q8_0 ||
@@ -920,11 +920,11 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                       ly.w_down_qtype == GGMLQuantType::Q3_K));
     bool will_fuse_down_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual &&
                                   !will_fuse_down_nvfp4 && n > 1 &&
-                                  (fp16_cache_.count(ly.w_down.data) || fp8_cache_.count(ly.w_down.data)));
+                                  (wcache_.fp16.count(ly.w_down.data) || wcache_.fp8.count(ly.w_down.data)));
     bool will_fuse_down_dequant_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual &&
                                           !will_fuse_down_nvfp4 &&
                                           !will_fuse_down_beta1 && n > 1 &&
-                                          dequant_scratch_ != nullptr &&
+                                          qscratch_.dequant != nullptr &&
                                           dequant_gpu_supported(ly.w_down_qtype));
     if (!will_fuse_down_residual && !will_fuse_down_beta1 &&
         !will_fuse_down_dequant_beta1 && !will_fuse_down_nvfp4 && !using_fp32_accum) {
@@ -935,14 +935,14 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     // 3. Gate and Up projections
     //    For decode (n=1): fuse RMSNorm→Q8_1→GEMV to avoid redundant quantization.
     {
-        auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
+        auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
         int d = static_cast<int>(h.shape[1]);
         // NVFP4 gate+up decode path
-        auto nvfp4_wg = nvfp4_cache_.find(ly.w_gate.data);
-        auto nvfp4_wu = nvfp4_cache_.find(ly.w_up.data);
-        bool nvfp4_ffn = (n == 1 && nvfp4_wg != nvfp4_cache_.end() &&
-                          nvfp4_wu != nvfp4_cache_.end());
-        bool fused_ffn_norm = (n == 1 && q8 != nullptr && d8_buf_ != nullptr &&
+        auto nvfp4_wg = wcache_.nvfp4.find(ly.w_gate.data);
+        auto nvfp4_wu = wcache_.nvfp4.find(ly.w_up.data);
+        bool nvfp4_ffn = (n == 1 && nvfp4_wg != wcache_.nvfp4.end() &&
+                          nvfp4_wu != wcache_.nvfp4.end());
+        bool fused_ffn_norm = (n == 1 && q8 != nullptr && qscratch_.d8_buf != nullptr &&
                                h.dtype == DType::FP16 &&
                                (ly.w_gate_qtype == GGMLQuantType::Q6_K ||
                                 ly.w_gate_qtype == GGMLQuantType::Q8_0 ||
@@ -964,11 +964,11 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             // Fused RMSNorm + Q8_1: quantize once, use for both gate and up
             rmsnorm_quantize_q8_1(static_cast<const half*>(h.data),
                                     static_cast<const half*>(ffn_norm_w.data),
-                                    q8, d8_buf_, static_cast<half*>(no.data),
+                                    q8, qscratch_.d8_buf, static_cast<half*>(no.data),
                                     d, eps, stream, norm_w_off_);
             // Fused gate+up GEMV: single kernel launch for both projections
             int ffn_rows = static_cast<int>(ly.w_gate.shape[0]);
-            gemv_gate_up_fused(ly.w_gate.data, ly.w_up.data, q8, d8_buf_,
+            gemv_gate_up_fused(ly.w_gate.data, ly.w_up.data, q8, qscratch_.d8_buf,
                                 static_cast<half*>(go.data),
                                 static_cast<half*>(uo.data),
                                 ffn_rows, d, ly.w_gate_qtype, stream);
@@ -976,37 +976,37 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             rmsnorm(h, ffn_norm_w, no, eps, stream, norm_w_off_);
 
             // FP8 prefill path: quantize norm_out→FP8 once, 2 separate FP8 GEMMs
-            auto fp8_wg = fp8_cache_.find(ly.w_gate.data);
-            auto fp8_wu = fp8_cache_.find(ly.w_up.data);
+            auto fp8_wg = wcache_.fp8.find(ly.w_gate.data);
+            auto fp8_wu = wcache_.fp8.find(ly.w_up.data);
             if (n > 1 && !cur_force_fp16_ &&
-                fp8_wg != fp8_cache_.end() && fp8_wu != fp8_cache_.end() &&
-                fp8_act_buf_ != nullptr && d_act_scale_ != nullptr) {
-                Tensor fp8_no(fp8_act_buf_, DType::FP8_E4M3, no.ndim, no.shape, true);
-                quantize_fp16_to_fp8_e4m3(no, fp8_no, d_act_scale_, stream,
-                                          d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_);
+                fp8_wg != wcache_.fp8.end() && fp8_wu != wcache_.fp8.end() &&
+                qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
+                Tensor fp8_no(qscratch_.fp8_act, DType::FP8_E4M3, no.ndim, no.shape, true);
+                quantize_fp16_to_fp8_e4m3(no, fp8_no, qscratch_.d_act_scale, stream,
+                                          qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
                 gemm_cublaslt(fp8_no, fp8_wg->second.weight, go, 1.0f, 0.0f,
-                              d_act_scale_, fp8_wg->second.d_scale, stream);
+                              qscratch_.d_act_scale, fp8_wg->second.d_scale, stream);
                 gemm_cublaslt(fp8_no, fp8_wu->second.weight, uo, 1.0f, 0.0f,
-                              d_act_scale_, fp8_wu->second.d_scale, stream);
+                              qscratch_.d_act_scale, fp8_wu->second.d_scale, stream);
             } else {
-                auto fused_gu_it = fused_gate_up_cache_.find(layer);
-                if (n > 1 && fused_gu_it != fused_gate_up_cache_.end()) {
+                auto fused_gu_it = wcache_.fused_gate_up.find(layer);
+                if (n > 1 && fused_gu_it != wcache_.fused_gate_up.end()) {
                     // Batched gate+up: single cuBLAS call for both projections
                     gemm_pair_batched(no, fused_gu_it->second, go, uo, stream);
                 } else {
-                    const auto* nv4p = (nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &nvfp4_cache_;
-                    const auto* ct4p = (cutlass_nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_nvfp4_cache_;
-                    const auto* mx4p = (cutlass_mxfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_mxfp4_cache_;
-                    gemm_dispatch(no, ly.w_gate, ly.w_gate_scales, ly.w_gate_qtype, go, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                                  d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                                  nv4p, ct4p, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                                  mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
-                    gemm_dispatch(no, ly.w_up,   ly.w_up_scales,   ly.w_up_qtype,   uo, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                                  d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                                  nv4p, ct4p, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                                  mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+                    const auto* nv4p = (wcache_.nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.nvfp4;
+                    const auto* ct4p = (wcache_.cutlass_nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_nvfp4;
+                    const auto* mx4p = (wcache_.cutlass_mxfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_mxfp4;
+                    gemm_dispatch(no, ly.w_gate, ly.w_gate_scales, ly.w_gate_qtype, go, qscratch_.dequant, stream, q8, qscratch_.d8_buf, &wcache_.fp16,
+                                  (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
+                                  qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                                  nv4p, ct4p, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
+                                  mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
+                    gemm_dispatch(no, ly.w_up,   ly.w_up_scales,   ly.w_up_qtype,   uo, qscratch_.dequant, stream, q8, qscratch_.d8_buf, &wcache_.fp16,
+                                  (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
+                                  qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                                  nv4p, ct4p, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
+                                  mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
                 }
             }
         }
@@ -1017,9 +1017,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     //    SwiGLU case: swiglu_quantize_q8_1 fuses activation + Q8_1 in one kernel,
     //    eliminating the intermediate FP16 buffer write and one kernel launch.
     {
-        auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
+        auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
         bool fused_down_residual = (!has_post_ffn_norm &&
-                                     n == 1 && q8 != nullptr && d8_buf_ != nullptr &&
+                                     n == 1 && q8 != nullptr && qscratch_.d8_buf != nullptr &&
                                      so.dtype == DType::FP16 &&
                                      (ly.w_down_qtype == GGMLQuantType::Q6_K ||
                                       ly.w_down_qtype == GGMLQuantType::Q8_0 ||
@@ -1031,7 +1031,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         if (will_fuse_down_nvfp4) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
-            auto& wd_nvfp4 = nvfp4_cache_.at(ly.w_down.data);
+            auto& wd_nvfp4 = wcache_.nvfp4.at(ly.w_down.data);
             int n_mb_d = K_d / 16;
             if (n_mb_d <= 512) {
                 // Small K: fused SwiGLU/GeGLU + NVFP4 GEMV + residual (MR path)
@@ -1078,50 +1078,50 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             if (cfg.ffn_activation != FFNActivation::GEGLU) {
                 swiglu_quantize_q8_1(static_cast<const half*>(go.data),
                                      static_cast<const half*>(uo.data),
-                                     q8, d8_buf_, K_d, stream);
+                                     q8, qscratch_.d8_buf, K_d, stream);
             } else {
                 geglu_quantize_q8_1(static_cast<const half*>(go.data),
                                      static_cast<const half*>(uo.data),
-                                     q8, d8_buf_, K_d, stream);
+                                     q8, qscratch_.d8_buf, K_d, stream);
             }
             // Use h.data as residual source (memcpy was skipped)
             const half* residual_ptr = static_cast<const half*>(h.data);
             if (ly.w_down_qtype == GGMLQuantType::Q6_K) {
-                gemv_q6k_q8_1_residual(ly.w_down.data, q8, d8_buf_,
+                gemv_q6k_q8_1_residual(ly.w_down.data, q8, qscratch_.d8_buf,
                                         static_cast<half*>(h.data), residual_ptr,
                                         M_d, K_d, stream);
             } else if (ly.w_down_qtype == GGMLQuantType::Q4_0) {
-                gemv_q4_0_q8_1_residual(ly.w_down.data, q8, d8_buf_,
+                gemv_q4_0_q8_1_residual(ly.w_down.data, q8, qscratch_.d8_buf,
                                           static_cast<half*>(h.data), residual_ptr,
                                           M_d, K_d, stream);
             } else if (ly.w_down_qtype == GGMLQuantType::Q4_K) {
-                gemv_q4_k_q8_1_residual(ly.w_down.data, q8, d8_buf_,
+                gemv_q4_k_q8_1_residual(ly.w_down.data, q8, qscratch_.d8_buf,
                                           static_cast<half*>(h.data), residual_ptr,
                                           M_d, K_d, stream);
             } else if (ly.w_down_qtype == GGMLQuantType::Q5_K) {
-                gemv_q5_k_q8_1_residual(ly.w_down.data, q8, d8_buf_,
+                gemv_q5_k_q8_1_residual(ly.w_down.data, q8, qscratch_.d8_buf,
                                           static_cast<half*>(h.data), residual_ptr,
                                           M_d, K_d, stream);
             } else if (ly.w_down_qtype == GGMLQuantType::Q2_K) {
-                gemv_q2_k_q8_1_residual(ly.w_down.data, q8, d8_buf_,
+                gemv_q2_k_q8_1_residual(ly.w_down.data, q8, qscratch_.d8_buf,
                                           static_cast<half*>(h.data), residual_ptr,
                                           M_d, K_d, stream);
             } else if (ly.w_down_qtype == GGMLQuantType::Q3_K) {
-                gemv_q3_k_q8_1_residual(ly.w_down.data, q8, d8_buf_,
+                gemv_q3_k_q8_1_residual(ly.w_down.data, q8, qscratch_.d8_buf,
                                           static_cast<half*>(h.data), residual_ptr,
                                           M_d, K_d, stream);
             } else {
-                gemv_q8_0_q8_1_residual(ly.w_down.data, q8, d8_buf_,
+                gemv_q8_0_q8_1_residual(ly.w_down.data, q8, qscratch_.d8_buf,
                                           static_cast<half*>(h.data), residual_ptr,
                                           M_d, K_d, stream);
             }
         } else if (has_post_ffn_norm && using_fp32_accum && n == 1 &&
-                   nvfp4_cache_.count(ly.w_down.data) && h.dtype == DType::FP16) {
+                   wcache_.nvfp4.count(ly.w_down.data) && h.dtype == DType::FP16) {
             // NVFP4 post-norm FP32 accum decode: activation → NVFP4 GEMV → post-norm.
             // ~40% less weight traffic than dp4a Q8_0 path.
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
-            auto& wd_nvfp4 = nvfp4_cache_.at(ly.w_down.data);
+            auto& wd_nvfp4 = wcache_.nvfp4.at(ly.w_down.data);
             if (cfg.ffn_activation != FFNActivation::GEGLU)
                 swiglu(go, uo, so, stream);
             else
@@ -1136,7 +1136,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 static_cast<half*>(h.data),
                 cfg.d_model, eps, norm_w_off_);
         } else if (has_post_ffn_norm && using_fp32_accum && n == 1 &&
-                   q8 != nullptr && d8_buf_ != nullptr &&
+                   q8 != nullptr && qscratch_.d8_buf != nullptr &&
                    (ly.w_down_qtype == GGMLQuantType::Q6_K ||
                     ly.w_down_qtype == GGMLQuantType::Q8_0 ||
                     ly.w_down_qtype == GGMLQuantType::Q4_0 ||
@@ -1151,26 +1151,26 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             if (cfg.ffn_activation != FFNActivation::GEGLU)
                 swiglu_quantize_q8_1(static_cast<const half*>(go.data),
                                      static_cast<const half*>(uo.data),
-                                     q8, d8_buf_, K_d, stream);
+                                     q8, qscratch_.d8_buf, K_d, stream);
             else
                 geglu_quantize_q8_1(static_cast<const half*>(go.data),
                                     static_cast<const half*>(uo.data),
-                                    q8, d8_buf_, K_d, stream);
+                                    q8, qscratch_.d8_buf, K_d, stream);
             half* fo_ptr = static_cast<half*>(fo.data);
             if (ly.w_down_qtype == GGMLQuantType::Q6_K)
-                gemv_q6k_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
+                gemv_q6k_q8_1(ly.w_down.data, q8, qscratch_.d8_buf, fo_ptr, M_d, K_d, stream);
             else if (ly.w_down_qtype == GGMLQuantType::Q8_0)
-                gemv_q8_0_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
+                gemv_q8_0_q8_1(ly.w_down.data, q8, qscratch_.d8_buf, fo_ptr, M_d, K_d, stream);
             else if (ly.w_down_qtype == GGMLQuantType::Q4_0)
-                gemv_q4_0_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
+                gemv_q4_0_q8_1(ly.w_down.data, q8, qscratch_.d8_buf, fo_ptr, M_d, K_d, stream);
             else if (ly.w_down_qtype == GGMLQuantType::Q4_K)
-                gemv_q4_k_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
+                gemv_q4_k_q8_1(ly.w_down.data, q8, qscratch_.d8_buf, fo_ptr, M_d, K_d, stream);
             else if (ly.w_down_qtype == GGMLQuantType::Q5_K)
-                gemv_q5_k_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
+                gemv_q5_k_q8_1(ly.w_down.data, q8, qscratch_.d8_buf, fo_ptr, M_d, K_d, stream);
             else if (ly.w_down_qtype == GGMLQuantType::Q2_K)
-                gemv_q2_k_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
+                gemv_q2_k_q8_1(ly.w_down.data, q8, qscratch_.d8_buf, fo_ptr, M_d, K_d, stream);
             else
-                gemv_q3_k_q8_1(ly.w_down.data, q8, d8_buf_, fo_ptr, M_d, K_d, stream);
+                gemv_q3_k_q8_1(ly.w_down.data, q8, qscratch_.d8_buf, fo_ptr, M_d, K_d, stream);
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             rmsnorm_fp32_accum_to_fp16_kernel<<<n, 512, 0, stream>>>(
                 static_cast<const half*>(fo.data),
@@ -1185,36 +1185,36 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 default:                    swiglu(go, uo, so, stream);  break;
             }
             if (will_fuse_down_beta1 && !cur_force_fp16_ &&
-                fp8_cache_.count(ly.w_down.data) &&
-                fp8_act_buf_ != nullptr && d_act_scale_ != nullptr) {
+                wcache_.fp8.count(ly.w_down.data) &&
+                qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
                 // FP8 beta=1: hidden = fp8(swiglu_out) @ fp8(w_down)^T + hidden
-                auto& e = fp8_cache_.at(ly.w_down.data);
-                Tensor fp8_so(fp8_act_buf_, DType::FP8_E4M3, so.ndim, so.shape, true);
-                quantize_fp16_to_fp8_e4m3(so, fp8_so, d_act_scale_, stream,
-                                          d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_);
-                gemm_cublaslt(fp8_so, e.weight, h, 1.0f, 1.0f, d_act_scale_, e.d_scale, stream);
-            } else if (will_fuse_down_beta1 && fp16_cache_.count(ly.w_down.data)) {
+                auto& e = wcache_.fp8.at(ly.w_down.data);
+                Tensor fp8_so(qscratch_.fp8_act, DType::FP8_E4M3, so.ndim, so.shape, true);
+                quantize_fp16_to_fp8_e4m3(so, fp8_so, qscratch_.d_act_scale, stream,
+                                          qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
+                gemm_cublaslt(fp8_so, e.weight, h, 1.0f, 1.0f, qscratch_.d_act_scale, e.d_scale, stream);
+            } else if (will_fuse_down_beta1 && wcache_.fp16.count(ly.w_down.data)) {
                 // Fused: hidden = swiglu_out @ w_down^T + hidden (cuBLAS beta=1).
-                const Tensor& wd_fp16 = fp16_cache_.at(ly.w_down.data);
+                const Tensor& wd_fp16 = wcache_.fp16.at(ly.w_down.data);
                 gemm(so, wd_fp16, h, 1.0f, 1.0f, stream);
             } else if ((will_fuse_down_beta1 || will_fuse_down_dequant_beta1) &&
-                       dequant_scratch_ != nullptr && dequant_gpu_supported(ly.w_down_qtype)) {
+                       qscratch_.dequant != nullptr && dequant_gpu_supported(ly.w_down_qtype)) {
                 // Dequant into scratch, then beta=1.0 GEMM directly into hidden (which holds residual)
                 int rows = static_cast<int>(ly.w_down.shape[0]);
                 int cols = static_cast<int>(ly.w_down.shape[1]);
-                dequant_gpu(ly.w_down.data, dequant_scratch_, ly.w_down_qtype, rows, cols, stream);
-                Tensor w_fp16(dequant_scratch_, DType::FP16, ly.w_down.ndim, ly.w_down.shape, true);
+                dequant_gpu(ly.w_down.data, qscratch_.dequant, ly.w_down_qtype, rows, cols, stream);
+                Tensor w_fp16(qscratch_.dequant, DType::FP16, ly.w_down.ndim, ly.w_down.shape, true);
                 gemm(so, w_fp16, h, 1.0f, 1.0f, stream);
             } else {
-                gemm_dispatch(so, ly.w_down, ly.w_down_scales, ly.w_down_qtype, fo, dequant_scratch_, stream,
-                              static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                              (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                              d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                              (nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &nvfp4_cache_,
-                              (cutlass_nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_nvfp4_cache_,
-                              cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                              (cutlass_mxfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_mxfp4_cache_,
-                              mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+                gemm_dispatch(so, ly.w_down, ly.w_down_scales, ly.w_down_qtype, fo, qscratch_.dequant, stream,
+                              static_cast<block_q8_1*>(qscratch_.q8_1_buf), qscratch_.d8_buf, &wcache_.fp16,
+                              (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
+                              qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                              (wcache_.nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.nvfp4,
+                              (wcache_.cutlass_nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_nvfp4,
+                              qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
+                              (wcache_.cutlass_mxfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_mxfp4,
+                              qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
                 if (has_post_ffn_norm && using_fp32_accum) {
                     // Post-FFN norm → FP32 accumulation (no D2D copy needed)
                     Tensor fp32_h = view_tokens(fp32_hidden_, n);
@@ -1270,18 +1270,18 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // If so, the NVFP4 path doesn't need Q8_1 quantization (takes FP16 directly).
     bool nvfp4_covers_layer = false;
     if (n == 1 && compute_dtype_ == DType::FP16) {
-        bool has_up = nvfp4_moe_cache_.count(ly.expert_up_packed.data) > 0;
-        bool has_down = nvfp4_moe_cache_.count(ly.expert_down_packed.data) > 0;
+        bool has_up = wcache_.nvfp4_moe.count(ly.expert_up_packed.data) > 0;
+        bool has_down = wcache_.nvfp4_moe.count(ly.expert_down_packed.data) > 0;
         nvfp4_covers_layer = has_up && has_down;
         if (nvfp4_covers_layer && ly.expert_gate_packed.data != nullptr) {
-            nvfp4_covers_layer = nvfp4_moe_cache_.count(ly.expert_gate_packed.data) > 0;
+            nvfp4_covers_layer = wcache_.nvfp4_moe.count(ly.expert_gate_packed.data) > 0;
         }
     }
 
     // Pre-check decode fast path (same logic as will_decode_fast below)
     GGMLQuantType up_qtype_pre = ly.expert_up_qtype;
     bool will_skip_residual_copy = (n == 1 &&
-        ly.expert_up_packed.data != nullptr && moe_dequant_buf_ != nullptr &&
+        ly.expert_up_packed.data != nullptr && moe_.dequant_buf != nullptr &&
         compute_dtype_ == DType::FP16 &&
         ly.expert_up_packed.on_device &&
         (up_qtype_pre == GGMLQuantType::Q6_K || up_qtype_pre == GGMLQuantType::Q8_0 ||
@@ -1295,13 +1295,13 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                         cudaMemcpyDeviceToDevice, stream);
     }
     // Fused RMSNorm + Q8_1: skip for NVFP4-covered layers (NVFP4 takes FP16 directly)
-    bool moe_fused_norm_q8 = (n == 1 && q8_1_buf_ != nullptr && d8_buf_ != nullptr &&
+    bool moe_fused_norm_q8 = (n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
                                h.dtype == DType::FP16 && !nvfp4_covers_layer);
     if (moe_fused_norm_q8) {
         // Fused: RMSNorm + Q8_1 (also writes FP16 norm_out for gate logits)
         rmsnorm_quantize_q8_1(static_cast<const half*>(h.data),
                                 static_cast<const half*>(norm_w.data),
-                                static_cast<block_q8_1*>(q8_1_buf_), d8_buf_,
+                                static_cast<block_q8_1*>(qscratch_.q8_1_buf), qscratch_.d8_buf,
                                 static_cast<half*>(no.data),
                                 d, eps, stream, norm_w_off_);
     } else {
@@ -1318,7 +1318,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
     GGMLQuantType up_qtype = ly.expert_up_qtype;
     bool will_decode_fast = (n == 1 &&
-                             ly.expert_up_packed.data != nullptr && moe_dequant_buf_ != nullptr &&
+                             ly.expert_up_packed.data != nullptr && moe_.dequant_buf != nullptr &&
                              compute_dtype_ == DType::FP16 &&
                              ly.expert_up_packed.on_device &&
                              (up_qtype == GGMLQuantType::Q6_K || up_qtype == GGMLQuantType::Q8_0 ||
@@ -1335,16 +1335,16 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     constexpr int kMaxFusedExperts = 8;
     if (ne <= kMaxFusedExperts &&
         n == 1 && compute_dtype_ == DType::FP16 && ly.moe_gate.dtype == DType::FP16 &&
-        moe_routing_buffers_.pool && will_decode_fast) {
+        moe_.routing_buffers.pool && will_decode_fast) {
         // Fused: gate GEMV + softmax/sigmoid + top-k in one kernel (1 launch)
         moe_gate_topk_fused(static_cast<const half*>(ly.moe_gate.data),
                             static_cast<const half*>(no.data),
                             ne, d, top_k,
-                            moe_routing_buffers_, routing, stream,
+                            moe_.routing_buffers, routing, stream,
                             use_sigmoid, norm_weights, router_bias_ptr);
     } else {
         // Separate: gate GEMV → intermediate logits → topk gating
-        Tensor gate_logits_f32 = slice_rows(moe_gate_logits_, n);
+        Tensor gate_logits_f32 = slice_rows(moe_.gate_logits, n);
 
         if (n == 1 && compute_dtype_ == DType::FP16 && ly.moe_gate.dtype == DType::FP16) {
             gemv_gate_fp32(static_cast<const half*>(ly.moe_gate.data),
@@ -1353,7 +1353,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                            ne, d, stream);
         } else {
             int64_t gl_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(ne)};
-            Tensor gate_logits_tmp(moe_gathered_.data, compute_dtype_, 2, gl_shape, true);
+            Tensor gate_logits_tmp(moe_.gathered.data, compute_dtype_, 2, gl_shape, true);
             gemm(no, ly.moe_gate, gate_logits_tmp, 1.0f, 0.0f, stream);
 
             int64_t numel = static_cast<int64_t>(n) * ne;
@@ -1371,8 +1371,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             }
         }
 
-        if (moe_routing_buffers_.pool) {
-            moe_topk_gating(gate_logits_f32, top_k, moe_routing_buffers_, routing, stream, use_sigmoid, norm_weights, router_bias_ptr, /*skip_sorting=*/will_decode_fast);
+        if (moe_.routing_buffers.pool) {
+            moe_topk_gating(gate_logits_f32, top_k, moe_.routing_buffers, routing, stream, use_sigmoid, norm_weights, router_bias_ptr, /*skip_sorting=*/will_decode_fast);
         } else {
             moe_topk_gating(gate_logits_f32, top_k, routing, stream, use_sigmoid, norm_weights, router_bias_ptr);
         }
@@ -1393,7 +1393,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // - Pre-dequanted: expert_w_gate[e] etc. are FP16 on GPU (legacy / unquantized packed)
     // - On-the-fly dequant: expert_*_packed is raw Q6_K/Q8_0/Q4_0 on GPU, dequant per GEMM
     bool use_packed_dequant = (ly.expert_up_packed.data != nullptr &&
-                               moe_dequant_buf_ != nullptr);
+                               moe_.dequant_buf != nullptr);
 
     // Non-gated expert FFN detection: no gate weights (Nemotron uses SiLU(up(x)) instead of SwiGLU)
     // Note: can't use expert_w_gate.empty() because loader pre-allocates the vector for all layers.
@@ -1437,32 +1437,32 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         };
 
         half* norm_ptr = static_cast<half*>(no.data);
-        half* gate_buf = static_cast<half*>(moe_expert_gate_.data);   // [top_k, eff]
-        half* up_buf   = static_cast<half*>(moe_expert_up_.data);     // [top_k, eff]
-        half* act_buf  = static_cast<half*>(moe_expert_swiglu_.data); // [top_k, eff]
-        half* down_buf = static_cast<half*>(moe_expert_down_.data);   // [top_k, d]
+        half* gate_buf = static_cast<half*>(moe_.expert_gate.data);   // [top_k, eff]
+        half* up_buf   = static_cast<half*>(moe_.expert_up.data);     // [top_k, eff]
+        half* act_buf  = static_cast<half*>(moe_.expert_swiglu.data); // [top_k, eff]
+        half* down_buf = static_cast<half*>(moe_.expert_down.data);   // [top_k, d]
 
         // --- NVFP4 MoE path: takes FP16 input directly, no Q8_1 needed ---
-        auto nvfp4_up_it = nvfp4_moe_cache_.find(ly.expert_up_packed.data);
-        auto nvfp4_down_it = nvfp4_moe_cache_.find(ly.expert_down_packed.data);
-        bool use_nvfp4_moe = (nvfp4_up_it != nvfp4_moe_cache_.end() &&
-                              nvfp4_down_it != nvfp4_moe_cache_.end());
+        auto nvfp4_up_it = wcache_.nvfp4_moe.find(ly.expert_up_packed.data);
+        auto nvfp4_down_it = wcache_.nvfp4_moe.find(ly.expert_down_packed.data);
+        bool use_nvfp4_moe = (nvfp4_up_it != wcache_.nvfp4_moe.end() &&
+                              nvfp4_down_it != wcache_.nvfp4_moe.end());
         if (use_nvfp4_moe && !non_gated_experts) {
-            auto nvfp4_gate_it = nvfp4_moe_cache_.find(ly.expert_gate_packed.data);
-            use_nvfp4_moe = (nvfp4_gate_it != nvfp4_moe_cache_.end());
+            auto nvfp4_gate_it = wcache_.nvfp4_moe.find(ly.expert_gate_packed.data);
+            use_nvfp4_moe = (nvfp4_gate_it != wcache_.nvfp4_moe.end());
         }
 
         if (use_nvfp4_moe) {
             // Gate+Up projection: NVFP4 MoE GEMV with FP16 input (norm_ptr)
             if (!non_gated_experts) {
                 gemv_nvfp4_moe_gate_up_fused(
-                    nvfp4_moe_cache_.at(ly.expert_gate_packed.data),
-                    nvfp4_moe_cache_.at(ly.expert_up_packed.data),
+                    wcache_.nvfp4_moe.at(ly.expert_gate_packed.data),
+                    wcache_.nvfp4_moe.at(ly.expert_up_packed.data),
                     expert_indices, norm_ptr,
                     gate_buf, up_buf, eff, d, top_k, stream);
             } else {
                 gemv_nvfp4_moe_decode(
-                    nvfp4_moe_cache_.at(ly.expert_up_packed.data),
+                    wcache_.nvfp4_moe.at(ly.expert_up_packed.data),
                     expert_indices, norm_ptr, up_buf,
                     eff, d, /*x_stride=*/0, top_k, stream);
             }
@@ -1471,7 +1471,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             if (!non_gated_experts) {
                 // Fused: swiglu(gate,up) computed inline during down GEMV
                 gemv_nvfp4_moe_swiglu_decode(
-                    nvfp4_moe_cache_.at(ly.expert_down_packed.data),
+                    wcache_.nvfp4_moe.at(ly.expert_down_packed.data),
                     expert_indices, gate_buf, up_buf, down_buf,
                     d, eff, /*x_stride=*/eff, top_k, stream);
             } else {
@@ -1480,7 +1480,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 Tensor up_t(up_buf, compute_dtype_, 2, act_shape, true);
                 relu_sqr_inplace(up_t, stream);
                 gemv_nvfp4_moe_decode(
-                    nvfp4_moe_cache_.at(ly.expert_down_packed.data),
+                    wcache_.nvfp4_moe.at(ly.expert_down_packed.data),
                     expert_indices, up_buf, down_buf,
                     d, eff, /*x_stride=*/eff, top_k, stream);
             }
@@ -1499,14 +1499,14 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         }
 
         // Use dp4a MMVQ path when Q8_1 buffers are available
-        bool use_dp4a = (q8_1_buf_ != nullptr && d8_buf_ != nullptr);
+        bool use_dp4a = (qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr);
 
         if (use_dp4a) {
             // Q8_1 may already be computed by the fused norm+quant above.
             // If not (e.g., prefill or non-FP16), quantize norm_out now.
-            auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
+            auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
             if (!moe_fused_norm_q8) {
-                quantize_fp16_to_q8_1(norm_ptr, q8, d8_buf_, d, stream);
+                quantize_fp16_to_q8_1(norm_ptr, q8, qscratch_.d8_buf, d, stream);
             }
 
             size_t up_stride_bytes = expert_stride(ly.expert_up_packed, up_qtype);
@@ -1517,43 +1517,43 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 if (up_qtype == GGMLQuantType::Q6_K) {
                     gemv_q6k_q8_1_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                        expert_indices, q8, d8_buf_, gate_buf, up_buf,
+                        expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
                 } else if (up_qtype == GGMLQuantType::Q4_K) {
                     gemv_q4_k_q8_1_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                        expert_indices, q8, d8_buf_, gate_buf, up_buf,
+                        expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
                 } else if (up_qtype == GGMLQuantType::Q5_K) {
                     gemv_q5_k_q8_1_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                        expert_indices, q8, d8_buf_, gate_buf, up_buf,
+                        expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
                 } else if (up_qtype == GGMLQuantType::Q4_0) {
                     gemv_q4_0_q8_1_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                        expert_indices, q8, d8_buf_, gate_buf, up_buf,
+                        expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
                 } else if (up_qtype == GGMLQuantType::Q2_K) {
                     gemv_q2_k_q8_1_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                        expert_indices, q8, d8_buf_, gate_buf, up_buf,
+                        expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
                 } else if (up_qtype == GGMLQuantType::Q3_K) {
                     gemv_q3_k_q8_1_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                        expert_indices, q8, d8_buf_, gate_buf, up_buf,
+                        expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
                 } else {
                     gemv_q8_0_q8_1_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
-                        expert_indices, q8, d8_buf_, gate_buf, up_buf,
+                        expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
                 }
@@ -1572,7 +1572,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     : (up_qtype == GGMLQuantType::Q3_K)
                     ? gemv_q3_k_q8_1_moe_decode : gemv_q8_0_q8_1_moe_decode;
                 moe_gemv_dp4a(ly.expert_up_packed.data, expert_indices,
-                              q8, d8_buf_, up_buf,
+                              q8, qscratch_.d8_buf, up_buf,
                               eff, d, up_stride_bytes,
                               /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
             }
@@ -1618,16 +1618,16 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         // and Q8_1 quantization into a single kernel, eliminating the intermediate
         // FP16 act_buf write+read.
         if (use_dp4a) {
-            auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
+            auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
             int eff_q8_blocks = eff / 32;
 
             if (!non_gated_experts) {
                 // Fused SwiGLU → Q8_1 (1 kernel instead of 2)
-                swiglu_quantize_q8_1(gate_buf, up_buf, q8, d8_buf_,
+                swiglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf,
                                       top_k * eff, stream);
             } else {
                 // Non-gated (relu²): fused relu² + Q8_1 quantization (1 kernel)
-                relu_sqr_quantize_q8_1(up_buf, q8, d8_buf_, top_k * eff, stream);
+                relu_sqr_quantize_q8_1(up_buf, q8, qscratch_.d8_buf, top_k * eff, stream);
             }
 
             // Down projection with dp4a GEMV
@@ -1645,7 +1645,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 ? gemv_q3_k_q8_1_moe_decode : gemv_q8_0_q8_1_moe_decode;
             size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_qtype);
             moe_gemv_dp4a_down(ly.expert_down_packed.data, expert_indices,
-                          q8, d8_buf_, down_buf,
+                          q8, qscratch_.d8_buf, down_buf,
                           d, eff, down_stride,
                           /*q8_1_stride=*/eff_q8_blocks, /*d8_stride=*/eff_q8_blocks,
                           top_k, stream);
@@ -1722,10 +1722,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                       use_tc ? "TC" : "scalar", n, expanded);
         const int32_t* d_offsets = static_cast<const int32_t*>(routing.expert_offsets.data);
         const int32_t* d_sorted  = static_cast<const int32_t*>(routing.sorted_token_ids.data);
-        char* expert_gate_base  = static_cast<char*>(moe_expert_gate_.data);
-        char* expert_up_base    = static_cast<char*>(moe_expert_up_.data);
-        char* expert_swiglu_base= static_cast<char*>(moe_expert_swiglu_.data);
-        char* expert_down_base  = static_cast<char*>(moe_expert_down_.data);
+        char* expert_gate_base  = static_cast<char*>(moe_.expert_gate.data);
+        char* expert_up_base    = static_cast<char*>(moe_.expert_up.data);
+        char* expert_swiglu_base= static_cast<char*>(moe_.expert_swiglu.data);
+        char* expert_down_base  = static_cast<char*>(moe_.expert_down.data);
 
         auto expert_stride_fn = [](const Tensor& packed, GGMLQuantType qtype) -> size_t {
             int64_t rows = packed.shape[1];
@@ -1760,10 +1760,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             {
                 int64_t gath_shape[2] = {static_cast<int64_t>(expanded),
                                           static_cast<int64_t>(d)};
-                Tensor gathered(moe_gathered_.data, compute_dtype_, 2, gath_shape, true);
+                Tensor gathered(moe_.gathered.data, compute_dtype_, 2, gath_shape, true);
                 moe_gather(no, routing, gathered, stream);
             }
-            char* gathered_base = static_cast<char*>(moe_gathered_.data);
+            char* gathered_base = static_cast<char*>(moe_.gathered.data);
 
             if (!non_gated_experts)
                 gemm_q6k_fused_moe_prefill(
@@ -1785,12 +1785,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         {
             int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
             if (non_gated_experts) {
-                Tensor up_t(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                Tensor up_t(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
                 relu_sqr_inplace(up_t, stream);
             } else {
-                Tensor g(moe_expert_gate_.data, compute_dtype_, 2, act_shape, true);
-                Tensor u(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
-                Tensor a(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                Tensor g(moe_.expert_gate.data, compute_dtype_, 2, act_shape, true);
+                Tensor u(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
+                Tensor a(moe_.expert_swiglu.data, compute_dtype_, 2, act_shape, true);
                 swiglu(g, u, a, stream);
             }
         }
@@ -1826,7 +1826,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     {
         int64_t gath_shape[2] = {static_cast<int64_t>(expanded),
                                   static_cast<int64_t>(d)};
-        Tensor gathered(moe_gathered_.data, compute_dtype_, 2, gath_shape, true);
+        Tensor gathered(moe_.gathered.data, compute_dtype_, 2, gath_shape, true);
         moe_gather(no, routing, gathered, stream);
     }
 
@@ -1836,9 +1836,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         ly.expert_up_packed.shape[1] * ly.expert_up_packed.shape[2],
         ly.expert_down_packed.shape[1] * ly.expert_down_packed.shape[2])) * sizeof(half);
     bool can_fp16_batch_nosync = (
-        moe_batch_dequant_buf_ != nullptr &&
-        moe_batch_dequant_buf_size_ >= static_cast<size_t>(ne) * fp16_per_expert &&
-        d_moe_weight_ptrs_ && d_moe_weight_ptrs_count_ >= ne &&
+        moe_.batch_dequant_buf != nullptr &&
+        moe_.batch_dequant_buf_size >= static_cast<size_t>(ne) * fp16_per_expert &&
+        moe_.d_weight_ptrs && moe_.d_weight_ptrs_count >= ne &&
         ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
         ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
         dequant_gpu_supported(up_qtype) &&
@@ -1858,14 +1858,14 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     size_t fp8_buf_needed = std::max(up_fp8_sz, down_fp8_sz)
                           + static_cast<size_t>(expanded) * max_act_cols;
     bool can_fp8_batch = (!can_fp16_batch_nosync &&
-                          moe_batch_dequant_buf_ != nullptr &&
-                          moe_batch_dequant_buf_size_ >= fp8_buf_needed &&
+                          moe_.batch_dequant_buf != nullptr &&
+                          moe_.batch_dequant_buf_size >= fp8_buf_needed &&
                           ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
                           ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
                           up_qtype == GGMLQuantType::Q6_K &&
                           ly.expert_down_qtype == GGMLQuantType::Q6_K &&
                           compute_dtype_ == DType::FP16 &&
-                          !fp16_cache_.count(ly.expert_up_packed.data));
+                          !wcache_.fp16.count(ly.expert_up_packed.data));
     if (can_fp8_batch && !non_gated_experts)
         can_fp8_batch = (ly.expert_gate_packed.data &&
                          ly.expert_gate_packed.on_device &&
@@ -1888,12 +1888,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                         cudaMemcpyDeviceToHost, stream);
         cudaStreamSynchronize(stream);
 
-        char* buf = static_cast<char*>(moe_batch_dequant_buf_);
-        char* gathered_base     = static_cast<char*>(moe_gathered_.data);
-        char* expert_gate_base  = static_cast<char*>(moe_expert_gate_.data);
-        char* expert_up_base    = static_cast<char*>(moe_expert_up_.data);
-        char* expert_swiglu_base= static_cast<char*>(moe_expert_swiglu_.data);
-        char* expert_down_base  = static_cast<char*>(moe_expert_down_.data);
+        char* buf = static_cast<char*>(moe_.batch_dequant_buf);
+        char* gathered_base     = static_cast<char*>(moe_.gathered.data);
+        char* expert_gate_base  = static_cast<char*>(moe_.expert_gate.data);
+        char* expert_up_base    = static_cast<char*>(moe_.expert_up.data);
+        char* expert_swiglu_base= static_cast<char*>(moe_.expert_swiglu.data);
+        char* expert_down_base  = static_cast<char*>(moe_.expert_down.data);
 
         auto batch_dequant_gemm = [&](const Tensor& packed, GGMLQuantType qtype,
                                        const char* a_base, char* c_base,
@@ -1912,7 +1912,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             gemm_moe_batched(a_base, c_base,
                              h_offsets.data(), b_ptrs.data(),
                              K_dim, N_dim, DType::FP16, ne, stream,
-                             d_moe_work_ptrs_);
+                             moe_.d_work_ptrs);
         };
 
         // Gate projection
@@ -1928,12 +1928,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         {
             int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
             if (non_gated_experts) {
-                Tensor up_t(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                Tensor up_t(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
                 relu_sqr_inplace(up_t, stream);
             } else {
-                Tensor g(moe_expert_gate_.data, compute_dtype_, 2, act_shape, true);
-                Tensor u(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
-                Tensor a(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                Tensor g(moe_.expert_gate.data, compute_dtype_, 2, act_shape, true);
+                Tensor u(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
+                Tensor a(moe_.expert_swiglu.data, compute_dtype_, 2, act_shape, true);
                 swiglu(g, u, a, stream);
             }
         }
@@ -1947,10 +1947,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
     } else if (can_fp8_batch) {
         if (layer == 0) IMP_LOG_INFO("MoE prefill: FP8 batch path (n=%d, expanded=%d, buf=%.1f MiB, need=%.1f MiB)",
-                                      n, expanded, moe_batch_dequant_buf_size_ / (1024.0*1024.0), fp8_buf_needed / (1024.0*1024.0));
+                                      n, expanded, moe_.batch_dequant_buf_size / (1024.0*1024.0), fp8_buf_needed / (1024.0*1024.0));
         // Expert offsets: device-grouped path uses d_offsets directly on GPU.
         // Host offsets + sync are deferred to the legacy fallback path only.
-        char* buf = static_cast<char*>(moe_batch_dequant_buf_);
+        char* buf = static_cast<char*>(moe_.batch_dequant_buf);
 
         // FP8 batched GEMM lambda: dequant Q6_K→FP8, quantize FP16 acts→FP8, cuBLAS FP8 GEMM→FP16
         auto chunked_fp8_gemm = [&](const Tensor& packed, GGMLQuantType qtype,
@@ -1960,7 +1960,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             int64_t cols = packed.shape[2];
             size_t weight_fp8_bytes = static_cast<size_t>(ne) * rows * cols;  // 1 byte per FP8 element
 
-            // Buffer layout in moe_batch_dequant_buf_:
+            // Buffer layout in moe_.batch_dequant_buf:
             //   [0 .. weight_fp8_bytes)                     = FP8 weights for all experts
             //   [weight_fp8_bytes .. weight_fp8_bytes + act) = FP8 activations
             uint8_t* fp8_weights = reinterpret_cast<uint8_t*>(buf);
@@ -1973,14 +1973,14 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             // 2. Per-expert FP8 scaling: calibrate absmax per expert, quantize with
             //    per-expert scale. Falls back to scale=1.0 if scale buffer unavailable.
             const int32_t* d_offsets = static_cast<const int32_t*>(routing.expert_offsets.data);
-            if (d_moe_fp8_scales_) {
-                // Calibrate per-expert: writes scales to d_moe_fp8_scales_
+            if (moe_.d_fp8_scales) {
+                // Calibrate per-expert: writes scales to moe_.d_fp8_scales
                 calibrate_fp8_scales_per_expert(a_base_fp16, K_dim, d_offsets, ne,
-                                                 d_moe_fp8_scales_, stream);
+                                                 moe_.d_fp8_scales, stream);
                 // Quantize with per-expert scale
                 quantize_fp16_to_fp8_e4m3_per_expert(a_base_fp16, fp8_acts,
                                                       K_dim, d_offsets, ne,
-                                                      d_moe_fp8_scales_, stream);
+                                                      moe_.d_fp8_scales, stream);
                 // Note: no D2H sync here — device-grouped path uses device-side
                 // scales directly. Host scales are only needed by the fallback path.
             } else {
@@ -1997,8 +1997,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                             static_cast<size_t>(ne + 1) * sizeof(int32_t),
                             cudaMemcpyDeviceToHost, stream);
             std::vector<float> h_act_scales(ne, 1.0f);
-            if (d_moe_fp8_scales_) {
-                cudaMemcpyAsync(h_act_scales.data(), d_moe_fp8_scales_,
+            if (moe_.d_fp8_scales) {
+                cudaMemcpyAsync(h_act_scales.data(), moe_.d_fp8_scales,
                                 static_cast<size_t>(ne) * sizeof(float),
                                 cudaMemcpyDeviceToHost, stream);
             }
@@ -2010,15 +2010,15 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             gemm_moe_batched(fp8_acts, c_base_fp16,
                              h_offsets.data(), weight_ptrs.data(),
                              K_dim, N_dim, DType::FP8_E4M3, ne, stream,
-                             d_moe_work_ptrs_, /*output_dtype=*/DType::FP16,
-                             d_moe_fp8_scales_ ? h_act_scales.data() : nullptr);
+                             moe_.d_work_ptrs, /*output_dtype=*/DType::FP16,
+                             moe_.d_fp8_scales ? h_act_scales.data() : nullptr);
         };
 
-        char* gathered_base     = static_cast<char*>(moe_gathered_.data);
-        char* expert_gate_base  = static_cast<char*>(moe_expert_gate_.data);
-        char* expert_up_base    = static_cast<char*>(moe_expert_up_.data);
-        char* expert_swiglu_base= static_cast<char*>(moe_expert_swiglu_.data);
-        char* expert_down_base  = static_cast<char*>(moe_expert_down_.data);
+        char* gathered_base     = static_cast<char*>(moe_.gathered.data);
+        char* expert_gate_base  = static_cast<char*>(moe_.expert_gate.data);
+        char* expert_up_base    = static_cast<char*>(moe_.expert_up.data);
+        char* expert_swiglu_base= static_cast<char*>(moe_.expert_swiglu.data);
+        char* expert_down_base  = static_cast<char*>(moe_.expert_down.data);
 
         // Gate projection (gated models only)
         if (!non_gated_experts)
@@ -2034,12 +2034,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
             if (non_gated_experts) {
                 // relu² in-place on up buffer (no memcpy needed)
-                Tensor up_t(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                Tensor up_t(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
                 relu_sqr_inplace(up_t, stream);
             } else {
-                Tensor g(moe_expert_gate_.data, compute_dtype_, 2, act_shape, true);
-                Tensor u(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
-                Tensor a(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                Tensor g(moe_.expert_gate.data, compute_dtype_, 2, act_shape, true);
+                Tensor u(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
+                Tensor a(moe_.expert_swiglu.data, compute_dtype_, 2, act_shape, true);
                 swiglu(g, u, a, stream);
             }
         }
@@ -2051,12 +2051,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
         // Falls through to existing scatter (step 7)
 
-    } else if (nvfp4_moe_cache_.count(ly.expert_up_packed.data) &&
-               nvfp4_moe_cache_.count(ly.expert_down_packed.data) &&
-               (non_gated_experts || nvfp4_moe_cache_.count(ly.expert_gate_packed.data)) &&
-               moe_batch_dequant_buf_ != nullptr &&
-               moe_batch_dequant_buf_size_ >= static_cast<size_t>(ne) * fp16_per_expert &&
-               d_moe_weight_ptrs_ && d_moe_weight_ptrs_count_ >= ne) {
+    } else if (wcache_.nvfp4_moe.count(ly.expert_up_packed.data) &&
+               wcache_.nvfp4_moe.count(ly.expert_down_packed.data) &&
+               (non_gated_experts || wcache_.nvfp4_moe.count(ly.expert_gate_packed.data)) &&
+               moe_.batch_dequant_buf != nullptr &&
+               moe_.batch_dequant_buf_size >= static_cast<size_t>(ne) * fp16_per_expert &&
+               moe_.d_weight_ptrs && moe_.d_weight_ptrs_count >= ne) {
         // =================================================================
         // NVFP4→FP16 BATCH DEQUANT + grouped GEMM (prefill fallback when Q6K freed)
         // Dequants NVFP4 expert weights to FP16, then same grouped GEMM as FP16 batch.
@@ -2070,17 +2070,17 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                         cudaMemcpyDeviceToHost, stream);
         cudaStreamSynchronize(stream);
 
-        char* buf = static_cast<char*>(moe_batch_dequant_buf_);
-        char* gathered_base     = static_cast<char*>(moe_gathered_.data);
-        char* expert_gate_base  = static_cast<char*>(moe_expert_gate_.data);
-        char* expert_up_base    = static_cast<char*>(moe_expert_up_.data);
-        char* expert_swiglu_base= static_cast<char*>(moe_expert_swiglu_.data);
-        char* expert_down_base  = static_cast<char*>(moe_expert_down_.data);
+        char* buf = static_cast<char*>(moe_.batch_dequant_buf);
+        char* gathered_base     = static_cast<char*>(moe_.gathered.data);
+        char* expert_gate_base  = static_cast<char*>(moe_.expert_gate.data);
+        char* expert_up_base    = static_cast<char*>(moe_.expert_up.data);
+        char* expert_swiglu_base= static_cast<char*>(moe_.expert_swiglu.data);
+        char* expert_down_base  = static_cast<char*>(moe_.expert_down.data);
 
         auto nvfp4_batch_dequant_gemm = [&](const void* packed_key,
                                              const char* a_base, char* c_base,
                                              int K_dim, int N_dim) {
-            const auto& nvfp4 = nvfp4_moe_cache_.at(packed_key);
+            const auto& nvfp4 = wcache_.nvfp4_moe.at(packed_key);
             int64_t rows = nvfp4.N;
             int64_t cols = nvfp4.K;
             size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
@@ -2095,7 +2095,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             gemm_moe_batched(a_base, c_base,
                              h_offsets.data(), b_ptrs.data(),
                              K_dim, N_dim, DType::FP16, ne, stream,
-                             d_moe_work_ptrs_);
+                             moe_.d_work_ptrs);
         };
 
         // Gate projection
@@ -2111,12 +2111,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         {
             int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
             if (non_gated_experts) {
-                Tensor up_t(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                Tensor up_t(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
                 relu_sqr_inplace(up_t, stream);
             } else {
-                Tensor g(moe_expert_gate_.data, compute_dtype_, 2, act_shape, true);
-                Tensor u(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
-                Tensor a(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                Tensor g(moe_.expert_gate.data, compute_dtype_, 2, act_shape, true);
+                Tensor u(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
+                Tensor a(moe_.expert_swiglu.data, compute_dtype_, 2, act_shape, true);
                 swiglu(g, u, a, stream);
             }
         }
@@ -2166,10 +2166,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
         // Check dequant buffer is large enough
         size_t dequant_needed = static_cast<size_t>(rows) * cols * sizeof(uint16_t);
-        if (dequant_needed > moe_dequant_buf_size_) {
+        if (dequant_needed > moe_.dequant_buf_size) {
             IMP_LOG_ERROR("dequant_expert: dequant buffer too small! "
                     "need=%zu have=%zu (rows=%ld cols=%ld)",
-                    dequant_needed, moe_dequant_buf_size_, (long)rows, (long)cols);
+                    dequant_needed, moe_.dequant_buf_size, (long)rows, (long)cols);
             return Tensor();
         }
 
@@ -2181,10 +2181,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 ExpertCacheKey ck{packed.data, expert_idx};
                 void* cached = expert_cache_.get_or_load(ck, host_ptr, expert_raw, stream);
                 src = static_cast<const char*>(cached);
-            } else if (moe_raw_staging_buf_) {
-                cudaMemcpyAsync(moe_raw_staging_buf_, host_ptr, expert_raw,
+            } else if (moe_.raw_staging_buf) {
+                cudaMemcpyAsync(moe_.raw_staging_buf, host_ptr, expert_raw,
                                 cudaMemcpyHostToDevice, stream);
-                src = static_cast<const char*>(moe_raw_staging_buf_);
+                src = static_cast<const char*>(moe_.raw_staging_buf);
             } else {
                 IMP_LOG_ERROR("dequant_expert: no staging buffer for host expert %d", expert_idx);
                 return Tensor();
@@ -2193,7 +2193,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             src = static_cast<const char*>(packed.data) + offset;
         }
 
-        char* dst = static_cast<char*>(moe_dequant_buf_);  // always slot 0
+        char* dst = static_cast<char*>(moe_.dequant_buf);  // always slot 0
 
         dequant_gpu(src, dst, qtype, static_cast<int>(rows), static_cast<int>(cols), stream);
 
@@ -2228,10 +2228,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 if (expert_cache_.n_slots_ > 0) {
                     ExpertCacheKey ck{packed.data, eidx};
                     w = expert_cache_.get_or_load(ck, host_ptr, expert_raw, stream);
-                } else if (moe_raw_staging_buf_ && expert_raw <= moe_raw_staging_size_) {
-                    cudaMemcpyAsync(moe_raw_staging_buf_, host_ptr, expert_raw,
+                } else if (moe_.raw_staging_buf && expert_raw <= moe_.raw_staging_size) {
+                    cudaMemcpyAsync(moe_.raw_staging_buf, host_ptr, expert_raw,
                                     cudaMemcpyHostToDevice, stream);
-                    w = moe_raw_staging_buf_;
+                    w = moe_.raw_staging_buf;
                 }
             }
 
@@ -2252,18 +2252,18 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         }
     };
 
-        char* gathered_base     = static_cast<char*>(moe_gathered_.data);
-        char* expert_gate_base  = static_cast<char*>(moe_expert_gate_.data);
-        char* expert_up_base    = static_cast<char*>(moe_expert_up_.data);
-        char* expert_swiglu_base= static_cast<char*>(moe_expert_swiglu_.data);
-        char* expert_down_base  = static_cast<char*>(moe_expert_down_.data);
+        char* gathered_base     = static_cast<char*>(moe_.gathered.data);
+        char* expert_gate_base  = static_cast<char*>(moe_.expert_gate.data);
+        char* expert_up_base    = static_cast<char*>(moe_.expert_up.data);
+        char* expert_swiglu_base= static_cast<char*>(moe_.expert_swiglu.data);
+        char* expert_down_base  = static_cast<char*>(moe_.expert_down.data);
 
         // Helper: get FP16 expert weight pointer from pre-dequant cache or unpacked weights.
         auto get_fp16_expert_ptr = [&](const Tensor& packed, GGMLQuantType qtype,
                                         const std::vector<Tensor>& fallback,
                                         int eidx) -> const void* {
-            if (packed.data && fp16_cache_.count(packed.data)) {
-                const Tensor& cached = fp16_cache_.at(packed.data);
+            if (packed.data && wcache_.fp16.count(packed.data)) {
+                const Tensor& cached = wcache_.fp16.at(packed.data);
                 int64_t rows = packed.shape[1];
                 int64_t cols = packed.shape[2];
                 size_t expert_offset = static_cast<size_t>(eidx) * rows * cols * sizeof(half);
@@ -2290,7 +2290,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             size_t expert_raw_sz = static_cast<size_t>(rows)
                                    * ggml_quant_row_bytes(qtype, cols);
 
-            if (!moe_batch_dequant_buf_ || expert_fp16_sz == 0) {
+            if (!moe_.batch_dequant_buf || expert_fp16_sz == 0) {
                 // No buffer — serial fallback
                 for (int e = 0; e < ne; ++e) {
                     int start = h_offsets[e];
@@ -2310,7 +2310,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             }
 
             const uint8_t* raw_base = static_cast<const uint8_t*>(packed.data);
-            char* buf = static_cast<char*>(moe_batch_dequant_buf_);
+            char* buf = static_cast<char*>(moe_.batch_dequant_buf);
 
             // Dequant all experts in one batch, then single GEMM.
             // With pp=512 and top_k=8, nearly all 128 experts are active, so
@@ -2329,23 +2329,23 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             gemm_moe_batched(a_base, c_base,
                              h_offsets.data(), b_ptrs.data(),
                              K_dim, N_dim, DType::FP16, ne, stream,
-                             d_moe_work_ptrs_);
+                             moe_.d_work_ptrs);
         };
 
         // Determine which path to use:
-        // 1. Pre-cached FP16 path: all experts in fp16_cache_ (fastest, no dequant)
+        // 1. Pre-cached FP16 path: all experts in wcache_.fp16 (fastest, no dequant)
         // 2. Dequant-then-batch path: packed experts on device + batch buffer available
         // 3. Serial path: fallback (one expert at a time)
         // Note: fused Q6K dp4a path is handled above (before the D2H sync).
 
-        bool has_precached_up = (ly.expert_up_packed.data && fp16_cache_.count(ly.expert_up_packed.data));
-        bool can_dequant_batch = (moe_batch_dequant_buf_ != nullptr &&
+        bool has_precached_up = (ly.expert_up_packed.data && wcache_.fp16.count(ly.expert_up_packed.data));
+        bool can_dequant_batch = (moe_.batch_dequant_buf != nullptr &&
                                    ly.expert_up_packed.data != nullptr &&
                                    ly.expert_up_packed.on_device &&
                                    dequant_gpu_supported(ly.expert_up_qtype));
 
         if (has_precached_up) {
-            // Pre-cached FP16 path — all expert packs in fp16_cache_
+            // Pre-cached FP16 path — all expert packs in wcache_.fp16
             // ===== PRE-CACHED FP16 BATCHED GEMM PATH =====
             std::vector<const void*> gate_w_ptrs(ne, nullptr);
             std::vector<const void*> up_w_ptrs(ne, nullptr);
@@ -2364,21 +2364,21 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             if (!non_gated_experts)
                 gemm_moe_batched(gathered_base, expert_gate_base,
                                   h_offsets.data(), gate_w_ptrs.data(),
-                                  d, eff, DType::FP16, ne, stream, d_moe_work_ptrs_);
+                                  d, eff, DType::FP16, ne, stream, moe_.d_work_ptrs);
             gemm_moe_batched(gathered_base, expert_up_base,
                               h_offsets.data(), up_w_ptrs.data(),
-                              d, eff, DType::FP16, ne, stream, d_moe_work_ptrs_);
+                              d, eff, DType::FP16, ne, stream, moe_.d_work_ptrs);
 
             {
                 int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
                 if (non_gated_experts) {
                     // relu² in-place on up buffer (no memcpy needed)
-                    Tensor up_t(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                    Tensor up_t(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
                     relu_sqr_inplace(up_t, stream);
                 } else {
-                    Tensor g(moe_expert_gate_.data, compute_dtype_, 2, act_shape, true);
-                    Tensor u(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
-                    Tensor a(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                    Tensor g(moe_.expert_gate.data, compute_dtype_, 2, act_shape, true);
+                    Tensor u(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
+                    Tensor a(moe_.expert_swiglu.data, compute_dtype_, 2, act_shape, true);
                     swiglu(g, u, a, stream);
                 }
             }
@@ -2387,7 +2387,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 char* batch_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
                 gemm_moe_batched(batch_down_act, expert_down_base,
                                   h_offsets.data(), down_w_ptrs.data(),
-                                  eff, d, DType::FP16, ne, stream, d_moe_work_ptrs_);
+                                  eff, d, DType::FP16, ne, stream, moe_.d_work_ptrs);
             }
 
         } else if (can_dequant_batch) {
@@ -2404,12 +2404,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
                 if (non_gated_experts) {
                     // relu² in-place on up buffer (no memcpy needed)
-                    Tensor up_t(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                    Tensor up_t(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
                     relu_sqr_inplace(up_t, stream);
                 } else {
-                    Tensor g(moe_expert_gate_.data, compute_dtype_, 2, act_shape, true);
-                    Tensor u(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
-                    Tensor a(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                    Tensor g(moe_.expert_gate.data, compute_dtype_, 2, act_shape, true);
+                    Tensor u(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
+                    Tensor a(moe_.expert_swiglu.data, compute_dtype_, 2, act_shape, true);
                     swiglu(g, u, a, stream);
                 }
             }
@@ -2454,12 +2454,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
                 if (non_gated_experts) {
                     // relu² in-place on up buffer (no memcpy needed)
-                    Tensor up_t(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
+                    Tensor up_t(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
                     relu_sqr_inplace(up_t, stream);
                 } else {
-                    Tensor g(moe_expert_gate_.data, compute_dtype_, 2, act_shape, true);
-                    Tensor u(moe_expert_up_.data, compute_dtype_, 2, act_shape, true);
-                    Tensor a(moe_expert_swiglu_.data, compute_dtype_, 2, act_shape, true);
+                    Tensor g(moe_.expert_gate.data, compute_dtype_, 2, act_shape, true);
+                    Tensor u(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
+                    Tensor a(moe_.expert_swiglu.data, compute_dtype_, 2, act_shape, true);
                     swiglu(g, u, a, stream);
                 }
             }
@@ -2500,7 +2500,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             // If no shared expert, also fuse residual add.
             const void* res_ptr = (!has_shared_expert && !residual_fused) ? r.data : nullptr;
             moe_scatter_fused_residual(
-                moe_expert_down_.data, routing.token_to_expanded,
+                moe_.expert_down.data, routing.token_to_expanded,
                 static_cast<const float*>(routing.expert_weights.data),
                 res_ptr, h.data,
                 n, d, top_k, stream);
@@ -2509,9 +2509,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             // Fallback: atomicAdd scatter into FP32 buffer, then convert
             int64_t expert_out_shape[2] = {static_cast<int64_t>(expanded),
                                             static_cast<int64_t>(d)};
-            Tensor expert_down_view(moe_expert_down_.data, compute_dtype_,
+            Tensor expert_down_view(moe_.expert_down.data, compute_dtype_,
                                     2, expert_out_shape, true);
-            Tensor scatter_out = slice_rows(moe_scatter_out_, n);
+            Tensor scatter_out = slice_rows(moe_.scatter_out, n);
             cudaMemsetAsync(scatter_out.data, 0,
                             static_cast<size_t>(n) * d * sizeof(float), stream);
             moe_scatter(expert_down_view, routing, scatter_out, stream);
@@ -2521,11 +2521,11 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             int blocks = static_cast<int>((numel + threads - 1) / threads);
             if (compute_dtype_ == DType::FP16) {
                 fp32_to_fp16_kernel<<<blocks, threads, 0, stream>>>(
-                    static_cast<const float*>(moe_scatter_out_.data),
+                    static_cast<const float*>(moe_.scatter_out.data),
                     static_cast<half*>(h.data),
                     numel);
             } else {
-                cudaMemcpyAsync(h.data, moe_scatter_out_.data,
+                cudaMemcpyAsync(h.data, moe_.scatter_out.data,
                                 static_cast<size_t>(numel) * sizeof(float),
                                 cudaMemcpyDeviceToDevice, stream);
             }
@@ -2541,37 +2541,37 @@ moe_after_experts:
         int eff_shared = static_cast<int>(ly.w_up_shared.shape[0]);
         bool shared_gated = (ly.w_gate_shared.data != nullptr);
 
-        // Reuse moe_expert_gate_, moe_expert_up_, moe_expert_swiglu_ as scratch.
+        // Reuse moe_.expert_gate, moe_.expert_up, moe_.expert_swiglu as scratch.
         int64_t sh_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(eff_shared)};
-        Tensor sh_up(moe_expert_up_.data, compute_dtype_, 2, sh_shape, true);
-        Tensor sh_swiglu(moe_expert_swiglu_.data, compute_dtype_, 2, sh_shape, true);
+        Tensor sh_up(moe_.expert_up.data, compute_dtype_, 2, sh_shape, true);
+        Tensor sh_swiglu(moe_.expert_swiglu.data, compute_dtype_, 2, sh_shape, true);
 
-        // Down projection output: [n, d_model]. Reuse moe_expert_down_.
+        // Down projection output: [n, d_model]. Reuse moe_.expert_down.
         int64_t sh_down_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
-        Tensor sh_down(moe_expert_down_.data, compute_dtype_, 2, sh_down_shape, true);
+        Tensor sh_down(moe_.expert_down.data, compute_dtype_, 2, sh_down_shape, true);
 
         // Up projection (dp4a MMVQ for decode)
         {
-            auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
-            const auto* nvfp4_ptr = (nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &nvfp4_cache_;
-            const auto* ct4_ptr = (cutlass_nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_nvfp4_cache_;
-            const auto* mx4p = (cutlass_mxfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_mxfp4_cache_;
+            auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
+            const auto* nvfp4_ptr = (wcache_.nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.nvfp4;
+            const auto* ct4_ptr = (wcache_.cutlass_nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_nvfp4;
+            const auto* mx4p = (wcache_.cutlass_mxfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_mxfp4;
             gemm_dispatch(no, ly.w_up_shared, Tensor(), ly.w_up_shared_qtype,
-                          sh_up, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                          (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                          d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                          nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                                  mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+                          sh_up, qscratch_.dequant, stream, q8, qscratch_.d8_buf, &wcache_.fp16,
+                          (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
+                          qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                          nvfp4_ptr, ct4_ptr, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
+                                  mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
 
             if (shared_gated) {
                 // Gated: gate + SwiGLU
-                Tensor sh_gate(moe_expert_gate_.data, compute_dtype_, 2, sh_shape, true);
+                Tensor sh_gate(moe_.expert_gate.data, compute_dtype_, 2, sh_shape, true);
                 gemm_dispatch(no, ly.w_gate_shared, Tensor(), ly.w_gate_shared_qtype,
-                              sh_gate, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                              (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                              d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                              nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                                  mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+                              sh_gate, qscratch_.dequant, stream, q8, qscratch_.d8_buf, &wcache_.fp16,
+                              (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
+                              qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                              nvfp4_ptr, ct4_ptr, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
+                                  mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
                 swiglu(sh_gate, sh_up, sh_swiglu, stream);
             } else {
                 // Non-gated: relu^2(up) in-place [Nemotron-H uses squared ReLU]
@@ -2581,11 +2581,11 @@ moe_after_experts:
             // Down projection (reads from sh_up for non-gated since relu² was in-place)
             Tensor& sh_act = shared_gated ? sh_swiglu : sh_up;
             gemm_dispatch(sh_act, ly.w_down_shared, Tensor(), ly.w_down_shared_qtype,
-                          sh_down, dequant_scratch_, stream, q8, d8_buf_, &fp16_cache_,
-                          (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                          d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                          nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                                  mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+                          sh_down, qscratch_.dequant, stream, q8, qscratch_.d8_buf, &wcache_.fp16,
+                          (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
+                          qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                          nvfp4_ptr, ct4_ptr, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
+                                  mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
         }
 
         // Add shared expert output to hidden (which already has routed expert output)
@@ -2599,7 +2599,7 @@ moe_after_experts:
     }
 
     // 10. Free routing result tensors only if allocated by moe_topk_gating.
-    //     When using pre-allocated buffers, memory belongs to moe_routing_buffers_.
+    //     When using pre-allocated buffers, memory belongs to moe_.routing_buffers.
     if (routing.owns_memory) {
         cudaFree(routing.expert_indices.data);
         cudaFree(routing.expert_weights.data);
@@ -2641,15 +2641,15 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
     // 2. ssm_in projection: [n, d_model] @ ssm_in^T -> [n, ssm_in_dim]
     //    ssm_in_dim = inner(z) + conv_channels(xBC) + n_heads(dt)
     Tensor proj = view_tokens(ssm_proj_buf_, n);
-    const auto* nvfp4_ssm_ptr = (nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &nvfp4_cache_;
-    const auto* ct4_ssm_ptr = (cutlass_nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_nvfp4_cache_;
-    const auto* mx4p = (cutlass_mxfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_mxfp4_cache_;
-    gemm_dispatch(no, ly.ssm_in, Tensor(), ly.ssm_in_qtype, proj, dequant_scratch_, stream,
-                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                  d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                  nvfp4_ssm_ptr, ct4_ssm_ptr, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                                  mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+    const auto* nvfp4_ssm_ptr = (wcache_.nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.nvfp4;
+    const auto* ct4_ssm_ptr = (wcache_.cutlass_nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_nvfp4;
+    const auto* mx4p = (wcache_.cutlass_mxfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_mxfp4;
+    gemm_dispatch(no, ly.ssm_in, Tensor(), ly.ssm_in_qtype, proj, qscratch_.dequant, stream,
+                  static_cast<block_q8_1*>(qscratch_.q8_1_buf), qscratch_.d8_buf, &wcache_.fp16,
+                  (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
+                  qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                  nvfp4_ssm_ptr, ct4_ssm_ptr, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
+                                  mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
 
     // 3. Split projection output [n, total_dim] into z, xBC, dt by column slices.
     //    proj layout: each row has [z(inner) | xBC(conv_channels) | dt(n_heads)].
@@ -2829,12 +2829,12 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
 
     // 10. ssm_out projection: [n, inner] @ ssm_out^T -> [n, d_model]
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
-    gemm_dispatch(y_buf, ly.ssm_out, Tensor(), ly.ssm_out_qtype, out_buf, dequant_scratch_, stream,
-                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                  d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                  nvfp4_ssm_ptr, ct4_ssm_ptr, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                                  mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+    gemm_dispatch(y_buf, ly.ssm_out, Tensor(), ly.ssm_out_qtype, out_buf, qscratch_.dequant, stream,
+                  static_cast<block_q8_1*>(qscratch_.q8_1_buf), qscratch_.d8_buf, &wcache_.fp16,
+                  (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
+                  qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                  nvfp4_ssm_ptr, ct4_ssm_ptr, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
+                                  mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
 
     // 11. Residual add: hidden = output + residual
     elementwise_add(out_buf, r, stream);
@@ -2880,15 +2880,15 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     //    ssm_proj_buf_ is [max_tokens, ssm_in_dim] but we only need [n, conv_channels].
     int64_t proj_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(conv_channels)};
     Tensor proj(ssm_proj_buf_.data, compute_dtype_, 2, proj_shape, true);
-    const auto* nvfp4_ptr = (nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &nvfp4_cache_;
-    const auto* ct4_ptr = (cutlass_nvfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_nvfp4_cache_;
-    const auto* mx4p = (cutlass_mxfp4_cache_.empty() || cur_force_fp16_) ? nullptr : &cutlass_mxfp4_cache_;
-    gemm_dispatch(no, ly.ssm_in, Tensor(), ly.ssm_in_qtype, proj, dequant_scratch_, stream,
-                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                  d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                  nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                  mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+    const auto* nvfp4_ptr = (wcache_.nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.nvfp4;
+    const auto* ct4_ptr = (wcache_.cutlass_nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_nvfp4;
+    const auto* mx4p = (wcache_.cutlass_mxfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_mxfp4;
+    gemm_dispatch(no, ly.ssm_in, Tensor(), ly.ssm_in_qtype, proj, qscratch_.dequant, stream,
+                  static_cast<block_q8_1*>(qscratch_.q8_1_buf), qscratch_.d8_buf, &wcache_.fp16,
+                  (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
+                  qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                  nvfp4_ptr, ct4_ptr, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
+                  mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
 
     // 3. Conv1d on full projection output [n, conv_channels]
     int64_t conv_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(conv_channels)};
@@ -2956,13 +2956,13 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
     Tensor gate_out(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
     gemm_dispatch(no, ly.gdn_gate, Tensor(), ly.gdn_gate_qtype, gate_out,
-                  dequant_scratch_, stream,
-                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr,
-                  fp8_act_buf_, d_act_scale_, d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                  nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_,
-                  cutlass_workspace_, cutlass_workspace_size_,
-                  mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+                  qscratch_.dequant, stream,
+                  static_cast<block_q8_1*>(qscratch_.q8_1_buf), qscratch_.d8_buf, &wcache_.fp16,
+                  (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr,
+                  qscratch_.fp8_act, qscratch_.d_act_scale, qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                  nvfp4_ptr, ct4_ptr, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf,
+                  qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
+                  mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
 
     if (h_st) {
         size_t es = dtype_size(compute_dtype_);
@@ -3010,12 +3010,12 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
 
     // 7. ssm_out projection: [n, inner] → [n, d_model]
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
-    gemm_dispatch(y_buf, ly.ssm_out, Tensor(), ly.ssm_out_qtype, out_buf, dequant_scratch_, stream,
-                  static_cast<block_q8_1*>(q8_1_buf_), d8_buf_, &fp16_cache_,
-                  (use_fp8_cache_ && !cur_force_fp16_) ? &fp8_cache_ : nullptr, fp8_act_buf_, d_act_scale_,
-                  d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_,
-                  nvfp4_ptr, ct4_ptr, cutlass_act_data_, cutlass_act_sf_, cutlass_workspace_, cutlass_workspace_size_,
-                  mx4p, mxfp4_act_sf_, mxfp4_workspace_, mxfp4_workspace_size_);
+    gemm_dispatch(y_buf, ly.ssm_out, Tensor(), ly.ssm_out_qtype, out_buf, qscratch_.dequant, stream,
+                  static_cast<block_q8_1*>(qscratch_.q8_1_buf), qscratch_.d8_buf, &wcache_.fp16,
+                  (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
+                  qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
+                  nvfp4_ptr, ct4_ptr, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
+                  mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
 
     // 8. Residual add
     elementwise_add(out_buf, r, stream);
@@ -3231,7 +3231,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     // use fused RMSNorm→Q8_1 + dp4a GEMV with FP32 output. Saves ~2.45x VRAM
     // bandwidth vs cuBLAS FP16 path (reads quantized weights directly).
     const auto out_qtype = model_->out_proj_qtype_;
-    const bool use_dp4a_lm = q8_1_buf_ && compute_dtype_ == DType::FP16 &&
+    const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == DType::FP16 &&
         (out_qtype == GGMLQuantType::Q6_K || out_qtype == GGMLQuantType::Q8_0 ||
          out_qtype == GGMLQuantType::Q4_0 || out_qtype == GGMLQuantType::Q4_K ||
          out_qtype == GGMLQuantType::Q5_K || out_qtype == GGMLQuantType::Q2_K ||
@@ -3241,8 +3241,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         Tensor h_last = view_tokens(hidden_, n).slice(n - 1, n);
         Tensor lg = view_tokens(logits_, 1);
 
-        auto nvfp4_lm_pf = nvfp4_cache_.find(model_->output_proj().data);
-        if (nvfp4_lm_pf != nvfp4_cache_.end()) {
+        auto nvfp4_lm_pf = wcache_.nvfp4.find(model_->output_proj().data);
+        if (nvfp4_lm_pf != wcache_.nvfp4.end()) {
             Tensor no_last = view_tokens(norm_out_, 1);
             rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
             debug_tensor_stats("after_final_rmsnorm", no_last, stream);
@@ -3256,31 +3256,31 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
                 debug_tensor_stats("after_final_rmsnorm", no_last, stream);
             }
-            auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
+            auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
             rmsnorm_quantize_q8_1(
                 static_cast<const half*>(h_last.data),
                 static_cast<const half*>(model_->output_norm().data),
-                q8, d8_buf_, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
+                q8, qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
             if (out_qtype == GGMLQuantType::Q6_K)
-                gemv_q6k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                gemv_q6k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else if (out_qtype == GGMLQuantType::Q4_0)
-                gemv_q4_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                gemv_q4_0_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else if (out_qtype == GGMLQuantType::Q4_K)
-                gemv_q4_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                gemv_q4_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else if (out_qtype == GGMLQuantType::Q5_K)
-                gemv_q5_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                gemv_q5_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else if (out_qtype == GGMLQuantType::Q2_K)
-                gemv_q2_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                gemv_q2_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else if (out_qtype == GGMLQuantType::Q3_K)
-                gemv_q3_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                gemv_q3_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else
-                gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         } else {
             Tensor no_last = view_tokens(norm_out_, 1);
@@ -3294,8 +3294,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         Tensor h_final = view_tokens(hidden_, n);
         Tensor lg = view_tokens(logits_, n);
 
-        auto nvfp4_lm = nvfp4_cache_.find(model_->output_proj().data);
-        if (n == 1 && nvfp4_lm != nvfp4_cache_.end()) {
+        auto nvfp4_lm = wcache_.nvfp4.find(model_->output_proj().data);
+        if (n == 1 && nvfp4_lm != wcache_.nvfp4.end()) {
             Tensor no_final = view_tokens(norm_out_, 1);
             rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
             debug_tensor_stats("after_final_rmsnorm", no_final, stream);
@@ -3309,33 +3309,33 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
                 debug_tensor_stats("after_final_rmsnorm", no_final, stream);
             }
-            auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
+            auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
             rmsnorm_quantize_q8_1(
                 static_cast<const half*>(h_final.data),
                 static_cast<const half*>(model_->output_norm().data),
-                q8, d8_buf_, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
+                q8, qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
             if (out_qtype == GGMLQuantType::Q6_K)
-                gemv_q6k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                gemv_q6k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else if (out_qtype == GGMLQuantType::Q4_0)
-                gemv_q4_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                gemv_q4_0_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else if (out_qtype == GGMLQuantType::Q4_K)
-                gemv_q4_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                gemv_q4_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else if (out_qtype == GGMLQuantType::Q5_K)
-                gemv_q5_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                gemv_q5_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else if (out_qtype == GGMLQuantType::Q2_K)
-                gemv_q2_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                gemv_q2_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else if (out_qtype == GGMLQuantType::Q3_K)
-                gemv_q3_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                gemv_q3_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             else
-                gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                     static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-        } else if (n > 1 && nvfp4_lm != nvfp4_cache_.end()) {
+        } else if (n > 1 && nvfp4_lm != wcache_.nvfp4.end()) {
             // Per-row NVFP4 GEMV LM head for batched decode.
             // NVFP4 GEMV is M=1 only — loop over rows.
             Tensor no_row = view_tokens(norm_out_, 1);
@@ -3352,13 +3352,13 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             // Per-row Q8_1 GEMV LM head for batched decode.
             // Quantized weights (Q8_0/Q6_K) can't be passed to cuBLAS directly.
             // Check if FP16 cache has the output projection — use cuBLAS GEMM if so.
-            if (fp16_cache_.count(model_->output_proj().data)) {
+            if (wcache_.fp16.count(model_->output_proj().data)) {
                 Tensor no_final = view_tokens(norm_out_, n);
                 rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
-                gemm(no_final, fp16_cache_.at(model_->output_proj().data), lg, 1.0f, 0.0f, stream);
+                gemm(no_final, wcache_.fp16.at(model_->output_proj().data), lg, 1.0f, 0.0f, stream);
                 goto lm_head_done;
             }
-            auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
+            auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
             for (int row = 0; row < n; ++row) {
                 Tensor h_row = h_final.slice(row, row + 1);
                 Tensor lg_row = lg.slice(row, row + 1);
@@ -3368,27 +3368,27 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 rmsnorm_quantize_q8_1(
                     static_cast<const half*>(h_row.data),
                     static_cast<const half*>(model_->output_norm().data),
-                    q8, d8_buf_, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
+                    q8, qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
                 if (out_qtype == GGMLQuantType::Q6_K)
-                    gemv_q6k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                    gemv_q6k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                        static_cast<float*>(lg_1d.data), cfg.vocab_size, cfg.d_model, stream);
                 else if (out_qtype == GGMLQuantType::Q4_0)
-                    gemv_q4_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                    gemv_q4_0_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                         static_cast<float*>(lg_1d.data), cfg.vocab_size, cfg.d_model, stream);
                 else if (out_qtype == GGMLQuantType::Q4_K)
-                    gemv_q4_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                    gemv_q4_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                         static_cast<float*>(lg_1d.data), cfg.vocab_size, cfg.d_model, stream);
                 else if (out_qtype == GGMLQuantType::Q5_K)
-                    gemv_q5_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                    gemv_q5_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                         static_cast<float*>(lg_1d.data), cfg.vocab_size, cfg.d_model, stream);
                 else if (out_qtype == GGMLQuantType::Q2_K)
-                    gemv_q2_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                    gemv_q2_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                         static_cast<float*>(lg_1d.data), cfg.vocab_size, cfg.d_model, stream);
                 else if (out_qtype == GGMLQuantType::Q3_K)
-                    gemv_q3_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                    gemv_q3_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                         static_cast<float*>(lg_1d.data), cfg.vocab_size, cfg.d_model, stream);
                 else
-                    gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+                    gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                         static_cast<float*>(lg_1d.data), cfg.vocab_size, cfg.d_model, stream);
             }
         } else {
@@ -3398,15 +3398,15 @@ void GraphExecutor::forward_logits(const InferenceState& state,
 
             // For n>1 decode with quantized output weights, use FP8 GEMM or FP16 cache.
             // Raw gemm() can't handle Q8_0/Q6_K weights with cuBLAS.
-            auto fp8_lm = fp8_cache_.find(model_->output_proj().data);
-            if (fp8_lm != fp8_cache_.end() && fp8_act_buf_ != nullptr && d_act_scale_ != nullptr) {
-                Tensor fp8_no(fp8_act_buf_, DType::FP8_E4M3, no_final.ndim, no_final.shape, true);
-                quantize_fp16_to_fp8_e4m3(no_final, fp8_no, d_act_scale_, stream,
-                                          d_fp8_block_maxes_, d_fp8_absmax_, fp8_max_grid_);
+            auto fp8_lm = wcache_.fp8.find(model_->output_proj().data);
+            if (fp8_lm != wcache_.fp8.end() && qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
+                Tensor fp8_no(qscratch_.fp8_act, DType::FP8_E4M3, no_final.ndim, no_final.shape, true);
+                quantize_fp16_to_fp8_e4m3(no_final, fp8_no, qscratch_.d_act_scale, stream,
+                                          qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
                 gemm_cublaslt(fp8_no, fp8_lm->second.weight, lg, 1.0f, 0.0f,
-                              d_act_scale_, fp8_lm->second.d_scale, stream);
-            } else if (fp16_cache_.count(model_->output_proj().data)) {
-                gemm(no_final, fp16_cache_.at(model_->output_proj().data), lg, 1.0f, 0.0f, stream);
+                              qscratch_.d_act_scale, fp8_lm->second.d_scale, stream);
+            } else if (wcache_.fp16.count(model_->output_proj().data)) {
+                gemm(no_final, wcache_.fp16.at(model_->output_proj().data), lg, 1.0f, 0.0f, stream);
             } else {
                 gemm(no_final, model_->output_proj(), lg, 1.0f, 0.0f, stream);
             }

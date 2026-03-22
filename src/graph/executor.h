@@ -11,6 +11,9 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "core/tensor.h"
+#include "graph/weight_cache_manager.h"
+#include "graph/moe_workspace.h"
+#include "graph/quant_scratch.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <vector>
@@ -203,13 +206,6 @@ struct InferenceState {
 // efficiency. No graph walking is done at runtime.
 class GraphExecutor {
 public:
-    // FP8 weight cache entry (public for use by static gemm_dispatch)
-    struct FP8CacheEntry {
-        Tensor weight;       // [N, K] FP8_E4M3 on device
-        float host_scale;    // absmax / 448
-        float* d_scale;      // device-side scale (1 float, for gemm_cublaslt bScale)
-    };
-
     GraphExecutor() = default;
     ~GraphExecutor();
 
@@ -386,15 +382,8 @@ private:
     Tensor swiglu_out_;    // [max_tokens, d_ff]
     Tensor ffn_out_;       // [max_tokens, d_model]
 
-    // MoE phase tensors (views into shared_workspace_, set by configure_moe_workspace)
-    MoeRoutingBuffers moe_routing_buffers_;
-    Tensor moe_gate_logits_;    // [max_tokens, n_experts] FP32
-    Tensor moe_gathered_;       // [max_tokens * top_k, d_model] compute_dtype
-    Tensor moe_expert_gate_;    // [max_tokens * top_k, expert_d_ff] compute_dtype
-    Tensor moe_expert_up_;      // [max_tokens * top_k, expert_d_ff] compute_dtype
-    Tensor moe_expert_swiglu_;  // [max_tokens * top_k, expert_d_ff] compute_dtype
-    Tensor moe_expert_down_;    // [max_tokens * top_k, d_model] compute_dtype
-    Tensor moe_scatter_out_;    // [max_tokens, d_model] FP32 (scatter output)
+    // MoE workspace (phase tensors + separately allocated buffers)
+    MoEWorkspace moe_;
 
     // SSM phase tensors (views into shared_workspace_, set by configure_ssm_workspace)
     Tensor ssm_proj_buf_;   // [max_tokens, ssm_in_dim] for ssm_in projection
@@ -406,121 +395,15 @@ private:
 
     // --- Separately allocated buffers (not part of unified workspace) ---
 
-    // On-the-fly dequant scratch buffer for quantized expert weights (1 expert).
-    void* moe_dequant_buf_ = nullptr;
-    size_t moe_dequant_buf_size_ = 0;
-
-    // Batch dequant buffer for MoE prefill: holds a chunk of experts' weights
-    // dequanted to FP16. Sized for L2-resident chunked processing: dequant a
-    // chunk of experts, then immediately GEMM while FP16 data is still in L2.
-    void* moe_batch_dequant_buf_ = nullptr;
-    size_t moe_batch_dequant_buf_size_ = 0;
-
-    // Pre-allocated device pointer array for batched MoE GEMM (avoids per-call cudaMallocAsync).
-    // Layout: [A_ptrs..., B_ptrs..., C_ptrs...] = 3 * n_experts void pointers.
-    void** d_moe_work_ptrs_ = nullptr;
-    int d_moe_work_ptrs_count_ = 0;  // n_experts used for allocation
-
-    // Per-expert FP8 scale buffer: [n_experts] floats on device.
-    // Used by calibrate_fp8_scales_per_expert() for dynamic per-expert scaling.
-    float* d_moe_fp8_scales_ = nullptr;
-
-    // Device-side weight pointer array for device-grouped GEMM.
-    // Eliminates host sync by keeping weight pointers on GPU.
-    // Stored as void** for easy cudaMemcpy; cast to const void** at call sites.
-    void** d_moe_weight_ptrs_ = nullptr;
-    int d_moe_weight_ptrs_count_ = 0;
-
-    // GPU staging buffer for one expert's raw quantized bytes (H2D copy).
-    // Used as fallback when expert_cache_ is not available.
-    void* moe_raw_staging_buf_ = nullptr;
-    size_t moe_raw_staging_size_ = 0;
-
     // LRU cache for host-resident expert weights on GPU.
     // Keeps recently-used experts in VRAM to avoid repeated H2D copies.
     ExpertLRUCache expert_cache_;
 
-    // On-the-fly dequant scratch buffer for non-MoE quantized weights (Q8_0/Q6_K).
-    void* dequant_scratch_ = nullptr;
-    size_t dequant_scratch_size_ = 0;
+    // Weight caches (FP16, FP8, NVFP4, CUTLASS NVFP4/MXFP4, fused KV/gate+up)
+    WeightCacheManager wcache_;
 
-    // Pre-dequantized FP16 weight cache for prefill GEMM (avoids per-layer dequant overhead).
-    // Maps raw quantized weight pointer -> pre-dequanted FP16 Tensor on GPU.
-    // Populated at init time; decode still uses dp4a GEMV on raw quantized weights.
-    std::unordered_map<const void*, Tensor> fp16_cache_;
-    size_t fp16_cache_bytes_ = 0;  // total VRAM used by FP16 cache
-
-    // FP8 E4M3 weight cache for prefill GEMM (2x compute throughput on sm_120).
-    // When use_fp8_cache_ is set, weights are cached as FP8 instead of FP16.
-    std::unordered_map<const void*, FP8CacheEntry> fp8_cache_;
-    size_t fp8_cache_bytes_ = 0;
-    bool use_fp8_cache_ = false;
-    float* fp8_migrated_scales_ = nullptr;  // bulk-allocated d_scale buffer for FP16→FP8 migration
-    int fp8_migrated_count_ = 0;            // number of entries in fp8_migrated_scales_
-    void* fp8_migrated_data_ = nullptr;     // bulk-allocated FP8 data buffer for migration
-    size_t fp8_migrated_data_size_ = 0;
-    float* fp8_overflow_scales_ = nullptr;  // bulk-allocated d_scale buffer for FP8 overflow cache
-    int fp8_overflow_count_ = 0;            // number of entries in fp8_overflow_scales_
-    void* fp8_overflow_data_ = nullptr;     // bulk-allocated FP8 data buffer for overflow
-    size_t fp8_overflow_data_size_ = 0;
-
-    // Scratch buffers for FP8 activation quantization (allocated once, reused per GEMM)
-    void* fp8_act_buf_ = nullptr;       // max_tokens * max_dim bytes
-    size_t fp8_act_buf_size_ = 0;
-    float* d_act_scale_ = nullptr;      // 1 float on device
-    float* d_fp8_block_maxes_ = nullptr; // pre-allocated reduction buffer
-    float* d_fp8_absmax_ = nullptr;      // pre-allocated absmax scalar
-    int fp8_max_grid_ = 0;              // max grid size for reduction
-
-    // NVFP4 decode weight cache: quantized from FP16 cache at init.
-    // Provides 31-47% bandwidth reduction vs raw Q8_0/Q6_K during decode GEMV.
-    // Mode: 0=off, 1=additive (FP16 + NVFP4), 2=only (NVFP4 replaces FP16)
-    std::unordered_map<const void*, NvFP4QuantResult> nvfp4_cache_;
-    size_t nvfp4_cache_bytes_ = 0;
-    int use_nvfp4_decode_ = 0;
-
-    // NVFP4 MoE expert weight cache: per-expert NVFP4 quantization.
-    // Keyed by packed expert tensor data pointer (expert_gate_packed.data etc.)
-    std::unordered_map<const void*, NvFP4MoEQuantResult> nvfp4_moe_cache_;
-    size_t nvfp4_moe_cache_bytes_ = 0;
-
-    // CUTLASS sm_120 block-scaled NVFP4 weight cache for native FP4 prefill GEMM.
-    // Keyed by original weight data pointer (same as nvfp4_cache_).
-    // Populated after NVFP4 quantization if sm_120 is available.
-    std::unordered_map<const void*, CutlassNvFP4Weight> cutlass_nvfp4_cache_;
-    size_t cutlass_nvfp4_cache_bytes_ = 0;
-
-    // Pre-allocated activation buffers for CUTLASS NVFP4 prefill.
-    void* cutlass_act_data_ = nullptr;     // [max_tokens, max_K/2] packed FP4
-    void* cutlass_act_sf_ = nullptr;       // SfAtom scale factors (NVFP4: UE4M3)
-    size_t cutlass_act_data_size_ = 0;
-    size_t cutlass_act_sf_size_ = 0;
-    void* cutlass_workspace_ = nullptr;    // CUTLASS GEMM workspace
-    size_t cutlass_workspace_size_ = 0;
-
-    // CUTLASS sm_120 MXFP4 weight cache (alternative to NVFP4 CUTLASS path).
-    // MXFP4 uses UE8M0 scales per 32 elements (vs NVFP4 UE4M3 per 16).
-    // Same packed FP4 data (borrowed), only scale factors differ.
-    std::unordered_map<const void*, CutlassMxFP4Weight> cutlass_mxfp4_cache_;
-    size_t cutlass_mxfp4_cache_bytes_ = 0;
-    bool use_mxfp4_prefill_ = false;
-
-    // MXFP4 activation buffers (SfAtom UE8M0 scales, SFVecSize=32).
-    // Packed data shares cutlass_act_data_ (same FP4 nibble format).
-    void* mxfp4_act_sf_ = nullptr;        // SfAtom UE8M0 scale factors
-    size_t mxfp4_act_sf_size_ = 0;
-    void* mxfp4_workspace_ = nullptr;     // MXFP4 GEMM workspace
-    size_t mxfp4_workspace_size_ = 0;
-
-    // Fused KV weight cache: concatenated [wk; wv] as [2*nkv*hd, d_model] FP16.
-    // Enables strided batched GEMM for K+V in a single cuBLAS call during prefill.
-    // Key = layer index. Only populated for layers where both wk/wv are FP16-cached.
-    std::unordered_map<int, Tensor> fused_kv_cache_;
-
-    // Fused gate+up weight cache: concatenated [w_gate; w_up] as [2*d_ff, d_model] FP16.
-    // Enables strided batched GEMM for gate+up in a single cuBLAS call during prefill.
-    // Key = layer index. Only populated for layers where both w_gate/w_up are FP16-cached.
-    std::unordered_map<int, Tensor> fused_gate_up_cache_;
+    // Quantization scratch buffers (FP8 act, CUTLASS act, dp4a, dequant, split-K)
+    QuantScratch qscratch_;
 
     // Pre-allocated sampling result buffers (avoids cudaMalloc/cudaFree per token).
     int32_t* d_sample_result_ = nullptr;  // device buffer for argmax/sample kernel output
@@ -529,17 +412,6 @@ private:
     // Pinned host buffer for logprobs extraction (D2H copy of logits)
     float* h_logits_pinned_ = nullptr;  // [vocab_size] pinned host memory
     int h_logits_pinned_size_ = 0;      // vocab_size used for allocation
-
-    // MMVQ (dp4a) scratch buffers for quantized input vector.
-    // Allocated once during init, reused each layer for decode GEMV.
-    void* q8_1_buf_ = nullptr;   // block_q8_1 array, size = max_dim / 32 * sizeof(block_q8_1)
-    float* d8_buf_ = nullptr;    // float scale array, size = max_dim / 32 * sizeof(float)
-    int q8_1_max_blocks_ = 0;    // max K/32 across all weight matrices
-
-    // Split-K paged attention scratch buffer.
-    // Holds partial softmax states: [batch * n_heads * max_splits * (2 + head_dim)] floats.
-    void* splitk_scratch_ = nullptr;
-    size_t splitk_scratch_size_ = 0;
 
     // --- Layer index mappings ---
 

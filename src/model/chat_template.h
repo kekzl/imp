@@ -43,14 +43,17 @@ public:
     bool init(ChatTemplateFamily family, const Tokenizer& tokenizer);
 
     // Build token ID vector: special tokens as raw IDs, text segments encoded
+    // suppress_thinking: inject /no_think for Qwen3 models to prevent thinking
     std::vector<int32_t> apply(const Tokenizer& tok,
-                               const std::vector<ChatMessage>& messages) const;
+                               const std::vector<ChatMessage>& messages,
+                               bool suppress_thinking = false) const;
 
     // Build token ID vector with image tokens inserted before the first user message.
     // Produces: <boi> <img_soft_token>*n_image_tokens <eoi> \n {text}
     std::vector<int32_t> apply_with_image(const Tokenizer& tok,
                                            const std::vector<ChatMessage>& messages,
-                                           int n_image_tokens) const;
+                                           int n_image_tokens,
+                                           bool suppress_thinking = false) const;
 
     const std::vector<int32_t>& stop_token_ids() const { return stop_token_ids_; }
     ChatTemplateFamily family() const { return family_; }
@@ -103,7 +106,8 @@ private:
 
     // Template-specific apply methods
     std::vector<int32_t> apply_chatml(const Tokenizer& tok,
-                                       const std::vector<ChatMessage>& msgs) const;
+                                       const std::vector<ChatMessage>& msgs,
+                                       bool suppress_thinking = false) const;
     std::vector<int32_t> apply_llama3(const Tokenizer& tok,
                                        const std::vector<ChatMessage>& msgs) const;
     std::vector<int32_t> apply_llama2(const Tokenizer& tok,
