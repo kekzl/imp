@@ -1,7 +1,7 @@
 #pragma once
 
 #include "graph/op.h"
-#include "model/model.h"
+#include "model/model_config.h"  // ModelConfig
 #include <vector>
 #include <string>
 

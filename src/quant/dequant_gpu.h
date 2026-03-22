@@ -1,6 +1,6 @@
 #pragma once
 
-#include "model/model.h"  // GGMLQuantType
+#include "model/model_config.h"  // GGMLQuantType
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstddef>

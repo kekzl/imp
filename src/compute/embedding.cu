@@ -1,5 +1,5 @@
 #include "compute/embedding.h"
-#include "model/model.h"  // GGMLQuantType
+#include "model/model_config.h"  // GGMLQuantType
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
