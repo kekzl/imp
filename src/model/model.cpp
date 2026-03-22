@@ -98,7 +98,15 @@ ModelArch parse_model_arch(const std::string& s) {
 
 void apply_arch_defaults(ModelConfig& cfg) {
     switch (cfg.arch) {
+        case ModelArch::LLAMA:
+        case ModelArch::LLAMA4:
+        case ModelArch::MISTRAL:
+        case ModelArch::MIXTRAL:
+            // LLaMA/Mistral use interleaved RoPE (2i, 2i+1), not NeoX split (i, i+d/2)
+            cfg.rope_neox = false;
+            break;
         case ModelArch::GEMMA3:
+            // Gemma-3 uses NeoX/split RoPE (default rope_neox=true is correct)
             cfg.embed_scale = std::sqrt(static_cast<float>(cfg.d_model));
             cfg.ffn_activation = FFNActivation::GEGLU;
             cfg.norm_placement = NormPlacement::POST_NORM;
