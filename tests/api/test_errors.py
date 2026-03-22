@@ -102,6 +102,22 @@ class TestParameterValidation:
         assert r.status_code == 200
 
 
+class TestModelField:
+    def test_missing_model_field(self, client):
+        r = client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "Hi"}],
+        })
+        assert r.status_code == 400
+        assert "model" in r.json()["error"]["message"].lower()
+
+    def test_missing_model_completions(self, client):
+        r = client.post("/v1/completions", json={
+            "prompt": "Hello",
+        })
+        assert r.status_code == 400
+        assert "model" in r.json()["error"]["message"].lower()
+
+
 class TestUnknownModel:
     def test_chat_completions_unknown_model(self, client):
         r = client.post("/v1/chat/completions", json={
