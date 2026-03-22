@@ -1,4 +1,5 @@
 #include "runtime/batch.h"
+#include "memory/vram_allocator.h"
 #include <algorithm>
 #include <cstring>
 
@@ -142,8 +143,10 @@ GPUBatchPool::~GPUBatchPool() {
     free_pool();
 }
 
-void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq) {
+void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq,
+                            VRAMAllocator* alloc) {
     free_pool();
+    alloc_ = alloc;
 
     max_batch_size_ = max_batch_size;
     max_blocks_per_seq_ = max_blocks_per_seq;
@@ -163,9 +166,13 @@ void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq) {
     pool_size_ = token_ids_sz + positions_sz + seq_offsets_sz +
                  block_tab_sz + ctx_lens_sz + sample_res_sz;
 
-    cudaError_t err = cudaMalloc(&pool_, pool_size_);
-    if (err != cudaSuccess) {
-        pool_ = nullptr;
+    if (alloc_) {
+        pool_ = alloc_->allocate(pool_size_, "batch_pool");
+    } else {
+        cudaError_t err = cudaMalloc(&pool_, pool_size_);
+        if (err != cudaSuccess) pool_ = nullptr;
+    }
+    if (!pool_) {
         pool_size_ = 0;
         return;
     }
@@ -235,7 +242,8 @@ GPUBatch GPUBatchPool::upload_into_pool(const Batch& batch, cudaStream_t stream)
 
 void GPUBatchPool::free_pool() {
     if (pool_) {
-        cudaFree(pool_);
+        if (alloc_) alloc_->free(pool_);
+        else cudaFree(pool_);
         pool_ = nullptr;
     }
     pool_size_ = 0;

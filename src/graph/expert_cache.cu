@@ -1,13 +1,16 @@
 #include "executor.h"
+#include "memory/vram_allocator.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <algorithm>
 
 namespace imp {
 
-bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes) {
+bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes,
+                          VRAMAllocator* alloc) {
     if (max_expert_raw == 0 || budget_bytes == 0) return false;
 
+    alloc_ = alloc;
     slot_size_ = max_expert_raw;
     n_slots_ = static_cast<int>(budget_bytes / slot_size_);
     if (n_slots_ < 2) {
@@ -18,11 +21,15 @@ bool ExpertLRUCache::init(size_t max_expert_raw, size_t budget_bytes) {
     }
 
     size_t total = static_cast<size_t>(n_slots_) * slot_size_;
-    cudaError_t err = cudaMalloc(&pool_, total);
-    if (err != cudaSuccess) {
-        IMP_LOG_WARN("Expert LRU cache: cudaMalloc failed for %zu bytes (%d slots): %s",
-                     total, n_slots_, cudaGetErrorString(err));
-        pool_ = nullptr;
+    if (alloc_) {
+        pool_ = alloc_->allocate(total, "expert_cache");
+    } else {
+        cudaError_t err = cudaMalloc(&pool_, total);
+        if (err != cudaSuccess) pool_ = nullptr;
+    }
+    if (!pool_) {
+        IMP_LOG_WARN("Expert LRU cache: allocation failed for %zu bytes (%d slots)",
+                     total, n_slots_);
         n_slots_ = 0;
         return false;
     }
@@ -106,7 +113,8 @@ void ExpertLRUCache::destroy() {
             IMP_LOG_INFO("Expert LRU cache stats: %ld hits, %ld misses (%.1f%% hit rate)",
                          (long)hits_, (long)misses_, hit_rate() * 100.0f);
         }
-        cudaFree(pool_);
+        if (alloc_) alloc_->free(pool_);
+        else cudaFree(pool_);
         pool_ = nullptr;
     }
     slots_.clear();

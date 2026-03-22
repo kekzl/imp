@@ -1,4 +1,5 @@
 #include "memory/ssm_state.h"
+#include "memory/vram_allocator.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 
@@ -6,7 +7,8 @@ namespace imp {
 
 SSMState::~SSMState() {
     if (pool_) {
-        cudaFree(pool_);
+        if (alloc_) alloc_->free(pool_);
+        else cudaFree(pool_);
         pool_ = nullptr;
     }
 }
@@ -14,10 +16,11 @@ SSMState::~SSMState() {
 bool SSMState::init(int n_ssm_layers, int max_sequences,
                     int conv_channels, int conv_kernel,
                     int n_heads, int head_dim_ssm, int state_size,
-                    DType h_dtype) {
+                    DType h_dtype, VRAMAllocator* alloc) {
     n_ssm_layers_ = n_ssm_layers;
     max_sequences_ = max_sequences;
     h_dtype_ = h_dtype;
+    alloc_ = alloc;
 
     // conv_state is always FP32 (small, needs precision)
     // h_state uses h_dtype (FP32 or FP16)
@@ -33,11 +36,14 @@ bool SSMState::init(int n_ssm_layers, int max_sequences,
     per_seq_bytes_ = per_layer_bytes_ * n_ssm_layers_;
     total_bytes_ = per_seq_bytes_ * max_sequences_;
 
-    cudaError_t err = cudaMalloc(&pool_, total_bytes_);
-    if (err != cudaSuccess) {
-        IMP_LOG_ERROR("Failed to allocate SSM state pool (%zu bytes): %s",
-                      total_bytes_, cudaGetErrorString(err));
-        pool_ = nullptr;
+    if (alloc_) {
+        pool_ = alloc_->allocate(total_bytes_, "ssm_state");
+    } else {
+        cudaError_t err = cudaMalloc(&pool_, total_bytes_);
+        if (err != cudaSuccess) pool_ = nullptr;
+    }
+    if (!pool_) {
+        IMP_LOG_ERROR("Failed to allocate SSM state pool (%zu bytes)", total_bytes_);
         return false;
     }
 

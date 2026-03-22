@@ -1,4 +1,5 @@
 #include "memory/gdn_state.h"
+#include "memory/vram_allocator.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 
@@ -6,18 +7,21 @@ namespace imp {
 
 GDNState::~GDNState() {
     if (pool_) {
-        cudaFree(pool_);
+        if (alloc_) alloc_->free(pool_);
+        else cudaFree(pool_);
         pool_ = nullptr;
     }
 }
 
 bool GDNState::init(int n_gdn_layers, int max_sequences,
-                    int n_heads, int head_dim, int state_dim) {
+                    int n_heads, int head_dim, int state_dim,
+                    VRAMAllocator* alloc) {
     n_gdn_layers_ = n_gdn_layers;
     max_sequences_ = max_sequences;
     n_heads_ = n_heads;
     head_dim_ = head_dim;
     state_dim_ = state_dim;
+    alloc_ = alloc;
 
     // State S[n_heads, head_dim, state_dim] in FP32
     auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
@@ -26,11 +30,14 @@ bool GDNState::init(int n_gdn_layers, int max_sequences,
     per_seq_bytes_ = per_layer_bytes_ * n_gdn_layers;
     total_bytes_ = per_seq_bytes_ * max_sequences;
 
-    cudaError_t err = cudaMalloc(&pool_, total_bytes_);
-    if (err != cudaSuccess) {
-        IMP_LOG_ERROR("Failed to allocate GDN state pool (%zu bytes): %s",
-                      total_bytes_, cudaGetErrorString(err));
-        pool_ = nullptr;
+    if (alloc_) {
+        pool_ = alloc_->allocate(total_bytes_, "gdn_state");
+    } else {
+        cudaError_t err = cudaMalloc(&pool_, total_bytes_);
+        if (err != cudaSuccess) pool_ = nullptr;
+    }
+    if (!pool_) {
+        IMP_LOG_ERROR("Failed to allocate GDN state pool (%zu bytes)", total_bytes_);
         return false;
     }
 

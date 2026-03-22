@@ -1,4 +1,5 @@
 #include "vision/vision_encoder.h"
+#include "memory/vram_allocator.h"
 #include "core/logging.h"
 
 #include <cublas_v2.h>
@@ -418,7 +419,13 @@ VisionEncoder::~VisionEncoder() {
 }
 
 void VisionEncoder::free_buffers() {
-    auto safe_free = [](half*& p) { if (p) { cudaFree(p); p = nullptr; } };
+    auto safe_free = [this](half*& p) {
+        if (p) {
+            if (alloc_) alloc_->free(p);
+            else cudaFree(p);
+            p = nullptr;
+        }
+    };
     safe_free(d_patches_);
     safe_free(d_hidden_);
     safe_free(d_residual_);
@@ -431,9 +438,11 @@ void VisionEncoder::free_buffers() {
     safe_free(d_pooled_);
 }
 
-bool VisionEncoder::init(const VisionModel& model, int lm_d_model, cudaStream_t stream) {
+bool VisionEncoder::init(const VisionModel& model, int lm_d_model, cudaStream_t stream,
+                         VRAMAllocator* alloc_in) {
     model_ = &model;
     lm_d_model_ = lm_d_model;
+    alloc_ = alloc_in;
 
     const auto& cfg = model.config;
     int np = cfg.num_patches;        // 4096
@@ -442,8 +451,13 @@ bool VisionEncoder::init(const VisionModel& model, int lm_d_model, cudaStream_t 
     int nh = cfg.num_heads;          // 16
     int pd = cfg.patch_size * cfg.patch_size * 3;  // 588
 
-    auto alloc = [](half*& ptr, size_t n) -> bool {
-        return cudaMalloc(&ptr, n * sizeof(half)) == cudaSuccess;
+    auto alloc = [this](half*& ptr, size_t n) -> bool {
+        size_t bytes = n * sizeof(half);
+        if (alloc_) {
+            ptr = static_cast<half*>(alloc_->allocate(bytes, "vision_encoder"));
+            return ptr != nullptr;
+        }
+        return cudaMalloc(&ptr, bytes) == cudaSuccess;
     };
 
     if (!alloc(d_patches_, np * pd) ||

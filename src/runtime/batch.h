@@ -7,6 +7,8 @@
 
 namespace imp {
 
+class VRAMAllocator;
+
 // CPU-side batch data (built by BatchBuilder)
 struct Batch {
     std::vector<int32_t> token_ids;     // flattened tokens
@@ -50,7 +52,8 @@ public:
     ~GPUBatchPool();
 
     // Allocate pool for the given max configuration. Call once at init.
-    void allocate(int max_batch_size, int max_blocks_per_seq);
+    void allocate(int max_batch_size, int max_blocks_per_seq,
+                  VRAMAllocator* alloc = nullptr);
 
     // Upload a CPU batch into the pre-allocated pool (async).
     // Returns a GPUBatch with pointers into the pool (caller must NOT free them).
@@ -67,6 +70,7 @@ public:
     int32_t* d_sample_result() const { return d_sample_result_; }
 
 private:
+    VRAMAllocator* alloc_ = nullptr;
     void* pool_ = nullptr;
     size_t pool_size_ = 0;
 

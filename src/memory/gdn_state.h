@@ -5,6 +5,8 @@
 
 namespace imp {
 
+class VRAMAllocator;
+
 // Manages per-sequence, per-GDN-layer recurrent state for Gated DeltaNet.
 // State per (sequence, layer): S[n_heads, head_dim, state_dim] in FP32.
 // The delta rule updates S incrementally: S = α*S + β*(v - S^T k)⊗k.
@@ -19,7 +21,8 @@ public:
     // head_dim: dimension per head (= ssm_inner_size / n_heads)
     // state_dim: state matrix second dimension (= ssm_state_size from GGUF)
     bool init(int n_gdn_layers, int max_sequences,
-              int n_heads, int head_dim, int state_dim);
+              int n_heads, int head_dim, int state_dim,
+              VRAMAllocator* alloc = nullptr);
 
     // Get pointer to S state for a given sequence and GDN layer.
     // Returns float* of shape [n_heads, head_dim, state_dim].
@@ -35,6 +38,7 @@ public:
     int state_dim() const { return state_dim_; }
 
 private:
+    VRAMAllocator* alloc_ = nullptr;
     void* pool_ = nullptr;
     int n_gdn_layers_ = 0;
     int max_sequences_ = 0;

@@ -65,9 +65,12 @@ struct ExpertLRUCache {
     int64_t hits_ = 0;
     int64_t misses_ = 0;
 
+    VRAMAllocator* alloc_ = nullptr;
+
     // Initialize: allocate n_slots * slot_size bytes on GPU.
     // Returns false if GPU allocation fails (cache disabled).
-    bool init(size_t max_expert_raw, size_t budget_bytes);
+    bool init(size_t max_expert_raw, size_t budget_bytes,
+              VRAMAllocator* alloc = nullptr);
 
     // Lookup or insert an expert. Returns GPU pointer to cached expert data.
     // If cache miss: copies from host, evicts LRU entry if needed.

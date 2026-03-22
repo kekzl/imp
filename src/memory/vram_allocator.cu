@@ -82,6 +82,12 @@ void VRAMAllocator::free(void* ptr) {
 bool VRAMAllocator::can_allocate(size_t bytes) const {
     if (!initialized_) return true;
 
+    // Small allocations (<16 MiB) always allowed — these are essential
+    // runtime buffers (batch pool, penalty tokens, etc.) that must succeed.
+    // Headroom enforcement targets large allocations (weight caches, KV cache).
+    constexpr size_t kSmallAllocThreshold = 16ULL * 1024 * 1024;
+    if (bytes < kSmallAllocThreshold) return true;
+
     // Check against actual free VRAM (not just our tracking)
     // to account for external allocations (driver, other processes).
     size_t free_mem = 0, total = 0;

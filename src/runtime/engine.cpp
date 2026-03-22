@@ -37,15 +37,15 @@ Engine::~Engine() {
         async_d_block_tables_ = nullptr;
     }
     if (d_penalty_tokens_) {
-        cudaFree(d_penalty_tokens_);
+        vram_alloc_.free(d_penalty_tokens_);
         d_penalty_tokens_ = nullptr;
     }
     if (d_vision_embeddings_) {
-        cudaFree(d_vision_embeddings_);
+        vram_alloc_.free(d_vision_embeddings_);
         d_vision_embeddings_ = nullptr;
     }
     if (d_vision_pixels_) {
-        cudaFree(d_vision_pixels_);
+        vram_alloc_.free(d_vision_pixels_);
         d_vision_pixels_ = nullptr;
     }
     if (h_sample_pinned_) {
@@ -625,7 +625,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             if (!ssm_state_->init(n_ssm_layers, config_.max_batch_size,
                                    conv_channels, mcfg.ssm_conv_kernel,
                                    n_heads, head_dim_ssm, mcfg.ssm_state_size,
-                                   config_.ssm_state_dtype)) {
+                                   config_.ssm_state_dtype, &vram_alloc_)) {
                 IMP_LOG_WARN("Failed to init SSM state, continuing without it");
                 ssm_state_.reset();
             }
@@ -661,15 +661,16 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // --- Pre-allocate decode batch pool for stable CUDA Graph pointers ---
     {
         int max_blocks_per_seq = blocks_per_seq;
-        decode_batch_pool_.allocate(config_.max_batch_size, max_blocks_per_seq);
+        decode_batch_pool_.allocate(config_.max_batch_size, max_blocks_per_seq, &vram_alloc_);
     }
 
     // --- Pre-allocate penalty token buffer to avoid sync cudaMalloc in decode hot path ---
     {
         d_penalty_tokens_capacity_ = static_cast<size_t>(config_.max_seq_len);
-        if (cudaMalloc(&d_penalty_tokens_, d_penalty_tokens_capacity_ * sizeof(int32_t)) != cudaSuccess) {
+        size_t pt_bytes = d_penalty_tokens_capacity_ * sizeof(int32_t);
+        d_penalty_tokens_ = static_cast<int32_t*>(vram_alloc_.allocate(pt_bytes, "penalty_tokens"));
+        if (!d_penalty_tokens_) {
             IMP_LOG_WARN("Failed to pre-allocate penalty token buffer (%zu tokens)", d_penalty_tokens_capacity_);
-            d_penalty_tokens_ = nullptr;
             d_penalty_tokens_capacity_ = 0;
         }
     }
@@ -769,7 +770,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
         int lm_d = vision_model_->lm_d_model > 0 ? vision_model_->lm_d_model : mcfg.d_model;
         vision_encoder_ = std::make_unique<VisionEncoder>();
-        if (!vision_encoder_->init(*vision_model_, lm_d, stream_)) {
+        if (!vision_encoder_->init(*vision_model_, lm_d, stream_, &vram_alloc_)) {
             IMP_LOG_ERROR("Failed to init vision encoder");
             vision_encoder_.reset();
             vision_model_.reset();
@@ -779,7 +780,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // Allocate device buffer for vision embeddings
         int n_img_tokens = vision_model_->config.num_image_tokens;
         size_t emb_bytes = static_cast<size_t>(n_img_tokens) * lm_d * sizeof(half);
-        if (cudaMalloc(&d_vision_embeddings_, emb_bytes) != cudaSuccess) {
+        d_vision_embeddings_ = static_cast<half*>(vram_alloc_.allocate(emb_bytes, "vision_embeddings"));
+        if (!d_vision_embeddings_) {
             IMP_LOG_ERROR("Failed to allocate vision embedding buffer (%zu bytes)", emb_bytes);
             vision_encoder_.reset();
             vision_model_.reset();
@@ -789,10 +791,10 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // Pre-allocate pixel buffer to avoid per-image cudaMalloc/Free
         int img_sz = vision_model_->config.image_size;
         d_vision_pixels_size_ = static_cast<size_t>(3) * img_sz * img_sz * sizeof(half);
-        if (cudaMalloc(&d_vision_pixels_, d_vision_pixels_size_) != cudaSuccess) {
+        d_vision_pixels_ = static_cast<half*>(vram_alloc_.allocate(d_vision_pixels_size_, "vision_pixels"));
+        if (!d_vision_pixels_) {
             IMP_LOG_WARN("Failed to pre-allocate vision pixel buffer (%.1f MiB), will alloc per-image",
                          d_vision_pixels_size_ / (1024.0 * 1024.0));
-            d_vision_pixels_ = nullptr;
             d_vision_pixels_size_ = 0;
         }
 
@@ -1382,11 +1384,12 @@ bool Engine::step() {
         if (needs_penalties && !req->output_tokens.empty()) {
             size_t n = req->output_tokens.size();
             if (n > d_penalty_tokens_capacity_) {
-                if (d_penalty_tokens_) cudaFree(d_penalty_tokens_);
+                if (d_penalty_tokens_) vram_alloc_.free(d_penalty_tokens_);
                 d_penalty_tokens_capacity_ = std::max(n, (size_t)256);
-                if (cudaMalloc(&d_penalty_tokens_, d_penalty_tokens_capacity_ * sizeof(int32_t)) != cudaSuccess) {
-                    IMP_LOG_ERROR("cudaMalloc failed for penalty tokens (%zu)", d_penalty_tokens_capacity_);
-                    d_penalty_tokens_ = nullptr;
+                d_penalty_tokens_ = static_cast<int32_t*>(
+                    vram_alloc_.allocate(d_penalty_tokens_capacity_ * sizeof(int32_t), "penalty_tokens"));
+                if (!d_penalty_tokens_) {
+                    IMP_LOG_ERROR("VRAMAllocator failed for penalty tokens (%zu)", d_penalty_tokens_capacity_);
                     d_penalty_tokens_capacity_ = 0;
                 }
             }
@@ -1814,11 +1817,12 @@ bool Engine::step() {
                     gpu_batch.n_sequences == 1) {
                     size_t n = req0->output_tokens.size();
                     if (n > d_penalty_tokens_capacity_) {
-                        if (d_penalty_tokens_) cudaFree(d_penalty_tokens_);
+                        if (d_penalty_tokens_) vram_alloc_.free(d_penalty_tokens_);
                         d_penalty_tokens_capacity_ = std::max(n, (size_t)256);
-                        if (cudaMalloc(&d_penalty_tokens_, d_penalty_tokens_capacity_ * sizeof(int32_t)) != cudaSuccess) {
-                            IMP_LOG_ERROR("cudaMalloc failed for penalty tokens (%zu)", d_penalty_tokens_capacity_);
-                            d_penalty_tokens_ = nullptr;
+                        d_penalty_tokens_ = static_cast<int32_t*>(
+                            vram_alloc_.allocate(d_penalty_tokens_capacity_ * sizeof(int32_t), "penalty_tokens"));
+                        if (!d_penalty_tokens_) {
+                            IMP_LOG_ERROR("VRAMAllocator failed for penalty tokens (%zu)", d_penalty_tokens_capacity_);
                             d_penalty_tokens_capacity_ = 0;
                         }
                     }
