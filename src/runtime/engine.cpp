@@ -117,6 +117,10 @@ VRAMBudget Engine::plan_vram_budget(int n_kv_layers, int head_dim) const {
     if (config_.use_fp8_prefill)       budget.reserve_bytes += 128ULL * 1024 * 1024;
     // Minimum 512 MiB to handle cuBLAS autotuning growth + misc stream allocs
     budget.reserve_bytes = std::max(budget.reserve_bytes, static_cast<size_t>(512ULL * 1024 * 1024));
+    // At least 10% of total VRAM as headroom to avoid shared/system memory fallback
+    size_t total_vram = 0;
+    { size_t f; cudaMemGetInfo(&f, &total_vram); }
+    budget.reserve_bytes = std::max(budget.reserve_bytes, total_vram / 10);
 
     // Estimate SSM footprint (not yet allocated at this point)
     size_t ssm_footprint = 0;
@@ -134,6 +138,8 @@ VRAMBudget Engine::plan_vram_budget(int n_kv_layers, int head_dim) const {
         }
     }
 
+    // Reduce available VRAM by reserve + 10% total VRAM headroom to prevent
+    // shared/system memory fallback on WSL2 (not visible via nvidia-smi).
     size_t available = free_vram;
     size_t overhead = budget.reserve_bytes + ssm_footprint;
     available = (available > overhead) ? (available - overhead) : 0;
