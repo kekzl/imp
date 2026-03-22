@@ -6,13 +6,16 @@
 
 namespace imp {
 
+class VRAMAllocator;
+
 class VisionEncoder {
 public:
     VisionEncoder() = default;
     ~VisionEncoder();
 
     // Initialize workspace buffers. lm_d_model = LLM hidden dim.
-    bool init(const VisionModel& model, int lm_d_model, cudaStream_t stream);
+    bool init(const VisionModel& model, int lm_d_model, cudaStream_t stream,
+              VRAMAllocator* alloc = nullptr);
 
     // Encode a preprocessed image.
     // d_pixels: [3, image_size, image_size] FP16 on device
@@ -20,6 +23,7 @@ public:
     bool encode(const half* d_pixels, half* d_output, cudaStream_t stream);
 
 private:
+    VRAMAllocator* alloc_ = nullptr;
     const VisionModel* model_ = nullptr;
     int lm_d_model_ = 0;
 

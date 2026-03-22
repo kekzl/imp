@@ -673,11 +673,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         {
             size_t expert_fp16_elems = static_cast<size_t>(eff) * d;
             size_t dequant_sz = expert_fp16_elems * sizeof(uint16_t);
-            cudaError_t err = cudaMalloc(&moe_dequant_buf_, dequant_sz);
-            if (err != cudaSuccess) {
-                IMP_LOG_ERROR("Failed to allocate MoE dequant buffer (%zu bytes): %s",
-                              dequant_sz, cudaGetErrorString(err));
-                moe_dequant_buf_ = nullptr;
+            moe_dequant_buf_ = vram_alloc(vram_alloc_, dequant_sz, "moe_dequant");
+            if (!moe_dequant_buf_) {
+                IMP_LOG_ERROR("Failed to allocate MoE dequant buffer (%zu bytes)", dequant_sz);
                 moe_dequant_buf_size_ = 0;
             } else {
                 moe_dequant_buf_size_ = dequant_sz;
@@ -702,11 +700,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 check(L.expert_gate_packed, L.expert_gate_qtype);
             }
             if (max_expert_raw > 0) {
-                cudaError_t err = cudaMalloc(&moe_raw_staging_buf_, max_expert_raw);
-                if (err != cudaSuccess) {
-                    IMP_LOG_ERROR("Failed to allocate MoE staging buffer (%zu bytes): %s",
-                                  max_expert_raw, cudaGetErrorString(err));
-                    moe_raw_staging_buf_ = nullptr;
+                moe_raw_staging_buf_ = vram_alloc(vram_alloc_, max_expert_raw, "moe_staging");
+                if (!moe_raw_staging_buf_) {
+                    IMP_LOG_ERROR("Failed to allocate MoE staging buffer (%zu bytes)", max_expert_raw);
                     moe_raw_staging_size_ = 0;
                 } else {
                     moe_raw_staging_size_ = max_expert_raw;
@@ -738,7 +734,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 size_t safety = 128 << 20;  // 128 MiB reserve
                 size_t budget = (free_mem > safety) ? free_mem - safety : 0;
                 budget = static_cast<size_t>(budget * 0.15);  // 15% of available
-                if (expert_cache_.init(max_expert_raw, budget)) {
+                if (expert_cache_.init(max_expert_raw, budget, vram_alloc_)) {
                     IMP_LOG_INFO("Expert LRU cache: %d slots (%.2f MiB / %.2f MiB budget)",
                                  expert_cache_.n_slots_,
                                  expert_cache_.n_slots_ * max_expert_raw / (1024.0 * 1024.0),
@@ -759,10 +755,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 if (ne_try <= 0) continue;
                 ne_try = std::min(ne_try, cfg.n_experts);
                 size_t sz = static_cast<size_t>(ne_try) * eff * d * sizeof(half);
-                cudaError_t err = cudaMalloc(&moe_batch_dequant_buf_, sz);
-                if (err != cudaSuccess) {
-                    IMP_LOG_DEBUG("MoE dequant buf alloc failed for %d experts: %s",
-                                 ne_try, cudaGetErrorString(cudaGetLastError()));
+                moe_batch_dequant_buf_ = vram_alloc(vram_alloc_, sz, "moe_batch_dequant");
+                if (!moe_batch_dequant_buf_) {
+                    IMP_LOG_DEBUG("MoE dequant buf alloc failed for %d experts", ne_try);
                     continue;
                 }
                 moe_batch_dequant_buf_size_ = sz;
@@ -887,20 +882,20 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             // CUTLASS GEMM workspace
             cutlass_workspace_size_ = gemm_nvfp4_cutlass_sm120_workspace(max_tokens_, max_n, max_k);
 
-            cudaError_t err1 = cudaMalloc(&cutlass_act_data_, cutlass_act_data_size_);
-            cudaError_t err2 = cudaMalloc(&cutlass_act_sf_, cutlass_act_sf_size_);
-            cudaError_t err3 = (cutlass_workspace_size_ > 0)
-                               ? cudaMalloc(&cutlass_workspace_, cutlass_workspace_size_)
-                               : cudaSuccess;
-            if (err1 != cudaSuccess || err2 != cudaSuccess || err3 != cudaSuccess) {
+            cutlass_act_data_ = vram_alloc(vram_alloc_, cutlass_act_data_size_, "cutlass_act_data");
+            cutlass_act_sf_ = vram_alloc(vram_alloc_, cutlass_act_sf_size_, "cutlass_act_sf");
+            cutlass_workspace_ = (cutlass_workspace_size_ > 0)
+                               ? vram_alloc(vram_alloc_, cutlass_workspace_size_, "cutlass_workspace")
+                               : nullptr;
+            if (!cutlass_act_data_ || !cutlass_act_sf_ ||
+                (cutlass_workspace_size_ > 0 && !cutlass_workspace_)) {
                 IMP_LOG_WARN("Failed to allocate CUTLASS NVFP4 activation buffers, native FP4 prefill disabled");
-                if (cutlass_act_data_) { cudaFree(cutlass_act_data_); cutlass_act_data_ = nullptr; }
-                if (cutlass_act_sf_) { cudaFree(cutlass_act_sf_); cutlass_act_sf_ = nullptr; }
-                if (cutlass_workspace_) { cudaFree(cutlass_workspace_); cutlass_workspace_ = nullptr; }
+                if (cutlass_act_data_) { vram_free(vram_alloc_, cutlass_act_data_); cutlass_act_data_ = nullptr; }
+                if (cutlass_act_sf_) { vram_free(vram_alloc_, cutlass_act_sf_); cutlass_act_sf_ = nullptr; }
+                if (cutlass_workspace_) { vram_free(vram_alloc_, cutlass_workspace_); cutlass_workspace_ = nullptr; }
                 cutlass_act_data_size_ = 0;
                 cutlass_act_sf_size_ = 0;
                 cutlass_workspace_size_ = 0;
-                cudaGetLastError();  // clear sticky error
             } else {
                 IMP_LOG_INFO("CUTLASS NVFP4 activation scratch: %.2f MiB (data=%.2f, sf=%.2f, ws=%.2f)",
                              (cutlass_act_data_size_ + cutlass_act_sf_size_ + cutlass_workspace_size_) / (1024.0 * 1024.0),
@@ -913,17 +908,17 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 if (cutlass_sm120_mxfp4_available()) {
                     mxfp4_act_sf_size_ = cutlass_mxfp4_sf_size(max_tokens_, max_k);
                     mxfp4_workspace_size_ = gemm_mxfp4_cutlass_sm120_workspace(max_tokens_, max_n, max_k);
-                    cudaError_t e1 = cudaMalloc(&mxfp4_act_sf_, mxfp4_act_sf_size_);
-                    cudaError_t e2 = (mxfp4_workspace_size_ > 0)
-                                     ? cudaMalloc(&mxfp4_workspace_, mxfp4_workspace_size_)
-                                     : cudaSuccess;
-                    if (e1 != cudaSuccess || e2 != cudaSuccess) {
+                    mxfp4_act_sf_ = vram_alloc(vram_alloc_, mxfp4_act_sf_size_, "mxfp4_act_sf");
+                    mxfp4_workspace_ = (mxfp4_workspace_size_ > 0)
+                                     ? vram_alloc(vram_alloc_, mxfp4_workspace_size_, "mxfp4_workspace")
+                                     : nullptr;
+                    if (!mxfp4_act_sf_ ||
+                        (mxfp4_workspace_size_ > 0 && !mxfp4_workspace_)) {
                         IMP_LOG_WARN("Failed to allocate MXFP4 activation buffers, MXFP4 prefill disabled");
-                        if (mxfp4_act_sf_) { cudaFree(mxfp4_act_sf_); mxfp4_act_sf_ = nullptr; }
-                        if (mxfp4_workspace_) { cudaFree(mxfp4_workspace_); mxfp4_workspace_ = nullptr; }
+                        if (mxfp4_act_sf_) { vram_free(vram_alloc_, mxfp4_act_sf_); mxfp4_act_sf_ = nullptr; }
+                        if (mxfp4_workspace_) { vram_free(vram_alloc_, mxfp4_workspace_); mxfp4_workspace_ = nullptr; }
                         mxfp4_act_sf_size_ = 0;
                         mxfp4_workspace_size_ = 0;
-                        cudaGetLastError();
                     } else {
                         IMP_LOG_INFO("CUTLASS MXFP4 activation scratch: sf=%.2f MiB, ws=%.2f MiB",
                                      mxfp4_act_sf_size_ / (1024.0 * 1024.0),
@@ -938,7 +933,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
 void GraphExecutor::release_moe_batch_buf() {
     if (moe_batch_dequant_buf_) {
         size_t freed = moe_batch_dequant_buf_size_;
-        cudaFree(moe_batch_dequant_buf_);
+        vram_free(vram_alloc_, moe_batch_dequant_buf_);
         moe_batch_dequant_buf_ = nullptr;
         moe_batch_dequant_buf_size_ = 0;
         IMP_LOG_INFO("Released MoE batch dequant buffer: %.2f MiB (experts on host)",
@@ -960,19 +955,19 @@ void GraphExecutor::free_buffers() {
 
     // Free fused KV weight cache
     for (auto& [idx, tensor] : fused_kv_cache_) {
-        if (tensor.data) cudaFree(tensor.data);
+        if (tensor.data) vram_free(vram_alloc_, tensor.data);
     }
     fused_kv_cache_.clear();
 
     // Free fused gate+up weight cache
     for (auto& [idx, tensor] : fused_gate_up_cache_) {
-        if (tensor.data) cudaFree(tensor.data);
+        if (tensor.data) vram_free(vram_alloc_, tensor.data);
     }
     fused_gate_up_cache_.clear();
 
     // Free FP16 weight cache
     for (auto& [ptr, tensor] : fp16_cache_) {
-        cudaFree(tensor.data);
+        vram_free(vram_alloc_, tensor.data);
     }
     fp16_cache_.clear();
     fp16_cache_bytes_ = 0;
@@ -1000,17 +995,17 @@ void GraphExecutor::free_buffers() {
 
     // Free CUTLASS NVFP4 activation buffers
     if (cutlass_act_data_) {
-        cudaFree(cutlass_act_data_);
+        vram_free(vram_alloc_, cutlass_act_data_);
         cutlass_act_data_ = nullptr;
         cutlass_act_data_size_ = 0;
     }
     if (cutlass_act_sf_) {
-        cudaFree(cutlass_act_sf_);
+        vram_free(vram_alloc_, cutlass_act_sf_);
         cutlass_act_sf_ = nullptr;
         cutlass_act_sf_size_ = 0;
     }
     if (cutlass_workspace_) {
-        cudaFree(cutlass_workspace_);
+        vram_free(vram_alloc_, cutlass_workspace_);
         cutlass_workspace_ = nullptr;
         cutlass_workspace_size_ = 0;
     }
@@ -1024,12 +1019,12 @@ void GraphExecutor::free_buffers() {
 
     // Free MXFP4 activation buffers
     if (mxfp4_act_sf_) {
-        cudaFree(mxfp4_act_sf_);
+        vram_free(vram_alloc_, mxfp4_act_sf_);
         mxfp4_act_sf_ = nullptr;
         mxfp4_act_sf_size_ = 0;
     }
     if (mxfp4_workspace_) {
-        cudaFree(mxfp4_workspace_);
+        vram_free(vram_alloc_, mxfp4_workspace_);
         mxfp4_workspace_ = nullptr;
         mxfp4_workspace_size_ = 0;
     }
@@ -1091,18 +1086,18 @@ void GraphExecutor::free_buffers() {
 
     moe_routing_buffers_.free();
     if (moe_dequant_buf_) {
-        cudaFree(moe_dequant_buf_);
+        vram_free(vram_alloc_, moe_dequant_buf_);
         moe_dequant_buf_ = nullptr;
         moe_dequant_buf_size_ = 0;
     }
     if (moe_raw_staging_buf_) {
-        cudaFree(moe_raw_staging_buf_);
+        vram_free(vram_alloc_, moe_raw_staging_buf_);
         moe_raw_staging_buf_ = nullptr;
         moe_raw_staging_size_ = 0;
     }
     expert_cache_.destroy();
     if (moe_batch_dequant_buf_) {
-        cudaFree(moe_batch_dequant_buf_);
+        vram_free(vram_alloc_, moe_batch_dequant_buf_);
         moe_batch_dequant_buf_ = nullptr;
     }
     moe_batch_dequant_buf_size_ = 0;
@@ -1229,12 +1224,10 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 return;
             }
 
-            void* fp16_buf = nullptr;
-            cudaError_t err = cudaMalloc(&fp16_buf, fp16_bytes);
-            if (err != cudaSuccess) {
-                IMP_LOG_DEBUG("Cleared FP16 cache alloc error: %s", cudaGetErrorString(cudaGetLastError()));
+            void* fp16_buf = vram_alloc(vram_alloc_, fp16_bytes, "fp16_weight_cache");
+            if (!fp16_buf) {
                 budget_exhausted = true;
-                IMP_LOG_WARN("FP16 cache: cudaMalloc failed after %d tensors (%.1f MiB)",
+                IMP_LOG_WARN("FP16 cache: allocation failed after %d tensors (%.1f MiB)",
                              cached_count, total_cache_bytes / (1024.0 * 1024.0));
                 return;
             }
@@ -1295,10 +1288,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             // shared (system) memory beyond physical VRAM, causing massive slowdowns.
             if (total_cache_bytes + 2 * one_sz > remaining_budget) break;
 
-            void* fused_buf = nullptr;
-            cudaError_t err = cudaMalloc(&fused_buf, 2 * one_sz);
-            if (err != cudaSuccess) {
-                IMP_LOG_DEBUG("Cleared fused KV alloc error: %s", cudaGetErrorString(cudaGetLastError()));
+            void* fused_buf = vram_alloc(vram_alloc_, 2 * one_sz, "fp16_weight_cache");
+            if (!fused_buf) {
                 break;
             }
 
@@ -1334,10 +1325,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             // Respect VRAM budget (see fused KV comment above)
             if (total_cache_bytes + 2 * one_sz > remaining_budget) break;
 
-            void* fused_buf = nullptr;
-            cudaError_t err = cudaMalloc(&fused_buf, 2 * one_sz);
-            if (err != cudaSuccess) {
-                IMP_LOG_DEBUG("Cleared fused gate+up alloc error: %s", cudaGetErrorString(cudaGetLastError()));
+            void* fused_buf = vram_alloc(vram_alloc_, 2 * one_sz, "fp16_weight_cache");
+            if (!fused_buf) {
                 break;
             }
 
@@ -1650,7 +1639,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     auto it = fp16_cache_.find(e.orig_ptr);
                     if (it != fp16_cache_.end()) {
                         size_t freed = it->second.nbytes();
-                        cudaFree(it->second.data);
+                        vram_free(vram_alloc_, it->second.data);
                         fp16_cache_.erase(it);
                         fp16_cache_bytes_ -= freed;
                         actual_from_fp16++;
@@ -1850,7 +1839,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
             // Free remaining FP16 cache
             for (auto& [ptr, tensor] : fp16_cache_) {
-                cudaFree(tensor.data);
+                vram_free(vram_alloc_, tensor.data);
             }
             size_t freed = fp16_cache_bytes_;
             fp16_cache_.clear();
@@ -1858,11 +1847,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
             // Free fused caches (prefill uses individual FP8 weights)
             for (auto& [idx, tensor] : fused_kv_cache_) {
-                if (tensor.data) cudaFree(tensor.data);
+                if (tensor.data) vram_free(vram_alloc_, tensor.data);
             }
             fused_kv_cache_.clear();
             for (auto& [idx, tensor] : fused_gate_up_cache_) {
-                if (tensor.data) cudaFree(tensor.data);
+                if (tensor.data) vram_free(vram_alloc_, tensor.data);
             }
             fused_gate_up_cache_.clear();
 
@@ -2254,9 +2243,9 @@ bool GraphExecutor::allocate_decode_workspace(cudaStream_t stream, int max_batch
                       + static_cast<size_t>(cfg.vocab_size) * sizeof(float) * max_batch;  // logits
     if (fp32_accum_buf_) persistent += static_cast<size_t>(dm) * sizeof(float) * max_batch;  // fp32_hidden
 
-    cudaError_t err = cudaMalloc(&decode_workspace_, persistent);
-    if (err != cudaSuccess) {
-        IMP_LOG_ERROR("Failed to allocate decode workspace: %s", cudaGetErrorString(err));
+    decode_workspace_ = vram_alloc(vram_alloc_, persistent, "decode_workspace");
+    if (!decode_workspace_) {
+        IMP_LOG_ERROR("Failed to allocate decode workspace");
         return false;
     }
     decode_persistent_size_ = persistent;
@@ -2270,10 +2259,10 @@ bool GraphExecutor::allocate_decode_workspace(cudaStream_t stream, int max_batch
     size_t shared = std::max({attn_shared_size_, ffn_shared_size_,
                               moe_shared_size_, ssm_shared_size_});
     if (shared > 0) {
-        err = cudaMalloc(&decode_shared_workspace_, shared);
-        if (err != cudaSuccess) {
-            IMP_LOG_ERROR("Failed to allocate decode shared workspace: %s", cudaGetErrorString(err));
-            cudaFree(decode_workspace_);
+        decode_shared_workspace_ = vram_alloc(vram_alloc_, shared, "decode_shared_workspace");
+        if (!decode_shared_workspace_) {
+            IMP_LOG_ERROR("Failed to allocate decode shared workspace");
+            vram_free(vram_alloc_, decode_workspace_);
             decode_workspace_ = nullptr;
             return false;
         }

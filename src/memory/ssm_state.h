@@ -5,6 +5,8 @@
 
 namespace imp {
 
+class VRAMAllocator;
+
 // Manages per-sequence, per-SSM-layer state for Mamba2 models.
 // Two state types per (sequence, layer):
 //   - conv_state: [conv_channels, conv_kernel] float (sliding window for causal conv1d)
@@ -23,7 +25,8 @@ public:
     bool init(int n_ssm_layers, int max_sequences,
               int conv_channels, int conv_kernel,
               int n_heads, int head_dim_ssm, int state_size,
-              DType h_dtype = DType::FP32);
+              DType h_dtype = DType::FP32,
+              VRAMAllocator* alloc = nullptr);
 
     // Get pointers into the state pool for a given sequence and SSM layer index.
     void* conv_state(int seq_id, int ssm_layer_idx);
@@ -37,6 +40,7 @@ public:
     DType h_dtype() const { return h_dtype_; }
 
 private:
+    VRAMAllocator* alloc_ = nullptr;
     void* pool_ = nullptr;
     int n_ssm_layers_ = 0;
     int max_sequences_ = 0;
