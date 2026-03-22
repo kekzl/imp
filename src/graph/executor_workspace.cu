@@ -1185,8 +1185,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     // struct controls strategy-level decisions (which phases to skip).
     size_t free_vram = 0, total_vram = 0;
     cudaMemGetInfo(&free_vram, &total_vram);
-    size_t remaining_budget = (free_vram > budget.reserve_bytes)
-                              ? (free_vram - budget.reserve_bytes) : 0;
+    // Reserve at least 10% of total VRAM as headroom to avoid shared/system
+    // memory fallback on WSL2 (not visible via nvidia-smi).
+    size_t min_reserve = std::max(budget.reserve_bytes, total_vram / 10);
+    size_t remaining_budget = (free_vram > min_reserve)
+                              ? (free_vram - min_reserve) : 0;
 
     // Helper: does this qtype benefit from NVFP4 conversion? (> 4.5 bits/elem)
     auto nvfp4_beneficial = [](GGMLQuantType qt) -> bool {
@@ -1603,10 +1606,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 size_t nvfp4_bytes = static_cast<size_t>(rows) * cols / 2 +
                                      static_cast<size_t>(rows) * cols / 16 + 4;
 
-                // Check actual free VRAM (1 MiB safety margin)
+                // Check actual free VRAM (10% of total as safety margin)
                 size_t free_mem = 0, total_mem = 0;
                 cudaMemGetInfo(&free_mem, &total_mem);
-                if (free_mem < nvfp4_bytes + 1024 * 1024) {
+                size_t nvfp4_safety = std::max(total_mem / 10, static_cast<size_t>(1024 * 1024));
+                if (free_mem < nvfp4_bytes + nvfp4_safety) {
                     IMP_LOG_INFO("NVFP4 incremental: VRAM exhausted after %d tensors "
                                  "(%.1f MiB, %.1f MiB free)", actual_count,
                                  actual_bytes / (1024.0 * 1024.0), free_mem / (1024.0 * 1024.0));
@@ -1899,7 +1903,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
                 size_t free_mem2 = 0, total_mem2 = 0;
                 cudaMemGetInfo(&free_mem2, &total_mem2);
-                if (free_mem2 < nvfp4_bytes + 1024 * 1024) break;
+                size_t nvfp4_safety2 = std::max(total_mem2 / 10, static_cast<size_t>(1024 * 1024));
+                if (free_mem2 < nvfp4_bytes + nvfp4_safety2) break;
 
                 // Dequant from quantized weights via scratch buffer
                 size_t need = static_cast<size_t>(rows) * cols * sizeof(half);
@@ -1950,7 +1955,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 cudaStreamSynchronize(stream);
                 size_t free_mem = 0, total_mem = 0;
                 cudaMemGetInfo(&free_mem, &total_mem);
-                constexpr size_t kCtReserve = 256ULL * 1024 * 1024;
+                size_t kCtReserve = std::max(total_mem / 10, static_cast<size_t>(256ULL * 1024 * 1024));
                 ct_budget = (free_mem > kCtReserve) ? (free_mem - kCtReserve) : 0;
             } else {
                 ct_budget = (remaining_budget > nvfp4_cache_bytes_)
