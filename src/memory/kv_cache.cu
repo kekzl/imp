@@ -1,4 +1,5 @@
 #include "memory/kv_cache.h"
+#include "memory/vram_allocator.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -25,13 +26,14 @@ namespace imp {
 // ---------------------------------------------------------------------------
 
 KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
-                 int max_blocks, int block_size)
+                 int max_blocks, int block_size, VRAMAllocator* alloc)
     : n_layers_(n_layers)
     , n_kv_heads_(n_kv_heads)
     , head_dim_(head_dim)
     , max_blocks_(max_blocks)
     , block_size_(block_size)
     , dtype_(dtype)
+    , alloc_(alloc)
     , block_bytes_((dtype == DType::INT4)
                    ? (static_cast<size_t>(block_size_) * n_kv_heads * head_dim / 2)
                    : (static_cast<size_t>(block_size_) * n_kv_heads * head_dim *
@@ -39,13 +41,17 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
 
     // Allocate contiguous GPU pool
     size_t total = static_cast<size_t>(n_layers_) * max_blocks_ * 2 * block_bytes_;
-    cudaError_t err = cudaMalloc(&pool_, total);
-    if (err != cudaSuccess) {
+    if (alloc_) {
+        pool_ = alloc_->allocate(total, "kv_cache");
+    } else {
+        cudaError_t err = cudaMalloc(&pool_, total);
+        if (err != cudaSuccess) pool_ = nullptr;
+    }
+    if (!pool_) {
         char msg[256];
         std::snprintf(msg, sizeof(msg),
-                      "KVCache: cudaMalloc failed for %.2f MiB (%s)",
-                      static_cast<double>(total) / (1024.0 * 1024.0),
-                      cudaGetErrorString(err));
+                      "KVCache: cudaMalloc failed for %.2f MiB (out of memory)",
+                      static_cast<double>(total) / (1024.0 * 1024.0));
         throw std::runtime_error(msg);
     }
 
@@ -56,16 +62,20 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
     if (dtype == DType::INT8 || dtype == DType::INT4) {
         scale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * sizeof(half);
         size_t scale_total = static_cast<size_t>(n_layers_) * max_blocks_ * 2 * scale_block_bytes_;
-        cudaError_t serr = cudaMalloc(&scale_pool_, scale_total);
-        if (serr != cudaSuccess) {
-            cudaFree(pool_);
+        if (alloc_) {
+            scale_pool_ = alloc_->allocate(scale_total, "kv_cache_scales");
+        } else {
+            cudaError_t serr = cudaMalloc(&scale_pool_, scale_total);
+            if (serr != cudaSuccess) scale_pool_ = nullptr;
+        }
+        if (!scale_pool_) {
+            if (alloc_) alloc_->free(pool_); else cudaFree(pool_);
             pool_ = nullptr;
             char msg[256];
             std::snprintf(msg, sizeof(msg),
-                          "KVCache: cudaMalloc failed for %s scale pool %.2f MiB (%s)",
+                          "KVCache: allocation failed for %s scale pool %.2f MiB",
                           (dtype == DType::INT4) ? "INT4" : "INT8",
-                          static_cast<double>(scale_total) / (1024.0 * 1024.0),
-                          cudaGetErrorString(serr));
+                          static_cast<double>(scale_total) / (1024.0 * 1024.0));
             throw std::runtime_error(msg);
         }
         cudaMemset(scale_pool_, 0, scale_total);
@@ -81,11 +91,11 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
 
 KVCache::~KVCache() {
     if (scale_pool_) {
-        cudaFree(scale_pool_);
+        if (alloc_) alloc_->free(scale_pool_); else cudaFree(scale_pool_);
         scale_pool_ = nullptr;
     }
     if (pool_) {
-        cudaFree(pool_);
+        if (alloc_) alloc_->free(pool_); else cudaFree(pool_);
         pool_ = nullptr;
     }
 }

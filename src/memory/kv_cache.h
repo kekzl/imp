@@ -7,12 +7,15 @@
 
 namespace imp {
 
+class VRAMAllocator;  // forward declaration
+
 static constexpr int kKVBlockSize = 16; // default tokens per block
 
 class KVCache {
 public:
     KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
-            int max_blocks, int block_size = kKVBlockSize);
+            int max_blocks, int block_size = kKVBlockSize,
+            VRAMAllocator* alloc = nullptr);
     ~KVCache();
 
     // Block allocation / deallocation
@@ -51,6 +54,7 @@ private:
     int max_blocks_;
     int block_size_;                // tokens per block (default 16)
     DType dtype_;
+    VRAMAllocator* alloc_ = nullptr;
     size_t block_bytes_;            // cached: block_size * n_kv_heads * head_dim * dtype_size(dtype)
 
     std::vector<int> ref_counts_;   // per-block reference count

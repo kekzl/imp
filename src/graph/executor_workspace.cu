@@ -19,6 +19,7 @@
 #include "compute/gemm_cublaslt_nvfp4.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
+#include "memory/vram_allocator.h"
 #include "runtime/pdl.h"
 
 #include <cuda_runtime.h>
@@ -32,6 +33,22 @@
 #include <algorithm>
 
 namespace imp {
+
+// Helper: allocate GPU memory through VRAMAllocator if available, else cudaMalloc.
+// Frees through the same path. Used for large persistent allocations.
+static void* vram_alloc(VRAMAllocator* alloc, size_t bytes, const char* tag) {
+    if (bytes == 0) return nullptr;
+    if (alloc) return alloc->allocate(bytes, tag);
+    void* ptr = nullptr;
+    if (cudaMalloc(&ptr, bytes) != cudaSuccess) return nullptr;
+    return ptr;
+}
+
+static void vram_free(VRAMAllocator* alloc, void* ptr) {
+    if (!ptr) return;
+    if (alloc) alloc->free(ptr);
+    else cudaFree(ptr);
+}
 
 // ---------------------------------------------------------------------------
 // GraphExecutor lifetime
@@ -389,11 +406,10 @@ bool GraphExecutor::allocate_persistent_workspace(int max_tokens) {
 
     size_t total = hidden_sz + residual_sz + norm_out_sz + logits_sz;
 
-    cudaError_t err = cudaMalloc(&persistent_workspace_, total);
-    if (err != cudaSuccess) {
-        IMP_LOG_ERROR("Failed to allocate persistent workspace (%zu bytes): %s",
-                      total, cudaGetErrorString(err));
-        persistent_workspace_ = nullptr;
+    persistent_workspace_ = vram_alloc(vram_alloc_, total, "persistent_workspace");
+    if (!persistent_workspace_) {
+        IMP_LOG_ERROR("Failed to allocate persistent workspace (%.1f MiB)",
+                      total / (1024.0 * 1024.0));
         return false;
     }
     persistent_workspace_size_ = total;
@@ -442,11 +458,10 @@ bool GraphExecutor::allocate_shared_workspace(int max_tokens) {
                                   moe_shared_size_, ssm_shared_size_});
     if (max_shared == 0) return true;  // no workspace needed
 
-    cudaError_t err = cudaMalloc(&shared_workspace_, max_shared);
-    if (err != cudaSuccess) {
-        IMP_LOG_ERROR("Failed to allocate shared workspace (%zu bytes): %s",
-                      max_shared, cudaGetErrorString(err));
-        shared_workspace_ = nullptr;
+    shared_workspace_ = vram_alloc(vram_alloc_, max_shared, "shared_workspace");
+    if (!shared_workspace_) {
+        IMP_LOG_ERROR("Failed to allocate shared workspace (%.1f MiB)",
+                      max_shared / (1024.0 * 1024.0));
         return false;
     }
     shared_workspace_size_ = max_shared;
@@ -488,11 +503,10 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
         if (max_weight_elems > 0) {
             dequant_scratch_size_ = max_weight_elems * sizeof(uint16_t);
-            cudaError_t err = cudaMalloc(&dequant_scratch_, dequant_scratch_size_);
-            if (err != cudaSuccess) {
-                IMP_LOG_ERROR("Failed to allocate dequant scratch (%zu bytes): %s",
-                              dequant_scratch_size_, cudaGetErrorString(err));
-                dequant_scratch_ = nullptr;
+            dequant_scratch_ = vram_alloc(vram_alloc_, dequant_scratch_size_, "dequant_scratch");
+            if (!dequant_scratch_) {
+                IMP_LOG_ERROR("Failed to allocate dequant scratch (%.1f MiB)",
+                              dequant_scratch_size_ / (1024.0 * 1024.0));
                 dequant_scratch_size_ = 0;
             } else {
                 IMP_LOG_INFO("Dequant scratch buffer: %.2f MiB",
@@ -614,13 +628,12 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             s_sz = static_cast<size_t>(nh) * attn_seq * attn_seq * sizeof(half);
         }
         if (attn_seq > 0) {
-            cudaError_t err = cudaMalloc(&attn_scores_buf_, s_sz);
-            if (err != cudaSuccess) {
-                cudaGetLastError();  // clear sticky error from failed cudaMalloc
-                IMP_LOG_WARN("Failed to allocate cuBLAS attention S-matrix (%zu bytes, %.1f MiB), "
+            attn_scores_buf_ = vram_alloc(vram_alloc_, s_sz, "attn_scores");
+            if (!attn_scores_buf_) {
+                cudaGetLastError();
+                IMP_LOG_WARN("Failed to allocate cuBLAS attention S-matrix (%.1f MiB), "
                              "will fall back to WMMA attention for prefill",
-                             s_sz, s_sz / (1024.0 * 1024.0));
-                attn_scores_buf_ = nullptr;
+                             s_sz / (1024.0 * 1024.0));
                 attn_scores_buf_size_ = 0;
             } else {
                 attn_scores_buf_size_ = s_sz;
@@ -817,17 +830,18 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             max_dim = std::max(max_dim, cfg.ssm_inner_size);
         }
         fp8_act_buf_size_ = static_cast<size_t>(max_tokens_) * max_dim;
-        cudaError_t err = cudaMalloc(&fp8_act_buf_, fp8_act_buf_size_);
-        if (err != cudaSuccess) {
-            IMP_LOG_WARN("Failed to allocate FP8 activation buffer (%zu bytes): %s",
-                         fp8_act_buf_size_, cudaGetErrorString(err));
-            fp8_act_buf_ = nullptr;
+        fp8_act_buf_ = vram_alloc(vram_alloc_, fp8_act_buf_size_, "fp8_activation");
+        if (!fp8_act_buf_) {
+            IMP_LOG_WARN("Failed to allocate FP8 activation buffer (%.1f MiB)",
+                         fp8_act_buf_size_ / (1024.0 * 1024.0));
             fp8_act_buf_size_ = 0;
         }
-        err = cudaMalloc(reinterpret_cast<void**>(&d_act_scale_), sizeof(float));
-        if (err != cudaSuccess) {
-            IMP_LOG_WARN("Failed to allocate FP8 act scale: %s", cudaGetErrorString(err));
-            d_act_scale_ = nullptr;
+        {
+            cudaError_t serr = cudaMalloc(reinterpret_cast<void**>(&d_act_scale_), sizeof(float));
+            if (serr != cudaSuccess) {
+                IMP_LOG_WARN("Failed to allocate FP8 act scale: %s", cudaGetErrorString(serr));
+                d_act_scale_ = nullptr;
+            }
         }
         // Pre-allocate reduction buffers for async FP8 activation quantization.
         // Eliminates per-call cudaMalloc + cudaStreamSynchronize from the hot path.
@@ -933,6 +947,11 @@ void GraphExecutor::release_moe_batch_buf() {
 }
 
 void GraphExecutor::free_buffers() {
+    // Helper: free through VRAMAllocator if pointer was tracked, else cudaFree.
+    auto vfree = [this](void*& p) {
+        if (p) { vram_free(vram_alloc_, p); p = nullptr; }
+    };
+
     // Free LongRoPE frequency tables
     if (longrope_short_freqs_) { cudaFree(longrope_short_freqs_); longrope_short_freqs_ = nullptr; }
     if (longrope_long_freqs_)  { cudaFree(longrope_long_freqs_);  longrope_long_freqs_  = nullptr; }
@@ -1045,26 +1064,17 @@ void GraphExecutor::free_buffers() {
         fp8_migrated_scales_ = nullptr;
         fp8_migrated_count_ = 0;
     }
-    if (fp8_migrated_data_) {
-        cudaFree(fp8_migrated_data_);
-        fp8_migrated_data_ = nullptr;
-        fp8_migrated_data_size_ = 0;
-    }
+    vfree(fp8_migrated_data_);
+    fp8_migrated_data_size_ = 0;
     if (fp8_overflow_scales_) {
         cudaFree(fp8_overflow_scales_);
         fp8_overflow_scales_ = nullptr;
         fp8_overflow_count_ = 0;
     }
-    if (fp8_overflow_data_) {
-        cudaFree(fp8_overflow_data_);
-        fp8_overflow_data_ = nullptr;
-        fp8_overflow_data_size_ = 0;
-    }
-    if (fp8_act_buf_) {
-        cudaFree(fp8_act_buf_);
-        fp8_act_buf_ = nullptr;
-        fp8_act_buf_size_ = 0;
-    }
+    vfree(fp8_overflow_data_);
+    fp8_overflow_data_size_ = 0;
+    vfree(fp8_act_buf_);
+    fp8_act_buf_size_ = 0;
     if (d_act_scale_) {
         cudaFree(d_act_scale_);
         d_act_scale_ = nullptr;
@@ -1110,11 +1120,8 @@ void GraphExecutor::free_buffers() {
         d_moe_weight_ptrs_ = nullptr;
         d_moe_weight_ptrs_count_ = 0;
     }
-    if (dequant_scratch_) {
-        cudaFree(dequant_scratch_);
-        dequant_scratch_ = nullptr;
-        dequant_scratch_size_ = 0;
-    }
+    vfree(dequant_scratch_);
+    dequant_scratch_size_ = 0;
     if (d_sample_result_) {
         cudaFree(d_sample_result_);
         d_sample_result_ = nullptr;
@@ -1142,28 +1149,16 @@ void GraphExecutor::free_buffers() {
         splitk_scratch_ = nullptr;
         splitk_scratch_size_ = 0;
     }
-    if (attn_scores_buf_) {
-        cudaFree(attn_scores_buf_);
-        attn_scores_buf_ = nullptr;
-        attn_scores_buf_size_ = 0;
-    }
+    vfree(attn_scores_buf_);
+    attn_scores_buf_size_ = 0;
 #ifdef IMP_USE_CUTLASS
     cutlass_fmha_free_workspace();
 #endif
-    if (shared_workspace_) {
-        cudaFree(shared_workspace_);
-        shared_workspace_ = nullptr;
-        shared_workspace_size_ = 0;
-    }
-    if (persistent_workspace_) {
-        cudaFree(persistent_workspace_);
-        persistent_workspace_ = nullptr;
-        persistent_workspace_size_ = 0;
-    }
-    if (fp32_accum_buf_) {
-        cudaFree(fp32_accum_buf_);
-        fp32_accum_buf_ = nullptr;
-    }
+    vfree(shared_workspace_);
+    shared_workspace_size_ = 0;
+    vfree(persistent_workspace_);
+    persistent_workspace_size_ = 0;
+    vfree(fp32_accum_buf_);
     ssm_layer_map_.clear();
     initialized_ = false;
 }
@@ -1450,13 +1445,10 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             cudaMalloc(&d_absmax, sizeof(float));
             cudaMalloc(&d_scales_all, fp8_entries.size() * sizeof(float));
 
-            // Bulk-allocate all FP8 data in one cudaMalloc
-            uint8_t* d_fp8_bulk = nullptr;
-            cudaError_t bulk_err = cudaMalloc(&d_fp8_bulk, total_fp8_bytes);
-            if (bulk_err != cudaSuccess) {
-                cudaGetLastError();
-                d_fp8_bulk = nullptr;
-            }
+            // Bulk-allocate all FP8 data
+            uint8_t* d_fp8_bulk = static_cast<uint8_t*>(
+                vram_alloc(vram_alloc_, total_fp8_bytes, "fp8_weight_cache"));
+            if (!d_fp8_bulk) cudaGetLastError();
 
             int actual_count = 0;
             size_t fp8_offset = 0;
@@ -1810,11 +1802,9 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     cudaMalloc(&d_scales_all, to_migrate.size() * sizeof(float));
 
                     uint8_t* d_fp8_bulk = nullptr;
-                    cudaError_t bulk_err = cudaMalloc(&d_fp8_bulk, total_fp8_bytes);
-                    if (bulk_err != cudaSuccess) {
-                        cudaGetLastError();
-                        d_fp8_bulk = nullptr;
-                    }
+                    d_fp8_bulk = static_cast<uint8_t*>(
+                        vram_alloc(vram_alloc_, total_fp8_bytes, "fp8_migration_cache"));
+                    if (!d_fp8_bulk) cudaGetLastError();
 
                     size_t fp8_offset = 0;
                     for (size_t i = 0; i < to_migrate.size() && d_fp8_bulk; i++) {

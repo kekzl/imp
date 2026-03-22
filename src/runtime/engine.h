@@ -17,6 +17,7 @@
 #include "memory/ssm_state.h"
 #include "memory/gdn_state.h"
 #include "memory/layer_offload.h"
+#include "memory/vram_allocator.h"
 #include "graph/executor.h"
 #include "compute/json_constrain.h"
 #include "compute/schema_constrain.h"
@@ -138,8 +139,10 @@ public:
     Model* model() const noexcept { return model_.get(); }
     const ChatTemplate& chat_template() const noexcept { return chat_template_; }
     GraphExecutor* executor() const noexcept { return executor_.get(); }
+    VRAMAllocator& vram_allocator() noexcept { return vram_alloc_; }
 
 private:
+    VRAMAllocator vram_alloc_;
     std::shared_ptr<Model> model_;
     EngineConfig config_;
     std::unique_ptr<Scheduler> scheduler_;

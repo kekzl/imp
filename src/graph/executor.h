@@ -255,6 +255,10 @@ public:
                               int32_t* d_token_id, int32_t* h_mapped,
                               cudaStream_t stream = nullptr);
 
+    // Set centralized VRAM allocator for budget-tracked allocations.
+    // Must be called before allocate_workspaces() / pre_dequant_weights().
+    void set_vram_allocator(class VRAMAllocator* alloc) { vram_alloc_ = alloc; }
+
     // Pre-dequantize quantized weights to FP16 on GPU for fast prefill GEMM.
     // Must be called AFTER model weights are uploaded to GPU.
     // budget: VRAM budget with per-phase caps computed by Engine::plan_vram_budget().
@@ -314,6 +318,7 @@ public:
     Tensor view_hidden(int n_tokens) const { return view_tokens(hidden_, n_tokens); }
 
 private:
+    class VRAMAllocator* vram_alloc_ = nullptr;
     const Model* model_ = nullptr;
     DType compute_dtype_ = DType::FP16;
     float norm_w_off_ = 0.0f;  // Gemma: 1.0 (norms use w+1 instead of w)

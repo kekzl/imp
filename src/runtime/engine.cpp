@@ -327,6 +327,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
     }
 
+    // --- Initialize centralized VRAM allocator (10% headroom for WSL2 safety) ---
+    if (!vram_alloc_.init(0.10f)) {
+        IMP_LOG_ERROR("Failed to initialize VRAM allocator");
+        return false;
+    }
+
     // --- Pre-allocate cuBLAS/cuBLASLt workspace while GPU memory is plentiful ---
     gemm_init();
 
@@ -337,6 +343,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // GPU workspace allocation is deferred to AFTER weight upload to maximize
     // VRAM available for expert layers during upload.
     executor_ = std::make_unique<GraphExecutor>();
+    executor_->set_vram_allocator(&vram_alloc_);
     {
         // Self-speculative verify needs logits for K+1 tokens in one pass.
         // Ensure max_batch_size (which sizes the logits buffer) is large enough.
@@ -572,7 +579,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     auto kv_cache = std::make_unique<KVCache>(
         n_kv_layers, mcfg.n_kv_heads, head_dim,
-        config_.kv_cache_dtype, max_blocks, kv_bs);
+        config_.kv_cache_dtype, max_blocks, kv_bs, &vram_alloc_);
 
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
@@ -677,6 +684,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
                          total_mem / (1024.0 * 1024.0),
                          free_mem / (1024.0 * 1024.0));
         }
+        vram_alloc_.report();
     }
 
     // --- Initialize green contexts if requested ---
