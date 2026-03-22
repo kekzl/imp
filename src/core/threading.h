@@ -7,6 +7,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <queue>
+#include <stop_token>
 #include <thread>
 #include <vector>
 
@@ -27,7 +28,10 @@ public:
         -> std::future<std::invoke_result_t<F, Args...>> {
         using R = std::invoke_result_t<F, Args...>;
         auto task = std::make_shared<std::packaged_task<R()>>(
-            std::bind(std::forward<F>(f), std::forward<Args>(args)...));
+            [func = std::forward<F>(f),
+             ...args_captured = std::forward<Args>(args)]() mutable {
+                return std::invoke(std::move(func), std::move(args_captured)...);
+            });
         auto future = task->get_future();
         {
             std::lock_guard<std::mutex> lock(mu_);
@@ -37,14 +41,13 @@ public:
         return future;
     }
 
-    size_t num_threads() const { return workers_.size(); }
+    [[nodiscard]] size_t num_threads() const { return workers_.size(); }
 
 private:
-    std::vector<std::thread> workers_;
+    std::vector<std::jthread> workers_;
     std::queue<std::function<void()>> tasks_;
     std::mutex mu_;
     std::condition_variable cv_;
-    bool stop_ = false;
 };
 
 } // namespace imp

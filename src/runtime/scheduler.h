@@ -20,8 +20,8 @@ public:
     void schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                   std::vector<std::shared_ptr<Request>>& decode_batch);
 
-    bool has_pending() const;
-    int active_count() const;
+    [[nodiscard]] bool has_pending() const;
+    [[nodiscard]] int active_count() const;
 
     // Memory-aware scheduling: set KV cache manager to check budget
     void set_kv_manager(KVCacheManager* mgr) { kv_manager_ = mgr; }

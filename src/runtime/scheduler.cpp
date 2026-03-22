@@ -2,6 +2,7 @@
 #include "memory/kv_cache_manager.h"
 #include "memory/kv_cache.h"
 #include <algorithm>
+#include <ranges>
 
 namespace imp {
 
@@ -19,21 +20,18 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
     decode_batch.clear();
 
     // 1. Remove finished/cancelled requests from active_
-    active_.erase(
-        std::remove_if(active_.begin(), active_.end(),
-            [](const std::shared_ptr<Request>& r) {
-                return r->status == RequestStatus::FINISHED ||
-                       r->status == RequestStatus::CANCELLED;
-            }),
-        active_.end());
+    std::erase_if(active_, [](const std::shared_ptr<Request>& r) {
+        return r->status == RequestStatus::FINISHED ||
+               r->status == RequestStatus::CANCELLED;
+    });
 
     // 2. Sort pending by ascending input token count (shortest-first)
     //    to reduce head-of-line blocking in continuous batching.
     if (pending_dirty_) {
-        std::sort(pending_.begin(), pending_.end(),
-                  [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
-                      return a->input_tokens.size() < b->input_tokens.size();
-                  });
+        std::ranges::sort(pending_, [](const std::shared_ptr<Request>& a,
+                                       const std::shared_ptr<Request>& b) {
+            return a->input_tokens.size() < b->input_tokens.size();
+        });
         pending_dirty_ = false;
     }
 
@@ -57,8 +55,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 // Reserve blocks, using prefix caching when enabled.
                 if (kv_manager_->prefix_caching_enabled()) {
                     int reused = kv_manager_->allocate_blocks_with_prefix(
-                        req->id, req->input_tokens.data(),
-                        static_cast<int>(req->input_tokens.size()));
+                        req->id, req->input_tokens);
                     if (reused < 0) {
                         ++it;
                         continue;
