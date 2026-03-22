@@ -190,8 +190,10 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
         config.self_spec_skip_n = args.self_spec_skip_n;
     }
 
-    // Prefix caching: always on for server (reuses KV blocks across requests)
-    config.use_prefix_caching = 1;
+    // Prefix caching: enable with IMP_PREFIX_CACHE=1 (off by default — cached
+    // blocks get different physical KV addresses, causing FP rounding differences
+    // in attention kernels and breaking determinism for identical requests).
+    config.use_prefix_caching = (std::getenv("IMP_PREFIX_CACHE") != nullptr) ? 1 : 0;
 
     // Green Contexts: SM partitioning for concurrent prefill/decode (CUDA 13.1+)
     config.enable_green_contexts = 1;
@@ -291,6 +293,64 @@ std::string load_model_into_state(ServerState& state, const std::string& path,
     return "";
 }
 
+// Validate common sampling parameters. Returns false and sets error response if invalid.
+bool validate_sampling_params(const json& body, httplib::Response& res) {
+    // messages must be an array (for chat completions)
+    if (body.contains("messages") && !body["messages"].is_null() && !body["messages"].is_array()) {
+        res.status = 400;
+        json err = {{"error", {{"message", "\"messages\" must be an array"},
+                                {"type", "invalid_request_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return false;
+    }
+
+    if (body.contains("temperature")) {
+        float t = body["temperature"].get<float>();
+        if (t < 0.0f || t > 2.0f) {
+            res.status = 400;
+            json err = {{"error", {{"message", "\"temperature\" must be between 0 and 2"},
+                                    {"type", "invalid_request_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return false;
+        }
+    }
+
+    if (body.contains("top_p")) {
+        float p = body["top_p"].get<float>();
+        if (p < 0.0f || p > 1.0f) {
+            res.status = 400;
+            json err = {{"error", {{"message", "\"top_p\" must be between 0 and 1"},
+                                    {"type", "invalid_request_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return false;
+        }
+    }
+
+    if (body.contains("max_tokens") && !body["max_tokens"].is_null()) {
+        int mt = body["max_tokens"].get<int>();
+        if (mt < 1) {
+            res.status = 400;
+            json err = {{"error", {{"message", "\"max_tokens\" must be at least 1"},
+                                    {"type", "invalid_request_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return false;
+        }
+    }
+
+    if (body.contains("n")) {
+        int n = body["n"].get<int>();
+        if (n != 1) {
+            res.status = 400;
+            json err = {{"error", {{"message", "\"n\" must be 1. n > 1 is not supported."},
+                                    {"type", "invalid_request_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void handle_chat_completions(const httplib::Request& req, httplib::Response& res,
                              ServerState& state) {
     // Parse request body
@@ -304,6 +364,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         res.set_content(err.dump(), "application/json");
         return;
     }
+
+    // Validate sampling parameters
+    if (!validate_sampling_params(body, res)) return;
 
     // Extract parameters
     auto messages = body.value("messages", json::array());
@@ -504,6 +567,12 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 }
                 fprintf(stderr, "[%s] model loaded: %s\n", req_id.c_str(), state.model_name.c_str());
                 fflush(stderr);
+            } else {
+                res.status = 404;
+                json err = {{"error", {{"message", "Model '" + requested_model + "' not found"},
+                                        {"type", "invalid_request_error"}}}};
+                res.set_content(err.dump(), "application/json");
+                return;
             }
         }
     }
@@ -1715,6 +1784,9 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
         return;
     }
 
+    // Validate sampling parameters
+    if (!validate_sampling_params(body, res)) return;
+
     // Extract prompt
     std::string prompt = body.value("prompt", "");
     if (prompt.empty()) {
@@ -1805,6 +1877,12 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
                 }
                 fprintf(stderr, "[%s] model loaded: %s\n", req_id.c_str(), state.model_name.c_str());
                 fflush(stderr);
+            } else {
+                res.status = 404;
+                json err = {{"error", {{"message", "Model '" + requested_model + "' not found"},
+                                        {"type", "invalid_request_error"}}}};
+                res.set_content(err.dump(), "application/json");
+                return;
             }
         }
     }

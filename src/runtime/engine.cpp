@@ -206,7 +206,6 @@ VRAMBudget Engine::plan_vram_budget(int n_kv_layers, int head_dim) const {
             budget.kv_cache_bytes = static_cast<size_t>(kv_available * 0.8);
             budget.kv_max_blocks = (per_block_total > 0)
                 ? static_cast<int>(budget.kv_cache_bytes / per_block_total) : needed_blocks;
-            budget.kv_max_blocks = std::max(budget.kv_max_blocks, needed_blocks);
             budget.nvfp4_second_pass = false;  // no FP16 to free
             break;
         }
@@ -229,7 +228,6 @@ VRAMBudget Engine::plan_vram_budget(int n_kv_layers, int head_dim) const {
             budget.kv_cache_bytes = static_cast<size_t>(available * 0.8);
             budget.kv_max_blocks = (per_block_total > 0)
                 ? static_cast<int>(budget.kv_cache_bytes / per_block_total) : needed_blocks;
-            budget.kv_max_blocks = std::max(budget.kv_max_blocks, needed_blocks);
             budget.nvfp4_second_pass = false;
             break;
         }
@@ -834,25 +832,29 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         int32_t warmup_id = tok ? tok->bos_id() : 1;
         if (warmup_id < 0) warmup_id = 1;
 
-        // Use a multi-token prompt to prime both prefill GEMM shapes and decode
-        // GEMV paths.  Single-token warmup only primes decode; the first prefill
-        // with a real prompt would still trigger cuBLAS autotuning.
-        auto req = std::make_shared<Request>();
-        req->id = next_request_id_++;
-        req->input_tokens.resize(16, warmup_id);
-        req->max_tokens = 4;
-        req->temperature = 0.0f;
-        req->ignore_eos = true;
-        scheduler_->add_request(req);
+        // Run multiple warmup requests with different prompt lengths to prime
+        // cuBLAS autotuning for all common GEMM shapes. Without this, the first
+        // real request triggers autotuning and produces subtly different results
+        // than subsequent identical requests (different cuBLAS algorithm choice).
+        for (int prompt_len : {16, 32}) {
+            auto req = std::make_shared<Request>();
+            req->id = next_request_id_++;
+            req->input_tokens.resize(prompt_len, warmup_id);
+            req->max_tokens = 2;
+            req->temperature = 0.0f;
+            req->ignore_eos = true;
+            scheduler_->add_request(req);
 
-        // Run prefill + decode steps to prime all kernel paths
-        for (int i = 0; i < 8 && req->status != RequestStatus::FINISHED; i++) {
-            step();
+            for (int i = 0; i < 8 && req->status != RequestStatus::FINISHED; i++) {
+                step();
+            }
+
+            kv_manager_->free_sequence(req->id);
+            while (kv_manager_->evict_cached_block()) {}
+            req->status = RequestStatus::CANCELLED;
         }
 
         // Clean up warmup state
-        kv_manager_->free_sequence(req->id);
-        req->status = RequestStatus::CANCELLED;
         decode_graph_runner_.invalidate();
         decode_batch_pool_.reset_upload_cache();
         if (async_graph_runner_.is_setup()) {
@@ -1183,8 +1185,15 @@ bool Engine::step() {
             }
 
             // Skip prefill for tokens covered by reused blocks.
+            // Recompute at least the last cached block so that the prefill
+            // attention kernel (flash attention) covers the boundary between
+            // cached and fresh tokens. Without this, the fresh-token prefill
+            // reads cached KV via paged attention, which produces slightly
+            // different floating-point results than flash attention, breaking
+            // determinism for identical consecutive requests.
             if (prefix_reused > 0) {
-                int skip_tokens = prefix_reused * kv_bs;
+                int effective_reused = (prefix_reused > 1) ? prefix_reused - 1 : 0;
+                int skip_tokens = effective_reused * kv_bs;
                 // Must keep at least 1 token for the forward pass.
                 if (skip_tokens >= total_input) {
                     skip_tokens = (total_input / kv_bs) * kv_bs;
@@ -1567,6 +1576,14 @@ bool Engine::step() {
     // ====================================================================
     if (!decode_batch.empty()) {
         cudaStream_t dec_stream = decode_stream();
+
+        // SSM/GDN models: recurrent state is per-sequence and the forward pass
+        // only supports a single gdn_seq_id/ssm_seq_id. Limit decode batch to 1
+        // sequence at a time to prevent state corruption between concurrent requests.
+        if ((ssm_state_ || gdn_state_) && decode_batch.size() > 1) {
+            // Keep only the first request; others stay in the scheduler for the next step.
+            decode_batch.resize(1);
+        }
 
         // 3a. Pre-process: allocate new blocks where needed
         valid_decode_.clear();
