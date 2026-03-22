@@ -381,44 +381,44 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
     Tensor lg = view_tokens(logits_, n);
 
     const auto out_qtype = model_->out_proj_qtype_;
-    auto nvfp4_lm = nvfp4_cache_.find(model_->output_proj().data);
-    if (nvfp4_lm != nvfp4_cache_.end()) {
+    auto nvfp4_lm = wcache_.nvfp4.find(model_->output_proj().data);
+    if (nvfp4_lm != wcache_.nvfp4.end()) {
         Tensor no_final = view_tokens(norm_out_, n);
         rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
         gemv_nvfp4_kpar_fp32(nvfp4_lm->second,
                               static_cast<const half*>(no_final.data),
                               static_cast<float*>(lg.data),
                               cfg.vocab_size, cfg.d_model, stream);
-    } else if (q8_1_buf_ && compute_dtype_ == DType::FP16 &&
+    } else if (qscratch_.q8_1_buf && compute_dtype_ == DType::FP16 &&
         (out_qtype == GGMLQuantType::Q6_K || out_qtype == GGMLQuantType::Q8_0 ||
          out_qtype == GGMLQuantType::Q4_0 || out_qtype == GGMLQuantType::Q4_K ||
          out_qtype == GGMLQuantType::Q5_K || out_qtype == GGMLQuantType::Q2_K ||
          out_qtype == GGMLQuantType::Q3_K)) {
-        auto* q8 = static_cast<block_q8_1*>(q8_1_buf_);
+        auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
         rmsnorm_quantize_q8_1(
             static_cast<const half*>(h_final.data),
             static_cast<const half*>(model_->output_norm().data),
-            q8, d8_buf_, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
+            q8, qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
         if (out_qtype == GGMLQuantType::Q6_K)
-            gemv_q6k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+            gemv_q6k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         else if (out_qtype == GGMLQuantType::Q8_0)
-            gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+            gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         else if (out_qtype == GGMLQuantType::Q4_K)
-            gemv_q4_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+            gemv_q4_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         else if (out_qtype == GGMLQuantType::Q5_K)
-            gemv_q5_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+            gemv_q5_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         else if (out_qtype == GGMLQuantType::Q2_K)
-            gemv_q2_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+            gemv_q2_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         else if (out_qtype == GGMLQuantType::Q3_K)
-            gemv_q3_k_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+            gemv_q3_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         else
-            gemv_q4_0_q8_1_fp32(model_->output_proj().data, q8, d8_buf_,
+            gemv_q4_0_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
     } else {
         Tensor no_final = view_tokens(norm_out_, n);

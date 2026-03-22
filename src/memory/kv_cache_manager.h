@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <list>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -12,6 +13,14 @@
 #include <memory>
 
 namespace imp {
+
+struct KVCacheStats {
+    int active_sequences = 0;
+    int total_blocks = 0;
+    int free_blocks = 0;
+    int cached_blocks = 0;
+    int pinned_blocks = 0;
+};
 
 class KVCacheManager {
 public:
@@ -59,19 +68,6 @@ public:
     // sequences could free enough.
     [[nodiscard]] bool can_allocate(int num_blocks) const;
 
-    // ── Prefix caching ───────────────────────────────────────────────
-
-    // Associate `prefix_hash` with the current block table of `seq_id`.
-    void register_prefix(int seq_id, size_t prefix_hash);
-
-    // Look up blocks previously registered under `prefix_hash`.
-    // Returns the cached block-id vector (empty if not found).
-    std::vector<int> find_prefix(size_t prefix_hash) const;
-
-    // Share the first `num_blocks` blocks from `source_seq_id` to
-    // `target_seq_id` by incrementing their reference counts.
-    void share_prefix(int source_seq_id, int target_seq_id, int num_blocks);
-
     // ── Content-addressed prefix caching ─────────────────────────────
 
     // Enable or disable automatic content-addressed prefix caching.
@@ -87,13 +83,12 @@ public:
     // should skip prefill for the first `result * kKVBlockSize` tokens.
     // Returns -1 on allocation failure.
     [[nodiscard]] int allocate_blocks_with_prefix(int seq_id,
-                                                   const int32_t* tokens,
-                                                   int num_tokens);
+                                                   std::span<const int32_t> tokens);
 
     // Register the block hashes for a sequence after prefill completes.
     // This must be called so that future sequences can match against
     // these blocks. `tokens` is the full token sequence.
-    void register_block_hashes(int seq_id, const int32_t* tokens, int num_tokens);
+    void register_block_hashes(int seq_id, std::span<const int32_t> tokens);
 
     // Number of cached (unreferenced) blocks in the hash table.
     int num_cached_blocks() const;
@@ -129,10 +124,11 @@ public:
 
     // ── Stats ────────────────────────────────────────────────────────
 
-    // Number of sequences that currently have allocated blocks.
-    int num_active_sequences() const;
+    // Snapshot of all cache statistics.
+    KVCacheStats stats() const;
 
-    // Total number of blocks across all active sequences.
+    // Individual stats (convenience wrappers).
+    int num_active_sequences() const;
     int total_allocated_blocks() const;
 
     // ── Persistent prefix cache ─────────────────────────────────────
@@ -152,7 +148,7 @@ public:
     // Compute the hash for a block of tokens. `parent_hash` is the hash
     // of the preceding block (0 for the first block). If the block has
     // fewer than kKVBlockSize tokens, it is NOT cacheable (partial block).
-    static size_t compute_block_hash(const int32_t* tokens, int count,
+    static size_t compute_block_hash(std::span<const int32_t> tokens,
                                      size_t parent_hash);
 
 private:
@@ -167,10 +163,6 @@ private:
     std::list<int> lru_order_;
     // O(1) lookup from seq_id to its position in lru_order_.
     std::unordered_map<int, std::list<int>::iterator> lru_map_;
-
-    // ── Prefix caching (legacy hash-to-block-table) ──────────────────
-    // prefix_hash -> block ids that hold the cached KV data.
-    std::unordered_map<size_t, std::vector<int>> prefix_cache_;
 
     // ── Content-addressed prefix caching ─────────────────────────────
     bool prefix_caching_enabled_ = false;

@@ -414,6 +414,16 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
             int right = snext[pos];
             if (right >= ns || sdel[right]) continue;
 
+            // Re-validate: the pair at this position may have changed since
+            // the merge was enqueued (e.g., the right neighbor was merged
+            // with ITS right neighbor, changing the symbol). Check that the
+            // current pair still maps to the same rank.
+            {
+                std::string cur_key = symbols[pos] + " " + symbols[right];
+                auto vit = merge_ranks_.find(cur_key);
+                if (vit == merge_ranks_.end() || vit->second != rank) continue;
+            }
+
             symbols[pos] = symbols[pos] + symbols[right];
             sdel[right] = true;
             sseq[pos]++;
