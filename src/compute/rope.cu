@@ -1,4 +1,5 @@
 #include "compute/rope.h"
+#include "compute/warp_reduce.cuh"
 #include "runtime/pdl.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
@@ -249,24 +250,19 @@ void rope_forward(Tensor& Q, Tensor& K,
 // Fused QK-norm + RoPE kernel (decode-only, n=1, FP16) with YaRN support
 // --------------------------------------------------------------------------
 
-__device__ __forceinline__ float rope_warp_reduce_sum(float val) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1)
-        val += __shfl_xor_sync(0xFFFFFFFF, val, offset);
-    return val;
-}
+// Use centralized warp_reduce_sum from warp_reduce.cuh
 
 __device__ __forceinline__ float rope_block_reduce_sum(float val, float* shared_buf) {
     const int lane = threadIdx.x & 31;
     const int warp_id = threadIdx.x >> 5;
 
-    val = rope_warp_reduce_sum(val);
+    val = warp_reduce_sum(val);
     if (lane == 0) shared_buf[warp_id] = val;
     __syncthreads();
 
     const int num_warps = (blockDim.x + 31) / 32;
     val = (threadIdx.x < num_warps) ? shared_buf[threadIdx.x] : 0.0f;
-    if (warp_id == 0) val = rope_warp_reduce_sum(val);
+    if (warp_id == 0) val = warp_reduce_sum(val);
     return val;
 }
 

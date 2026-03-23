@@ -1,4 +1,5 @@
 #include "compute/softmax.h"
+#include "compute/warp_reduce.cuh"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -6,25 +7,6 @@
 #include <cfloat>
 
 namespace imp {
-
-// --------------------------------------------------------------------------
-// Warp-level reductions
-// --------------------------------------------------------------------------
-__device__ __forceinline__ float warp_reduce_max(float val) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        val = fmaxf(val, __shfl_xor_sync(0xFFFFFFFF, val, offset));
-    }
-    return val;
-}
-
-__device__ __forceinline__ float warp_reduce_sum(float val) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        val += __shfl_xor_sync(0xFFFFFFFF, val, offset);
-    }
-    return val;
-}
 
 // --------------------------------------------------------------------------
 // Block-level max reduction (up to 8 warps = 256 threads)
