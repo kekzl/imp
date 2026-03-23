@@ -1,4 +1,5 @@
 #include "compute/layernorm.h"
+#include "compute/warp_reduce.cuh"
 #include "runtime/pdl.h"
 #include "core/tensor.h"
 #include <cuda_runtime.h>
@@ -7,17 +8,6 @@
 #include <cmath>
 
 namespace imp {
-
-// --------------------------------------------------------------------------
-// Warp-level reduction: sum across a warp using shuffle intrinsics
-// --------------------------------------------------------------------------
-__device__ __forceinline__ float warp_reduce_sum(float val) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        val += __shfl_xor_sync(0xFFFFFFFF, val, offset);
-    }
-    return val;
-}
 
 // --------------------------------------------------------------------------
 // Block-level reduction using shared memory (up to 32 warps = 1024 threads)

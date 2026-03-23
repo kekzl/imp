@@ -1,4 +1,5 @@
 #include "compute/reduce.h"
+#include "compute/warp_reduce.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cfloat>
@@ -8,29 +9,6 @@ namespace imp {
 
 static constexpr int BLOCK_SIZE = 256;
 static constexpr int WARP_SIZE = 32;
-
-// ============================================================================
-// Warp-level reduction primitives
-// ============================================================================
-
-__device__ __forceinline__
-float warp_reduce_sum(float val) {
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-        val += __shfl_xor_sync(0xFFFFFFFF, val, offset);
-    }
-    return val;
-}
-
-__device__ __forceinline__
-float warp_reduce_max(float val) {
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-        float other = __shfl_xor_sync(0xFFFFFFFF, val, offset);
-        val = fmaxf(val, other);
-    }
-    return val;
-}
 
 // ============================================================================
 // Reduce LAST dimension  --  input [outer, inner] -> output [outer]

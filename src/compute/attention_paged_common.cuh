@@ -1,5 +1,6 @@
 #pragma once
 
+#include "compute/warp_reduce.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <float.h>
@@ -10,21 +11,6 @@ namespace imp {
 static constexpr int WARP_SIZE = 32;
 static constexpr int BLOCK_THREADS = 256;
 static constexpr int NUM_WARPS = BLOCK_THREADS / WARP_SIZE;  // 8
-
-// Warp-level reductions (used by FP16, FP8, and INT8 kernels)
-__device__ __forceinline__ float warp_reduce_max(float val) {
-    #pragma unroll
-    for (int mask = WARP_SIZE / 2; mask > 0; mask >>= 1)
-        val = fmaxf(val, __shfl_xor_sync(0xffffffff, val, mask));
-    return val;
-}
-
-__device__ __forceinline__ float warp_reduce_sum(float val) {
-    #pragma unroll
-    for (int mask = WARP_SIZE / 2; mask > 0; mask >>= 1)
-        val += __shfl_xor_sync(0xffffffff, val, mask);
-    return val;
-}
 
 // cp.async helpers for pipelined Split-K attention
 __device__ __forceinline__ void cp_async_ca_8(void* smem, const void* glob) {
