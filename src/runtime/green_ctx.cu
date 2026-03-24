@@ -145,6 +145,10 @@ bool GreenContextManager::init(int device, float prefill_sm_ratio) {
     }
 
 fallback:
+    // Clear any stale CUDA errors from failed green context operations.
+    // Without this, the error propagates to subsequent cuBLAS calls
+    // (cublasLtMatmul returns INVALID_VALUE) causing output corruption.
+    cudaGetLastError();
 #endif  // IMP_CUDA_13_1
 
     // Fallback: create regular CUDA streams (no SM partitioning)
