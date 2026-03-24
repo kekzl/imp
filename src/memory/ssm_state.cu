@@ -38,6 +38,16 @@ bool SSMState::init(int n_ssm_layers, int max_sequences,
 
     if (alloc_) {
         pool_ = alloc_->allocate(total_bytes_, "ssm_state");
+        // SSM state is critical — fall back to raw cudaMalloc if the
+        // headroom-aware allocator rejects it (e.g. Nemotron-30B uses
+        // 29+ GiB for weights, leaving <headroom free, but SSM state
+        // is only ~25 MiB and essential for correct inference).
+        if (!pool_) {
+            IMP_LOG_WARN("SSM state: allocator rejected, trying raw cudaMalloc (%zu bytes)", total_bytes_);
+            cudaError_t err = cudaMalloc(&pool_, total_bytes_);
+            if (err == cudaSuccess) alloc_ = nullptr;  // don't free via allocator
+            else pool_ = nullptr;
+        }
     } else {
         cudaError_t err = cudaMalloc(&pool_, total_bytes_);
         if (err != cudaSuccess) pool_ = nullptr;
