@@ -111,6 +111,12 @@ public:
         float top_p = 1.0f;
         int top_k = 0;
         int seed = -1;
+        // Think budget: break loop when reasoning tokens exceed limit.
+        // CPU then takes over with force_token for </think> injection.
+        int think_budget_limit = 0;      // 0 = no limit
+        int32_t think_start_id = -1;     // <think> token ID
+        int32_t think_end_id = -1;       // </think> token ID
+        bool initial_in_think = false;   // true if already inside <think> block
     };
 
     // Build the conditional graph and all device state.
@@ -150,6 +156,10 @@ private:
     int* d_context_len_ = nullptr;         // [1] current context length on device
     int* d_step_counter_ = nullptr;        // [1] step counter on device
     int32_t* d_stop_ids_ = nullptr;        // [n_stop_ids] stop token IDs on device
+
+    // Think budget tracking (device-side)
+    int* d_think_count_ = nullptr;          // [1] reasoning token counter
+    int* d_in_think_ = nullptr;             // [1] currently inside <think> block
 
     // Mapped pinned memory for zero-copy host readback
     int32_t* h_ring_buffer_ = nullptr;     // host pointer to ring buffer

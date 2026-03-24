@@ -1551,14 +1551,11 @@ bool Engine::step() {
             }
 
             // Try async graph loop after first decode step.
-            // Disabled when think_budget is active — the loop runs entirely on GPU
-            // and cannot enforce per-step logit manipulation for budget control.
-            bool dreq_think_budget = (valid_decode[0]->think_budget > 0.0f && think_end_id_ >= 0);
+            // Think budget is now handled device-side in post_decode_step_kernel.
             if (decode_graph_runner_.is_ready() && valid_decode.size() == 1 &&
                 !offload_mgr_ && !ssm_state_ && !config_.enable_speculative &&
                 config_.use_cuda_graphs && !async_graph_runner_.is_setup() &&
-                !needs_logprobs && !needs_json_mode && !needs_schema_mode &&
-                !dreq_think_budget) {
+                !needs_logprobs && !needs_json_mode && !needs_schema_mode) {
                 auto& dreq = valid_decode[0];
                 bool dreq_has_penalties = (dreq->repetition_penalty != 1.0f ||
                                            dreq->frequency_penalty != 0.0f ||
@@ -1661,13 +1658,10 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     bool req_has_penalties = (req->repetition_penalty != 1.0f ||
                               req->frequency_penalty != 0.0f ||
                               req->presence_penalty != 0.0f);
-    // Disable async graph loop when think budget is active: the loop runs entirely
-    // on GPU and cannot check/enforce the budget per-token from the CPU side.
-    bool think_budget_active = (req->think_budget > 0.0f && think_end_id_ >= 0);
+    // Think budget is now enforced device-side in post_decode_step_kernel.
     if (req->status == RequestStatus::DECODING && !req->output_tokens.empty() &&
         config_.use_cuda_graphs && !offload_mgr_ && !ssm_state_ && !gdn_state_ &&
-        !config_.enable_speculative && !req->ignore_eos && !req_has_penalties &&
-        !think_budget_active) {
+        !config_.enable_speculative && !req->ignore_eos && !req_has_penalties) {
         int32_t first_token = req->output_tokens.back();
         Tokenizer* gtok = model_->tokenizer();
         auto graph_tokens = try_graph_loop_decode(req, first_token, decode_stream());
@@ -1807,6 +1801,13 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(
     gcfg.top_p = req.top_p;
     gcfg.top_k = req.top_k;
     gcfg.seed = req.seed;
+    // Think budget: device-side enforcement in post_decode_step_kernel
+    if (req.think_budget > 0.0f && think_end_id_ >= 0) {
+        gcfg.think_budget_limit = static_cast<int>(req.max_tokens * req.think_budget);
+        gcfg.think_start_id = think_start_id_;
+        gcfg.think_end_id = think_end_id_;
+        gcfg.initial_in_think = req.in_think_block;
+    }
     return gcfg;
 }
 
