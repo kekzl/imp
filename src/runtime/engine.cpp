@@ -711,12 +711,22 @@ bool Engine::init_features() {
         }
     }
 
-    // Cache think token IDs for stop-suppression during reasoning
+    // Cache think token IDs for stop-suppression during reasoning.
+    // Only treat as think model if <think> is a special token (high vocab ID),
+    // not a regular text piece. Nemotron has "<think>" at ID 12 as a normal
+    // text token — treating it as think-start breaks stop-token suppression.
     {
         Tokenizer* ptok = model_->tokenizer();
         if (ptok) {
-            think_start_id_ = ptok->find_token("<think>");
-            think_end_id_ = ptok->find_token("</think>");
+            int32_t ts = ptok->find_token("<think>");
+            int32_t te = ptok->find_token("</think>");
+            int vocab = ptok->vocab_size();
+            // Heuristic: special/added tokens are typically in the last 1% of vocab
+            bool is_special = (ts >= 0 && ts > vocab * 99 / 100);
+            if (is_special) {
+                think_start_id_ = ts;
+                think_end_id_ = te;
+            }
         }
     }
 
@@ -759,6 +769,7 @@ void Engine::warmup() {
             step();
 
         kv_manager_->free_sequence(req->id);
+        reset_ssm_state(req->id);
         while (kv_manager_->evict_cached_block()) {}
         req->status = RequestStatus::CANCELLED;
     }
@@ -771,6 +782,9 @@ void Engine::warmup() {
     async_pending_tokens_.clear();
     async_pending_cursor_ = 0;
     cudaStreamSynchronize(stream_);
+    // Clear any stale CUDA errors from warmup (e.g. green context reconfigure
+    // failure on consumer GPUs — the error propagates to cuBLAS otherwise).
+    cudaGetLastError();
     IMP_LOG_INFO("Warmup complete");
 }
 

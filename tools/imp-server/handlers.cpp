@@ -268,13 +268,21 @@ std::string load_model_into_state(ServerState& state, const std::string& path,
     state.max_seq_len = imp_model_max_seq_len(state.model);
     if (state.max_seq_len <= 0) state.max_seq_len = static_cast<int>(config.max_seq_len);
 
-    // Detect thinking model (DeepSeek R1 etc.) by checking for <think> token in vocab
-    state.think_start_id = state.tok->find_token("<think>");
-    state.think_end_id = state.tok->find_token("</think>");
-    state.is_think_model = (state.think_start_id >= 0);
-    if (state.is_think_model) {
-        printf("Reasoning model: <think>=%d, </think>=%d\n",
-               state.think_start_id, state.think_end_id);
+    // Detect thinking model (DeepSeek R1, Qwen3 etc.) by checking for <think> token.
+    // Only treat as think model if <think> is a special/added token (high vocab ID),
+    // not a regular text piece. Nemotron has "<think>" at ID 12 as normal text.
+    {
+        int32_t ts = state.tok->find_token("<think>");
+        int32_t te = state.tok->find_token("</think>");
+        int vocab = state.tok->vocab_size();
+        bool is_special = (ts >= 0 && ts > vocab * 99 / 100);
+        state.think_start_id = is_special ? ts : -1;
+        state.think_end_id = is_special ? te : -1;
+        state.is_think_model = is_special;
+        if (state.is_think_model) {
+            printf("Reasoning model: <think>=%d, </think>=%d\n",
+                   state.think_start_id, state.think_end_id);
+        }
     }
 
     if (state.have_template) {
