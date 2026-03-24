@@ -927,6 +927,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 std::string think_scan_buf;
                 int think_scan_count = 0;
                 int n_reasoning_tokens = 0;
+                bool content_started = (think_phase == ThinkPhase::CONTENT);
                 int think_reentries = 0;
                 const int kMaxThinkReentries = 1;
                 const int kThinkScanLimit = 8;
@@ -1090,6 +1091,15 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                             }
                             continue;
                         }
+                    }
+
+                    // Strip leading whitespace after </think> → CONTENT transition
+                    // (matches extract_reasoning behavior in non-streaming path)
+                    if (!content_started && think_phase == ThinkPhase::CONTENT) {
+                        auto ns = piece.find_first_not_of("\n\r\t ");
+                        if (ns == std::string::npos) continue;  // all whitespace
+                        piece = piece.substr(ns);
+                        content_started = true;
                     }
 
                     // CONTENT phase: handle stray think tokens from confused models
