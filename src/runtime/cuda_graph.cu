@@ -305,9 +305,22 @@ __global__ void post_decode_step_kernel(
         int eos_id,
         const int32_t* __restrict__ d_stop_ids,
         int n_stop_ids,
+        // Think budget (all 0/-1 when disabled)
+        int think_budget_limit,
+        int32_t think_start_id,
+        int32_t think_end_id,
+        int* __restrict__ d_think_count,             // [1] reasoning token counter
+        int* __restrict__ d_in_think,                // [1] think block flag
         cudaGraphConditionalHandle handle) {
     int step = *d_step_counter;
     int32_t token = *d_token_id;
+
+    // Track think state on device
+    if (think_budget_limit > 0) {
+        if (token == think_start_id)       *d_in_think = 1;
+        else if (token == think_end_id)    *d_in_think = 0;
+        else if (*d_in_think)              (*d_think_count)++;
+    }
 
     // Write token to ring buffer (visible to host via mapped memory)
     d_ring_buffer[step] = token;
@@ -326,6 +339,12 @@ __global__ void post_decode_step_kernel(
     bool should_stop = (step + 1 >= max_steps) || (token == eos_id);
     for (int i = 0; i < n_stop_ids; i++) {
         if (token == d_stop_ids[i]) should_stop = true;
+    }
+
+    // Think budget: break loop to return to CPU for force_token injection
+    if (think_budget_limit > 0 && *d_in_think &&
+        *d_think_count >= think_budget_limit) {
+        should_stop = true;
     }
 
     if (should_stop) {
@@ -367,6 +386,18 @@ bool CudaGraphConditionalRunner::setup(
         cudaMemcpyAsync(d_stop_ids_, config_.stop_ids.data(),
                          config_.stop_ids.size() * sizeof(int32_t),
                          cudaMemcpyHostToDevice, stream);
+    }
+
+    // Think budget counters (device-side)
+    if (config_.think_budget_limit > 0) {
+        err = cudaMalloc(&d_think_count_, sizeof(int));
+        if (err != cudaSuccess) goto fail;
+        err = cudaMalloc(&d_in_think_, sizeof(int));
+        if (err != cudaSuccess) goto fail;
+        int zero = 0;
+        int init_think = config_.initial_in_think ? 1 : 0;
+        cudaMemcpyAsync(d_think_count_, &zero, sizeof(int), cudaMemcpyHostToDevice, stream);
+        cudaMemcpyAsync(d_in_think_, &init_think, sizeof(int), cudaMemcpyHostToDevice, stream);
     }
 
     // ---- Allocate mapped pinned memory for ring buffer ----
@@ -477,12 +508,14 @@ bool CudaGraphConditionalRunner::setup(
                                         reinterpret_cast<int32_t*>(h_step_counter_),
                                         stream);
 
-        // 5b. Post-decode-step kernel: ring buffer write, counter increment, EOS check
+        // 5b. Post-decode-step kernel: ring buffer write, counter increment, EOS check, think budget
         post_decode_step_kernel<<<1, 1, 0, stream>>>(
             d_token_id_, d_ring_buffer_, d_step_counter_mapped_,
             d_position_, d_context_len_, d_step_counter_,
             config_.max_steps, config_.eos_id,
             d_stop_ids_, static_cast<int>(config_.stop_ids.size()),
+            config_.think_budget_limit, config_.think_start_id, config_.think_end_id,
+            d_think_count_, d_in_think_,
             handle_);
 
         // 5c. End capture
@@ -585,6 +618,8 @@ void CudaGraphConditionalRunner::cleanup() {
     if (d_context_len_) { cudaFree(d_context_len_); d_context_len_ = nullptr; }
     if (d_step_counter_) { cudaFree(d_step_counter_); d_step_counter_ = nullptr; }
     if (d_stop_ids_) { cudaFree(d_stop_ids_); d_stop_ids_ = nullptr; }
+    if (d_think_count_) { cudaFree(d_think_count_); d_think_count_ = nullptr; }
+    if (d_in_think_) { cudaFree(d_in_think_); d_in_think_ = nullptr; }
 
     if (h_ring_buffer_) { cudaFreeHost(h_ring_buffer_); h_ring_buffer_ = nullptr; }
     d_ring_buffer_ = nullptr;
