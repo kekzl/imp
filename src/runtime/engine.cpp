@@ -757,7 +757,7 @@ void Engine::warmup() {
         req->status = RequestStatus::CANCELLED;
     }
 
-    decode_graph_runner_.invalidate();
+    for (int i = 0; i < kMaxGraphPoolSize; i++) decode_graph_pool_[i].invalidate();
     decode_batch_pool_.reset_upload_cache();
     if (async_graph_runner_.is_setup()) async_graph_runner_.cleanup();
     if (async_d_block_tables_) { cudaFree(async_d_block_tables_); async_d_block_tables_ = nullptr; }
@@ -1447,26 +1447,28 @@ bool Engine::step() {
             Tensor decode_logits_out;
 
             // 3e. Execute forward pass (piecewise CUDA Graph: forward in graph,
-            //     sampling always eager — compatible with penalties, force_token,
-            //     constraints, logprobs, and think-budget without graph invalidation)
+            //     sampling always eager — per-batch-size graph pool avoids
+            //     re-capture when continuous batching changes batch size)
             static const bool profiling = (std::getenv("IMP_PROFILE") != nullptr);
+            int graph_idx = gpu_batch.n_sequences - 1;
             if (config_.use_cuda_graphs && !profiling &&
                 gpu_batch.n_sequences > 0 &&
+                graph_idx < kMaxGraphPoolSize &&
                 decode_batch_pool_.is_allocated()) {
-                if (gpu_batch.n_sequences != last_decode_batch_size_ ||
-                    gpu_batch.max_blocks_per_seq != last_decode_max_blocks_) {
-                    decode_graph_runner_.invalidate();
-                    last_decode_batch_size_ = gpu_batch.n_sequences;
-                    last_decode_max_blocks_ = gpu_batch.max_blocks_per_seq;
+                auto& graph_runner = decode_graph_pool_[graph_idx];
+
+                if (gpu_batch.max_blocks_per_seq != last_decode_max_blocks_per_graph_[graph_idx]) {
+                    graph_runner.invalidate();
+                    last_decode_max_blocks_per_graph_[graph_idx] = gpu_batch.max_blocks_per_seq;
                 }
 
                 // Graph captures ONLY forward_logits — sampling runs eager after
                 Tensor logits_out;
-                decode_graph_runner_.set_decode_fn(
+                graph_runner.set_decode_fn(
                     [this, &state, &logits_out](cudaStream_t s) {
                         executor_->forward_logits(state, logits_out, s);
                     });
-                decode_graph_runner_.execute(dec_stream);
+                graph_runner.execute(dec_stream);
 
                 if (logits_out.data == nullptr) {
                     logits_out = executor_->get_logits_view(gpu_batch.n_sequences);
@@ -1552,7 +1554,7 @@ bool Engine::step() {
 
             // Try async graph loop after first decode step.
             // Think budget is now handled device-side in post_decode_step_kernel.
-            if (decode_graph_runner_.is_ready() && valid_decode.size() == 1 &&
+            if (decode_graph_pool_[0].is_ready() && valid_decode.size() == 1 &&
                 !offload_mgr_ && !ssm_state_ && !config_.enable_speculative &&
                 config_.use_cuda_graphs && !async_graph_runner_.is_setup() &&
                 !needs_logprobs && !needs_json_mode && !needs_schema_mode) {
@@ -1766,7 +1768,7 @@ int Engine::prepare_graph_loop(std::shared_ptr<Request>& req) {
     int remaining = req->max_tokens - static_cast<int>(req->output_tokens.size());
     if (remaining <= 0) return 0;
 
-    constexpr int kMaxLayersForConditionalGraph = 40;
+    constexpr int kMaxLayersForConditionalGraph = 128;
     if (model_->config().n_layers > kMaxLayersForConditionalGraph) return 0;
 
     { size_t f = 0, t = 0; cudaMemGetInfo(&f, &t);
