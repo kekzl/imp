@@ -590,8 +590,14 @@ bool Engine::init_features() {
 
     // Green contexts
     if (config_.use_green_contexts) {
-        if (!green_ctx_.init(0, config_.green_ctx_prefill_ratio))
+        if (!green_ctx_.init(0, config_.green_ctx_prefill_ratio)) {
             IMP_LOG_WARN("Green context init failed — falling back to regular streams");
+            // Clear the CUDA error state so it doesn't corrupt subsequent operations.
+            // Green context failure on sm_120 consumer GPUs is expected (requires
+            // data-center features). Without clearing, the stale error causes
+            // cublasLtMatmul to fail with CUBLAS_STATUS_INVALID_VALUE.
+            cudaGetLastError();
+        }
         if (green_ctx_.is_available() && config_.prefill_chunk_size > 0)
             if (executor_->allocate_decode_workspace(stream_, config_.max_batch_size))
                 IMP_LOG_INFO("Concurrent prefill/decode overlap enabled");
