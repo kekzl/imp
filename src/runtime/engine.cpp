@@ -14,7 +14,9 @@
 
 #include <cstring>
 #include <cmath>
+#include <chrono>
 #include <algorithm>
+#include <functional>
 #include <vector>
 
 namespace imp {
@@ -102,6 +104,20 @@ bool Engine::is_stop_token(int32_t token) const {
     return false;
 }
 
+void Engine::track_think_state(Request& req, int32_t token) const {
+    if (token == think_start_id_) req.in_think_block = true;
+    else if (token == think_end_id_) req.in_think_block = false;
+}
+
+bool Engine::should_stop(Request& req, int32_t token) const {
+    if (req.ignore_eos) return false;
+    // Inside <think>...</think>: suppress stop tokens so reasoning can complete.
+    // The model may generate <|im_end|> during reasoning as part of its internal
+    // monologue — stopping here produces empty content (llama.cpp ignores this).
+    if (req.in_think_block) return false;
+    return is_stop_token(token);
+}
+
 void Engine::fill_sampling_params(const Request& req, InferenceState& state) const {
     state.temperature = req.temperature;
     state.top_p = req.top_p;
@@ -123,6 +139,34 @@ void Engine::fill_sampling_params(const Request& req, InferenceState& state) con
     state.mirostat_tau = req.mirostat_tau;
     state.mirostat_eta = req.mirostat_eta;
     state.mirostat_mu = req.mirostat_mu;
+
+    // Banned tokens (chat template special tokens that must not be generated)
+    if (!banned_token_ids_.empty()) {
+        state.banned_tokens = banned_token_ids_.data();
+        state.n_banned_tokens = static_cast<int>(banned_token_ids_.size());
+    }
+
+    // Think budget: force </think> token via logit manipulation when budget exceeded.
+    // Count reasoning tokens (between <think> and </think>) from output history.
+    // The model generates </think> itself so it lands in the KV cache correctly.
+    state.force_token = -1;
+    // (think budget logic below)
+    if (req.think_budget > 0.0f && req.in_think_block && think_end_id_ >= 0) {
+        int think_limit = static_cast<int>(req.max_tokens * req.think_budget);
+        // Count reasoning tokens in output so far
+        int n_reasoning = 0;
+        bool in_think = false;
+        for (int32_t t : req.output_tokens) {
+            if (t == think_start_id_) in_think = true;
+            else if (t == think_end_id_) in_think = false;
+            else if (in_think) n_reasoning++;
+        }
+        if (n_reasoning >= think_limit) {
+            state.force_token = think_end_id_;
+            IMP_LOG_DEBUG("Think budget: forcing </think> after %d reasoning tokens (limit=%d)",
+                          n_reasoning, think_limit);
+        }
+    }
 }
 
 void Engine::upload_penalties(const Request& req, InferenceState& state,
@@ -607,6 +651,71 @@ bool Engine::init_features() {
             chat_template_.init(family, *tok);
     }
 
+    // Build banned token list: special/control tokens that must never appear
+    // in generated output.  If the model emits e.g. <|im_start|> or
+    // <|endoftext|> mid-generation it starts a phantom new turn or hallucinates
+    // a continuation, causing output degeneration.  llama.cpp blocks all
+    // control tokens via llama_token_is_control(); we scan the vocabulary for
+    // tokens matching known special-token patterns.
+    {
+        banned_token_ids_.clear();
+        auto add_if_valid = [this](int32_t id) {
+            if (id >= 0) banned_token_ids_.push_back(id);
+        };
+
+        // Collect IDs that must NOT be banned (stop tokens + EOS).
+        // The model must be able to generate these to terminate output.
+        std::vector<int32_t> keep_ids;
+        Tokenizer* tok = model_->tokenizer();
+        if (tok) keep_ids.push_back(static_cast<int32_t>(tok->eos_id()));
+        for (int32_t sid : chat_template_.stop_token_ids())
+            keep_ids.push_back(sid);
+        auto is_kept = [&](int32_t id) {
+            return std::find(keep_ids.begin(), keep_ids.end(), id) != keep_ids.end();
+        };
+
+        // Chat template start-of-turn delimiters (never valid in output)
+        if (!is_kept(chat_template_.im_start_id()))
+            add_if_valid(chat_template_.im_start_id());
+        if (!is_kept(chat_template_.start_header_id()))
+            add_if_valid(chat_template_.start_header_id());
+        if (!is_kept(chat_template_.end_header_id()))
+            add_if_valid(chat_template_.end_header_id());
+
+        // Scan vocab for <|...|> control tokens, excluding stop/EOS tokens
+        if (tok) {
+            int vocab_size = tok->vocab_size();
+            for (int i = 0; i < vocab_size; i++) {
+                if (is_kept(static_cast<int32_t>(i))) continue;
+                const std::string& t = tok->token_text(i);
+                if (t.size() >= 4 && t[0] == '<' && t[1] == '|' &&
+                    t[t.size()-1] == '>' && t[t.size()-2] == '|') {
+                    add_if_valid(static_cast<int32_t>(i));
+                }
+            }
+        }
+
+        // Deduplicate
+        std::sort(banned_token_ids_.begin(), banned_token_ids_.end());
+        banned_token_ids_.erase(
+            std::unique(banned_token_ids_.begin(), banned_token_ids_.end()),
+            banned_token_ids_.end());
+
+        if (!banned_token_ids_.empty()) {
+            IMP_LOG_INFO("Banned %zu special tokens from generation",
+                         banned_token_ids_.size());
+        }
+    }
+
+    // Cache think token IDs for stop-suppression during reasoning
+    {
+        Tokenizer* ptok = model_->tokenizer();
+        if (ptok) {
+            think_start_id_ = ptok->find_token("<think>");
+            think_end_id_ = ptok->find_token("</think>");
+        }
+    }
+
     // Vision
     if (!config_.mmproj_path.empty()) {
         if (!vision_.init(config_.mmproj_path, mcfg.d_model, model_.get(), vram_alloc_, stream_))
@@ -752,7 +861,8 @@ bool Engine::step() {
         bool generation_done = false;
         if (token >= 0) {
             req->output_tokens.push_back(token);
-            bool is_stop = !req->ignore_eos && is_stop_token(token);
+            track_think_state(*req, token);
+            bool is_stop = should_stop(*req, token);
             generation_done = is_stop ||
                 static_cast<int>(req->output_tokens.size()) >= req->max_tokens;
             if (!generation_done) return true;
@@ -1106,6 +1216,7 @@ bool Engine::step() {
             }
 
             req->output_tokens.push_back(next_token);
+            track_think_state(*req, next_token);
 
             Tokenizer* tok = model_->tokenizer();
             IMP_LOG_DEBUG("Prefill -> token %d (ctx=%d): id=%d [%s]",
@@ -1115,7 +1226,7 @@ bool Engine::step() {
             // Update constraint FSM
             constraints_.update(next_token);
 
-            if ((!req->ignore_eos && is_stop_token(next_token)) ||
+            if (should_stop(*req, next_token) ||
                 static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
                 finish_request(req);
             } else {
@@ -1243,7 +1354,18 @@ bool Engine::step() {
             state.max_context_len = max_ctx;
             state.is_prefill = false;
             fill_sampling_params(*valid_decode[0], state);
-            state.seed = -1;  // decode uses per-request seeds
+
+            // Derive per-step seed: mix request seed with output count so each
+            // decode step gets a different random draw.  Without this, seed=-1
+            // falls back to a fixed 42 on every step, producing identical RNG
+            // values and causing repetition loops on long structured outputs.
+            {
+                auto& req0 = valid_decode[0];
+                int base_seed = req0->seed >= 0 ? req0->seed
+                    : static_cast<int>(std::hash<int>{}(req0->id) ^ std::chrono::steady_clock::now().time_since_epoch().count());
+                int step = static_cast<int>(req0->output_tokens.size());
+                state.seed = base_seed + step;
+            }
 
             // Penalties (single-sequence only)
             if (gpu_batch.n_sequences == 1) {
@@ -1295,6 +1417,10 @@ bool Engine::step() {
                     auto& req = valid_decode[i];
                     InferenceState per_state = state;
                     fill_sampling_params(*req, per_state);
+                    // Per-step seed (same fix as single-sequence path)
+                    int base_seed = req->seed >= 0 ? req->seed
+                        : static_cast<int>(std::hash<int>{}(req->id) ^ std::chrono::steady_clock::now().time_since_epoch().count());
+                    per_state.seed = base_seed + static_cast<int>(req->output_tokens.size());
                     per_state.penalty_tokens = nullptr;
                     per_state.n_penalty_tokens = 0;
                     bool req_needs_pen = (req->repetition_penalty != 1.0f ||
@@ -1323,7 +1449,10 @@ bool Engine::step() {
             Tensor decode_logits_out;
 
             static const bool profiling = (std::getenv("IMP_PROFILE") != nullptr);
-            if (config_.use_cuda_graphs && !profiling &&
+            // Skip CUDA graphs when think budget is active — the budget enforcer
+            // needs per-step logit manipulation that isn't captured by graphs.
+            bool skip_graph = (valid_decode[0]->think_budget > 0.0f && think_end_id_ >= 0);
+            if (config_.use_cuda_graphs && !profiling && !skip_graph &&
                 gpu_batch.n_sequences > 0 &&
                 decode_batch_pool_.is_allocated()) {
                 if (gpu_batch.n_sequences != last_decode_batch_size_ ||
@@ -1338,12 +1467,14 @@ bool Engine::step() {
                                      (state.repetition_penalty != 1.0f ||
                                       state.frequency_penalty != 0.0f ||
                                       state.presence_penalty != 0.0f));
+                bool has_force_token = (state.force_token >= 0);
                 bool greedy_single = (state.temperature <= 0.0f || state.top_k == 1) &&
                                      gpu_batch.n_sequences == 1 &&
                                      h_sample_pinned_ != nullptr &&
                                      executor_->d_sample_result() != nullptr &&
                                      !needs_logprobs && !needs_json_mode &&
-                                     !needs_schema_mode && !has_penalties;
+                                     !needs_schema_mode && !has_penalties &&
+                                     !has_force_token;
 
                 if (greedy_single != graph_includes_sampling_) {
                     decode_graph_runner_.invalidate();
@@ -1439,13 +1570,14 @@ bool Engine::step() {
                 int32_t next_token = tokens[i];
 
                 req->output_tokens.push_back(next_token);
+                track_think_state(*req, next_token);
 
                 IMP_LOG_DEBUG("Decode step %d (ctx=%d, pos=%d): id=%d [%s]",
                               (int)req->output_tokens.size(), req->context_len(),
                               req->context_len() - 1,
                               next_token, tok->decode_token(next_token).c_str());
 
-                if ((!req->ignore_eos && is_stop_token(next_token)) ||
+                if (should_stop(*req, next_token) ||
                     static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
                     finish_request(req);
                 }
@@ -1561,15 +1693,21 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     bool req_has_penalties = (req->repetition_penalty != 1.0f ||
                               req->frequency_penalty != 0.0f ||
                               req->presence_penalty != 0.0f);
+    // Disable async graph loop when think budget is active: the loop runs entirely
+    // on GPU and cannot check/enforce the budget per-token from the CPU side.
+    bool think_budget_active = (req->think_budget > 0.0f && think_end_id_ >= 0);
     if (req->status == RequestStatus::DECODING && !req->output_tokens.empty() &&
         config_.use_cuda_graphs && !offload_mgr_ && !ssm_state_ && !gdn_state_ &&
-        !config_.enable_speculative && !req->ignore_eos && !req_has_penalties) {
+        !config_.enable_speculative && !req->ignore_eos && !req_has_penalties &&
+        !think_budget_active) {
         int32_t first_token = req->output_tokens.back();
         Tokenizer* gtok = model_->tokenizer();
         auto graph_tokens = try_graph_loop_decode(req, first_token, decode_stream());
         if (!graph_tokens.empty()) {
             int32_t last = graph_tokens.back();
-            bool hit_stop = is_stop_token(last);
+            // Track think state through all graph tokens
+            for (int32_t t : graph_tokens) track_think_state(*req, t);
+            bool hit_stop = should_stop(*req, last);
             if (hit_stop) graph_tokens.pop_back();
 
             for (int32_t t : graph_tokens) {
@@ -1617,7 +1755,8 @@ bool Engine::try_speculative_decode(
     auto accept_tokens = [&](const std::vector<int32_t>& tokens) {
         for (int32_t t : tokens) {
             req->output_tokens.push_back(t);
-            if ((!req->ignore_eos && is_stop_token(t)) ||
+            track_think_state(*req, t);
+            if (should_stop(*req, t) ||
                 static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
                 finish_request(req);
                 break;

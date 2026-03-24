@@ -79,6 +79,7 @@ void BatchBuilder::reset() {
     batch_.n_sequences = 0;
     batch_.total_tokens = 0;
     batch_.max_blocks_per_seq = 0;
+    batch_.actual_blocks_per_seq = 0;
     raw_block_tables_.clear();
 
     batch_.seq_offsets.push_back(0);
@@ -120,6 +121,7 @@ Batch BatchBuilder::build() {
         max_blocks = std::max(max_blocks, n);
     }
     batch_.max_blocks_per_seq = max_blocks;
+    batch_.actual_blocks_per_seq = max_blocks;
 
     // Build padded 2D block table: [n_sequences, max_blocks_per_seq]
     batch_.block_tables.clear();
@@ -223,7 +225,9 @@ GPUBatch GPUBatchPool::upload_into_pool(const Batch& batch, cudaStream_t stream)
         // first block ID are unchanged. Within a request, existing block IDs are
         // stable (only new blocks appended). Between requests, the first block ID
         // changes (different physical page), forcing a re-upload.
-        int n_blocks = static_cast<int>(batch.block_tables.size()) / batch.n_sequences;
+        int n_blocks = batch.actual_blocks_per_seq > 0
+                     ? batch.actual_blocks_per_seq
+                     : static_cast<int>(batch.block_tables.size()) / batch.n_sequences;
         int first_block = batch.block_tables[0];
         if (batch.n_sequences == 1 && n_blocks == last_upload_n_blocks_ &&
             first_block == last_upload_first_block_) {

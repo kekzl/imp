@@ -209,6 +209,9 @@ private:
     int32_t* d_penalty_tokens_ = nullptr;
     size_t d_penalty_tokens_capacity_ = 0;
 
+    // ── Banned tokens (special/control tokens that must not be generated) ──
+    std::vector<int32_t> banned_token_ids_;
+
     // ── Stream helpers ───────────────────────────────────────────────
     cudaStream_t prefill_stream() const;
     cudaStream_t decode_stream() const;
@@ -223,6 +226,15 @@ private:
 
     // ── Inference helpers ────────────────────────────────────────────
     bool is_stop_token(int32_t token) const;
+
+    // Track <think>/<\/think> state and check if generation should stop.
+    // Suppresses stop tokens while inside a think block (like llama.cpp).
+    void track_think_state(Request& req, int32_t token) const;
+    bool should_stop(Request& req, int32_t token) const;
+
+    // Think token IDs (cached from chat template init, -1 if not a think model)
+    int32_t think_start_id_ = -1;
+    int32_t think_end_id_ = -1;
     void upload_penalties(const Request& req, InferenceState& state,
                           cudaStream_t stream);
     void fill_sampling_params(const Request& req, InferenceState& state) const;

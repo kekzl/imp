@@ -981,6 +981,19 @@ __global__ void apply_penalties_kernel(
     logits[idx] = logit;
 }
 
+// Force a single token: set all logits to -inf except the given token.
+// Used by think-budget to force </think> generation via logit manipulation.
+__global__ void force_single_token_kernel(float* logits, int vocab_size, int32_t keep_token) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= vocab_size) return;
+    logits[idx] = (idx == keep_token) ? 0.0f : -1e30f;
+}
+
+void force_single_token(float* logits, int vocab_size, int32_t keep_token, cudaStream_t stream) {
+    int blocks = (vocab_size + 255) / 256;
+    force_single_token_kernel<<<blocks, 256, 0, stream>>>(logits, vocab_size, keep_token);
+}
+
 void apply_penalties(float* logits, int vocab_size,
                      const int32_t* token_ids, int n_tokens,
                      float repetition_penalty,

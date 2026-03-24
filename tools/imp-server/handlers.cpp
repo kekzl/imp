@@ -721,6 +721,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     imp_req->top_logprobs = top_logprobs;
     imp_req->json_mode = json_mode;
     imp_req->json_schema = json_schema_str;
+    imp_req->think_budget = think_budget;
     imp_req->status = imp::RequestStatus::PENDING;
 
     // Create a ServerRequest wrapper and submit to the batching engine
@@ -1041,15 +1042,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
                     if (think_phase == ThinkPhase::REASONING) {
                         n_reasoning_tokens++;
-                        // Think budget: cap reasoning at configured fraction of max_tokens
-                        int think_limit = (think_budget > 0.0f)
-                            ? static_cast<int>(max_tokens * think_budget) : 0;
-                        if (snap_think_end_id >= 0 &&
-                            n_reasoning_tokens >= think_limit &&
-                            token != snap_think_end_id) {
-                            token = snap_think_end_id;
-                            piece = snap_tok->decode_token(token);
-                        }
+                        // No forced </think> injection — let the model decide when
+                        // to stop thinking (like llama.cpp).  Forcing </think> via
+                        // token replacement corrupts the KV cache: the model sees
+                        // the original token, not </think>, so it keeps reasoning
+                        // while imp treats subsequent tokens as content.
                         if (token == snap_think_end_id) {
                             if (!emit_reasoning(reasoning_utf8_buf)) return false;
                             reasoning_utf8_buf.clear();
@@ -1079,10 +1076,16 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                                 continue;
                             }
                         } else {
+                            // Keep a tail overlap so "</think>" spanning multiple
+                            // tokens can still be detected on the next iteration.
+                            // "</think>" is 8 bytes; we need at most 7 bytes of
+                            // overlap to catch any partial match at the boundary.
+                            constexpr size_t kOverlap = 7;
                             size_t complete = utf8_complete_len(reasoning_utf8_buf);
-                            if (complete > 0) {
-                                std::string to_emit = reasoning_utf8_buf.substr(0, complete);
-                                reasoning_utf8_buf = reasoning_utf8_buf.substr(complete);
+                            if (complete > kOverlap) {
+                                size_t emit_end = complete - kOverlap;
+                                std::string to_emit = reasoning_utf8_buf.substr(0, emit_end);
+                                reasoning_utf8_buf = reasoning_utf8_buf.substr(emit_end);
                                 if (!emit_reasoning(to_emit)) return false;
                             }
                             continue;
@@ -1598,7 +1601,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 finish = evt.finish_reason ? evt.finish_reason : "length";
             }
 
-            // Think budget: cap reasoning at configured fraction of max_tokens (non-streaming)
+            // Track think tokens for usage reporting (no forced cap — model
+            // decides when to stop thinking, matching llama.cpp behavior).
             if (snap_is_think_model && snap_think_end_id >= 0 &&
                 state.default_args.reasoning_format == "deepseek") {
                 if (token == snap_think_start_id) {
@@ -1607,12 +1611,6 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     ns_in_think = false;
                 } else if (ns_in_think) {
                     ns_think_tokens++;
-                    int think_limit = (think_budget > 0.0f)
-                        ? static_cast<int>(max_tokens * think_budget) : 0;
-                    if (ns_think_tokens >= think_limit) {
-                        token = snap_think_end_id;
-                        ns_in_think = false;
-                    }
                 }
             }
 
@@ -1921,6 +1919,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
     imp_req->mirostat_eta = mirostat_eta;
     imp_req->logprobs = req_logprobs;
     imp_req->top_logprobs = top_logprobs;
+    imp_req->think_budget = body.value("think_budget", state.default_think_budget);
     imp_req->status = imp::RequestStatus::PENDING;
 
     auto server_req = std::make_shared<ServerRequest>();

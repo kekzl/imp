@@ -20,6 +20,7 @@ struct Batch {
     int n_sequences = 0;
     int total_tokens = 0;
     int max_blocks_per_seq = 0;
+    int actual_blocks_per_seq = 0;  // Pre-padding block count (for upload cache invalidation)
 };
 
 // GPU-side batch data (device pointers)
