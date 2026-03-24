@@ -860,13 +860,27 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                       qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
                       (wcache_.cutlass_mxfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_mxfp4,
                       qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
-        if (has_post_attn_norm) {
-            // post_attn_norm is the pre-FFN norm, NOT an attention output norm.
-            // Just add the O-projection to the residual. The norm is applied
-            // later in run_ffn() where post_attn_norm serves as ffn_norm_w.
+        if (has_post_attn_norm && using_fp32_accum) {
+            // Sandwich norm with FP32 accumulator (Gemma-3):
+            // FP32 residual += attn_out, then post_attn_norm → FP16 hidden.
+            Tensor fp32_h = view_tokens(fp32_hidden_, n);
+            float eps = model_->config().rms_norm_eps;
+            // Add attn output to FP32 accumulator, apply post_attn_norm, write FP16
+            rmsnorm_fp32_accum_to_fp16_kernel<<<n, 512, 0, stream>>>(
+                static_cast<const half*>(po.data),
+                static_cast<const half*>(ly.post_attn_norm.data),
+                static_cast<float*>(fp32_h.data),
+                static_cast<half*>(h.data),
+                model_->config().d_model, eps, norm_w_off_);
+        } else if (has_post_attn_norm) {
+            // Sandwich norm without FP32 accumulator: add + norm → h
             elementwise_add_store(po, r, h, stream);
+            Tensor no = view_tokens(norm_out_, n);
+            rmsnorm(h, ly.post_attn_norm, no, model_->config().rms_norm_eps, stream, norm_w_off_);
+            cudaMemcpyAsync(h.data, no.data, h.nbytes(),
+                            cudaMemcpyDeviceToDevice, stream);
         } else {
-            // No post-norm: h = po + residual (fused add-store, no copy)
+            // Standard pre-norm: h = attn_out + residual
             elementwise_add_store(po, r, h, stream);
         }
     }
