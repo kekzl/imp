@@ -109,6 +109,9 @@ void apply_arch_defaults(ModelConfig& cfg) {
             // Gemma-3 uses NeoX/split RoPE (default rope_neox=true is correct)
             cfg.embed_scale = std::sqrt(static_cast<float>(cfg.d_model));
             cfg.ffn_activation = FFNActivation::GEGLU;
+            // Gemma-3 uses sandwich norm: pre-norm (attn_norm/ffn_norm) AND
+            // post-norm (post_attention_norm/post_ffw_norm). The POST_NORM
+            // flag activates the FP32 residual accumulator for stability.
             cfg.norm_placement = NormPlacement::POST_NORM;
             break;
         case ModelArch::NEMOTRON_H_MOE:
