@@ -60,6 +60,11 @@ public:
     bool is_raw() const { return family_ == ChatTemplateFamily::RAW; }
     const std::string& default_system_message() const { return default_system_message_; }
 
+    // Special token accessors (for banned token list)
+    int32_t im_start_id() const { return im_start_id_; }
+    int32_t start_header_id() const { return start_header_id_; }
+    int32_t end_header_id() const { return end_header_id_; }
+
 private:
     ChatTemplateFamily family_ = ChatTemplateFamily::RAW;
     std::vector<int32_t> stop_token_ids_;

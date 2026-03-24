@@ -46,6 +46,9 @@ void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p,
 
 // Apply repetition / frequency / presence penalties to logits in-place.
 // token_ids: device array of previously generated tokens.
+// Force a single token: set all logits to -inf except keep_token.
+void force_single_token(float* logits, int vocab_size, int32_t keep_token, cudaStream_t stream);
+
 // n_tokens: number of tokens in history.
 // Modifies logits before sampling to discourage repetition.
 void apply_penalties(float* logits, int vocab_size,

@@ -56,6 +56,8 @@ struct Request {
     float mirostat_eta = 0.1f;        // Learning rate
     float mirostat_mu = 0.0f;         // Running variable (persists across tokens, init = 2*tau)
     bool ignore_eos = false;   // Don't stop on EOS (benchmark mode)
+    bool in_think_block = false; // Currently inside <think>...</think> (suppress stop tokens)
+    float think_budget = 0.0f;  // Fraction of max_tokens for reasoning (0=unlimited)
     int prefill_offset = 0;    // Chunked prefill: tokens processed so far
     int cached_tokens = 0;     // Tokens served from prefix cache (skipped in prefill)
 

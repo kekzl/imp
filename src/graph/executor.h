@@ -171,6 +171,15 @@ struct InferenceState {
     JsonConstrainer* json_constrainer = nullptr;
     SchemaConstrainer* schema_constrainer = nullptr;
 
+    // Banned tokens: set logits to -inf before sampling (e.g. chat template special tokens)
+    const int32_t* banned_tokens = nullptr;  // HOST pointer, small list
+    int n_banned_tokens = 0;
+
+    // Force token: when >= 0, set ALL logits except this token to -inf.
+    // Used by think-budget to force </think> generation via logit manipulation
+    // so the token lands correctly in the KV cache (NVIDIA NIM approach).
+    int32_t force_token = -1;
+
     // Vision: when non-null, replace vision_token_id positions with vision embeddings
     const half* vision_embeddings = nullptr;  // [n_vision_tokens, d_model] FP16 on device
     int vision_token_id = -1;                 // <image_soft_token> ID

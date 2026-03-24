@@ -68,11 +68,38 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
                           stream);
     }
 
+    // Ban special tokens (e.g. <|im_start|>, <|im_end|>) from generation.
+    // These are chat template delimiters that should never appear in model output.
+    // Without this, the model can emit <|im_start|> mid-generation, which starts
+    // a phantom new turn and causes output degeneration (Qwen3, Llama3, etc.).
+    if (state.banned_tokens != nullptr && state.n_banned_tokens > 0) {
+        // Small list (typically 2-5 tokens) — copy to device and set to -inf.
+        // Use a small stack-allocated device buffer via cudaMemcpyAsync.
+        float neg_inf = -1e30f;
+        for (int bi = 0; bi < state.n_banned_tokens; bi++) {
+            int32_t tid = state.banned_tokens[bi];
+            if (tid >= 0 && tid < vocab_size) {
+                cudaMemcpyAsync(logits_ptr + tid, &neg_inf, sizeof(float),
+                                cudaMemcpyHostToDevice, stream);
+            }
+        }
+    }
+
+    // Force token: set all logits except force_token to -inf.
+    // Used by think-budget to force </think> via logit manipulation
+    // so the model generates it naturally into the KV cache (NVIDIA NIM approach).
+    if (state.force_token >= 0 && state.force_token < vocab_size) {
+        force_single_token(logits_ptr, vocab_size, state.force_token, stream);
+    }
+
     // JSON/Schema mode: apply logit mask to constrain output
-    if (state.schema_constrainer) {
-        state.schema_constrainer->apply_mask(logits_ptr, vocab_size, stream);
-    } else if (state.json_constrainer) {
-        state.json_constrainer->apply_mask(logits_ptr, vocab_size, stream);
+    if (state.force_token < 0) {
+        // Only apply constraints when not forcing a token
+        if (state.schema_constrainer) {
+            state.schema_constrainer->apply_mask(logits_ptr, vocab_size, stream);
+        } else if (state.json_constrainer) {
+            state.json_constrainer->apply_mask(logits_ptr, vocab_size, stream);
+        }
     }
 
     int32_t token;
@@ -270,10 +297,25 @@ int32_t GraphExecutor::sample_single_from_logits(const Tensor& logits,
                           state.dry_multiplier, state.dry_base,
                           state.dry_allowed_length, state.dry_penalty_last_n, stream);
     }
-    if (state.schema_constrainer) {
-        state.schema_constrainer->apply_mask(lp, vocab, stream);
-    } else if (state.json_constrainer) {
-        state.json_constrainer->apply_mask(lp, vocab, stream);
+    // Ban special tokens
+    if (state.banned_tokens != nullptr && state.n_banned_tokens > 0) {
+        float neg_inf = -1e30f;
+        for (int bi = 0; bi < state.n_banned_tokens; bi++) {
+            int32_t tid = state.banned_tokens[bi];
+            if (tid >= 0 && tid < vocab)
+                cudaMemcpyAsync(lp + tid, &neg_inf, sizeof(float),
+                                cudaMemcpyHostToDevice, stream);
+        }
+    }
+    // Force token (think-budget)
+    if (state.force_token >= 0 && state.force_token < vocab) {
+        force_single_token(lp, vocab, state.force_token, stream);
+    }
+    if (state.force_token < 0) {
+        if (state.schema_constrainer)
+            state.schema_constrainer->apply_mask(lp, vocab, stream);
+        else if (state.json_constrainer)
+            state.json_constrainer->apply_mask(lp, vocab, stream);
     }
     if (state.min_p > 0.0f) apply_min_p(lp, vocab, state.min_p, stream);
     if (state.typical_p > 0.0f && state.typical_p < 1.0f)

@@ -52,6 +52,12 @@ public:
     int bos_id() const;
     int eos_id() const;
 
+    // Raw token text from vocabulary (for special token scanning)
+    const std::string& token_text(int id) const {
+        static const std::string empty;
+        return (id >= 0 && id < static_cast<int>(vocab_.size())) ? vocab_[id] : empty;
+    }
+
     // Look up a token string in the vocabulary, returns -1 if not found
     int32_t find_token(const std::string& text) const;
 
