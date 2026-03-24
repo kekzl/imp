@@ -167,8 +167,6 @@ private:
     int last_decode_batch_size_ = -1;
     int last_decode_max_blocks_ = -1;
     int32_t* h_sample_pinned_ = nullptr;
-    bool graph_includes_sampling_ = false;
-
     // Async conditional graph loop
     CudaGraphConditionalRunner async_graph_runner_;
     std::shared_ptr<Request> async_graph_req_;

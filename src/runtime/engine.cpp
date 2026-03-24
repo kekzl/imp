@@ -1448,11 +1448,11 @@ bool Engine::step() {
             std::vector<int32_t> tokens;
             Tensor decode_logits_out;
 
+            // 3e. Execute forward pass (piecewise CUDA Graph: forward in graph,
+            //     sampling always eager — compatible with penalties, force_token,
+            //     constraints, logprobs, and think-budget without graph invalidation)
             static const bool profiling = (std::getenv("IMP_PROFILE") != nullptr);
-            // Skip CUDA graphs when think budget is active — the budget enforcer
-            // needs per-step logit manipulation that isn't captured by graphs.
-            bool skip_graph = (valid_decode[0]->think_budget > 0.0f && think_end_id_ >= 0);
-            if (config_.use_cuda_graphs && !profiling && !skip_graph &&
+            if (config_.use_cuda_graphs && !profiling &&
                 gpu_batch.n_sequences > 0 &&
                 decode_batch_pool_.is_allocated()) {
                 if (gpu_batch.n_sequences != last_decode_batch_size_ ||
@@ -1462,55 +1462,21 @@ bool Engine::step() {
                     last_decode_max_blocks_ = gpu_batch.max_blocks_per_seq;
                 }
 
-                bool has_penalties = (state.penalty_tokens != nullptr &&
-                                     state.n_penalty_tokens > 0 &&
-                                     (state.repetition_penalty != 1.0f ||
-                                      state.frequency_penalty != 0.0f ||
-                                      state.presence_penalty != 0.0f));
-                bool has_force_token = (state.force_token >= 0);
-                bool greedy_single = (state.temperature <= 0.0f || state.top_k == 1) &&
-                                     gpu_batch.n_sequences == 1 &&
-                                     h_sample_pinned_ != nullptr &&
-                                     executor_->d_sample_result() != nullptr &&
-                                     !needs_logprobs && !needs_json_mode &&
-                                     !needs_schema_mode && !has_penalties &&
-                                     !has_force_token;
+                // Graph captures ONLY forward_logits — sampling runs eager after
+                Tensor logits_out;
+                decode_graph_runner_.set_decode_fn(
+                    [this, &state, &logits_out](cudaStream_t s) {
+                        executor_->forward_logits(state, logits_out, s);
+                    });
+                decode_graph_runner_.execute(dec_stream);
 
-                if (greedy_single != graph_includes_sampling_) {
-                    decode_graph_runner_.invalidate();
-                    graph_includes_sampling_ = greedy_single;
+                if (logits_out.data == nullptr) {
+                    logits_out = executor_->get_logits_view(gpu_batch.n_sequences);
                 }
-
-                if (greedy_single) {
-                    decode_graph_runner_.set_decode_fn(
-                        [this, &state](cudaStream_t s) {
-                            Tensor logits_out;
-                            executor_->forward_logits(state, logits_out, s);
-                            if (logits_out.data == nullptr)
-                                logits_out = executor_->get_logits_view(1);
-                            int64_t vshape[1] = {logits_out.shape[logits_out.ndim - 1]};
-                            Tensor flat = logits_out.slice(0, 1).reshape(1, vshape);
-                            sample_greedy_device(flat, executor_->d_sample_result(),
-                                                  h_sample_pinned_, s);
-                        });
-                    decode_graph_runner_.execute(dec_stream);
-                    cudaEventRecord(decode_done_, dec_stream);
-                    cudaEventSynchronize(decode_done_);
-                    tokens = {*h_sample_pinned_};
-                } else {
-                    Tensor logits_out;
-                    decode_graph_runner_.set_decode_fn(
-                        [this, &state, &logits_out](cudaStream_t s) {
-                            executor_->forward_logits(state, logits_out, s);
-                        });
-                    decode_graph_runner_.execute(dec_stream);
-
-                    if (logits_out.data == nullptr) {
-                        logits_out = executor_->get_logits_view(gpu_batch.n_sequences);
-                    }
-                    tokens = sample_per_request(logits_out);
-                    if (needs_logprobs) decode_logits_out = logits_out;
-                }
+                // Eager sampling (handles all modes: greedy, top-k/p, penalties,
+                // force_token, constraints, logprobs, mirostat)
+                tokens = sample_per_request(logits_out);
+                if (needs_logprobs) decode_logits_out = logits_out;
             } else {
                 executor_->forward_logits(state, decode_logits_out, dec_stream);
                 tokens = sample_per_request(decode_logits_out);
