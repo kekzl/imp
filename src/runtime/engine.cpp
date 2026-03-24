@@ -149,22 +149,20 @@ void Engine::fill_sampling_params(const Request& req, InferenceState& state) con
     // Think budget: force </think> token via logit manipulation when budget exceeded.
     // Count reasoning tokens (between <think> and </think>) from output history.
     // The model generates </think> itself so it lands in the KV cache correctly.
+    // Think budget: force </think> via logit manipulation when budget exceeded.
+    // Scan output_tokens directly (no dependency on in_think_block tracking).
     state.force_token = -1;
-    // (think budget logic below)
-    if (req.think_budget > 0.0f && req.in_think_block && think_end_id_ >= 0) {
+    if (req.think_budget > 0.0f && think_end_id_ >= 0 && !req.output_tokens.empty()) {
         int think_limit = static_cast<int>(req.max_tokens * req.think_budget);
-        // Count reasoning tokens in output so far
         int n_reasoning = 0;
-        bool in_think = false;
+        bool currently_thinking = false;
         for (int32_t t : req.output_tokens) {
-            if (t == think_start_id_) in_think = true;
-            else if (t == think_end_id_) in_think = false;
-            else if (in_think) n_reasoning++;
+            if (t == think_start_id_) currently_thinking = true;
+            else if (t == think_end_id_) currently_thinking = false;
+            else if (currently_thinking) n_reasoning++;
         }
-        if (n_reasoning >= think_limit) {
+        if (currently_thinking && n_reasoning >= think_limit) {
             state.force_token = think_end_id_;
-            IMP_LOG_DEBUG("Think budget: forcing </think> after %d reasoning tokens (limit=%d)",
-                          n_reasoning, think_limit);
         }
     }
 }
@@ -1552,11 +1550,15 @@ bool Engine::step() {
                 kv_manager_->touch(req->id);
             }
 
-            // Try async graph loop after first decode step
+            // Try async graph loop after first decode step.
+            // Disabled when think_budget is active — the loop runs entirely on GPU
+            // and cannot enforce per-step logit manipulation for budget control.
+            bool dreq_think_budget = (valid_decode[0]->think_budget > 0.0f && think_end_id_ >= 0);
             if (decode_graph_runner_.is_ready() && valid_decode.size() == 1 &&
                 !offload_mgr_ && !ssm_state_ && !config_.enable_speculative &&
                 config_.use_cuda_graphs && !async_graph_runner_.is_setup() &&
-                !needs_logprobs && !needs_json_mode && !needs_schema_mode) {
+                !needs_logprobs && !needs_json_mode && !needs_schema_mode &&
+                !dreq_think_budget) {
                 auto& dreq = valid_decode[0];
                 bool dreq_has_penalties = (dreq->repetition_penalty != 1.0f ||
                                            dreq->frequency_penalty != 0.0f ||
