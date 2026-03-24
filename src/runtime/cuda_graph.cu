@@ -335,15 +335,20 @@ __global__ void post_decode_step_kernel(
     // Update mapped step counter (host-visible, for polling)
     *d_ring_step_counter = step + 1;
 
-    // Check stop conditions
-    bool should_stop = (step + 1 >= max_steps) || (token == eos_id);
-    for (int i = 0; i < n_stop_ids; i++) {
-        if (token == d_stop_ids[i]) should_stop = true;
+    // Check stop conditions.
+    // Suppress stop tokens (EOS, <|im_end|>) while inside <think> block —
+    // the model may emit them during reasoning, stopping prematurely.
+    bool in_think = (think_budget_limit > 0 && d_in_think && *d_in_think);
+    bool should_stop = (step + 1 >= max_steps);
+    if (!in_think) {
+        if (token == eos_id) should_stop = true;
+        for (int i = 0; i < n_stop_ids; i++) {
+            if (token == d_stop_ids[i]) should_stop = true;
+        }
     }
 
     // Think budget: break loop to return to CPU for force_token injection
-    if (think_budget_limit > 0 && *d_in_think &&
-        *d_think_count >= think_budget_limit) {
+    if (in_think && *d_think_count >= think_budget_limit) {
         should_stop = true;
     }
 

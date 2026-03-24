@@ -163,9 +163,11 @@ private:
     std::vector<std::shared_ptr<Request>> valid_decode_;
 
     // ── CUDA Graphs ──────────────────────────────────────────────────
-    CudaGraphRunner decode_graph_runner_;
-    int last_decode_batch_size_ = -1;
-    int last_decode_max_blocks_ = -1;
+    // Per-batch-size graph pool: avoids re-capture when batch size changes
+    // during continuous batching (key = n_sequences).
+    static constexpr int kMaxGraphPoolSize = 8;
+    CudaGraphRunner decode_graph_pool_[kMaxGraphPoolSize];  // index = n_sequences - 1
+    int last_decode_max_blocks_per_graph_[kMaxGraphPoolSize] = {};
     int32_t* h_sample_pinned_ = nullptr;
     // Async conditional graph loop
     CudaGraphConditionalRunner async_graph_runner_;
