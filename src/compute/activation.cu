@@ -240,6 +240,57 @@ __global__ void gelu_fp16_kernel(
 }
 
 // --------------------------------------------------------------------------
+// Host dispatch helpers — gated (2-input) and unary (1-input) activation
+// launch with FP32 vec4/scalar + FP16 half2 paths.
+// --------------------------------------------------------------------------
+
+// Gated activation dispatch: out = act(gate) * up
+// Handles FP32 (vec4 + scalar fallback) and FP16 (half2, PDL-enabled).
+static void dispatch_gated_activation(
+    const Tensor& gate, const Tensor& up, Tensor& out, int64_t n,
+    void(*fp32_vec4)(const float*, const float*, float*, int64_t),
+    void(*fp32_scalar)(const float*, const float*, float*, int64_t),
+    void(*fp16_kernel)(const __half*, const __half*, __half*, int64_t),
+    bool pdl_enabled, cudaStream_t stream)
+{
+    const int block = 256;
+    switch (gate.dtype) {
+        case DType::FP32:
+            if (n % 4 == 0 && n >= 4) {
+                const int grid = static_cast<int>((n / 4 + block - 1) / block);
+                fp32_vec4<<<grid, block, 0, stream>>>(
+                    static_cast<const float*>(gate.data),
+                    static_cast<const float*>(up.data),
+                    static_cast<float*>(out.data), n);
+            } else {
+                const int grid = static_cast<int>((n + block - 1) / block);
+                fp32_scalar<<<grid, block, 0, stream>>>(
+                    static_cast<const float*>(gate.data),
+                    static_cast<const float*>(up.data),
+                    static_cast<float*>(out.data), n);
+            }
+            break;
+        case DType::FP16: {
+            const int64_t half_n = (n + 1) / 2;
+            const int grid = static_cast<int>((half_n + block - 1) / block);
+            if (pdl_enabled) {
+                pdl::launch(fp16_kernel, dim3(grid), dim3(block), size_t(0), stream,
+                    static_cast<const __half*>(gate.data),
+                    static_cast<const __half*>(up.data),
+                    static_cast<__half*>(out.data), n);
+            } else {
+                fp16_kernel<<<grid, block, 0, stream>>>(
+                    static_cast<const __half*>(gate.data),
+                    static_cast<const __half*>(up.data),
+                    static_cast<__half*>(out.data), n);
+            }
+            break;
+        }
+        default: break;
+    }
+}
+
+// --------------------------------------------------------------------------
 // Host dispatch: swiglu
 // --------------------------------------------------------------------------
 void swiglu(const Tensor& gate, const Tensor& up, Tensor& out,
@@ -247,42 +298,9 @@ void swiglu(const Tensor& gate, const Tensor& up, Tensor& out,
 {
     const int64_t n = gate.numel();
     if (n == 0) return;
-
-    const int block = 256;
-
-    switch (gate.dtype) {
-        case DType::FP32: {
-            if (n % 4 == 0 && n >= 4) {
-                const int grid = static_cast<int>((n / 4 + block - 1) / block);
-                swiglu_fp32_vec4_kernel<<<grid, block, 0, stream>>>(
-                    static_cast<const float*>(gate.data),
-                    static_cast<const float*>(up.data),
-                    static_cast<float*>(out.data),
-                    n);
-            } else {
-                const int grid = static_cast<int>((n + block - 1) / block);
-                swiglu_fp32_kernel<<<grid, block, 0, stream>>>(
-                    static_cast<const float*>(gate.data),
-                    static_cast<const float*>(up.data),
-                    static_cast<float*>(out.data),
-                    n);
-            }
-            break;
-        }
-        case DType::FP16: {
-            // Each thread handles 2 elements
-            const int64_t half_n = (n + 1) / 2;
-            const int grid = static_cast<int>((half_n + block - 1) / block);
-            pdl::launch(swiglu_fp16_kernel, dim3(grid), dim3(block), size_t(0), stream,
-                static_cast<const __half*>(gate.data),
-                static_cast<const __half*>(up.data),
-                static_cast<__half*>(out.data),
-                n);
-            break;
-        }
-        default:
-            break;
-    }
+    dispatch_gated_activation(gate, up, out, n,
+        swiglu_fp32_vec4_kernel, swiglu_fp32_kernel, swiglu_fp16_kernel,
+        true, stream);
 }
 
 // --------------------------------------------------------------------------
@@ -293,41 +311,9 @@ void geglu(const Tensor& gate, const Tensor& up, Tensor& out,
 {
     const int64_t n = gate.numel();
     if (n == 0) return;
-
-    const int block = 256;
-
-    switch (gate.dtype) {
-        case DType::FP32: {
-            if (n % 4 == 0 && n >= 4) {
-                const int grid = static_cast<int>((n / 4 + block - 1) / block);
-                geglu_fp32_vec4_kernel<<<grid, block, 0, stream>>>(
-                    static_cast<const float*>(gate.data),
-                    static_cast<const float*>(up.data),
-                    static_cast<float*>(out.data),
-                    n);
-            } else {
-                const int grid = static_cast<int>((n + block - 1) / block);
-                geglu_fp32_kernel<<<grid, block, 0, stream>>>(
-                    static_cast<const float*>(gate.data),
-                    static_cast<const float*>(up.data),
-                    static_cast<float*>(out.data),
-                    n);
-            }
-            break;
-        }
-        case DType::FP16: {
-            const int64_t half_n = (n + 1) / 2;
-            const int grid = static_cast<int>((half_n + block - 1) / block);
-            pdl::launch(geglu_fp16_kernel, dim3(grid), dim3(block), size_t(0), stream,
-                static_cast<const __half*>(gate.data),
-                static_cast<const __half*>(up.data),
-                static_cast<__half*>(out.data),
-                n);
-            break;
-        }
-        default:
-            break;
-    }
+    dispatch_gated_activation(gate, up, out, n,
+        geglu_fp32_vec4_kernel, geglu_fp32_kernel, geglu_fp16_kernel,
+        true, stream);
 }
 
 // --------------------------------------------------------------------------
@@ -339,35 +325,29 @@ void gelu(const Tensor& x, Tensor& out, cudaStream_t stream)
     if (n == 0) return;
 
     const int block = 256;
-
     switch (x.dtype) {
-        case DType::FP32: {
+        case DType::FP32:
             if (n % 4 == 0 && n >= 4) {
                 const int grid = static_cast<int>((n / 4 + block - 1) / block);
                 gelu_fp32_vec4_kernel<<<grid, block, 0, stream>>>(
                     static_cast<const float*>(x.data),
-                    static_cast<float*>(out.data),
-                    n);
+                    static_cast<float*>(out.data), n);
             } else {
                 const int grid = static_cast<int>((n + block - 1) / block);
                 gelu_fp32_kernel<<<grid, block, 0, stream>>>(
                     static_cast<const float*>(x.data),
-                    static_cast<float*>(out.data),
-                    n);
+                    static_cast<float*>(out.data), n);
             }
             break;
-        }
         case DType::FP16: {
             const int64_t half_n = (n + 1) / 2;
             const int grid = static_cast<int>((half_n + block - 1) / block);
             gelu_fp16_kernel<<<grid, block, 0, stream>>>(
                 static_cast<const __half*>(x.data),
-                static_cast<__half*>(out.data),
-                n);
+                static_cast<__half*>(out.data), n);
             break;
         }
-        default:
-            break;
+        default: break;
     }
 }
 

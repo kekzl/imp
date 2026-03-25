@@ -1,4 +1,5 @@
 #include "compute/sampling.h"
+#include "compute/warp_reduce.cuh"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -14,27 +15,7 @@ namespace imp {
 static constexpr int BLOCK_SIZE = 256;
 static constexpr int WARP_SIZE = 32;
 
-// ============================================================================
-// Warp reduction helpers
-// ============================================================================
-
 namespace {
-
-template<typename T>
-__device__ __forceinline__ T warp_reduce_max(T val) {
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-        val = fmaxf(val, __shfl_xor_sync(0xFFFFFFFF, val, offset));
-    return val;
-}
-
-template<typename T>
-__device__ __forceinline__ T warp_reduce_sum(T val) {
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-        val += __shfl_xor_sync(0xFFFFFFFF, val, offset);
-    return val;
-}
 
 // Shared memory size for topk_topp_sample_kernel.
 static inline size_t topk_topp_smem_size(int top_k) {
