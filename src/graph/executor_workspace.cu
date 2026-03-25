@@ -460,9 +460,16 @@ bool GraphExecutor::allocate_shared_workspace(int max_tokens) {
 
     shared_workspace_ = vram_alloc(vram_alloc_, max_shared, "shared_workspace");
     if (!shared_workspace_) {
-        IMP_LOG_ERROR("Failed to allocate shared workspace (%.1f MiB)",
+        // Shared workspace is critical for GEMV scratch buffers. Fall back to
+        // raw cudaMalloc bypassing headroom (Nemotron-30B leaves <headroom free).
+        IMP_LOG_WARN("Shared workspace: allocator rejected (%.1f MiB), trying raw cudaMalloc",
                       max_shared / (1024.0 * 1024.0));
-        return false;
+        cudaError_t err = cudaMalloc(&shared_workspace_, max_shared);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("Failed to allocate shared workspace (%.1f MiB)",
+                          max_shared / (1024.0 * 1024.0));
+            return false;
+        }
     }
     shared_workspace_size_ = max_shared;
     shared_workspace_max_tokens_ = max_tokens;

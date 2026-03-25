@@ -1834,6 +1834,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         }
         if (profile_active) cudaEventRecord(ev_attn[i], stream);
 
+
         // FFN: MoE, dense, or none (attention-only layers may have no FFN)
         if (layer_has_moe(i)) {
             run_moe_ffn(i, stream);
