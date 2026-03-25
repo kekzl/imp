@@ -358,12 +358,10 @@ bool Engine::init_weights() {
                  n_heads * hd_ssm * mcfg.ssm_state_size * dtype_size(config_.ssm_state_dtype));
         }
 
-        size_t safety = 256ULL * 1024 * 1024;
-        if (config_.use_cuda_graphs)    safety += 256ULL * 1024 * 1024;
+        size_t safety = 256ULL * 1024 * 1024;  // base safety
+        // Only add safety for features that will actually allocate VRAM.
+        // On tight VRAM models (Nemotron-30B), every MiB matters for expert coverage.
         if (config_.enable_speculative) safety += 256ULL * 1024 * 1024;
-        if (config_.use_green_contexts) safety += 128ULL * 1024 * 1024;
-        if (config_.use_fp8_prefill)    safety += 128ULL * 1024 * 1024;
-        safety = std::max(safety, static_cast<size_t>(512ULL * 1024 * 1024));
         expert_reserve += safety;
 
         IMP_LOG_INFO("Expert upload reserve: %.2f MiB (workspace=%.2f, kv=%.2f, ssm+safety=rest)",
