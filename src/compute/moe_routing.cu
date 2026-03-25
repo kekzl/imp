@@ -417,34 +417,18 @@ __global__ void scatter_token_ids_kernel(
 //   gathered[i, :] = input[sorted_token_ids[i], :]
 // ============================================================================
 
-__global__ void moe_gather_kernel(const float* __restrict__ input,
-                                  const int32_t* __restrict__ sorted_token_ids,
-                                  float* __restrict__ gathered,
-                                  int total_tokens,
-                                  int d_model) {
-    int row = blockIdx.x;
-    if (row >= total_tokens) return;
-
-    int src_token = sorted_token_ids[row];
-    const float* src = input + static_cast<int64_t>(src_token) * d_model;
-    float* dst = gathered + static_cast<int64_t>(row) * d_model;
-
-    for (int col = threadIdx.x; col < d_model; col += blockDim.x) {
-        dst[col] = src[col];
-    }
-}
-
-__global__ void moe_gather_fp16_kernel(const half* __restrict__ input,
+template<typename T>
+__global__ void moe_gather_kernel_impl(const T* __restrict__ input,
                                        const int32_t* __restrict__ sorted_token_ids,
-                                       half* __restrict__ gathered,
+                                       T* __restrict__ gathered,
                                        int total_tokens,
                                        int d_model) {
     int row = blockIdx.x;
     if (row >= total_tokens) return;
 
     int src_token = sorted_token_ids[row];
-    const half* src = input + static_cast<int64_t>(src_token) * d_model;
-    half* dst = gathered + static_cast<int64_t>(row) * d_model;
+    const T* src = input + static_cast<int64_t>(src_token) * d_model;
+    T* dst = gathered + static_cast<int64_t>(row) * d_model;
 
     for (int col = threadIdx.x; col < d_model; col += blockDim.x) {
         dst[col] = src[col];
@@ -505,29 +489,13 @@ __global__ void scatter_token_ids_with_flat_idx_kernel(
 }
 
 // Scatter-add kernel using the flat index to look up weights.
-__global__ void moe_scatter_kernel(const float* __restrict__ expert_output,
-                                   const int32_t* __restrict__ sorted_token_ids,
-                                   const int32_t* __restrict__ sorted_flat_idx,
-                                   const float* __restrict__ expert_weights,
-                                   float* __restrict__ output,
-                                   int total_tokens,
-                                   int d_model) {
-    int row = blockIdx.x;
-    if (row >= total_tokens) return;
+// Reads from T* expert output (float or half), always accumulates into float* output.
+// The to_float helper handles the FP16→FP32 conversion when T=half.
+__device__ __forceinline__ float to_float(float v) { return v; }
+__device__ __forceinline__ float to_float(half v) { return __half2float(v); }
 
-    int token_id = sorted_token_ids[row];
-    int flat_idx = sorted_flat_idx[row];
-    float weight = expert_weights[flat_idx];
-
-    const float* src = expert_output + static_cast<int64_t>(row) * d_model;
-    float* dst = output + static_cast<int64_t>(token_id) * d_model;
-
-    for (int col = threadIdx.x; col < d_model; col += blockDim.x) {
-        atomicAdd(&dst[col], weight * src[col]);
-    }
-}
-
-__global__ void moe_scatter_fp16_kernel(const half* __restrict__ expert_output,
+template<typename T>
+__global__ void moe_scatter_kernel_impl(const T* __restrict__ expert_output,
                                         const int32_t* __restrict__ sorted_token_ids,
                                         const int32_t* __restrict__ sorted_flat_idx,
                                         const float* __restrict__ expert_weights,
@@ -541,11 +509,11 @@ __global__ void moe_scatter_fp16_kernel(const half* __restrict__ expert_output,
     int flat_idx = sorted_flat_idx[row];
     float weight = expert_weights[flat_idx];
 
-    const half* src = expert_output + static_cast<int64_t>(row) * d_model;
+    const T* src = expert_output + static_cast<int64_t>(row) * d_model;
     float* dst = output + static_cast<int64_t>(token_id) * d_model;
 
     for (int col = threadIdx.x; col < d_model; col += blockDim.x) {
-        atomicAdd(&dst[col], weight * __half2float(src[col]));
+        atomicAdd(&dst[col], weight * to_float(src[col]));
     }
 }
 
@@ -771,12 +739,12 @@ void moe_gather(const Tensor& input, const MoeRoutingResult& routing,
     if (input.dtype == DType::FP16) {
         const half* d_input = static_cast<const half*>(input.data);
         half* d_gathered    = static_cast<half*>(gathered.data);
-        moe_gather_fp16_kernel<<<total_tokens, BLOCK_SIZE, 0, stream>>>(
+        moe_gather_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(
             d_input, d_sorted, d_gathered, total_tokens, d_model);
     } else {
         const float* d_input = static_cast<const float*>(input.data);
         float* d_gathered    = static_cast<float*>(gathered.data);
-        moe_gather_kernel<<<total_tokens, BLOCK_SIZE, 0, stream>>>(
+        moe_gather_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(
             d_input, d_sorted, d_gathered, total_tokens, d_model);
     }
 }
@@ -807,12 +775,12 @@ void moe_scatter(const Tensor& expert_output, const MoeRoutingResult& routing,
 
     if (expert_output.dtype == DType::FP16) {
         const half* d_expert_out = static_cast<const half*>(expert_output.data);
-        moe_scatter_fp16_kernel<<<total_tokens, BLOCK_SIZE, 0, stream>>>(
+        moe_scatter_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(
             d_expert_out, d_sorted_token_ids, d_sorted_flat_idx,
             d_expert_weights, d_output, total_tokens, d_model);
     } else {
         const float* d_expert_out = static_cast<const float*>(expert_output.data);
-        moe_scatter_kernel<<<total_tokens, BLOCK_SIZE, 0, stream>>>(
+        moe_scatter_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(
             d_expert_out, d_sorted_token_ids, d_sorted_flat_idx,
             d_expert_weights, d_output, total_tokens, d_model);
     }

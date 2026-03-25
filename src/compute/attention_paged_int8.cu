@@ -110,18 +110,9 @@ __global__ void paged_attention_splitk_int8_kernel(
 
     // Early exit if this split has no work
     if (split_start >= split_end) {
-        int partial_idx = ((batch_idx * n_heads + head_idx) * num_splits + split_idx);
-        constexpr int partial_stride = 2 + HEAD_DIM;
-        float* out = partial_out + (int64_t)partial_idx * partial_stride;
-        if (threadIdx.x == 0) {
-            out[0] = -FLT_MAX;
-            out[1] = 0.0f;
-        }
-        if (threadIdx.x < WARP_SIZE) {
-            #pragma unroll
-            for (int i = 0; i < ELEMS; i++)
-                out[2 + lane_offset + i] = 0.0f;
-        }
+        write_empty_split_sentinel<HEAD_DIM>(
+            partial_out, batch_idx, n_heads, head_idx,
+            num_splits, split_idx, lane_offset);
         return;
     }
 
@@ -184,16 +175,11 @@ __global__ void paged_attention_splitk_int8_kernel(
             // Load K scale and fuse all scales: softmax_scale * q_scale * k_scale
             half k_sc = K_sc_block[t * n_kv_heads + kv_head];
             dot *= scale * q_scale * __half2float(k_sc);
-            if (softcap > 0.0f) dot = softcap * tanhf(dot / softcap);
+            dot = apply_softcap(dot, softcap);
 
             // ---- Online softmax update ----
-            float m_new = fmaxf(m_w, dot);
-            float exp_diff = expf(m_w - m_new);
-            float p = expf(dot - m_new);
-            float l_new = exp_diff * l_w + p;
-
-            float rescale = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
-            float w_new   = (l_new > 0.0f) ? (p / l_new) : 0.0f;
+            float rescale, w_new;
+            online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
             // ---- V accumulation with trivial int8→float dequant ----
             const int8_t* V_tok = V_block + t * kv_slot_stride + kv_head * HEAD_DIM;
@@ -242,9 +228,6 @@ __global__ void paged_attention_splitk_int8_kernel(
                     }
                 }
             }
-
-            m_w = m_new;
-            l_w = l_new;
         }
     }
 
@@ -440,15 +423,10 @@ __global__ void paged_attention_decode_int8_kernel(
 
             half k_sc = K_sc_block[t * n_kv_heads + kv_head];
             dot *= scale * q_scale * __half2float(k_sc);
-            if (softcap > 0.0f) dot = softcap * tanhf(dot / softcap);
+            dot = apply_softcap(dot, softcap);
 
-            float m_new = fmaxf(m_w, dot);
-            float exp_diff = expf(m_w - m_new);
-            float p = expf(dot - m_new);
-            float l_new = exp_diff * l_w + p;
-
-            float rescale = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
-            float w_new   = (l_new > 0.0f) ? (p / l_new) : 0.0f;
+            float rescale, w_new;
+            online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
             // ---- V accumulation with vectorized int8 loads ----
             const int8_t* V_tok = V_block + t * kv_slot_stride + kv_head * HEAD_DIM;
@@ -490,9 +468,6 @@ __global__ void paged_attention_decode_int8_kernel(
                             + w_new_scaled * static_cast<float>(static_cast<int8_t>((packed >> 24) & 0xFF));
                 }
             }
-
-            m_w = m_new;
-            l_w = l_new;
         }
     }
 
@@ -563,29 +538,10 @@ void paged_attention_decode_int8(
                       + NUM_WARPS * sizeof(float)
                       + NUM_WARPS * head_dim * sizeof(float);
 
-    // ---- Split-K decision (same heuristic as FP16/FP8) ----
-    int total_blocks_nosplit = batch_size * n_heads;
-    int num_splits = 1;
-    int num_ctx_blocks = (max_context_len + block_size - 1) / block_size;
-
+    // ---- Split-K decision ----
     void* scratch_ptr = nullptr;
-    size_t scratch_size = 0;
-    paged_attention_get_splitk_scratch(&scratch_ptr, &scratch_size);
-
-    static int num_sms_int8 = kpar_n_sms();
-    if (num_ctx_blocks >= 4 && total_blocks_nosplit < 2 * num_sms_int8 && scratch_ptr != nullptr) {
-        int target_blocks = 2 * num_sms_int8;
-        num_splits = (target_blocks + total_blocks_nosplit - 1) / total_blocks_nosplit;
-        num_splits = min(num_splits, num_ctx_blocks);
-        num_splits = min(num_splits, 32);
-        num_splits = max(num_splits, 1);
-
-        int partial_stride = 2 + head_dim;
-        size_t needed = (size_t)batch_size * n_heads * num_splits * partial_stride * sizeof(float);
-        if (needed > scratch_size) {
-            num_splits = 1;
-        }
-    }
+    int num_splits = compute_splitk_splits(
+        batch_size, n_heads, head_dim, max_context_len, block_size, &scratch_ptr);
 
     if (num_splits > 1) {
         float* partial = static_cast<float*>(scratch_ptr);

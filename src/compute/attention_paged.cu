@@ -10,16 +10,12 @@
 namespace imp {
 
 // ---------------------------------------------------------------------------
-// Device helpers (anonymous namespace to keep file-local)
+// Device helpers — apply_softcap, write_empty_split_sentinel, and
+// online_softmax_step are now in attention_paged_common.cuh.
+// ContextRange remains file-local (only used in this TU).
 // ---------------------------------------------------------------------------
 namespace {
 
-// Apply attention logit softcapping: tanh-based clamping used by some models.
-__device__ __forceinline__ float apply_softcap(float dot, float softcap) {
-    return (softcap > 0.0f) ? (softcap * tanhf(dot / softcap)) : dot;
-}
-
-// Compute the range of KV blocks to iterate, accounting for sliding window.
 struct ContextRange {
     int effective_start;
     int first_block;
@@ -32,29 +28,6 @@ __device__ __forceinline__ ContextRange compute_context_range(
                           ? (ctx_len - sliding_window) : 0;
     return {effective_start, effective_start / block_size,
             (ctx_len + block_size - 1) / block_size};
-}
-
-// Write sentinel partial result for an empty split-K split (max=-inf, sum=0, O=0).
-// Must be called with all threads in the block active; only threadIdx.x==0 writes
-// the scalar fields and the first warp zeroes the O buffer.
-template<int HEAD_DIM>
-__device__ __forceinline__ void write_empty_split_sentinel(
-    float* partial_out, int batch_idx, int n_heads, int head_idx,
-    int num_splits, int split_idx, int lane_offset) {
-    constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
-    int partial_idx = ((batch_idx * n_heads + head_idx) * num_splits + split_idx);
-    constexpr int partial_stride = 2 + HEAD_DIM;
-    float* out = partial_out + (int64_t)partial_idx * partial_stride;
-    if (threadIdx.x == 0) {
-        out[0] = -FLT_MAX;
-        out[1] = 0.0f;
-    }
-    if (threadIdx.x < WARP_SIZE) {
-        #pragma unroll
-        for (int i = 0; i < ELEMS; i++) {
-            out[2 + lane_offset + i] = 0.0f;
-        }
-    }
 }
 
 } // anonymous namespace
@@ -279,22 +252,14 @@ paged_attention_gqa_kernel(
                 dot *= scale;
                 dot = apply_softcap(dot, softcap);
 
-                float m_new = fmaxf(m_w, dot);
-                float exp_diff = expf(m_w - m_new);
-                float p = expf(dot - m_new);
-                float l_new = exp_diff * l_w + p;
-
-                float rescale = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
-                float w_new   = (l_new > 0.0f) ? (p / l_new) : 0.0f;
+                float rescale, w_new;
+                online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
                 for (int i = 0; i < elems_per_thread; i++) {
                     int d = lane_id + i * WARP_SIZE;
                     float v_val = (d < head_dim) ? __half2float(s_v_cur[ti * head_dim + d]) : 0.0f;
                     o_reg[i] = rescale * o_reg[i] + w_new * v_val;
                 }
-
-                m_w = m_new;
-                l_w = l_new;
             }
         }
 
@@ -444,13 +409,8 @@ __global__ void paged_attention_decode_kernel(
             dot *= scale;
             dot = apply_softcap(dot, softcap);
 
-            float m_new = fmaxf(m_w, dot);
-            float exp_diff = expf(m_w - m_new);
-            float p = expf(dot - m_new);
-            float l_new = exp_diff * l_w + p;
-
-            float rescale = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
-            float w_new   = (l_new > 0.0f) ? (p / l_new) : 0.0f;
+            float rescale, w_new;
+            online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
             // Vectorized V accumulation using half2 streaming loads
             const half* V_tok = V_block + t * kv_slot_stride + kv_head * HEAD_DIM;
@@ -463,9 +423,6 @@ __global__ void paged_attention_decode_kernel(
                     o_reg[2*i+1] = rescale * o_reg[2*i+1] + w_new * __half2float(v2.y);
                 }
             }
-
-            m_w = m_new;
-            l_w = l_new;
         }
     }
 
@@ -588,13 +545,8 @@ __global__ void paged_attention_decode_kernel_generic(
             dot *= scale;
             dot = apply_softcap(dot, softcap);
 
-            float m_new = fmaxf(m_w, dot);
-            float exp_diff = expf(m_w - m_new);
-            float p = expf(dot - m_new);
-            float l_new = exp_diff * l_w + p;
-
-            float rescale = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
-            float w_new   = (l_new > 0.0f) ? (p / l_new) : 0.0f;
+            float rescale, w_new;
+            online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
             const half* V_tok = V_block + t * kv_slot_stride + kv_head * head_dim;
             for (int i = 0; i < elems_per_thread; i++) {
@@ -602,9 +554,6 @@ __global__ void paged_attention_decode_kernel_generic(
                 if (d < head_dim)
                     o_reg[i] = rescale * o_reg[i] + w_new * __half2float(ldcs_half(&V_tok[d]));
             }
-
-            m_w = m_new;
-            l_w = l_new;
         }
     }
 
@@ -805,13 +754,8 @@ __global__ void paged_attention_splitk_kernel(
             dot *= scale;
             dot = apply_softcap(dot, softcap);
 
-            float m_new = fmaxf(m_w, dot);
-            float exp_diff = expf(m_w - m_new);
-            float p = expf(dot - m_new);
-            float l_new = exp_diff * l_w + p;
-
-            float rescale = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
-            float w_new   = (l_new > 0.0f) ? (p / l_new) : 0.0f;
+            float rescale, w_new;
+            online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
             // Vectorized V accumulation
             const half* V_tok = V_block + t * kv_slot_stride + kv_head * HEAD_DIM;
@@ -848,9 +792,6 @@ __global__ void paged_attention_splitk_kernel(
                     }
                 }
             }
-
-            m_w = m_new;
-            l_w = l_new;
         }
     }
 
@@ -1069,12 +1010,8 @@ __global__ void paged_attention_splitk_pipeline_kernel(
             dot *= scale;
             dot = apply_softcap(dot, softcap);
 
-            float m_new = fmaxf(m_w, dot);
-            float exp_diff = expf(m_w - m_new);
-            float p = expf(dot - m_new);
-            float l_new = exp_diff * l_w + p;
-            float rescale = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
-            float w_new   = (l_new > 0.0f) ? (p / l_new) : 0.0f;
+            float rescale, w_new;
+            online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
             // Wait for V[t]
             cp_async_wait_group<0>();
@@ -1090,8 +1027,6 @@ __global__ void paged_attention_splitk_pipeline_kernel(
                 }
             }
 
-            m_w = m_new;
-            l_w = l_new;
             cur = 1 - cur;  // swap K double-buffer
         }
     }
@@ -1411,12 +1346,8 @@ __global__ void paged_attention_cluster_kernel(
             dot *= scale;
             dot = apply_softcap(dot, softcap);
 
-            float m_new = fmaxf(m_w, dot);
-            float exp_diff = expf(m_w - m_new);
-            float p = expf(dot - m_new);
-            float l_new = exp_diff * l_w + p;
-            float rescale = (l_new > 0.0f) ? (exp_diff * l_w / l_new) : 0.0f;
-            float w_new   = (l_new > 0.0f) ? (p / l_new) : 0.0f;
+            float rescale, w_new;
+            online_softmax_step(dot, m_w, l_w, rescale, w_new);
 
             // Read V token from DSMEM
             const half* V_tok = cur + ti * 2 * HEAD_DIM + HEAD_DIM;
@@ -1429,9 +1360,6 @@ __global__ void paged_attention_cluster_kernel(
                     o_reg[2*i+1] = rescale * o_reg[2*i+1] + w_new * __half2float(v2.y);
                 }
             }
-
-            m_w = m_new;
-            l_w = l_new;
         }
 
         cluster.sync();  // wait for next-block prefetch + current compute

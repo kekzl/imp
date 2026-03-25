@@ -52,6 +52,55 @@
 
 
 namespace imp {
+namespace {
+
+// ---------------------------------------------------------------------------
+// Decode-fast eligibility predicate.
+// Returns true when n=1, packed expert weights are on-device in a supported
+// quantization format, the dequant buffer exists, and compute dtype is FP16.
+// ---------------------------------------------------------------------------
+static bool can_decode_fast(int n, const Tensor& expert_up_packed,
+                            GGMLQuantType up_qtype, void* dequant_buf,
+                            DType compute_dtype) {
+    return (n == 1 &&
+            expert_up_packed.data != nullptr && dequant_buf != nullptr &&
+            compute_dtype == DType::FP16 &&
+            expert_up_packed.on_device &&
+            (up_qtype == GGMLQuantType::Q6_K || up_qtype == GGMLQuantType::Q8_0 ||
+             up_qtype == GGMLQuantType::Q4_0 || up_qtype == GGMLQuantType::Q4_K ||
+             up_qtype == GGMLQuantType::Q5_K || up_qtype == GGMLQuantType::Q2_K ||
+             up_qtype == GGMLQuantType::Q3_K));
+}
+
+// ---------------------------------------------------------------------------
+// Expert activation dispatch: SwiGLU for gated experts, ReLU^2 for non-gated.
+// Operates on the expanded-layout buffers (shape [rows, eff]).
+// ---------------------------------------------------------------------------
+static void apply_expert_activation(void* gate_data, void* up_data, void* swiglu_data,
+                                    bool non_gated, int64_t rows, int64_t eff,
+                                    DType compute_dtype, cudaStream_t stream) {
+    int64_t act_shape[2] = {rows, eff};
+    if (non_gated) {
+        Tensor up_t(up_data, compute_dtype, 2, act_shape, true);
+        relu_sqr_inplace(up_t, stream);
+    } else {
+        Tensor g(gate_data, compute_dtype, 2, act_shape, true);
+        Tensor u(up_data, compute_dtype, 2, act_shape, true);
+        Tensor a(swiglu_data, compute_dtype, 2, act_shape, true);
+        swiglu(g, u, a, stream);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Compute expert stride (bytes between experts in a packed tensor).
+// ---------------------------------------------------------------------------
+static size_t expert_stride(const Tensor& packed, GGMLQuantType qtype) {
+    int64_t rows = packed.shape[1];
+    int64_t cols = packed.shape[2];
+    return static_cast<size_t>(rows) * ggml_quant_row_bytes(qtype, cols);
+}
+
+} // anonymous namespace
 
 void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // Configure shared workspace for MoE phase
@@ -91,16 +140,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     }
 
     // Pre-check decode fast path (same logic as will_decode_fast below)
-    GGMLQuantType up_qtype_pre = ly.expert_up_qtype;
-    bool will_skip_residual_copy = (n == 1 &&
-        ly.expert_up_packed.data != nullptr && moe_.dequant_buf != nullptr &&
-        compute_dtype_ == DType::FP16 &&
-        ly.expert_up_packed.on_device &&
-        (up_qtype_pre == GGMLQuantType::Q6_K || up_qtype_pre == GGMLQuantType::Q8_0 ||
-         up_qtype_pre == GGMLQuantType::Q4_0 || up_qtype_pre == GGMLQuantType::Q4_K ||
-         up_qtype_pre == GGMLQuantType::Q5_K || up_qtype_pre == GGMLQuantType::Q2_K ||
-         up_qtype_pre == GGMLQuantType::Q3_K) &&
-        ly.w_up_shared.data == nullptr);  // must not have shared expert for full residual fusion
+    bool will_skip_residual_copy = can_decode_fast(n, ly.expert_up_packed,
+        ly.expert_up_qtype, moe_.dequant_buf, compute_dtype_) &&
+        ly.w_up_shared.data == nullptr;  // must not have shared expert for full residual fusion
 
     if (!will_skip_residual_copy) {
         cudaMemcpyAsync(r.data, h.data, h.nbytes(),
@@ -129,14 +171,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     bool norm_weights = cfg.expert_weights_norm;
 
     GGMLQuantType up_qtype = ly.expert_up_qtype;
-    bool will_decode_fast = (n == 1 &&
-                             ly.expert_up_packed.data != nullptr && moe_.dequant_buf != nullptr &&
-                             compute_dtype_ == DType::FP16 &&
-                             ly.expert_up_packed.on_device &&
-                             (up_qtype == GGMLQuantType::Q6_K || up_qtype == GGMLQuantType::Q8_0 ||
-                              up_qtype == GGMLQuantType::Q4_0 || up_qtype == GGMLQuantType::Q4_K ||
-                              up_qtype == GGMLQuantType::Q5_K || up_qtype == GGMLQuantType::Q2_K ||
-                              up_qtype == GGMLQuantType::Q3_K));
+    bool will_decode_fast = can_decode_fast(n, ly.expert_up_packed, up_qtype,
+                                            moe_.dequant_buf, compute_dtype_);
 
     MoeRoutingResult routing;
 
@@ -240,13 +276,6 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         // Device pointers from routing result (no D2H copy needed)
         const int32_t* expert_indices = static_cast<const int32_t*>(routing.expert_indices.data);
         const float* expert_weights   = static_cast<const float*>(routing.expert_weights.data);
-
-        // Compute expert stride (bytes between experts in packed tensor)
-        auto expert_stride = [](const Tensor& packed, GGMLQuantType qtype) -> size_t {
-            int64_t rows = packed.shape[1];
-            int64_t cols = packed.shape[2];
-            return static_cast<size_t>(rows) * ggml_quant_row_bytes(qtype, cols);
-        };
 
         half* norm_ptr = static_cast<half*>(no.data);
         half* gate_buf = static_cast<half*>(moe_.expert_gate.data);   // [top_k, eff]
@@ -463,18 +492,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                           top_k, stream);
         } else {
             // Non-dp4a: separate activation + FP16 down GEMV
-            int64_t act_shape[2] = {static_cast<int64_t>(top_k),
-                                     static_cast<int64_t>(eff)};
-            if (non_gated_experts) {
-                // relu² in-place on up_buf, then use up_buf directly for down projection
-                Tensor up_t(up_buf, compute_dtype_, 2, act_shape, true);
-                relu_sqr_inplace(up_t, stream);
-            } else {
-                Tensor gate_t(gate_buf, compute_dtype_, 2, act_shape, true);
-                Tensor up_t(up_buf, compute_dtype_, 2, act_shape, true);
-                Tensor act_t(act_buf, compute_dtype_, 2, act_shape, true);
-                swiglu(gate_t, up_t, act_t, stream);
-            }
+            apply_expert_activation(gate_buf, up_buf, act_buf,
+                                    non_gated_experts, top_k, eff,
+                                    compute_dtype_, stream);
             size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_qtype);
             half* down_input = non_gated_experts ? up_buf : act_buf;
             if (up_qtype == GGMLQuantType::Q6_K) {
@@ -539,12 +559,6 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         char* expert_swiglu_base= static_cast<char*>(moe_.expert_swiglu.data);
         char* expert_down_base  = static_cast<char*>(moe_.expert_down.data);
 
-        auto expert_stride_fn = [](const Tensor& packed, GGMLQuantType qtype) -> size_t {
-            int64_t rows = packed.shape[1];
-            int64_t cols = packed.shape[2];
-            return static_cast<size_t>(rows) * ggml_quant_row_bytes(qtype, cols);
-        };
-
         if (use_tc) {
             // TC path: gather-free via sorted_token_ids indirection.
             // Gate and up read from original hidden state (no.data), down reads
@@ -556,7 +570,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     ly.expert_gate_packed.data,
                     no.data, expert_gate_base, d_offsets,
                     eff, d,
-                    expert_stride_fn(ly.expert_gate_packed, ly.expert_gate_qtype),
+                    expert_stride(ly.expert_gate_packed, ly.expert_gate_qtype),
                     ne, stream, d_sorted);
 
             // Up projection
@@ -564,7 +578,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 ly.expert_up_packed.data,
                 no.data, expert_up_base, d_offsets,
                 eff, d,
-                expert_stride_fn(ly.expert_up_packed, up_qtype),
+                expert_stride(ly.expert_up_packed, up_qtype),
                 ne, stream, d_sorted);
 
         } else {
@@ -582,30 +596,21 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     ly.expert_gate_packed.data,
                     gathered_base, expert_gate_base, d_offsets,
                     eff, d,
-                    expert_stride_fn(ly.expert_gate_packed, ly.expert_gate_qtype),
+                    expert_stride(ly.expert_gate_packed, ly.expert_gate_qtype),
                     ne, stream);
 
             gemm_q6k_fused_moe_prefill(
                 ly.expert_up_packed.data,
                 gathered_base, expert_up_base, d_offsets,
                 eff, d,
-                expert_stride_fn(ly.expert_up_packed, up_qtype),
+                expert_stride(ly.expert_up_packed, up_qtype),
                 ne, stream);
         }
 
         // Activation (FP16)
-        {
-            int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
-            if (non_gated_experts) {
-                Tensor up_t(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
-                relu_sqr_inplace(up_t, stream);
-            } else {
-                Tensor g(moe_.expert_gate.data, compute_dtype_, 2, act_shape, true);
-                Tensor u(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
-                Tensor a(moe_.expert_swiglu.data, compute_dtype_, 2, act_shape, true);
-                swiglu(g, u, a, stream);
-            }
-        }
+        apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
+                                moe_.expert_swiglu.data, non_gated_experts,
+                                expanded, eff, compute_dtype_, stream);
 
         // Down projection (reads from expanded-layout SwiGLU output, no indirection)
         char* fused_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -614,14 +619,14 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 ly.expert_down_packed.data,
                 fused_down_act, expert_down_base, d_offsets,
                 d, eff,
-                expert_stride_fn(ly.expert_down_packed, ly.expert_down_qtype),
+                expert_stride(ly.expert_down_packed, ly.expert_down_qtype),
                 ne, stream);
         } else {
             gemm_q6k_fused_moe_prefill(
                 ly.expert_down_packed.data,
                 fused_down_act, expert_down_base, d_offsets,
                 d, eff,
-                expert_stride_fn(ly.expert_down_packed, ly.expert_down_qtype),
+                expert_stride(ly.expert_down_packed, ly.expert_down_qtype),
                 ne, stream);
         }
 
@@ -737,18 +742,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                             gathered_base, expert_up_base, d, eff);
 
         // Activation
-        {
-            int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
-            if (non_gated_experts) {
-                Tensor up_t(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
-                relu_sqr_inplace(up_t, stream);
-            } else {
-                Tensor g(moe_.expert_gate.data, compute_dtype_, 2, act_shape, true);
-                Tensor u(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
-                Tensor a(moe_.expert_swiglu.data, compute_dtype_, 2, act_shape, true);
-                swiglu(g, u, a, stream);
-            }
-        }
+        apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
+                                moe_.expert_swiglu.data, non_gated_experts,
+                                expanded, eff, compute_dtype_, stream);
 
         // Down projection
         char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -842,19 +838,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                          gathered_base, expert_up_base, d, eff);
 
         // Activation (FP16 — reuse existing kernels)
-        {
-            int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
-            if (non_gated_experts) {
-                // relu² in-place on up buffer (no memcpy needed)
-                Tensor up_t(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
-                relu_sqr_inplace(up_t, stream);
-            } else {
-                Tensor g(moe_.expert_gate.data, compute_dtype_, 2, act_shape, true);
-                Tensor u(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
-                Tensor a(moe_.expert_swiglu.data, compute_dtype_, 2, act_shape, true);
-                swiglu(g, u, a, stream);
-            }
-        }
+        apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
+                                moe_.expert_swiglu.data, non_gated_experts,
+                                expanded, eff, compute_dtype_, stream);
 
         // Down projection: up buffer for non-gated (relu² in-place), swiglu for gated
         char* fp8_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -920,18 +906,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                   gathered_base, expert_up_base, d, eff);
 
         // Activation
-        {
-            int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
-            if (non_gated_experts) {
-                Tensor up_t(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
-                relu_sqr_inplace(up_t, stream);
-            } else {
-                Tensor g(moe_.expert_gate.data, compute_dtype_, 2, act_shape, true);
-                Tensor u(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
-                Tensor a(moe_.expert_swiglu.data, compute_dtype_, 2, act_shape, true);
-                swiglu(g, u, a, stream);
-            }
-        }
+        apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
+                                moe_.expert_swiglu.data, non_gated_experts,
+                                expanded, eff, compute_dtype_, stream);
 
         // Down projection
         char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -1181,19 +1158,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                               h_offsets.data(), up_w_ptrs.data(),
                               d, eff, DType::FP16, ne, stream, moe_.d_work_ptrs);
 
-            {
-                int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
-                if (non_gated_experts) {
-                    // relu² in-place on up buffer (no memcpy needed)
-                    Tensor up_t(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
-                    relu_sqr_inplace(up_t, stream);
-                } else {
-                    Tensor g(moe_.expert_gate.data, compute_dtype_, 2, act_shape, true);
-                    Tensor u(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
-                    Tensor a(moe_.expert_swiglu.data, compute_dtype_, 2, act_shape, true);
-                    swiglu(g, u, a, stream);
-                }
-            }
+            apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
+                                    moe_.expert_swiglu.data, non_gated_experts,
+                                    expanded, eff, compute_dtype_, stream);
 
             {
                 char* batch_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -1212,19 +1179,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             chunked_dequant_gemm(ly.expert_up_packed, ly.expert_up_qtype,
                                  ly.expert_w_up, gathered_base, expert_up_base, d, eff);
 
-            {
-                int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
-                if (non_gated_experts) {
-                    // relu² in-place on up buffer (no memcpy needed)
-                    Tensor up_t(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
-                    relu_sqr_inplace(up_t, stream);
-                } else {
-                    Tensor g(moe_.expert_gate.data, compute_dtype_, 2, act_shape, true);
-                    Tensor u(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
-                    Tensor a(moe_.expert_swiglu.data, compute_dtype_, 2, act_shape, true);
-                    swiglu(g, u, a, stream);
-                }
-            }
+            apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
+                                    moe_.expert_swiglu.data, non_gated_experts,
+                                    expanded, eff, compute_dtype_, stream);
 
             {
                 char* dequant_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -1262,19 +1219,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 }
             }
 
-            {
-                int64_t act_shape[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
-                if (non_gated_experts) {
-                    // relu² in-place on up buffer (no memcpy needed)
-                    Tensor up_t(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
-                    relu_sqr_inplace(up_t, stream);
-                } else {
-                    Tensor g(moe_.expert_gate.data, compute_dtype_, 2, act_shape, true);
-                    Tensor u(moe_.expert_up.data, compute_dtype_, 2, act_shape, true);
-                    Tensor a(moe_.expert_swiglu.data, compute_dtype_, 2, act_shape, true);
-                    swiglu(g, u, a, stream);
-                }
-            }
+            apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
+                                    moe_.expert_swiglu.data, non_gated_experts,
+                                    expanded, eff, compute_dtype_, stream);
 
             // Down projection activation source: up buffer for non-gated (relu² in-place),
             // swiglu buffer for gated.

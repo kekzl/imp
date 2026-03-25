@@ -20,49 +20,133 @@ namespace imp {
 // Q8_1 block: 32 values quantized to INT8 with per-block scale (d) and sum (s).
 // ===========================================================================
 
-// Quantize K FP16 values to Q8_1 blocks.
-// Grid: K/32 blocks, 32 threads each. One block per Q8_1 output block.
-__global__ void quantize_fp16_to_q8_1_kernel(const half* __restrict__ x,
-                                              block_q8_1* __restrict__ q8_1_out,
-                                              float* __restrict__ d8_out,
-                                              int K) {
-    const int block_idx = blockIdx.x;
-    const int lane = threadIdx.x;  // 0..31
-    const int base = block_idx * 32;
+// ---------------------------------------------------------------------------
+// Activation functors for fused activation + Q8_1 quantization kernels.
+//
+// Each functor computes the activated value for one element. Gated variants
+// (SwiGLU, GeGLU) read from both a gate and an up projection. Non-gated
+// variants (Identity, ReLU²) use a single input.
+// ---------------------------------------------------------------------------
 
-    if (base + lane >= K) return;
+struct IdentityAct {
+    __device__ __forceinline__ float operator()(const half* input, const half* /*unused*/,
+                                                int idx, int total) const {
+        // Early-out for OOB threads (preserves original quantize_fp16_to_q8_1 behavior
+        // where partial-warp threads return instead of contributing val=0).
+        (void)total;
+        return __half2float(input[idx]);
+    }
+    static constexpr bool kEarlyReturn = true;   // OOB threads return before quantize
+    static constexpr bool kClampQuantize = false;
+};
 
-    // Load one FP16 value per thread
-    float val = __half2float(x[base + lane]);
+struct SwiGLUAct {
+    // SwiGLU: silu(gate) * up = gate * sigmoid(gate) * up
+    __device__ __forceinline__ float operator()(const half* gate, const half* up,
+                                                int idx, int /*total*/) const {
+        float g = __half2float(gate[idx]);
+        float u = __half2float(up[idx]);
+        return g / (1.0f + expf(-g)) * u;
+    }
+    static constexpr bool kEarlyReturn = false;
+    static constexpr bool kClampQuantize = false;
+};
 
-    // Find max absolute value across the 32-element block via warp shuffle
-    float amax = fabsf(val);
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        float other = __shfl_xor_sync(0xFFFFFFFF, amax, offset);
-        amax = fmaxf(amax, other);
+struct GeGLUAct {
+    // GEGLU: gelu_tanh(gate) * up
+    __device__ __forceinline__ float operator()(const half* gate, const half* up,
+                                                int idx, int /*total*/) const {
+        constexpr float SQRT_2_PI = 0.7978845608028654f;
+        constexpr float COEFF = 0.044715f;
+        float g = __half2float(gate[idx]);
+        float u = __half2float(up[idx]);
+        float gelu_g = g * 0.5f * (1.0f + tanhf(SQRT_2_PI * (g + COEFF * g * g * g)));
+        return gelu_g * u;
+    }
+    static constexpr bool kEarlyReturn = false;
+    static constexpr bool kClampQuantize = false;
+};
+
+struct ReLUSqrAct {
+    // relu²(x) = max(0, x)²
+    __device__ __forceinline__ float operator()(const half* input, const half* /*unused*/,
+                                                int idx, int /*total*/) const {
+        float v = __half2float(input[idx]);
+        return (v > 0.0f) ? v * v : 0.0f;
+    }
+    static constexpr bool kEarlyReturn = true;   // OOB threads return before quantize
+    static constexpr bool kUsesGate = false;
+    // ReLU² uses slightly different quantization: roundf + clamping (original behavior)
+    static constexpr bool kClampQuantize = true;
+};
+
+// ---------------------------------------------------------------------------
+// Fused activation + Q8_1 quantization kernel (templated).
+//
+// Each block handles 32 contiguous elements (one Q8_1 block), 32 threads/block.
+// The activation functor determines which activation is applied before quantization.
+// ---------------------------------------------------------------------------
+template<typename Act>
+__global__ void fused_act_quantize_q8_1_kernel(
+        const half* __restrict__ input,      // primary input (or gate for gated acts)
+        const half* __restrict__ gate_or_null, // up projection for gated acts, null otherwise
+        block_q8_1* __restrict__ q8_out,
+        float* __restrict__ d8_out,
+        int total_elements,
+        Act act) {
+    const int blk = blockIdx.x;
+    const int tid = threadIdx.x;  // 0..31
+    const int idx = blk * 32 + tid;
+
+    // For kEarlyReturn functors: OOB threads return before shuffle reduction.
+    // This preserves the original behavior of quantize_fp16_to_q8_1 and
+    // relu_sqr_quantize_q8_1 where partial-warp threads exit early.
+    if constexpr (Act::kEarlyReturn) {
+        if (idx >= total_elements) return;
     }
 
-    // Compute scale: d = max / 127
+    // Compute activated value
+    float val = 0.0f;
+    if constexpr (Act::kEarlyReturn) {
+        val = act(input, gate_or_null, idx, total_elements);
+    } else {
+        if (idx < total_elements)
+            val = act(input, gate_or_null, idx, total_elements);
+    }
+
+    // Warp-cooperative quantization: find max abs
+    float amax = fabsf(val);
+    for (int off = 16; off > 0; off >>= 1)
+        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, off));
+
     float d = amax / 127.0f;
-    float id = (d != 0.0f) ? (1.0f / d) : 0.0f;
+    int8_t q;
+    if constexpr (Act::kClampQuantize) {
+        // ReLU² path: uses roundf + explicit clamping (original behavior)
+        float id = (d > 0.0f) ? 127.0f / amax : 0.0f;
+        q = (int8_t)fminf(fmaxf(roundf(val * id), -127.0f), 127.0f);
+    } else {
+        // Standard path: __float2int_rn
+        float id = (d != 0.0f) ? (1.0f / d) : 0.0f;
+        q = static_cast<int8_t>(__float2int_rn(val * id));
+    }
 
-    // Quantize: round to nearest int8
-    int8_t q = static_cast<int8_t>(__float2int_rn(val * id));
-
-    // Write output: lane 0 writes the header, all lanes write their qs byte
-    block_q8_1* out = &q8_1_out[block_idx];
-    out->qs[lane] = q;
-    if (lane == 0) {
-        out->d = __float2half(d);
-        d8_out[block_idx] = d;
+    // Write Q8_1 block
+    q8_out[blk].qs[tid] = q;
+    if (tid == 0) {
+        q8_out[blk].d = __float2half(d);
+        d8_out[blk] = d;
     }
 }
 
+// Quantize K FP16 values to Q8_1 blocks.
+// Grid: K/32 blocks, 32 threads each. One block per Q8_1 output block.
 void quantize_fp16_to_q8_1(const half* x, block_q8_1* q8_1_out, float* d8_out,
                             int K, cudaStream_t stream) {
     int n_blocks = K / 32;
     if (n_blocks <= 0) return;
-    quantize_fp16_to_q8_1_kernel<<<n_blocks, 32, 0, stream>>>(x, q8_1_out, d8_out, K);
+    fused_act_quantize_q8_1_kernel<<<n_blocks, 32, 0, stream>>>(
+        x, nullptr, q8_1_out, d8_out, K, IdentityAct{});
 
     // Pad to the next Q6_K block boundary (256 elements = 8 Q8_1 blocks).
     // When K is not a multiple of 256, the dp4a GEMV reads ceil(K/256)*8
@@ -76,153 +160,42 @@ void quantize_fp16_to_q8_1(const half* x, block_q8_1* q8_1_out, float* d8_out,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Fused SwiGLU + Q8_1 quantization kernel.
+// Fused SwiGLU + Q8_1 quantization.
 // Computes silu(gate) * up and quantizes the result to Q8_1 in a single pass.
 // Eliminates the intermediate FP16 activation buffer write+read.
-//
-// Each block handles 32 contiguous elements (one Q8_1 block).
-// 32 threads per block (one full warp).
-// ---------------------------------------------------------------------------
-__global__ void swiglu_quantize_q8_1_kernel(
-        const half* __restrict__ gate,       // [total_elements] FP16
-        const half* __restrict__ up,         // [total_elements] FP16
-        block_q8_1* __restrict__ q8_out,     // [total_elements/32] Q8_1 blocks
-        float* __restrict__ d8_out,          // [total_elements/32] block scales
-        int total_elements) {
-    const int blk = blockIdx.x;
-    const int tid = threadIdx.x;  // 0..31
-    const int idx = blk * 32 + tid;
-
-    // SwiGLU: silu(gate) * up = gate * sigmoid(gate) * up
-    float val = 0.0f;
-    if (idx < total_elements) {
-        float g = __half2float(gate[idx]);
-        float u = __half2float(up[idx]);
-        val = g / (1.0f + expf(-g)) * u;
-    }
-
-    // Warp-cooperative quantization: find max abs
-    float amax = fabsf(val);
-    for (int off = 16; off > 0; off >>= 1)
-        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, off));
-
-    float d = amax / 127.0f;
-    float id = (d != 0.0f) ? (1.0f / d) : 0.0f;
-    int8_t q = static_cast<int8_t>(__float2int_rn(val * id));
-
-    q8_out[blk].qs[tid] = q;
-    if (tid == 0) {
-        q8_out[blk].d = __float2half(d);
-        d8_out[blk] = d;
-    }
-}
-
 void swiglu_quantize_q8_1(const half* gate, const half* up,
                             block_q8_1* q8_out, float* d8_out,
                             int total_elements, cudaStream_t stream) {
     int n_blocks = total_elements / 32;
     if (n_blocks <= 0) return;
-    swiglu_quantize_q8_1_kernel<<<n_blocks, 32, 0, stream>>>(
-        gate, up, q8_out, d8_out, total_elements);
+    fused_act_quantize_q8_1_kernel<<<n_blocks, 32, 0, stream>>>(
+        gate, up, q8_out, d8_out, total_elements, SwiGLUAct{});
 }
 
-// ---------------------------------------------------------------------------
-// Fused GEGLU + Q8_1 quantization kernel.
+// Fused GEGLU + Q8_1 quantization.
 // Computes gelu_tanh(gate) * up and quantizes the result to Q8_1 in one pass.
 // Eliminates the intermediate FP16 activation buffer write+read for GEGLU models
-// (Gemma-3).  Each block handles 32 elements (one Q8_1 block), 32 threads/block.
-// ---------------------------------------------------------------------------
-__global__ void geglu_quantize_q8_1_kernel(
-        const half* __restrict__ gate,
-        const half* __restrict__ up,
-        block_q8_1* __restrict__ q8_out,
-        float* __restrict__ d8_out,
-        int total_elements) {
-    constexpr float SQRT_2_PI = 0.7978845608028654f;
-    constexpr float COEFF = 0.044715f;
-
-    const int blk = blockIdx.x;
-    const int tid = threadIdx.x;
-    const int idx = blk * 32 + tid;
-
-    float val = 0.0f;
-    if (idx < total_elements) {
-        float g = __half2float(gate[idx]);
-        float u = __half2float(up[idx]);
-        float gelu_g = g * 0.5f * (1.0f + tanhf(SQRT_2_PI * (g + COEFF * g * g * g)));
-        val = gelu_g * u;
-    }
-
-    float amax = fabsf(val);
-    for (int off = 16; off > 0; off >>= 1)
-        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, off));
-
-    float d = amax / 127.0f;
-    float id = (d != 0.0f) ? (1.0f / d) : 0.0f;
-    int8_t q = static_cast<int8_t>(__float2int_rn(val * id));
-
-    q8_out[blk].qs[tid] = q;
-    if (tid == 0) {
-        q8_out[blk].d = __float2half(d);
-        d8_out[blk] = d;
-    }
-}
-
+// (Gemma-3).
 void geglu_quantize_q8_1(const half* gate, const half* up,
                            block_q8_1* q8_out, float* d8_out,
                            int total_elements, cudaStream_t stream) {
     int n_blocks = total_elements / 32;
     if (n_blocks <= 0) return;
-    geglu_quantize_q8_1_kernel<<<n_blocks, 32, 0, stream>>>(
-        gate, up, q8_out, d8_out, total_elements);
+    fused_act_quantize_q8_1_kernel<<<n_blocks, 32, 0, stream>>>(
+        gate, up, q8_out, d8_out, total_elements, GeGLUAct{});
 }
 
-// ---------------------------------------------------------------------------
-// Fused relu² + Q8_1 quantization kernel.
-//
+// Fused relu² + Q8_1 quantization.
 // Reads FP16 input, applies relu²(x) = max(0, x)², quantizes to Q8_1.
 // Replaces 3 separate operations (memcpy + relu_sqr_inplace + quantize).
 // Used by non-gated MoE experts (Nemotron).
-// ---------------------------------------------------------------------------
-__global__ void relu_sqr_quantize_q8_1_kernel(
-        const half* __restrict__ input,      // [total_elements] FP16
-        block_q8_1* __restrict__ q8_out,     // [total_elements/32] Q8_1 blocks
-        float* __restrict__ d8_out,          // [total_elements/32] block scales
-        int total_elements) {
-    int blk = blockIdx.x;
-    int tid = threadIdx.x;
-    int base = blk * 32 + tid;
-    if (base >= total_elements) return;
-
-    // Read input and apply relu²
-    float v = __half2float(input[base]);
-    v = (v > 0.0f) ? v * v : 0.0f;
-
-    // Warp reduction for absmax
-    float amax = fabsf(v);
-    for (int mask = 16; mask >= 1; mask >>= 1)
-        amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, mask));
-
-    float d = amax / 127.0f;
-    float id = (d > 0.0f) ? 127.0f / amax : 0.0f;
-    int8_t q = (int8_t)fminf(fmaxf(roundf(v * id), -127.0f), 127.0f);
-
-    // Write Q8_1 block
-    q8_out[blk].qs[tid] = q;
-    if (tid == 0) {
-        q8_out[blk].d = __float2half(d);
-        d8_out[blk] = d;
-    }
-}
-
 void relu_sqr_quantize_q8_1(const half* input,
                               block_q8_1* q8_out, float* d8_out,
                               int total_elements, cudaStream_t stream) {
     int n_blocks = total_elements / 32;
     if (n_blocks <= 0) return;
-    relu_sqr_quantize_q8_1_kernel<<<n_blocks, 32, 0, stream>>>(
-        input, q8_out, d8_out, total_elements);
+    fused_act_quantize_q8_1_kernel<<<n_blocks, 32, 0, stream>>>(
+        input, nullptr, q8_out, d8_out, total_elements, ReLUSqrAct{});
 }
 
 // ---------------------------------------------------------------------------
