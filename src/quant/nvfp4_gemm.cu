@@ -180,6 +180,35 @@ __device__ __forceinline__ void init_lut(float* s_lut, int tid)
     }
 }
 
+// Warp-level K-parallel micro-block loop: accumulates dot(row, x) for one row.
+// DotFn signature: float(const uint8_t* pb, int elem_offset)
+// Used by multi-row kernels where each warp (32 threads) handles one row.
+template<typename DotFn>
+__device__ __forceinline__ float warp_k_loop(
+    const uint8_t* __restrict__ row_packed,
+    const uint8_t* __restrict__ row_ms,
+    float tensor_scale, int n_mb, int lane, DotFn dot_fn)
+{
+    float acc = 0.0f;
+    for (int mi = lane; mi < n_mb; mi += 32) {
+        int byte_off = mi * 8;
+        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
+        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
+        float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
+        acc = __fmaf_rn(dot_fn(pb, byte_off * 2), cs, acc);
+    }
+    return acc;
+}
+
+// Warp-level reduction: shuffle-down within 32 threads.
+__device__ __forceinline__ float warp_reduce(float acc)
+{
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+    return acc;
+}
+
 // ---------------------------------------------------------------------------
 // Basic GEMV: y[row] = A_nvfp4[row,:] @ x
 // ---------------------------------------------------------------------------
@@ -266,21 +295,10 @@ gemv_nvfp4_multirow_kernel(
     const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
 
     // K-parallel within warp (32 threads), prmt register LUT
-    float acc = 0.0f;
-    for (int mi = lane; mi < n_mb; mi += 32) {
-        int byte_off = mi * 8;
-        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
-        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
-        float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
-        float local_dot = dot_micro_block(pb, x, byte_off * 2);
-        acc = __fmaf_rn(local_dot, cs, acc);
-    }
+    float acc = warp_k_loop(row_packed, row_ms, tensor_scale, n_mb, lane,
+        [&] __device__ (const uint8_t* pb, int off) { return dot_micro_block(pb, x, off); });
 
-    // Warp-level reduction
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1)
-        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
-
+    acc = warp_reduce(acc);
     if (lane == 0) y[row] = __float2half(acc);
 }
 
@@ -307,20 +325,10 @@ gemv_nvfp4_multirow_fp32_kernel(
     const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
     const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
 
-    float acc = 0.0f;
-    for (int mi = lane; mi < n_mb; mi += 32) {
-        int byte_off = mi * 8;
-        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
-        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
-        float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
-        float local_dot = dot_micro_block(pb, x, byte_off * 2);
-        acc = __fmaf_rn(local_dot, cs, acc);
-    }
+    float acc = warp_k_loop(row_packed, row_ms, tensor_scale, n_mb, lane,
+        [&] __device__ (const uint8_t* pb, int off) { return dot_micro_block(pb, x, off); });
 
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1)
-        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
-
+    acc = warp_reduce(acc);
     if (lane == 0) y[row] = acc;
 }
 
@@ -665,18 +673,10 @@ gemv_nvfp4_qkv_fused_mr_kernel(
         ts = ts_v; out = yv;
     }
 
-    float acc = 0.0f;
-    for (int mi = lane; mi < n_mb; mi += 32) {
-        int byte_off = mi * 8;
-        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
-        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
-        float cs = ts * fp8_e4m3_to_float_fast(row_ms[mi]);
-        float local_dot = dot_micro_block(pb, x, byte_off * 2);
-        acc = __fmaf_rn(local_dot, cs, acc);
-    }
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1)
-        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+    float acc = warp_k_loop(row_packed, row_ms, ts, n_mb, lane,
+        [&] __device__ (const uint8_t* pb, int off) { return dot_micro_block(pb, x, off); });
+
+    acc = warp_reduce(acc);
     if (lane == 0) out[local_row] = __float2half(acc);
 }
 
@@ -717,18 +717,10 @@ gemv_nvfp4_gate_up_fused_mr_kernel(
         ts = ts_u; out = yu;
     }
 
-    float acc = 0.0f;
-    for (int mi = lane; mi < n_mb; mi += 32) {
-        int byte_off = mi * 8;
-        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
-        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
-        float cs = ts * fp8_e4m3_to_float_fast(row_ms[mi]);
-        float local_dot = dot_micro_block(pb, x, byte_off * 2);
-        acc = __fmaf_rn(local_dot, cs, acc);
-    }
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1)
-        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+    float acc = warp_k_loop(row_packed, row_ms, ts, n_mb, lane,
+        [&] __device__ (const uint8_t* pb, int off) { return dot_micro_block(pb, x, off); });
+
+    acc = warp_reduce(acc);
     if (lane == 0) out[local_row] = __float2half(acc);
 }
 
@@ -752,18 +744,10 @@ gemv_nvfp4_residual_mr_kernel(
     const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
     const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
 
-    float acc = 0.0f;
-    for (int mi = lane; mi < n_mb; mi += 32) {
-        int byte_off = mi * 8;
-        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
-        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
-        float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
-        float local_dot = dot_micro_block(pb, x, byte_off * 2);
-        acc = __fmaf_rn(local_dot, cs, acc);
-    }
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1)
-        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+    float acc = warp_k_loop(row_packed, row_ms, tensor_scale, n_mb, lane,
+        [&] __device__ (const uint8_t* pb, int off) { return dot_micro_block(pb, x, off); });
+
+    acc = warp_reduce(acc);
     if (lane == 0) y[row] = __float2half(acc + __half2float(residual[row]));
 }
 
@@ -786,27 +770,18 @@ gemv_nvfp4_swiglu_residual_mr_kernel(
     const int n_mb = K / kMicroBlockSize;
 
     __shared__ float s_lut[16];
-    if (threadIdx.x < 16) {
-        constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
-        s_lut[threadIdx.x] = (threadIdx.x < 8) ? kMag[threadIdx.x] : -kMag[threadIdx.x & 7];
-    }
+    init_lut(s_lut, threadIdx.x);
     __syncthreads();
 
     const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
     const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
 
-    float acc = 0.0f;
-    for (int mi = lane; mi < n_mb; mi += 32) {
-        int byte_off = mi * 8;
-        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
-        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
-        float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
-        float local_dot = dot_micro_block_swiglu(pb, gate, up, byte_off * 2, s_lut);
-        acc = __fmaf_rn(local_dot, cs, acc);
-    }
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1)
-        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+    float acc = warp_k_loop(row_packed, row_ms, tensor_scale, n_mb, lane,
+        [&] __device__ (const uint8_t* pb, int off) {
+            return dot_micro_block_swiglu(pb, gate, up, off, s_lut);
+        });
+
+    acc = warp_reduce(acc);
     if (lane == 0) y[row] = __float2half(acc + __half2float(residual[row]));
 }
 
@@ -829,27 +804,18 @@ gemv_nvfp4_geglu_residual_mr_kernel(
     const int n_mb = K / kMicroBlockSize;
 
     __shared__ float s_lut[16];
-    if (threadIdx.x < 16) {
-        constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
-        s_lut[threadIdx.x] = (threadIdx.x < 8) ? kMag[threadIdx.x] : -kMag[threadIdx.x & 7];
-    }
+    init_lut(s_lut, threadIdx.x);
     __syncthreads();
 
     const uint8_t* row_packed = packed_data + (int64_t)row * K_half;
     const uint8_t* row_ms = micro_scales + (int64_t)row * n_mb;
 
-    float acc = 0.0f;
-    for (int mi = lane; mi < n_mb; mi += 32) {
-        int byte_off = mi * 8;
-        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
-        const uint8_t* pb = reinterpret_cast<const uint8_t*>(&packed2);
-        float cs = tensor_scale * fp8_e4m3_to_float_fast(row_ms[mi]);
-        float local_dot = dot_micro_block_geglu(pb, gate, up, byte_off * 2, s_lut);
-        acc = __fmaf_rn(local_dot, cs, acc);
-    }
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1)
-        acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+    float acc = warp_k_loop(row_packed, row_ms, tensor_scale, n_mb, lane,
+        [&] __device__ (const uint8_t* pb, int off) {
+            return dot_micro_block_geglu(pb, gate, up, off, s_lut);
+        });
+
+    acc = warp_reduce(acc);
     if (lane == 0) y[row] = __float2half(acc + __half2float(residual[row]));
 }
 
@@ -1172,19 +1138,10 @@ gemv_nvfp4_moe_gate_up_mr_kernel(
     const uint8_t* row_packed = W + (size_t)row * (K / 2);
     const uint8_t* row_ms = MS + (size_t)row * n_mb;
 
-    float acc = 0.0f;
-    for (int mi = lane; mi < n_mb; mi += 32) {
-        int byte_off = mi * 8;
-        uint2 packed2 = *reinterpret_cast<const uint2*>(row_packed + byte_off);
-        float cs = ts * fp8_e4m3_to_float_fast(row_ms[mi]);
-        acc = __fmaf_rn(dot_micro_block(
-            reinterpret_cast<const uint8_t*>(&packed2), x, byte_off * 2), cs, acc);
-    }
+    float acc = warp_k_loop(row_packed, row_ms, ts, n_mb, lane,
+        [&] __device__ (const uint8_t* pb, int off) { return dot_micro_block(pb, x, off); });
 
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1)
-        acc += __shfl_down_sync(0xFFFFFFFF, acc, off);
-
+    acc = warp_reduce(acc);
     if (lane == 0) out[(size_t)expert_slot * rows + row] = __float2half(acc);
 }
 
@@ -1222,19 +1179,10 @@ gemv_nvfp4_moe_decode_mr_kernel(
     float ts = tensor_scales[expert_id];
     const half* xi = x + (size_t)expert_slot * x_stride;
 
-    float acc = 0.0f;
-    for (int mi = lane; mi < n_mb; mi += 32) {
-        int byte_off = mi * 8;
-        uint2 packed2 = *reinterpret_cast<const uint2*>(W + byte_off);
-        float cs = ts * fp8_e4m3_to_float_fast(MS[mi]);
-        acc = __fmaf_rn(dot_micro_block(
-            reinterpret_cast<const uint8_t*>(&packed2), xi, byte_off * 2), cs, acc);
-    }
+    float acc = warp_k_loop(W, MS, ts, n_mb, lane,
+        [&] __device__ (const uint8_t* pb, int off) { return dot_micro_block(pb, xi, off); });
 
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1)
-        acc += __shfl_down_sync(0xFFFFFFFF, acc, off);
-
+    acc = warp_reduce(acc);
     if (lane == 0) y[(size_t)expert_slot * rows + row] = __float2half(acc);
 }
 
@@ -1412,26 +1360,15 @@ gemv_nvfp4_moe_swiglu_mr_kernel(
     const half* ui = up   + (size_t)expert_slot * x_stride;
 
     __shared__ float s_lut[16];
-    if (threadIdx.x < 16) {
-        constexpr float kMag[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
-        s_lut[threadIdx.x] = (threadIdx.x < 8) ? kMag[threadIdx.x] : -kMag[threadIdx.x & 7];
-    }
+    init_lut(s_lut, threadIdx.x);
     __syncthreads();
 
-    float acc = 0.0f;
-    for (int mi = lane; mi < n_mb; mi += 32) {
-        int byte_off = mi * 8;
-        uint2 packed2 = *reinterpret_cast<const uint2*>(W + byte_off);
-        float cs = ts * fp8_e4m3_to_float_fast(MS[mi]);
-        acc = __fmaf_rn(dot_micro_block_swiglu(
-            reinterpret_cast<const uint8_t*>(&packed2), gi, ui,
-            byte_off * 2, s_lut), cs, acc);
-    }
+    float acc = warp_k_loop(W, MS, ts, n_mb, lane,
+        [&] __device__ (const uint8_t* pb, int off) {
+            return dot_micro_block_swiglu(pb, gi, ui, off, s_lut);
+        });
 
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1)
-        acc += __shfl_down_sync(0xFFFFFFFF, acc, off);
-
+    acc = warp_reduce(acc);
     if (lane == 0) y[(size_t)expert_slot * rows + row] = __float2half(acc);
 }
 
