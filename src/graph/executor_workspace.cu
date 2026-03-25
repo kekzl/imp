@@ -34,6 +34,24 @@
 
 namespace imp {
 
+// Helper: round up to 256-byte alignment (used throughout for workspace layout).
+static inline size_t align256(size_t x) { return (x + 255) & ~size_t(255); }
+
+// Helper: saturating budget deduction (avoids underflow on size_t).
+static inline void deduct_budget(size_t& budget, size_t amount) {
+    budget = (budget > amount) ? (budget - amount) : 0;
+}
+
+// Helper: create a 2D Tensor view at `ptr` and advance ptr by `aligned_sz`.
+// Used by configure_*_workspace() and allocate_persistent_workspace() to lay out
+// tensors in a contiguous buffer.
+static Tensor make_workspace_tensor(char*& ptr, DType dtype, int64_t rows, int64_t cols, size_t aligned_sz) {
+    int64_t shape[2] = {rows, cols};
+    Tensor t(ptr, dtype, 2, shape, true);
+    ptr += aligned_sz;
+    return t;
+}
+
 // Helper: allocate GPU memory through VRAMAllocator if available, else cudaMalloc.
 // Frees through the same path. Used for large persistent allocations.
 static void* vram_alloc(VRAMAllocator* alloc, size_t bytes, const char* tag) {
@@ -48,6 +66,83 @@ static void vram_free(VRAMAllocator* alloc, void* ptr) {
     if (!ptr) return;
     if (alloc) alloc->free(ptr);
     else cudaFree(ptr);
+}
+
+// Helper: create a fused weight pair by concatenating two FP16 cached weights.
+// Used for fused KV and fused gate+up weight creation in Phase 1.
+// Returns true if the fused weight was created, false if skipped/failed.
+// Sets should_stop=true when budget is exhausted or allocation fails (caller should break).
+static bool create_fused_weight_pair(
+    const Tensor& w_a, const Tensor& w_b,
+    const std::unordered_map<const void*, Tensor>& fp16_cache,
+    VRAMAllocator* allocator,
+    size_t& total_cache_bytes, size_t remaining_budget,
+    cudaStream_t stream,
+    std::unordered_map<int, Tensor>& out_map, int layer_idx,
+    bool& should_stop)
+{
+    should_stop = false;
+    if (!w_a.data || !w_b.data) return false;
+    // Both must be in FP16 cache
+    auto it_a = fp16_cache.find(w_a.data);
+    auto it_b = fp16_cache.find(w_b.data);
+    if (it_a == fp16_cache.end() || it_b == fp16_cache.end()) return false;
+
+    int a_rows = static_cast<int>(w_a.shape[0]);
+    int K = static_cast<int>(w_a.shape[1]);
+    size_t one_sz = static_cast<size_t>(a_rows) * K * sizeof(half);
+
+    // Respect VRAM budget — on WSL2/WDDM, cudaMalloc silently spills to
+    // shared (system) memory beyond physical VRAM, causing massive slowdowns.
+    if (total_cache_bytes + 2 * one_sz > remaining_budget) {
+        should_stop = true;
+        return false;
+    }
+
+    void* fused_buf = vram_alloc(allocator, 2 * one_sz, "fp16_weight_cache");
+    if (!fused_buf) {
+        should_stop = true;
+        return false;
+    }
+
+    cudaMemcpyAsync(fused_buf, it_a->second.data, one_sz,
+                     cudaMemcpyDeviceToDevice, stream);
+    cudaMemcpyAsync(static_cast<char*>(fused_buf) + one_sz,
+                     it_b->second.data, one_sz,
+                     cudaMemcpyDeviceToDevice, stream);
+
+    int64_t shape[2] = {2 * a_rows, static_cast<int64_t>(K)};
+    out_map[layer_idx] = Tensor(fused_buf, DType::FP16, 2, shape, true);
+    total_cache_bytes += 2 * one_sz;
+    return true;
+}
+
+// Helper: iterate all dense layer weights in priority order (attention first,
+// then SSM/shared/FFN). Used by Phases 2-3 of pre_dequant_weights to collect
+// weights for FP8/NVFP4 caching with a consistent priority ordering.
+// The callback receives (weight_tensor, qtype) for each eligible weight.
+template <typename Fn>
+static void for_each_dense_weight(const Model& model, const ModelConfig& cfg, Fn&& fn) {
+    // Pass 1: attention weights (critical for cuBLAS prefill)
+    for (int i = 0; i < cfg.n_layers; i++) {
+        const auto& L = model.layer(i);
+        fn(L.wq, L.wq_qtype);
+        fn(L.wk, L.wk_qtype);
+        fn(L.wv, L.wv_qtype);
+        fn(L.wo, L.wo_qtype);
+    }
+    // Pass 2: SSM, shared experts, and dense FFN
+    for (int i = 0; i < cfg.n_layers; i++) {
+        const auto& L = model.layer(i);
+        fn(L.ssm_in, L.ssm_in_qtype);
+        fn(L.ssm_out, L.ssm_out_qtype);
+        fn(L.w_gate_shared, L.w_gate_shared_qtype);
+        fn(L.w_up_shared, L.w_up_shared_qtype);
+        fn(L.w_down_shared, L.w_down_shared_qtype);
+        fn(L.w_gate, L.w_gate_qtype);
+        fn(L.w_up, L.w_up_qtype);
+        fn(L.w_down, L.w_down_qtype);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +349,7 @@ size_t GraphExecutor::workspace_estimate() const {
     const auto& cfg = model_->config();
     int d = cfg.d_model;
     size_t es = dtype_size(compute_dtype_);
-    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
+
 
     // Persistent: hidden + residual + norm_out + logits
     size_t persistent = 3 * align256(static_cast<size_t>(max_tokens_) * d * es)
@@ -326,7 +421,7 @@ void GraphExecutor::compute_shared_sizes(int max_tokens) {
     int hd  = cfg.head_dim > 0 ? cfg.head_dim : (d / nh);
     size_t es = dtype_size(compute_dtype_);
 
-    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
+
 
     // Attention phase: q, k+v (contiguous for batched GEMM), attn_out, proj_out
     // Check for Q+Gate interleaving (Qwen3.5): Q projection output is 2x larger
@@ -397,7 +492,7 @@ bool GraphExecutor::allocate_persistent_workspace(int max_tokens) {
     int v = cfg.vocab_size;
     size_t es = dtype_size(compute_dtype_);
 
-    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
+
 
     size_t hidden_sz   = align256(static_cast<size_t>(max_tokens) * d * es);
     size_t residual_sz = align256(static_cast<size_t>(max_tokens) * d * es);
@@ -416,16 +511,9 @@ bool GraphExecutor::allocate_persistent_workspace(int max_tokens) {
 
     char* ptr = static_cast<char*>(persistent_workspace_);
 
-    auto make = [&](int64_t cols, size_t aligned_sz) -> Tensor {
-        int64_t shape[2] = {static_cast<int64_t>(max_tokens), cols};
-        Tensor t(ptr, compute_dtype_, 2, shape, true);
-        ptr += aligned_sz;
-        return t;
-    };
-
-    hidden_   = make(d, hidden_sz);
-    residual_ = make(d, residual_sz);
-    norm_out_ = make(d, norm_out_sz);
+    hidden_   = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d, hidden_sz);
+    residual_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d, residual_sz);
+    norm_out_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d, norm_out_sz);
 
     {
         int64_t shape[2] = {static_cast<int64_t>(max_logit_tokens_), static_cast<int64_t>(v)};
@@ -1111,34 +1199,12 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         int fused_kv_count = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
-            if (!L.wk.data || !L.wv.data) continue;
-            auto wk_it = wcache_.fp16.find(L.wk.data);
-            auto wv_it = wcache_.fp16.find(L.wv.data);
-            if (wk_it == wcache_.fp16.end() || wv_it == wcache_.fp16.end()) continue;
-
-            int k_rows = static_cast<int>(L.wk.shape[0]);  // nkv * hd
-            int K = static_cast<int>(L.wk.shape[1]);        // d_model
-            size_t one_sz = static_cast<size_t>(k_rows) * K * sizeof(half);
-
-            // Respect VRAM budget — on WSL2/WDDM, cudaMalloc silently spills to
-            // shared (system) memory beyond physical VRAM, causing massive slowdowns.
-            if (total_cache_bytes + 2 * one_sz > remaining_budget) break;
-
-            void* fused_buf = vram_alloc(vram_alloc_, 2 * one_sz, "fp16_weight_cache");
-            if (!fused_buf) {
-                break;
-            }
-
-            cudaMemcpyAsync(fused_buf, wk_it->second.data, one_sz,
-                             cudaMemcpyDeviceToDevice, stream);
-            cudaMemcpyAsync(static_cast<char*>(fused_buf) + one_sz,
-                             wv_it->second.data, one_sz,
-                             cudaMemcpyDeviceToDevice, stream);
-
-            int64_t shape[2] = {2 * k_rows, static_cast<int64_t>(K)};
-            wcache_.fused_kv[i] = Tensor(fused_buf, DType::FP16, 2, shape, true);
-            total_cache_bytes += 2 * one_sz;
-            fused_kv_count++;
+            bool stop = false;
+            if (create_fused_weight_pair(L.wk, L.wv, wcache_.fp16, vram_alloc_,
+                                         total_cache_bytes, remaining_budget,
+                                         stream, wcache_.fused_kv, i, stop))
+                fused_kv_count++;
+            else if (stop) break;
         }
 
         // Create fused gate+up weights for strided batched prefill GEMM.
@@ -1146,36 +1212,16 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         int fused_gu_count = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
-            if (!L.w_gate.data || !L.w_up.data) continue;
             // Both must be the same shape (d_ff x d_model)
-            if (L.w_gate.shape[0] != L.w_up.shape[0] ||
-                L.w_gate.shape[1] != L.w_up.shape[1]) continue;
-            auto wg_it = wcache_.fp16.find(L.w_gate.data);
-            auto wu_it = wcache_.fp16.find(L.w_up.data);
-            if (wg_it == wcache_.fp16.end() || wu_it == wcache_.fp16.end()) continue;
-
-            int g_rows = static_cast<int>(L.w_gate.shape[0]);  // d_ff
-            int K = static_cast<int>(L.w_gate.shape[1]);        // d_model
-            size_t one_sz = static_cast<size_t>(g_rows) * K * sizeof(half);
-
-            // Respect VRAM budget (see fused KV comment above)
-            if (total_cache_bytes + 2 * one_sz > remaining_budget) break;
-
-            void* fused_buf = vram_alloc(vram_alloc_, 2 * one_sz, "fp16_weight_cache");
-            if (!fused_buf) {
-                break;
-            }
-
-            cudaMemcpyAsync(fused_buf, wg_it->second.data, one_sz,
-                             cudaMemcpyDeviceToDevice, stream);
-            cudaMemcpyAsync(static_cast<char*>(fused_buf) + one_sz,
-                             wu_it->second.data, one_sz,
-                             cudaMemcpyDeviceToDevice, stream);
-
-            int64_t shape[2] = {2 * g_rows, static_cast<int64_t>(K)};
-            wcache_.fused_gate_up[i] = Tensor(fused_buf, DType::FP16, 2, shape, true);
-            total_cache_bytes += 2 * one_sz;
-            fused_gu_count++;
+            if (L.w_gate.data && L.w_up.data &&
+                (L.w_gate.shape[0] != L.w_up.shape[0] ||
+                 L.w_gate.shape[1] != L.w_up.shape[1])) continue;
+            bool stop = false;
+            if (create_fused_weight_pair(L.w_gate, L.w_up, wcache_.fp16, vram_alloc_,
+                                         total_cache_bytes, remaining_budget,
+                                         stream, wcache_.fused_gate_up, i, stop))
+                fused_gu_count++;
+            else if (stop) break;
         }
 
         if (cached_count > 0) {
@@ -1188,8 +1234,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     } // end Phase 1
 
     // Deduct Phase 1 allocation from shared budget
-    remaining_budget = (remaining_budget > total_cache_bytes)
-                       ? (remaining_budget - total_cache_bytes) : 0;
+    deduct_budget(remaining_budget, total_cache_bytes);
 
     // --- Phase 2: FP8 cache for uncached weights (primary when wcache_.use_fp8) ---
     // When wcache_.use_fp8 is true and Phase 1 was skipped, this is the primary path
@@ -1233,24 +1278,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         };
 
         // Same priority order — attention first, then SSM/FFN
-        for (int i = 0; i < cfg.n_layers; i++) {
-            const auto& L = model_->layer(i);
-            collect_weight_fp8(L.wq, L.wq_qtype);
-            collect_weight_fp8(L.wk, L.wk_qtype);
-            collect_weight_fp8(L.wv, L.wv_qtype);
-            collect_weight_fp8(L.wo, L.wo_qtype);
-        }
-        for (int i = 0; i < cfg.n_layers; i++) {
-            const auto& L = model_->layer(i);
-            collect_weight_fp8(L.ssm_in, L.ssm_in_qtype);
-            collect_weight_fp8(L.ssm_out, L.ssm_out_qtype);
-            collect_weight_fp8(L.w_gate_shared, L.w_gate_shared_qtype);
-            collect_weight_fp8(L.w_up_shared, L.w_up_shared_qtype);
-            collect_weight_fp8(L.w_down_shared, L.w_down_shared_qtype);
-            collect_weight_fp8(L.w_gate, L.w_gate_qtype);
-            collect_weight_fp8(L.w_up, L.w_up_qtype);
-            collect_weight_fp8(L.w_down, L.w_down_qtype);
-        }
+        for_each_dense_weight(*model_, cfg, collect_weight_fp8);
 
         if (!fp8_entries.empty() && qscratch_.dequant) {
             // Pre-allocate reusable calibration temp buffers
@@ -1342,8 +1370,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     }
 
     // Deduct Phase 2 allocation from shared budget
-    remaining_budget = (remaining_budget > wcache_.fp8_bytes)
-                       ? (remaining_budget - wcache_.fp8_bytes) : 0;
+    deduct_budget(remaining_budget, wcache_.fp8_bytes);
 
     // --- Phase 3: NVFP4 decode weight cache ---
     // Converts eligible weights (> 4.5 bits/elem) to NVFP4 format for faster
@@ -1380,24 +1407,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         collect_weight_nvfp4(model_->output_proj(), model_->out_proj_qtype_);
 
         // Dense attention + FFN: every tensor benefits every decode step.
-        for (int i = 0; i < cfg.n_layers; i++) {
-            const auto& L = model_->layer(i);
-            collect_weight_nvfp4(L.wq, L.wq_qtype);
-            collect_weight_nvfp4(L.wk, L.wk_qtype);
-            collect_weight_nvfp4(L.wv, L.wv_qtype);
-            collect_weight_nvfp4(L.wo, L.wo_qtype);
-        }
-        for (int i = 0; i < cfg.n_layers; i++) {
-            const auto& L = model_->layer(i);
-            collect_weight_nvfp4(L.ssm_in, L.ssm_in_qtype);
-            collect_weight_nvfp4(L.ssm_out, L.ssm_out_qtype);
-            collect_weight_nvfp4(L.w_gate_shared, L.w_gate_shared_qtype);
-            collect_weight_nvfp4(L.w_up_shared, L.w_up_shared_qtype);
-            collect_weight_nvfp4(L.w_down_shared, L.w_down_shared_qtype);
-            collect_weight_nvfp4(L.w_gate, L.w_gate_qtype);
-            collect_weight_nvfp4(L.w_up, L.w_up_qtype);
-            collect_weight_nvfp4(L.w_down, L.w_down_qtype);
-        }
+        for_each_dense_weight(*model_, cfg, collect_weight_nvfp4);
 
         if (wcache_.nvfp4_decode_mode == 2 && !nvfp4_entries.empty()) {
             // Mode 2 incremental: process FP16-cached entries first (each conversion
@@ -1811,8 +1821,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             if (ct_count > 0) {
                 cudaStreamSynchronize(stream);
                 wcache_.cutlass_nvfp4_bytes = ct_total;
-                remaining_budget = (remaining_budget > ct_total + wcache_.nvfp4_bytes)
-                                   ? (remaining_budget - ct_total - wcache_.nvfp4_bytes) : 0;
+                deduct_budget(remaining_budget, ct_total + wcache_.nvfp4_bytes);
                 IMP_LOG_INFO("CUTLASS sm_120 NVFP4 weight cache: %d tensors, %.2f MiB",
                              ct_count, ct_total / (1024.0 * 1024.0));
             }
@@ -1925,17 +1934,11 @@ void GraphExecutor::configure_attn_workspace(int max_tokens) {
     int hd  = cfg.head_dim > 0 ? cfg.head_dim : (d / nh);
     size_t es = dtype_size(compute_dtype_);
 
-    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
+
     char* ptr = static_cast<char*>(shared_workspace_);
 
-    auto make = [&](int64_t cols, size_t aligned_sz) -> Tensor {
-        int64_t shape[2] = {static_cast<int64_t>(max_tokens), cols};
-        Tensor t(ptr, compute_dtype_, 2, shape, true);
-        ptr += aligned_sz;
-        return t;
-    };
-
-    q_        = make(nh * hd,  align256(static_cast<size_t>(max_tokens) * nh * hd * es));
+    q_        = make_workspace_tensor(ptr, compute_dtype_, max_tokens, nh * hd,
+                                      align256(static_cast<size_t>(max_tokens) * nh * hd * es));
     // K and V are contiguous (no alignment gap) to enable strided batched GEMM.
     // v_.data == k_.data + kv_raw exactly, so output_stride = kv_raw / es.
     {
@@ -1945,8 +1948,10 @@ void GraphExecutor::configure_attn_workspace(int max_tokens) {
         v_ = Tensor(ptr + kv_raw, compute_dtype_, 2, kv_shape, true);
         ptr += align256(2 * kv_raw);
     }
-    attn_out_ = make(nh * hd,  align256(static_cast<size_t>(max_tokens) * nh * hd * es));
-    proj_out_ = make(d,        align256(static_cast<size_t>(max_tokens) * d * es));
+    attn_out_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, nh * hd,
+                                      align256(static_cast<size_t>(max_tokens) * nh * hd * es));
+    proj_out_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d,
+                                      align256(static_cast<size_t>(max_tokens) * d * es));
 }
 
 void GraphExecutor::configure_ffn_workspace(int max_tokens) {
@@ -1955,20 +1960,16 @@ void GraphExecutor::configure_ffn_workspace(int max_tokens) {
     int ff = cfg.d_ff;
     size_t es = dtype_size(compute_dtype_);
 
-    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
     char* ptr = static_cast<char*>(shared_workspace_);
 
-    auto make = [&](int64_t cols, size_t aligned_sz) -> Tensor {
-        int64_t shape[2] = {static_cast<int64_t>(max_tokens), cols};
-        Tensor t(ptr, compute_dtype_, 2, shape, true);
-        ptr += aligned_sz;
-        return t;
-    };
-
-    gate_out_   = make(ff, align256(static_cast<size_t>(max_tokens) * ff * es));
-    up_out_     = make(ff, align256(static_cast<size_t>(max_tokens) * ff * es));
-    swiglu_out_ = make(ff, align256(static_cast<size_t>(max_tokens) * ff * es));
-    ffn_out_    = make(d,  align256(static_cast<size_t>(max_tokens) * d * es));
+    gate_out_   = make_workspace_tensor(ptr, compute_dtype_, max_tokens, ff,
+                                        align256(static_cast<size_t>(max_tokens) * ff * es));
+    up_out_     = make_workspace_tensor(ptr, compute_dtype_, max_tokens, ff,
+                                        align256(static_cast<size_t>(max_tokens) * ff * es));
+    swiglu_out_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, ff,
+                                        align256(static_cast<size_t>(max_tokens) * ff * es));
+    ffn_out_    = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d,
+                                        align256(static_cast<size_t>(max_tokens) * d * es));
 }
 
 void GraphExecutor::configure_moe_workspace(int max_tokens) {
@@ -1980,28 +1981,25 @@ void GraphExecutor::configure_moe_workspace(int max_tokens) {
     size_t es = dtype_size(compute_dtype_);
     int expanded = max_tokens * top_k;
 
-    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
+
     char* ptr = static_cast<char*>(shared_workspace_);
 
     // gate_logits: FP32
-    {
-        int64_t shape[2] = {static_cast<int64_t>(max_tokens), static_cast<int64_t>(ne)};
-        moe_.gate_logits = Tensor(ptr, DType::FP32, 2, shape, true);
-        ptr += align256(static_cast<size_t>(max_tokens) * ne * sizeof(float));
-    }
+    moe_.gate_logits = make_workspace_tensor(ptr, DType::FP32, max_tokens, ne,
+                                             align256(static_cast<size_t>(max_tokens) * ne * sizeof(float)));
 
-    auto make_moe = [&](Tensor& t, int64_t rows, int64_t cols, size_t aligned_sz, DType dt) {
-        int64_t shape[2] = {rows, cols};
-        t = Tensor(ptr, dt, 2, shape, true);
-        ptr += aligned_sz;
-    };
-
-    make_moe(moe_.gathered,      expanded, d,   align256(static_cast<size_t>(expanded) * d * es),   compute_dtype_);
-    make_moe(moe_.expert_gate,   expanded, eff, align256(static_cast<size_t>(expanded) * eff * es), compute_dtype_);
-    make_moe(moe_.expert_up,     expanded, eff, align256(static_cast<size_t>(expanded) * eff * es), compute_dtype_);
-    make_moe(moe_.expert_swiglu, expanded, eff, align256(static_cast<size_t>(expanded) * eff * es), compute_dtype_);
-    make_moe(moe_.expert_down,   expanded, d,   align256(static_cast<size_t>(expanded) * d * es),   compute_dtype_);
-    make_moe(moe_.scatter_out,   max_tokens, d, align256(static_cast<size_t>(max_tokens) * d * sizeof(float)), DType::FP32);
+    moe_.gathered      = make_workspace_tensor(ptr, compute_dtype_, expanded, d,
+                                               align256(static_cast<size_t>(expanded) * d * es));
+    moe_.expert_gate   = make_workspace_tensor(ptr, compute_dtype_, expanded, eff,
+                                               align256(static_cast<size_t>(expanded) * eff * es));
+    moe_.expert_up     = make_workspace_tensor(ptr, compute_dtype_, expanded, eff,
+                                               align256(static_cast<size_t>(expanded) * eff * es));
+    moe_.expert_swiglu = make_workspace_tensor(ptr, compute_dtype_, expanded, eff,
+                                               align256(static_cast<size_t>(expanded) * eff * es));
+    moe_.expert_down   = make_workspace_tensor(ptr, compute_dtype_, expanded, d,
+                                               align256(static_cast<size_t>(expanded) * d * es));
+    moe_.scatter_out   = make_workspace_tensor(ptr, DType::FP32, max_tokens, d,
+                                               align256(static_cast<size_t>(max_tokens) * d * sizeof(float)));
 }
 
 void GraphExecutor::configure_ssm_workspace(int max_tokens) {
@@ -2015,25 +2013,24 @@ void GraphExecutor::configure_ssm_workspace(int max_tokens) {
     int ssm_in_dim = inner + conv_channels + n_heads;
     size_t es = dtype_size(compute_dtype_);
 
-    auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
-    char* ptr = static_cast<char*>(shared_workspace_);
 
-    auto make = [&](int64_t cols, size_t aligned_sz) -> Tensor {
-        int64_t shape[2] = {static_cast<int64_t>(max_tokens), cols};
-        Tensor t(ptr, compute_dtype_, 2, shape, true);
-        ptr += aligned_sz;
-        return t;
-    };
+    char* ptr = static_cast<char*>(shared_workspace_);
 
     // GDN layers need FP32 intermediate (4 bytes/elem) for numerical precision.
     // Non-GDN SSM layers only need FP16 (es bytes/elem).
     size_t proj_elem_size = has_gdn_ ? sizeof(float) : es;
-    ssm_proj_buf_ = make(ssm_in_dim,    align256(static_cast<size_t>(max_tokens) * ssm_in_dim * proj_elem_size));
-    ssm_xBC_buf_  = make(conv_channels,  align256(static_cast<size_t>(max_tokens) * conv_channels * es));
-    ssm_y_buf_    = make(inner,          align256(static_cast<size_t>(max_tokens) * inner * es));
-    ssm_z_buf_    = make(inner,          align256(static_cast<size_t>(max_tokens) * inner * es));
-    ssm_out_buf_  = make(d,              align256(static_cast<size_t>(max_tokens) * d * es));
-    ssm_dt_buf_   = make(n_heads,        align256(static_cast<size_t>(max_tokens) * n_heads * es));
+    ssm_proj_buf_ = make_workspace_tensor(ptr, compute_dtype_, max_tokens, ssm_in_dim,
+                                          align256(static_cast<size_t>(max_tokens) * ssm_in_dim * proj_elem_size));
+    ssm_xBC_buf_  = make_workspace_tensor(ptr, compute_dtype_, max_tokens, conv_channels,
+                                          align256(static_cast<size_t>(max_tokens) * conv_channels * es));
+    ssm_y_buf_    = make_workspace_tensor(ptr, compute_dtype_, max_tokens, inner,
+                                          align256(static_cast<size_t>(max_tokens) * inner * es));
+    ssm_z_buf_    = make_workspace_tensor(ptr, compute_dtype_, max_tokens, inner,
+                                          align256(static_cast<size_t>(max_tokens) * inner * es));
+    ssm_out_buf_  = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d,
+                                          align256(static_cast<size_t>(max_tokens) * d * es));
+    ssm_dt_buf_   = make_workspace_tensor(ptr, compute_dtype_, max_tokens, n_heads,
+                                          align256(static_cast<size_t>(max_tokens) * n_heads * es));
 }
 
 bool GraphExecutor::resize_workspace(int new_max_tokens, cudaStream_t stream) {
