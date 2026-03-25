@@ -1,5 +1,6 @@
 #include "quant/nvfp4_quant.h"
 #include "quant/dequant_gpu.h"
+#include "quant/fp8_utils.cuh"
 #include "core/tensor.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
@@ -75,96 +76,75 @@ __device__ __forceinline__ uint8_t float_abs_to_fp4_e2m1(float abs_val)
     return 7;                          // -> 6.0
 }
 
+// float_to_fp8_e4m3() and fp8_e4m3_to_float() are provided by fp8_utils.cuh.
+
 // ---------------------------------------------------------------------------
-// Device helper: FP32 -> FP8 E4M3 software conversion with saturation.
-// Reuses the same bit-manipulation approach from fp8_quant.cu.
+// Device helper: quantize one micro-block (16 FP16 values) to NVFP4.
+//
+// Loads 16 values from `input + base`, computes the micro-scale via
+// two-level scaling, writes the packed FP4 nibbles and FP8 micro-scale.
+//
+// Shared by quantize_nvfp4_kernel and quantize_nvfp4_from_absmax_kernel.
 // ---------------------------------------------------------------------------
-__device__ __forceinline__ uint8_t float_to_fp8_e4m3(float val)
+__device__ __forceinline__ void quantize_micro_block_nvfp4(
+    const half* __restrict__ input,
+    uint8_t*    __restrict__ packed_out,
+    uint8_t*    __restrict__ micro_scales,
+    float                    tensor_scale,
+    int64_t                  base,           // first element index in input
+    int64_t                  row,
+    int64_t                  col_mb,
+    int64_t                  num_mb_per_row,
+    int64_t                  K)
 {
-    const uint32_t sign = (val < 0.0f) ? 1u : 0u;
-    float abs_val = fabsf(val);
+    // Step 1: Load 16 FP16 values and find local absmax.
+    float vals[kMicroBlockSize];
+    float local_absmax = 0.0f;
 
-    if (abs_val > kFP8E4M3Max) abs_val = kFP8E4M3Max;  // clamp
-
-    // Smallest E4M3 subnormal: 2^(-9)
-    if (abs_val < (1.0f / 512.0f)) {
-        return (uint8_t)(sign << 7);
+    #pragma unroll
+    for (int i = 0; i < kMicroBlockSize; i++) {
+        vals[i] = __half2float(input[base + i]);
+        float av = fabsf(vals[i]);
+        if (av > local_absmax) local_absmax = av;
     }
 
-    uint32_t fbits;
-    memcpy(&fbits, &abs_val, sizeof(float));
-    int f_exp = (int)((fbits >> 23) & 0xFF) - 127;
-    uint32_t f_man = fbits & 0x7FFFFF;
+    // Step 2: Compute micro-scale = local_absmax / (tensor_scale * 6.0).
+    // Clamp to avoid division by zero and FP8 representable range.
+    float micro_scale_f = local_absmax / (tensor_scale * kFP4E2M1Max);
+    if (micro_scale_f < 1.0f / 512.0f) micro_scale_f = 1.0f / 512.0f;  // FP8 E4M3 min subnormal
+    if (micro_scale_f > kFP8E4M3Max) micro_scale_f = kFP8E4M3Max;
 
-    int e4 = f_exp + 7;  // E4M3 bias = 7
+    // Convert micro-scale to FP8 E4M3.
+    uint8_t micro_scale_fp8 = float_to_fp8_e4m3(micro_scale_f);
 
-    uint8_t result;
-    if (e4 <= 0) {
-        // Subnormal in E4M3.
-        int shift = 1 - e4;
-        uint32_t full_man = (1u << 23) | f_man;
-        int right_shift = 20 + shift;
-        uint8_t m3;
-        if (right_shift >= 32) {
-            m3 = 0;
-        } else {
-            uint32_t shifted = full_man >> right_shift;
-            uint32_t remainder = full_man & ((1u << right_shift) - 1);
-            uint32_t half_point = 1u << (right_shift - 1);
-            if (remainder > half_point ||
-                (remainder == half_point && (shifted & 1))) {
-                shifted += 1;
-            }
-            m3 = (uint8_t)(shifted & 0x07);
-            if (shifted > 7) {
-                result = (uint8_t)((sign << 7) | (1 << 3) | 0);
-                return result;
-            }
-        }
-        result = (uint8_t)((sign << 7) | m3);
-    } else if (e4 >= 15) {
-        // E4M3 has no Inf/NaN; saturate to max (e=14, m=7) = 448.
-        result = (uint8_t)((sign << 7) | 0x7E | 0x01);
-        result = (uint8_t)((sign << 7) | (14 << 3) | 7);
-    } else {
-        // Normal.
-        uint32_t round_bit = (f_man >> 19) & 1;
-        uint32_t sticky = (f_man & 0x7FFFF) ? 1 : 0;
-        uint8_t m3 = (uint8_t)((f_man >> 20) & 0x07);
-        if (round_bit && (sticky || (m3 & 1))) {
-            m3 += 1;
-            if (m3 > 7) {
-                m3 = 0;
-                e4 += 1;
-                if (e4 >= 15) {
-                    result = (uint8_t)((sign << 7) | (14 << 3) | 7);
-                    return result;
-                }
-            }
-        }
-        result = (uint8_t)((sign << 7) | ((e4 & 0x0F) << 3) | (m3 & 0x07));
+    // Reconstruct the actual micro-scale from FP8 (for quantization consistency).
+    float micro_scale_actual = fp8_e4m3_to_float(micro_scale_fp8);
+    if (micro_scale_actual == 0.0f) micro_scale_actual = 1.0f / 512.0f;
+
+    // Store micro-scale.
+    micro_scales[row * num_mb_per_row + col_mb] = micro_scale_fp8;
+
+    // Step 3: Quantize each value to FP4 E2M1 and pack 2 per byte.
+    float inv_combined_scale = 1.0f / (tensor_scale * micro_scale_actual);
+    int64_t packed_base = row * (K / 2) + col_mb * (kMicroBlockSize / 2);
+
+    #pragma unroll
+    for (int i = 0; i < kMicroBlockSize; i += 2) {
+        // Quantize even element (low nibble).
+        float scaled0 = vals[i] * inv_combined_scale;
+        uint8_t sign0 = (scaled0 < 0.0f) ? 1u : 0u;
+        uint8_t code0 = float_abs_to_fp4_e2m1(fabsf(scaled0));
+        uint8_t fp4_0 = (sign0 << 3) | code0;
+
+        // Quantize odd element (high nibble).
+        float scaled1 = vals[i + 1] * inv_combined_scale;
+        uint8_t sign1 = (scaled1 < 0.0f) ? 1u : 0u;
+        uint8_t code1 = float_abs_to_fp4_e2m1(fabsf(scaled1));
+        uint8_t fp4_1 = (sign1 << 3) | code1;
+
+        // Pack: low nibble = even, high nibble = odd.
+        packed_out[packed_base + i / 2] = (fp4_1 << 4) | fp4_0;
     }
-    return result;
-}
-
-// ---------------------------------------------------------------------------
-// Device helper: FP8 E4M3 -> FP32 software conversion.
-// ---------------------------------------------------------------------------
-__device__ __forceinline__ float fp8_e4m3_to_float(uint8_t bits)
-{
-    uint32_t sign = (bits >> 7) & 1;
-    uint32_t exp  = (bits >> 3) & 0x0F;
-    uint32_t man  = bits & 0x07;
-
-    float abs_val;
-    if (exp == 0) {
-        // Subnormal: value = 0.mantissa * 2^(1 - bias) = man * 2^(-9)
-        abs_val = (float)man * (1.0f / 512.0f);
-    } else {
-        // Normal: value = 1.mantissa * 2^(exp - bias) = (8 + man) * 2^(exp - 10)
-        abs_val = (float)(8 + man) * exp2f((float)(exp) - 10.0f);
-    }
-    return sign ? -abs_val : abs_val;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,54 +215,9 @@ __global__ void quantize_nvfp4_kernel(
     int64_t col_mb = mb_idx % num_mb_per_row;
     int64_t base  = row * K + col_mb * kMicroBlockSize;
 
-    // Step 1: Load 16 FP16 values and find local absmax.
-    float vals[kMicroBlockSize];
-    float local_absmax = 0.0f;
-
-    #pragma unroll
-    for (int i = 0; i < kMicroBlockSize; i++) {
-        vals[i] = __half2float(input[base + i]);
-        float av = fabsf(vals[i]);
-        if (av > local_absmax) local_absmax = av;
-    }
-
-    // Step 2: Compute micro-scale = local_absmax / (tensor_scale * 6.0).
-    // Clamp to avoid division by zero and FP8 representable range.
-    float micro_scale_f = local_absmax / (tensor_scale * kFP4E2M1Max);
-    if (micro_scale_f < 1.0f / 512.0f) micro_scale_f = 1.0f / 512.0f;  // FP8 E4M3 min subnormal
-    if (micro_scale_f > kFP8E4M3Max) micro_scale_f = kFP8E4M3Max;
-
-    // Convert micro-scale to FP8 E4M3.
-    uint8_t micro_scale_fp8 = float_to_fp8_e4m3(micro_scale_f);
-
-    // Reconstruct the actual micro-scale from FP8 (for quantization consistency).
-    float micro_scale_actual = fp8_e4m3_to_float(micro_scale_fp8);
-    if (micro_scale_actual == 0.0f) micro_scale_actual = 1.0f / 512.0f;
-
-    // Store micro-scale.
-    micro_scales[row * num_mb_per_row + col_mb] = micro_scale_fp8;
-
-    // Step 3: Quantize each value to FP4 E2M1 and pack 2 per byte.
-    float inv_combined_scale = 1.0f / (tensor_scale * micro_scale_actual);
-    int64_t packed_base = row * (K / 2) + col_mb * (kMicroBlockSize / 2);
-
-    #pragma unroll
-    for (int i = 0; i < kMicroBlockSize; i += 2) {
-        // Quantize even element (low nibble).
-        float scaled0 = vals[i] * inv_combined_scale;
-        uint8_t sign0 = (scaled0 < 0.0f) ? 1u : 0u;
-        uint8_t code0 = float_abs_to_fp4_e2m1(fabsf(scaled0));
-        uint8_t fp4_0 = (sign0 << 3) | code0;
-
-        // Quantize odd element (high nibble).
-        float scaled1 = vals[i + 1] * inv_combined_scale;
-        uint8_t sign1 = (scaled1 < 0.0f) ? 1u : 0u;
-        uint8_t code1 = float_abs_to_fp4_e2m1(fabsf(scaled1));
-        uint8_t fp4_1 = (sign1 << 3) | code1;
-
-        // Pack: low nibble = even, high nibble = odd.
-        packed_out[packed_base + i / 2] = (fp4_1 << 4) | fp4_0;
-    }
+    quantize_micro_block_nvfp4(input, packed_out, micro_scales,
+                               tensor_scale, base, row, col_mb,
+                               num_mb_per_row, K);
 }
 
 // ---------------------------------------------------------------------------
@@ -313,43 +248,9 @@ __global__ void quantize_nvfp4_from_absmax_kernel(
     int64_t col_mb = mb_idx % num_mb_per_row;
     int64_t base  = row * K + col_mb * kMicroBlockSize;
 
-    float vals[kMicroBlockSize];
-    float local_absmax = 0.0f;
-
-    #pragma unroll
-    for (int i = 0; i < kMicroBlockSize; i++) {
-        vals[i] = __half2float(input[base + i]);
-        float av = fabsf(vals[i]);
-        if (av > local_absmax) local_absmax = av;
-    }
-
-    float micro_scale_f = local_absmax / (tensor_scale * kFP4E2M1Max);
-    if (micro_scale_f < 1.0f / 512.0f) micro_scale_f = 1.0f / 512.0f;
-    if (micro_scale_f > kFP8E4M3Max) micro_scale_f = kFP8E4M3Max;
-
-    uint8_t micro_scale_fp8 = float_to_fp8_e4m3(micro_scale_f);
-    float micro_scale_actual = fp8_e4m3_to_float(micro_scale_fp8);
-    if (micro_scale_actual == 0.0f) micro_scale_actual = 1.0f / 512.0f;
-
-    micro_scales[row * num_mb_per_row + col_mb] = micro_scale_fp8;
-
-    float inv_combined_scale = 1.0f / (tensor_scale * micro_scale_actual);
-    int64_t packed_base = row * (K / 2) + col_mb * (kMicroBlockSize / 2);
-
-    #pragma unroll
-    for (int i = 0; i < kMicroBlockSize; i += 2) {
-        float scaled0 = vals[i] * inv_combined_scale;
-        uint8_t sign0 = (scaled0 < 0.0f) ? 1u : 0u;
-        uint8_t code0 = float_abs_to_fp4_e2m1(fabsf(scaled0));
-        uint8_t fp4_0 = (sign0 << 3) | code0;
-
-        float scaled1 = vals[i + 1] * inv_combined_scale;
-        uint8_t sign1 = (scaled1 < 0.0f) ? 1u : 0u;
-        uint8_t code1 = float_abs_to_fp4_e2m1(fabsf(scaled1));
-        uint8_t fp4_1 = (sign1 << 3) | code1;
-
-        packed_out[packed_base + i / 2] = (fp4_1 << 4) | fp4_0;
-    }
+    quantize_micro_block_nvfp4(input, packed_out, micro_scales,
+                               tensor_scale, base, row, col_mb,
+                               num_mb_per_row, K);
 }
 
 // ---------------------------------------------------------------------------

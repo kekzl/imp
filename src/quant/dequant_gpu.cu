@@ -805,6 +805,15 @@ void dequant_gpu_fp8(const void* src, void* dst, GGMLQuantType qtype,
 // Dispatch: FP16
 // ---------------------------------------------------------------------------
 
+// Macro for scalar dequant kernels that share (src_u8, dst_fp16, rows, cols) signature.
+#define DEQUANT_CASE(QTYPE, KERNEL) \
+    case GGMLQuantType::QTYPE: \
+        KERNEL<<<blocks, threads, 0, stream>>>( \
+            static_cast<const uint8_t*>(src), \
+            static_cast<half*>(dst), \
+            rows, cols); \
+        break;
+
 void dequant_gpu(const void* src, void* dst, GGMLQuantType qtype,
                  int rows, int cols, cudaStream_t stream)
 {
@@ -816,6 +825,7 @@ void dequant_gpu(const void* src, void* dst, GGMLQuantType qtype,
 
     switch (qtype) {
         case GGMLQuantType::Q6_K: {
+            // Q6_K uses block-centric v2 kernel with different grid/thread config.
             int total_q6k_blocks = rows * (cols / 256);
             dequant_q6k_v2_kernel<<<total_q6k_blocks, 128, 0, stream>>>(
                 static_cast<const uint8_t*>(src),
@@ -824,80 +834,23 @@ void dequant_gpu(const void* src, void* dst, GGMLQuantType qtype,
             break;
         }
 
-        case GGMLQuantType::Q8_0:
-            dequant_q8_0_kernel<<<blocks, threads, 0, stream>>>(
-                static_cast<const uint8_t*>(src),
-                static_cast<half*>(dst),
-                rows, cols);
-            break;
-
-        case GGMLQuantType::Q4_0:
-            dequant_q4_0_kernel<<<blocks, threads, 0, stream>>>(
-                static_cast<const uint8_t*>(src),
-                static_cast<half*>(dst),
-                rows, cols);
-            break;
-
-        case GGMLQuantType::Q4_1:
-            dequant_q4_1_kernel<<<blocks, threads, 0, stream>>>(
-                static_cast<const uint8_t*>(src),
-                static_cast<half*>(dst),
-                rows, cols);
-            break;
-
-        case GGMLQuantType::Q5_0:
-            dequant_q5_0_kernel<<<blocks, threads, 0, stream>>>(
-                static_cast<const uint8_t*>(src),
-                static_cast<half*>(dst),
-                rows, cols);
-            break;
-
-        case GGMLQuantType::Q5_1:
-            dequant_q5_1_kernel<<<blocks, threads, 0, stream>>>(
-                static_cast<const uint8_t*>(src),
-                static_cast<half*>(dst),
-                rows, cols);
-            break;
-
-        case GGMLQuantType::Q2_K:
-            dequant_q2k_kernel<<<blocks, threads, 0, stream>>>(
-                static_cast<const uint8_t*>(src),
-                static_cast<half*>(dst),
-                rows, cols);
-            break;
-
-        case GGMLQuantType::Q3_K:
-            dequant_q3k_kernel<<<blocks, threads, 0, stream>>>(
-                static_cast<const uint8_t*>(src),
-                static_cast<half*>(dst),
-                rows, cols);
-            break;
-
-        case GGMLQuantType::Q4_K:
-            dequant_q4k_kernel<<<blocks, threads, 0, stream>>>(
-                static_cast<const uint8_t*>(src),
-                static_cast<half*>(dst),
-                rows, cols);
-            break;
-
-        case GGMLQuantType::Q5_K:
-            dequant_q5k_kernel<<<blocks, threads, 0, stream>>>(
-                static_cast<const uint8_t*>(src),
-                static_cast<half*>(dst),
-                rows, cols);
-            break;
-
-        case GGMLQuantType::Q8_K:
-            dequant_q8k_kernel<<<blocks, threads, 0, stream>>>(
-                static_cast<const uint8_t*>(src),
-                static_cast<half*>(dst),
-                rows, cols);
-            break;
+        DEQUANT_CASE(Q8_0, dequant_q8_0_kernel)
+        DEQUANT_CASE(Q4_0, dequant_q4_0_kernel)
+        DEQUANT_CASE(Q4_1, dequant_q4_1_kernel)
+        DEQUANT_CASE(Q5_0, dequant_q5_0_kernel)
+        DEQUANT_CASE(Q5_1, dequant_q5_1_kernel)
+        DEQUANT_CASE(Q2_K, dequant_q2k_kernel)
+        DEQUANT_CASE(Q3_K, dequant_q3k_kernel)
+        DEQUANT_CASE(Q4_K, dequant_q4k_kernel)
+        DEQUANT_CASE(Q5_K, dequant_q5k_kernel)
+        DEQUANT_CASE(Q8_K, dequant_q8k_kernel)
 
         default:
             IMP_LOG_ERROR("dequant_gpu: unsupported qtype %u", static_cast<unsigned>(qtype));
             break;
     }
 }
+
+#undef DEQUANT_CASE
 
 } // namespace imp

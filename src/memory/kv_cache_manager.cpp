@@ -9,6 +9,31 @@
 
 namespace imp {
 
+namespace {
+
+// Rollback a partial block allocation: free blocks added after original_size,
+// trim the blocks/hashes vectors, and erase the sequence entries if empty.
+static void rollback_partial_allocation(
+        KVCache* cache,
+        std::unordered_map<int, std::vector<int>>& seq_blocks,
+        std::unordered_map<int, std::vector<size_t>>& seq_block_hashes,
+        int seq_id,
+        std::vector<int>& blocks,
+        std::vector<size_t>& hashes,
+        size_t original_size) {
+    for (size_t j = original_size; j < blocks.size(); ++j) {
+        cache->free_block(blocks[j]);
+    }
+    blocks.resize(original_size);
+    hashes.resize(original_size);
+    if (blocks.empty()) {
+        seq_blocks.erase(seq_id);
+        seq_block_hashes.erase(seq_id);
+    }
+}
+
+} // anonymous namespace
+
 // ─── Construction / destruction ──────────────────────────────────────
 
 KVCacheManager::KVCacheManager(std::unique_ptr<KVCache> cache)
@@ -255,15 +280,8 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id,
             int block_id = allocate_block_with_eviction();
             if (block_id < 0) {
                 // Rollback everything we allocated/shared in this call.
-                for (size_t j = original_size; j < blocks.size(); ++j) {
-                    cache_->free_block(blocks[j]);
-                }
-                blocks.resize(original_size);
-                hashes.resize(original_size);
-                if (blocks.empty()) {
-                    seq_blocks_.erase(seq_id);
-                    seq_block_hashes_.erase(seq_id);
-                }
+                rollback_partial_allocation(cache_.get(), seq_blocks_,
+                    seq_block_hashes_, seq_id, blocks, hashes, original_size);
                 return -1;
             }
 
@@ -276,15 +294,8 @@ int KVCacheManager::allocate_blocks_with_prefix(int seq_id,
             // Partial block or prefix caching disabled — plain allocation.
             int block_id = allocate_block_with_eviction();
             if (block_id < 0) {
-                for (size_t j = original_size; j < blocks.size(); ++j) {
-                    cache_->free_block(blocks[j]);
-                }
-                blocks.resize(original_size);
-                hashes.resize(original_size);
-                if (blocks.empty()) {
-                    seq_blocks_.erase(seq_id);
-                    seq_block_hashes_.erase(seq_id);
-                }
+                rollback_partial_allocation(cache_.get(), seq_blocks_,
+                    seq_block_hashes_, seq_id, blocks, hashes, original_size);
                 return -1;
             }
 

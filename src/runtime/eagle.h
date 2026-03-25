@@ -120,6 +120,12 @@ private:
                         float temperature, float top_p, int top_k, int seed,
                         cudaStream_t stream);
 
+    // Ensure pre-allocated verify buffers are large enough for n_tokens/max_blocks.
+    void ensure_verify_buffers(int n_tokens, int max_blocks);
+
+    // Build a base InferenceState for target model forward passes (verify/refresh).
+    InferenceState make_base_state(int n_tokens, int max_ctx, int max_blocks);
+
     EagleHead head_;
     EagleConfig config_;
     bool initialized_ = false;
