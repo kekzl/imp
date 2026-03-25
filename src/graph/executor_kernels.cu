@@ -18,6 +18,69 @@
 namespace imp {
 
 // ---------------------------------------------------------------------------
+// Device helpers for paged KV cache block table lookup
+// ---------------------------------------------------------------------------
+
+// Resolve the physical block ID from the block table for a given token.
+// For batched decode (n_sequences > 1), each token maps to its own sequence row.
+// For single-sequence or legacy mode, uses a flat block table.
+__device__ __forceinline__ int kv_get_block_id(
+    const int* block_tables, int block_idx,
+    int token_idx, int max_blocks_per_seq, int n_sequences) {
+    if (max_blocks_per_seq > 0 && n_sequences > 1)
+        return block_tables[token_idx * max_blocks_per_seq + block_idx];
+    return block_tables[block_idx];
+}
+
+// Compute block index and slot within block from a token's position.
+// Returns the physical block ID via kv_get_block_id.
+__device__ __forceinline__ int kv_resolve_slot(
+    const int* block_tables, int pos, int block_size,
+    int token_idx, int max_blocks_per_seq, int n_sequences,
+    int& slot_in_block) {
+    int block_idx = pos / block_size;
+    slot_in_block = pos % block_size;
+    return kv_get_block_id(block_tables, block_idx, token_idx, max_blocks_per_seq, n_sequences);
+}
+
+// ---------------------------------------------------------------------------
+// dp4a GEMV dispatch helper (file-local)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Returns true if the quant type supports dp4a (Q8_1-input) GEMV kernels.
+inline bool is_dp4a_qtype(GGMLQuantType qt) {
+    switch (qt) {
+        case GGMLQuantType::Q6_K: case GGMLQuantType::Q8_0:
+        case GGMLQuantType::Q4_0: case GGMLQuantType::Q4_K:
+        case GGMLQuantType::Q5_K: case GGMLQuantType::Q2_K:
+        case GGMLQuantType::Q3_K:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Dispatch dp4a GEMV by quant type: y = W @ q8_1 (FP16 output).
+// All variants share the same signature.
+void dispatch_dp4a_gemv(GGMLQuantType qtype,
+                        const void* W, const block_q8_1* q8_1, const float* d8,
+                        half* y, int M, int K, cudaStream_t stream) {
+    switch (qtype) {
+        case GGMLQuantType::Q6_K: gemv_q6k_q8_1(W, q8_1, d8, y, M, K, stream); break;
+        case GGMLQuantType::Q4_0: gemv_q4_0_q8_1(W, q8_1, d8, y, M, K, stream); break;
+        case GGMLQuantType::Q4_K: gemv_q4_k_q8_1(W, q8_1, d8, y, M, K, stream); break;
+        case GGMLQuantType::Q5_K: gemv_q5_k_q8_1(W, q8_1, d8, y, M, K, stream); break;
+        case GGMLQuantType::Q2_K: gemv_q2_k_q8_1(W, q8_1, d8, y, M, K, stream); break;
+        case GGMLQuantType::Q3_K: gemv_q3_k_q8_1(W, q8_1, d8, y, M, K, stream); break;
+        default:                  gemv_q8_0_q8_1(W, q8_1, d8, y, M, K, stream); break;
+    }
+}
+
+} // anonymous namespace
+
+// ---------------------------------------------------------------------------
 // Small CUDA kernels used by the executor
 // ---------------------------------------------------------------------------
 
@@ -314,18 +377,10 @@ __global__ void write_kv_cache_kernel(
     if (token_idx >= n_tokens) return;
 
     int pos = positions[token_idx];
-    int block_idx = pos / block_size;
-    int slot_in_block = pos % block_size;
-
-    int block_id;
-    if (max_blocks_per_seq > 0 && n_sequences > 1) {
-        // Batched: for decode, token i = sequence i
-        int seq_idx = token_idx;  // 1 token per sequence in decode
-        block_id = block_tables[seq_idx * max_blocks_per_seq + block_idx];
-    } else {
-        // Single-sequence or legacy path
-        block_id = block_tables[block_idx];
-    }
+    int slot_in_block;
+    int block_id = kv_resolve_slot(block_tables, pos, block_size,
+                                   token_idx, max_blocks_per_seq, n_sequences,
+                                   slot_in_block);
 
     half* dst = cache_base + static_cast<int64_t>(block_id) * block_stride
                            + static_cast<int64_t>(slot_in_block) * row_elems;
@@ -357,16 +412,10 @@ __global__ void write_kv_cache_fused_kernel(
     if (token_idx >= n_tokens) return;
 
     int pos = positions[token_idx];
-    int block_idx = pos / block_size;
-    int slot_in_block = pos % block_size;
-
-    int block_id;
-    if (max_blocks_per_seq > 0 && n_sequences > 1) {
-        int seq_idx = token_idx;
-        block_id = block_tables[seq_idx * max_blocks_per_seq + block_idx];
-    } else {
-        block_id = block_tables[block_idx];
-    }
+    int slot_in_block;
+    int block_id = kv_resolve_slot(block_tables, pos, block_size,
+                                   token_idx, max_blocks_per_seq, n_sequences,
+                                   slot_in_block);
 
     // blockIdx.y selects K (0) or V (1)
     const half* src;
@@ -406,16 +455,10 @@ __global__ void write_kv_cache_fp8_kernel(
     if (token_idx >= n_tokens) return;
 
     int pos = positions[token_idx];
-    int block_idx = pos / block_size;
-    int slot_in_block = pos % block_size;
-
-    int block_id;
-    if (max_blocks_per_seq > 0 && n_sequences > 1) {
-        int seq_idx = token_idx;
-        block_id = block_tables[seq_idx * max_blocks_per_seq + block_idx];
-    } else {
-        block_id = block_tables[block_idx];
-    }
+    int slot_in_block;
+    int block_id = kv_resolve_slot(block_tables, pos, block_size,
+                                   token_idx, max_blocks_per_seq, n_sequences,
+                                   slot_in_block);
 
     __nv_fp8_e4m3* dst = cache_base + static_cast<int64_t>(block_id) * block_stride
                                      + static_cast<int64_t>(slot_in_block) * row_elems;
@@ -445,16 +488,10 @@ __global__ void write_kv_cache_fp8_kernel(
     if (token_idx >= n_tokens) return;
 
     int pos = positions[token_idx];
-    int block_idx = pos / block_size;
-    int slot_in_block = pos % block_size;
-
-    int block_id;
-    if (max_blocks_per_seq > 0 && n_sequences > 1) {
-        int seq_idx = token_idx;
-        block_id = block_tables[seq_idx * max_blocks_per_seq + block_idx];
-    } else {
-        block_id = block_tables[block_idx];
-    }
+    int slot_in_block;
+    int block_id = kv_resolve_slot(block_tables, pos, block_size,
+                                   token_idx, max_blocks_per_seq, n_sequences,
+                                   slot_in_block);
 
     uint8_t* dst = cache_base + static_cast<int64_t>(block_id) * block_stride
                                + static_cast<int64_t>(slot_in_block) * row_elems;
@@ -513,16 +550,10 @@ __global__ void write_kv_cache_int8_kernel(
     if (token_idx >= n_tokens) return;
 
     const int pos = positions[token_idx];
-    const int block_idx = pos / block_size;
-    const int slot_in_block = pos % block_size;
-
-    int block_id;
-    if (max_blocks_per_seq > 0 && n_sequences > 1) {
-        int seq_idx = token_idx;
-        block_id = block_tables[seq_idx * max_blocks_per_seq + block_idx];
-    } else {
-        block_id = block_tables[block_idx];
-    }
+    int slot_in_block;
+    int block_id = kv_resolve_slot(block_tables, pos, block_size,
+                                   token_idx, max_blocks_per_seq, n_sequences,
+                                   slot_in_block);
 
     // Select K or V based on blockIdx.y
     const half* src_base = (blockIdx.y == 0) ? k_in : v_in;
@@ -602,16 +633,10 @@ __global__ void write_kv_cache_int4_kernel(
     if (token_idx >= n_tokens) return;
 
     const int pos = positions[token_idx];
-    const int block_idx = pos / block_size;
-    const int slot_in_block = pos % block_size;
-
-    int block_id;
-    if (max_blocks_per_seq > 0 && n_sequences > 1) {
-        int seq_idx = token_idx;
-        block_id = block_tables[seq_idx * max_blocks_per_seq + block_idx];
-    } else {
-        block_id = block_tables[block_idx];
-    }
+    int slot_in_block;
+    int block_id = kv_resolve_slot(block_tables, pos, block_size,
+                                   token_idx, max_blocks_per_seq, n_sequences,
+                                   slot_in_block);
 
     const half* src_base = (blockIdx.y == 0) ? k_in : v_in;
     uint8_t* cache_base = (blockIdx.y == 0) ? k_cache_base : v_cache_base;
@@ -699,16 +724,10 @@ __global__ void write_kv_cache_rope_fused_kernel(
     if (token_idx >= n_tokens) return;
 
     int pos = positions[token_idx];
-    int block_idx_kv = pos / block_size;
-    int slot_in_block = pos % block_size;
-
-    int block_id;
-    if (max_blocks_per_seq > 0 && n_sequences > 1) {
-        int seq_idx = token_idx;
-        block_id = block_tables[seq_idx * max_blocks_per_seq + block_idx_kv];
-    } else {
-        block_id = block_tables[block_idx_kv];
-    }
+    int slot_in_block;
+    int block_id = kv_resolve_slot(block_tables, pos, block_size,
+                                   token_idx, max_blocks_per_seq, n_sequences,
+                                   slot_in_block);
 
     if (blockIdx.y == 0) {
         // K path: apply RoPE during write
@@ -791,15 +810,10 @@ __global__ void write_kv_cache_fp8_fused_kernel(
     if (token_idx >= n_tokens) return;
 
     int pos = positions[token_idx];
-    int block_idx = pos / block_size;
-    int slot_in_block = pos % block_size;
-
-    int block_id;
-    if (max_blocks_per_seq > 0 && n_sequences > 1) {
-        block_id = block_tables[token_idx * max_blocks_per_seq + block_idx];
-    } else {
-        block_id = block_tables[block_idx];
-    }
+    int slot_in_block;
+    int block_id = kv_resolve_slot(block_tables, pos, block_size,
+                                   token_idx, max_blocks_per_seq, n_sequences,
+                                   slot_in_block);
 
     const half* src;
     __nv_fp8_e4m3* dst;
@@ -1057,14 +1071,14 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
         }
     }
     if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
-               q8_1_buf != nullptr && d8_buf != nullptr && qtype == GGMLQuantType::Q4_0) {
-        // dp4a MMVQ Q4_0: quantize input to Q8_1, then dp4a dot product
+               q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype)) {
+        // dp4a MMVQ: quantize input to Q8_1, then dp4a dot product
         int K = static_cast<int>(weight.shape[1]);
         quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
                                q8_1_buf, d8_buf, K, stream);
-        gemv_q4_0_q8_1(weight.data, q8_1_buf, d8_buf,
-                        static_cast<half*>(output.data),
-                        static_cast<int>(weight.shape[0]), K, stream);
+        dispatch_dp4a_gemv(qtype, weight.data, q8_1_buf, d8_buf,
+                           static_cast<half*>(output.data),
+                           static_cast<int>(weight.shape[0]), K, stream);
     } else if (qtype == GGMLQuantType::Q4_1 && fp16_cache != nullptr) {
         // Prefer pre-dequantized FP16 cache (P3 optimization)
         auto it = fp16_cache->find(weight.data);
@@ -1076,60 +1090,6 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
     } else if (qtype == GGMLQuantType::Q4_1) {
         // weight is [N, K/2] packed nibbles, scales is [N, num_groups]
         quant_gemm_int4(input, weight, scales, output, stream);
-    } else if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
-               q8_1_buf != nullptr && d8_buf != nullptr && qtype == GGMLQuantType::Q6_K) {
-        // dp4a MMVQ Q6_K: quantize input to Q8_1, then dp4a dot product
-        int K = static_cast<int>(weight.shape[1]);
-        quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
-                               q8_1_buf, d8_buf, K, stream);
-        gemv_q6k_q8_1(weight.data, q8_1_buf, d8_buf,
-                       static_cast<half*>(output.data),
-                       static_cast<int>(weight.shape[0]), K, stream);
-    } else if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
-               q8_1_buf != nullptr && d8_buf != nullptr && qtype == GGMLQuantType::Q8_0) {
-        // dp4a MMVQ Q8_0: quantize input to Q8_1, then dp4a dot product
-        int K = static_cast<int>(weight.shape[1]);
-        quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
-                               q8_1_buf, d8_buf, K, stream);
-        gemv_q8_0_q8_1(weight.data, q8_1_buf, d8_buf,
-                        static_cast<half*>(output.data),
-                        static_cast<int>(weight.shape[0]), K, stream);
-    } else if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
-               q8_1_buf != nullptr && d8_buf != nullptr && qtype == GGMLQuantType::Q4_K) {
-        // dp4a MMVQ Q4_K
-        int K = static_cast<int>(weight.shape[1]);
-        quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
-                               q8_1_buf, d8_buf, K, stream);
-        gemv_q4_k_q8_1(weight.data, q8_1_buf, d8_buf,
-                         static_cast<half*>(output.data),
-                         static_cast<int>(weight.shape[0]), K, stream);
-    } else if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
-               q8_1_buf != nullptr && d8_buf != nullptr && qtype == GGMLQuantType::Q5_K) {
-        // dp4a MMVQ Q5_K
-        int K = static_cast<int>(weight.shape[1]);
-        quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
-                               q8_1_buf, d8_buf, K, stream);
-        gemv_q5_k_q8_1(weight.data, q8_1_buf, d8_buf,
-                         static_cast<half*>(output.data),
-                         static_cast<int>(weight.shape[0]), K, stream);
-    } else if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
-               q8_1_buf != nullptr && d8_buf != nullptr && qtype == GGMLQuantType::Q2_K) {
-        // dp4a MMVQ Q2_K
-        int K = static_cast<int>(weight.shape[1]);
-        quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
-                               q8_1_buf, d8_buf, K, stream);
-        gemv_q2_k_q8_1(weight.data, q8_1_buf, d8_buf,
-                         static_cast<half*>(output.data),
-                         static_cast<int>(weight.shape[0]), K, stream);
-    } else if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
-               q8_1_buf != nullptr && d8_buf != nullptr && qtype == GGMLQuantType::Q3_K) {
-        // dp4a MMVQ Q3_K
-        int K = static_cast<int>(weight.shape[1]);
-        quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
-                               q8_1_buf, d8_buf, K, stream);
-        gemv_q3_k_q8_1(weight.data, q8_1_buf, d8_buf,
-                         static_cast<half*>(output.data),
-                         static_cast<int>(weight.shape[0]), K, stream);
     } else if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
                dequant_scratch != nullptr && qtype == GGMLQuantType::Q6_K) {
         // Fallback: Fused Q6_K GEMV (FP16 dequant path)

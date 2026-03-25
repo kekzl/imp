@@ -1,4 +1,5 @@
 #include "quant/fp8_quant.h"
+#include "quant/fp8_utils.cuh"
 #include "core/tensor.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
@@ -29,96 +30,8 @@ static constexpr int kBlockSize = 256;
 static constexpr int kElemsPerThread = 4;
 static constexpr float kFP8E4M3Max = 448.0f;
 
-// ---------------------------------------------------------------------------
-// Software FP8 conversion helpers (reused from fp8_utils.cu patterns)
-// ---------------------------------------------------------------------------
-
-// FP32 -> FP8 E4M3 with saturation (no Inf in E4M3).
-__device__ __forceinline__ uint8_t float_to_fp8_e4m3_sw(float val)
-{
-    const uint32_t sign = (val < 0.0f) ? 1u : 0u;
-    float abs_val = fabsf(val);
-
-    // Clamp to E4M3 max representable.
-    if (abs_val > kFP8E4M3Max) abs_val = kFP8E4M3Max;
-
-    // Smallest E4M3 subnormal: 2^(-9) = 1/512
-    if (abs_val < (1.0f / 512.0f)) {
-        return (uint8_t)(sign << 7);  // flush to zero
-    }
-
-    // Extract float fields.
-    uint32_t fbits;
-    memcpy(&fbits, &abs_val, sizeof(float));
-    int f_exp = (int)((fbits >> 23) & 0xFF) - 127;  // unbiased
-    uint32_t f_man = fbits & 0x7FFFFF;               // 23-bit mantissa
-
-    int e4 = f_exp + 7;  // bias for E4M3
-
-    uint8_t result;
-    if (e4 <= 0) {
-        // Subnormal in E4M3 range.
-        int shift = 1 - e4;
-        uint32_t full_man = (1u << 23) | f_man;
-        int right_shift = 20 + shift;
-        uint8_t m3;
-        if (right_shift >= 32) {
-            m3 = 0;
-        } else {
-            uint32_t shifted = full_man >> right_shift;
-            uint32_t remainder = full_man & ((1u << right_shift) - 1);
-            uint32_t half_point = 1u << (right_shift - 1);
-            if (remainder > half_point ||
-                (remainder == half_point && (shifted & 1))) {
-                shifted += 1;
-            }
-            m3 = (uint8_t)(shifted & 0x07);
-            if (shifted > 7) {
-                // Rounded up into normal range.
-                result = (uint8_t)((sign << 7) | (1 << 3) | 0);
-                return result;
-            }
-        }
-        result = (uint8_t)((sign << 7) | m3);
-    } else if (e4 >= 15) {
-        // Overflow -> saturate to max normal (not NaN).
-        result = (uint8_t)((sign << 7) | 0x7E);
-    } else {
-        // Normal value: round 23-bit mantissa to 3-bit.
-        uint32_t m3 = (f_man + (1u << 19)) >> 20;
-        if (m3 > 7) {
-            m3 = 0;
-            e4 += 1;
-            if (e4 >= 15) {
-                result = (uint8_t)((sign << 7) | 0x7E);
-                return result;
-            }
-        }
-        result = (uint8_t)((sign << 7) | (e4 << 3) | (m3 & 0x07));
-    }
-    return result;
-}
-
-// FP8 E4M3 -> FP32 software conversion.
-__device__ __forceinline__ float fp8_e4m3_to_float_sw(uint8_t x)
-{
-    const uint32_t sign = (x >> 7) & 1;
-    int exp = (int)((x >> 3) & 0x0F);
-    uint32_t man = x & 0x07;
-
-    if (exp == 0 && man == 0) return sign ? -0.0f : 0.0f;
-    if (exp == 15 && man != 0) return __int_as_float(0x7FC00000);  // NaN
-
-    float val;
-    if (exp == 0) {
-        // Subnormal: value = 2^(-6) * (m / 8)
-        val = ldexpf((float)man / 8.0f, -6);
-    } else {
-        // Normal: value = 2^(exp-7) * (1 + m/8)
-        val = ldexpf(1.0f + (float)man / 8.0f, exp - 7);
-    }
-    return sign ? -val : val;
-}
+// float_to_fp8_e4m3() and fp8_e4m3_to_float() are provided by fp8_utils.cuh.
+// Used in the #else software fallback paths below.
 
 // ---------------------------------------------------------------------------
 // Absmax reduction kernel
@@ -232,7 +145,7 @@ __global__ void calibrate_quantize_fp8_kernel(
         int idx = base + i;
         if (idx < n) {
             float val = __half2float(input[idx]) * inv_scale;
-            output[idx] = float_to_fp8_e4m3_sw(val);
+            output[idx] = float_to_fp8_e4m3(val);
         }
     }
 #endif
@@ -271,7 +184,7 @@ __global__ void quantize_fp16_to_fp8_scaled_kernel(
         int idx = base + i;
         if (idx < n) {
             float val = __half2float(input[idx]) * inv_scale;
-            output[idx] = float_to_fp8_e4m3_sw(val);
+            output[idx] = float_to_fp8_e4m3(val);
         }
     }
 #endif
@@ -308,7 +221,7 @@ __global__ void dequantize_fp8_to_fp16_scaled_kernel(
     for (int i = 0; i < kElemsPerThread; ++i) {
         int idx = base + i;
         if (idx < n) {
-            float fval = fp8_e4m3_to_float_sw(input[idx]) * scale;
+            float fval = fp8_e4m3_to_float(input[idx]) * scale;
             output[idx] = __float2half(fval);
         }
     }
@@ -354,7 +267,7 @@ __global__ void quantize_fp16_to_fp8_with_scale_kernel(
         int idx = base + i;
         if (idx < n) {
             float val = __half2float(input[idx]) * inv_scale;
-            output[idx] = float_to_fp8_e4m3_sw(val);
+            output[idx] = float_to_fp8_e4m3(val);
         }
     }
 #endif
@@ -692,7 +605,7 @@ __global__ void quantize_fp16_to_fp8_per_expert_kernel(
         int idx = base + i;
         if (idx < n_elems) {
             float val = __half2float(expert_in[idx]) * inv_scale;
-            expert_out[idx] = float_to_fp8_e4m3_sw(val);
+            expert_out[idx] = float_to_fp8_e4m3(val);
         }
     }
 #endif

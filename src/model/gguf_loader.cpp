@@ -225,6 +225,19 @@ struct GGUFValue {
     std::vector<int32_t> int_array;
 };
 
+// ---- Read array elements by type into a GGUFValue ----
+
+template<typename T, typename ReadFn>
+static void read_array_elements(BinaryReader& r, uint64_t count,
+                                 std::vector<T>& out, ReadFn read_fn,
+                                 size_t element_size) {
+    size_t safe = std::min(static_cast<size_t>(count), r.remaining() / element_size);
+    out.reserve(safe);
+    for (uint64_t i = 0; i < count && !r.failed(); i++) {
+        out.push_back(read_fn(r));
+    }
+}
+
 static GGUFValue read_gguf_value(BinaryReader& r, GGUFValueType type) {
     GGUFValue v;
     v.type = type;
@@ -244,28 +257,19 @@ static GGUFValue read_gguf_value(BinaryReader& r, GGUFValueType type) {
         case GGUFValueType::ARRAY: {
             auto arr_type = static_cast<GGUFValueType>(r.read_u32());
             uint64_t count = r.read_u64();
-            size_t remaining = r.remaining();
             if (arr_type == GGUFValueType::STRING) {
                 // Each string is at least 8 bytes (u64 length prefix)
-                size_t safe = std::min(static_cast<size_t>(count), remaining / 8);
-                v.str_array.reserve(safe);
-                for (uint64_t i = 0; i < count && !r.failed(); i++)
-                    v.str_array.push_back(r.read_string());
+                read_array_elements(r, count, v.str_array,
+                    [](BinaryReader& br) { return br.read_string(); }, 8);
             } else if (arr_type == GGUFValueType::FLOAT32) {
-                size_t safe = std::min(static_cast<size_t>(count), remaining / 4);
-                v.float_array.reserve(safe);
-                for (uint64_t i = 0; i < count && !r.failed(); i++)
-                    v.float_array.push_back(r.read_f32());
+                read_array_elements(r, count, v.float_array,
+                    [](BinaryReader& br) { return br.read_f32(); }, 4);
             } else if (arr_type == GGUFValueType::INT32) {
-                size_t safe = std::min(static_cast<size_t>(count), remaining / 4);
-                v.int_array.reserve(safe);
-                for (uint64_t i = 0; i < count && !r.failed(); i++)
-                    v.int_array.push_back(r.read_i32());
+                read_array_elements(r, count, v.int_array,
+                    [](BinaryReader& br) { return br.read_i32(); }, 4);
             } else if (arr_type == GGUFValueType::UINT32) {
-                size_t safe = std::min(static_cast<size_t>(count), remaining / 4);
-                v.int_array.reserve(safe);
-                for (uint64_t i = 0; i < count && !r.failed(); i++)
-                    v.int_array.push_back(static_cast<int32_t>(r.read_u32()));
+                read_array_elements(r, count, v.int_array,
+                    [](BinaryReader& br) { return static_cast<int32_t>(br.read_u32()); }, 4);
             } else {
                 // Skip unknown array element types
                 for (uint64_t i = 0; i < count && !r.failed(); i++)
@@ -481,6 +485,31 @@ static bool assign_tensor(Model& model, const std::string& name,
     return false;
 }
 
+// ---- Parse tensor info entries from a BinaryReader ----
+
+static void parse_tensor_infos(BinaryReader& reader, uint64_t tensor_count,
+                                std::vector<GGUFTensorInfo>& out) {
+    for (uint64_t i = 0; i < tensor_count && !reader.failed(); i++) {
+        GGUFTensorInfo info;
+        info.name = reader.read_string();
+        info.n_dims = reader.read_u32();
+        for (uint32_t d = 0; d < info.n_dims && d < 4; d++) {
+            info.dims[d] = static_cast<int64_t>(reader.read_u64());
+        }
+        // Skip extra dims if n_dims > 4 (shouldn't happen)
+        for (uint32_t d = 4; d < info.n_dims; d++) {
+            reader.read_u64();
+        }
+        // Fill remaining dims with 1
+        for (uint32_t d = info.n_dims; d < 4; d++) {
+            info.dims[d] = 1;
+        }
+        info.type = static_cast<GGMLType>(reader.read_u32());
+        info.offset = reader.read_u64();
+        out.push_back(std::move(info));
+    }
+}
+
 // ---- Main GGUF loader ----
 
 std::unique_ptr<Model> load_gguf(const std::string& path) {
@@ -560,26 +589,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     // 4. Parse tensor info entries
     std::vector<GGUFTensorInfo> tensor_infos;
     tensor_infos.reserve(static_cast<size_t>(tensor_count));
-
-    for (uint64_t i = 0; i < tensor_count && !reader.failed(); i++) {
-        GGUFTensorInfo info;
-        info.name = reader.read_string();
-        info.n_dims = reader.read_u32();
-        for (uint32_t d = 0; d < info.n_dims && d < 4; d++) {
-            info.dims[d] = static_cast<int64_t>(reader.read_u64());
-        }
-        // Skip extra dims if n_dims > 4 (shouldn't happen)
-        for (uint32_t d = 4; d < info.n_dims; d++) {
-            reader.read_u64();
-        }
-        // Fill remaining dims with 1
-        for (uint32_t d = info.n_dims; d < 4; d++) {
-            info.dims[d] = 1;
-        }
-        info.type = static_cast<GGMLType>(reader.read_u32());
-        info.offset = reader.read_u64();
-        tensor_infos.push_back(std::move(info));
-    }
+    parse_tensor_infos(reader, tensor_count, tensor_infos);
 
     if (reader.failed()) {
         IMP_LOG_ERROR("GGUF tensor info truncated: %s", path.c_str());
@@ -674,20 +684,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                 }
 
                 // Parse shard tensor infos
-                for (uint64_t i = 0; i < stensor_count && !sreader.failed(); i++) {
-                    GGUFTensorInfo info;
-                    info.name = sreader.read_string();
-                    info.n_dims = sreader.read_u32();
-                    for (uint32_t d = 0; d < info.n_dims && d < 4; d++)
-                        info.dims[d] = static_cast<int64_t>(sreader.read_u64());
-                    for (uint32_t d = 4; d < info.n_dims; d++)
-                        sreader.read_u64();
-                    for (uint32_t d = info.n_dims; d < 4; d++)
-                        info.dims[d] = 1;
-                    info.type = static_cast<GGMLType>(sreader.read_u32());
-                    info.offset = sreader.read_u64();
-                    tensor_infos.push_back(std::move(info));
-                }
+                parse_tensor_infos(sreader, stensor_count, tensor_infos);
 
                 // Compute shard tensor data start
                 size_t salign = alignment;  // use same alignment as primary

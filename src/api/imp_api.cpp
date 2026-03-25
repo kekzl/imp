@@ -297,6 +297,63 @@ void imp_context_free(ImpContext ctx) {
     delete ctx;
 }
 
+// --- Helper: tokenize a prompt using chat template or raw encoding ---
+
+namespace {
+
+static std::vector<int32_t> tokenize_prompt(ImpContext ctx,
+                                             const char* prompt,
+                                             const ImpGenerateParams* params) {
+    auto* tok = ctx->model_handle->model->tokenizer();
+    const auto& tmpl = ctx->engine->chat_template();
+    bool has_img = ctx->engine->has_vision() &&
+                   ctx->engine->has_vision_input();
+
+    // Tokenize the prompt, injecting image tokens if a vision image is set.
+    if (params->apply_chat_template && !tmpl.is_raw()) {
+        std::vector<imp::ChatMessage> messages = {{"user", prompt}};
+        if (has_img) {
+            return tmpl.apply_with_image(*tok, messages, 256);
+        } else {
+            return tmpl.apply(*tok, messages);
+        }
+    }
+
+    auto tokens = tok->encode(prompt);
+    if (tok->add_bos() && (tokens.empty() || tokens[0] != tok->bos_id())) {
+        tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
+    }
+    return tokens;
+}
+
+// --- Helper: apply sampling params from ImpGenerateParams to a Request ---
+
+static void apply_sampling_params(imp::Request& req,
+                                   const ImpGenerateParams* params) {
+    req.max_tokens = params->max_tokens;
+    req.temperature = params->temperature;
+    req.top_p = params->top_p;
+    req.top_k = params->top_k;
+    req.seed = params->seed;
+    req.min_p = params->min_p;
+    req.typical_p = params->typical_p;
+    req.repetition_penalty = params->repetition_penalty;
+    req.frequency_penalty = params->frequency_penalty;
+    req.presence_penalty = params->presence_penalty;
+    req.repeat_last_n = params->repeat_last_n;
+    req.dry_multiplier = params->dry_multiplier;
+    req.dry_base = params->dry_base;
+    req.dry_allowed_length = params->dry_allowed_length;
+    req.dry_penalty_last_n = params->dry_penalty_last_n;
+    req.mirostat = params->mirostat;
+    req.mirostat_tau = params->mirostat_tau;
+    req.mirostat_eta = params->mirostat_eta;
+    if (params->mirostat == 2 && req.mirostat_mu == 0.0f)
+        req.mirostat_mu = 2.0f * params->mirostat_tau;
+}
+
+} // anonymous namespace
+
 // --- Generation ---
 
 ImpError imp_generate_streaming(ImpContext ctx, const char* prompt,
@@ -313,47 +370,12 @@ ImpError imp_generate_streaming(ImpContext ctx, const char* prompt,
         auto* tok = ctx->model_handle->model->tokenizer();
         if (!tok) return IMP_ERROR_INVALID_MODEL;
 
-        // Tokenize the prompt, injecting image tokens if a vision image is set.
-        std::vector<int32_t> tokens;
-        const auto& tmpl = ctx->engine->chat_template();
-        bool has_img = ctx->engine->has_vision() &&
-                       ctx->engine->has_vision_input();
-        if (params->apply_chat_template && !tmpl.is_raw()) {
-            std::vector<imp::ChatMessage> messages = {{"user", prompt}};
-            if (has_img) {
-                tokens = tmpl.apply_with_image(*tok, messages, 256);
-            } else {
-                tokens = tmpl.apply(*tok, messages);
-            }
-        } else {
-            tokens = tok->encode(prompt);
-            if (tok->add_bos() && (tokens.empty() || tokens[0] != tok->bos_id())) {
-                tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
-            }
-        }
+        auto tokens = tokenize_prompt(ctx, prompt, params);
 
         // Create request
         auto req = std::make_shared<imp::Request>();
         req->input_tokens = std::move(tokens);
-        req->max_tokens = params->max_tokens;
-        req->temperature = params->temperature;
-        req->top_p = params->top_p;
-        req->top_k = params->top_k;
-        req->seed = params->seed;
-        req->min_p = params->min_p;
-        req->typical_p = params->typical_p;
-        req->repetition_penalty = params->repetition_penalty;
-        req->frequency_penalty = params->frequency_penalty;
-        req->presence_penalty = params->presence_penalty;
-        req->repeat_last_n = params->repeat_last_n;
-        req->dry_multiplier = params->dry_multiplier;
-        req->dry_base = params->dry_base;
-        req->dry_allowed_length = params->dry_allowed_length;
-        req->dry_penalty_last_n = params->dry_penalty_last_n;
-        req->mirostat = params->mirostat;
-        req->mirostat_tau = params->mirostat_tau;
-        req->mirostat_eta = params->mirostat_eta;
-        if (params->mirostat == 2) req->mirostat_mu = 2.0f * params->mirostat_tau;
+        apply_sampling_params(*req, params);
         req->status = imp::RequestStatus::PENDING;
 
         ctx->engine->add_request(req);
@@ -414,47 +436,12 @@ ImpError imp_generate(ImpContext ctx, const char* prompt,
         auto* tok = ctx->model_handle->model->tokenizer();
         if (!tok) return IMP_ERROR_INVALID_MODEL;
 
-        // Tokenize (same logic as imp_generate_streaming)
-        std::vector<int32_t> tokens;
-        const auto& tmpl = ctx->engine->chat_template();
-        bool has_img = ctx->engine->has_vision() &&
-                       ctx->engine->has_vision_input();
-        if (params->apply_chat_template && !tmpl.is_raw()) {
-            std::vector<imp::ChatMessage> messages = {{"user", prompt}};
-            if (has_img) {
-                tokens = tmpl.apply_with_image(*tok, messages, 256);
-            } else {
-                tokens = tmpl.apply(*tok, messages);
-            }
-        } else {
-            tokens = tok->encode(prompt);
-            if (tok->add_bos() && (tokens.empty() || tokens[0] != tok->bos_id())) {
-                tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
-            }
-        }
+        auto tokens = tokenize_prompt(ctx, prompt, params);
 
         // Create request with all sampling params
         auto req = std::make_shared<imp::Request>();
         req->input_tokens = std::move(tokens);
-        req->max_tokens = params->max_tokens;
-        req->temperature = params->temperature;
-        req->top_p = params->top_p;
-        req->top_k = params->top_k;
-        req->seed = params->seed;
-        req->min_p = params->min_p;
-        req->typical_p = params->typical_p;
-        req->repetition_penalty = params->repetition_penalty;
-        req->frequency_penalty = params->frequency_penalty;
-        req->presence_penalty = params->presence_penalty;
-        req->repeat_last_n = params->repeat_last_n;
-        req->dry_multiplier = params->dry_multiplier;
-        req->dry_base = params->dry_base;
-        req->dry_allowed_length = params->dry_allowed_length;
-        req->dry_penalty_last_n = params->dry_penalty_last_n;
-        req->mirostat = params->mirostat;
-        req->mirostat_tau = params->mirostat_tau;
-        req->mirostat_eta = params->mirostat_eta;
-        if (params->mirostat == 2) req->mirostat_mu = 2.0f * params->mirostat_tau;
+        apply_sampling_params(*req, params);
         req->ignore_eos = (params->ignore_eos != 0);
         req->logprobs = (params->logprobs != 0);
         req->top_logprobs = std::max(0, std::min(20, params->top_logprobs));
@@ -660,31 +647,11 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params,
         }
 
         // Update sampling params on the request for this step
-        req->temperature = params->temperature;
-        req->top_p = params->top_p;
-        req->top_k = params->top_k;
-        req->seed = params->seed;
-        req->max_tokens = params->max_tokens;
+        apply_sampling_params(*req, params);
         req->ignore_eos = caller_ignore_eos;
-        req->min_p = params->min_p;
-        req->typical_p = params->typical_p;
-        req->repetition_penalty = params->repetition_penalty;
-        req->frequency_penalty = params->frequency_penalty;
-        req->presence_penalty = params->presence_penalty;
-        req->repeat_last_n = params->repeat_last_n;
-        req->dry_multiplier = params->dry_multiplier;
-        req->dry_base = params->dry_base;
-        req->dry_allowed_length = params->dry_allowed_length;
-        req->dry_penalty_last_n = params->dry_penalty_last_n;
-        req->mirostat = params->mirostat;
-        req->mirostat_tau = params->mirostat_tau;
-        req->mirostat_eta = params->mirostat_eta;
         req->logprobs = (params->logprobs != 0);
         req->top_logprobs = std::max(0, std::min(20, params->top_logprobs));
         req->json_mode = (params->json_mode != 0);
-        // Initialize mu on first decode step with mirostat enabled
-        if (params->mirostat == 2 && req->mirostat_mu == 0.0f)
-            req->mirostat_mu = 2.0f * params->mirostat_tau;
 
         // Self-speculative (and future multi-token) steps may produce
         // multiple tokens per engine->step().  Track how many have been

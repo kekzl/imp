@@ -440,6 +440,14 @@ bool EagleDecoder::load_head(const std::string& safetensors_path, cudaStream_t s
     //   v1: eagle_module.embed_tokens.weight, eagle_module.layers.0.*
     //   v3: lm_head.weight, midlayer.*, fc.weight, norm.weight
 
+    // Helper: find tensor by v1 suffix, fall back to v3 midlayer prefix, then upload
+    auto load_weight = [&](const char* v1_name, const char* v3_name, Tensor& dest) -> const TensorInfo* {
+        auto* ti = find_tensor(v1_name);
+        if (!ti) ti = find_tensor(v3_name);
+        if (ti) dest = upload_tensor(*ti);
+        return ti;
+    };
+
     // embed_tokens — EAGLE's own embedding (or shared with target)
     auto* ti_embed = find_tensor("embed_tokens.weight");
     if (ti_embed) {
@@ -485,58 +493,27 @@ bool EagleDecoder::load_head(const std::string& safetensors_path, cudaStream_t s
     auto* ti_fc_b = find_tensor("fc.bias");
     if (ti_fc_b) head_.fc_bias = upload_tensor(*ti_fc_b);
 
-    // Transformer layer weights: try midlayer.* then eagle_module.layers.0.*
-    auto* ti_in = find_tensor("input_layernorm.weight");
-    if (!ti_in) ti_in = find_tensor("midlayer.input_layernorm.weight");
-    if (ti_in) head_.input_norm = upload_tensor(*ti_in);
+    // Transformer layer weights: try v1 suffix then midlayer.* prefix
+    load_weight("input_layernorm.weight", "midlayer.input_layernorm.weight", head_.input_norm);
 
-    auto* ti_wq = find_tensor("self_attn.q_proj.weight");
-    if (!ti_wq) ti_wq = find_tensor("midlayer.self_attn.q_proj.weight");
-    if (ti_wq) head_.wq = upload_tensor(*ti_wq);
-
-    auto* ti_wk = find_tensor("self_attn.k_proj.weight");
-    if (!ti_wk) ti_wk = find_tensor("midlayer.self_attn.k_proj.weight");
-    if (ti_wk) head_.wk = upload_tensor(*ti_wk);
-
-    auto* ti_wv = find_tensor("self_attn.v_proj.weight");
-    if (!ti_wv) ti_wv = find_tensor("midlayer.self_attn.v_proj.weight");
-    if (ti_wv) head_.wv = upload_tensor(*ti_wv);
-
-    auto* ti_wo = find_tensor("self_attn.o_proj.weight");
-    if (!ti_wo) ti_wo = find_tensor("midlayer.self_attn.o_proj.weight");
-    if (ti_wo) head_.wo = upload_tensor(*ti_wo);
+    auto* ti_wq = load_weight("self_attn.q_proj.weight", "midlayer.self_attn.q_proj.weight", head_.wq);
+    auto* ti_wk = load_weight("self_attn.k_proj.weight", "midlayer.self_attn.k_proj.weight", head_.wk);
+    load_weight("self_attn.v_proj.weight", "midlayer.self_attn.v_proj.weight", head_.wv);
+    load_weight("self_attn.o_proj.weight", "midlayer.self_attn.o_proj.weight", head_.wo);
 
     // Optional biases (Qwen3)
-    auto* ti_qb = find_tensor("self_attn.q_proj.bias");
-    if (!ti_qb) ti_qb = find_tensor("midlayer.self_attn.q_proj.bias");
-    if (ti_qb) head_.q_bias = upload_tensor(*ti_qb);
-    auto* ti_kb = find_tensor("self_attn.k_proj.bias");
-    if (!ti_kb) ti_kb = find_tensor("midlayer.self_attn.k_proj.bias");
-    if (ti_kb) head_.k_bias = upload_tensor(*ti_kb);
-    auto* ti_vb = find_tensor("self_attn.v_proj.bias");
-    if (!ti_vb) ti_vb = find_tensor("midlayer.self_attn.v_proj.bias");
-    if (ti_vb) head_.v_bias = upload_tensor(*ti_vb);
+    load_weight("self_attn.q_proj.bias", "midlayer.self_attn.q_proj.bias", head_.q_bias);
+    load_weight("self_attn.k_proj.bias", "midlayer.self_attn.k_proj.bias", head_.k_bias);
+    load_weight("self_attn.v_proj.bias", "midlayer.self_attn.v_proj.bias", head_.v_bias);
 
-    auto* ti_pan = find_tensor("post_attention_layernorm.weight");
-    if (!ti_pan) ti_pan = find_tensor("midlayer.post_attention_layernorm.weight");
-    if (ti_pan) head_.post_attn_norm = upload_tensor(*ti_pan);
+    load_weight("post_attention_layernorm.weight", "midlayer.post_attention_layernorm.weight", head_.post_attn_norm);
 
-    auto* ti_gate = find_tensor("mlp.gate_proj.weight");
-    if (!ti_gate) ti_gate = find_tensor("midlayer.mlp.gate_proj.weight");
-    if (ti_gate) head_.gate_proj = upload_tensor(*ti_gate);
-
-    auto* ti_up = find_tensor("mlp.up_proj.weight");
-    if (!ti_up) ti_up = find_tensor("midlayer.mlp.up_proj.weight");
-    if (ti_up) head_.up_proj = upload_tensor(*ti_up);
-
-    auto* ti_down = find_tensor("mlp.down_proj.weight");
-    if (!ti_down) ti_down = find_tensor("midlayer.mlp.down_proj.weight");
-    if (ti_down) head_.down_proj = upload_tensor(*ti_down);
+    auto* ti_gate = load_weight("mlp.gate_proj.weight", "midlayer.mlp.gate_proj.weight", head_.gate_proj);
+    load_weight("mlp.up_proj.weight", "midlayer.mlp.up_proj.weight", head_.up_proj);
+    load_weight("mlp.down_proj.weight", "midlayer.mlp.down_proj.weight", head_.down_proj);
 
     // EAGLE-3 v3: hidden_norm, lm_head, norm, vocab mappings
-    auto* ti_hn = find_tensor("hidden_norm.weight");
-    if (!ti_hn) ti_hn = find_tensor("midlayer.hidden_norm.weight");
-    if (ti_hn) head_.hidden_norm = upload_tensor(*ti_hn);
+    load_weight("hidden_norm.weight", "midlayer.hidden_norm.weight", head_.hidden_norm);
 
     auto* ti_lm = find_tensor("lm_head.weight");
     if (ti_lm) {
@@ -775,6 +752,13 @@ void EagleDecoder::eagle_forward(int32_t token, int position, cudaStream_t strea
 
     int d = head_.d_model;
 
+    // Helper: add bias vector to dst in-place
+    auto vec_add_gpu = [&](half* dst, const half* bias, int n) {
+        if (!bias) return;
+        constexpr int T = 256;
+        vec_add_kernel<<<(n + T - 1) / T, T, 0, stream>>>(dst, bias, dst, n);
+    };
+
     // d_fused_ holds "hidden_states" — either FC output (first iter) or already set
     // to d_eagle_hidden_ by the caller for subsequent iterations.
     // The residual is taken from d_fused_.
@@ -834,24 +818,9 @@ void EagleDecoder::eagle_forward(int32_t token, int position, cudaStream_t strea
         gemv(head_.wv, in_t, v_t, stream);
 
         // Add biases if present
-        if (head_.q_bias.data) {
-            int threads = 256;
-            int blocks = (qkv_dim + threads - 1) / threads;
-            vec_add_kernel<<<blocks, threads, 0, stream>>>(
-                d_q_, static_cast<const half*>(head_.q_bias.data), d_q_, qkv_dim);
-        }
-        if (head_.k_bias.data) {
-            int threads = 256;
-            int blocks = (kv_dim + threads - 1) / threads;
-            vec_add_kernel<<<blocks, threads, 0, stream>>>(
-                d_k_, static_cast<const half*>(head_.k_bias.data), d_k_, kv_dim);
-        }
-        if (head_.v_bias.data) {
-            int threads = 256;
-            int blocks = (kv_dim + threads - 1) / threads;
-            vec_add_kernel<<<blocks, threads, 0, stream>>>(
-                d_v_, static_cast<const half*>(head_.v_bias.data), d_v_, kv_dim);
-        }
+        vec_add_gpu(d_q_, static_cast<const half*>(head_.q_bias.data), qkv_dim);
+        vec_add_gpu(d_k_, static_cast<const half*>(head_.k_bias.data), kv_dim);
+        vec_add_gpu(d_v_, static_cast<const half*>(head_.v_bias.data), kv_dim);
 
         // RoPE
         {
@@ -931,9 +900,8 @@ void EagleDecoder::eagle_forward(int32_t token, int position, cudaStream_t strea
     // 5. Residual: hidden = hidden_states + attn_output
     //    d_fused_ holds hidden_states (FC output or prev EAGLE hidden)
     {
-        int threads = 256;
-        int blocks = (d + threads - 1) / threads;
-        vec_add_kernel<<<blocks, threads, 0, stream>>>(
+        constexpr int T = 256;
+        vec_add_kernel<<<(d + T - 1) / T, T, 0, stream>>>(
             d_fused_, d_proj_out_, d_eagle_hidden_, d);
     }
 
@@ -976,12 +944,7 @@ void EagleDecoder::eagle_forward(int32_t token, int position, cudaStream_t strea
     }
 
     // 10. Final residual: eagle_hidden += ffn_out
-    {
-        int threads = 256;
-        int blocks = (d + threads - 1) / threads;
-        vec_add_kernel<<<blocks, threads, 0, stream>>>(
-            d_eagle_hidden_, d_ffn_out_, d_eagle_hidden_, d);
-    }
+    vec_add_gpu(d_eagle_hidden_, d_ffn_out_, d);
 }
 
 // ---------------------------------------------------------------------------
@@ -1033,11 +996,13 @@ std::vector<int32_t> EagleDecoder::draft_tokens(int32_t last_token, int position
                 gemv(head_.fc_weight, in_t, out_t, stream);
             }
             // Add FC bias if present
-            if (head_.fc_bias.data) {
-                int threads2 = 256;
-                int blocks2 = (d + threads2 - 1) / threads2;
-                vec_add_kernel<<<blocks2, threads2, 0, stream>>>(
-                    d_fused_, static_cast<const half*>(head_.fc_bias.data), d_fused_, d);
+            {
+                constexpr int T = 256;
+                auto* bias = static_cast<const half*>(head_.fc_bias.data);
+                if (bias) {
+                    vec_add_kernel<<<(d + T - 1) / T, T, 0, stream>>>(
+                        d_fused_, bias, d_fused_, d);
+                }
             }
         } else {
             // Subsequent iterations: hidden_states = previous EAGLE output
@@ -1128,6 +1093,40 @@ std::vector<int32_t> EagleDecoder::draft_tokens(int32_t last_token, int position
 }
 
 // ---------------------------------------------------------------------------
+// Shared helpers for verify() and refresh_features()
+// ---------------------------------------------------------------------------
+
+void EagleDecoder::ensure_verify_buffers(int n_tokens, int max_blocks) {
+    int bt_total = n_tokens * max_blocks;
+    // Grow buffers as needed (tracked by gpu_allocs_ for cleanup)
+    if (n_tokens > max_verify_alloc_) {
+        d_verify_tokens_ = static_cast<int32_t*>(gpu_alloc(n_tokens * sizeof(int32_t)));
+        d_verify_positions_ = static_cast<int*>(gpu_alloc(n_tokens * sizeof(int)));
+        d_verify_ctx_lens_ = static_cast<int*>(gpu_alloc(n_tokens * sizeof(int)));
+        max_verify_alloc_ = n_tokens;
+    }
+    if (bt_total > max_verify_bt_alloc_) {
+        d_verify_block_table_ = static_cast<int*>(gpu_alloc(bt_total * sizeof(int)));
+        max_verify_bt_alloc_ = bt_total;
+    }
+}
+
+InferenceState EagleDecoder::make_base_state(int n_tokens, int max_ctx, int max_blocks) {
+    InferenceState state;
+    state.token_ids = d_verify_tokens_;
+    state.positions = d_verify_positions_;
+    state.n_tokens = n_tokens;
+    state.kv_cache = target_kv_cache_;
+    state.block_tables = d_verify_block_table_;
+    state.context_lens = d_verify_ctx_lens_;
+    state.max_context_len = max_ctx;
+    state.n_sequences = n_tokens;
+    state.max_blocks_per_seq = max_blocks;
+    state.is_prefill = false;  // decode mode: writes KV then paged attention
+    return state;
+}
+
+// ---------------------------------------------------------------------------
 // Verification (reuses target model, similar to SpeculativeDecoder::verify)
 // ---------------------------------------------------------------------------
 
@@ -1186,21 +1185,9 @@ EagleDecoder::verify(const std::vector<int32_t>& draft, int32_t last_token,
     int max_ctx = position + n_verify;
 
     // Ensure pre-allocated verify buffers are large enough
-    int bt_total = n_verify * max_blocks;
-    if (n_verify > max_verify_alloc_ || bt_total > max_verify_bt_alloc_) {
-        // Grow buffers (tracked by gpu_allocs_ for cleanup)
-        if (n_verify > max_verify_alloc_) {
-            d_verify_tokens_ = static_cast<int32_t*>(gpu_alloc(n_verify * sizeof(int32_t)));
-            d_verify_positions_ = static_cast<int*>(gpu_alloc(n_verify * sizeof(int)));
-            d_verify_ctx_lens_ = static_cast<int*>(gpu_alloc(n_verify * sizeof(int)));
-            max_verify_alloc_ = n_verify;
-        }
-        if (bt_total > max_verify_bt_alloc_) {
-            d_verify_block_table_ = static_cast<int*>(gpu_alloc(bt_total * sizeof(int)));
-            max_verify_bt_alloc_ = bt_total;
-        }
-    }
+    ensure_verify_buffers(n_verify, max_blocks);
 
+    int bt_total = n_verify * max_blocks;
     cudaMemcpyAsync(d_verify_tokens_, h_tokens.data(), n_verify * sizeof(int32_t),
                     cudaMemcpyHostToDevice, stream);
     cudaMemcpyAsync(d_verify_positions_, h_positions.data(), n_verify * sizeof(int),
@@ -1215,17 +1202,7 @@ EagleDecoder::verify(const std::vector<int32_t>& draft, int32_t last_token,
     // Each virtual sequence has 1 query token, sharing the same physical
     // block table. KV write happens before paged attention (decode path),
     // so each verify token's K/V is visible to subsequent queries.
-    InferenceState state;
-    state.token_ids = d_verify_tokens_;
-    state.positions = d_verify_positions_;
-    state.n_tokens = n_verify;
-    state.kv_cache = target_kv_cache_;
-    state.block_tables = d_verify_block_table_;
-    state.context_lens = d_verify_ctx_lens_;
-    state.max_context_len = max_ctx;
-    state.n_sequences = n_verify;
-    state.max_blocks_per_seq = max_blocks;
-    state.is_prefill = false;  // decode mode: writes KV then paged attention
+    InferenceState state = make_base_state(n_verify, max_ctx, max_blocks);
     state.skip_nvfp4 = true;  // bypass NVFP4 GEMM (CUTLASS overhead kills M=5), keep FP8
     state.per_row_lm_head = true;  // per-row GEMV LM head for n>1
     state.temperature = temperature;
@@ -1356,16 +1333,7 @@ void EagleDecoder::refresh_features(int32_t token, int position, int seq_id,
     int ctx_len = position + 1;  // after writing this token
 
     // Ensure buffers are allocated
-    if (!max_verify_alloc_) {
-        d_verify_tokens_ = static_cast<int32_t*>(gpu_alloc(sizeof(int32_t)));
-        d_verify_positions_ = static_cast<int*>(gpu_alloc(sizeof(int)));
-        d_verify_ctx_lens_ = static_cast<int*>(gpu_alloc(sizeof(int)));
-        max_verify_alloc_ = 1;
-    }
-    if (max_blocks > max_verify_bt_alloc_) {
-        d_verify_block_table_ = static_cast<int*>(gpu_alloc(max_blocks * sizeof(int)));
-        max_verify_bt_alloc_ = max_blocks;
-    }
+    ensure_verify_buffers(1, max_blocks);
 
     // Upload single token, position, block table, context length
     cudaMemcpyAsync(d_verify_tokens_, &token, sizeof(int32_t),
@@ -1378,17 +1346,7 @@ void EagleDecoder::refresh_features(int32_t token, int position, int seq_id,
     cudaMemcpyAsync(d_verify_ctx_lens_, &ctx_len, sizeof(int),
                     cudaMemcpyHostToDevice, stream);
 
-    InferenceState state;
-    state.token_ids = d_verify_tokens_;
-    state.positions = d_verify_positions_;
-    state.n_tokens = 1;
-    state.kv_cache = target_kv_cache_;
-    state.block_tables = d_verify_block_table_;
-    state.context_lens = d_verify_ctx_lens_;
-    state.max_context_len = ctx_len;
-    state.n_sequences = 1;
-    state.max_blocks_per_seq = max_blocks;
-    state.is_prefill = false;
+    InferenceState state = make_base_state(1, ctx_len, max_blocks);
     state.skip_lm_head = true;  // only need feature snapshots, skip LM head GEMV
 
     (void)target_executor_->resize_workspace(1, stream);
