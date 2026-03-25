@@ -10,6 +10,56 @@
 namespace imp {
 
 // ---------------------------------------------------------------------------
+// Device helpers (anonymous namespace to keep file-local)
+// ---------------------------------------------------------------------------
+namespace {
+
+// Apply attention logit softcapping: tanh-based clamping used by some models.
+__device__ __forceinline__ float apply_softcap(float dot, float softcap) {
+    return (softcap > 0.0f) ? (softcap * tanhf(dot / softcap)) : dot;
+}
+
+// Compute the range of KV blocks to iterate, accounting for sliding window.
+struct ContextRange {
+    int effective_start;
+    int first_block;
+    int num_ctx_blocks;
+};
+
+__device__ __forceinline__ ContextRange compute_context_range(
+    int ctx_len, int block_size, int sliding_window) {
+    int effective_start = (sliding_window > 0 && ctx_len > sliding_window)
+                          ? (ctx_len - sliding_window) : 0;
+    return {effective_start, effective_start / block_size,
+            (ctx_len + block_size - 1) / block_size};
+}
+
+// Write sentinel partial result for an empty split-K split (max=-inf, sum=0, O=0).
+// Must be called with all threads in the block active; only threadIdx.x==0 writes
+// the scalar fields and the first warp zeroes the O buffer.
+template<int HEAD_DIM>
+__device__ __forceinline__ void write_empty_split_sentinel(
+    float* partial_out, int batch_idx, int n_heads, int head_idx,
+    int num_splits, int split_idx, int lane_offset) {
+    constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
+    int partial_idx = ((batch_idx * n_heads + head_idx) * num_splits + split_idx);
+    constexpr int partial_stride = 2 + HEAD_DIM;
+    float* out = partial_out + (int64_t)partial_idx * partial_stride;
+    if (threadIdx.x == 0) {
+        out[0] = -FLT_MAX;
+        out[1] = 0.0f;
+    }
+    if (threadIdx.x < WARP_SIZE) {
+        #pragma unroll
+        for (int i = 0; i < ELEMS; i++) {
+            out[2 + lane_offset + i] = 0.0f;
+        }
+    }
+}
+
+} // anonymous namespace
+
+// ---------------------------------------------------------------------------
 // Paged Attention -- Decode Kernel (single-query per sequence)
 // ---------------------------------------------------------------------------
 //
@@ -159,12 +209,8 @@ paged_attention_gqa_kernel(
     // s_v(buf) = s_kv_h + buf * 2 * tile_elems + tile_elems
 
     // ---- Context range ----
-    int effective_start = 0;
-    if (sliding_window > 0 && ctx_len > sliding_window) {
-        effective_start = ctx_len - sliding_window;
-    }
-    const int first_block = effective_start / block_size;
-    const int num_ctx_blocks = (ctx_len + block_size - 1) / block_size;
+    const auto [effective_start, first_block, num_ctx_blocks] =
+        compute_context_range(ctx_len, block_size, sliding_window);
 
     // ---- Double-buffered KV block iteration ----
     int buf = 0;
@@ -231,7 +277,7 @@ paged_attention_gqa_kernel(
                 }
                 dot = warp_reduce_sum(dot);
                 dot *= scale;
-                if (softcap > 0.0f) dot = softcap * tanhf(dot / softcap);
+                dot = apply_softcap(dot, softcap);
 
                 float m_new = fmaxf(m_w, dot);
                 float exp_diff = expf(m_w - m_new);
@@ -365,12 +411,8 @@ __global__ void paged_attention_decode_kernel(
     #pragma unroll
     for (int i = 0; i < ELEMS; i++) o_reg[i] = 0.0f;
 
-    int effective_start = 0;
-    if (sliding_window > 0 && ctx_len > sliding_window) {
-        effective_start = ctx_len - sliding_window;
-    }
-    const int first_block = effective_start / block_size;
-    const int num_ctx_blocks = (ctx_len + block_size - 1) / block_size;
+    const auto [effective_start, first_block, num_ctx_blocks] =
+        compute_context_range(ctx_len, block_size, sliding_window);
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
@@ -400,7 +442,7 @@ __global__ void paged_attention_decode_kernel(
             }
             dot = warp_reduce_sum(dot);
             dot *= scale;
-            if (softcap > 0.0f) dot = softcap * tanhf(dot / softcap);
+            dot = apply_softcap(dot, softcap);
 
             float m_new = fmaxf(m_w, dot);
             float exp_diff = expf(m_w - m_new);
@@ -518,12 +560,8 @@ __global__ void paged_attention_decode_kernel_generic(
     float o_reg[8];
     for (int i = 0; i < elems_per_thread; i++) o_reg[i] = 0.0f;
 
-    int effective_start = 0;
-    if (sliding_window > 0 && ctx_len > sliding_window) {
-        effective_start = ctx_len - sliding_window;
-    }
-    const int first_block = effective_start / block_size;
-    const int num_ctx_blocks = (ctx_len + block_size - 1) / block_size;
+    const auto [effective_start, first_block, num_ctx_blocks] =
+        compute_context_range(ctx_len, block_size, sliding_window);
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
@@ -548,7 +586,7 @@ __global__ void paged_attention_decode_kernel_generic(
             }
             dot = warp_reduce_sum(dot);
             dot *= scale;
-            if (softcap > 0.0f) dot = softcap * tanhf(dot / softcap);
+            dot = apply_softcap(dot, softcap);
 
             float m_new = fmaxf(m_w, dot);
             float exp_diff = expf(m_w - m_new);
@@ -680,12 +718,8 @@ __global__ void paged_attention_splitk_kernel(
     }
 
     // ---- Determine KV block range for this split ----
-    int effective_start = 0;
-    if (sliding_window > 0 && ctx_len > sliding_window) {
-        effective_start = ctx_len - sliding_window;
-    }
-    const int first_block = effective_start / block_size;
-    const int num_ctx_blocks = (ctx_len + block_size - 1) / block_size;
+    const auto [effective_start, first_block, num_ctx_blocks] =
+        compute_context_range(ctx_len, block_size, sliding_window);
     const int total_blocks = num_ctx_blocks - first_block;
 
     // Divide blocks among splits
@@ -696,20 +730,9 @@ __global__ void paged_attention_splitk_kernel(
 
     // Early exit if this split has no work
     if (split_start >= split_end) {
-        // Write sentinel partial: max=-inf, sum=0
-        int partial_idx = ((batch_idx * n_heads + head_idx) * num_splits + split_idx);
-        constexpr int partial_stride = 2 + HEAD_DIM;
-        float* out = partial_out + (int64_t)partial_idx * partial_stride;
-        if (threadIdx.x == 0) {
-            out[0] = -FLT_MAX;
-            out[1] = 0.0f;
-        }
-        if (threadIdx.x < WARP_SIZE) {
-            #pragma unroll
-            for (int i = 0; i < ELEMS; i++) {
-                out[2 + lane_offset + i] = 0.0f;
-            }
-        }
+        write_empty_split_sentinel<HEAD_DIM>(
+            partial_out, batch_idx, n_heads, head_idx,
+            num_splits, split_idx, lane_offset);
         return;
     }
 
@@ -780,7 +803,7 @@ __global__ void paged_attention_splitk_kernel(
             }
             dot = warp_reduce_sum(dot);
             dot *= scale;
-            if (softcap > 0.0f) dot = softcap * tanhf(dot / softcap);
+            dot = apply_softcap(dot, softcap);
 
             float m_new = fmaxf(m_w, dot);
             float exp_diff = expf(m_w - m_new);
@@ -950,11 +973,8 @@ __global__ void paged_attention_splitk_pipeline_kernel(
     }
 
     // ---- Determine KV block range for this split ----
-    int effective_start = 0;
-    if (sliding_window > 0 && ctx_len > sliding_window)
-        effective_start = ctx_len - sliding_window;
-    const int first_block = effective_start / block_size;
-    const int num_ctx_blocks = (ctx_len + block_size - 1) / block_size;
+    const auto [effective_start, first_block, num_ctx_blocks] =
+        compute_context_range(ctx_len, block_size, sliding_window);
     const int total_blocks = num_ctx_blocks - first_block;
 
     int blocks_per_split = (total_blocks + num_splits - 1) / num_splits;
@@ -963,14 +983,9 @@ __global__ void paged_attention_splitk_pipeline_kernel(
     if (split_end > num_ctx_blocks) split_end = num_ctx_blocks;
 
     if (split_start >= split_end) {
-        int partial_idx = ((batch_idx * n_heads + head_idx) * num_splits + split_idx);
-        constexpr int partial_stride = 2 + HEAD_DIM;
-        float* out = partial_out + (int64_t)partial_idx * partial_stride;
-        if (threadIdx.x == 0) { out[0] = -FLT_MAX; out[1] = 0.0f; }
-        if (threadIdx.x < WARP_SIZE) {
-            #pragma unroll
-            for (int i = 0; i < ELEMS; i++) out[2 + lane_offset + i] = 0.0f;
-        }
+        write_empty_split_sentinel<HEAD_DIM>(
+            partial_out, batch_idx, n_heads, head_idx,
+            num_splits, split_idx, lane_offset);
         return;
     }
 
@@ -1052,7 +1067,7 @@ __global__ void paged_attention_splitk_pipeline_kernel(
             }
             dot = warp_reduce_sum(dot);
             dot *= scale;
-            if (softcap > 0.0f) dot = softcap * tanhf(dot / softcap);
+            dot = apply_softcap(dot, softcap);
 
             float m_new = fmaxf(m_w, dot);
             float exp_diff = expf(m_w - m_new);
@@ -1330,11 +1345,8 @@ __global__ void paged_attention_cluster_kernel(
     for (int i = 0; i < ELEMS; i++) o_reg[i] = 0.0f;
 
     // ---- Context range ----
-    int effective_start = 0;
-    if (sliding_window > 0 && ctx_len > sliding_window)
-        effective_start = ctx_len - sliding_window;
-    const int first_block = effective_start / block_size;
-    const int num_ctx_blocks = (ctx_len + block_size - 1) / block_size;
+    const auto [effective_start, first_block, num_ctx_blocks] =
+        compute_context_range(ctx_len, block_size, sliding_window);
 
     // ---- Prefetch first KV block into buffer 0 (block 0 only) ----
     int cur_buf = 0;
@@ -1397,7 +1409,7 @@ __global__ void paged_attention_cluster_kernel(
             }
             dot = warp_reduce_sum(dot);
             dot *= scale;
-            if (softcap > 0.0f) dot = softcap * tanhf(dot / softcap);
+            dot = apply_softcap(dot, softcap);
 
             float m_new = fmaxf(m_w, dot);
             float exp_diff = expf(m_w - m_new);

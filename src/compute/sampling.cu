@@ -7,13 +7,45 @@
 #include <cstdio>
 #include <cfloat>
 #include <algorithm>
-#include <unordered_map>
 #include <vector>
 
 namespace imp {
 
 static constexpr int BLOCK_SIZE = 256;
 static constexpr int WARP_SIZE = 32;
+
+// ============================================================================
+// Warp reduction helpers
+// ============================================================================
+
+namespace {
+
+template<typename T>
+__device__ __forceinline__ T warp_reduce_max(T val) {
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
+        val = fmaxf(val, __shfl_xor_sync(0xFFFFFFFF, val, offset));
+    return val;
+}
+
+template<typename T>
+__device__ __forceinline__ T warp_reduce_sum(T val) {
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
+        val += __shfl_xor_sync(0xFFFFFFFF, val, offset);
+    return val;
+}
+
+// Shared memory size for topk_topp_sample_kernel.
+static inline size_t topk_topp_smem_size(int top_k) {
+    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
+    return static_cast<size_t>(top_k) * (sizeof(float) + sizeof(int))
+         + BLOCK_SIZE * sizeof(float)
+         + 2 * sizeof(float)
+         + NUM_WARPS * top_k * (sizeof(float) + sizeof(int));
+}
+
+} // anonymous namespace
 
 // ============================================================================
 // Greedy sampling (argmax)
@@ -284,11 +316,7 @@ __global__ void topk_topp_sample_kernel(
         if (v > local_max) local_max = v;
     }
     // Warp reduction
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-        float other = __shfl_xor_sync(0xFFFFFFFF, local_max, offset);
-        if (other > local_max) local_max = other;
-    }
+    local_max = warp_reduce_max(local_max);
     // Store per-warp result
     s_reduce[tid] = -FLT_MAX;
     __syncthreads();
@@ -313,10 +341,7 @@ __global__ void topk_topp_sample_kernel(
         local_sum += e;
     }
     // Warp reduction for sum
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-        local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, offset);
-    }
+    local_sum = warp_reduce_sum(local_sum);
     s_reduce[tid] = 0.0f;
     __syncthreads();
     if (tid % WARP_SIZE == 0) s_reduce[tid / WARP_SIZE] = local_sum;
@@ -593,10 +618,7 @@ __global__ void softmax_max_kernel(
         float v = logits[i];
         if (v > local_max) local_max = v;
     }
-    for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
-        float o = __shfl_xor_sync(0xFFFFFFFF, local_max, off);
-        if (o > local_max) local_max = o;
-    }
+    local_max = warp_reduce_max(local_max);
     int warp_id = threadIdx.x / WARP_SIZE;
     int lane_id = threadIdx.x % WARP_SIZE;
     if (lane_id == 0) s_max[warp_id] = local_max;
@@ -621,8 +643,7 @@ __global__ void softmax_sum_kernel(
          i += blockDim.x * gridDim.x) {
         local_sum += expf((logits[i] - global_max) * inv_temperature);
     }
-    for (int off = WARP_SIZE / 2; off > 0; off >>= 1)
-        local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, off);
+    local_sum = warp_reduce_sum(local_sum);
     int warp_id = threadIdx.x / WARP_SIZE;
     int lane_id = threadIdx.x % WARP_SIZE;
     if (lane_id == 0) s_sum[warp_id] = local_sum;
@@ -789,6 +810,36 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size,
     return h_result;
 }
 
+// Shared implementation for both sample_topk_topp overloads.
+// When owns_result is true, d_result was allocated internally and will be freed.
+static int32_t sample_topk_topp_impl(
+        const float* d_logits, int vocab_size, int top_k, float top_p,
+        float inv_temperature, unsigned int seed,
+        int32_t* d_result, bool owns_result, cudaStream_t stream) {
+
+    // For large top_k, use CUB radix sort path (no MAX_TOP_K limit)
+    if (top_k > MAX_TOP_K) {
+        int32_t result = sample_topk_topp_cub(
+            d_logits, vocab_size, top_k, top_p, inv_temperature, seed,
+            d_result, stream);
+        if (owns_result) cudaFree(d_result);
+        return result;
+    }
+
+    size_t smem_bytes = topk_topp_smem_size(top_k);
+
+    topk_topp_sample_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(
+        d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result);
+
+    int32_t h_result = 0;
+    cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+
+    if (owns_result) cudaFree(d_result);
+    return h_result;
+}
+
 int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
                          float temperature, unsigned int seed,
                          cudaStream_t stream) {
@@ -799,45 +850,14 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
     if (temperature <= 0.0f) temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
 
-    // For large top_k, use CUB radix sort path (no MAX_TOP_K limit)
-    if (top_k > MAX_TOP_K) {
-        int32_t* d_result = nullptr;
-        if (cudaMalloc(&d_result, sizeof(int32_t)) != cudaSuccess) {
-            IMP_LOG_ERROR("sample_topk_topp: cudaMalloc failed");
-            return 0;
-        }
-        int32_t result = sample_topk_topp_cub(
-            d_logits, vocab_size, top_k, top_p, inv_temperature, seed,
-            d_result, stream);
-        cudaFree(d_result);
-        return result;
-    }
-
-    int32_t* d_result_alloc = nullptr;
-    if (cudaMalloc(&d_result_alloc, sizeof(int32_t)) != cudaSuccess) {
+    int32_t* d_result = nullptr;
+    if (cudaMalloc(&d_result, sizeof(int32_t)) != cudaSuccess) {
         IMP_LOG_ERROR("sample_topk_topp: cudaMalloc failed");
         return 0;
     }
 
-    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
-    size_t smem_bytes = static_cast<size_t>(top_k) * sizeof(float)
-                      + static_cast<size_t>(top_k) * sizeof(int)
-                      + BLOCK_SIZE * sizeof(float)
-                      + 1 * sizeof(float)
-                      + 1 * sizeof(float)
-                      + NUM_WARPS * top_k * sizeof(float)
-                      + NUM_WARPS * top_k * sizeof(int);
-
-    topk_topp_sample_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(
-        d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result_alloc);
-
-    int32_t h_result = 0;
-    cudaMemcpyAsync(&h_result, d_result_alloc, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
-
-    cudaFree(d_result_alloc);
-    return h_result;
+    return sample_topk_topp_impl(d_logits, vocab_size, top_k, top_p,
+                                  inv_temperature, seed, d_result, true, stream);
 }
 
 int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
@@ -851,31 +871,8 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
     if (temperature <= 0.0f) temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
 
-    // For large top_k, use CUB radix sort path (no MAX_TOP_K limit)
-    if (top_k > MAX_TOP_K) {
-        return sample_topk_topp_cub(
-            d_logits, vocab_size, top_k, top_p, inv_temperature, seed,
-            d_result, stream);
-    }
-
-    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
-    size_t smem_bytes = static_cast<size_t>(top_k) * sizeof(float)
-                      + static_cast<size_t>(top_k) * sizeof(int)
-                      + BLOCK_SIZE * sizeof(float)
-                      + 1 * sizeof(float)
-                      + 1 * sizeof(float)
-                      + NUM_WARPS * top_k * sizeof(float)
-                      + NUM_WARPS * top_k * sizeof(int);
-
-    topk_topp_sample_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(
-        d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result);
-
-    int32_t h_result = 0;
-    cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
-
-    return h_result;
+    return sample_topk_topp_impl(d_logits, vocab_size, top_k, top_p,
+                                  inv_temperature, seed, d_result, false, stream);
 }
 
 // ===========================================================================
@@ -918,14 +915,7 @@ void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p,
     if (temperature <= 0.0f) temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
 
-    constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
-    size_t smem_bytes = static_cast<size_t>(top_k) * sizeof(float)
-                      + static_cast<size_t>(top_k) * sizeof(int)
-                      + BLOCK_SIZE * sizeof(float)
-                      + 1 * sizeof(float)
-                      + 1 * sizeof(float)
-                      + NUM_WARPS * top_k * sizeof(float)
-                      + NUM_WARPS * top_k * sizeof(int);
+    size_t smem_bytes = topk_topp_smem_size(top_k);
 
     topk_topp_sample_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(
         d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result);
@@ -1033,10 +1023,7 @@ __global__ void apply_min_p_kernel(
         float v = logits[i];
         if (v > local_max) local_max = v;
     }
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-        float other = __shfl_xor_sync(0xFFFFFFFF, local_max, offset);
-        if (other > local_max) local_max = other;
-    }
+    local_max = warp_reduce_max(local_max);
     int warp_id = tid / WARP_SIZE;
     int lane_id = tid % WARP_SIZE;
     if (lane_id == 0) s_max[warp_id] = local_max;
@@ -1198,11 +1185,7 @@ __global__ void apply_typical_p_kernel(
     float local_max = -FLT_MAX;
     for (int i = tid; i < vocab_size; i += blockDim.x)
         local_max = fmaxf(local_max, logits[i]);
-    #pragma unroll
-    for (int o = WARP_SIZE / 2; o > 0; o >>= 1) {
-        float other = __shfl_xor_sync(0xFFFFFFFF, local_max, o);
-        local_max = fmaxf(local_max, other);
-    }
+    local_max = warp_reduce_max(local_max);
     if (lane_id == 0) s_warp[warp_id] = local_max;
     __syncthreads();
     if (tid == 0) {
@@ -1217,9 +1200,7 @@ __global__ void apply_typical_p_kernel(
     float local_sum = 0.0f;
     for (int i = tid; i < vocab_size; i += blockDim.x)
         local_sum += expf(logits[i] - gmax);
-    #pragma unroll
-    for (int o = WARP_SIZE / 2; o > 0; o >>= 1)
-        local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, o);
+    local_sum = warp_reduce_sum(local_sum);
     if (lane_id == 0) s_warp[warp_id] = local_sum;
     __syncthreads();
     if (tid == 0) {
@@ -1239,9 +1220,7 @@ __global__ void apply_typical_p_kernel(
         float p = expf(logits[i] - gmax) / sum_exp;
         if (p > 1e-30f) local_ent -= p * log2f(p);
     }
-    #pragma unroll
-    for (int o = WARP_SIZE / 2; o > 0; o >>= 1)
-        local_ent += __shfl_xor_sync(0xFFFFFFFF, local_ent, o);
+    local_ent = warp_reduce_sum(local_ent);
     if (lane_id == 0) s_warp[warp_id] = local_ent;
     __syncthreads();
     if (tid == 0) {
@@ -1258,11 +1237,7 @@ __global__ void apply_typical_p_kernel(
         float surprise = -(logits[i] - log_sum_exp) * inv_log2;
         local_md = fmaxf(local_md, fabsf(surprise - H));
     }
-    #pragma unroll
-    for (int o = WARP_SIZE / 2; o > 0; o >>= 1) {
-        float other = __shfl_xor_sync(0xFFFFFFFF, local_md, o);
-        local_md = fmaxf(local_md, other);
-    }
+    local_md = warp_reduce_max(local_md);
     if (lane_id == 0) s_warp[warp_id] = local_md;
     __syncthreads();
     if (tid == 0) {
@@ -1352,11 +1327,7 @@ __global__ void mirostat_v2_sample_kernel(
     for (int i = tid; i < vocab_size; i += blockDim.x)
         local_max = fmaxf(local_max, logits[i]);
 
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-        float other = __shfl_xor_sync(0xFFFFFFFF, local_max, offset);
-        local_max = fmaxf(local_max, other);
-    }
+    local_max = warp_reduce_max(local_max);
     if (lane_id == 0) s_warp[warp_id] = local_max;
     __syncthreads();
 
@@ -1373,9 +1344,7 @@ __global__ void mirostat_v2_sample_kernel(
     for (int i = tid; i < vocab_size; i += blockDim.x)
         local_sum += expf((logits[i] - gmax) * inv_temperature);
 
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-        local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, offset);
+    local_sum = warp_reduce_sum(local_sum);
     if (lane_id == 0) s_warp[warp_id] = local_sum;
     __syncthreads();
 
@@ -1402,9 +1371,7 @@ __global__ void mirostat_v2_sample_kernel(
             local_fsum += expf((logits[i] - gmax) * inv_temperature);
     }
 
-    #pragma unroll
-    for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1)
-        local_fsum += __shfl_xor_sync(0xFFFFFFFF, local_fsum, offset);
+    local_fsum = warp_reduce_sum(local_fsum);
     if (lane_id == 0) s_warp[warp_id] = local_fsum;
     __syncthreads();
 

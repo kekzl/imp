@@ -21,6 +21,58 @@
 
 namespace imp {
 
+// =====================================================================
+// File-local helpers (pure refactoring — no behavior changes)
+// =====================================================================
+namespace {
+
+// Free prefill metadata buffers when not using the pre-allocated pool.
+void free_prefill_buffers(int32_t* d_token_ids, int* d_positions,
+                           int* d_block_tables, int* d_context_lens,
+                           cudaStream_t stream) {
+    cudaFreeAsync(d_token_ids, stream);
+    cudaFreeAsync(d_positions, stream);
+    cudaFreeAsync(d_block_tables, stream);
+    cudaFreeAsync(d_context_lens, stream);
+}
+
+// Compute a deterministic-but-varying seed for each decode step.
+// Mixes the request seed (or a hash of the request ID + clock) with
+// the current output token count so each step gets a unique RNG draw.
+int compute_step_seed(const Request& req) {
+    int base_seed = req.seed >= 0 ? req.seed
+        : static_cast<int>(std::hash<int>{}(req.id) ^
+            std::chrono::steady_clock::now().time_since_epoch().count());
+    int step = static_cast<int>(req.output_tokens.size());
+    return base_seed + step;
+}
+
+// Build a TokenLogprobInfo from raw logits on the host.
+TokenLogprobInfo build_logprob_info(const float* h_logits, int vocab_size,
+                                            int32_t sampled_token, int top_logprobs,
+                                            Tokenizer* tok) {
+    LogprobResult lp_result;
+    compute_logprobs_cpu(h_logits, vocab_size, sampled_token, top_logprobs, &lp_result);
+
+    TokenLogprobInfo info;
+    info.logprob = lp_result.sampled_logprob;
+    info.text = tok->decode_token(sampled_token);
+    info.top.reserve(lp_result.top.size());
+    for (const auto& [tid, tlp] : lp_result.top) {
+        info.top.push_back({tid, tlp, tok->decode_token(tid)});
+    }
+    return info;
+}
+
+// Ensure workspace 0 is active (used before prefill and after decode).
+void ensure_prefill_workspace(GraphExecutor* executor) {
+    if (executor->has_decode_workspace() && executor->active_workspace() != 0) {
+        executor->use_workspace(0);
+    }
+}
+
+} // anonymous namespace
+
 Engine::~Engine() {
     // Save prefix cache to disk before shutdown
     if (kv_manager_ && !config_.prefix_cache_path.empty() &&
@@ -1138,10 +1190,8 @@ bool Engine::step() {
             executor_->forward_logits(state, logits_out, pf_stream);
 
             if (!pf_pool_used) {
-                cudaFreeAsync(d_token_ids, pf_stream);
-                cudaFreeAsync(d_positions, pf_stream);
-                cudaFreeAsync(d_block_tables, pf_stream);
-                cudaFreeAsync(d_context_lens, pf_stream);
+                free_prefill_buffers(d_token_ids, d_positions,
+                                     d_block_tables, d_context_lens, pf_stream);
             }
 
             req->prefill_offset = offset + chunk_len;
@@ -1172,10 +1222,8 @@ bool Engine::step() {
                 cudaEventRecord(prefill_done_, pf_stream);
 
                 if (!pf_pool_used) {
-                    cudaFreeAsync(d_token_ids, pf_stream);
-                    cudaFreeAsync(d_positions, pf_stream);
-                    cudaFreeAsync(d_block_tables, pf_stream);
-                    cudaFreeAsync(d_context_lens, pf_stream);
+                    free_prefill_buffers(d_token_ids, d_positions,
+                                         d_block_tables, d_context_lens, pf_stream);
                 }
 
                 cudaEventSynchronize(prefill_done_);
@@ -1186,19 +1234,15 @@ bool Engine::step() {
                 next_token = sampled[0];
 
                 if (!pf_pool_used) {
-                    cudaFreeAsync(d_token_ids, pf_stream);
-                    cudaFreeAsync(d_positions, pf_stream);
-                    cudaFreeAsync(d_block_tables, pf_stream);
-                    cudaFreeAsync(d_context_lens, pf_stream);
+                    free_prefill_buffers(d_token_ids, d_positions,
+                                         d_block_tables, d_context_lens, pf_stream);
                 }
             } else {
                 next_token = executor_->forward(state, pf_stream);
 
                 if (!pf_pool_used) {
-                    cudaFreeAsync(d_token_ids, pf_stream);
-                    cudaFreeAsync(d_positions, pf_stream);
-                    cudaFreeAsync(d_block_tables, pf_stream);
-                    cudaFreeAsync(d_context_lens, pf_stream);
+                    free_prefill_buffers(d_token_ids, d_positions,
+                                         d_block_tables, d_context_lens, pf_stream);
                 }
             }
 
@@ -1216,19 +1260,10 @@ bool Engine::step() {
                                 cudaMemcpyDeviceToHost, pf_stream);
                 cudaStreamSynchronize(pf_stream);
 
-                LogprobResult lp_result;
-                compute_logprobs_cpu(executor_->h_logits_pinned(), vocab_size,
-                                     next_token, req->top_logprobs, &lp_result);
-
-                Tokenizer* ptok = model_->tokenizer();
-                TokenLogprobInfo info;
-                info.logprob = lp_result.sampled_logprob;
-                info.text = ptok->decode_token(next_token);
-                info.top.reserve(lp_result.top.size());
-                for (const auto& [tid, tlp] : lp_result.top) {
-                    info.top.push_back({tid, tlp, ptok->decode_token(tid)});
-                }
-                req->output_logprobs.push_back(std::move(info));
+                req->output_logprobs.push_back(
+                    build_logprob_info(executor_->h_logits_pinned(), vocab_size,
+                                       next_token, req->top_logprobs,
+                                       model_->tokenizer()));
             }
 
             req->output_tokens.push_back(next_token);
@@ -1259,9 +1294,7 @@ bool Engine::step() {
     // ====================================================================
     // 2b. Restore workspace
     // ====================================================================
-    if (executor_->has_decode_workspace() && executor_->active_workspace() != 0) {
-        executor_->use_workspace(0);
-    }
+    ensure_prefill_workspace(executor_.get());
 
     // ====================================================================
     // 3. Process decode requests (BATCHED)
@@ -1375,13 +1408,7 @@ bool Engine::step() {
             // decode step gets a different random draw.  Without this, seed=-1
             // falls back to a fixed 42 on every step, producing identical RNG
             // values and causing repetition loops on long structured outputs.
-            {
-                auto& req0 = valid_decode[0];
-                int base_seed = req0->seed >= 0 ? req0->seed
-                    : static_cast<int>(std::hash<int>{}(req0->id) ^ std::chrono::steady_clock::now().time_since_epoch().count());
-                int step = static_cast<int>(req0->output_tokens.size());
-                state.seed = base_seed + step;
-            }
+            state.seed = compute_step_seed(*valid_decode[0]);
 
             // Penalties (single-sequence only)
             if (gpu_batch.n_sequences == 1) {
@@ -1434,9 +1461,7 @@ bool Engine::step() {
                     InferenceState per_state = state;
                     fill_sampling_params(*req, per_state);
                     // Per-step seed (same fix as single-sequence path)
-                    int base_seed = req->seed >= 0 ? req->seed
-                        : static_cast<int>(std::hash<int>{}(req->id) ^ std::chrono::steady_clock::now().time_since_epoch().count());
-                    per_state.seed = base_seed + static_cast<int>(req->output_tokens.size());
+                    per_state.seed = compute_step_seed(*req);
                     per_state.penalty_tokens = nullptr;
                     per_state.n_penalty_tokens = 0;
                     bool req_needs_pen = (req->repetition_penalty != 1.0f ||
@@ -1532,18 +1557,9 @@ bool Engine::step() {
                     if (!req->logprobs) continue;
 
                     float* h_logits = h_base + static_cast<size_t>(slot) * vocab_size;
-                    LogprobResult lp_result;
-                    compute_logprobs_cpu(h_logits, vocab_size,
-                                         tokens[i], req->top_logprobs, &lp_result);
-
-                    TokenLogprobInfo info;
-                    info.logprob = lp_result.sampled_logprob;
-                    info.text = tok->decode_token(tokens[i]);
-                    info.top.reserve(lp_result.top.size());
-                    for (const auto& [tid, tlp] : lp_result.top) {
-                        info.top.push_back({tid, tlp, tok->decode_token(tid)});
-                    }
-                    req->output_logprobs.push_back(std::move(info));
+                    req->output_logprobs.push_back(
+                        build_logprob_info(h_logits, vocab_size, tokens[i],
+                                           req->top_logprobs, tok));
                     slot++;
                 }
             }
@@ -1592,9 +1608,7 @@ bool Engine::step() {
 decode_done:
 
     // Restore prefill workspace
-    if (executor_->has_decode_workspace() && executor_->active_workspace() != 0) {
-        executor_->use_workspace(0);
-    }
+    ensure_prefill_workspace(executor_.get());
 
     return scheduler_->has_pending() || scheduler_->active_count() > 0;
 }
