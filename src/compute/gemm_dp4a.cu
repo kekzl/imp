@@ -63,6 +63,17 @@ void quantize_fp16_to_q8_1(const half* x, block_q8_1* q8_1_out, float* d8_out,
     int n_blocks = K / 32;
     if (n_blocks <= 0) return;
     quantize_fp16_to_q8_1_kernel<<<n_blocks, 32, 0, stream>>>(x, q8_1_out, d8_out, K);
+
+    // Pad to the next Q6_K block boundary (256 elements = 8 Q8_1 blocks).
+    // When K is not a multiple of 256, the dp4a GEMV reads ceil(K/256)*8
+    // Q8_1 blocks but only K/32 exist. Zero-fill the gap to prevent
+    // out-of-bounds garbage causing NaN (Nemotron: K=2688=10.5*256).
+    int padded_blocks = ((K + 255) / 256) * 8;  // ceil(K/256) * (256/32)
+    if (padded_blocks > n_blocks) {
+        int pad_count = padded_blocks - n_blocks;
+        cudaMemsetAsync(q8_1_out + n_blocks, 0, pad_count * sizeof(block_q8_1), stream);
+        cudaMemsetAsync(d8_out + n_blocks, 0, pad_count * sizeof(float), stream);
+    }
 }
 
 // ---------------------------------------------------------------------------

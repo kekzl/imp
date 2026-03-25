@@ -34,12 +34,24 @@ void* VRAMAllocator::allocate(size_t bytes, const char* tag) {
     if (bytes == 0) return nullptr;
 
     if (initialized_ && !can_allocate(bytes)) {
-        IMP_LOG_WARN("VRAMAllocator: rejecting %s allocation of %.2f MiB "
-                     "(would violate %.0f MiB headroom, %.2f MiB available)",
-                     tag, bytes / (1024.0 * 1024.0),
-                     headroom_ / (1024.0 * 1024.0),
-                     available() / (1024.0 * 1024.0));
-        return nullptr;
+        // Headroom check failed — but check if physical GPU memory suffices.
+        // For models that use nearly all VRAM (e.g. Nemotron-30B at 29+ GiB),
+        // the 10% headroom is too conservative. Critical allocations (workspace,
+        // SSM state, dequant scratch) should still succeed if CUDA has memory.
+        size_t free_mem = 0, total_mem = 0;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        if (free_mem >= bytes + (64 << 20)) {  // 64 MiB minimum safety
+            IMP_LOG_WARN("VRAMAllocator: %s (%.2f MiB) exceeds headroom, "
+                         "allowing (%.0f MiB GPU free)",
+                         tag, bytes / (1024.0 * 1024.0), free_mem / (1024.0 * 1024.0));
+        } else {
+            IMP_LOG_WARN("VRAMAllocator: rejecting %s allocation of %.2f MiB "
+                         "(%.0f MiB free, need %.0f MiB headroom)",
+                         tag, bytes / (1024.0 * 1024.0),
+                         free_mem / (1024.0 * 1024.0),
+                         headroom_ / (1024.0 * 1024.0));
+            return nullptr;
+        }
     }
 
     void* ptr = nullptr;
