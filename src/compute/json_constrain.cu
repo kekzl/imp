@@ -1,4 +1,5 @@
 #include "compute/json_constrain.h"
+#include "compute/constrain_common.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cfloat>
@@ -6,133 +7,6 @@
 #include <algorithm>
 
 namespace imp {
-
-// ============================================================================
-// GPU kernel: apply category mask to logits
-// ============================================================================
-
-__global__ void json_mask_kernel(float* __restrict__ logits,
-                                 const uint16_t* __restrict__ token_cats,
-                                 const uint16_t* __restrict__ allowed_mask,
-                                 int vocab_size) {
-    uint16_t mask = *allowed_mask;
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < vocab_size) {
-        if ((token_cats[idx] & mask) == 0) {
-            logits[idx] = -FLT_MAX;
-        }
-    }
-}
-
-// ============================================================================
-// Token classification
-// ============================================================================
-
-static uint16_t classify_token_text(const std::string& text) {
-    if (text.empty()) return CAT_WHITESPACE;  // allow empty/special tokens
-
-    uint16_t cat = 0;
-
-    // Check if the entire token is a single JSON structural character
-    if (text.size() == 1) {
-        char c = text[0];
-        switch (c) {
-            case '{': cat |= CAT_OPEN_BRACE; break;
-            case '}': cat |= CAT_CLOSE_BRACE; break;
-            case '[': cat |= CAT_OPEN_BRACKET; break;
-            case ']': cat |= CAT_CLOSE_BRACKET; break;
-            case ':': cat |= CAT_COLON; break;
-            case ',': cat |= CAT_COMMA; break;
-            case '"': cat |= CAT_QUOTE; break;
-            case ' ': case '\t': case '\n': case '\r':
-                cat |= CAT_WHITESPACE; break;
-            default: break;
-        }
-    }
-
-    // Multi-char tokens: check if they start with structural chars
-    if (text.size() >= 1) {
-        char first = text[0];
-        // Check if starts with { or [
-        if (first == '{') cat |= CAT_OPEN_BRACE;
-        if (first == '[') cat |= CAT_OPEN_BRACKET;
-        if (first == '}') cat |= CAT_CLOSE_BRACE;
-        if (first == ']') cat |= CAT_CLOSE_BRACKET;
-        if (first == ':') cat |= CAT_COLON;
-        if (first == ',') cat |= CAT_COMMA;
-        if (first == '"') cat |= CAT_QUOTE;
-    }
-
-    // String content: tokens that are valid inside a JSON string
-    // (any printable character, including escaped sequences)
-    {
-        bool all_string_safe = true;
-        for (char c : text) {
-            if (c == '"' || c == '\0') { all_string_safe = false; break; }
-        }
-        if (all_string_safe && !text.empty()) {
-            cat |= CAT_STRING_CHAR;
-        }
-    }
-
-    // Number: starts with digit or minus
-    if (!text.empty()) {
-        char first = text[0];
-        if ((first >= '0' && first <= '9') || first == '-') {
-            cat |= CAT_NUMBER_START;
-        }
-        // Number continuation
-        bool all_num = true;
-        for (char c : text) {
-            if (!((c >= '0' && c <= '9') || c == '.' || c == 'e' ||
-                  c == 'E' || c == '+' || c == '-')) {
-                all_num = false;
-                break;
-            }
-        }
-        if (all_num && !text.empty()) {
-            cat |= CAT_NUMBER_CONT;
-        }
-    }
-
-    // Literal starts
-    if (text.size() >= 1) {
-        if (text[0] == 't') cat |= CAT_TRUE_START;
-        if (text[0] == 'f') cat |= CAT_FALSE_START;
-        if (text[0] == 'n') cat |= CAT_NULL_START;
-    }
-
-    // Literal continuation (for partial tokens like "ru", "ull", etc.)
-    {
-        bool is_literal_part = true;
-        for (char c : text) {
-            if (!(c == 'r' || c == 'u' || c == 'e' || c == 'a' ||
-                  c == 'l' || c == 's')) {
-                is_literal_part = false;
-                break;
-            }
-        }
-        if (is_literal_part && !text.empty()) {
-            cat |= CAT_LITERAL_CONT;
-        }
-    }
-
-    // Whitespace
-    {
-        bool all_ws = true;
-        for (char c : text) {
-            if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
-                all_ws = false;
-                break;
-            }
-        }
-        if (all_ws && !text.empty()) {
-            cat |= CAT_WHITESPACE;
-        }
-    }
-
-    return cat;
-}
 
 // ============================================================================
 // JsonConstrainer implementation
@@ -158,7 +32,7 @@ bool JsonConstrainer::init(const Tokenizer& tok) {
     for (int i = 0; i < vocab_size_; i++) {
         std::string text = tok.decode_token(static_cast<int32_t>(i));
         token_texts_[i] = text;
-        token_categories_[i] = classify_token_text(text);
+        token_categories_[i] = classify_token(text);
     }
 
     // Upload to device
@@ -460,7 +334,7 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
     // Launch masking kernel
     int threads = 256;
     int blocks = (vocab_size + threads - 1) / threads;
-    json_mask_kernel<<<blocks, threads, 0, stream>>>(
+    constrain_mask_kernel<<<blocks, threads, 0, stream>>>(
         d_logits, d_token_categories_, d_allowed_mask_, vocab_size);
 }
 

@@ -41,11 +41,38 @@ static __device__ __forceinline__ void rope_yarn(
 }
 
 // --------------------------------------------------------------------------
-// RoPE kernel for FP32 with YaRN support
+// RoPE element access traits: abstracts FP32 (direct) vs FP16 (convert)
 // --------------------------------------------------------------------------
-__global__ void rope_forward_fp32_kernel(
-    float* __restrict__ Q,
-    float* __restrict__ K,
+template<typename T>
+struct RopeTraits;
+
+template<>
+struct RopeTraits<float> {
+    static __device__ __forceinline__ float load(const float* ptr, int64_t idx) {
+        return ptr[idx];
+    }
+    static __device__ __forceinline__ void store(float* ptr, int64_t idx, float val) {
+        ptr[idx] = val;
+    }
+};
+
+template<>
+struct RopeTraits<__half> {
+    static __device__ __forceinline__ float load(const __half* ptr, int64_t idx) {
+        return __half2float(ptr[idx]);
+    }
+    static __device__ __forceinline__ void store(__half* ptr, int64_t idx, float val) {
+        ptr[idx] = __float2half(val);
+    }
+};
+
+// --------------------------------------------------------------------------
+// Unified RoPE kernel with YaRN support (FP32 and FP16 via template)
+// --------------------------------------------------------------------------
+template<typename T>
+__global__ void rope_forward_kernel(
+    T* __restrict__ Q,
+    T* __restrict__ K,
     const int* __restrict__ positions,
     int batch,
     int seq_len,
@@ -62,6 +89,8 @@ __global__ void rope_forward_fp32_kernel(
     float corr_dim_1,
     const float* __restrict__ longrope_inv_freqs)
 {
+    using Traits = RopeTraits<T>;
+
     const int token_idx = blockIdx.x;
     const int head_idx  = blockIdx.y;
     const int pair_idx  = threadIdx.x;
@@ -99,91 +128,29 @@ __global__ void rope_forward_fp32_kernel(
     if (head_idx < n_heads) {
         int64_t base = static_cast<int64_t>(token_idx) * n_heads * head_dim
                      + static_cast<int64_t>(head_idx) * head_dim;
-        float q0 = Q[base + idx0];
-        float q1 = Q[base + idx1];
-        Q[base + idx0] = q0 * cos_val - q1 * sin_val;
-        Q[base + idx1] = q0 * sin_val + q1 * cos_val;
+        float q0 = Traits::load(Q, base + idx0);
+        float q1 = Traits::load(Q, base + idx1);
+        Traits::store(Q, base + idx0, q0 * cos_val - q1 * sin_val);
+        Traits::store(Q, base + idx1, q0 * sin_val + q1 * cos_val);
     }
 
     if (head_idx < n_kv_heads) {
         int64_t base = static_cast<int64_t>(token_idx) * n_kv_heads * head_dim
                      + static_cast<int64_t>(head_idx) * head_dim;
-        float k0 = K[base + idx0];
-        float k1 = K[base + idx1];
-        K[base + idx0] = k0 * cos_val - k1 * sin_val;
-        K[base + idx1] = k0 * sin_val + k1 * cos_val;
+        float k0 = Traits::load(K, base + idx0);
+        float k1 = Traits::load(K, base + idx1);
+        Traits::store(K, base + idx0, k0 * cos_val - k1 * sin_val);
+        Traits::store(K, base + idx1, k0 * sin_val + k1 * cos_val);
     }
 }
 
-// --------------------------------------------------------------------------
-// RoPE kernel for FP16 with YaRN support
-// --------------------------------------------------------------------------
-__global__ void rope_forward_fp16_kernel(
-    __half* __restrict__ Q,
-    __half* __restrict__ K,
-    const int* __restrict__ positions,
-    int batch,
-    int seq_len,
-    int n_heads,
-    int n_kv_heads,
-    int head_dim,
-    float theta,
-    float inv_scaling,
-    int rope_pairs,
-    bool neox,
-    float ext_factor,
-    float attn_factor,
-    float corr_dim_0,
-    float corr_dim_1,
-    const float* __restrict__ longrope_inv_freqs)
-{
-    const int token_idx = blockIdx.x;
-    const int head_idx  = blockIdx.y;
-    const int pair_idx  = threadIdx.x;
-
-    if (pair_idx >= rope_pairs) return;
-
-    const int pos = positions[token_idx];
-
-    float cos_val, sin_val;
-    if (longrope_inv_freqs) {
-        float freq = longrope_inv_freqs[pair_idx];
-        float angle = static_cast<float>(pos) * freq;
-        cos_val = __cosf(angle);
-        sin_val = __sinf(angle);
-    } else if (ext_factor != 0.0f) {
-        float theta_extrap = static_cast<float>(pos) / powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs));
-        rope_yarn(theta_extrap, inv_scaling, corr_dim_0, corr_dim_1,
-                  2 * pair_idx, ext_factor, attn_factor, cos_val, sin_val);
-    } else {
-        float freq = 1.0f / powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs));
-        freq *= inv_scaling;
-        float angle = static_cast<float>(pos) * freq;
-        cos_val = __cosf(angle);
-        sin_val = __sinf(angle);
-    }
-
-    const int idx0 = neox ? pair_idx : (2 * pair_idx);
-    const int idx1 = neox ? (pair_idx + rope_pairs) : (2 * pair_idx + 1);
-
-    if (head_idx < n_heads) {
-        int64_t base = static_cast<int64_t>(token_idx) * n_heads * head_dim
-                     + static_cast<int64_t>(head_idx) * head_dim;
-        float q0 = __half2float(Q[base + idx0]);
-        float q1 = __half2float(Q[base + idx1]);
-        Q[base + idx0] = __float2half(q0 * cos_val - q1 * sin_val);
-        Q[base + idx1] = __float2half(q0 * sin_val + q1 * cos_val);
-    }
-
-    if (head_idx < n_kv_heads) {
-        int64_t base = static_cast<int64_t>(token_idx) * n_kv_heads * head_dim
-                     + static_cast<int64_t>(head_idx) * head_dim;
-        float k0 = __half2float(K[base + idx0]);
-        float k1 = __half2float(K[base + idx1]);
-        K[base + idx0] = __float2half(k0 * cos_val - k1 * sin_val);
-        K[base + idx1] = __float2half(k0 * sin_val + k1 * cos_val);
-    }
-}
+// Explicit template instantiations
+template __global__ void rope_forward_kernel<float>(
+    float*, float*, const int*, int, int, int, int, int,
+    float, float, int, bool, float, float, float, float, const float*);
+template __global__ void rope_forward_kernel<__half>(
+    __half*, __half*, const int*, int, int, int, int, int,
+    float, float, int, bool, float, float, float, float, const float*);
 
 // --------------------------------------------------------------------------
 // Host dispatch
@@ -222,7 +189,7 @@ void rope_forward(Tensor& Q, Tensor& K,
 
     switch (Q.dtype) {
         case DType::FP32:
-            pdl::launch(rope_forward_fp32_kernel, grid, block, 0, stream,
+            pdl::launch(rope_forward_kernel<float>, grid, block, 0, stream,
                 static_cast<float*>(Q.data),
                 static_cast<float*>(K.data),
                 positions,
@@ -232,7 +199,7 @@ void rope_forward(Tensor& Q, Tensor& K,
                 longrope_inv_freqs);
             break;
         case DType::FP16:
-            pdl::launch(rope_forward_fp16_kernel, grid, block, 0, stream,
+            pdl::launch(rope_forward_kernel<__half>, grid, block, 0, stream,
                 static_cast<__half*>(Q.data),
                 static_cast<__half*>(K.data),
                 positions,
@@ -470,8 +437,8 @@ void rope_yarn_corr_dims(int n_dims, int n_ctx_orig, float freq_base,
 // PDL registration
 // --------------------------------------------------------------------------
 void rope_pdl_register() {
-    pdl::enable(reinterpret_cast<const void*>(&rope_forward_fp16_kernel));
-    pdl::enable(reinterpret_cast<const void*>(&rope_forward_fp32_kernel));
+    pdl::enable(reinterpret_cast<const void*>(&rope_forward_kernel<__half>));
+    pdl::enable(reinterpret_cast<const void*>(&rope_forward_kernel<float>));
     pdl::enable(reinterpret_cast<const void*>(&qknorm_rope_fused_fp16_kernel));
 }
 

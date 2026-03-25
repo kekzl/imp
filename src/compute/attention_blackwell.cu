@@ -22,6 +22,7 @@
 // =============================================================================
 
 #include "compute/attention_tc.h"
+#include "compute/attention_paged_common.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <float.h>
@@ -37,10 +38,10 @@ static constexpr int BW_WARP_SIZE      = 32;
 static constexpr int BW_NUM_WARPS      = 8;
 static constexpr int BW_BLOCK_THREADS  = BW_WARP_SIZE * BW_NUM_WARPS;  // 256
 
-// WMMA tile dimensions
-static constexpr int WMMA_M = 16;
-static constexpr int WMMA_N = 16;
-static constexpr int WMMA_K = 16;
+// WMMA tile dimensions (from attention_paged_common.cuh)
+static constexpr int WMMA_M = kWmmaTileM;
+static constexpr int WMMA_N = kWmmaTileN;
+static constexpr int WMMA_K = kWmmaTileK;
 
 // ---- kernel (templated on Br) -----------------------------------------------
 
@@ -149,20 +150,9 @@ __global__ void flash_attention_blackwell_kernel(
     __syncthreads();
 
     // ---- number of KV tiles to iterate ----
-    int num_kv_tiles = (seq_kv + BW_Bc - 1) / BW_Bc;
-    int first_kv_tile = 0;
-    if (causal) {
-        int max_q = q_start + Br - 1;
-        if (max_q >= seq_q) max_q = seq_q - 1;
-        int furthest_kv_tile = (max_q + BW_Bc) / BW_Bc;
-        if (furthest_kv_tile < num_kv_tiles) num_kv_tiles = furthest_kv_tile;
-    }
-    if (sliding_window > 0) {
-        int earliest_kv = q_start - sliding_window + 1;
-        if (earliest_kv > 0) {
-            first_kv_tile = earliest_kv / BW_Bc;
-        }
-    }
+    int num_kv_tiles, first_kv_tile;
+    compute_kv_tile_bounds(q_start, Br, BW_Bc, seq_q, seq_kv,
+                           causal, sliding_window, first_kv_tile, num_kv_tiles);
 
     // Derived constants for WMMA tiling
     const int hd_chunks     = head_dim / WMMA_K;
@@ -232,25 +222,9 @@ __global__ void flash_attention_blackwell_kernel(
         __syncthreads();
 
         // ---- Apply scale, softcap, and causal/sliding_window mask ----
-        {
-            const int total = Br * BW_Bc;
-            for (int i = tid; i < total; i += BW_BLOCK_THREADS) {
-                int r = i / BW_Bc;
-                int c = i % BW_Bc;
-                int gq = q_start  + r;
-                int gk = kv_start + c;
-
-                if (gq < seq_q && gk < seq_kv) {
-                    float val = SP_float[i] * scale;
-                    if (softcap > 0.0f) val = softcap * tanhf(val / softcap);
-                    if (causal && gq < gk) val = -FLT_MAX;
-                    if (sliding_window > 0 && (gq - gk) >= sliding_window) val = -FLT_MAX;
-                    SP_float[i] = val;
-                } else {
-                    SP_float[i] = -FLT_MAX;
-                }
-            }
-        }
+        apply_score_masks(SP_float, Br, BW_Bc, BW_BLOCK_THREADS,
+                          tid, q_start, kv_start, seq_q, seq_kv,
+                          scale, softcap, causal, sliding_window);
         __syncthreads();
 
         // ============================================================

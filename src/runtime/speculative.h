@@ -80,9 +80,7 @@ private:
     KVCacheManager* draft_kv_manager_ = nullptr;
     bool initialized_ = false;
 
-    // Stochastic acceptance for non-greedy sampling.
-    // Accept draft token with probability min(1, p_target / p_draft).
-    bool stochastic_accept(float p_target, float p_draft, unsigned int& rng_state);
+    // Stochastic acceptance is provided by speculative_common.h (spec_stochastic_accept).
 };
 
 } // namespace imp

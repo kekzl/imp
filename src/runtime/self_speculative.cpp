@@ -1,17 +1,12 @@
 #include "runtime/self_speculative.h"
+#include "runtime/speculative_common.h"
 #include "compute/sampling.h"
-#include "core/logging.h"
-#include <cuda_runtime.h>
-#include <cmath>
-#include <algorithm>
 #include <cstring>
 
 namespace imp {
 
 static void check_cuda(cudaError_t err, const char* msg) {
-    if (err != cudaSuccess) {
-        IMP_LOG_ERROR("self_spec %s: %s", msg, cudaGetErrorString(err));
-    }
+    spec_check_cuda(err, msg);
 }
 
 SelfSpeculativeDecoder::~SelfSpeculativeDecoder() {
