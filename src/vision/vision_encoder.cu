@@ -1,4 +1,5 @@
 #include "vision/vision_encoder.h"
+#include "compute/warp_reduce.cuh"
 #include "memory/vram_allocator.h"
 #include "core/logging.h"
 
@@ -148,26 +149,11 @@ __global__ void vision_layernorm_kernel(
     half* o_row = out + row * D;
 
     // Compute mean
+    __shared__ float s_buf[32];
     float sum = 0.0f;
     for (int i = tid; i < D; i += blockDim.x)
         sum += __half2float(x_row[i]);
-    // Warp reduction
-    for (int mask = 16; mask > 0; mask >>= 1)
-        sum += __shfl_xor_sync(0xffffffff, sum, mask);
-    // Cross-warp reduction
-    __shared__ float s_buf[32];
-    int warp_id = tid / 32;
-    int lane = tid % 32;
-    int n_warps = (blockDim.x + 31) / 32;
-    if (lane == 0) s_buf[warp_id] = sum;
-    __syncthreads();
-    if (tid == 0) {
-        float total = 0.0f;
-        for (int w = 0; w < n_warps; w++) total += s_buf[w];
-        s_buf[0] = total;
-    }
-    __syncthreads();
-    float mean = s_buf[0] / D;
+    float mean = block_reduce_sum(sum, s_buf) / D;
 
     // Compute variance
     float var_sum = 0.0f;
@@ -175,17 +161,7 @@ __global__ void vision_layernorm_kernel(
         float v = __half2float(x_row[i]) - mean;
         var_sum += v * v;
     }
-    for (int mask = 16; mask > 0; mask >>= 1)
-        var_sum += __shfl_xor_sync(0xffffffff, var_sum, mask);
-    if (lane == 0) s_buf[warp_id] = var_sum;
-    __syncthreads();
-    if (tid == 0) {
-        float total = 0.0f;
-        for (int w = 0; w < n_warps; w++) total += s_buf[w];
-        s_buf[0] = total;
-    }
-    __syncthreads();
-    float inv_std = rsqrtf(s_buf[0] / D + eps);
+    float inv_std = rsqrtf(block_reduce_sum(var_sum, s_buf) / D + eps);
 
     // Normalize + scale + bias
     for (int i = tid; i < D; i += blockDim.x) {
@@ -208,27 +184,13 @@ __global__ void vision_rmsnorm_kernel(
     const half* x_row = x + row * D;
     half* o_row = out + row * D;
 
+    __shared__ float s_buf[32];
     float ss = 0.0f;
     for (int i = tid; i < D; i += blockDim.x) {
         float v = __half2float(x_row[i]);
         ss += v * v;
     }
-    for (int mask = 16; mask > 0; mask >>= 1)
-        ss += __shfl_xor_sync(0xffffffff, ss, mask);
-
-    __shared__ float s_buf[32];
-    int warp_id = tid / 32;
-    int lane = tid % 32;
-    int n_warps = (blockDim.x + 31) / 32;
-    if (lane == 0) s_buf[warp_id] = ss;
-    __syncthreads();
-    if (tid == 0) {
-        float total = 0.0f;
-        for (int w = 0; w < n_warps; w++) total += s_buf[w];
-        s_buf[0] = total;
-    }
-    __syncthreads();
-    float inv_rms = rsqrtf(s_buf[0] / D + eps);
+    float inv_rms = rsqrtf(block_reduce_sum(ss, s_buf) / D + eps);
 
     for (int i = tid; i < D; i += blockDim.x) {
         float v = __half2float(x_row[i]) * inv_rms * __half2float(weight[i]);
@@ -271,29 +233,16 @@ __global__ void gelu_tanh_kernel(half* __restrict__ x, int N) {
 __global__ void softmax_2d_kernel(half* __restrict__ scores, int cols) {
     int row = blockIdx.x;  // flattened: head * num_patches + patch
     int tid = threadIdx.x;
-    int warp_id = tid / 32;
-    int lane = tid % 32;
-    int n_warps = (blockDim.x + 31) / 32;
 
     half* row_ptr = scores + static_cast<int64_t>(row) * cols;
+
+    __shared__ float s_buf[32];
 
     // Find max
     float max_val = -FLT_MAX;
     for (int j = tid; j < cols; j += blockDim.x)
         max_val = fmaxf(max_val, __half2float(row_ptr[j]));
-    for (int mask = 16; mask > 0; mask >>= 1)
-        max_val = fmaxf(max_val, __shfl_xor_sync(0xffffffff, max_val, mask));
-
-    __shared__ float s_buf[32];
-    if (lane == 0) s_buf[warp_id] = max_val;
-    __syncthreads();
-    if (tid == 0) {
-        float m = -FLT_MAX;
-        for (int w = 0; w < n_warps; w++) m = fmaxf(m, s_buf[w]);
-        s_buf[0] = m;
-    }
-    __syncthreads();
-    max_val = s_buf[0];
+    max_val = block_reduce_max(max_val, s_buf);
 
     // Exp and sum
     float sum = 0.0f;
@@ -302,17 +251,7 @@ __global__ void softmax_2d_kernel(half* __restrict__ scores, int cols) {
         row_ptr[j] = __float2half(e);
         sum += e;
     }
-    for (int mask = 16; mask > 0; mask >>= 1)
-        sum += __shfl_xor_sync(0xffffffff, sum, mask);
-    if (lane == 0) s_buf[warp_id] = sum;
-    __syncthreads();
-    if (tid == 0) {
-        float total = 0.0f;
-        for (int w = 0; w < n_warps; w++) total += s_buf[w];
-        s_buf[0] = total;
-    }
-    __syncthreads();
-    float inv_sum = 1.0f / s_buf[0];
+    float inv_sum = 1.0f / block_reduce_sum(sum, s_buf);
 
     // Normalize
     for (int j = tid; j < cols; j += blockDim.x)

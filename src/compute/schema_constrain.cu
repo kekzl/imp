@@ -1,5 +1,6 @@
 #include "compute/schema_constrain.h"
 #include "compute/json_constrain.h"  // reuse token category definitions
+#include "compute/constrain_common.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -8,38 +9,6 @@
 #include <cstring>
 
 namespace imp {
-
-// ---------------------------------------------------------------------------
-// GPU kernel: dual mask — category bitmask + per-token allow
-// ---------------------------------------------------------------------------
-__global__ void schema_mask_kernel(
-    float* __restrict__ logits,
-    const uint16_t* __restrict__ token_cats,
-    const uint8_t* __restrict__ token_allow,
-    const uint16_t* __restrict__ allowed_mask,
-    int vocab_size,
-    bool use_token_allow)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= vocab_size) return;
-
-    uint16_t mask = *allowed_mask;
-    bool cat_ok = (token_cats[idx] & mask) != 0;
-
-    if (use_token_allow) {
-        // Schema mode: token must pass category mask AND token_allow.
-        // token_allow further restricts which tokens are valid (e.g., only
-        // property name prefixes, not arbitrary strings).
-        bool allow_ok = token_allow[idx] != 0;
-        if (!cat_ok || !allow_ok) {
-            logits[idx] = -FLT_MAX;
-        }
-    } else {
-        if (!cat_ok) {
-            logits[idx] = -FLT_MAX;
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Initialization
@@ -65,73 +34,7 @@ bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> s
     for (int i = 0; i < vocab_size_; i++) {
         std::string text = tok.decode_token(i);
         token_texts_[i] = text;
-
-        if (text.empty()) continue;
-
-        uint16_t cat = 0;
-        char first = text[0];
-        bool all_same = true;
-        for (size_t j = 1; j < text.size(); j++) {
-            if (text[j] != first) { all_same = false; break; }
-        }
-
-        // Single-character tokens get precise categories
-        if (text.size() == 1) {
-            switch (first) {
-                case '{': cat |= CAT_OPEN_BRACE; break;
-                case '}': cat |= CAT_CLOSE_BRACE; break;
-                case '[': cat |= CAT_OPEN_BRACKET; break;
-                case ']': cat |= CAT_CLOSE_BRACKET; break;
-                case ':': cat |= CAT_COLON; break;
-                case ',': cat |= CAT_COMMA; break;
-                case '"': cat |= CAT_QUOTE; break;
-                case 't': cat |= CAT_TRUE_START | CAT_STRING_CHAR | CAT_LITERAL_CONT; break;
-                case 'f': cat |= CAT_FALSE_START | CAT_STRING_CHAR | CAT_LITERAL_CONT; break;
-                case 'n': cat |= CAT_NULL_START | CAT_STRING_CHAR | CAT_LITERAL_CONT; break;
-                default: break;
-            }
-            if (first >= '0' && first <= '9')
-                cat |= CAT_NUMBER_START | CAT_NUMBER_CONT | CAT_STRING_CHAR;
-            if (first == '-')
-                cat |= CAT_NUMBER_START | CAT_NUMBER_CONT | CAT_STRING_CHAR;
-            if (first == '.' || first == 'e' || first == 'E' || first == '+')
-                cat |= CAT_NUMBER_CONT | CAT_STRING_CHAR;
-            if (first == ' ' || first == '\t' || first == '\n' || first == '\r')
-                cat |= CAT_WHITESPACE;
-            // General string chars
-            if (first >= 32 && first != '"' && first != '\\')
-                cat |= CAT_STRING_CHAR;
-            // Literal continuation
-            if (std::strchr("ruealskl", first))
-                cat |= CAT_LITERAL_CONT;
-        } else {
-            // Multi-character tokens
-            bool is_ws = true;
-            bool is_str = true;
-            bool is_num = true;
-            bool is_lit = true;
-            for (char c : text) {
-                if (c != ' ' && c != '\t' && c != '\n' && c != '\r') is_ws = false;
-                if (c < 32 || c == '"' || c == '\\') is_str = false;
-                if (!std::strchr("0123456789.-+eE", c)) is_num = false;
-                if (!std::islower(static_cast<unsigned char>(c))) is_lit = false;
-            }
-            if (is_ws) cat |= CAT_WHITESPACE;
-            if (is_str) cat |= CAT_STRING_CHAR;
-            if (is_num) {
-                cat |= CAT_NUMBER_CONT;
-                if (first >= '0' && first <= '9') cat |= CAT_NUMBER_START;
-                if (first == '-') cat |= CAT_NUMBER_START;
-            }
-            if (is_lit) {
-                cat |= CAT_LITERAL_CONT;
-                if (first == 't') cat |= CAT_TRUE_START;
-                if (first == 'f') cat |= CAT_FALSE_START;
-                if (first == 'n') cat |= CAT_NULL_START;
-            }
-        }
-
-        token_categories_[i] = cat;
+        token_categories_[i] = classify_token(text);
     }
 
     // Upload to GPU
@@ -414,7 +317,7 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
 
     int threads = 256;
     int blocks = (vocab_size + threads - 1) / threads;
-    schema_mask_kernel<<<blocks, threads, 0, stream>>>(
+    constrain_mask_allow_kernel<<<blocks, threads, 0, stream>>>(
         d_logits, d_token_categories_, d_token_allow_, d_allowed_mask_,
         vocab_size, need_token_allow_);
 }

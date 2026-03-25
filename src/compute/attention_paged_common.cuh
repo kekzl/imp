@@ -153,4 +153,67 @@ static inline int compute_splitk_splits(
     return num_splits;
 }
 
+// ---------------------------------------------------------------------------
+// WMMA tile dimensions shared by attention_tc.cu and attention_blackwell.cu.
+// ---------------------------------------------------------------------------
+static constexpr int kWmmaTileM = 16;
+static constexpr int kWmmaTileN = 16;
+static constexpr int kWmmaTileK = 16;
+
+// ---------------------------------------------------------------------------
+// Compute KV tile loop bounds for causal + sliding_window masking.
+// Shared by all WMMA prefill attention kernels.
+//
+// On entry:  first_kv_tile = 0, num_kv_tiles = ceil(seq_kv / Bc).
+// On return: both are narrowed to the range that can produce non-masked scores.
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ void compute_kv_tile_bounds(
+    int q_start, int Br, int Bc, int seq_q, int seq_kv,
+    bool causal, int sliding_window,
+    int& first_kv_tile, int& num_kv_tiles) {
+    num_kv_tiles = (seq_kv + Bc - 1) / Bc;
+    first_kv_tile = 0;
+    if (causal) {
+        int max_q = q_start + Br - 1;
+        if (max_q >= seq_q) max_q = seq_q - 1;
+        int furthest_kv_tile = (max_q + Bc) / Bc;
+        if (furthest_kv_tile < num_kv_tiles) num_kv_tiles = furthest_kv_tile;
+    }
+    if (sliding_window > 0) {
+        int earliest_kv = q_start - sliding_window + 1;
+        if (earliest_kv > 0) {
+            first_kv_tile = earliest_kv / Bc;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Apply scale, softcap, and causal/sliding_window mask to a score tile.
+// S_tile is [Br x Bc] row-major.  Called by all threads in the block with a
+// strided loop.  Used by both Hopper and Blackwell WMMA prefill kernels.
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ void apply_score_masks(
+    float* S_tile, int Br, int Bc, int block_threads,
+    int tid, int q_start, int kv_start,
+    int seq_q, int seq_kv, float scale,
+    float softcap, bool causal, int sliding_window) {
+    const int total = Br * Bc;
+    for (int i = tid; i < total; i += block_threads) {
+        int r = i / Bc;
+        int c = i % Bc;
+        int gq = q_start  + r;
+        int gk = kv_start + c;
+
+        if (gq < seq_q && gk < seq_kv) {
+            float val = S_tile[i] * scale;
+            if (softcap > 0.0f) val = apply_softcap(val, softcap);
+            if (causal && gq < gk) val = -FLT_MAX;
+            if (sliding_window > 0 && (gq - gk) >= sliding_window) val = -FLT_MAX;
+            S_tile[i] = val;
+        } else {
+            S_tile[i] = -FLT_MAX;
+        }
+    }
+}
+
 } // namespace imp

@@ -8,23 +8,61 @@
 namespace imp {
 
 // --------------------------------------------------------------------------
-// Vectorized embedding kernel (float4 path for FP32)
-// Grid: (n_tokens), Block: min(256, ceil(d_model/4))
-// Each thread copies 4 consecutive FP32 elements.
+// Embedding vector type traits: maps element type to 4-element vector type
+// FP32: float  -> float4 (16 bytes), FP16: __half -> float2 (8 bytes),
+// BF16: uint16 -> uint2  (8 bytes).  All pack 4 elements per vector load.
 // --------------------------------------------------------------------------
-__global__ void embedding_lookup_fp32_vec4(
-    const float* __restrict__ table,
+template<typename T> struct EmbedVecTraits;
+template<> struct EmbedVecTraits<float>    { using Vec = float4; };
+template<> struct EmbedVecTraits<__half>   { using Vec = float2; };
+template<> struct EmbedVecTraits<uint16_t> { using Vec = uint2;  };
+
+// --------------------------------------------------------------------------
+// Scalar embedding kernel (fallback when d_model % 4 != 0)
+// --------------------------------------------------------------------------
+template<typename T>
+__global__ void embedding_lookup_scalar_kernel(
+    const T* __restrict__ table,
     const int32_t* __restrict__ token_ids,
-    float* __restrict__ out,
+    T* __restrict__ out,
     int d_model)
 {
     const int token = blockIdx.x;
     const int tid   = threadIdx.x;
-    const int vec_d = d_model / 4;  // number of float4 elements per row
+    const int row   = token_ids[token];
 
-    const int row = token_ids[token];
-    const float4* src = reinterpret_cast<const float4*>(table + static_cast<int64_t>(row) * d_model);
-    float4*       dst = reinterpret_cast<float4*>(out + static_cast<int64_t>(token) * d_model);
+    for (int i = tid; i < d_model; i += blockDim.x) {
+        out[static_cast<int64_t>(token) * d_model + i] =
+            table[static_cast<int64_t>(row) * d_model + i];
+    }
+}
+
+// Explicit template instantiations
+template __global__ void embedding_lookup_scalar_kernel<float>(
+    const float*, const int32_t*, float*, int);
+template __global__ void embedding_lookup_scalar_kernel<__half>(
+    const __half*, const int32_t*, __half*, int);
+
+// --------------------------------------------------------------------------
+// Vectorized embedding kernel: copies 4 elements per vector load/store
+// Grid: (n_tokens), Block: 256
+// --------------------------------------------------------------------------
+template<typename T>
+__global__ void embedding_lookup_vec_kernel(
+    const T* __restrict__ table,
+    const int32_t* __restrict__ token_ids,
+    T* __restrict__ out,
+    int d_model)
+{
+    using Vec = typename EmbedVecTraits<T>::Vec;
+
+    const int token = blockIdx.x;
+    const int tid   = threadIdx.x;
+    const int row   = token_ids[token];
+    const int vec_d = d_model / 4;  // number of vector elements per row
+
+    const Vec* src = reinterpret_cast<const Vec*>(table + static_cast<int64_t>(row) * d_model);
+    Vec*       dst = reinterpret_cast<Vec*>(out + static_cast<int64_t>(token) * d_model);
 
     for (int i = tid; i < vec_d; i += blockDim.x) {
         dst[i] = src[i];
@@ -38,106 +76,63 @@ __global__ void embedding_lookup_fp32_vec4(
     }
 }
 
-// --------------------------------------------------------------------------
-// Scalar embedding kernel for FP32 fallback
-// --------------------------------------------------------------------------
-__global__ void embedding_lookup_fp32(
-    const float* __restrict__ table,
-    const int32_t* __restrict__ token_ids,
-    float* __restrict__ out,
-    int d_model)
-{
-    const int token = blockIdx.x;
-    const int tid   = threadIdx.x;
-    const int row   = token_ids[token];
+// Explicit template instantiations
+template __global__ void embedding_lookup_vec_kernel<float>(
+    const float*, const int32_t*, float*, int);
+template __global__ void embedding_lookup_vec_kernel<__half>(
+    const __half*, const int32_t*, __half*, int);
+template __global__ void embedding_lookup_vec_kernel<uint16_t>(
+    const uint16_t*, const int32_t*, uint16_t*, int);
 
-    for (int i = tid; i < d_model; i += blockDim.x) {
-        out[static_cast<int64_t>(token) * d_model + i] =
-            table[static_cast<int64_t>(row) * d_model + i];
-    }
+// --------------------------------------------------------------------------
+// Quantized dequantization helpers (shared by batch and device-side kernels)
+// --------------------------------------------------------------------------
+
+// Q8_0 block format: 34 bytes per 32 elements (2 fp16 scale + 32 int8)
+static __device__ __forceinline__ half dequant_q8_0_element(
+    const uint8_t* __restrict__ row_ptr, int i)
+{
+    int blk = i / 32;
+    int q_idx = i % 32;
+    const uint8_t* block_ptr = row_ptr + blk * 34;
+    half d_val = *reinterpret_cast<const half*>(block_ptr);
+    int8_t q = reinterpret_cast<const int8_t*>(block_ptr + 2)[q_idx];
+    return __float2half(__half2float(d_val) * static_cast<float>(q));
 }
 
-// --------------------------------------------------------------------------
-// Vectorized embedding kernel for FP16 (copies 4 half values = 2x uint32)
-// --------------------------------------------------------------------------
-__global__ void embedding_lookup_fp16_vec(
-    const __half* __restrict__ table,
-    const int32_t* __restrict__ token_ids,
-    __half* __restrict__ out,
-    int d_model)
+// Q6_K block format: 210 bytes per 256 elements (GGML interleaved layout)
+static __device__ __forceinline__ half dequant_q6k_element(
+    const uint8_t* __restrict__ row_ptr, int idx)
 {
-    const int token = blockIdx.x;
-    const int tid   = threadIdx.x;
-    const int row   = token_ids[token];
+    int blk = idx / 256;
+    int i   = idx % 256;
+    const uint8_t* block_ptr = row_ptr + blk * 210;
 
-    // Use float2 to load 4 half values at once (8 bytes)
-    const int vec_d = d_model / 4;
-    const float2* src = reinterpret_cast<const float2*>(table + static_cast<int64_t>(row) * d_model);
-    float2*       dst = reinterpret_cast<float2*>(out + static_cast<int64_t>(token) * d_model);
+    const uint8_t* ql    = block_ptr;
+    const uint8_t* qh    = block_ptr + 128;
+    const int8_t*  scales = reinterpret_cast<const int8_t*>(block_ptr + 192);
+    half d_val = *reinterpret_cast<const half*>(block_ptr + 208);
 
-    for (int i = tid; i < vec_d; i += blockDim.x) {
-        dst[i] = src[i];
-    }
+    int group  = i >> 7;
+    int within = i & 127;
+    int quad   = within >> 5;
+    int l      = within & 31;
 
-    // Handle tail
-    const int tail_start = vec_d * 4;
-    for (int i = tail_start + tid; i < d_model; i += blockDim.x) {
-        out[static_cast<int64_t>(token) * d_model + i] =
-            table[static_cast<int64_t>(row) * d_model + i];
-    }
-}
+    int ql_idx = (group << 6) + ((quad & 1) << 5) + l;
+    int qh_idx = (group << 5) + l;
 
-// --------------------------------------------------------------------------
-// Scalar FP16 fallback
-// --------------------------------------------------------------------------
-__global__ void embedding_lookup_fp16(
-    const __half* __restrict__ table,
-    const int32_t* __restrict__ token_ids,
-    __half* __restrict__ out,
-    int d_model)
-{
-    const int token = blockIdx.x;
-    const int tid   = threadIdx.x;
-    const int row   = token_ids[token];
+    uint8_t ql_byte = ql[ql_idx];
+    uint8_t low4 = (quad >= 2) ? ((ql_byte >> 4) & 0xFu) : (ql_byte & 0xFu);
+    uint8_t high2 = (qh[qh_idx] >> (quad * 2)) & 0x3u;
+    int q6 = static_cast<int>((high2 << 4) | low4) - 32;
 
-    for (int i = tid; i < d_model; i += blockDim.x) {
-        out[static_cast<int64_t>(token) * d_model + i] =
-            table[static_cast<int64_t>(row) * d_model + i];
-    }
-}
-
-// --------------------------------------------------------------------------
-// BF16 embedding kernel (__nv_bfloat16 stored as uint16)
-// --------------------------------------------------------------------------
-__global__ void embedding_lookup_bf16_vec(
-    const uint16_t* __restrict__ table,
-    const int32_t* __restrict__ token_ids,
-    uint16_t* __restrict__ out,
-    int d_model)
-{
-    const int token = blockIdx.x;
-    const int tid   = threadIdx.x;
-    const int row   = token_ids[token];
-
-    // Use uint2 to copy 4 bf16 values (8 bytes) at a time
-    const int vec_d = d_model / 4;
-    const uint2* src = reinterpret_cast<const uint2*>(table + static_cast<int64_t>(row) * d_model);
-    uint2*       dst = reinterpret_cast<uint2*>(out + static_cast<int64_t>(token) * d_model);
-
-    for (int i = tid; i < vec_d; i += blockDim.x) {
-        dst[i] = src[i];
-    }
-
-    const int tail_start = vec_d * 4;
-    for (int i = tail_start + tid; i < d_model; i += blockDim.x) {
-        out[static_cast<int64_t>(token) * d_model + i] =
-            table[static_cast<int64_t>(row) * d_model + i];
-    }
+    float val = __half2float(d_val) * static_cast<float>(scales[i >> 4])
+                * static_cast<float>(q6);
+    return __float2half(val);
 }
 
 // --------------------------------------------------------------------------
 // Q8_0 embedding lookup: dequantize only the needed rows on the fly.
-// Q8_0 block format: 34 bytes per 32 elements (2 fp16 scale + 32 int8).
 // Grid: (n_tokens), Block: 256
 // --------------------------------------------------------------------------
 __global__ void embedding_lookup_q8_0_kernel(
@@ -155,19 +150,13 @@ __global__ void embedding_lookup_q8_0_kernel(
     half* out_row = out + static_cast<int64_t>(token) * d_model;
 
     for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
-        int blk = i / 32;
-        int q_idx = i % 32;
-        const uint8_t* block_ptr = row_ptr + blk * 34;
-        half d_val = *reinterpret_cast<const half*>(block_ptr);
-        int8_t q = reinterpret_cast<const int8_t*>(block_ptr + 2)[q_idx];
-        out_row[i] = __float2half(__half2float(d_val) * static_cast<float>(q));
+        out_row[i] = dequant_q8_0_element(row_ptr, i);
     }
 }
 
 // --------------------------------------------------------------------------
 // Q6_K embedding lookup: dequantize only the needed rows on the fly.
-// Q6_K block format: 210 bytes per 256 elements.
-// Uses same GGML interleaved layout as dequant_gpu.cu.
+// Grid: (n_tokens), Block: 256
 // --------------------------------------------------------------------------
 __global__ void embedding_lookup_q6k_kernel(
     const uint8_t* __restrict__ table_raw,
@@ -184,31 +173,7 @@ __global__ void embedding_lookup_q6k_kernel(
     half* out_row = out + static_cast<int64_t>(token) * d_model;
 
     for (int idx = threadIdx.x; idx < d_model; idx += blockDim.x) {
-        int blk = idx / 256;
-        int i   = idx % 256;
-        const uint8_t* block_ptr = row_ptr + blk * 210;
-
-        const uint8_t* ql    = block_ptr;
-        const uint8_t* qh    = block_ptr + 128;
-        const int8_t*  scales = reinterpret_cast<const int8_t*>(block_ptr + 192);
-        half d_val = *reinterpret_cast<const half*>(block_ptr + 208);
-
-        int group  = i >> 7;
-        int within = i & 127;
-        int quad   = within >> 5;
-        int l      = within & 31;
-
-        int ql_idx = (group << 6) + ((quad & 1) << 5) + l;
-        int qh_idx = (group << 5) + l;
-
-        uint8_t ql_byte = ql[ql_idx];
-        uint8_t low4 = (quad >= 2) ? ((ql_byte >> 4) & 0xFu) : (ql_byte & 0xFu);
-        uint8_t high2 = (qh[qh_idx] >> (quad * 2)) & 0x3u;
-        int q6 = static_cast<int>((high2 << 4) | low4) - 32;
-
-        float val = __half2float(d_val) * static_cast<float>(scales[i >> 4])
-                    * static_cast<float>(q6);
-        out_row[idx] = __float2half(val);
+        out_row[idx] = dequant_q6k_element(row_ptr, idx);
     }
 }
 
@@ -227,13 +192,13 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids,
     switch (table.dtype) {
         case DType::FP32: {
             if (d_model % 4 == 0) {
-                embedding_lookup_fp32_vec4<<<n_tokens, block, 0, stream>>>(
+                embedding_lookup_vec_kernel<float><<<n_tokens, block, 0, stream>>>(
                     static_cast<const float*>(table.data),
                     token_ids,
                     static_cast<float*>(out.data),
                     d_model);
             } else {
-                embedding_lookup_fp32<<<n_tokens, block, 0, stream>>>(
+                embedding_lookup_scalar_kernel<float><<<n_tokens, block, 0, stream>>>(
                     static_cast<const float*>(table.data),
                     token_ids,
                     static_cast<float*>(out.data),
@@ -243,13 +208,13 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids,
         }
         case DType::FP16: {
             if (d_model % 4 == 0) {
-                embedding_lookup_fp16_vec<<<n_tokens, block, 0, stream>>>(
+                embedding_lookup_vec_kernel<__half><<<n_tokens, block, 0, stream>>>(
                     static_cast<const __half*>(table.data),
                     token_ids,
                     static_cast<__half*>(out.data),
                     d_model);
             } else {
-                embedding_lookup_fp16<<<n_tokens, block, 0, stream>>>(
+                embedding_lookup_scalar_kernel<__half><<<n_tokens, block, 0, stream>>>(
                     static_cast<const __half*>(table.data),
                     token_ids,
                     static_cast<__half*>(out.data),
@@ -258,7 +223,7 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids,
             break;
         }
         case DType::BF16: {
-            embedding_lookup_bf16_vec<<<n_tokens, block, 0, stream>>>(
+            embedding_lookup_vec_kernel<uint16_t><<<n_tokens, block, 0, stream>>>(
                 static_cast<const uint16_t*>(table.data),
                 token_ids,
                 static_cast<uint16_t*>(out.data),
@@ -313,7 +278,7 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids,
 // Only supports n_tokens=1 (single decode step).
 // --------------------------------------------------------------------------
 
-// FP16 device-side embedding (vectorized)
+// FP16 device-side embedding (vectorized, reads token ID from device memory)
 __global__ void embedding_lookup_fp16_device_kernel(
     const __half* __restrict__ table,
     const int32_t* __restrict__ d_token_id,
@@ -337,7 +302,7 @@ __global__ void embedding_lookup_fp16_device_kernel(
     }
 }
 
-// Q8_0 device-side embedding
+// Q8_0 device-side embedding (uses shared dequant helper)
 __global__ void embedding_lookup_q8_0_device_kernel(
     const uint8_t* __restrict__ table_raw,
     const int32_t* __restrict__ d_token_id,
@@ -351,16 +316,11 @@ __global__ void embedding_lookup_q8_0_device_kernel(
     const uint8_t* row_ptr = table_raw + static_cast<int64_t>(row) * row_bytes;
 
     for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
-        int blk = i / 32;
-        int q_idx = i % 32;
-        const uint8_t* block_ptr = row_ptr + blk * 34;
-        half d_val = *reinterpret_cast<const half*>(block_ptr);
-        int8_t q = reinterpret_cast<const int8_t*>(block_ptr + 2)[q_idx];
-        out[i] = __float2half(__half2float(d_val) * static_cast<float>(q));
+        out[i] = dequant_q8_0_element(row_ptr, i);
     }
 }
 
-// Q6_K device-side embedding
+// Q6_K device-side embedding (uses shared dequant helper)
 __global__ void embedding_lookup_q6k_device_kernel(
     const uint8_t* __restrict__ table_raw,
     const int32_t* __restrict__ d_token_id,
@@ -374,31 +334,7 @@ __global__ void embedding_lookup_q6k_device_kernel(
     const uint8_t* row_ptr = table_raw + static_cast<int64_t>(row) * row_bytes;
 
     for (int idx = threadIdx.x; idx < d_model; idx += blockDim.x) {
-        int blk = idx / 256;
-        int i   = idx % 256;
-        const uint8_t* block_ptr = row_ptr + blk * 210;
-
-        const uint8_t* ql    = block_ptr;
-        const uint8_t* qh    = block_ptr + 128;
-        const int8_t*  scales = reinterpret_cast<const int8_t*>(block_ptr + 192);
-        half d_val = *reinterpret_cast<const half*>(block_ptr + 208);
-
-        int group  = i >> 7;
-        int within = i & 127;
-        int quad   = within >> 5;
-        int l      = within & 31;
-
-        int ql_idx = (group << 6) + ((quad & 1) << 5) + l;
-        int qh_idx = (group << 5) + l;
-
-        uint8_t ql_byte = ql[ql_idx];
-        uint8_t low4 = (quad >= 2) ? ((ql_byte >> 4) & 0xFu) : (ql_byte & 0xFu);
-        uint8_t high2 = (qh[qh_idx] >> (quad * 2)) & 0x3u;
-        int q6 = static_cast<int>((high2 << 4) | low4) - 32;
-
-        float val = __half2float(d_val) * static_cast<float>(scales[i >> 4])
-                    * static_cast<float>(q6);
-        out[idx] = __float2half(val);
+        out[idx] = dequant_q6k_element(row_ptr, idx);
     }
 }
 

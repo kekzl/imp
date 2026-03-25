@@ -1,4 +1,5 @@
 #include "compute/attention_tc.h"
+#include "compute/attention_paged_common.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <float.h>
@@ -46,10 +47,10 @@ static constexpr int TC_WARP_SIZE = 32;
 static constexpr int TC_BLOCK_THREADS = 128;
 static constexpr int TC_NUM_WARPS = TC_BLOCK_THREADS / TC_WARP_SIZE;
 
-// WMMA tile dimensions
-static constexpr int WMMA_M = 16;
-static constexpr int WMMA_N = 16;
-static constexpr int WMMA_K = 16;
+// WMMA tile dimensions (from attention_paged_common.cuh)
+static constexpr int WMMA_M = kWmmaTileM;
+static constexpr int WMMA_N = kWmmaTileN;
+static constexpr int WMMA_K = kWmmaTileK;
 
 __global__ void flash_attention_prefill_tc_kernel(
     const half* __restrict__ Q,
@@ -136,20 +137,9 @@ __global__ void flash_attention_prefill_tc_kernel(
     float l_i = 0.0f;       // running denominator
 
     // ---- Number of KV tiles to iterate ----
-    int num_kv_tiles = (seq_kv + TC_Bc - 1) / TC_Bc;
-    int first_kv_tile = 0;
-    if (causal) {
-        int max_q = q_start + TC_Br - 1;
-        if (max_q >= seq_q) max_q = seq_q - 1;
-        int furthest_kv_tile = (max_q + TC_Bc) / TC_Bc;
-        if (furthest_kv_tile < num_kv_tiles) num_kv_tiles = furthest_kv_tile;
-    }
-    if (sliding_window > 0) {
-        int earliest_kv = q_start - sliding_window + 1;
-        if (earliest_kv > 0) {
-            first_kv_tile = earliest_kv / TC_Bc;
-        }
-    }
+    int num_kv_tiles, first_kv_tile;
+    compute_kv_tile_bounds(q_start, TC_Br, TC_Bc, seq_q, seq_kv,
+                           causal, sliding_window, first_kv_tile, num_kv_tiles);
 
     // Derived constants for WMMA tiling
     const int hd_chunks   = head_dim / WMMA_K;              // e.g. 128/16 = 8
@@ -247,25 +237,9 @@ __global__ void flash_attention_prefill_tc_kernel(
         __syncthreads();
 
         // ---- Apply scale, softcap, and causal mask to S_tile ----
-        {
-            const int total = TC_Br * TC_Bc;
-            for (int i = tid; i < total; i += TC_BLOCK_THREADS) {
-                int r = i / TC_Bc;
-                int c = i % TC_Bc;
-                int gq = q_start  + r;
-                int gk = kv_start + c;
-
-                if (gq < seq_q && gk < seq_kv) {
-                    float val = S_tile[i] * scale;
-                    if (softcap > 0.0f) val = softcap * tanhf(val / softcap);
-                    if (causal && gq < gk) val = -FLT_MAX;
-                    if (sliding_window > 0 && (gq - gk) >= sliding_window) val = -FLT_MAX;
-                    S_tile[i] = val;
-                } else {
-                    S_tile[i] = -FLT_MAX;
-                }
-            }
-        }
+        apply_score_masks(S_tile, TC_Br, TC_Bc, TC_BLOCK_THREADS,
+                          tid, q_start, kv_start, seq_q, seq_kv,
+                          scale, softcap, causal, sliding_window);
         __syncthreads();
 
         // ============================================================

@@ -1,8 +1,5 @@
 #include "runtime/speculative.h"
-#include "core/logging.h"
-#include <cuda_runtime.h>
-#include <cmath>
-#include <algorithm>
+#include "runtime/speculative_common.h"
 #include <cstring>
 #include <stdexcept>
 
@@ -280,63 +277,17 @@ SpeculativeDecoder::verify(const std::vector<int32_t>& draft,
     // RNG state for stochastic acceptance.
     unsigned int rng_state = (seed >= 0) ? static_cast<unsigned int>(seed) : 42u;
 
-    // Convert logits to probabilities (softmax) per position.
-    // For efficiency, only compute softmax for the rows we need.
-    auto softmax_row = [&](int row, std::vector<float>& probs) {
-        const float* row_logits = h_logits.data() + row * vocab_size;
-        probs.resize(vocab_size);
-
-        // Find max for numerical stability.
-        float max_val = row_logits[0];
-        for (int v = 1; v < vocab_size; ++v) {
-            max_val = std::max(max_val, row_logits[v]);
-        }
-
-        // Apply temperature before softmax.
-        float inv_temp = greedy ? 1.0f : (1.0f / temperature);
-        float sum = 0.0f;
-        for (int v = 0; v < vocab_size; ++v) {
-            probs[v] = std::exp((row_logits[v] - max_val) * inv_temp);
-            sum += probs[v];
-        }
-        float inv_sum = 1.0f / (sum + 1e-10f);
-        for (int v = 0; v < vocab_size; ++v) {
-            probs[v] *= inv_sum;
-        }
-    };
-
-    // Argmax helper.
-    auto argmax = [&](const std::vector<float>& probs) -> int32_t {
-        return static_cast<int32_t>(
-            std::distance(probs.begin(), std::max_element(probs.begin(), probs.end())));
-    };
-
-    // Weighted random sample helper (for stochastic acceptance resampling).
-    auto sample_from = [&](const std::vector<float>& probs) -> int32_t {
-        // LCG step for random float in [0, 1).
-        rng_state = rng_state * 1664525u + 1013904223u;
-        float r = static_cast<float>(rng_state & 0x00FFFFFFu) / static_cast<float>(0x01000000u);
-
-        float cumsum = 0.0f;
-        for (int v = 0; v < static_cast<int>(probs.size()); ++v) {
-            cumsum += probs[v];
-            if (cumsum >= r) {
-                return static_cast<int32_t>(v);
-            }
-        }
-        return static_cast<int32_t>(probs.size() - 1);
-    };
-
     std::vector<float> target_probs;
 
     // Verify each draft token.
     int n_accepted = 0;
     for (int i = 0; i < K; ++i) {
-        softmax_row(i, target_probs);
+        softmax_row(h_logits.data() + i * vocab_size, vocab_size,
+                    temperature, target_probs);
 
         if (greedy) {
             // Greedy: accept if target argmax matches draft token.
-            int32_t target_choice = argmax(target_probs);
+            int32_t target_choice = spec_argmax(target_probs);
             if (target_choice == draft[i]) {
                 result.accepted.push_back(draft[i]);
                 n_accepted++;
@@ -364,7 +315,7 @@ SpeculativeDecoder::verify(const std::vector<int32_t>& draft,
             if (config_.acceptance_threshold > 0.0f && p_target < config_.acceptance_threshold) {
                 // Reject: resample from the target distribution.
                 result.n_accepted = n_accepted;
-                result.next_token = sample_from(target_probs);
+                result.next_token = spec_sample_from(target_probs, rng_state);
                 goto cleanup;
             }
 
@@ -373,7 +324,7 @@ SpeculativeDecoder::verify(const std::vector<int32_t>& draft,
             // This is a simplification; a production implementation would
             // cache draft logits for exact ratio computation.
             float p_draft_approx = 1.0f / static_cast<float>(std::max(top_k_val, 1));
-            if (stochastic_accept(p_target, p_draft_approx, rng_state)) {
+            if (spec_stochastic_accept(p_target, p_draft_approx, rng_state)) {
                 result.accepted.push_back(draft[i]);
                 n_accepted++;
             } else {
@@ -390,9 +341,9 @@ SpeculativeDecoder::verify(const std::vector<int32_t>& draft,
                     for (int v = 0; v < vocab_size; ++v) {
                         adjusted[v] *= inv;
                     }
-                    result.next_token = sample_from(adjusted);
+                    result.next_token = spec_sample_from(adjusted, rng_state);
                 } else {
-                    result.next_token = sample_from(target_probs);
+                    result.next_token = spec_sample_from(target_probs, rng_state);
                 }
                 result.n_accepted = n_accepted;
                 goto cleanup;
@@ -402,11 +353,12 @@ SpeculativeDecoder::verify(const std::vector<int32_t>& draft,
 
     // All K draft tokens accepted. Sample token K+1 from the last logit row.
     {
-        softmax_row(K, target_probs);
+        softmax_row(h_logits.data() + K * vocab_size, vocab_size,
+                    temperature, target_probs);
         if (greedy) {
-            result.next_token = argmax(target_probs);
+            result.next_token = spec_argmax(target_probs);
         } else {
-            result.next_token = sample_from(target_probs);
+            result.next_token = spec_sample_from(target_probs, rng_state);
         }
         result.n_accepted = K;
     }
@@ -467,27 +419,6 @@ std::vector<int32_t> SpeculativeDecoder::step(int32_t last_token, int position,
     draft_kv_manager_->rollback(seq_id, rollback_pos);
 
     return output;
-}
-
-// ─── Stochastic acceptance ───────────────────────────────────────────────────
-
-bool SpeculativeDecoder::stochastic_accept(float p_target, float p_draft,
-                                           unsigned int& rng_state) {
-    if (p_draft <= 0.0f) {
-        // Draft assigned zero probability -- always accept the target's choice.
-        return false;
-    }
-
-    float ratio = p_target / p_draft;
-    if (ratio >= 1.0f) {
-        return true;
-    }
-
-    // LCG random number in [0, 1).
-    rng_state = rng_state * 1664525u + 1013904223u;
-    float r = static_cast<float>(rng_state & 0x00FFFFFFu) / static_cast<float>(0x01000000u);
-
-    return r < ratio;
 }
 
 } // namespace imp
