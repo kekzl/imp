@@ -542,7 +542,7 @@ bool Engine::init_kv_cache() {
     bool tq_use_mxfp4 = false;
     if (config_.kv_cache_dtype == DType::TURBOQUANT) {
         cudaDeviceProp prop;
-        cudaGetDeviceProperties(&prop, config_.device_id);
+        cudaGetDeviceProperties(&prop, 0);
         int sm_ver = prop.major * 10 + prop.minor;
         if (sm_ver >= 120 && (head_dim % 32 == 0)) {
             tq_use_mxfp4 = true;

@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 #include "compute/attention_mxfp4_prefill.h"
+#include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "compute/attention.h"
 #include "compute/attention_tc.h"
 #include "core/tensor.h"

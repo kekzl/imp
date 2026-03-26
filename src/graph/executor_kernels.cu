@@ -882,8 +882,11 @@ __global__ void write_kv_cache_turboquant_kernel(
     }
 }
 
-// FP4 E2M1 + UE8M0 helpers for TurboQuant MXFP4 path (shared header)
+// FP4 E2M1 + UE8M0 helpers for TurboQuant MXFP4 path (shared header).
+// Close namespace before including to avoid double-nesting (header defines in imp::).
+} // namespace imp
 #include "quant/turboquant_fp4.cuh"
+namespace imp {
 
 // Aliases for shorter names in the kernel below
 #define tq_float_abs_to_fp4  tq_fp4_quantize_abs
