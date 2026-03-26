@@ -119,6 +119,8 @@ static imp::DType map_dtype(ImpDType dt) {
         case IMP_DTYPE_INT8:     return imp::DType::INT8;
         case IMP_DTYPE_INT4:     return imp::DType::INT4;
         case IMP_DTYPE_INT32:    return imp::DType::INT32;
+        case IMP_DTYPE_FP4_E2M1: return imp::DType::FP4_E2M1;
+        case IMP_DTYPE_TURBOQUANT: return imp::DType::TURBOQUANT;
         default:                 return imp::DType::FP16;
     }
 }

@@ -30,10 +30,14 @@ public:
     void* k_ptr(int layer, int block_id);
     void* v_ptr(int layer, int block_id);
 
-    // INT8 per-head scale access (nullptr if dtype != INT8)
+    // INT8/INT4/TURBOQUANT per-head scale access (nullptr if not applicable)
     void* k_scale_ptr(int layer, int block_id);
     void* v_scale_ptr(int layer, int block_id);
     size_t scale_block_bytes() const;
+
+    // TurboQuant QJL sketch access (nullptr if dtype != TURBOQUANT)
+    void* k_sketch_ptr(int layer, int block_id);
+    size_t sketch_block_bytes() const;
 
     // Capacity queries
     int num_free_blocks() const;
@@ -61,10 +65,17 @@ private:
     std::vector<int> free_list_;
     void* pool_ = nullptr;          // single contiguous GPU allocation
 
-    // INT8 per-head scales: one half per head per token slot.
+    // INT8/INT4/TURBOQUANT per-head scales: one half per head per token slot.
     // Layout mirrors pool_ but with scale_block_bytes_ per block.
+    // For TURBOQUANT: K scales store PolarQuant norms, V scales store INT4 per-head scales.
     void* scale_pool_ = nullptr;
     size_t scale_block_bytes_ = 0;  // block_size * n_kv_heads * sizeof(half)
+
+    // TurboQuant QJL 1-bit sketch storage.
+    // Layout mirrors K portion of pool_ but with sketch_block_bytes_ per block.
+    // Only allocated when dtype == TURBOQUANT.
+    void* sketch_pool_ = nullptr;
+    size_t sketch_block_bytes_ = 0;  // block_size * n_kv_heads * (head_dim / 8)
 };
 
 } // namespace imp
