@@ -49,7 +49,11 @@ typedef struct {
     int gpu_layers;                // Layers to keep on GPU (-1 = all, 0 = all offloaded)
 
     // KV cache precision
-    ImpDType kv_cache_dtype;       // FP16 (default), FP8_E4M3, INT8, INT4, or TURBOQUANT
+    ImpDType kv_cache_dtype;       // FP16 (default), FP8_E4M3, INT8, INT4, TURBOQUANT, or TURBOQUANT_LITE
+
+    // TurboQuant Lite: QJL sketch dimension = sketch_multiplier * head_dim.
+    // Higher = better quality but more memory. 2 = ~3.1 bits/elem avg, 3 = ~3.6 bits/elem avg.
+    int turboquant_sketch_multiplier; // default 2 (sketch_dim = 2 * head_dim)
 
     // SSM state precision
     ImpDType ssm_state_dtype;      // FP32 (default) or FP16 for SSM h_state

@@ -88,6 +88,21 @@ void paged_attention_decode_turboquant(
     float softcap = 0.0f, cudaStream_t stream = nullptr,
     int max_blocks_per_seq = 0);
 
+// TurboQuant Lite Paged attention for decode: QJL sketch-only K + INT4 V.
+// K is represented only by QJL sketches + FP16 norms (no INT4 directions in pool).
+// Q.K estimated purely via QJL: ||q|| * ||k|| * (2*popcount(XNOR(sketch_q, sketch_k)) - sketch_dim) / sketch_dim
+// V accumulation: standard INT4 with per-head FP16 scales.
+void paged_attention_decode_turboquant_lite(
+    const Tensor& Q, const Tensor& V_cache,
+    Tensor& O,
+    const half* K_norms, const half* V_scales,
+    const uint8_t* K_sketches, const uint8_t* qjl_matrix,
+    const int* block_tables, const int* context_lens,
+    int block_size, float scale, int sketch_dim,
+    int max_context_len, int sliding_window = 0,
+    float softcap = 0.0f, cudaStream_t stream = nullptr,
+    int max_blocks_per_seq = 0);
+
 // Split-K scratch buffer accessor (for use by FP8/INT8 launcher TUs).
 // Returns pointer + size. Either can be nullptr/0 if unset.
 void paged_attention_get_splitk_scratch(void** out_ptr, size_t* out_size);

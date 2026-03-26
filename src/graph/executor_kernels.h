@@ -174,6 +174,30 @@ __global__ void write_kv_cache_turboquant_kernel(
     int max_blocks_per_seq,
     int n_sequences);
 
+// TurboQuant Lite: QJL sketch-only K + INT4 V write kernel.
+// K path (blockIdx.y == 0): Compute L2 norm + QJL sketch (no INT4 direction quantization).
+// V path (blockIdx.y == 1): Standard INT4 per-head quantization.
+__global__ void write_kv_cache_turboquant_lite_kernel(
+    const half* __restrict__ k_in,
+    const half* __restrict__ v_in,
+    const int* __restrict__ positions,
+    const int* __restrict__ block_tables,
+    uint8_t* __restrict__ v_cache_base,         // INT4 packed values (V only, no K in pool)
+    half* __restrict__ k_norm_base,             // FP16 norms (in scale_pool K region)
+    half* __restrict__ v_scale_base,            // FP16 per-head V scales (in scale_pool V region)
+    uint8_t* __restrict__ k_sketch_base,        // QJL 1-bit sketches (primary K representation)
+    const uint8_t* __restrict__ qjl_matrix,     // [sketch_dim, head_dim/8] packed Rademacher signs
+    int v_block_stride,                         // kKVBlockSize * n_kv_heads * head_dim / 2 (bytes)
+    int scale_block_stride,                     // kKVBlockSize * n_kv_heads (half elems)
+    int sketch_block_stride,                    // kKVBlockSize * n_kv_heads * sketch_dim / 8 (bytes)
+    int n_kv_heads,
+    int head_dim,
+    int sketch_dim,
+    int block_size,
+    int n_tokens,
+    int max_blocks_per_seq,
+    int n_sequences);
+
 __global__ void write_kv_cache_rope_fused_kernel(
     const half* __restrict__ k_in,
     const half* __restrict__ v_in,
