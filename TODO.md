@@ -94,7 +94,25 @@ Tensor-core-based decoding with low-bit KV cache. 8.6x vs FP16 FlashDecoding on 
 ### DeltaKV (arxiv:2602.08005)
 Residual-based KV compression. 187 tok/s at 128k context on Blackwell PRO 6000. Orthogonal to weight quantization.
 
-### CUDA 13.2 Features
-- `IMP_CUDA_13_2=1` flag exists in CMakeLists.txt but no code uses it yet
-- cuBLASLt MXFP4/NVFP4 GEMM: blocked on sm_120 kernel availability
-- Sampling already uses optimized fused top-k kernel (cub::DeviceTopK not needed)
+### CUDA 13.2 / CCCL 3.2 Features
+Available in our CUDA 13.2.0 toolkit but not yet used:
+
+- **`cub::DeviceTopK`** (`device_topk.cuh`): O(n) top-k selection via AIR algorithm.
+  Current fused kernel handles top_k ≤ 128 efficiently; DeviceTopK is relevant for:
+  - The CUB Radix Sort fallback path (top_k > 128) — direct replacement, 5x faster
+  - Future speculative decoding verification (large K for candidate ranking)
+  - Warp/Block-scope variants on the CCCL roadmap would enable fused sampling
+- **MXFP8 Grouped GEMM** (cuBLASLt): sm_120f TMA WS tactics now enabled.
+  Relevant for MoE prefill with mixed-precision expert batching.
+- **Host Task Spin-Wait Dispatch**: reduces kernel launch latency.
+  Relevant for TTFT-optimized pipeline with many small kernels per step.
+- **cuBLASLt Algo 66 bugfix**: concurrent matmul with TMA was silently corrupt on sm_120.
+  Fixed in CUDA 13.2 — no action needed (we're on 13.2.0).
+- **NVCC GB202 CuTe GEMM corruption**: fixed in CUDA 13.1, we're on 13.2. No action needed.
+
+### sm_120f (Blackwell Family Feature Set)
+Switched from sm_120a to sm_120f in commit fa3ced6:
+- Enables TMA warp-specialized grouped GEMM tactics in CUTLASS/cuBLAS
+- Forward-compatible within Blackwell family (sm_120, sm_121)
+- Resolved ptxas C7600 register allocation bug for TurboQuant
+- +10% TurboQuant prefill, +7.6% MXFP4 prefill
