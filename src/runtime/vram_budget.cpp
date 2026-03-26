@@ -64,7 +64,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
     // --- 4. Compute KV cache per-block cost ---
     int bs = config.kv_block_size > 0 ? config.kv_block_size : kKVBlockSize;
     size_t single_block_bytes;
-    if (config.kv_cache_dtype == DType::INT4) {
+    if (config.kv_cache_dtype == DType::INT4 || config.kv_cache_dtype == DType::TURBOQUANT) {
         single_block_bytes = static_cast<size_t>(bs) *
                              mcfg.n_kv_heads * head_dim / 2;
     } else {
@@ -72,9 +72,15 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
                              mcfg.n_kv_heads * head_dim * dtype_size(config.kv_cache_dtype);
     }
     size_t per_block_total = single_block_bytes * 2 * n_kv_layers;
-    if (config.kv_cache_dtype == DType::INT8 || config.kv_cache_dtype == DType::INT4) {
+    if (config.kv_cache_dtype == DType::INT8 || config.kv_cache_dtype == DType::INT4
+        || config.kv_cache_dtype == DType::TURBOQUANT) {
         size_t scale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * sizeof(half);
         per_block_total += scale_per_block * 2 * n_kv_layers;
+    }
+    if (config.kv_cache_dtype == DType::TURBOQUANT) {
+        // QJL sketch pool: only for K (1x, not 2x)
+        size_t sketch_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * (head_dim / 8);
+        per_block_total += sketch_per_block * n_kv_layers;
     }
 
     int blocks_per_seq = (config.max_seq_len + bs - 1) / bs;

@@ -1042,6 +1042,9 @@ void GraphExecutor::free_buffers() {
         if (p) { vram_free(vram_alloc_, p); p = nullptr; }
     };
 
+    // Free TurboQuant QJL projection
+    qjl_destroy(qjl_proj_);
+
     // Free LongRoPE frequency tables
     if (longrope_short_freqs_) { cudaFree(longrope_short_freqs_); longrope_short_freqs_ = nullptr; }
     if (longrope_long_freqs_)  { cudaFree(longrope_long_freqs_);  longrope_long_freqs_  = nullptr; }

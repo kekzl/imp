@@ -49,7 +49,7 @@ typedef struct {
     int gpu_layers;                // Layers to keep on GPU (-1 = all, 0 = all offloaded)
 
     // KV cache precision
-    ImpDType kv_cache_dtype;       // FP16 (default), FP8_E4M3, or INT8 for half-size KV cache
+    ImpDType kv_cache_dtype;       // FP16 (default), FP8_E4M3, INT8, INT4, or TURBOQUANT
 
     // SSM state precision
     ImpDType ssm_state_dtype;      // FP32 (default) or FP16 for SSM h_state
