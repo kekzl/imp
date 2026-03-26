@@ -6,6 +6,7 @@
 
 #ifdef IMP_USE_CUTLASS
 #include "compute/attention_cutlass_fmha.h"
+#include "compute/attention_mxfp4_prefill.h"
 #endif
 
 namespace imp {
@@ -29,13 +30,23 @@ void attention_prefill_dispatch(
     float scale, bool causal, int sliding_window, float softcap, cudaStream_t stream) {
     int sm = get_device_sm_version();
 #ifdef IMP_USE_CUTLASS
+    // sliding_window that covers entire seq_kv doesn't restrict attention
+    int seq_kv = static_cast<int>(K.shape[1]);
+    bool sw_active = (sliding_window > 0 && sliding_window < seq_kv);
+
+    // MXFP4 tensor core attention: block-scaled FP4 Q·K^T on sm_120+.
+    // ~2x compute throughput over FP16 TC. Enabled with IMP_MXFP4_ATTENTION=1.
+    // Uses O(seq²) memory — falls back for long sequences or unsupported configs.
+    if (attention_mxfp4_available() && sm >= 120 && !sw_active) {
+        if (attention_mxfp4_prefill(Q, K, V, O, scale, causal, softcap, stream)) {
+            return;
+        }
+    }
+
     // CUTLASS FMHA: WGMMA + TMA on sm_90+. ~2x throughput vs WMMA.
     // Supports softcap (Gemma-2/3). Not supported: sliding window (Mistral).
     // Set IMP_NO_CUTLASS_FMHA=1 to force WMMA fallback (for benchmarking).
     static bool use_cutlass = !getenv("IMP_NO_CUTLASS_FMHA");
-    // sliding_window that covers entire seq_kv doesn't restrict attention
-    int seq_kv = static_cast<int>(K.shape[1]);
-    bool sw_active = (sliding_window > 0 && sliding_window < seq_kv);
     if (use_cutlass && sm >= 90 && !sw_active) {
         if (cutlass_fmha_prefill(Q, K, V, O, scale, causal, softcap, stream)) {
             return;
