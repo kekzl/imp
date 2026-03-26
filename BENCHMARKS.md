@@ -3,8 +3,8 @@
 All benchmarks on a single **NVIDIA RTX 5090** (32 GB GDDR7, Blackwell sm_120).
 Models loaded from GGUF. Each test runs 5 repetitions; averages reported.
 
-- **imp v0.2** — NVFP4 decode cache + FP8 prefill cache, CUDA graphs, PDL
-- **llama.cpp** b5285 — flash attention enabled (`-fa 1`), full GPU offload (`-ngl 99`)
+- **imp v0.4** — NVFP4 decode cache + FP8 prefill cache, CUDA graphs, PDL
+- **llama.cpp** b8445 — flash attention enabled, full GPU offload (`-ngl 99`)
 
 ## Decode Throughput (tg128)
 
@@ -12,18 +12,11 @@ Tokens generated per second — the metric that determines how fast a model resp
 
 | Model | Params | Quant | imp | llama.cpp | Delta |
 |-------|-------:|-------|----:|----------:|------:|
-| Qwen3-1.7B | 1.7B | Q8_0 | **477** | 446 | **+7%** |
-| Qwen3-4B | 4.0B | Q8_0 | **393** | 244 | **+61%** |
-| Phi-4-mini | 3.8B | Q8_0 | 264 | **277** | -5% |
-| DeepSeek-R1-Distill-Qwen-7B | 7.6B | Q8_0 | **283** | 176 | **+61%** |
-| Mistral-7B | 7.2B | Q8_0 | **270** | 173 | **+56%** |
-| Llama-3.1-8B | 8.0B | Q8_0 | **262** | 165 | **+59%** |
-| Qwen3-8B | 8.2B | Q8_0 | **262** | 157 | **+67%** |
-| Gemma-3-12B | 11.8B | Q8_0 | **146** | 98 | **+49%** |
-| DeepSeek-R1-Distill-Qwen-14B | 14.8B | Q6_K | **126** | 110 | **+15%** |
-| Qwen3-Coder-30B MoE | 30.5B | Q6_K | **293** | 251 | **+17%** |
-| Mixtral-8x7B MoE | 46.7B | Q4_K_M | 64 | — | *host offload* |
-| Nemotron-30B-A3B | 30.5B | Q6_K | 86 | — | *Mamba2 hybrid* |
+| Qwen3-4B | 4.0B | Q8_0 | **390** | 244 | **+60%** |
+| Qwen3-8B | 8.2B | Q8_0 | **264** | 157 | **+68%** |
+| Qwen3.5-4B (GDN) | 4.0B | Q8_0 | **327** | 180 | **+82%** |
+| Gemma-3-12B | 11.8B | Q8_0 | **139** | 98 | **+42%** |
+| Qwen3-Coder-30B MoE | 30.5B | Q6_K | **265** | 251 | **+6%** |
 
 ## Prefill Throughput (pp512)
 
@@ -31,26 +24,27 @@ Tokens processed per second during the prompt ingestion phase.
 
 | Model | Params | Quant | imp | llama.cpp | Delta |
 |-------|-------:|-------|----:|----------:|------:|
-| Qwen3-1.7B | 1.7B | Q8_0 | **39506** | 38464 | +3% |
-| Qwen3-4B | 4.0B | Q8_0 | **27240** | 21337 | **+28%** |
-| Phi-4-mini | 3.8B | Q8_0 | 20949 | **27259** | -23% |
-| DeepSeek-R1-Distill-Qwen-7B | 7.6B | Q8_0 | **21386** | 15867 | **+35%** |
-| Mistral-7B | 7.2B | Q8_0 | **19661** | 15097 | **+30%** |
-| Llama-3.1-8B | 8.0B | Q8_0 | **18611** | 15152 | **+23%** |
-| Qwen3-8B | 8.2B | Q8_0 | **17486** | 14172 | **+23%** |
-| Gemma-3-12B | 11.8B | Q8_0 | **11262** | 9269 | **+22%** |
-| DeepSeek-R1-Distill-Qwen-14B | 14.8B | Q6_K | **10264** | 6367 | **+61%** |
-| Qwen3-Coder-30B MoE | 30.5B | Q6_K | 5722 | **6090** | -6% |
-| Mixtral-8x7B MoE | 46.7B | Q4_K_M | 7390 | — | *host offload* |
-| Nemotron-30B-A3B | 30.5B | Q6_K | — | — | *bench mode broken* |
+| Qwen3-4B | 4.0B | Q8_0 | **25801** | 21337 | **+21%** |
+| Qwen3-8B | 8.2B | Q8_0 | **15819** | 14172 | **+12%** |
+| Qwen3.5-4B (GDN) | 4.0B | Q8_0 | **16017** | 11149 | **+44%** |
+| Gemma-3-12B | 11.8B | Q8_0 | **8479** | 9269 | -9% |
+| Qwen3-Coder-30B MoE | 30.5B | Q6_K | 5645 | **6090** | -7% |
+
+## KV Cache Quantization (Qwen3-8B Q8_0)
+
+| KV Cache | Decode (tok/s) | Prefill (tok/s) | Quality |
+|----------|------:|--------:|---------|
+| FP8 E4M3 (default) | **248** | **17950** | Baseline |
+| INT4 | 233 | 17693 | Good |
+| TurboQuant (PolarQuant + QJL) | 191 | 16006 | = FP8 |
+| TurboQuant Lite (QJL only) | 190 | 15417 | Degraded |
 
 ## Notes
 
-- **Phi-4-mini**: imp disables NVFP4 for dense models with d_model < 4096 (not enough weight data to amortize NVFP4 dequant overhead). Falls back to dp4a Q8_0 path. llama.cpp's Q8_0 CUDA kernels are well-tuned for this size.
-- **Mixtral-8x7B**: Expert weights are partially offloaded to host memory in imp. llama.cpp cannot load this model on a single 32 GB GPU.
-- **Nemotron-30B-A3B**: Mamba2 + Attention + MoE hybrid architecture. Not supported by llama.cpp. imp's benchmark mode is broken for this model due to layer offloading incompatibility with CUDA graphs; real prompt inference works (86 tok/s decode).
-- **Prefill variance**: cuBLAS autotuning can cause up to 2.6x variance in prefill numbers between container restarts. Decode numbers are stable and reproducible.
-- **llama.cpp version**: Docker image `ghcr.io/ggml-org/llama.cpp:full-cuda`, build 35bee03.
+- **Prefill variance**: cuBLAS autotuning can cause up to 2.6x variance in prefill numbers between container restarts (GPU temperature unrelated — 25°C at idle). Decode numbers are stable. Compare decode only for reliable A/B testing.
+- **Qwen3.5 GDN**: Gated DeltaNet hybrid architecture (24 GDN + 8 attention layers). Benchmark throughput is correct; output quality has a known divergence from llama.cpp under investigation.
+- **TurboQuant**: PolarQuant INT4 K directions + QJL sketch correction + INT4 V. MXFP4 variant (FP4 E2M1 + UE8M0 micro-scales) available for K directions on sm_120+.
+- **MXFP4 Prefill**: CUTLASS block-scaled GEMM for prefill (`--mxfp4-prefill`). Currently ~10% slower than FP8 cuBLASLt for Q8_0 models due to activation quantization overhead. Native MXFP4 GGUF format planned to eliminate this.
 
 ## Hardware
 

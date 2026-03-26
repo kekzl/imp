@@ -1,212 +1,100 @@
 # TODO
 
-## Performance
+## Open Work
 
-- [x] **Gemma-3-12B Decode Bench** — ~~Bench mode "internal error"~~.
-  Fix: `ignore_eos=true` during prefill (synthetic tokens → immediate EOS → FINISHED).
-  `imp_decode_step` sets ignore_eos correctly for actual decode.
+### GDN / Qwen3.5 Output Quality
+Qwen3.5 Gated DeltaNet models produce degenerate output after ~15-30 tokens (repetition loops), while llama.cpp generates correct output with the same GGUF files. Benchmark throughput is correct (327 tok/s for 4B).
 
-- [x] **Gemma-3-12B NVFP4 Decode** — head_dim=256 KV cache consumed VRAM, limiting
-  NVFP4 budget. GeGLU+GEMV fusion boosted decode: 59→100 tok/s (+70%).
-  KV budget trade-off (10% cap for mode 2) + incremental NVFP4 processing
-  (net VRAM-negative per FP16→NVFP4 conversion) achieved 334/337 tensor
-  coverage. Gemma-3-12B decode: 86→119 tok/s (bench), 96 tok/s (real prompt).
+**Fixed so far:**
+- SSM/GDN state reset between requests (prefix caching leak)
+- Shared memory race condition in fused multi-token scan kernel
+- L2 normalization epsilon (additive → max-based, matching llama.cpp)
 
-- [x] **CUTLASS FMHA head_dim=96** — Added template `Shape<_128, _96, _96>`.
-  Phi4-mini actually has head_dim=128 (rope_dim=96 is partial RoPE, not head_dim).
-  CUTLASS FMHA already worked correctly. Template added for future models with head_dim=96.
+**Still broken:** Prefill logits diverge slightly from llama.cpp even for 2-token prompts. The divergence accumulates through 24 GDN layers. Code review found no math errors — needs layer-by-layer tensor dump comparison against llama.cpp.
 
-- [x] **Init Async Quantization** — Eliminated per-tensor `cudaStreamSynchronize` in
-  weight cache construction. FP8 overflow, FP16→FP8 migration, and NVFP4 cache now
-  use async calibrate+quantize with single sync at end. Bulk cudaMalloc for FP8 data
-  and scale buffers. DeepSeek-14B init: 55.4s → ~35s (37% faster).
+**Files:** `src/compute/gdn.cu`, `src/graph/executor_forward.cu` (run_gdn)
 
-- [x] **Decode Kernel Fusion** — Fused activation+GEMV+residual kernels:
-  - SwiGLU+NVFP4 GEMV+residual: Qwen3-4B 273→298 (+9%), Qwen3-8B 138→184 (+33%)
-  - GeGLU+NVFP4 GEMV+residual: Gemma-3-12B 59→100 (+70%)
-  - Multi-row dispatch (8 rows/block) for all fused NVFP4 GEMV variants
-  - MoE SwiGLU+NVFP4 GEMV fusion for down projection
-  - NVFP4 GEMV kernels registered with PDL, launches via pdl::launch()
-  Tested: RMSNorm+GEMV fusion regresses (extra norm_w loads + muls in inner
-  loop outweigh kernel launch savings). Multi-row threshold >512 also
-  regresses (lower occupancy for large-K projections).
+### MXFP4 Native GGUF Weight Format
+Plan documented in `docs/MXFP4_GGUF_PLAN.md`. Native MXFP4 weights would feed directly into Blackwell tensor cores via CUTLASS — zero dequant overhead, expected 2-4x prefill speedup vs Q4_K_M.
 
-- [x] **CUTLASS FMHA Softcap** — Added `SoftcapCausalFusion` for models with
-  logit soft-capping (Gemma-2). Uses `__constant__` memory for softcap params,
-  applies scale→tanh→undo-scale in `before_softmax` hook. Dispatch relaxed to
-  attempt CUTLASS for softcap models (graceful fallback). HD=256 tiles require
-  >200 KB smem — exceeds RTX 5090 limit (99 KB), so Gemma-3 still uses WMMA.
-  Gemma-3 doesn't actually use softcap (only Gemma-2 does).
+**Status:** CUTLASS MXFP4 GEMM path is fully implemented (`--mxfp4-prefill`), but only works when NVFP4 cache exists as source data. Native MXFP4 GGUF eliminates this dependency.
 
-- [x] **dp4a Fused Act+GEMV+Residual** — Attempted fusing SwiGLU/GeGLU + Q8_1
-  quantize + dp4a GEMV + residual into a single kernel. Two-pass approach
-  (pass 1: compute amax, pass 2: recompute + quantize + dp4a) to avoid float[32]
-  register pressure. **Result: 22% regression** (Qwen3-4B 150→117 tok/s).
-  Root cause: 2x gate/up L2 reads + 2x SwiGLU ALU per inner loop iteration.
-  The kpar GEMV is memory-bound on weight reads — doubling input bandwidth
-  and ALU per block saturates L2. Same pattern as attention O-proj inline quant
-  (deliberately kept as separate quant + kpar for higher occupancy).
-  Reverted — separate `swiglu_quantize_q8_1 + gemv_q*_q8_1_residual` is faster.
+**Remaining:**
+1. GGUF type extension + loader (~50 lines)
+2. Python converter: SafeTensors → block-Hadamard → MXFP4 → GGUF (~200 lines)
+3. Weight upload: mmap → GPU-ready format (~30 lines)
+4. MXFP4 GEMV for decode (~100 lines CUDA)
+5. Optional: MR-GPTQ calibration for better quality (~150 lines Python)
 
-- [x] **NVFP4 LM Head** — FP32 output NVFP4 GEMV for output projection (LM head).
-  Saves ~47% weight reads vs Q8_0 dp4a for vocab_size×d_model decode GEMV.
-  Output projection collected first in NVFP4 budget to ensure inclusion.
-  Large weights that exceed dequant scratch use temporary buffer during init.
-  Multi-row (NR=8) dispatch for K ≤ 8192, kpar (128 threads) for larger K.
-  Correctness verified on Qwen3-4B, Qwen3-8B, DeepSeek-7B.
+### TurboQuant Optimization
+Current gap vs FP8 baseline: -23% decode (191 vs 248 tok/s). This is algorithm-inherent — QJL sketch computation adds per-token overhead.
 
-- [x] **KV Cache Budget Trade-off** — In NVFP4 mode 2, KV cache allocation
-  capped at 10% of available VRAM (was 80%). Excess KV blocks sit unused while
-  weight caching directly improves decode throughput. Also skip 2x KV headroom
-  and don't enforce needed_blocks floor. Qwen3-8B real prompt: 110→174 tok/s
-  decode by trading 100K→30K KV tokens for full NVFP4 coverage.
+**Optimized so far:**
+- Warp-cooperative Q sketch (eliminated per-thread atomicOr contention)
+- Warp-parallel QJL XNOR+popcount (32 lanes instead of lane-0 serial)
+- INT4 dequant: div→mul, L1 prefetch, dead code removal
+- PolarQuant INT4 symmetric clamp [-7,7] (was [-8,7])
 
-- [x] **MoE NVFP4 Auto-Detection** — Removed d_model < 4096 threshold for MoE
-  models. Expert weights dominate VRAM and sparse activation limits quantization
-  error accumulation. Qwen3-Coder-30B: 247→265 tok/s (+7%), Nemotron-30B: 68→75
-  tok/s (+10%).
+**Remaining:** QJL overhead is inherent (~8% of decode). Only way to close the gap: remove QJL entirely (use MXFP4 K directions with group micro-scales instead).
 
-- [x] **cuBLASLt NVFP4 Probe** — status=7 (INVALID_VALUE). Investigated: cuBLASLt
-  handle works (FP16 GEMM passes), CUDA_R_4F_E2M1 data type recognized (enum=33),
-  but no FP4 GEMM kernels exist for sm_120 in cuBLAS 13.2. Tested all combinations
-  (OP_T/OP_N, BF16/FP32/FP16 output, with/without D_SCALE_MODE) — all fail.
-  Root cause: cuBLASLt FP4 kernels only compiled for sm_100 (data center Blackwell).
-  Fixed probe config (BF16 output, OP_T, D_SCALE_MODE) to auto-activate when NVIDIA
-  adds sm_120 support. CUTLASS NVFP4 path is primary — no performance impact.
+### Speculative Decoding
+- **EAGLE-3**: Dead end on single GPU (56 tok/s vs 306 baseline). Draft model shares same weights = 78% cost per layer.
+- **Self-speculative**: Dead end (50% of baseline). Memory-bound decode can't amortize.
+- **DFlash**: Not feasible — no draft model for Qwen3-32B, training requires datacenter GPUs.
+- **N-gram speculation**: Implemented (`src/runtime/ngram_spec.cpp`), viable for repetitive prompts.
 
 ---
 
-## L2 Cache Tuning
+## Completed (v0.4)
 
-Phase 1 (in-kernel `__ldcs`/`__stcs`) and Phase 2 (L2 persisting reservation) are done.
-KV reads use streaming loads, attention output uses streaming stores, L2 reservation is 75%.
-**Result: +2-4% decode across Q8_0 models, +4.3% on MoE.** Remaining items: GEMV weight
-streaming (medium risk) and per-phase L2 policy rotation (complex, CUDA Graph incompatible).
+### Performance
+- [x] NVFP4 decode cache: 50% VRAM savings, all dense weights → FP4 E2M1
+- [x] FP8 prefill cache: FP8×FP8 cuBLASLt, 2x tensor core throughput
+- [x] SwiGLU+GEMV fusion: +33% Qwen3-8B, +5.5% Qwen3-4B
+- [x] GeGLU+GEMV fusion: +70% Gemma-3-12B
+- [x] NVFP4 prmt register LUT: +4.7% Qwen3-4B, +7.7% Qwen3-8B, +16% Gemma-3-12B
+- [x] RMSNorm vectorization: float4 loads, 100% cache line utilization
+- [x] rmsnorm_quantize_q8_1: 256→1024 threads, 2x speedup
+- [x] NVFP4 multi-row occupancy: __launch_bounds__ 6→8, +5% gate_up
+- [x] NVFP4 LM head in async graph loop: -47% LM head latency
+- [x] MoE fused TC kernel: persistent work-queue dispatch, -38% kernel time
+- [x] Fused token-centric MoE scatter: no atomics, +3.1% MoE prefill
+- [x] L2 cache tuning: streaming KV loads + persisting reservation, +2-4% decode
 
-### Phase 1: In-Kernel Cache Operators (PTX-level)
+### Architecture Support
+- [x] Qwen3.5 GDN (Gated DeltaNet): fused scan kernel, partial RoPE, output gate
+- [x] Nemotron-H (Mamba2 + Attention + MoE hybrid)
+- [x] Gemma-3 vision (SigLIP encoder, mmproj.gguf)
 
-Compatible with CUDA Graphs (no host-side API calls in the hot path).
+### Infrastructure
+- [x] TurboQuant KV cache (PolarQuant + QJL + INT4 V)
+- [x] TurboQuant MXFP4 variant (FP4 E2M1 + UE8M0 micro-scales for K)
+- [x] CUTLASS MXFP4 prefill GEMM (sm_120 block-scaled tensor ops)
+- [x] CUTLASS MXFP4 prefill attention (Q·K^T only)
+- [x] Hadamard transform kernel (block-diagonal WHT, 16/32/64/128)
+- [x] NVFP4→MXFP4 scale conversion
+- [x] Code quality: 5 rounds refactoring, -1224 lines across 42 files
 
-- [x] **`__ldcs` for paged attention KV reads** — KV cache data is accessed once per
-  decode step, then not needed until next step. Changed K/V loads in all paged attention
-  kernels (FP16, FP8, INT8 — split-K, GQA, cluster) to `__ldcs()` (evict-first).
-  cp.async pipeline kernels kept `.ca` (`.cg` requires 16-byte minimum, not 4/8).
-  **Result:** Qwen3-8B +3.3%, Qwen3-4B +2.4%, Phi4-mini +2.9%, Qwen3-Coder-30B +4.3%.
-  Gemma-3-12B ~0% (head_dim=256, fewer heads = less KV L2 pressure).
-
-- [ ] **`__ldcs` for GEMV weight reads** — In both K-par and row-par dp4a kernels,
-  each weight row is read by exactly one block (K-par) or one warp (row-par). No
-  cross-block reuse. Making weight loads streaming prevents stale weight lines from
-  occupying L2 space needed by the next kernel (different weight matrix).
-  Requires changes in each `DequantTraits::dp4a_block()` function — replace `memcpy`
-  of weight bytes with `__ldcs`-based loads.
-  **Files:** `src/compute/gemv_dp4a_traits.cuh` (all dp4a_block specializations)
-  **Expected:** +1-3% decode. Smaller impact than KV streaming because weight-to-weight
-  L2 contention is less severe (sequential GEMV launches, hardware prefetcher handles
-  the transition).
-  **Risk:** Medium — `__ldcs` bypasses L1. For K-par GEMV where 12 blocks/SM read
-  different rows of the same weight matrix, L1 may have been caching shared sub-block
-  metadata (Q6_K scales, Q4_K super-block headers). Benchmark carefully per quant type.
-  May need `__ldcg` (L2-only, skip L1) instead of `__ldcs` (evict-first) for complex
-  quant types.
-
-- [x] **Keep Q8_1 activation loads as default `.ca`** — Confirmed: Q8_1 is most reused
-  data in K-par GEMV (read by all M blocks). No streaming hints added.
-
-- [x] **`__stcs` for attention output writes** — All final O writes in paged attention
-  (FP16, FP8, INT8, reduce kernel, cluster kernel) use `__stcs` to avoid L2 pollution.
-  Impact included in the +2-4% above (cannot isolate from KV streaming).
-
-### Phase 2: Persisting L2 Reservation (Engine-level)
-
-One-time setup at engine init. Does NOT require per-kernel changes. Complements Phase 1.
-
-- [x] **`cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, ...)`** — Reserve 75% of
-  L2 for persisting data. RTX 5090: 45 MB reserved / 60 MB total.
-  Called once in `Engine::init()` after GPU properties query. Enables the
-  streaming/persisting distinction from Phase 1 `__ldcs`/`__stcs` hints.
-
-- [ ] **`cudaAccessPolicyWindow` per decode step** — Set a single policy window before
-  the layer loop in `forward_logits()` covering all model weights as `persisting` and
-  everything else as `streaming`. This is a coarse-grained approach (one window for the
-  entire forward pass, not per-layer rotation).
-  **Files:** `src/graph/executor_forward.cu` (forward_logits), `src/graph/executor.h`
-  **Concern:** Incompatible with CUDA Graphs — stream attributes are snapshot at capture
-  time. Only applies to non-graph decode path (logprobs, JSON mode, first decode step).
-  For graph path, Phase 1 in-kernel operators are the only option.
-  **Expected:** +1-3% on non-graph path. No effect on graph path.
-
-### Phase 3: Per-Phase L2 Policy Rotation (Aggressive)
-
-Per-layer weight pinning. Highest potential but most complex.
-
-- [ ] **Rotate policy window between attention and FFN** — In `run_attention()`: set
-  policy window covering KV cache as persisting. In `run_ffn()`: set policy window
-  covering FFN weight matrices (gate, up, down) as persisting. This ensures the L2
-  persisting region always contains the data most relevant to the current compute phase.
-  **Concern:** 2× `cudaStreamSetAttribute` per layer = 64-96 host-side calls per decode
-  step. At ~1-2 µs each = 64-192 µs overhead. Decode step for Qwen3-4B is ~3.3 ms,
-  so 2-6% overhead. May negate the benefit. Also incompatible with CUDA Graphs.
-  **Approach:** Only enable on non-graph path. Profile host overhead carefully.
-  Could batch the attribute set with the kernel launch to amortize.
-  **Expected:** +3-8% if overhead is manageable. The per-phase pinning perfectly matches
-  the sequential access pattern (attention reads KV → FFN reads weights → next layer).
-
-### Notes
-
-- **CUDA Graphs compatibility:** Phase 1 (in-kernel `__ldcs`/`__ldcg`) works inside
-  captured graphs. Phase 2 L2 reservation is a one-time init call (fine). Phase 2/3
-  `cudaAccessPolicyWindow` is incompatible with graph replay — only affects non-graph path.
-- **Blackwell L2 latency:** RTX 5090 L2 is ~358 cycles (vs ~273 on Hopper), but still
-  far better than ~800+ cycle GDDR7 access. L2 pinning remains strongly beneficial.
-- **L2 sector size:** 32 bytes. L2 cache line: 128 bytes. Weight block reads should
-  align to 32-byte boundaries where possible (Q8_0: 34 bytes — misaligned; Q6_K: 210
-  bytes — misaligned; Q4_K: 144 bytes — aligned to 16 but not 32).
-- **Prefill is compute-bound** — L2 tuning targets decode GEMV only. Do not apply
-  streaming hints to prefill cuBLAS GEMM paths.
+### Dead Ends (confirmed no benefit)
+- RMSNorm+GEMV fusion, multi-row threshold >512, MoE SwiGLU+GEMV fusion
+- PDL registration, dp4a fused act+GEMV, CUTLASS FMHA HD=256
+- NVFP4 half2 FMA, split accumulators, __ldcs streaming weights
+- Self-speculative decoding, EAGLE-3 (single GPU)
+- NVFP4 prmt for SwiGLU/GeGLU, CUTLASS NVFP4 TC GEMM for M=1
+- Paged attention __launch_bounds__, RMSNorm+NVFP4 LM head fusion
+- cudaAccessPolicyWindow for decode activations
 
 ---
 
-## QuTLASS / MR-GPTQ (arXiv:2509.23202)
+## Research / Future
 
-Fused online-rotation + MXFP4 GEMM kernels für Blackwell. Höherer Throughput als ideale
-NVFP4 Matmul durch lightweight fused Aktivierungsrotation direkt im Kernel. Evaluiert auf
-RTX 5090: **6x layer-wise Speedup, 4x End-to-End Inference Speedup**.
+### BitDecoding (arxiv:2503.18773)
+Tensor-core-based decoding with low-bit KV cache. 8.6x vs FP16 FlashDecoding on Blackwell. Requires MXFP4 KV cache format — builds on TurboQuant MXFP4 infrastructure.
 
-- [x] Paper lesen und Kernelarchitektur verstehen (online rotation vs. unsere statische Quantisierung)
-- [x] Evaluieren ob MR-GPTQ-Gewichte (4-bit rotated) als neues Quantformat in imp integrierbar sind
-- [x] Walsh-Hadamard Kernel: `hadamard.cu` — block-diagonal WHT (16/32/64/128), warp-shuffle + SMEM
-- [x] CUTLASS MXFP4 GEMM: `gemm_cutlass_mxfp4_sm120.cu` — mx_float4_t + UE8M0 scales (SFVecSize=32)
-- [x] NVFP4→MXFP4 Scale-Konvertierung: 2× UE4M3 per 16 → 1× UE8M0 per 32
-- [x] MXFP4 Aktivierungsquantisierung: absmax per 32 → UE8M0 + FP4 E2M1 pack
-- [x] Integration in Prefill-Pfad: MXFP4 GEMM als Alternative zum NVFP4 CUTLASS Pfad
-- [x] Bench: MXFP4 vs. NVFP4 CUTLASS Prefill auf Qwen3-8B
-- [ ] Fused rotation+MXFP4 GEMM Kernel für Decode GEMV prototypen
-- [ ] MR-GPTQ SafeTensors Loader (nur LLaMA-8B verfügbar, niedrige Priorität)
+### DeltaKV (arxiv:2602.08005)
+Residual-based KV compression. 187 tok/s at 128k context on Blackwell PRO 6000. Orthogonal to weight quantization.
 
-**Erkenntnisse:**
-- QuTLASS: Apache 2.0, CUTLASS v4.2.1, PyTorch-only. Portierbar.
-- MR-GPTQ: SafeTensors mit qweight + scales + forward_hadamard_matrix + weight/act_global_scale
-- hadamard_group_size=128 (pro Projektion, nicht global)
-- Nur LLaMA-3.1-8B-Instruct MR-GPTQ verfügbar (kein Qwen/Gemma)
-- Decode (90% GEMV, memory-bound): MXFP4 = NVFP4 = 4 bits/element → kein BW-Vorteil
-- Prefill (compute-bound): MXFP4 Tensor Cores = same throughput as NVFP4 (both FP4)
-- Hauptvorteil von MR-GPTQ: bessere Accuracy durch Hadamard-Rotation (96% vs ~93% FP16 recovery)
-- **Nächster Schritt**: MXFP4 GEMM in Prefill-Pfad einbauen und gegen NVFP4 benchen
-
----
-
-## BitDecoding (arXiv:2503.18773)
-
-Tensor-Core-basiertes Decoding mit Low-bit KV-Cache. Übertrifft FP16 FlashDecoding-v2 um **8.6x
-auf RTX 5090** (native MXFP4). Reduziert Single-Batch Decode-Latenz um **3x bei 128K Kontext**
-(LLaMA-3.1-8B).
-
-- [ ] Paper lesen: wie werden Tensor Cores für Decode-Attention mit quantisiertem KV genutzt?
-- [ ] MXFP4 KV-Cache Format evaluieren (aktuell: FP8 E4M3 / INT8, kein FP4 KV)
-- [ ] TC-basierte Paged Attention prototypen (aktuell: WMMA nur FP16/FP8 in decode)
-- [ ] Integration mit bestehendem KV-Cache-Manager (Block-basiert, kKVBlockSize=16)
-
-**Relevanz:** Unser Decode ist 90%+ GEMV (memory-bound, ~44% peak BW). Paged Attention nutzt
-WMMA nur für FP16/FP8. MXFP4 KV-Cache mit TC-Decoding könnte bei langen Kontexten massiv helfen —
-4x weniger KV-Daten + höherer TC-Throughput. Besonders relevant für 32GB VRAM-Limit der RTX 5090.
+### CUDA 13.2 Features
+- `IMP_CUDA_13_2=1` flag exists in CMakeLists.txt but no code uses it yet
+- cuBLASLt MXFP4/NVFP4 GEMM: blocked on sm_120 kernel availability
+- Sampling already uses optimized fused top-k kernel (cub::DeviceTopK not needed)
