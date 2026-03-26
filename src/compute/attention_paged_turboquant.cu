@@ -195,6 +195,14 @@ paged_attention_decode_turboquant_kernel(
         if (tok_start < effective_start) first_tok = effective_start - tok_start;
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
+            // Prefetch next token's K direction + V into L1 cache
+            if (t + 1 < (tok_end - tok_start)) {
+                const uint8_t* K_dir_next = K_dir_block + (t + 1) * kv_slot_stride + kv_head * kv_head_bytes;
+                const uint8_t* V_next     = V_block     + (t + 1) * kv_slot_stride + kv_head * kv_head_bytes;
+                asm volatile("prefetch.global.L1 [%0];\n" :: "l"(K_dir_next + lane_offset / 2));
+                asm volatile("prefetch.global.L1 [%0];\n" :: "l"(V_next + lane_offset / 2));
+            }
+
             const uint8_t* K_dir_tok = K_dir_block + t * kv_slot_stride + kv_head * kv_head_bytes;
             float k_norm = __half2float(K_norm_block[t * n_kv_heads + kv_head]);
 
@@ -473,6 +481,14 @@ paged_attention_splitk_turboquant_kernel(
         if (tok_start < effective_start) first_tok = effective_start - tok_start;
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
+            // Prefetch next token's K direction + V into L1 cache
+            if (t + 1 < (tok_end - tok_start)) {
+                const uint8_t* K_dir_next = K_dir_block + (t + 1) * kv_slot_stride + kv_head * kv_head_bytes;
+                const uint8_t* V_next     = V_block     + (t + 1) * kv_slot_stride + kv_head * kv_head_bytes;
+                asm volatile("prefetch.global.L1 [%0];\n" :: "l"(K_dir_next + lane_offset / 2));
+                asm volatile("prefetch.global.L1 [%0];\n" :: "l"(V_next + lane_offset / 2));
+            }
+
             const uint8_t* K_dir_tok = K_dir_block + t * kv_slot_stride + kv_head * kv_head_bytes;
             float k_norm = __half2float(K_norm_block[t * n_kv_heads + kv_head]);
 
@@ -840,6 +856,14 @@ paged_attention_decode_turboquant_lite_kernel(
         if (tok_start < effective_start) first_tok = effective_start - tok_start;
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
+            // Prefetch next token's sketch + V into L1 cache
+            if (t + 1 < (tok_end - tok_start)) {
+                const uint8_t* K_sk_next = K_sk_block + (t + 1) * sketch_slot_stride + kv_head * sketch_head_bytes;
+                const uint8_t* V_next    = V_block    + (t + 1) * kv_slot_stride + kv_head * kv_head_bytes;
+                asm volatile("prefetch.global.L1 [%0];\n" :: "l"(K_sk_next));
+                asm volatile("prefetch.global.L1 [%0];\n" :: "l"(V_next + lane_offset / 2));
+            }
+
             float k_norm = __half2float(K_norm_block[t * n_kv_heads + kv_head]);
 
             // Fix 3: Pure QJL dot product — warp-parallel XNOR+popcount
@@ -1070,6 +1094,14 @@ paged_attention_splitk_turboquant_lite_kernel(
         if (tok_start < effective_start) first_tok = effective_start - tok_start;
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
+            // Prefetch next token's sketch + V into L1 cache
+            if (t + 1 < (tok_end - tok_start)) {
+                const uint8_t* K_sk_next = K_sk_block + (t + 1) * sketch_slot_stride + kv_head * sketch_head_bytes;
+                const uint8_t* V_next    = V_block    + (t + 1) * kv_slot_stride + kv_head * kv_head_bytes;
+                asm volatile("prefetch.global.L1 [%0];\n" :: "l"(K_sk_next));
+                asm volatile("prefetch.global.L1 [%0];\n" :: "l"(V_next + lane_offset / 2));
+            }
+
             float k_norm = __half2float(K_norm_block[t * n_kv_heads + kv_head]);
 
             // Fix 3: Pure QJL dot product — warp-parallel XNOR+popcount
