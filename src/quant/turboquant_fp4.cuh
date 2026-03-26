@@ -67,4 +67,7 @@ __device__ __forceinline__ float tq_fp4_unpack_hi(uint8_t packed) {
     return tq_fp4_dequant_nibble((packed >> 4) & 0xF);
 }
 
+// Reciprocal of INT4 symmetric range max (7) for dequantization: val / 7.0
+static constexpr float kTQINT4InvScale = 1.0f / 7.0f;
+
 } // namespace imp

@@ -39,8 +39,6 @@ __device__ __forceinline__ int tq_unpack_int4_hi(uint8_t packed) {
 // QJL correction weight (from TurboQuant paper)
 static constexpr float kQJLLambda = 0.1f;
 
-// Fix 2: INT4 division → multiplication (avoid fdiv latency)
-static constexpr float kINV7 = 1.0f / 7.0f;
 
 template<int HEAD_DIM, bool USE_MXFP4 = false>
 __global__ void __launch_bounds__(256, 2)
@@ -120,10 +118,9 @@ paged_attention_decode_turboquant_kernel(
         q_sketch[i] = 0;
     __syncthreads();
 
-    // Fix 4: Warp-cooperative Q sketch — all 32 lanes compute ONE sketch row together
+    // Warp-cooperative Q sketch: each warp computes one sketch row
     {
         const int bytes_per_qjl_row = HEAD_DIM / 8;
-        // Each warp handles one sketch row at a time; warps iterate in parallel
         for (int sr = warp_id; sr < sketch_dim; sr += NUM_WARPS) {
             const uint8_t* R_row = qjl_matrix + sr * bytes_per_qjl_row;
 
@@ -175,6 +172,8 @@ paged_attention_decode_turboquant_kernel(
     #pragma unroll
     for (int i = 0; i < ELEMS; i++) o_reg[i] = 0.0f;
 
+    const float inv_sketch_dim = 1.0f / static_cast<float>(sketch_dim);
+
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
         const uint8_t* K_dir_block = K_dir_cache + (int64_t)phys_block * kv_block_stride;
@@ -199,8 +198,10 @@ paged_attention_decode_turboquant_kernel(
             if (t + 1 < (tok_end - tok_start)) {
                 const uint8_t* K_dir_next = K_dir_block + (t + 1) * kv_slot_stride + kv_head * kv_head_bytes;
                 const uint8_t* V_next     = V_block     + (t + 1) * kv_slot_stride + kv_head * kv_head_bytes;
-                asm volatile("prefetch.global.L1 [%0];\n" :: "l"(K_dir_next + lane_offset / 2));
-                asm volatile("prefetch.global.L1 [%0];\n" :: "l"(V_next + lane_offset / 2));
+                if (lane_id == 0) {
+                    asm volatile("prefetch.global.L1 [%0];\n" :: "l"(K_dir_next));
+                    asm volatile("prefetch.global.L1 [%0];\n" :: "l"(V_next));
+                }
             }
 
             const uint8_t* K_dir_tok = K_dir_block + t * kv_slot_stride + kv_head * kv_head_bytes;
@@ -229,8 +230,8 @@ paged_attention_decode_turboquant_kernel(
                 #pragma unroll
                 for (int i = 0; i < ELEMS / 2; i++) {
                     uint8_t packed = k_bytes[i];
-                    float d0 = static_cast<float>(tq_unpack_int4_lo(packed)) * kINV7;
-                    float d1 = static_cast<float>(tq_unpack_int4_hi(packed)) * kINV7;
+                    float d0 = static_cast<float>(tq_unpack_int4_lo(packed)) * kTQINT4InvScale;
+                    float d1 = static_cast<float>(tq_unpack_int4_hi(packed)) * kTQINT4InvScale;
                     dot_polar += q_reg[2*i]   * d0;
                     dot_polar += q_reg[2*i+1] * d1;
                 }
@@ -238,7 +239,7 @@ paged_attention_decode_turboquant_kernel(
             dot_polar = warp_reduce_sum(dot_polar);
             dot_polar *= k_norm;
 
-            // Fix 3: QJL correction — warp-parallel XNOR+popcount
+            // QJL correction: warp-parallel XNOR+popcount
             float dot_qjl;
             {
                 const uint8_t* k_sketch = K_sk_block + t * sketch_slot_stride + kv_head * sketch_head_bytes;
@@ -250,16 +251,10 @@ paged_attention_decode_turboquant_kernel(
                     memcpy(&k_word, k_sketch + sb * 4, sizeof(uint32_t));
                     local_match += __popc(~(q_sketch32[sb] ^ k_word));
                 }
-                // Handle remaining bytes on lane 0
-                if (lane_id == 0) {
-                    for (int sb = n_words * 4; sb < sketch_bytes; sb++) {
-                        uint8_t xnor = ~(q_sketch[sb] ^ k_sketch[sb]);
-                        local_match += __popc(static_cast<unsigned int>(xnor) & 0xFF);
-                    }
-                }
-                int match_count = warp_reduce_sum(local_match);
+                // sketch_dim is always a multiple of 32 → sketch_bytes divisible by 4, no tail needed
+                int match_count = static_cast<int>(warp_reduce_sum(static_cast<float>(local_match)));
                 dot_qjl = q_norm * k_norm * static_cast<float>(2 * match_count - sketch_dim)
-                          / static_cast<float>(sketch_dim);
+                          * inv_sketch_dim;
             }
 
             // Combined estimate with QJL correction
@@ -402,7 +397,7 @@ paged_attention_splitk_turboquant_kernel(
         q_sketch[i] = 0;
     __syncthreads();
 
-    // Fix 4: Warp-cooperative Q sketch — all 32 lanes compute ONE sketch row together
+    // Warp-cooperative Q sketch: each warp computes one sketch row
     {
         const int bytes_per_qjl_row = HEAD_DIM / 8;
         for (int sr = warp_id; sr < sketch_dim; sr += NUM_WARPS) {
@@ -462,6 +457,8 @@ paged_attention_splitk_turboquant_kernel(
     #pragma unroll
     for (int i = 0; i < ELEMS; i++) o_reg[i] = 0.0f;
 
+    const float inv_sketch_dim = 1.0f / static_cast<float>(sketch_dim);
+
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
         int phys_block = bt[blk];
         const uint8_t* K_dir_block = K_dir_cache + (int64_t)phys_block * kv_block_stride;
@@ -485,8 +482,10 @@ paged_attention_splitk_turboquant_kernel(
             if (t + 1 < (tok_end - tok_start)) {
                 const uint8_t* K_dir_next = K_dir_block + (t + 1) * kv_slot_stride + kv_head * kv_head_bytes;
                 const uint8_t* V_next     = V_block     + (t + 1) * kv_slot_stride + kv_head * kv_head_bytes;
-                asm volatile("prefetch.global.L1 [%0];\n" :: "l"(K_dir_next + lane_offset / 2));
-                asm volatile("prefetch.global.L1 [%0];\n" :: "l"(V_next + lane_offset / 2));
+                if (lane_id == 0) {
+                    asm volatile("prefetch.global.L1 [%0];\n" :: "l"(K_dir_next));
+                    asm volatile("prefetch.global.L1 [%0];\n" :: "l"(V_next));
+                }
             }
 
             const uint8_t* K_dir_tok = K_dir_block + t * kv_slot_stride + kv_head * kv_head_bytes;
@@ -513,8 +512,8 @@ paged_attention_splitk_turboquant_kernel(
                 #pragma unroll
                 for (int i = 0; i < ELEMS / 2; i++) {
                     uint8_t packed = k_bytes[i];
-                    float d0 = static_cast<float>(tq_unpack_int4_lo(packed)) * kINV7;
-                    float d1 = static_cast<float>(tq_unpack_int4_hi(packed)) * kINV7;
+                    float d0 = static_cast<float>(tq_unpack_int4_lo(packed)) * kTQINT4InvScale;
+                    float d1 = static_cast<float>(tq_unpack_int4_hi(packed)) * kTQINT4InvScale;
                     dot_polar += q_reg[2*i]   * d0;
                     dot_polar += q_reg[2*i+1] * d1;
                 }
@@ -522,7 +521,7 @@ paged_attention_splitk_turboquant_kernel(
             dot_polar = warp_reduce_sum(dot_polar);
             dot_polar *= k_norm;
 
-            // Fix 3: QJL correction — warp-parallel XNOR+popcount
+            // QJL correction: warp-parallel XNOR+popcount
             float dot_qjl;
             {
                 const uint8_t* k_sketch = K_sk_block + t * sketch_slot_stride + kv_head * sketch_head_bytes;
@@ -534,15 +533,10 @@ paged_attention_splitk_turboquant_kernel(
                     memcpy(&k_word, k_sketch + sb * 4, sizeof(uint32_t));
                     local_match += __popc(~(q_sketch32[sb] ^ k_word));
                 }
-                if (lane_id == 0) {
-                    for (int sb = n_words * 4; sb < sketch_bytes; sb++) {
-                        uint8_t xnor = ~(q_sketch[sb] ^ k_sketch[sb]);
-                        local_match += __popc(static_cast<unsigned int>(xnor) & 0xFF);
-                    }
-                }
-                int match_count = warp_reduce_sum(local_match);
+                // sketch_dim is always a multiple of 32 → sketch_bytes divisible by 4, no tail needed
+                int match_count = static_cast<int>(warp_reduce_sum(static_cast<float>(local_match)));
                 dot_qjl = q_norm * k_norm * static_cast<float>(2 * match_count - sketch_dim)
-                          / static_cast<float>(sketch_dim);
+                          * inv_sketch_dim;
             }
 
             float dot = (1.0f - kQJLLambda) * dot_polar + kQJLLambda * dot_qjl;
@@ -796,7 +790,7 @@ paged_attention_decode_turboquant_lite_kernel(
         q_sketch[i] = 0;
     __syncthreads();
 
-    // Fix 4: Warp-cooperative Q sketch — all 32 lanes compute ONE sketch row together
+    // Warp-cooperative Q sketch: each warp computes one sketch row
     {
         const int bytes_per_qjl_row = HEAD_DIM / 8;
         for (int sr = warp_id; sr < sketch_dim; sr += NUM_WARPS) {
@@ -841,6 +835,8 @@ paged_attention_decode_turboquant_lite_kernel(
     #pragma unroll
     for (int i = 0; i < ELEMS; i++) o_reg[i] = 0.0f;
 
+    const float inv_sketch_dim = 1.0f / static_cast<float>(sketch_dim);
+
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
         const uint8_t* V_block     = V_cache     + (int64_t)phys_block * kv_block_stride;
@@ -860,13 +856,15 @@ paged_attention_decode_turboquant_lite_kernel(
             if (t + 1 < (tok_end - tok_start)) {
                 const uint8_t* K_sk_next = K_sk_block + (t + 1) * sketch_slot_stride + kv_head * sketch_head_bytes;
                 const uint8_t* V_next    = V_block    + (t + 1) * kv_slot_stride + kv_head * kv_head_bytes;
-                asm volatile("prefetch.global.L1 [%0];\n" :: "l"(K_sk_next));
-                asm volatile("prefetch.global.L1 [%0];\n" :: "l"(V_next + lane_offset / 2));
+                if (lane_id == 0) {
+                    asm volatile("prefetch.global.L1 [%0];\n" :: "l"(K_sk_next));
+                    asm volatile("prefetch.global.L1 [%0];\n" :: "l"(V_next));
+                }
             }
 
             float k_norm = __half2float(K_norm_block[t * n_kv_heads + kv_head]);
 
-            // Fix 3: Pure QJL dot product — warp-parallel XNOR+popcount
+            // Pure QJL dot product: warp-parallel XNOR+popcount
             float dot_qjl;
             {
                 const uint8_t* k_sketch = K_sk_block + t * sketch_slot_stride + kv_head * sketch_head_bytes;
@@ -878,15 +876,10 @@ paged_attention_decode_turboquant_lite_kernel(
                     memcpy(&k_word, k_sketch + sb * 4, sizeof(uint32_t));
                     local_match += __popc(~(q_sketch32[sb] ^ k_word));
                 }
-                if (lane_id == 0) {
-                    for (int sb = n_words * 4; sb < sketch_bytes; sb++) {
-                        uint8_t xnor = ~(q_sketch[sb] ^ k_sketch[sb]);
-                        local_match += __popc(static_cast<unsigned int>(xnor) & 0xFF);
-                    }
-                }
-                int match_count = warp_reduce_sum(local_match);
+                // sketch_dim is always a multiple of 32 → sketch_bytes divisible by 4, no tail needed
+                int match_count = static_cast<int>(warp_reduce_sum(static_cast<float>(local_match)));
                 dot_qjl = q_norm * k_norm * static_cast<float>(2 * match_count - sketch_dim)
-                          / static_cast<float>(sketch_dim);
+                          * inv_sketch_dim;
             }
 
             float dot = dot_qjl * scale;
@@ -1024,7 +1017,7 @@ paged_attention_splitk_turboquant_lite_kernel(
         q_sketch[i] = 0;
     __syncthreads();
 
-    // Fix 4: Warp-cooperative Q sketch — all 32 lanes compute ONE sketch row together
+    // Warp-cooperative Q sketch: each warp computes one sketch row
     {
         const int bytes_per_qjl_row = HEAD_DIM / 8;
         for (int sr = warp_id; sr < sketch_dim; sr += NUM_WARPS) {
@@ -1079,6 +1072,8 @@ paged_attention_splitk_turboquant_lite_kernel(
     #pragma unroll
     for (int i = 0; i < ELEMS; i++) o_reg[i] = 0.0f;
 
+    const float inv_sketch_dim = 1.0f / static_cast<float>(sketch_dim);
+
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
         int phys_block = bt[blk];
         const uint8_t* V_block     = V_cache     + (int64_t)phys_block * kv_block_stride;
@@ -1098,13 +1093,15 @@ paged_attention_splitk_turboquant_lite_kernel(
             if (t + 1 < (tok_end - tok_start)) {
                 const uint8_t* K_sk_next = K_sk_block + (t + 1) * sketch_slot_stride + kv_head * sketch_head_bytes;
                 const uint8_t* V_next    = V_block    + (t + 1) * kv_slot_stride + kv_head * kv_head_bytes;
-                asm volatile("prefetch.global.L1 [%0];\n" :: "l"(K_sk_next));
-                asm volatile("prefetch.global.L1 [%0];\n" :: "l"(V_next + lane_offset / 2));
+                if (lane_id == 0) {
+                    asm volatile("prefetch.global.L1 [%0];\n" :: "l"(K_sk_next));
+                    asm volatile("prefetch.global.L1 [%0];\n" :: "l"(V_next));
+                }
             }
 
             float k_norm = __half2float(K_norm_block[t * n_kv_heads + kv_head]);
 
-            // Fix 3: Pure QJL dot product — warp-parallel XNOR+popcount
+            // Pure QJL dot product: warp-parallel XNOR+popcount
             float dot_qjl;
             {
                 const uint8_t* k_sketch = K_sk_block + t * sketch_slot_stride + kv_head * sketch_head_bytes;
@@ -1116,15 +1113,10 @@ paged_attention_splitk_turboquant_lite_kernel(
                     memcpy(&k_word, k_sketch + sb * 4, sizeof(uint32_t));
                     local_match += __popc(~(q_sketch32[sb] ^ k_word));
                 }
-                if (lane_id == 0) {
-                    for (int sb = n_words * 4; sb < sketch_bytes; sb++) {
-                        uint8_t xnor = ~(q_sketch[sb] ^ k_sketch[sb]);
-                        local_match += __popc(static_cast<unsigned int>(xnor) & 0xFF);
-                    }
-                }
-                int match_count = warp_reduce_sum(local_match);
+                // sketch_dim is always a multiple of 32 → sketch_bytes divisible by 4, no tail needed
+                int match_count = static_cast<int>(warp_reduce_sum(static_cast<float>(local_match)));
                 dot_qjl = q_norm * k_norm * static_cast<float>(2 * match_count - sketch_dim)
-                          / static_cast<float>(sketch_dim);
+                          * inv_sketch_dim;
             }
 
             float dot = dot_qjl * scale;
