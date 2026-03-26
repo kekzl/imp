@@ -524,8 +524,7 @@ bool Engine::init_kv_cache() {
                      "(layers=%d/%d, kv_heads=%d, head_dim=%d, block_size=%d)",
                      max_blocks, static_cast<double>(max_blocks) * kv_bs,
                      static_cast<double>(total_kv) / (1024.0 * 1024.0),
-                     kv_dtype == DType::FP8_E4M3 ? "FP8_E4M3" :
-                     kv_dtype == DType::INT8 ? "INT8" : kv_dtype == DType::INT4 ? "INT4" : "FP16",
+                     dtype_name(kv_dtype),
                      n_kv_layers, mcfg.n_layers, mcfg.n_kv_heads, head_dim, kv_bs);
     }
 
@@ -546,6 +545,16 @@ bool Engine::init_kv_cache() {
     }
 
     executor_->set_kv_layer_map(std::move(kv_layer_map));
+
+    // Initialize QJL projection for TurboQuant KV cache
+    if (config_.kv_cache_dtype == DType::TURBOQUANT) {
+        auto& qjl = executor_->qjl_projection();
+        if (!qjl_init(qjl, head_dim, head_dim, /*seed=*/42, stream_)) {
+            IMP_LOG_ERROR("Failed to initialize QJL projection for TurboQuant");
+            return false;
+        }
+    }
+
     if (offload_mgr_) executor_->set_offload_manager(offload_mgr_.get());
     scheduler_->set_kv_manager(kv_manager_.get());
 

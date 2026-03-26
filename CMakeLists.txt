@@ -106,6 +106,7 @@ set(IMP_QUANT_SOURCES
     src/quant/fp8_quant.cu
     src/quant/nvfp4_quant.cu
     src/quant/nvfp4_gemm.cu
+    src/quant/turboquant.cu
 )
 
 set(IMP_COMPUTE_SOURCES
@@ -120,6 +121,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_paged_fp8.cu
     src/compute/attention_paged_int8.cu
     src/compute/attention_paged_int4.cu
+    src/compute/attention_paged_turboquant.cu
     src/compute/attention_tc.cu
     src/compute/attention_blackwell.cu
     src/compute/attention_cublas.cu
@@ -315,6 +317,7 @@ if(IMP_BUILD_TESTS)
         tests/test_fp8_gemm.cu
         tests/test_attention_tc.cu
         tests/test_nvfp4_quant.cu
+        tests/test_turboquant.cu
         tests/test_fp8_kv_cache.cu
         tests/test_speculative.cpp
         tests/test_sampling.cu

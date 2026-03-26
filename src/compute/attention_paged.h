@@ -69,6 +69,25 @@ void paged_attention_decode_int4(
     float softcap = 0.0f, cudaStream_t stream = nullptr,
     int max_blocks_per_seq = 0);
 
+// TurboQuant Paged attention for decode: PolarQuant INT4 K + QJL sketch + INT4 V.
+// Q: [batch, 1, n_heads, head_dim] FP16
+// K_dir_cache: [num_blocks, block_size, n_kv_heads, head_dim/2] packed INT4 unit directions
+// V_cache: [num_blocks, block_size, n_kv_heads, head_dim/2] packed INT4 values
+// K_norms: [num_blocks, block_size, n_kv_heads] FP16 PolarQuant norms
+// V_scales: [num_blocks, block_size, n_kv_heads] FP16 per-head V scales
+// K_sketches: [num_blocks, block_size, n_kv_heads, sketch_dim/8] packed 1-bit QJL sketches
+// qjl_matrix: [sketch_dim, head_dim/8] packed Rademacher signs
+void paged_attention_decode_turboquant(
+    const Tensor& Q, const Tensor& K_dir_cache, const Tensor& V_cache,
+    Tensor& O,
+    const half* K_norms, const half* V_scales,
+    const uint8_t* K_sketches, const uint8_t* qjl_matrix,
+    const int* block_tables, const int* context_lens,
+    int block_size, float scale, int sketch_dim,
+    int max_context_len, int sliding_window = 0,
+    float softcap = 0.0f, cudaStream_t stream = nullptr,
+    int max_blocks_per_seq = 0);
+
 // Split-K scratch buffer accessor (for use by FP8/INT8 launcher TUs).
 // Returns pointer + size. Either can be nullptr/0 if unset.
 void paged_attention_get_splitk_scratch(void** out_ptr, size_t* out_size);
