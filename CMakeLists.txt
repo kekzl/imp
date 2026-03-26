@@ -148,6 +148,7 @@ if(IMP_USE_CUTLASS)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_mxfp4_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_cutlass_fmha.cu)
+    list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxfp4_prefill.cu)
 endif()
 
 set(IMP_RUNTIME_SOURCES
@@ -329,6 +330,7 @@ if(IMP_BUILD_TESTS)
         tests/test_tokenizer.cpp
         tests/test_chat_template.cpp
         tests/test_hadamard.cu
+        tests/test_attention_mxfp4.cu
     )
 
     add_executable(imp-tests ${IMP_TEST_SOURCES})
