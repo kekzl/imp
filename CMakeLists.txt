@@ -19,13 +19,17 @@ add_compile_definitions(IMP_CUDA_13_1=1)
 # add_compile_definitions(IMP_CUDA_13_2=1)
 
 # --- CUDA Architecture ---
-# sm_90a = Hopper, sm_100 = Blackwell B200, sm_120a = Blackwell B300/RTX 5090
-option(IMP_NATIVE_SM120 "Build exclusively for sm_120 (RTX 5090) — enables native Blackwell SASS" OFF)
+# sm_90a = Hopper, sm_100 = Blackwell B200, sm_120f = Blackwell RTX 50-series
+# Using sm_120f (family feature set) instead of sm_120a (architecture-specific):
+# - Enables TMA warp-specialized grouped GEMM tactics in CUTLASS
+# - Forward-compatible within the Blackwell family (sm_120, sm_121)
+# - No sm_120a-specific features (cvt.e2m1 etc.) are used in the codebase
+option(IMP_NATIVE_SM120 "Build exclusively for sm_120f (RTX 5090) — enables Blackwell family features" OFF)
 if(IMP_NATIVE_SM120)
-    set(CMAKE_CUDA_ARCHITECTURES "120a")
+    set(CMAKE_CUDA_ARCHITECTURES "120f")
     message(STATUS "CUDA architectures: 120a (native RTX 5090 build)")
 elseif(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES "90a;100;120a")
+    set(CMAKE_CUDA_ARCHITECTURES "90a;100;120f")
     message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 else()
     message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
@@ -151,11 +155,8 @@ if(IMP_USE_CUTLASS)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxfp4_prefill.cu)
 endif()
 
-# TurboQuant paged attention kernels trigger ptxas C7600 on sm_120a with
-# fast-math optimizations (CUDA 13.2 compiler bug: "register allocation
-# failed with register count of 7"). Override to disable fast-math flags.
-set_source_files_properties(src/compute/attention_paged_turboquant.cu PROPERTIES
-    COMPILE_FLAGS "--ftz=false --prec-div=true --prec-sqrt=true --fmad=true")
+# Note: TurboQuant paged attention previously required a fast-math override
+# (ptxas C7600 on sm_120a). This is resolved by using sm_120f instead.
 
 set(IMP_RUNTIME_SOURCES
     src/runtime/green_ctx.cu
