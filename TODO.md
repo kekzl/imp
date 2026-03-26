@@ -86,6 +86,59 @@ Current gap vs FP8 baseline: -23% decode (191 vs 248 tok/s). This is algorithm-i
 
 ---
 
+## Upgrade Path: CUTLASS 4.4.2 + PTX 9.2
+
+### CUTLASS 4.4.1 → 4.4.2
+We're on CUTLASS v4.4.1 (FetchContent). Upgrade to 4.4.2 brings:
+- **SM120f compilation** for examples and NVFP4/MX Grouped GEMM profiler
+- **Hopper FMHA causal perf fix**: unnecessary convergence barriers in mbarrier sync
+- **SM120 memory fence fix** for CLC scheduler Pingpong kernel
+- **SM120 SMEM alignment fix** for scale factors (was causing garbage output)
+- **SM120 PDL fix** for Grouped GEMM
+- **Example 87**: SM120 Blockwise GEMM (reference for GGUF-dequant GEMM)
+- **Example 92**: MoE low-latency kernels (TMA weights, CPASYNC tokens)
+- **Block-scaled sparse kernels** for SM100/SM120
+- **Heuristics-based autotuning** via nvidia-matmul-heuristics
+
+SM120 GEMM architecture notes:
+- Pingpong (2×4 MMA warps) and Cooperative (1×8 MMA warps) schedules
+- Default: KernelTmaWarpSpecializedCooperative
+- GeForce: Cluster 1×1×1 only (no multicast), TN layout only
+- SM120 FMHA: exists but blocked by wiring issues in fmha_v2 (WIP upstream)
+
+### PTX ISA 9.2 Opportunities
+Available in CUDA 13.2 but not yet used in imp:
+
+**High value for attention/decode:**
+- **`cp.async.bulk` with `.ignore_oob`**: OOB reads return zero instead of crashing.
+  Eliminates bounds-checking in TMA descriptors for variable sequence lengths.
+  Major simplification for paged attention with partial last blocks.
+- **`st.async` with `.b128`**: 16-byte async stores. Perfect for KV cache writeback
+  (one instruction per FP16 KV vector slot at head_dim=64).
+- **`cvt .bf16x2` ↔ narrow types** (`.e2m1x2`, `.e4m3x2`): packed FP4/FP8 pair
+  conversion. 2x throughput for KV cache quantize/dequantize pipeline.
+
+**Medium value:**
+- **`u8x4`/`s8x4` SIMD** for add/sub/min/max: packed 4-byte integer ops.
+  Useful for index operations in KV cache management.
+- **`add.sat`** for u16x2/s16x2/u32: overflow-safe index arithmetic.
+- **`.scale_vec::4X` with `.ue8m0`** for MXFP4 MMA: finer scale granularity
+  (1 scale per 4 elements vs per block). Better quantization accuracy.
+
+**From PTX 9.1 (already available):**
+- **`cvt .f16x2`/`.bf16x2` → `.e2m1x2`**: online FP16→FP4 quantization.
+  Quantize K/V on-the-fly before KV cache write → 50% VRAM savings.
+
+### tcgen05 on SM120
+Tensor core instruction set for Blackwell. Available but constrained:
+- No multicast (cluster 1×1×1), TN layout only
+- Mixing tcgen05 with CUDA-core ops (softmax between MMA steps) requires
+  expensive sync between Generic and Async proxies
+- 256-bit loads available on SM120f (family feature)
+- Flash Attention 4 pattern (fused softmax + MMA) still research-grade
+
+---
+
 ## Research / Future
 
 ### BitDecoding (arxiv:2503.18773)
