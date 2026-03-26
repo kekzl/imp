@@ -780,11 +780,11 @@ __global__ void write_kv_cache_turboquant_kernel(
                 float v0 = __half2float(src[head_offset + d]) * inv_norm;
                 float v1 = (d + 1 < head_dim) ? __half2float(src[head_offset + d + 1]) * inv_norm : 0.0f;
 
-                // Uniform quantize [-1, 1] → [-8, 7]
+                // Uniform quantize [-1, 1] → [-7, 7] (symmetric for /7 dequant)
                 int q0 = __float2int_rn(v0 * 7.0f);
                 int q1 = __float2int_rn(v1 * 7.0f);
-                q0 = max(-8, min(7, q0));
-                q1 = max(-8, min(7, q1));
+                q0 = max(-7, min(7, q0));
+                q1 = max(-7, min(7, q1));
 
                 uint8_t packed = (static_cast<uint8_t>(q0 & 0xF)) |
                                  (static_cast<uint8_t>(q1 & 0xF) << 4);
