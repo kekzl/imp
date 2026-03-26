@@ -5,7 +5,7 @@
 # =============================================================================
 FROM nvidia/cuda:13.2.0-devel-ubuntu24.04 AS builder
 
-ARG CUDA_ARCHITECTURES="90a;100;120a"
+ARG CUDA_ARCHITECTURES="90a;100;120f"
 ARG CMAKE_BUILD_TYPE=Release
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
