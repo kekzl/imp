@@ -1173,7 +1173,11 @@ bool Engine::step() {
         upload_penalties(*req, state, pf_stream);
 
         // Recurrent state (SSM/GDN)
-        fill_recurrent_state(*req, state, offset == 0, pf_stream);
+        // Always reset for recurrent models — unlike KV cache, the recurrent
+        // state cannot be reused across requests via prefix caching.
+        // Without reset, the state from a previous request (or warmup) leaks
+        // into the new one, causing degenerate output after the first request.
+        fill_recurrent_state(*req, state, /*reset=*/true, pf_stream);
 
         // Vision embeddings on first chunk
         if (vision_.has_input() && vision_.is_available() && offset == 0) {
