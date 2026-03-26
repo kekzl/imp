@@ -8,6 +8,7 @@
 #include "compute/json_constrain.h"
 #include "compute/schema_constrain.h"
 #include "quant/nvfp4_quant.h"
+#include "quant/turboquant.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "core/tensor.h"
@@ -304,6 +305,10 @@ public:
     // where forward_logits isn't called but the graph writes to this buffer).
     Tensor get_logits_view(int n) const { return view_tokens(logits_, n); }
 
+    // Access QJL projection for TurboQuant (initialized by Engine if kv_cache_dtype == TURBOQUANT)
+    QJLProjection& qjl_projection() { return qjl_proj_; }
+    const QJLProjection& qjl_projection() const { return qjl_proj_; }
+
     // Release the MoE batch dequant buffer when expert weights are on host.
     // Call after weight upload if experts didn't fit on GPU.
     void release_moe_batch_buf();
@@ -437,6 +442,9 @@ private:
     // Scale = absmax / 448.0; used as inv_scale = 1/scale for write, scale for read.
     std::vector<float> kv_scales_;       // [n_kv_layers] per-layer FP8 scale
     std::vector<bool>  kv_calibrated_;   // [n_kv_layers] whether scale has been calibrated
+
+    // TurboQuant QJL projection matrix (shared across all layers, initialized once)
+    QJLProjection qjl_proj_;
 
     // YaRN correction dimension boundaries [2], precomputed at init.
     // yarn_corr_dims_[0] = start (full interpolation below), yarn_corr_dims_[1] = end (full extrapolation above)

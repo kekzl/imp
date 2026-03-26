@@ -16,6 +16,7 @@ typedef enum {
     IMP_DTYPE_INT4      = 6,
     IMP_DTYPE_INT32     = 7,
     IMP_DTYPE_FP4_E2M1  = 8,
+    IMP_DTYPE_TURBOQUANT = 9,   // TurboQuant: PolarQuant INT4 K + QJL sketch + INT4 V
 } ImpDType;
 
 typedef enum {
