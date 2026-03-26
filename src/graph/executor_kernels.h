@@ -174,6 +174,33 @@ __global__ void write_kv_cache_turboquant_kernel(
     int max_blocks_per_seq,
     int n_sequences);
 
+// TurboQuant MXFP4 variant: PolarQuant FP4 E2M1 K directions + UE8M0 micro-scales + QJL.
+// K path: normalize → per-32-element UE8M0 scale → FP4 E2M1 quantize → QJL sketch
+// V path: standard INT4 per-head quantization (same as non-MXFP4 variant)
+__global__ void write_kv_cache_turboquant_mxfp4_kernel(
+    const half* __restrict__ k_in,
+    const half* __restrict__ v_in,
+    const int* __restrict__ positions,
+    const int* __restrict__ block_tables,
+    uint8_t* __restrict__ k_dir_cache_base,    // FP4 E2M1 packed directions (same layout as INT4)
+    uint8_t* __restrict__ v_cache_base,         // INT4 packed values
+    half* __restrict__ k_norm_base,             // FP16 PolarQuant norms
+    half* __restrict__ v_scale_base,            // FP16 per-head V scales
+    uint8_t* __restrict__ k_sketch_base,        // QJL 1-bit sketches
+    uint8_t* __restrict__ k_mscale_base,        // UE8M0 micro-scales [block, slot, head, head_dim/32]
+    const uint8_t* __restrict__ qjl_matrix,     // [sketch_dim, head_dim/8] packed Rademacher signs
+    int block_stride,                           // kKVBlockSize * n_kv_heads * head_dim / 2 (bytes)
+    int scale_block_stride,                     // kKVBlockSize * n_kv_heads (half elems)
+    int sketch_block_stride,                    // kKVBlockSize * n_kv_heads * sketch_dim / 8 (bytes)
+    int mscale_block_stride,                    // kKVBlockSize * n_kv_heads * (head_dim / 32) (bytes)
+    int n_kv_heads,
+    int head_dim,
+    int sketch_dim,
+    int block_size,
+    int n_tokens,
+    int max_blocks_per_seq,
+    int n_sequences);
+
 // TurboQuant Lite: QJL sketch-only K + INT4 V write kernel.
 // K path (blockIdx.y == 0): Compute L2 norm + QJL sketch (no INT4 direction quantization).
 // V path (blockIdx.y == 1): Standard INT4 per-head quantization.

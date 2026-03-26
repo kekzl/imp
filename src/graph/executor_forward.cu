@@ -180,7 +180,7 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
             kv_block_size, n,
             state.max_blocks_per_seq, state.n_sequences);
     } else if (use_turboquant) {
-        // TurboQuant KV cache write: PolarQuant INT4 directions + QJL sketch for K, INT4 for V
+        // TurboQuant KV cache write: PolarQuant directions + QJL sketch for K, INT4 for V
         Tensor kv = view_tokens(k_, n);
         Tensor vv = view_tokens(v_, n);
         int int4_block_stride = kv_block_size * nkv * hd / 2;
@@ -188,21 +188,46 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
         int sketch_dim = qjl_proj_.sketch_dim;
         int sketch_block_stride = kv_block_size * nkv * (sketch_dim / 8);
         dim3 grid_tq(n, 2);
-        write_kv_cache_turboquant_kernel<<<grid_tq, 256, 0, stream>>>(
-            static_cast<const half*>(kv.data),
-            static_cast<const half*>(vv.data),
-            state.positions,
-            state.block_tables,
-            static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
-            static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
-            static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
-            static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)),
-            static_cast<uint8_t*>(cache->k_sketch_ptr(kv_layer, 0)),
-            static_cast<const uint8_t*>(qjl_proj_.matrix),
-            int4_block_stride, scale_block_stride_tq, sketch_block_stride,
-            nkv, hd, sketch_dim,
-            kv_block_size, n,
-            state.max_blocks_per_seq, state.n_sequences);
+
+        if (cache->use_mxfp4()) {
+            // MXFP4 path: FP4 E2M1 directions + UE8M0 per-32-element micro-scales
+            int n_groups = hd / 32;
+            int mscale_block_stride = kv_block_size * nkv * n_groups;
+            write_kv_cache_turboquant_mxfp4_kernel<<<grid_tq, 256, 0, stream>>>(
+                static_cast<const half*>(kv.data),
+                static_cast<const half*>(vv.data),
+                state.positions,
+                state.block_tables,
+                static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
+                static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
+                static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
+                static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)),
+                static_cast<uint8_t*>(cache->k_sketch_ptr(kv_layer, 0)),
+                static_cast<uint8_t*>(cache->k_mscale_ptr(kv_layer, 0)),
+                static_cast<const uint8_t*>(qjl_proj_.matrix),
+                int4_block_stride, scale_block_stride_tq, sketch_block_stride,
+                mscale_block_stride,
+                nkv, hd, sketch_dim,
+                kv_block_size, n,
+                state.max_blocks_per_seq, state.n_sequences);
+        } else {
+            // INT4 uniform path
+            write_kv_cache_turboquant_kernel<<<grid_tq, 256, 0, stream>>>(
+                static_cast<const half*>(kv.data),
+                static_cast<const half*>(vv.data),
+                state.positions,
+                state.block_tables,
+                static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
+                static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
+                static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
+                static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)),
+                static_cast<uint8_t*>(cache->k_sketch_ptr(kv_layer, 0)),
+                static_cast<const uint8_t*>(qjl_proj_.matrix),
+                int4_block_stride, scale_block_stride_tq, sketch_block_stride,
+                nkv, hd, sketch_dim,
+                kv_block_size, n,
+                state.max_blocks_per_seq, state.n_sequences);
+        }
     } else if (use_int4) {
         // INT4 quantized KV cache write — 2 values packed per byte, per-head scales
         Tensor kv = view_tokens(k_, n);
@@ -808,7 +833,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                         state.max_blocks_per_seq);
         } else if (cache_dtype == DType::TURBOQUANT) {
             // TurboQuant paged attention: PolarQuant K + QJL correction + INT4 V (Split-K enabled)
+            // K_mscales: non-null if MXFP4 path (FP4 E2M1 + UE8M0), null for uniform INT4
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
+            const uint8_t* k_mscales = cache->use_mxfp4()
+                ? static_cast<const uint8_t*>(cache->k_mscale_ptr(kv_layer, 0))
+                : nullptr;
             paged_attention_decode_turboquant(q4, k_c, v_c, o4,
                                         static_cast<const half*>(cache->k_scale_ptr(kv_layer, 0)),
                                         static_cast<const half*>(cache->v_scale_ptr(kv_layer, 0)),
@@ -818,7 +847,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                         kv_bs, scale, qjl_proj_.sketch_dim,
                                         state.max_context_len, layer_sliding_window,
                                         cfg.attn_logit_softcap, stream,
-                                        state.max_blocks_per_seq);
+                                        state.max_blocks_per_seq,
+                                        k_mscales);
         } else if (cache_dtype == DType::INT4) {
             // INT4 paged attention with per-head scales and INT4 unpack (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
