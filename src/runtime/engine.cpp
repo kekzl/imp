@@ -528,9 +528,32 @@ bool Engine::init_kv_cache() {
                      n_kv_layers, mcfg.n_layers, mcfg.n_kv_heads, head_dim, kv_bs);
     }
 
+    // Compute sketch_dim for TurboQuant / TurboQuant Lite (0 for other modes)
+    int kv_sketch_dim = 0;
+    if (config_.kv_cache_dtype == DType::TURBOQUANT) {
+        kv_sketch_dim = head_dim;
+    } else if (config_.kv_cache_dtype == DType::TURBOQUANT_LITE) {
+        int mult = config_.turboquant_sketch_multiplier;
+        if (mult <= 0) mult = 2;
+        kv_sketch_dim = head_dim * mult;
+    }
+
+    // Detect sm_120+ for MXFP4 TurboQuant: FP4 E2M1 + UE8M0 micro-scales
+    bool tq_use_mxfp4 = false;
+    if (config_.kv_cache_dtype == DType::TURBOQUANT) {
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, config_.device_id);
+        int sm_ver = prop.major * 10 + prop.minor;
+        if (sm_ver >= 120 && (head_dim % 32 == 0)) {
+            tq_use_mxfp4 = true;
+            IMP_LOG_INFO("TurboQuant: sm_%d detected, using MXFP4 FP4 E2M1 + UE8M0 for K directions", sm_ver);
+        }
+    }
+
     auto kv_cache = std::make_unique<KVCache>(
         n_kv_layers, mcfg.n_kv_heads, head_dim,
-        config_.kv_cache_dtype, max_blocks, kv_bs, &vram_alloc_);
+        config_.kv_cache_dtype, max_blocks, kv_bs, &vram_alloc_, kv_sketch_dim,
+        tq_use_mxfp4);
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
 
@@ -546,11 +569,22 @@ bool Engine::init_kv_cache() {
 
     executor_->set_kv_layer_map(std::move(kv_layer_map));
 
-    // Initialize QJL projection for TurboQuant KV cache
-    if (config_.kv_cache_dtype == DType::TURBOQUANT) {
+    // Initialize QJL projection for TurboQuant / TurboQuant Lite KV cache
+    if (config_.kv_cache_dtype == DType::TURBOQUANT
+        || config_.kv_cache_dtype == DType::TURBOQUANT_LITE) {
         auto& qjl = executor_->qjl_projection();
-        if (!qjl_init(qjl, head_dim, head_dim, /*seed=*/42, stream_)) {
-            IMP_LOG_ERROR("Failed to initialize QJL projection for TurboQuant");
+        int sketch_dim;
+        if (config_.kv_cache_dtype == DType::TURBOQUANT_LITE) {
+            int mult = config_.turboquant_sketch_multiplier;
+            if (mult <= 0) mult = 2;
+            sketch_dim = head_dim * mult;
+            IMP_LOG_INFO("TurboQuant Lite: sketch_dim=%d (mult=%d, head_dim=%d)", sketch_dim, mult, head_dim);
+        } else {
+            sketch_dim = head_dim;  // standard TurboQuant: sketch_dim = head_dim
+        }
+        if (!qjl_init(qjl, head_dim, sketch_dim, /*seed=*/42, stream_)) {
+            IMP_LOG_ERROR("Failed to initialize QJL projection for %s",
+                          dtype_name(config_.kv_cache_dtype));
             return false;
         }
     }

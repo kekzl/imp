@@ -68,6 +68,7 @@ ImpConfig imp_config_default(void) {
     config.self_spec_exit_layer = -1;   // auto
     config.self_spec_skip_n = -1;       // auto
     config.mmproj_path = NULL;          // no vision model
+    config.turboquant_sketch_multiplier = 2; // sketch_dim = 2 * head_dim
     return config;
 }
 
@@ -121,6 +122,7 @@ static imp::DType map_dtype(ImpDType dt) {
         case IMP_DTYPE_INT32:    return imp::DType::INT32;
         case IMP_DTYPE_FP4_E2M1: return imp::DType::FP4_E2M1;
         case IMP_DTYPE_TURBOQUANT: return imp::DType::TURBOQUANT;
+        case IMP_DTYPE_TURBOQUANT_LITE: return imp::DType::TURBOQUANT_LITE;
         default:                 return imp::DType::FP16;
     }
 }
@@ -264,6 +266,7 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
         ecfg.self_spec_k = config->self_spec_k;
         ecfg.self_spec_exit_layer = config->self_spec_exit_layer;
         ecfg.self_spec_skip_n = config->self_spec_skip_n;
+        ecfg.turboquant_sketch_multiplier = config->turboquant_sketch_multiplier;
         if (config->mmproj_path)
             ecfg.mmproj_path = config->mmproj_path;
 
