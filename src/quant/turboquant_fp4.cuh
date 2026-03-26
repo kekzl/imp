@@ -12,7 +12,7 @@ static constexpr int kTQFP4GroupSize = 32;
 
 // FP4 E2M1 dequant LUT: magnitude code [0-7] → float value
 // Values: {0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}
-__constant__ float kTQFP4DequantLUT[8] = {
+static __constant__ float kTQFP4DequantLUT[8] = {
     0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f
 };
 

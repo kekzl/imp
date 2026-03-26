@@ -1,0 +1,19 @@
+```json
+{
+  "hook": "Microsoft verspricht: Weniger KI-Überforderung und mehr Nutzen – was steckt dahinter?",
+  "body_segments": [
+    "s1: Microsoft hat kürzlich angekündigt, dass zukünftige KI-Anwendungen weniger nervend sein werden.",
+  "body_segments": [
+      "Microsoft arbeitet intensiv an der Verbesserung seiner KI-Modelle, um lästige oder ungenaue Ergebnisse in Zukunft zu vermeiden.",
+  "body_segments": [
+    "In einer Pressemitteilung gab Microsoft bekannt, dass es in den kommenden Monaten verstärkt auf die Reduzierung von Nervosität durch KI setzen wird. Hier sind drei Gründe, warum das wichtig ist:",
+  "body_segments": [
+    "**1. Weniger Frustration für Anwender:**\nDurch verbesserte Algorithmen und klareere Benutzeroberflächen verspricht Microsoft, die nervigen Aspekte ihrer Software deutlich zu reduzieren.
+,
+[
+"microsoft",
+"künstliche_intelligenz",
+"nutzererfahrung"
+]
+}
+```

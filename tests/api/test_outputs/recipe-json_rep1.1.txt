@@ -1,0 +1,13 @@
+```json
+{
+  "name": "Veganes Kokoscurry",
+  "servings": 4,
+  "prep_time": "30min",
+  "ingredients": [
+    {"item": "Kokosmilch", "amount": "400 ml"},
+{"item": "Zwiebeln", "amount": "2 Stück"},
+{"item": "Knoblauchzehe", "amount": "1 Stk."},
+{"item":"Ingwer", "amount": "1 Prise"},
+{"item":"Chili", "amount": "1 Prise"},
+{"item":"Kokosmilch", "amount":"200ml"}
+```
