@@ -19,20 +19,28 @@ add_compile_definitions(IMP_CUDA_13_1=1)
 # add_compile_definitions(IMP_CUDA_13_2=1)
 
 # --- CUDA Architecture ---
-# sm_90a = Hopper, sm_100 = Blackwell B200, sm_120f = Blackwell RTX 50-series
-# Using sm_120f (family feature set) instead of sm_120a (architecture-specific):
-# - Enables TMA warp-specialized grouped GEMM tactics in CUTLASS
-# - Forward-compatible within the Blackwell family (sm_120, sm_121)
-# - No sm_120a-specific features (cvt.e2m1 etc.) are used in the codebase
-option(IMP_NATIVE_SM120 "Build exclusively for sm_120f (RTX 5090) — enables Blackwell family features" OFF)
+# sm_120f (family feature set) enables TMA warp-specialized grouped GEMM tactics.
+# CMake < 3.31 doesn't understand the 'f' suffix, so we pass Blackwell gencode
+# flags directly to nvcc and let CMake handle only Hopper (90a) and sm_100.
+#
+# Blackwell gencode flags:
+#   -gencode arch=compute_120f,code=sm_120    (SASS cubin with family features)
+#   -gencode arch=compute_120,code=compute_120 (PTX for forward compatibility)
+set(IMP_SM120_FLAGS "--generate-code=arch=compute_120f,code=sm_120 --generate-code=arch=compute_120,code=compute_120")
+
+option(IMP_NATIVE_SM120 "Build exclusively for sm_120f (RTX 5090)" OFF)
 if(IMP_NATIVE_SM120)
-    set(CMAKE_CUDA_ARCHITECTURES "120f")
-    message(STATUS "CUDA architectures: 120a (native RTX 5090 build)")
+    set(CMAKE_CUDA_ARCHITECTURES OFF)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${IMP_SM120_FLAGS}")
+    message(STATUS "CUDA architectures: sm_120f (native RTX 5090)")
 elseif(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES "90a;100;120f")
-    message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+    set(CMAKE_CUDA_ARCHITECTURES "90a;100")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${IMP_SM120_FLAGS}")
+    message(STATUS "CUDA architectures: 90a + 100 + 120f (default)")
 else()
-    message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+    # User-provided archs — add 120f unless user explicitly set something
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${IMP_SM120_FLAGS}")
+    message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES} + 120f")
 endif()
 
 # --- Options ---
