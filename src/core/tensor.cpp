@@ -17,6 +17,7 @@ size_t dtype_size(DType dt) {
         case DType::INT32:     return 4;
         case DType::FP4_E2M1:  return 1; // packed: 2 elements per byte
         case DType::TURBOQUANT: return 1; // packed INT4 directions (2 per byte), sketch stored separately
+        case DType::TURBOQUANT_LITE: return 1; // V is INT4 packed; K stored as sketches separately
     }
     return 0;
 }
@@ -33,6 +34,7 @@ const char* dtype_name(DType dt) {
         case DType::INT32:     return "INT32";
         case DType::FP4_E2M1:  return "FP4_E2M1";
         case DType::TURBOQUANT: return "TURBOQUANT";
+        case DType::TURBOQUANT_LITE: return "TURBOQUANT_LITE";
     }
     return "UNKNOWN";
 }

@@ -882,6 +882,158 @@ __global__ void write_kv_cache_turboquant_kernel(
     }
 }
 
+// ---------------------------------------------------------------------------
+// TurboQuant Lite: QJL sketch-only K + INT4 V
+//
+// K path (blockIdx.y == 0):
+//   1. Compute L2 norm per head
+//   2. Store FP16 norm
+//   3. Compute QJL sketch: sign(R @ k) — this IS the K representation (no INT4 dirs)
+//
+// V path (blockIdx.y == 1): Standard INT4 per-head quantization (same as INT4/TQ kernel)
+// ---------------------------------------------------------------------------
+__global__ void write_kv_cache_turboquant_lite_kernel(
+    const half* __restrict__ k_in,
+    const half* __restrict__ v_in,
+    const int* __restrict__ positions,
+    const int* __restrict__ block_tables,
+    uint8_t* __restrict__ v_cache_base,
+    half* __restrict__ k_norm_base,
+    half* __restrict__ v_scale_base,
+    uint8_t* __restrict__ k_sketch_base,
+    const uint8_t* __restrict__ qjl_matrix,
+    int v_block_stride,
+    int scale_block_stride,
+    int sketch_block_stride,
+    int n_kv_heads,
+    int head_dim,
+    int sketch_dim,
+    int block_size,
+    int n_tokens,
+    int max_blocks_per_seq,
+    int n_sequences)
+{
+    const int token_idx = blockIdx.x;
+    if (token_idx >= n_tokens) return;
+
+    const int pos = positions[token_idx];
+    int slot_in_block;
+    int block_id = kv_resolve_slot(block_tables, pos, block_size,
+                                   token_idx, max_blocks_per_seq, n_sequences,
+                                   slot_in_block);
+
+    const int row_elems = n_kv_heads * head_dim;
+
+    if (blockIdx.y == 0) {
+        // ── K path: norm + QJL sketch only (no INT4 direction quantization) ──
+        const half* src = k_in + static_cast<int64_t>(token_idx) * row_elems;
+        half* norm_dst = k_norm_base + static_cast<int64_t>(block_id) * scale_block_stride
+                         + static_cast<int64_t>(slot_in_block) * n_kv_heads;
+        const int sketch_row_bytes = n_kv_heads * (sketch_dim / 8);
+        uint8_t* sketch_dst = k_sketch_base + static_cast<int64_t>(block_id) * sketch_block_stride
+                              + static_cast<int64_t>(slot_in_block) * sketch_row_bytes;
+
+        const int warp_id = threadIdx.x / 32;
+        const int lane_id = threadIdx.x % 32;
+        const int num_warps = blockDim.x / 32;
+        const int bytes_per_row_qjl = head_dim / 8;
+
+        for (int h = warp_id; h < n_kv_heads; h += num_warps) {
+            const int head_offset = h * head_dim;
+
+            // Step 1: Compute L2 norm
+            float norm_sq = 0.0f;
+            for (int d = lane_id; d < head_dim; d += 32) {
+                float val = __half2float(src[head_offset + d]);
+                norm_sq += val * val;
+            }
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1)
+                norm_sq += __shfl_xor_sync(0xFFFFFFFF, norm_sq, offset);
+
+            float norm = sqrtf(norm_sq);
+
+            // Step 2: Store norm
+            if (lane_id == 0) {
+                norm_dst[h] = __float2half(norm);
+            }
+
+            // Step 3: QJL sketch = sign(R @ k) for each sketch row
+            const int sketch_byte_offset = h * (sketch_dim / 8);
+
+            for (int sr = lane_id; sr < sketch_dim; sr += 32) {
+                const uint8_t* R_row = qjl_matrix + sr * bytes_per_row_qjl;
+
+                float dot = 0.0f;
+                for (int d = 0; d < head_dim; d += 8) {
+                    uint8_t r_byte = __ldg(&R_row[d / 8]);
+                    #pragma unroll
+                    for (int b = 0; b < 8; b++) {
+                        float sign = (r_byte & (1u << b)) ? 1.0f : -1.0f;
+                        float k_val = __half2float(src[head_offset + d + b]);
+                        dot += sign * k_val;
+                    }
+                }
+
+                int byte_idx = sr / 8;
+                int bit_idx = sr % 8;
+                uint8_t bit_val = (dot >= 0.0f) ? (1u << bit_idx) : 0;
+
+                atomicOr(reinterpret_cast<unsigned int*>(
+                    &sketch_dst[sketch_byte_offset + (byte_idx & ~3)]),
+                    static_cast<unsigned int>(bit_val) << (8 * (byte_idx & 3)));
+            }
+        }
+    } else {
+        // ── V path: Standard INT4 per-head quantization ──
+        const half* src = v_in + static_cast<int64_t>(token_idx) * row_elems;
+        const int row_bytes = n_kv_heads * head_dim / 2;
+        uint8_t* dst = v_cache_base + static_cast<int64_t>(block_id) * v_block_stride
+                       + static_cast<int64_t>(slot_in_block) * row_bytes;
+        half* scale_dst = v_scale_base + static_cast<int64_t>(block_id) * scale_block_stride
+                          + static_cast<int64_t>(slot_in_block) * n_kv_heads;
+
+        const int warp_id = threadIdx.x / 32;
+        const int lane_id = threadIdx.x % 32;
+        const int num_warps = blockDim.x / 32;
+
+        for (int h = warp_id; h < n_kv_heads; h += num_warps) {
+            const int head_offset = h * head_dim;
+
+            float amax = 0.0f;
+            for (int d = lane_id; d < head_dim; d += 32) {
+                float val = __half2float(src[head_offset + d]);
+                amax = fmaxf(amax, fabsf(val));
+            }
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1)
+                amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset));
+
+            float sc = amax / 7.0f;
+            float inv_sc = (amax > 1e-8f) ? (7.0f / amax) : 0.0f;
+
+            const int head_byte_offset = h * head_dim / 2;
+            for (int d = lane_id * 2; d < head_dim; d += 64) {
+                float v0 = __half2float(src[head_offset + d]);
+                float v1 = (d + 1 < head_dim) ? __half2float(src[head_offset + d + 1]) : 0.0f;
+
+                int q0 = __float2int_rn(v0 * inv_sc);
+                int q1 = __float2int_rn(v1 * inv_sc);
+                q0 = max(-8, min(7, q0));
+                q1 = max(-8, min(7, q1));
+
+                uint8_t packed = (static_cast<uint8_t>(q0 & 0xF)) |
+                                 (static_cast<uint8_t>(q1 & 0xF) << 4);
+                dst[head_byte_offset + d / 2] = packed;
+            }
+
+            if (lane_id == 0) {
+                scale_dst[h] = __float2half(sc);
+            }
+        }
+    }
+}
+
 // Fused KV cache write with RoPE on K: applies RoPE to K during write, copies V directly.
 // blockIdx.x = token index, blockIdx.y = 0 (K+RoPE) or 1 (V copy).
 // Eliminates the separate RoPE kernel launch for K in the decode path.
