@@ -1,0 +1,20 @@
+```json
+{
+  "name": "Veganes Kokoscurry",
+  "servings": 4,
+  "prep_time": "30min",
+  "ingredients": [
+    {"item": "Kokosmilch", "amount": "400 ml"},
+{"item": "Kurkuma", "amount": "1 Teelöffel"},
+{"item": "Kokosmilch", "amount": "400 ml"},
+{"item": "Zwiebel", "amount": "1 Stück"},
+{"item": "Knoblauchzehe", "1 Stück"},
+{"item": "Kurkuma", "1 Teelöffel"},
+{"item": "Chili", "amount": "1 Stück"},
+{"item": "Kokosmilch": "200 ml"},
+{"item": "Currypulver": "1 EL"},
+{"item": "Kokosmilch": "200 ml"},
+{"item":"Zwiebeln","amount":"2 Stück"},
+{"item":"Knoblauchzehe","amount":"1 Stück"},
+{"item":"Kurkuma-Pulver","amount":"1 Teelöffel"}
+```

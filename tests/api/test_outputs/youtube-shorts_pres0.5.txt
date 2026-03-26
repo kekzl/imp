@@ -1,0 +1,17 @@
+```json
+{
+  "hook": "Microsoft verspricht: Weniger KI-Überforderung und mehr Nutzen – was steckt dahinter?",
+  "body_segments": [
+    "Microsoft hat kürzlich angekündigt, dass zukünftige KI-Systeme weniger störend und besser in den Alltag integriert sein werden.",
+  "body_segments": [
+    "Microsoft hat kürzlich angekündigt, dass es bei der Entwicklung von KI-Systemen verstärkt auf Nutzerfreundlichkeit und Respekt achten wird.",
+  "body_segments": [
+    "Mit dieser Ankündigung will Microsoft die Sorge nachgehen, dass KI-Modelle zu oft menschliches Verhalten nachahmen, anstatt objektiv zu sein.",
+  "body_segments": [
+    "Microsoft hat kürzlich angekündigt, dass künftige Versionen ihrer KI-Tools weniger störend und besser in den Workflow integriert sein werden.",
+  "cta": "Meldet euch in den Kommentaren, wenn ihr mehr über KI-Verbesserungen hören wollt!",
+  "body_segments": [
+    "Microsoft hat kürzlich angekündigt, dass künftige Versionen von Microsoft 365 weniger störendes KI-Verhalten zeigen werden.",
+  "cta": "Abonnieren und klingeln, um keine Updates zu verpassen!"",
+  "tags": ["Microsoft", "KI", "Künstliche Intelligenz", "Tech-News"]}
+```

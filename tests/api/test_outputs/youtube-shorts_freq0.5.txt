@@ -1,0 +1,29 @@
+```json
+{
+  "hook": "Microsoft verspricht: Weniger KI-Überforderung und mehr Nutzen – was steckt dahinter?",
+  "body_segments": [
+    "Microsoft hat kürzlich angekündigt, dass zukünftige KI-Systeme weniger störend und besser in den Alltag integriert sein werden.",
+  "body_segments": [
+    "Microsoft hat kürzlich angekündigt, dass es bei der Entwicklung von KI-Systemen verstärkt auf Nutzerfreundlichkeit und Respekt achten wird.",
+  "body_segments": [
+    "Mit dieser Ankündigung will Microsoft die Sorge nachgehen, dass KI-Modelle zu oft unangemessenes oder irreführendes Verhalten zeigen.",
+  "body_segments": [
+    "In den letzten Jahren hat Microsoft verstärkt in künstliche Intelligenz (KI) investiert. Doch was bedeutet das für uns? Und warum verspricht Microsoft weniger KI-Nerverei?
+
+"body_segments": [
+  "Im Jahr 2023 machte Microsoft mit dem Launch von ChatGPT große Wellen im Bereich der KI. Doch jetzt gibt Microsoft erste Signale, dass sie die KI-Nervosität reduzieren wollen.
+
+Was meinst du dazu? Lass es mich in den Kommentaren wissen!
+
+}
+
+```json
+{
+  "hook": ". . .",
+  "body_segments": ["s1", "s2", "s3"],
+  "cta": "...",
+  "tags": ["t1"],
+  "title_options": ["t1", "t2", "t3"],
+  "hook_score": 0.8
+}
+```

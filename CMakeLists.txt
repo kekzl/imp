@@ -151,6 +151,12 @@ if(IMP_USE_CUTLASS)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxfp4_prefill.cu)
 endif()
 
+# TurboQuant paged attention kernels trigger ptxas C7600 on sm_120a with
+# fast-math optimizations (CUDA 13.2 compiler bug: "register allocation
+# failed with register count of 7"). Override to disable fast-math flags.
+set_source_files_properties(src/compute/attention_paged_turboquant.cu PROPERTIES
+    COMPILE_FLAGS "--ftz=false --prec-div=true --prec-sqrt=true --fmad=true")
+
 set(IMP_RUNTIME_SOURCES
     src/runtime/green_ctx.cu
     src/runtime/scheduler.cpp

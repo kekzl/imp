@@ -9,7 +9,10 @@ set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O2 -g -DNDEBUG")
 # CUDA flags
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr --extended-lambda")
 set(CMAKE_CUDA_FLAGS_DEBUG "-G -g -O0")
-set(CMAKE_CUDA_FLAGS_RELEASE "-O3 --use_fast_math --extra-device-vectorization -Xptxas -O3 -DNDEBUG")
+# Note: --use_fast_math is replaced by its constituent flags to allow per-file
+# override via --ftz=false etc. (CUDA 13.2 ptxas bug on sm_120a for TurboQuant).
+# --use_fast_math = --ftz=true --prec-div=false --prec-sqrt=false --fmad=true
+set(CMAKE_CUDA_FLAGS_RELEASE "-O3 --ftz=true --prec-div=false --prec-sqrt=false --fmad=true --extra-device-vectorization -Xptxas -O3 -DNDEBUG")
 set(CMAKE_CUDA_FLAGS_RELWITHDEBINFO "-O2 -g -lineinfo -DNDEBUG")
 
 # Suppress noisy CUDA warnings

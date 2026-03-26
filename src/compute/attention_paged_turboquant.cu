@@ -40,7 +40,8 @@ __device__ __forceinline__ int tq_unpack_int4_hi(uint8_t packed) {
 static constexpr float kQJLLambda = 0.1f;
 
 template<int HEAD_DIM, bool USE_MXFP4 = false>
-__global__ void paged_attention_decode_turboquant_kernel(
+__global__ void __launch_bounds__(256, 2)
+paged_attention_decode_turboquant_kernel(
     const half* __restrict__ Q,                // [batch, n_heads, HEAD_DIM]
     const uint8_t* __restrict__ K_dir_cache,   // INT4 or FP4 E2M1 packed normalized directions
     const uint8_t* __restrict__ V_cache,       // INT4 packed values
@@ -321,7 +322,8 @@ __global__ void paged_attention_decode_turboquant_kernel(
 // ---------------------------------------------------------------------------
 
 template<int HEAD_DIM, bool USE_MXFP4 = false>
-__global__ void paged_attention_splitk_turboquant_kernel(
+__global__ void __launch_bounds__(256, 2)
+paged_attention_splitk_turboquant_kernel(
     const half* __restrict__ Q,
     const uint8_t* __restrict__ K_dir_cache,
     const uint8_t* __restrict__ V_cache,
@@ -706,7 +708,8 @@ void paged_attention_decode_turboquant(
 // ===========================================================================
 
 template<int HEAD_DIM>
-__global__ void paged_attention_decode_turboquant_lite_kernel(
+__global__ void __launch_bounds__(256, 2)
+paged_attention_decode_turboquant_lite_kernel(
     const half* __restrict__ Q,                // [batch, n_heads, HEAD_DIM]
     const uint8_t* __restrict__ V_cache,       // INT4 packed values
     const half* __restrict__ K_norms,          // [total_blocks, block_size, n_kv_heads] FP16 norms
@@ -922,7 +925,8 @@ __global__ void paged_attention_decode_turboquant_lite_kernel(
 // ---------------------------------------------------------------------------
 
 template<int HEAD_DIM>
-__global__ void paged_attention_splitk_turboquant_lite_kernel(
+__global__ void __launch_bounds__(256, 2)
+paged_attention_splitk_turboquant_lite_kernel(
     const half* __restrict__ Q,
     const uint8_t* __restrict__ V_cache,
     const half* __restrict__ K_norms,
