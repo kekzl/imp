@@ -79,6 +79,10 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.kv_int4 = true;
         } else if (std::strcmp(arg, "--kv-turboquant") == 0) {
             args.kv_turboquant = true;
+        } else if (std::strcmp(arg, "--kv-turboquant-lite") == 0) {
+            args.kv_turboquant_lite = true;
+        } else if (std::strcmp(arg, "--tq-sketch-mult") == 0 && i + 1 < argc) {
+            args.turboquant_sketch_mult = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--prefill-chunk-size") == 0 && i + 1 < argc) {
             args.prefill_chunk_size = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--decode-nvfp4") == 0) {

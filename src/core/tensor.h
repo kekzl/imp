@@ -17,7 +17,8 @@ enum class DType : uint8_t {
     INT4      = 6,
     INT32     = 7,
     FP4_E2M1  = 8,
-    TURBOQUANT = 9,   // TurboQuant: PolarQuant INT4 K + QJL sketch + INT4 V
+    TURBOQUANT = 9,       // TurboQuant: PolarQuant INT4 K + QJL sketch + INT4 V
+    TURBOQUANT_LITE = 10, // TurboQuant Lite: QJL sketch-only K (no INT4 dirs) + INT4 V
 };
 
 // Bytes per element. INT4 returns 1 (two elements packed per byte).
