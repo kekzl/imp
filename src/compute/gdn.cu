@@ -112,7 +112,7 @@ gdn_scan_fused_kernel(
                 if (d < stride) s_reduce[d] += s_reduce[d + stride];
                 __syncthreads();
             }
-            float k_inv = rsqrtf(s_reduce[0] + 1e-6f);
+            float k_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
 
             s_reduce[d] = q_sq;
             __syncthreads();
@@ -120,7 +120,7 @@ gdn_scan_fused_kernel(
                 if (d < stride) s_reduce[d] += s_reduce[d + stride];
                 __syncthreads();
             }
-            float q_inv = rsqrtf(s_reduce[0] + 1e-6f);
+            float q_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
 
             // Normalize in-place
             if (d < SS) {
@@ -150,6 +150,11 @@ gdn_scan_fused_kernel(
         }
 
         y_out[t * inner + h * HD + d] = __float2half(y_partial * scale);
+
+        // Sync before next token — the next iteration overwrites s_k/s_q in
+        // shared memory. Without this barrier, fast threads can overwrite
+        // s_k/s_q while slow threads are still reading them in the loops above.
+        if (t + 1 < n_tokens) __syncthreads();
     }
 
     // Store state back to global memory (once, at the end)
