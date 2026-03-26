@@ -882,6 +882,226 @@ __global__ void write_kv_cache_turboquant_kernel(
     }
 }
 
+// FP4 E2M1 + UE8M0 helpers for TurboQuant MXFP4 path (shared header)
+#include "quant/turboquant_fp4.cuh"
+
+// Aliases for shorter names in the kernel below
+#define tq_float_abs_to_fp4  tq_fp4_quantize_abs
+#define tq_float_to_ue8m0    tq_fp4_float_to_ue8m0
+#define tq_ue8m0_to_float    tq_fp4_ue8m0_to_float
+
+// ---------------------------------------------------------------------------
+// TurboQuant MXFP4 write kernel
+//
+// K path (blockIdx.y == 0):
+//   1. Compute L2 norm per head
+//   2. Normalize direction to unit vector
+//   3. Per-32-element groups: compute absmax → UE8M0 micro-scale
+//   4. Quantize direction to signed FP4 E2M1 with micro-scale
+//   5. Compute QJL sketch
+//   6. Store: FP4 E2M1 direction, FP16 norm, UE8M0 micro-scales, packed sketch
+//
+// V path (blockIdx.y == 1): Standard INT4 per-head quantization (identical)
+// ---------------------------------------------------------------------------
+__global__ void write_kv_cache_turboquant_mxfp4_kernel(
+    const half* __restrict__ k_in,
+    const half* __restrict__ v_in,
+    const int* __restrict__ positions,
+    const int* __restrict__ block_tables,
+    uint8_t* __restrict__ k_dir_cache_base,
+    uint8_t* __restrict__ v_cache_base,
+    half* __restrict__ k_norm_base,
+    half* __restrict__ v_scale_base,
+    uint8_t* __restrict__ k_sketch_base,
+    uint8_t* __restrict__ k_mscale_base,
+    const uint8_t* __restrict__ qjl_matrix,
+    int block_stride,
+    int scale_block_stride,
+    int sketch_block_stride,
+    int mscale_block_stride,
+    int n_kv_heads,
+    int head_dim,
+    int sketch_dim,
+    int block_size,
+    int n_tokens,
+    int max_blocks_per_seq,
+    int n_sequences)
+{
+    const int token_idx = blockIdx.x;
+    if (token_idx >= n_tokens) return;
+
+    const int pos = positions[token_idx];
+    int slot_in_block;
+    int block_id = kv_resolve_slot(block_tables, pos, block_size,
+                                   token_idx, max_blocks_per_seq, n_sequences,
+                                   slot_in_block);
+
+    const int row_elems = n_kv_heads * head_dim;
+    constexpr int GROUP_SIZE = 32;  // MXFP4 micro-scale group
+
+    if (blockIdx.y == 0) {
+        // ── K path: PolarQuant + FP4 E2M1 + UE8M0 micro-scales + QJL ──
+        const half* src = k_in + static_cast<int64_t>(token_idx) * row_elems;
+        const int row_bytes = n_kv_heads * head_dim / 2;
+        uint8_t* dir_dst = k_dir_cache_base + static_cast<int64_t>(block_id) * block_stride
+                           + static_cast<int64_t>(slot_in_block) * row_bytes;
+        half* norm_dst = k_norm_base + static_cast<int64_t>(block_id) * scale_block_stride
+                         + static_cast<int64_t>(slot_in_block) * n_kv_heads;
+        const int sketch_row_bytes = n_kv_heads * (sketch_dim / 8);
+        uint8_t* sketch_dst = k_sketch_base + static_cast<int64_t>(block_id) * sketch_block_stride
+                              + static_cast<int64_t>(slot_in_block) * sketch_row_bytes;
+        const int n_groups = head_dim / GROUP_SIZE;
+        const int mscale_row_bytes = n_kv_heads * n_groups;
+        uint8_t* mscale_dst = k_mscale_base + static_cast<int64_t>(block_id) * mscale_block_stride
+                              + static_cast<int64_t>(slot_in_block) * mscale_row_bytes;
+
+        const int warp_id = threadIdx.x / 32;
+        const int lane_id = threadIdx.x % 32;
+        const int num_warps = blockDim.x / 32;
+        const int bytes_per_row_qjl = head_dim / 8;
+
+        for (int h = warp_id; h < n_kv_heads; h += num_warps) {
+            const int head_offset = h * head_dim;
+
+            // Step 1: Compute L2 norm
+            float norm_sq = 0.0f;
+            for (int d = lane_id; d < head_dim; d += 32) {
+                float val = __half2float(src[head_offset + d]);
+                norm_sq += val * val;
+            }
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1)
+                norm_sq += __shfl_xor_sync(0xFFFFFFFF, norm_sq, offset);
+
+            float norm = sqrtf(norm_sq);
+            float inv_norm = (norm > 1e-8f) ? (1.0f / norm) : 0.0f;
+
+            // Step 2: Store norm
+            if (lane_id == 0) {
+                norm_dst[h] = __float2half(norm);
+            }
+
+            // Step 3: Per-group FP4 E2M1 quantization with UE8M0 micro-scales.
+            // Each group of 32 direction elements gets one UE8M0 scale.
+            const int head_byte_offset = h * head_dim / 2;
+            const int head_mscale_offset = h * n_groups;
+
+            for (int g = 0; g < n_groups; g++) {
+                int g_start = g * GROUP_SIZE;
+
+                // 3a: Find per-group absmax of normalized direction
+                float group_amax = 0.0f;
+                for (int d = lane_id; d < GROUP_SIZE; d += 32) {
+                    float dir_val = __half2float(src[head_offset + g_start + d]) * inv_norm;
+                    group_amax = fmaxf(group_amax, fabsf(dir_val));
+                }
+                #pragma unroll
+                for (int offset = 16; offset > 0; offset >>= 1)
+                    group_amax = fmaxf(group_amax, __shfl_xor_sync(0xFFFFFFFF, group_amax, offset));
+
+                // 3b: Compute UE8M0 micro-scale = ceil_pow2(group_amax / 6.0)
+                float raw_scale = group_amax / 6.0f;
+                uint8_t ue8m0 = tq_float_to_ue8m0(raw_scale);
+                float actual_scale = tq_ue8m0_to_float(ue8m0);
+                if (actual_scale == 0.0f) actual_scale = 1.0f / (1 << 30);  // avoid div-by-zero
+                float inv_scale = 1.0f / actual_scale;
+
+                // 3c: Store micro-scale
+                if (lane_id == 0) {
+                    mscale_dst[head_mscale_offset + g] = ue8m0;
+                }
+
+                // 3d: Quantize direction elements to signed FP4 E2M1
+                for (int d = lane_id * 2; d < GROUP_SIZE; d += 64) {
+                    float v0 = __half2float(src[head_offset + g_start + d]) * inv_norm;
+                    float v1 = (d + 1 < GROUP_SIZE)
+                        ? __half2float(src[head_offset + g_start + d + 1]) * inv_norm
+                        : 0.0f;
+
+                    // Scale to FP4 range and quantize
+                    float s0 = v0 * inv_scale;
+                    float s1 = v1 * inv_scale;
+                    uint8_t sign0 = (s0 < 0.0f) ? 1u : 0u;
+                    uint8_t sign1 = (s1 < 0.0f) ? 1u : 0u;
+                    uint8_t code0 = tq_float_abs_to_fp4(fabsf(s0));
+                    uint8_t code1 = tq_float_abs_to_fp4(fabsf(s1));
+                    uint8_t fp4_0 = (sign0 << 3) | code0;
+                    uint8_t fp4_1 = (sign1 << 3) | code1;
+
+                    // Pack: low nibble = even, high nibble = odd
+                    uint8_t packed = fp4_0 | (fp4_1 << 4);
+                    dir_dst[head_byte_offset + (g_start + d) / 2] = packed;
+                }
+            }
+
+            // Step 4: QJL sketch (identical to non-MXFP4 path)
+            const int sketch_byte_offset = h * (sketch_dim / 8);
+            for (int sr = lane_id; sr < sketch_dim; sr += 32) {
+                const uint8_t* R_row = qjl_matrix + sr * bytes_per_row_qjl;
+                float dot = 0.0f;
+                for (int d = 0; d < head_dim; d += 8) {
+                    uint8_t r_byte = __ldg(&R_row[d / 8]);
+                    #pragma unroll
+                    for (int b = 0; b < 8; b++) {
+                        float sign = (r_byte & (1u << b)) ? 1.0f : -1.0f;
+                        float k_val = __half2float(src[head_offset + d + b]);
+                        dot += sign * k_val;
+                    }
+                }
+                int byte_idx = sr / 8;
+                int bit_idx = sr % 8;
+                uint8_t bit_val = (dot >= 0.0f) ? (1u << bit_idx) : 0;
+                atomicOr(reinterpret_cast<unsigned int*>(
+                    &sketch_dst[sketch_byte_offset + (byte_idx & ~3)]),
+                    static_cast<unsigned int>(bit_val) << (8 * (byte_idx & 3)));
+            }
+        }
+    } else {
+        // ── V path: Standard INT4 per-head quantization (identical to non-MXFP4) ──
+        const half* src = v_in + static_cast<int64_t>(token_idx) * row_elems;
+        const int row_bytes = n_kv_heads * head_dim / 2;
+        uint8_t* dst = v_cache_base + static_cast<int64_t>(block_id) * block_stride
+                       + static_cast<int64_t>(slot_in_block) * row_bytes;
+        half* scale_dst = v_scale_base + static_cast<int64_t>(block_id) * scale_block_stride
+                          + static_cast<int64_t>(slot_in_block) * n_kv_heads;
+
+        const int warp_id = threadIdx.x / 32;
+        const int lane_id = threadIdx.x % 32;
+        const int num_warps = blockDim.x / 32;
+
+        for (int h = warp_id; h < n_kv_heads; h += num_warps) {
+            const int head_offset = h * head_dim;
+            float amax = 0.0f;
+            for (int d = lane_id; d < head_dim; d += 32) {
+                float val = __half2float(src[head_offset + d]);
+                amax = fmaxf(amax, fabsf(val));
+            }
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1)
+                amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset));
+
+            float sc = amax / 7.0f;
+            float inv_sc = (amax > 1e-8f) ? (7.0f / amax) : 0.0f;
+
+            const int head_byte_offset = h * head_dim / 2;
+            for (int d = lane_id * 2; d < head_dim; d += 64) {
+                float v0 = __half2float(src[head_offset + d]);
+                float v1 = (d + 1 < head_dim) ? __half2float(src[head_offset + d + 1]) : 0.0f;
+                int q0 = __float2int_rn(v0 * inv_sc);
+                int q1 = __float2int_rn(v1 * inv_sc);
+                q0 = max(-8, min(7, q0));
+                q1 = max(-8, min(7, q1));
+                uint8_t packed = (static_cast<uint8_t>(q0 & 0xF)) |
+                                 (static_cast<uint8_t>(q1 & 0xF) << 4);
+                dst[head_byte_offset + d / 2] = packed;
+            }
+            if (lane_id == 0) {
+                scale_dst[h] = __float2half(sc);
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TurboQuant Lite: QJL sketch-only K + INT4 V
 //

@@ -92,6 +92,13 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
         size_t sketch_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * (sketch_dim / 8);
         per_block_total += sketch_per_block * n_kv_layers;
     }
+    // MXFP4 micro-scale pool for TurboQuant K directions (sm_120 auto-detected at runtime).
+    // Budget conservatively: always include for TURBOQUANT if head_dim % 32 == 0.
+    if (is_tq && (head_dim % 32 == 0)) {
+        int n_groups = head_dim / 32;
+        size_t mscale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * n_groups;
+        per_block_total += mscale_per_block * n_kv_layers;
+    }
 
     int blocks_per_seq = (config.max_seq_len + bs - 1) / bs;
     int needed_blocks = blocks_per_seq * config.max_batch_size;

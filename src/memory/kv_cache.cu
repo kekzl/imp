@@ -30,13 +30,15 @@ namespace imp {
 // ---------------------------------------------------------------------------
 
 KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
-                 int max_blocks, int block_size, VRAMAllocator* alloc, int sketch_dim)
+                 int max_blocks, int block_size, VRAMAllocator* alloc, int sketch_dim,
+                 bool use_mxfp4)
     : n_layers_(n_layers)
     , n_kv_heads_(n_kv_heads)
     , head_dim_(head_dim)
     , max_blocks_(max_blocks)
     , block_size_(block_size)
     , sketch_dim_(sketch_dim)
+    , use_mxfp4_(use_mxfp4)
     , dtype_(dtype)
     , alloc_(alloc)
     , block_bytes_((dtype == DType::INT4 || dtype == DType::TURBOQUANT
@@ -128,6 +130,33 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
                      n_layers_, max_blocks_);
     }
 
+    // Allocate MXFP4 UE8M0 micro-scale pool for TurboQuant K directions (sm_120 path).
+    // One UE8M0 byte per 32 direction elements per head per token.
+    if (dtype == DType::TURBOQUANT && use_mxfp4_ && head_dim >= kTQMicroScaleGroup) {
+        int n_groups_per_head = head_dim / kTQMicroScaleGroup;
+        mscale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * n_groups_per_head;
+        // K-only (same indexing as sketch pool)
+        size_t mscale_total = static_cast<size_t>(n_layers_) * max_blocks_ * mscale_block_bytes_;
+        if (alloc_) {
+            mscale_pool_ = alloc_->allocate(mscale_total, "kv_cache_mscales");
+        } else {
+            cudaError_t merr = cudaMalloc(&mscale_pool_, mscale_total);
+            if (merr != cudaSuccess) mscale_pool_ = nullptr;
+        }
+        if (!mscale_pool_) {
+            IMP_LOG_WARN("KVCache: MXFP4 micro-scale pool allocation failed (%.2f KiB), "
+                         "falling back to uniform INT4 quantization",
+                         static_cast<double>(mscale_total) / 1024.0);
+            use_mxfp4_ = false;
+        } else {
+            cudaMemset(mscale_pool_, 0, mscale_total);
+            IMP_LOG_INFO("KVCache: MXFP4 micro-scales enabled for K directions "
+                         "(%d groups/head, %.1f KiB)",
+                         n_groups_per_head,
+                         static_cast<double>(mscale_total) / 1024.0);
+        }
+    }
+
     // Initialise per-block ref counts (0 = free) and build free list
     ref_counts_.resize(max_blocks_, 0);
     free_list_.reserve(max_blocks_);
@@ -137,6 +166,10 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
 }
 
 KVCache::~KVCache() {
+    if (mscale_pool_) {
+        if (alloc_) alloc_->free(mscale_pool_); else cudaFree(mscale_pool_);
+        mscale_pool_ = nullptr;
+    }
     if (sketch_pool_) {
         if (alloc_) alloc_->free(sketch_pool_); else cudaFree(sketch_pool_);
         sketch_pool_ = nullptr;
@@ -320,6 +353,28 @@ void* KVCache::k_sketch_ptr(int layer, int block_id) {
 
 size_t KVCache::sketch_block_bytes() const {
     return sketch_block_bytes_;
+}
+
+// ---------------------------------------------------------------------------
+// TurboQuant MXFP4 micro-scale pointer computation
+// ---------------------------------------------------------------------------
+
+void* KVCache::k_mscale_ptr(int layer, int block_id) {
+    if (!mscale_pool_) return nullptr;
+#ifdef IMP_DEBUG
+    if (layer < 0 || layer >= n_layers_ || block_id < 0 || block_id >= max_blocks_) {
+        IMP_LOG_ERROR("KV cache k_mscale_ptr bounds violation: layer=%d/%d, block=%d/%d",
+                      layer, n_layers_, block_id, max_blocks_);
+    }
+#endif
+    // Same indexing as sketch pool: [layer, block_id] * mscale_block_bytes_ (K only)
+    size_t offset = (static_cast<size_t>(layer) * max_blocks_ +
+                     static_cast<size_t>(block_id)) * mscale_block_bytes_;
+    return static_cast<char*>(mscale_pool_) + offset;
+}
+
+size_t KVCache::mscale_block_bytes() const {
+    return mscale_block_bytes_;
 }
 
 } // namespace imp

@@ -69,14 +69,9 @@ void paged_attention_decode_int4(
     float softcap = 0.0f, cudaStream_t stream = nullptr,
     int max_blocks_per_seq = 0);
 
-// TurboQuant Paged attention for decode: PolarQuant INT4 K + QJL sketch + INT4 V.
-// Q: [batch, 1, n_heads, head_dim] FP16
-// K_dir_cache: [num_blocks, block_size, n_kv_heads, head_dim/2] packed INT4 unit directions
-// V_cache: [num_blocks, block_size, n_kv_heads, head_dim/2] packed INT4 values
-// K_norms: [num_blocks, block_size, n_kv_heads] FP16 PolarQuant norms
-// V_scales: [num_blocks, block_size, n_kv_heads] FP16 per-head V scales
-// K_sketches: [num_blocks, block_size, n_kv_heads, sketch_dim/8] packed 1-bit QJL sketches
-// qjl_matrix: [sketch_dim, head_dim/8] packed Rademacher signs
+// TurboQuant Paged attention for decode: PolarQuant K + QJL sketch + INT4 V.
+// K_dir_cache: packed directions — INT4 uniform (K_mscales=nullptr) or FP4 E2M1 (K_mscales!=nullptr)
+// K_mscales: nullptr → uniform INT4 dequant (/7.0), non-null → MXFP4 FP4 E2M1 + UE8M0 micro-scales
 void paged_attention_decode_turboquant(
     const Tensor& Q, const Tensor& K_dir_cache, const Tensor& V_cache,
     Tensor& O,
@@ -86,7 +81,8 @@ void paged_attention_decode_turboquant(
     int block_size, float scale, int sketch_dim,
     int max_context_len, int sliding_window = 0,
     float softcap = 0.0f, cudaStream_t stream = nullptr,
-    int max_blocks_per_seq = 0);
+    int max_blocks_per_seq = 0,
+    const uint8_t* K_mscales = nullptr);
 
 // TurboQuant Lite Paged attention for decode: QJL sketch-only K + INT4 V.
 // K is represented only by QJL sketches + FP16 norms (no INT4 directions in pool).

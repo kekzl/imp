@@ -1,6 +1,7 @@
 #include "compute/attention_paged.h"
 #include "compute/attention_paged_common.cuh"
 #include "compute/attention.h"
+#include "quant/turboquant_fp4.cuh"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -38,15 +39,16 @@ __device__ __forceinline__ int tq_unpack_int4_hi(uint8_t packed) {
 // QJL correction weight (from TurboQuant paper)
 static constexpr float kQJLLambda = 0.1f;
 
-template<int HEAD_DIM>
+template<int HEAD_DIM, bool USE_MXFP4 = false>
 __global__ void paged_attention_decode_turboquant_kernel(
     const half* __restrict__ Q,                // [batch, n_heads, HEAD_DIM]
-    const uint8_t* __restrict__ K_dir_cache,   // INT4 packed normalized directions
+    const uint8_t* __restrict__ K_dir_cache,   // INT4 or FP4 E2M1 packed normalized directions
     const uint8_t* __restrict__ V_cache,       // INT4 packed values
     const half* __restrict__ K_norms,          // [total_blocks, block_size, n_kv_heads] FP16 norms
     const half* __restrict__ V_scales,         // [total_blocks, block_size, n_kv_heads] FP16 scales
     const uint8_t* __restrict__ K_sketches,    // [total_blocks, block_size, n_kv_heads, sketch_dim/8] packed bits
     const uint8_t* __restrict__ qjl_matrix,    // [sketch_dim, head_dim/8] packed Rademacher signs
+    const uint8_t* __restrict__ K_mscales,     // MXFP4: UE8M0 micro-scales [blocks, block_size, n_kv_heads, hd/32] (nullptr if !USE_MXFP4)
     half* __restrict__ O,
     const int* __restrict__ block_tables,
     const int* __restrict__ context_lens,
@@ -147,13 +149,18 @@ __global__ void paged_attention_decode_turboquant_kernel(
     __syncthreads();
 
     const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
-    const int kv_head_bytes = HEAD_DIM / 2;  // bytes per head per token (INT4 packed)
+    const int kv_head_bytes = HEAD_DIM / 2;  // bytes per head per token (INT4/FP4 packed)
     const int kv_block_stride = block_size * n_kv_heads * kv_head_bytes;
     const int kv_slot_stride  = n_kv_heads * kv_head_bytes;
     const int scale_block_stride = block_size * n_kv_heads;
     const int sketch_head_bytes = sketch_dim / 8;
     const int sketch_slot_stride = n_kv_heads * sketch_head_bytes;
     const int sketch_kv_block_stride = block_size * sketch_slot_stride;
+
+    // MXFP4 micro-scale strides (only used when USE_MXFP4 == true)
+    constexpr int N_GROUPS = HEAD_DIM / 32;
+    const int mscale_slot_stride = USE_MXFP4 ? (n_kv_heads * N_GROUPS) : 0;
+    const int mscale_block_stride_v = USE_MXFP4 ? (block_size * mscale_slot_stride) : 0;
 
     int effective_start = 0;
     if (sliding_window > 0 && ctx_len > sliding_window)
@@ -174,6 +181,10 @@ __global__ void paged_attention_decode_turboquant_kernel(
         const half* K_norm_block   = K_norms     + (int64_t)phys_block * scale_block_stride;
         const half* V_sc_block     = V_scales    + (int64_t)phys_block * scale_block_stride;
         const uint8_t* K_sk_block  = K_sketches  + (int64_t)phys_block * sketch_kv_block_stride;
+        // MXFP4 micro-scale block pointer (only valid when USE_MXFP4)
+        const uint8_t* K_ms_block  = USE_MXFP4
+            ? (K_mscales + (int64_t)phys_block * mscale_block_stride_v)
+            : nullptr;
 
         int tok_start = blk * block_size;
         int tok_end   = tok_start + block_size;
@@ -188,12 +199,27 @@ __global__ void paged_attention_decode_turboquant_kernel(
 
             // PolarQuant Q.K: q . (norm * dir_quantized) = norm * q . dir_quantized
             float dot_polar = 0.0f;
-            {
+            if constexpr (USE_MXFP4) {
+                // MXFP4 path: FP4 E2M1 nibbles + per-32-element UE8M0 micro-scales
+                const uint8_t* k_bytes = K_dir_tok + lane_offset / 2;
+                const uint8_t* k_ms = K_ms_block + t * mscale_slot_stride + kv_head * N_GROUPS;
+                #pragma unroll
+                for (int i = 0; i < ELEMS / 2; i++) {
+                    uint8_t packed = k_bytes[i];
+                    int elem_idx = lane_offset + 2 * i;
+                    int group_idx = elem_idx / 32;
+                    float ms = tq_fp4_ue8m0_to_float(k_ms[group_idx]);
+                    float d0 = tq_fp4_unpack_lo(packed) * ms;
+                    float d1 = tq_fp4_unpack_hi(packed) * ms;
+                    dot_polar += q_reg[2*i]   * d0;
+                    dot_polar += q_reg[2*i+1] * d1;
+                }
+            } else {
+                // INT4 uniform path: signed INT4 / 7.0
                 const uint8_t* k_bytes = K_dir_tok + lane_offset / 2;
                 #pragma unroll
                 for (int i = 0; i < ELEMS / 2; i++) {
                     uint8_t packed = k_bytes[i];
-                    // Dequant: INT4 → float, then divide by 7 to get unit vector component
                     float d0 = static_cast<float>(tq_unpack_int4_lo(packed)) / 7.0f;
                     float d1 = static_cast<float>(tq_unpack_int4_hi(packed)) / 7.0f;
                     dot_polar += q_reg[2*i]   * d0;
@@ -294,7 +320,7 @@ __global__ void paged_attention_decode_turboquant_kernel(
 // Split-K Phase 1: TurboQuant variant
 // ---------------------------------------------------------------------------
 
-template<int HEAD_DIM>
+template<int HEAD_DIM, bool USE_MXFP4 = false>
 __global__ void paged_attention_splitk_turboquant_kernel(
     const half* __restrict__ Q,
     const uint8_t* __restrict__ K_dir_cache,
@@ -303,6 +329,7 @@ __global__ void paged_attention_splitk_turboquant_kernel(
     const half* __restrict__ V_scales,
     const uint8_t* __restrict__ K_sketches,
     const uint8_t* __restrict__ qjl_matrix,
+    const uint8_t* __restrict__ K_mscales,     // MXFP4 UE8M0 micro-scales (nullptr if !USE_MXFP4)
     float* __restrict__ partial_out,
     const int* __restrict__ block_tables,
     const int* __restrict__ context_lens,
@@ -399,6 +426,10 @@ __global__ void paged_attention_splitk_turboquant_kernel(
     const int sketch_slot_stride = n_kv_heads * sketch_head_bytes;
     const int sketch_kv_block_stride = block_size * sketch_slot_stride;
 
+    constexpr int N_GROUPS_SK = HEAD_DIM / 32;
+    const int mscale_slot_stride_sk = USE_MXFP4 ? (n_kv_heads * N_GROUPS_SK) : 0;
+    const int mscale_block_stride_sk = USE_MXFP4 ? (block_size * mscale_slot_stride_sk) : 0;
+
     int effective_start = 0;
     if (sliding_window > 0 && ctx_len > sliding_window)
         effective_start = ctx_len - sliding_window;
@@ -429,6 +460,9 @@ __global__ void paged_attention_splitk_turboquant_kernel(
         const half* K_norm_block   = K_norms     + (int64_t)phys_block * scale_block_stride;
         const half* V_sc_block     = V_scales    + (int64_t)phys_block * scale_block_stride;
         const uint8_t* K_sk_block  = K_sketches  + (int64_t)phys_block * sketch_kv_block_stride;
+        const uint8_t* K_ms_block_sk = USE_MXFP4
+            ? (K_mscales + (int64_t)phys_block * mscale_block_stride_sk)
+            : nullptr;
 
         int tok_start = blk * block_size;
         int tok_end   = tok_start + block_size;
@@ -443,7 +477,21 @@ __global__ void paged_attention_splitk_turboquant_kernel(
 
             // PolarQuant dot product
             float dot_polar = 0.0f;
-            {
+            if constexpr (USE_MXFP4) {
+                const uint8_t* k_bytes = K_dir_tok + lane_offset / 2;
+                const uint8_t* k_ms = K_ms_block_sk + t * mscale_slot_stride_sk + kv_head * N_GROUPS_SK;
+                #pragma unroll
+                for (int i = 0; i < ELEMS / 2; i++) {
+                    uint8_t packed = k_bytes[i];
+                    int elem_idx = lane_offset + 2 * i;
+                    int group_idx = elem_idx / 32;
+                    float ms = tq_fp4_ue8m0_to_float(k_ms[group_idx]);
+                    float d0 = tq_fp4_unpack_lo(packed) * ms;
+                    float d1 = tq_fp4_unpack_hi(packed) * ms;
+                    dot_polar += q_reg[2*i]   * d0;
+                    dot_polar += q_reg[2*i+1] * d1;
+                }
+            } else {
                 const uint8_t* k_bytes = K_dir_tok + lane_offset / 2;
                 #pragma unroll
                 for (int i = 0; i < ELEMS / 2; i++) {
@@ -551,7 +599,8 @@ void paged_attention_decode_turboquant(
     int block_size, float scale, int sketch_dim,
     int max_context_len, int sliding_window,
     float softcap, cudaStream_t stream,
-    int max_blocks_per_seq)
+    int max_blocks_per_seq,
+    const uint8_t* K_mscales)
 {
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads    = static_cast<int>(Q.shape[2]);
@@ -561,32 +610,32 @@ void paged_attention_decode_turboquant(
     const int max_num_blocks = (max_blocks_per_seq > 0) ? max_blocks_per_seq
                                : (max_context_len + block_size - 1) / block_size;
 
-    // Shared memory: Q sketch bytes (aligned) + warp reduction arrays
     const int sketch_bytes = sketch_dim / 8;
     const int sketch_aligned = (sketch_bytes + 3) & ~3;
     size_t smem_bytes = sketch_aligned
-                      + NUM_WARPS * sizeof(float)     // warp_max
-                      + NUM_WARPS * sizeof(float)     // warp_l
-                      + NUM_WARPS * head_dim * sizeof(float);  // warp_o
+                      + NUM_WARPS * sizeof(float)
+                      + NUM_WARPS * sizeof(float)
+                      + NUM_WARPS * head_dim * sizeof(float);
 
-    // Split-K decision
     void* scratch_ptr = nullptr;
     int num_splits = compute_splitk_splits(
         batch_size, n_heads, head_dim, max_context_len, block_size, &scratch_ptr);
 
+    const bool use_mxfp4 = (K_mscales != nullptr);
+
     if (num_splits > 1) {
         float* partial = static_cast<float*>(scratch_ptr);
-
         dim3 grid1(batch_size, n_heads, num_splits);
         dim3 block1(BLOCK_THREADS);
 
-        #define LAUNCH_SPLITK_TQ(HD) \
-            paged_attention_splitk_turboquant_kernel<HD><<<grid1, block1, smem_bytes, stream>>>( \
+        // Macro for dispatching split-K kernel with optional MXFP4 template
+        #define LAUNCH_SPLITK_TQ(HD, MX) \
+            paged_attention_splitk_turboquant_kernel<HD, MX><<<grid1, block1, smem_bytes, stream>>>( \
                 reinterpret_cast<const half*>(Q.data), \
                 reinterpret_cast<const uint8_t*>(K_dir_cache.data), \
                 reinterpret_cast<const uint8_t*>(V_cache.data), \
                 K_norms, V_scales, \
-                K_sketches, qjl_matrix, \
+                K_sketches, qjl_matrix, K_mscales, \
                 partial, \
                 block_tables, context_lens, \
                 batch_size, n_heads, n_kv_heads, \
@@ -594,46 +643,55 @@ void paged_attention_decode_turboquant(
                 max_num_blocks, num_splits, \
                 sliding_window, softcap)
 
+        #define DISPATCH_SPLITK_TQ(HD) \
+            if (use_mxfp4) { LAUNCH_SPLITK_TQ(HD, true); } \
+            else            { LAUNCH_SPLITK_TQ(HD, false); }
+
         switch (head_dim) {
-            case 64:  LAUNCH_SPLITK_TQ(64);  break;
-            case 96:  LAUNCH_SPLITK_TQ(96);  break;
-            case 128: LAUNCH_SPLITK_TQ(128); break;
-            case 256: LAUNCH_SPLITK_TQ(256); break;
+            case 64:  DISPATCH_SPLITK_TQ(64);  break;
+            case 96:  DISPATCH_SPLITK_TQ(96);  break;
+            case 128: DISPATCH_SPLITK_TQ(128); break;
+            case 256: DISPATCH_SPLITK_TQ(256); break;
             default:
                 IMP_LOG_ERROR("paged_attention_splitk_turboquant: unsupported head_dim %d", head_dim);
                 return;
         }
+        #undef DISPATCH_SPLITK_TQ
         #undef LAUNCH_SPLITK_TQ
 
-        // Split-K Phase 2: reuse shared reduce launcher
         paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data),
                                       batch_size, n_heads, head_dim, num_splits, stream);
     } else {
         dim3 grid(batch_size, n_heads);
         dim3 block(BLOCK_THREADS);
 
-        #define LAUNCH_TQ(HD) \
-            paged_attention_decode_turboquant_kernel<HD><<<grid, block, smem_bytes, stream>>>( \
+        #define LAUNCH_TQ(HD, MX) \
+            paged_attention_decode_turboquant_kernel<HD, MX><<<grid, block, smem_bytes, stream>>>( \
                 reinterpret_cast<const half*>(Q.data), \
                 reinterpret_cast<const uint8_t*>(K_dir_cache.data), \
                 reinterpret_cast<const uint8_t*>(V_cache.data), \
                 K_norms, V_scales, \
-                K_sketches, qjl_matrix, \
+                K_sketches, qjl_matrix, K_mscales, \
                 reinterpret_cast<half*>(O.data), \
                 block_tables, context_lens, \
                 batch_size, n_heads, n_kv_heads, \
                 block_size, scale, sketch_dim, max_context_len, max_num_blocks, \
                 sliding_window, softcap)
 
+        #define DISPATCH_TQ(HD) \
+            if (use_mxfp4) { LAUNCH_TQ(HD, true); } \
+            else            { LAUNCH_TQ(HD, false); }
+
         switch (head_dim) {
-            case 64:  LAUNCH_TQ(64);  break;
-            case 96:  LAUNCH_TQ(96);  break;
-            case 128: LAUNCH_TQ(128); break;
-            case 256: LAUNCH_TQ(256); break;
+            case 64:  DISPATCH_TQ(64);  break;
+            case 96:  DISPATCH_TQ(96);  break;
+            case 128: DISPATCH_TQ(128); break;
+            case 256: DISPATCH_TQ(256); break;
             default:
                 IMP_LOG_ERROR("paged_attention_decode_turboquant: unsupported head_dim %d", head_dim);
                 return;
         }
+        #undef DISPATCH_TQ
         #undef LAUNCH_TQ
     }
 }
