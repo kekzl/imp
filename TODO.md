@@ -119,10 +119,22 @@ Available in our CUDA 13.2.0 toolkit but not yet used:
 - **PTX ISA 9.2**: Extended FP4 cvt variants (.f16x2/.bf16x2 → FP4/FP8), `.scale_vec::4X`
   for MXFP4 MMA. Could improve NVFP4 quantization pipeline throughput.
 
-**Low Priority / Already Fixed:**
+**Investigate / Re-benchmark:**
+- **NVFP4/MXFP8 small M,N perf** (cuBLAS 13.2): cuBLAS improved block-scaled
+  kernels for M,N ≤ 32 on Blackwell. Previously, TC GEMM for M=1 (decode) was
+  a dead end due to setup overhead. Re-benchmark: could NVFP4 cuBLASLt M=1 now
+  beat the scalar prmt GEMV? If so, decode gets tensor core acceleration for free.
+- **Per-batch device-side alpha/beta** (`CUBLASLT_MATMUL_DESC_ALPHA_BATCH_STRIDE`):
+  enables per-head scaling in GQA attention without extra kernel launches.
+  Relevant for mixed-precision KV cache heads.
+
+**Low Priority / Already Fixed / Verified:**
 - **LMEM reduction on WDDM** (R595 driver): less local memory overhead on WSL2.
 - **cuBLASLt Algo 66 bugfix**: concurrent TMA matmul corruption on sm_120 — fixed in 13.2.
 - **NVCC GB202 CuTe GEMM corruption**: fixed in 13.1, we're on 13.2.
+- **FP8 illegal memory access on GeForce**: fixed in 13.2. We use FP8 prefill cache.
+- **Grouped GEMM k=0 gotcha**: our MoE code already filters empty experts (count==0 → skip)
+  before calling cublasGemmGroupedBatchedEx. No action needed.
 
 ### sm_120f (Blackwell Family Feature Set)
 Switched from sm_120a to sm_120f in commit fa3ced6:
