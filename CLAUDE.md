@@ -38,7 +38,7 @@ imp/
 
 ## Build System
 
-CMake 3.25+ with C++20 and CUDA 20 standards. The project builds as a static library (`imp`) plus optional tools and tests.
+CMake 3.25+ with C++20 host code and CUDA 13.2+ device code. The project builds as a static library (`imp`) plus optional tools and tests.
 
 ### Build Commands
 
