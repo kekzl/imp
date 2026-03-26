@@ -97,18 +97,32 @@ Residual-based KV compression. 187 tok/s at 128k context on Blackwell PRO 6000. 
 ### CUDA 13.2 / CCCL 3.2 Features
 Available in our CUDA 13.2.0 toolkit but not yet used:
 
-- **`cub::DeviceTopK`** (`device_topk.cuh`): O(n) top-k selection via AIR algorithm.
-  Current fused kernel handles top_k ≤ 128 efficiently; DeviceTopK is relevant for:
-  - The CUB Radix Sort fallback path (top_k > 128) — direct replacement, 5x faster
-  - Future speculative decoding verification (large K for candidate ranking)
-  - Warp/Block-scope variants on the CCCL roadmap would enable fused sampling
-- **MXFP8 Grouped GEMM** (cuBLASLt): sm_120f TMA WS tactics now enabled.
-  Relevant for MoE prefill with mixed-precision expert batching.
-- **Host Task Spin-Wait Dispatch**: reduces kernel launch latency.
-  Relevant for TTFT-optimized pipeline with many small kernels per step.
-- **cuBLASLt Algo 66 bugfix**: concurrent matmul with TMA was silently corrupt on sm_120.
-  Fixed in CUDA 13.2 — no action needed (we're on 13.2.0).
-- **NVCC GB202 CuTe GEMM corruption**: fixed in CUDA 13.1, we're on 13.2. No action needed.
+**High Priority:**
+- **Grouped GEMM with CUDA Graphs + device-side shapes** (cuBLASLt):
+  Host-sync-free MoE expert dispatch — expert routing results stay on GPU,
+  no D2H copy needed. Up to 4x speedup over multi-stream GEMM for MoE.
+  Directly relevant for Qwen3-Coder-30B MoE and DeepSeek models.
+- **`cub::DeviceTopK`** (`device_topk.cuh`): O(n) top-k via AIR algorithm.
+  5x faster than radix sort for the top_k > 128 fallback path.
+  Warp/Block-scope variants on CCCL roadmap for fused sampling.
+- **`cub::DeviceSegmentedReduce` (fixed-size)**: uniform segment_size variant,
+  up to 66x speedup for small segments. Perfect for per-head reductions in MHA
+  where all heads have the same dimension.
+
+**Medium Priority:**
+- **`cudaMemcpyWithAttributesAsync`**: L2 persistence hints on individual transfers.
+  Could pin frequently-accessed prefix cache segments in L2 without batched API.
+- **Host Task Spin-Wait Dispatch** (`cudaLaunchHostFunc`): lower CPU-side callback
+  latency. Relevant for dynamic token routing in speculative decoding.
+- **`add.f32x2` native PTX** (Blackwell): native float2 ops for softmax reductions
+  and attention score accumulation — reduces instruction count.
+- **PTX ISA 9.2**: Extended FP4 cvt variants (.f16x2/.bf16x2 → FP4/FP8), `.scale_vec::4X`
+  for MXFP4 MMA. Could improve NVFP4 quantization pipeline throughput.
+
+**Low Priority / Already Fixed:**
+- **LMEM reduction on WDDM** (R595 driver): less local memory overhead on WSL2.
+- **cuBLASLt Algo 66 bugfix**: concurrent TMA matmul corruption on sm_120 — fixed in 13.2.
+- **NVCC GB202 CuTe GEMM corruption**: fixed in 13.1, we're on 13.2.
 
 ### sm_120f (Blackwell Family Feature Set)
 Switched from sm_120a to sm_120f in commit fa3ced6:
