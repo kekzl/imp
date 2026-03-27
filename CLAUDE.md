@@ -57,6 +57,9 @@ cmake -B build -DCMAKE_BUILD_TYPE=Debug \
 
 # Release with debug info
 cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+# Build with sanitizers (host code only, for debugging)
+cmake -B build-asan -DIMP_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
 ```
 
 ### Build Options
@@ -67,6 +70,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
 | `IMP_BUILD_TOOLS` | ON | Build imp-cli and imp-bench |
 | `IMP_BUILD_BENCH` | ON | Build benchmark tool |
 | `IMP_BUILD_SERVER` | ON | Build imp-server (OpenAI-compatible HTTP server) |
+| `IMP_SANITIZERS` | OFF | Enable ASAN + UBSAN (host C++ code only) |
 | `CMAKE_CUDA_ARCHITECTURES` | `90a;100;120` | Target GPU architectures |
 
 ### Dependencies
