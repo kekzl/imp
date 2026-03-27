@@ -315,5 +315,87 @@ TEST(EmbeddingTest, DeviceSideLookup) {
     free_gpu_tensor(d_out);
 }
 
+// =========================================================================
+// Boundary token IDs: first and last row of embedding table
+// =========================================================================
+
+TEST(EmbeddingTest, BoundaryTokenIds) {
+    constexpr int vocab = 64;
+    constexpr int d_model = 16;
+    std::vector<float> h_table(vocab * d_model);
+    for (int i = 0; i < vocab * d_model; i++)
+        h_table[i] = static_cast<float>(i) * 0.01f;
+
+    // Request first (0) and last (vocab-1) token
+    std::vector<int32_t> token_ids = {0, vocab - 1};
+    int32_t* d_ids = upload_token_ids(token_ids);
+
+    Tensor d_table = make_gpu_tensor(h_table.data(), DType::FP32, {vocab, d_model});
+    Tensor d_out   = alloc_gpu_tensor(DType::FP32, {2, d_model});
+
+    embedding_lookup(d_table, d_ids, 2, d_out);
+    cudaDeviceSynchronize();
+
+    auto h_out = read_gpu_tensor(d_out);
+
+    // Token 0 -> row 0
+    for (int d = 0; d < d_model; d++) {
+        EXPECT_NEAR(h_out[d], h_table[d], 1e-5f)
+            << "Boundary first token mismatch at dim " << d;
+    }
+    // Token vocab-1 -> last row
+    for (int d = 0; d < d_model; d++) {
+        EXPECT_NEAR(h_out[d_model + d], h_table[(vocab - 1) * d_model + d], 1e-5f)
+            << "Boundary last token mismatch at dim " << d;
+    }
+
+    cudaFree(d_ids);
+    free_gpu_tensor(d_table);
+    free_gpu_tensor(d_out);
+}
+
+// =========================================================================
+// Large vocab (150k, typical LLM size) — verify correct lookup at scale
+// =========================================================================
+
+TEST(EmbeddingTest, LargeVocab) {
+    constexpr int vocab = 150000;
+    constexpr int d_model = 32;
+
+    // Fill table with deterministic pattern: row r, col c -> r * 0.001 + c
+    std::vector<float> h_table(vocab * d_model);
+    for (int r = 0; r < vocab; r++) {
+        for (int c = 0; c < d_model; c++) {
+            h_table[r * d_model + c] = static_cast<float>(r) * 0.001f
+                                       + static_cast<float>(c);
+        }
+    }
+
+    // Sample a few token IDs spread across the range
+    std::vector<int32_t> token_ids = {0, 42, 1337, 99999, 149999};
+    int n_tokens = static_cast<int>(token_ids.size());
+    int32_t* d_ids = upload_token_ids(token_ids);
+
+    Tensor d_table = make_gpu_tensor(h_table.data(), DType::FP32, {vocab, d_model});
+    Tensor d_out   = alloc_gpu_tensor(DType::FP32, {n_tokens, d_model});
+
+    embedding_lookup(d_table, d_ids, n_tokens, d_out);
+    cudaDeviceSynchronize();
+
+    auto h_out = read_gpu_tensor(d_out);
+
+    for (int t = 0; t < n_tokens; t++) {
+        int tid = token_ids[t];
+        for (int d = 0; d < d_model; d++) {
+            EXPECT_NEAR(h_out[t * d_model + d], h_table[tid * d_model + d], 1e-4f)
+                << "LargeVocab mismatch at token_id=" << tid << " dim " << d;
+        }
+    }
+
+    cudaFree(d_ids);
+    free_gpu_tensor(d_table);
+    free_gpu_tensor(d_out);
+}
+
 } // namespace
 } // namespace imp
