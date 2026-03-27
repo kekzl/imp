@@ -332,6 +332,58 @@ TEST(TokenizerGPT2Test, PreTokenizeSpaces) {
     EXPECT_EQ(ids.size(), 2u);
 }
 
+// ---- SPM UTF-8 / Edge Case Tests ----
+
+TEST(TokenizerSPMTest, EncodeUTF8Multibyte) {
+    Tokenizer tok = make_spm_tokenizer();
+    // "café" contains multibyte UTF-8 (é = 0xC3 0xA9). Small vocab will use byte
+    // fallback, but must not crash.
+    auto ids = tok.encode("caf\xc3\xa9");
+    EXPECT_GT(ids.size(), 0u);
+    // Round-trip: decode should produce something (byte fallback reconstructs bytes)
+    std::string decoded = tok.decode(ids);
+    EXPECT_FALSE(decoded.empty());
+}
+
+TEST(TokenizerSPMTest, EncodeEmoji) {
+    Tokenizer tok = make_spm_tokenizer();
+    // "Hello 🌍" — emoji is 4-byte UTF-8 (F0 9F 8C 8D), falls back to byte tokens
+    auto ids = tok.encode("Hello \xf0\x9f\x8c\x8d");
+    EXPECT_GT(ids.size(), 0u);
+    std::string decoded = tok.decode(ids);
+    EXPECT_FALSE(decoded.empty());
+}
+
+TEST(TokenizerSPMTest, EncodeCJK) {
+    Tokenizer tok = make_spm_tokenizer();
+    // "你好世界" — each CJK char is 3-byte UTF-8, will byte-fallback
+    auto ids = tok.encode("\xe4\xbd\xa0\xe5\xa5\xbd\xe4\xb8\x96\xe7\x95\x8c");
+    EXPECT_GT(ids.size(), 0u);
+    std::string decoded = tok.decode(ids);
+    EXPECT_FALSE(decoded.empty());
+}
+
+// ---- GPT2 UTF-8 / Edge Case Tests ----
+
+TEST(TokenizerGPT2Test, EncodeUTF8) {
+    Tokenizer tok = make_gpt2_tokenizer();
+    // "café" — GPT2 byte-level BPE encodes all bytes, should round-trip
+    auto ids = tok.encode("caf\xc3\xa9");
+    EXPECT_GT(ids.size(), 0u);
+    std::string decoded = tok.decode(ids);
+    EXPECT_EQ(decoded, "caf\xc3\xa9");
+}
+
+TEST(TokenizerGPT2Test, LongString) {
+    Tokenizer tok = make_gpt2_tokenizer();
+    // 1000-char string of repeating ASCII
+    std::string long_str(1000, 'x');
+    auto ids = tok.encode(long_str);
+    EXPECT_GT(ids.size(), 0u);
+    std::string decoded = tok.decode(ids);
+    EXPECT_EQ(decoded, long_str);
+}
+
 // ---- Type dispatch ----
 
 TEST(TokenizerDispatchTest, SPMDefault) {
@@ -343,6 +395,24 @@ TEST(TokenizerDispatchTest, SetType) {
     Tokenizer tok;
     tok.set_type("gpt2");
     EXPECT_EQ(tok.type(), "gpt2");
+}
+
+TEST(TokenizerDispatchTest, MaxLength) {
+    // Test both tokenizer types with a 10K-char string — must not crash
+    std::string huge(10000, 'A');
+
+    {
+        Tokenizer tok = make_spm_tokenizer();
+        auto ids = tok.encode(huge);
+        EXPECT_GT(ids.size(), 0u);
+        EXPECT_LE(ids.size(), 10001u);  // at most 1 token per char + space prefix
+    }
+    {
+        Tokenizer tok = make_gpt2_tokenizer();
+        auto ids = tok.encode(huge);
+        EXPECT_GT(ids.size(), 0u);
+        EXPECT_LE(ids.size(), 10001u);
+    }
 }
 
 } // namespace
