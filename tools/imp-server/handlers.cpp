@@ -708,12 +708,15 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         }
     }
 
-    // Determine thinking mode before tokenization (needed for /no_think injection)
+    // Determine thinking mode before tokenization (needed for /no_think injection).
+    // Default: enable thinking for think-capable models (matches llama.cpp behavior).
+    // Clients can override with "enable_thinking": false to suppress.
     bool enable_thinking = false;
     if (snap_is_think_model && state.default_args.reasoning_format == "deepseek" &&
         snap_think_start_id >= 0) {
+        enable_thinking = true;  // default ON for think models
         if (body.contains("enable_thinking")) {
-            enable_thinking = body.value("enable_thinking", false);
+            enable_thinking = body.value("enable_thinking", true);
         }
     }
     bool suppress_thinking = snap_is_think_model && !enable_thinking && think_budget <= 0.0f;
@@ -731,9 +734,13 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         tokens = snap_tok->encode(raw);
     }
 
-    // Optionally append <think> token to trigger reasoning mode.
+    // Append <think>\n to trigger reasoning mode (matches llama.cpp behavior).
+    // Without this prefix, think-trained models produce degenerate output.
     if (enable_thinking && snap_think_start_id >= 0) {
         tokens.push_back(snap_think_start_id);
+        // Append newline after <think> — the model expects "\n" before reasoning
+        auto nl_ids = snap_tok->encode("\n");
+        tokens.insert(tokens.end(), nl_ids.begin(), nl_ids.end());
     }
 
     int n_prompt_tokens = static_cast<int>(tokens.size());
