@@ -1631,12 +1631,6 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                  ? state.ssm_state->h_state(state.ssm_seq_id, ssm_idx)
                  : nullptr;
 
-    // GDN layers lack ssm_d (D skip connection). Use ssm_a as dummy (same shape [n_heads]).
-    // The ssm_scan kernel reads D[h] for skip connections — when using A_log values as D,
-    // the skip contribution is non-zero but small (A_log are typically negative).
-    // TODO: allocate a proper zero-filled D tensor for GDN layers.
-    const Tensor& ssm_d_ref = (ly.ssm_d.data != nullptr) ? ly.ssm_d : ly.ssm_a;
-
     // Gate projection — computed before scan, used after in RMSNormGated
     int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
     Tensor gate_out(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
