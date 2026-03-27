@@ -315,5 +315,113 @@ TEST_F(AttentionBlackwellTest, NonAlignedSeqLen) {
              /*causal=*/true);
 }
 
+TEST_F(AttentionBlackwellTest, SlidingWindow) {
+    // Sliding window = 64: tokens beyond 64 positions back should be masked
+    if (sm_ < 90) {
+        GTEST_SKIP() << "WMMA attention requires sm_90+";
+    }
+
+    const int B = 1, Sq = 128, Skv = 128, NH = 2, NKV = 2, HD = 128;
+    const int sliding_window = 64;
+    float scale = 1.0f / std::sqrt(static_cast<float>(HD));
+
+    size_t q_elems  = B * Sq * NH * HD;
+    size_t kv_elems = B * Skv * NKV * HD;
+
+    std::vector<float> Q_f(q_elems), K_f(kv_elems), V_f(kv_elems);
+    for (size_t i = 0; i < q_elems; i++)
+        Q_f[i] = 0.02f * static_cast<float>((i * 7 + 3) % 13 - 6);
+    for (size_t i = 0; i < kv_elems; i++) {
+        K_f[i] = 0.02f * static_cast<float>((i * 11 + 5) % 13 - 6);
+        V_f[i] = 0.02f * static_cast<float>((i * 13 + 7) % 13 - 6);
+    }
+
+    // CPU reference with sliding window mask
+    std::vector<float> O_ref(q_elems, 0.0f);
+    for (int b = 0; b < B; b++) {
+        for (int h = 0; h < NH; h++) {
+            int kvh = h / (NH / NKV);
+            for (int qi = 0; qi < Sq; qi++) {
+                float m = -FLT_MAX;
+                std::vector<float> s(Skv);
+                for (int ki = 0; ki < Skv; ki++) {
+                    float dot = 0.0f;
+                    for (int d = 0; d < HD; d++) {
+                        dot += Q_f[((b * Sq + qi) * NH + h) * HD + d]
+                             * K_f[((b * Skv + ki) * NKV + kvh) * HD + d];
+                    }
+                    dot *= scale;
+                    // Causal + sliding window mask
+                    if (ki > qi || qi - ki >= sliding_window) dot = -FLT_MAX;
+                    s[ki] = dot;
+                    m = fmaxf(m, dot);
+                }
+                float sum = 0.0f;
+                for (int ki = 0; ki < Skv; ki++) {
+                    s[ki] = expf(s[ki] - m);
+                    sum += s[ki];
+                }
+                if (sum > 0.0f)
+                    for (int ki = 0; ki < Skv; ki++) s[ki] /= sum;
+                for (int d = 0; d < HD; d++) {
+                    float acc = 0.0f;
+                    for (int ki = 0; ki < Skv; ki++)
+                        acc += s[ki] * V_f[((b * Skv + ki) * NKV + kvh) * HD + d];
+                    O_ref[((b * Sq + qi) * NH + h) * HD + d] = acc;
+                }
+            }
+        }
+    }
+
+    // GPU
+    std::vector<half> Q_h(q_elems), K_h(kv_elems), V_h(kv_elems);
+    for (size_t i = 0; i < q_elems; i++)  Q_h[i] = __float2half(Q_f[i]);
+    for (size_t i = 0; i < kv_elems; i++) K_h[i] = __float2half(K_f[i]);
+    for (size_t i = 0; i < kv_elems; i++) V_h[i] = __float2half(V_f[i]);
+
+    size_t q_bytes  = q_elems * sizeof(half);
+    size_t kv_bytes = kv_elems * sizeof(half);
+
+    void *d_q, *d_k, *d_v, *d_o;
+    cudaMalloc(&d_q, q_bytes);
+    cudaMalloc(&d_k, kv_bytes);
+    cudaMalloc(&d_v, kv_bytes);
+    cudaMalloc(&d_o, q_bytes);
+
+    cudaMemcpy(d_q, Q_h.data(), q_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_k, K_h.data(), kv_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_v, V_h.data(), kv_bytes, cudaMemcpyHostToDevice);
+    cudaMemset(d_o, 0, q_bytes);
+
+    int64_t q_shape[]  = {B, Sq, NH, HD};
+    int64_t kv_shape[] = {B, Skv, NKV, HD};
+    Tensor Qt(d_q, DType::FP16, 4, q_shape, true);
+    Tensor Kt(d_k, DType::FP16, 4, kv_shape, true);
+    Tensor Vt(d_v, DType::FP16, 4, kv_shape, true);
+    Tensor Ot(d_o, DType::FP16, 4, q_shape, true);
+
+    flash_attention_blackwell(Qt, Kt, Vt, Ot, scale, /*causal=*/true,
+                              sliding_window, 0.0f, stream_);
+    cudaStreamSynchronize(stream_);
+
+    cudaError_t err = cudaGetLastError();
+    ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+    std::vector<half> O_h(q_elems);
+    cudaMemcpy(O_h.data(), d_o, q_bytes, cudaMemcpyDeviceToHost);
+
+    float max_err = 0.0f;
+    for (size_t i = 0; i < q_elems; i++) {
+        float got = __half2float(O_h[i]);
+        float ref = O_ref[i];
+        float denom = std::max(std::abs(ref), 1e-6f);
+        max_err = std::max(max_err, std::abs(got - ref) / denom);
+    }
+    EXPECT_LT(max_err, 1e-2f)
+        << "Sliding window max relative error " << max_err;
+
+    cudaFree(d_q); cudaFree(d_k); cudaFree(d_v); cudaFree(d_o);
+}
+
 } // namespace
 } // namespace imp

@@ -417,5 +417,114 @@ TEST(RoPETest, RopeLargerDim) {
     cudaFree(pos_dev);
 }
 
+// =========================================================================
+// Test 6 -- PartialRoPE (Qwen3.5 style: rope_dim=64, head_dim=256)
+//   Only the first rope_dim dimensions should be rotated.
+//   The remaining (head_dim - rope_dim) dimensions must stay unchanged.
+// =========================================================================
+TEST(RoPETest, PartialRoPE) {
+    const int batch      = 1;
+    const int seq_len    = 2;
+    const int n_heads    = 2;
+    const int n_kv_heads = 2;
+    const int head_dim   = 256;
+    const int rope_dim   = 64;
+    const float theta    = 10000.0f;
+    const float scaling  = 1.0f;
+
+    const int64_t q_count = (int64_t)batch * seq_len * n_heads * head_dim;
+    const int64_t k_count = (int64_t)batch * seq_len * n_kv_heads * head_dim;
+
+    std::vector<float> q_host(q_count), k_host(k_count);
+    fill_linear(q_host);
+    fill_linear(k_host);
+
+    // Keep originals for comparison of the unrotated portion
+    std::vector<float> q_orig(q_host), k_orig(k_host);
+
+    // Non-zero positions to ensure rotation happens
+    std::vector<int> pos_host = {3, 7};
+
+    // CPU reference: only rotate first rope_dim dims
+    std::vector<float> q_ref(q_host), k_ref(k_host);
+    for (int b = 0; b < batch; b++) {
+        for (int s = 0; s < seq_len; s++) {
+            int pos = pos_host[b * seq_len + s];
+            for (int h = 0; h < n_heads; h++) {
+                float* qh = q_ref.data() + (((int64_t)b * seq_len + s) * n_heads + h) * head_dim;
+                for (int i = 0; i < rope_dim / 2; i++) {
+                    float freq = 1.0f / (powf(theta, (2.0f * i) / rope_dim) * scaling);
+                    float angle = pos * freq;
+                    float c = cosf(angle), sn = sinf(angle);
+                    float q0 = qh[2 * i], q1 = qh[2 * i + 1];
+                    qh[2 * i]     = q0 * c - q1 * sn;
+                    qh[2 * i + 1] = q0 * sn + q1 * c;
+                }
+            }
+            for (int h = 0; h < n_kv_heads; h++) {
+                float* kh = k_ref.data() + (((int64_t)b * seq_len + s) * n_kv_heads + h) * head_dim;
+                for (int i = 0; i < rope_dim / 2; i++) {
+                    float freq = 1.0f / (powf(theta, (2.0f * i) / rope_dim) * scaling);
+                    float angle = pos * freq;
+                    float c = cosf(angle), sn = sinf(angle);
+                    float k0 = kh[2 * i], k1 = kh[2 * i + 1];
+                    kh[2 * i]     = k0 * c - k1 * sn;
+                    kh[2 * i + 1] = k0 * sn + k1 * c;
+                }
+            }
+        }
+    }
+
+    // Upload to GPU
+    float* q_dev  = to_device(q_host.data(), q_count);
+    float* k_dev  = to_device(k_host.data(), k_count);
+    int*  pos_dev = to_device(pos_host.data(), pos_host.size());
+
+    Tensor Q = make_device_tensor(q_dev, DType::FP32, batch, seq_len, n_heads, head_dim);
+    Tensor K = make_device_tensor(k_dev, DType::FP32, batch, seq_len, n_kv_heads, head_dim);
+
+    rope_forward(Q, K, pos_dev, head_dim, theta, scaling, rope_dim);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    auto q_out = to_host(q_dev, q_count);
+    auto k_out = to_host(k_dev, k_count);
+
+    const float tol = 5e-4f;
+
+    // Verify rotated portion matches CPU reference
+    for (int64_t i = 0; i < q_count; i++) {
+        EXPECT_NEAR(q_out[i], q_ref[i], tol)
+            << "Q partial RoPE mismatch at index " << i;
+    }
+    for (int64_t i = 0; i < k_count; i++) {
+        EXPECT_NEAR(k_out[i], k_ref[i], tol)
+            << "K partial RoPE mismatch at index " << i;
+    }
+
+    // Verify unrotated portion (dims >= rope_dim) is unchanged
+    for (int b = 0; b < batch; b++) {
+        for (int s = 0; s < seq_len; s++) {
+            for (int h = 0; h < n_heads; h++) {
+                int64_t base = (((int64_t)b * seq_len + s) * n_heads + h) * head_dim;
+                for (int d = rope_dim; d < head_dim; d++) {
+                    EXPECT_NEAR(q_out[base + d], q_orig[base + d], 1e-6f)
+                        << "Q dim " << d << " should be unchanged (partial RoPE)";
+                }
+            }
+            for (int h = 0; h < n_kv_heads; h++) {
+                int64_t base = (((int64_t)b * seq_len + s) * n_kv_heads + h) * head_dim;
+                for (int d = rope_dim; d < head_dim; d++) {
+                    EXPECT_NEAR(k_out[base + d], k_orig[base + d], 1e-6f)
+                        << "K dim " << d << " should be unchanged (partial RoPE)";
+                }
+            }
+        }
+    }
+
+    cudaFree(q_dev);
+    cudaFree(k_dev);
+    cudaFree(pos_dev);
+}
+
 } // namespace
 } // namespace imp
