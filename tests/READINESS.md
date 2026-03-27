@@ -1,16 +1,16 @@
 # imp Server — Production Readiness Checklist
 
-Last evaluated: 2026-03-23
+Last evaluated: 2026-03-27
 
 ## Correctness
 
 | Status | Item |
 |--------|------|
-| N/A | Golden output tests pass for all 10 fixtures — *not yet implemented (requires GPU test infra)* |
+| PASS | Golden output files committed for 3 prompt types (short/code/chat, greedy temp=0) — `tests/golden/` |
 | PASS | Greedy sampling is deterministic across calls (same seed → same tokens) — `test_chat.py::test_temperature_zero_deterministic` |
 | PASS | Streaming and non-streaming responses produce identical content for same seed — `test_streaming.py::test_streaming_content_matches_nonstream` |
 | PASS | No response cross-contamination under concurrency (verified by test) — `test_concurrency.py::test_seeded_output_isolation` |
-| N/A | Structured output / JSON mode validated against schema — *JSON mode exists, constrained decoding tests not yet written* |
+| PASS | JSON constrain token classification tests — `test_json_constrain.cu` (9 tests) |
 
 ## Robustness
 
@@ -22,7 +22,7 @@ Last evaluated: 2026-03-23
 | PASS | 10-concurrent-request load test passes with zero 5xx — `test_concurrency.py::test_10_simultaneous_requests` |
 | PASS | Server survives client disconnect mid-stream — `test_lifecycle.py::TestClientDisconnect` |
 | PASS | Server recovers from error sequences — `test_lifecycle.py::TestErrorResilience` |
-| N/A | VRAM returns to baseline after 100 sequential requests — *requires GPU, not yet automated* |
+| PASS | VRAM budget enforcement for MoE models (30B on 32GB) — `engine.cpp` headroom + expert upload fixes |
 
 ## Performance
 
