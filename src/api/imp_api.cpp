@@ -715,11 +715,9 @@ ImpError imp_context_reset(ImpContext ctx) {
         ctx->consumed_output = 0;
     }
 
-    // Note: We do not reset the entire scheduler here because other sequences
-    // may exist in batch scenarios. For the single-sequence C API, clearing
-    // the active request is sufficient. A full reset would drain all pending
-    // and active requests from the scheduler, which is beyond the scope of
-    // this function.
+    // Invalidate cached CUDA graphs — stale graph captures from the previous
+    // request can produce non-deterministic output if replayed for a new request.
+    ctx->engine->invalidate_graphs();
 
     return IMP_SUCCESS;
 }

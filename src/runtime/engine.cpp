@@ -134,6 +134,17 @@ void Engine::reset_ssm_state(int seq_id) {
     }
 }
 
+void Engine::invalidate_graphs() {
+    for (int i = 0; i < kMaxGraphPoolSize; i++)
+        decode_graph_pool_[i].invalidate();
+    if (async_graph_runner_.is_setup()) {
+        async_graph_runner_.cleanup();
+    }
+    async_graph_req_ = nullptr;
+    async_pending_tokens_.clear();
+    async_pending_cursor_ = 0;
+}
+
 size_t Engine::effective_free_vram() const {
     size_t free_mem = 0, total_mem = 0;
     if (cudaMemGetInfo(&free_mem, &total_mem) != cudaSuccess) {

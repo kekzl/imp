@@ -126,6 +126,10 @@ public:
     // Reset SSM state for a sequence (call on context_reset for hybrid models)
     void reset_ssm_state(int seq_id);
 
+    // Invalidate all cached CUDA graphs (call on context_reset to ensure
+    // deterministic output — stale graph captures can produce different results)
+    void invalidate_graphs();
+
     // Vision: set image for next generation. Returns false if no mmproj loaded.
     [[nodiscard]] bool set_image(const std::string& path);
     [[nodiscard]] bool set_image_from_memory(const uint8_t* data, size_t len);
