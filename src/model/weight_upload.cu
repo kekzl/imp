@@ -885,7 +885,12 @@ static bool upload_expert_weights(
 
         // Reserve for KV cache + SSM state + activation workspace + FP16 cache.
         // Engine passes the exact reserve based on computed workspace sizes.
-        size_t budget = (free_mem > expert_reserve_bytes) ? (free_mem - expert_reserve_bytes) : 0;
+        // CUDA driver overhead on WSL2/WDDM: cudaMalloc alignment, page tables,
+        // and WDDM shared memory management consume ~30% beyond the requested size.
+        // Empirical on RTX 5090 WSL2: 22 GiB expert alloc leaves 0 MiB from 28.7 GiB free.
+        size_t overhead = free_mem * 3 / 10;  // 30% of available VRAM
+        size_t total_reserve = expert_reserve_bytes + overhead;
+        size_t budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
 
         if (budget >= total_expert_bytes) {
             // All experts fit
@@ -950,9 +955,9 @@ static bool upload_expert_weights(
                 size_t total_raw = static_cast<size_t>(n_experts) * expert_raw;
 
                 if (experts_upload_layer[i]) {
-                    // Upload raw quantized bytes to GPU
+                    // Upload raw quantized bytes to GPU (respects VRAM reserve)
                     void* gpu_ptr = nullptr;
-                    cudaError_t err = cudaMalloc(&gpu_ptr, total_raw);
+                    cudaError_t err = checked_cuda_malloc(&gpu_ptr, total_raw);
                     if (err == cudaSuccess) {
                         cudaError_t cpy_err = h2d_copy(gpu_ptr, packed.data, total_raw, ctx.stream);
                         if (cpy_err != cudaSuccess) {
@@ -1166,6 +1171,12 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
     } else {
         cudaDeviceSynchronize();
     }
+
+    // Reset cached VRAM state — the dense upload pass consumed an unknown amount
+    // of VRAM (including CUDA driver overhead, page tables, alignment).
+    // Expert upload must use real cudaMemGetInfo for accurate budget enforcement.
+    g_cached_free_mem = 0;
+    g_total_allocated = 0;
 
     // =========================================================================
     // --- Pass 2: Expert weight upload ---
