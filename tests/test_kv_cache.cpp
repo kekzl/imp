@@ -1087,5 +1087,124 @@ TEST(KVCacheManagerTest, EvictAllCachedBlocksPoolIntegrity) {
     EXPECT_EQ(mgr->num_free_blocks(), 8);  // All returned to free pool
 }
 
+// ============================================================================
+// Edge case tests
+// ============================================================================
+
+// 39. AllocateAtCapacity — exhaust the pool, verify next allocate returns false
+TEST(KVCacheManagerTest, AllocateAtCapacity) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(8);
+
+    // Fill the entire pool.
+    bool ok = mgr->allocate_blocks(0, 8);
+    ASSERT_TRUE(ok);
+    EXPECT_EQ(mgr->num_free_blocks(), 0);
+
+    // Next allocation should fail gracefully (not crash).
+    ok = mgr->allocate_blocks(1, 1);
+    EXPECT_FALSE(ok);
+    EXPECT_TRUE(mgr->block_table(1).empty());
+
+    // Original sequence should be unaffected.
+    EXPECT_EQ(static_cast<int>(mgr->block_table(0).size()), 8);
+
+    mgr->free_sequence(0);
+}
+
+// 40. AllocateFreeAllocate — fill pool, free, reallocate (block recycling)
+TEST(KVCacheManagerTest, AllocateFreeAllocate) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(8);
+
+    // Fill the pool entirely.
+    bool ok = mgr->allocate_blocks(0, 8);
+    ASSERT_TRUE(ok);
+    EXPECT_EQ(mgr->num_free_blocks(), 0);
+
+    // Free the sequence — all blocks return to the pool.
+    mgr->free_sequence(0);
+    EXPECT_EQ(mgr->num_free_blocks(), 8);
+
+    // Reallocate the same count — should succeed with recycled blocks.
+    ok = mgr->allocate_blocks(1, 8);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(static_cast<int>(mgr->block_table(1).size()), 8);
+    EXPECT_EQ(mgr->num_free_blocks(), 0);
+
+    mgr->free_sequence(1);
+}
+
+// 41. EvictionUnderPressure — third sequence triggers eviction of oldest unused
+TEST(KVCacheManagerTest, EvictionUnderPressure) {
+    SKIP_IF_NO_CUDA();
+
+    // Pool fits only 2 sequences worth of blocks (4 + 4 = 8).
+    auto mgr = MakeManager(8);
+
+    mgr->allocate_blocks(0, 4);
+    mgr->allocate_blocks(1, 4);
+    EXPECT_EQ(mgr->num_free_blocks(), 0);
+
+    // Touch seq 1 so seq 0 remains LRU.
+    mgr->touch(1);
+
+    // Evict LRU to make room, then allocate third sequence.
+    int victim = mgr->evict_lru();
+    EXPECT_EQ(victim, 0);
+    EXPECT_EQ(mgr->num_free_blocks(), 4);
+
+    bool ok = mgr->allocate_blocks(2, 4);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(static_cast<int>(mgr->block_table(2).size()), 4);
+
+    // Seq 0 should be gone, seq 1 and seq 2 should be active.
+    EXPECT_TRUE(mgr->block_table(0).empty());
+    EXPECT_EQ(mgr->num_active_sequences(), 2);
+
+    mgr->free_sequence(1);
+    mgr->free_sequence(2);
+}
+
+// 42. ZeroBlocks — allocating 0 blocks is a no-op, no crash
+TEST(KVCacheManagerTest, ZeroBlocks) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(8);
+
+    bool ok = mgr->allocate_blocks(0, 0);
+    EXPECT_TRUE(ok);
+    EXPECT_TRUE(mgr->block_table(0).empty());
+    EXPECT_EQ(mgr->num_free_blocks(), 8);
+}
+
+// 43. SequenceIdReuse — free seq id=0, then reuse id=0 with fresh state
+TEST(KVCacheManagerTest, SequenceIdReuse) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(16);
+
+    // Allocate seq 0 with 4 blocks.
+    bool ok = mgr->allocate_blocks(0, 4);
+    ASSERT_TRUE(ok);
+    EXPECT_EQ(static_cast<int>(mgr->block_table(0).size()), 4);
+
+    // Free it.
+    mgr->free_sequence(0);
+    EXPECT_TRUE(mgr->block_table(0).empty());
+    EXPECT_EQ(mgr->num_free_blocks(), 16);
+
+    // Reuse id=0 with a different block count.
+    ok = mgr->allocate_blocks(0, 2);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(static_cast<int>(mgr->block_table(0).size()), 2);
+    EXPECT_EQ(mgr->num_active_sequences(), 1);
+    EXPECT_EQ(mgr->num_free_blocks(), 14);
+
+    mgr->free_sequence(0);
+}
+
 } // namespace
 } // namespace imp
