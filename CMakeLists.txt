@@ -362,11 +362,12 @@ if(IMP_BUILD_TESTS)
         tests/test_json_constrain.cu
         tests/test_gdn.cu
         tests/test_gemm_dp4a.cu
+        tests/gguf_stub.cpp
     )
 
     add_executable(imp-tests ${IMP_TEST_SOURCES})
     target_link_libraries(imp-tests PRIVATE imp GTest::gtest GTest::gtest_main)
-    target_include_directories(imp-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_include_directories(imp-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     set_target_properties(imp-tests PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
         CUDA_RESOLVE_DEVICE_SYMBOLS ON
@@ -380,7 +381,7 @@ if(IMP_BUILD_TESTS)
     # ctest -L gpu   — GPU tests (require NVIDIA GPU)
     # ctest -L perf  — Performance regression tests
     add_test(NAME unit_tests COMMAND imp-tests
-        "--gtest_filter=TensorTest.*:GgufLoaderTest.*:TokenizerSPMTest.*:TokenizerGPT2Test.*:TokenizerDispatchTest.*:ChatTemplate*:BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*")
+        "--gtest_filter=TensorTest.*:GgufLoaderTest.*:TokenizerSPMTest.*:TokenizerGPT2Test.*:TokenizerDispatchTest.*:ChatTemplate*:BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub")
     set_tests_properties(unit_tests PROPERTIES LABELS "unit")
 
     add_test(NAME gpu_tests COMMAND imp-tests
