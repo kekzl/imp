@@ -7,6 +7,7 @@
 #include <cmath>
 #include <algorithm>
 #include <numeric>
+#include <limits>
 #include <map>
 
 namespace imp {
@@ -194,6 +195,66 @@ TEST(SamplingTest, SamplingDistribution) {
     // Token 2 should be least frequent (<30% of samples)
     EXPECT_LT(counts[2], N * 3 / 10)
         << "Token 2 (lowest logit) should appear <30% of the time";
+
+    free_gpu_tensor(d_logits);
+}
+
+// =========================================================================
+// Edge case tests
+// =========================================================================
+
+TEST(SamplingTest, NaNLogits) {
+    // If any logit is NaN, verify no crash (graceful handling)
+    float nan_val = std::numeric_limits<float>::quiet_NaN();
+    std::vector<float> logits = {1.0f, nan_val, 3.0f, 2.0f};
+    Tensor d_logits = make_logits(logits.data(), logits.size());
+
+    // Should not crash — result may be any token
+    int32_t token = sample_greedy(d_logits);
+    EXPECT_GE(token, 0);
+    EXPECT_LT(token, static_cast<int32_t>(logits.size()));
+
+    free_gpu_tensor(d_logits);
+}
+
+TEST(SamplingTest, AllIdenticalLogits) {
+    // All logits equal — any token is valid (uniform distribution)
+    constexpr int V = 16;
+    std::vector<float> logits(V, 1.0f);
+    Tensor d_logits = make_logits(logits.data(), V);
+
+    // Greedy: should return a valid token (ties → lowest index)
+    int32_t token = sample_greedy(d_logits);
+    EXPECT_EQ(token, 0);
+
+    // Stochastic: should produce valid tokens across seeds
+    for (unsigned int seed = 0; seed < 20; seed++) {
+        int32_t t = sample_topk_topp(d_logits, /*top_k=*/128, /*top_p=*/1.0f,
+                                      /*temperature=*/1.0f, seed);
+        EXPECT_GE(t, 0);
+        EXPECT_LT(t, V);
+    }
+
+    free_gpu_tensor(d_logits);
+}
+
+TEST(SamplingTest, SingleNonNegInf) {
+    // One logit=0, rest=-inf → must always select that token
+    constexpr int V = 32;
+    float neg_inf = -std::numeric_limits<float>::infinity();
+    std::vector<float> logits(V, neg_inf);
+    logits[17] = 0.0f;
+    Tensor d_logits = make_logits(logits.data(), V);
+
+    // Greedy
+    EXPECT_EQ(sample_greedy(d_logits), 17);
+
+    // Stochastic with various seeds
+    for (unsigned int seed = 0; seed < 20; seed++) {
+        int32_t t = sample_topk_topp(d_logits, /*top_k=*/128, /*top_p=*/1.0f,
+                                      /*temperature=*/1.0f, seed);
+        EXPECT_EQ(t, 17) << "Only non-(-inf) token should be sampled, seed=" << seed;
+    }
 
     free_gpu_tensor(d_logits);
 }
