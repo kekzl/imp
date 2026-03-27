@@ -128,6 +128,68 @@ std::string find_model_path(const ServerState& state, const std::string& name) {
     return "";
 }
 
+// Auto-swap model if a different one is requested and available as GGUF.
+// Returns true if the model is now loaded (either already loaded or swapped).
+// Returns false if the model couldn't be found or loaded (caller should 404).
+// Must be called with state.mtx held.
+bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
+                          httplib::Response& res) {
+    if (!state.model_loaded()) {
+        // No model loaded — try to load the requested one
+        std::string path = find_model_path(state, requested_model);
+        if (path.empty()) {
+            res.status = 503;
+            json err = {{"error", {{"message", "No model loaded and '" + requested_model + "' not found in models directory"},
+                                    {"type", "server_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return false;
+        }
+        printf("[auto-swap] Loading %s...\n", requested_model.c_str());
+        fflush(stdout);
+        std::string error = load_model_into_state(state, path, json::object());
+        if (!error.empty()) {
+            res.status = 500;
+            json err = {{"error", {{"message", "Auto-load failed: " + error},
+                                    {"type", "server_error"}}}};
+            res.set_content(err.dump(), "application/json");
+            return false;
+        }
+        printf("[auto-swap] %s loaded successfully\n", requested_model.c_str());
+        fflush(stdout);
+        return true;
+    }
+
+    if (requested_model == state.model_name) {
+        return true;  // Already loaded
+    }
+
+    // Different model requested — try to swap
+    std::string path = find_model_path(state, requested_model);
+    if (path.empty()) {
+        // Model not found in models dir — serve with current model anyway
+        // (matches llama.cpp behavior for unknown model names)
+        return true;
+    }
+
+    printf("[auto-swap] Swapping %s → %s...\n", state.model_name.c_str(), requested_model.c_str());
+    fflush(stdout);
+    std::string error = load_model_into_state(state, path, json::object());
+    if (!error.empty()) {
+        // Swap failed — try to keep serving with whatever is loaded
+        printf("[auto-swap] Swap failed: %s\n", error.c_str());
+        fflush(stdout);
+        if (state.model_loaded()) return true;  // Old model still works
+        res.status = 500;
+        json err = {{"error", {{"message", "Model swap failed: " + error},
+                                {"type", "server_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return false;
+    }
+    printf("[auto-swap] %s loaded successfully\n", requested_model.c_str());
+    fflush(stdout);
+    return true;
+}
+
 // Build ImpConfig from default args + optional JSON overrides.
 // Auto-detects optimal preset from model_path unless overridden.
 ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
@@ -582,21 +644,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     std::vector<int32_t> snap_stop_token_ids;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
-        snap_model_loaded = state.model_loaded();
-        if (!snap_model_loaded) {
-            res.status = 503;
-            json err = {{"error", {{"message", "No model loaded"},
-                                    {"type", "server_error"}}}};
-            res.set_content(err.dump(), "application/json");
-            return;
-        }
-        if (requested_model != state.model_name) {
-            res.status = 404;
-            json err = {{"error", {{"message", "Model '" + requested_model + "' not found. Loaded: " + state.model_name},
-                                    {"type", "invalid_request_error"}}}};
-            res.set_content(err.dump(), "application/json");
-            return;
-        }
+        if (!ensure_model_loaded(state, requested_model, res)) return;
+        snap_model_loaded = true;
         snap_tok = state.tok;
         snap_chat_tpl = state.chat_tpl;
         snap_have_template = state.have_template;
@@ -1882,20 +1931,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
     int snap_max_seq_len;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
-        if (!state.model_loaded()) {
-            res.status = 503;
-            json err = {{"error", {{"message", "No model loaded"},
-                                    {"type", "server_error"}}}};
-            res.set_content(err.dump(), "application/json");
-            return;
-        }
-        if (requested_model != state.model_name) {
-            res.status = 404;
-            json err = {{"error", {{"message", "Model '" + requested_model + "' not found. Loaded: " + state.model_name},
-                                    {"type", "invalid_request_error"}}}};
-            res.set_content(err.dump(), "application/json");
-            return;
-        }
+        if (!ensure_model_loaded(state, requested_model, res)) return;
         snap_tok = state.tok;
         snap_model_name = state.model_name;
         snap_is_think_model = state.is_think_model;
