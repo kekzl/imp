@@ -2,6 +2,8 @@
 #include "imp/imp.h"
 #include "gguf_stub.h"
 
+#include <cuda_runtime.h>
+
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -333,6 +335,81 @@ TEST_F(StubModelTest, PrefillDecodeStub) {
 
     // Reset should always succeed
     EXPECT_EQ(imp_context_reset(ctx), IMP_SUCCESS);
+
+    imp_context_free(ctx);
+    imp_model_free(model);
+}
+
+TEST_F(StubModelTest, VRAMLeakDetection) {
+    ImpModel model = nullptr;
+    ASSERT_EQ(imp_model_load(stub_path_.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+
+    ImpConfig config = imp_config_default();
+    config.max_seq_len = 64;
+    config.max_batch_size = 1;
+    config.enable_cuda_graphs = 0;
+    config.enable_pdl = 0;
+
+    ImpContext ctx = nullptr;
+    ImpError err = imp_context_create(model, &config, &ctx);
+    if (err != IMP_SUCCESS) {
+        imp_model_free(model);
+        GTEST_SKIP() << "Context creation failed: " << imp_error_string(err);
+    }
+
+    // Run one warm-up request so lazy CUDA allocations are settled
+    {
+        int32_t warmup_tokens[] = {1, 2, 3};
+        err = imp_prefill(ctx, warmup_tokens, 3);
+        if (err == IMP_SUCCESS) {
+            ImpGenerateParams p = imp_generate_params_default();
+            p.max_tokens = 2;
+            p.temperature = 0.0f;
+            p.seed = 42;
+            int32_t tok;
+            imp_decode_step(ctx, &p, &tok);
+        }
+        imp_context_reset(ctx);
+    }
+
+    // Measure VRAM baseline after warm-up
+    cudaDeviceSynchronize();
+    size_t free_before = 0, total = 0;
+    cudaMemGetInfo(&free_before, &total);
+
+    // Run 20 prefill+decode+reset cycles
+    constexpr int kNumRequests = 20;
+    for (int i = 0; i < kNumRequests; i++) {
+        int32_t tokens[] = {1, 2, 3, 4, 5};
+        err = imp_prefill(ctx, tokens, 5);
+        if (err != IMP_SUCCESS) break;
+
+        ImpGenerateParams params = imp_generate_params_default();
+        params.max_tokens = 4;
+        params.temperature = 0.0f;
+        params.seed = 100 + i;
+
+        for (int j = 0; j < 2; j++) {
+            int32_t out_token = 0;
+            err = imp_decode_step(ctx, &params, &out_token);
+            if (err != IMP_SUCCESS) break;
+        }
+
+        err = imp_context_reset(ctx);
+        if (err != IMP_SUCCESS) break;
+    }
+
+    // Measure VRAM after all requests
+    cudaDeviceSynchronize();
+    size_t free_after = 0;
+    cudaMemGetInfo(&free_after, &total);
+
+    size_t leak = (free_before > free_after) ? (free_before - free_after) : 0;
+    float leak_pct = 100.0f * static_cast<float>(leak) / static_cast<float>(total);
+    EXPECT_LT(leak_pct, 5.0f)
+        << "VRAM leak detected: " << (leak / (1024 * 1024)) << " MiB after "
+        << kNumRequests << " requests (" << leak_pct << "% of total "
+        << (total / (1024 * 1024)) << " MiB)";
 
     imp_context_free(ctx);
     imp_model_free(model);
