@@ -48,6 +48,16 @@ option(IMP_BUILD_TESTS "Build tests" ON)
 option(IMP_BUILD_TOOLS "Build CLI and benchmark tools" ON)
 option(IMP_BUILD_BENCH "Build benchmarks" ON)
 option(IMP_BUILD_SERVER "Build imp-server (OpenAI-compatible HTTP server)" ON)
+option(IMP_SANITIZERS "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+
+if(IMP_SANITIZERS)
+    set(SANITIZER_FLAGS "-fsanitize=address,undefined -fno-omit-frame-pointer -g")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SANITIZER_FLAGS}")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${SANITIZER_FLAGS}")
+    # Note: CUDA code is NOT sanitized (nvcc doesn't support ASAN).
+    # ASAN catches host-side memory errors in the C++ runtime/API layer.
+    message(STATUS "Sanitizers enabled: ASAN + UBSAN (host code only)")
+endif()
 
 # --- Third-party dependencies ---
 include(FetchContent)
@@ -350,6 +360,8 @@ if(IMP_BUILD_TESTS)
         tests/test_softmax.cu
         tests/test_ssm.cu
         tests/test_json_constrain.cu
+        tests/test_gdn.cu
+        tests/test_gemm_dp4a.cu
     )
 
     add_executable(imp-tests ${IMP_TEST_SOURCES})

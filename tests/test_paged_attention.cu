@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cfloat>
 #include <numeric>
+#include <algorithm>
 
 namespace imp {
 namespace {
@@ -655,6 +656,155 @@ TEST(PagedAttentionTest, GQALongContext) {
     }
 
     free_gpu(d_Q); free_gpu(d_K); free_gpu(d_V); free_gpu(d_O);
+    cudaFree(d_bt); cudaFree(d_ctx);
+}
+
+// =========================================================================
+// INT4 pack/unpack roundtrip
+// =========================================================================
+
+TEST(INT4QuantTest, PackUnpackRoundtrip) {
+    // INT4 signed range: [-8, 7]. Two values packed per byte: lo nibble + hi nibble.
+    auto pack_int4 = [](int lo, int hi) -> uint8_t {
+        return static_cast<uint8_t>((lo & 0xF) | ((hi & 0xF) << 4));
+    };
+    auto unpack_lo = [](uint8_t b) -> int {
+        int v = b & 0xF; return (v >= 8) ? (v - 16) : v;
+    };
+    auto unpack_hi = [](uint8_t b) -> int {
+        int v = (b >> 4) & 0xF; return (v >= 8) ? (v - 16) : v;
+    };
+
+    // Test all valid INT4 pairs
+    for (int lo = -8; lo <= 7; lo++) {
+        for (int hi = -8; hi <= 7; hi++) {
+            uint8_t packed = pack_int4(lo, hi);
+            EXPECT_EQ(unpack_lo(packed), lo) << "lo=" << lo << " hi=" << hi;
+            EXPECT_EQ(unpack_hi(packed), hi) << "lo=" << lo << " hi=" << hi;
+        }
+    }
+}
+
+// =========================================================================
+// INT4 paged attention decode: single head, short context
+// =========================================================================
+
+TEST(PagedAttentionINT4Test, DecodeSingleHead) {
+    constexpr int batch = 1, n_heads = 1, n_kv_heads = 1, head_dim = 64;
+    constexpr int seq_len = 8;
+    constexpr int num_blocks = 1;
+    constexpr int max_blocks = 1;
+    const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
+
+    srand(42);
+    // Generate FP16 Q and FP32 K/V reference data
+    std::vector<float> h_Q(head_dim), h_K(seq_len * head_dim), h_V(seq_len * head_dim);
+    for (int i = 0; i < head_dim; i++) h_Q[i] = sinf(static_cast<float>(i) * 0.1f);
+    for (int i = 0; i < seq_len * head_dim; i++) {
+        h_K[i] = cosf(static_cast<float>(i) * 0.05f) * 0.5f;
+        h_V[i] = sinf(static_cast<float>(i) * 0.03f + 1.0f) * 0.5f;
+    }
+
+    // Quantize K/V to INT4: per-head-per-slot scale, packed uint8 [head_dim/2]
+    // INT4 KV cache layout: [num_blocks, block_size, n_kv_heads, head_dim/2] packed uint8
+    // Scales: [num_blocks, block_size, n_kv_heads] FP16
+    int half_hd = head_dim / 2;
+    int cache_bytes = num_blocks * BLOCK_SIZE * n_kv_heads * half_hd;
+    int scale_elems = num_blocks * BLOCK_SIZE * n_kv_heads;
+    std::vector<uint8_t> k_int4(cache_bytes, 0), v_int4(cache_bytes, 0);
+    std::vector<half> k_scales(scale_elems, __float2half(0.0f));
+    std::vector<half> v_scales(scale_elems, __float2half(0.0f));
+
+    // K/V dequantized via INT4 (for CPU reference)
+    std::vector<float> k_deq(seq_len * head_dim, 0.0f), v_deq(seq_len * head_dim, 0.0f);
+
+    auto quant_and_fill = [&](const std::vector<float>& src,
+                               std::vector<uint8_t>& dst_int4,
+                               std::vector<half>& dst_scales,
+                               std::vector<float>& deq_out) {
+        for (int s = 0; s < seq_len; s++) {
+            int slot = s % BLOCK_SIZE;
+            int block = s / BLOCK_SIZE;
+            const float* row = src.data() + s * head_dim;
+            // Find max abs for scale
+            float amax = 0;
+            for (int d = 0; d < head_dim; d++)
+                amax = fmaxf(amax, fabsf(row[d]));
+            float sc = amax / 7.0f;  // INT4 signed max = 7
+            dst_scales[block * BLOCK_SIZE * n_kv_heads + slot * n_kv_heads + 0] = __float2half(sc);
+            float inv_sc = (sc > 0) ? 1.0f / sc : 0.0f;
+            int base = block * BLOCK_SIZE * n_kv_heads * half_hd + slot * n_kv_heads * half_hd;
+            for (int d = 0; d < head_dim; d += 2) {
+                int q0 = static_cast<int>(roundf(row[d] * inv_sc));
+                int q1 = static_cast<int>(roundf(row[d + 1] * inv_sc));
+                q0 = std::max(-8, std::min(7, q0));
+                q1 = std::max(-8, std::min(7, q1));
+                dst_int4[base + d / 2] = static_cast<uint8_t>((q0 & 0xF) | ((q1 & 0xF) << 4));
+                // Dequant for CPU reference
+                deq_out[s * head_dim + d] = q0 * sc;
+                deq_out[s * head_dim + d + 1] = q1 * sc;
+            }
+        }
+    };
+    quant_and_fill(h_K, k_int4, k_scales, k_deq);
+    quant_and_fill(h_V, v_int4, v_scales, v_deq);
+
+    // CPU reference attention using dequantized INT4 K/V
+    std::vector<float> h_O(head_dim, 0.0f);
+    cpu_attention(h_Q.data(), k_deq.data(), v_deq.data(), h_O.data(),
+                  seq_len, head_dim, scale);
+
+    // Upload to GPU
+    Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
+
+    // INT4 cache: [num_blocks, block_size, n_kv_heads, head_dim/2]
+    Tensor d_K_cache, d_V_cache;
+    d_K_cache.dtype = DType::INT8;  // raw bytes
+    d_K_cache.ndim = 4;
+    d_K_cache.shape[0] = num_blocks; d_K_cache.shape[1] = BLOCK_SIZE;
+    d_K_cache.shape[2] = n_kv_heads; d_K_cache.shape[3] = half_hd;
+    d_K_cache.compute_strides(); d_K_cache.on_device = true;
+    cudaMalloc(&d_K_cache.data, cache_bytes);
+    cudaMemcpy(d_K_cache.data, k_int4.data(), cache_bytes, cudaMemcpyHostToDevice);
+
+    d_V_cache.dtype = DType::INT8;
+    d_V_cache.ndim = 4;
+    d_V_cache.shape[0] = num_blocks; d_V_cache.shape[1] = BLOCK_SIZE;
+    d_V_cache.shape[2] = n_kv_heads; d_V_cache.shape[3] = half_hd;
+    d_V_cache.compute_strides(); d_V_cache.on_device = true;
+    cudaMalloc(&d_V_cache.data, cache_bytes);
+    cudaMemcpy(d_V_cache.data, v_int4.data(), cache_bytes, cudaMemcpyHostToDevice);
+
+    Tensor d_O = alloc_gpu_tensor_fp16({batch, 1, n_heads, head_dim});
+
+    half *d_k_scales, *d_v_scales;
+    cudaMalloc(&d_k_scales, scale_elems * sizeof(half));
+    cudaMalloc(&d_v_scales, scale_elems * sizeof(half));
+    cudaMemcpy(d_k_scales, k_scales.data(), scale_elems * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_v_scales, v_scales.data(), scale_elems * sizeof(half), cudaMemcpyHostToDevice);
+
+    int* d_bt = nullptr; int* d_ctx = nullptr;
+    cudaMalloc(&d_bt, max_blocks * sizeof(int));
+    cudaMalloc(&d_ctx, sizeof(int));
+    int bt_val = 0, ctx = seq_len;
+    cudaMemcpy(d_bt, &bt_val, sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
+
+    paged_attention_decode_int4(d_Q, d_K_cache, d_V_cache, d_O,
+                                 d_k_scales, d_v_scales,
+                                 d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
+    cudaDeviceSynchronize();
+    EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "INT4 paged attention kernel failed";
+
+    auto result = read_gpu_fp16(d_O);
+    for (int d = 0; d < head_dim; d++) {
+        EXPECT_NEAR(result[d], h_O[d], 0.15f)
+            << "INT4 paged attention mismatch at dim " << d;
+    }
+
+    free_gpu(d_Q); free_gpu(d_O);
+    cudaFree(d_K_cache.data); cudaFree(d_V_cache.data);
+    cudaFree(d_k_scales); cudaFree(d_v_scales);
     cudaFree(d_bt); cudaFree(d_ctx);
 }
 
