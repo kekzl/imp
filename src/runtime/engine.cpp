@@ -335,7 +335,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
 
     // --- Core initialization ---
-    if (!vram_alloc_.init(0.10f)) {
+    // 5% headroom (was 10%) — MoE models (30B Q6_K) need every MiB on 32GB.
+    // WSL2/WDDM has ~500 MiB driver overhead, 5% of 32GB = 1.6 GB covers it.
+    if (!vram_alloc_.init(0.05f)) {
         IMP_LOG_ERROR("Failed to initialize VRAM allocator");
         return false;
     }
