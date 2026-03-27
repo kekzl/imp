@@ -610,5 +610,92 @@ TEST(ChatTemplateVisionTest, NonGemmaFallsBackToTextOnly) {
     EXPECT_EQ(with_image, without_image);
 }
 
+// ---- Think mode and edge cases ----
+
+TEST(ChatTemplateApplyTest, ChatMLSuppressThinking) {
+    Tokenizer tok = make_chat_tokenizer();
+    ChatTemplate tpl;
+    tpl.init(ChatTemplateFamily::CHATML, tok);
+
+    std::vector<ChatMessage> msgs = {{"user", "Hi"}};
+    auto ids_suppress = tpl.apply(tok, msgs, /*suppress_thinking=*/true);
+    auto ids_normal   = tpl.apply(tok, msgs, /*suppress_thinking=*/false);
+
+    ASSERT_FALSE(ids_suppress.empty());
+    // suppress_thinking injects "/no_think" as a system message, producing more tokens
+    EXPECT_GT(ids_suppress.size(), ids_normal.size());
+    // Extra im_start for the injected system message
+    int im_starts = std::count(ids_suppress.begin(), ids_suppress.end(), IM_START);
+    EXPECT_EQ(im_starts, 3);  // system(/no_think) + user + assistant prefix
+}
+
+TEST(ChatTemplateApplyTest, ChatMLNoSuppressThinking) {
+    Tokenizer tok = make_chat_tokenizer();
+    ChatTemplate tpl;
+    tpl.init(ChatTemplateFamily::CHATML, tok);
+
+    std::vector<ChatMessage> msgs = {{"user", "Hi"}};
+    auto ids = tpl.apply(tok, msgs, /*suppress_thinking=*/false);
+
+    ASSERT_FALSE(ids.empty());
+    // No system message injected — only user + assistant prefix
+    int im_starts = std::count(ids.begin(), ids.end(), IM_START);
+    EXPECT_EQ(im_starts, 2);
+    // Encode "/no_think" and verify none of its leading bytes appear in sequence
+    auto no_think_ids = tok.encode("/no_think");
+    ASSERT_FALSE(no_think_ids.empty());
+    // The full /no_think sequence should not appear in the output
+    auto it = std::search(ids.begin(), ids.end(), no_think_ids.begin(), no_think_ids.end());
+    EXPECT_EQ(it, ids.end());
+}
+
+TEST(ChatTemplateApplyTest, EmptyUserMessage) {
+    Tokenizer tok = make_chat_tokenizer();
+    ChatTemplate tpl;
+    tpl.init(ChatTemplateFamily::CHATML, tok);
+
+    std::vector<ChatMessage> msgs = {{"user", ""}};
+    auto ids = tpl.apply(tok, msgs);
+
+    // Should not crash and should produce valid structure tokens
+    ASSERT_FALSE(ids.empty());
+    EXPECT_TRUE(contains(ids, IM_START));
+    EXPECT_TRUE(contains(ids, IM_END));
+}
+
+TEST(ChatTemplateApplyTest, VeryLongSystemMessage) {
+    Tokenizer tok = make_chat_tokenizer();
+    ChatTemplate tpl;
+    tpl.init(ChatTemplateFamily::CHATML, tok);
+
+    std::string long_sys(10000, 'A');
+    std::vector<ChatMessage> msgs = {{"system", long_sys}, {"user", "Hi"}};
+    auto ids = tpl.apply(tok, msgs);
+
+    // Should not crash, token count should be proportional to input length
+    ASSERT_FALSE(ids.empty());
+    EXPECT_GT(ids.size(), 5000u);  // byte-fallback: at least 1 token per char
+}
+
+TEST(ChatTemplateApplyTest, MultipleSystemMessages) {
+    Tokenizer tok = make_chat_tokenizer();
+    ChatTemplate tpl;
+    tpl.init(ChatTemplateFamily::CHATML, tok);
+
+    std::vector<ChatMessage> msgs = {
+        {"system", "First system."},
+        {"system", "Second system."},
+        {"user", "Hi"},
+    };
+    auto ids = tpl.apply(tok, msgs);
+
+    // Should not crash; both system messages are rendered as separate turns
+    ASSERT_FALSE(ids.empty());
+    EXPECT_TRUE(contains(ids, IM_START));
+    // 2 system + 1 user + 1 assistant prefix = 4 im_start tokens
+    int im_starts = std::count(ids.begin(), ids.end(), IM_START);
+    EXPECT_EQ(im_starts, 4);
+}
+
 } // namespace
 } // namespace imp
