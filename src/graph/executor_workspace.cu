@@ -392,17 +392,26 @@ size_t GraphExecutor::workspace_estimate() const {
     auxiliary += 256 * 1024;  // MMVQ scratch (conservative)
     auxiliary += static_cast<size_t>(max_logit_tokens_) * nh_est * 32 * (2 + hd_est) * sizeof(float);  // split-K
 
-    // S-matrix: capped at 256 MiB, but estimate conservatively
-    auxiliary += std::min(static_cast<size_t>(nh_est) * max_tokens_ * max_tokens_ * sizeof(half),
-                          static_cast<size_t>(256) << 20);
+    // S-matrix for cuBLAS attention fallback — only needed when CUTLASS FMHA
+    // is unavailable or unsupported (e.g., softcap, sliding window).
+    // Skip for MoE-heavy models where VRAM is tight: WMMA/CUTLASS FMHA
+    // doesn't need the S-matrix. This saves up to 256 MiB.
+    bool is_moe = (cfg.n_experts > 0 && cfg.n_experts_active > 0);
+    if (!is_moe) {
+        auxiliary += std::min(static_cast<size_t>(nh_est) * max_tokens_ * max_tokens_ * sizeof(half),
+                              static_cast<size_t>(256) << 20);
+    }
 
-    // Safety margin for FP8 act buffers, CUTLASS workspace, misc
-    auxiliary += 32ULL << 20;
+    // Safety margin for FP8 act buffers, misc (reduced for MoE to save VRAM)
+    auxiliary += is_moe ? (8ULL << 20) : (32ULL << 20);
 
 #ifdef IMP_USE_CUTLASS
     // CUTLASS FMHA workspace (LSE buffer + kernel cooperative workspace)
-    int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
-    auxiliary += cutlass_fmha_workspace_estimate(1, max_tokens_, cfg.n_heads, hd);
+    // Skip for MoE models where prefill uses cuBLAS (compute-light attention)
+    if (!is_moe) {
+        int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
+        auxiliary += cutlass_fmha_workspace_estimate(1, max_tokens_, cfg.n_heads, hd);
+    }
 #endif
 
     return persistent + shared + fp32_accum + auxiliary;
