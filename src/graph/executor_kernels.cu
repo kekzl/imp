@@ -473,9 +473,23 @@ __global__ void write_kv_cache_fp8_kernel(
                                      + static_cast<int64_t>(slot_in_block) * row_elems;
     const half* src = data_in + static_cast<int64_t>(token_idx) * row_elems;
 
-    for (int i = threadIdx.x; i < row_elems; i += blockDim.x) {
-        float val = __half2float(src[i]) * inv_scale;
-        dst[i] = __nv_fp8_e4m3(val);
+    // Vectorized: load 4 FP16 (float2 = half4), convert+scale, store 4 FP8 (uint32_t)
+    const int vec_elems = row_elems / 4;
+    const float2* src4 = reinterpret_cast<const float2*>(src);
+    uint32_t* dst4 = reinterpret_cast<uint32_t*>(dst);
+    for (int i = threadIdx.x; i < vec_elems; i += blockDim.x) {
+        float2 h2 = src4[i];
+        const half* hp = reinterpret_cast<const half*>(&h2);
+        uint8_t fp8[4];
+        #pragma unroll
+        for (int j = 0; j < 4; j++) {
+            fp8[j] = static_cast<uint8_t>(__nv_fp8_e4m3(__half2float(hp[j]) * inv_scale).__x);
+        }
+        dst4[i] = *reinterpret_cast<uint32_t*>(fp8);
+    }
+    // Scalar tail for non-aligned remainder
+    for (int i = vec_elems * 4 + threadIdx.x; i < row_elems; i += blockDim.x) {
+        dst[i] = __nv_fp8_e4m3(__half2float(src[i]) * inv_scale);
     }
 }
 #else
@@ -508,10 +522,15 @@ __global__ void write_kv_cache_fp8_kernel(
 
     // FP8 E4M3 range: [-448, 448]
     const float fp8_max = 448.0f;
-    for (int i = threadIdx.x; i < row_elems; i += blockDim.x) {
-        float val = __half2float(src[i]) * inv_scale;
+
+    // Vectorized: load 4 FP16 (float2 = half4), convert+scale+clamp, store 4 FP8 (uint32_t)
+    const int vec_elems = row_elems / 4;
+    const float2* src4 = reinterpret_cast<const float2*>(src);
+    uint32_t* dst4 = reinterpret_cast<uint32_t*>(dst);
+
+    auto fp16_to_fp8_sw = [&] __device__ (half h) -> uint8_t {
+        float val = __half2float(h) * inv_scale;
         val = fminf(fmaxf(val, -fp8_max), fp8_max);
-        // Simple rounding: convert float to FP8 E4M3 bit pattern
         // Sign(1) | Exponent(4) | Mantissa(3)
         uint32_t bits = __float_as_uint(val);
         uint8_t sign = (bits >> 24) & 0x80;
@@ -524,7 +543,22 @@ __global__ void write_kv_cache_fp8_kernel(
             exponent = 15;
             mantissa = 0x06; // max finite for E4M3 (no inf/nan encoding)
         }
-        dst[i] = sign | (static_cast<uint8_t>(exponent) << 3) | mantissa;
+        return sign | (static_cast<uint8_t>(exponent) << 3) | mantissa;
+    };
+
+    for (int i = threadIdx.x; i < vec_elems; i += blockDim.x) {
+        float2 h2 = src4[i];
+        const half* hp = reinterpret_cast<const half*>(&h2);
+        uint8_t fp8[4];
+        #pragma unroll
+        for (int j = 0; j < 4; j++) {
+            fp8[j] = fp16_to_fp8_sw(hp[j]);
+        }
+        dst4[i] = *reinterpret_cast<uint32_t*>(fp8);
+    }
+    // Scalar tail for non-aligned remainder
+    for (int i = vec_elems * 4 + threadIdx.x; i < row_elems; i += blockDim.x) {
+        dst[i] = fp16_to_fp8_sw(src[i]);
     }
 }
 #endif
@@ -585,11 +619,14 @@ __global__ void write_kv_cache_int8_kernel(
         const int head_offset = h * head_dim;
 
         // Step 1: Load FP16 values and compute per-head absmax
+        // Vectorized: load 2 FP16 per iteration via half2 for better coalescing.
+        // head_dim is always even (64, 128, 256).
         float amax = 0.0f;
-        // Each lane handles head_dim/32 elements (head_dim is typically 64/96/128)
-        for (int d = lane_id; d < head_dim; d += 32) {
-            float val = __half2float(src[head_offset + d]);
-            amax = fmaxf(amax, fabsf(val));
+        const half2* src2 = reinterpret_cast<const half2*>(src + head_offset);
+        for (int d = lane_id; d < head_dim / 2; d += 32) {
+            half2 h2 = src2[d];
+            amax = fmaxf(amax, fabsf(__half2float(h2.x)));
+            amax = fmaxf(amax, fabsf(__half2float(h2.y)));
         }
         // Warp-level absmax reduction
         #pragma unroll
@@ -600,11 +637,20 @@ __global__ void write_kv_cache_int8_kernel(
         float sc = amax / 127.0f;
         float inv_sc = (amax > 1e-8f) ? (127.0f / amax) : 0.0f;
 
-        // Step 3: Quantize and write int8 data
-        for (int d = lane_id; d < head_dim; d += 32) {
-            float val = __half2float(src[head_offset + d]);
-            int8_t q = static_cast<int8_t>(__float2int_rn(val * inv_sc));
-            dst[head_offset + d] = q;
+        // Step 3: Quantize and write int8 data (vectorized: load 4 FP16 via float2,
+        // store 4 INT8 via uint32_t). head_dim is always a multiple of 4 (64, 128, 256).
+        // Each lane processes 4 consecutive elements per iteration, stride = 32*4 = 128.
+        const float2* src_head4 = reinterpret_cast<const float2*>(src + head_offset);
+        for (int d4 = lane_id; d4 < head_dim / 4; d4 += 32) {
+            float2 h2 = src_head4[d4];
+            const half* hp = reinterpret_cast<const half*>(&h2);
+            uint32_t packed;
+            int8_t* p = reinterpret_cast<int8_t*>(&packed);
+            #pragma unroll
+            for (int j = 0; j < 4; j++) {
+                p[j] = static_cast<int8_t>(__float2int_rn(__half2float(hp[j]) * inv_sc));
+            }
+            reinterpret_cast<uint32_t*>(dst + head_offset)[d4] = packed;
         }
 
         // Step 4: Write scale (one half per head per token)
@@ -1400,7 +1446,22 @@ __global__ void write_kv_cache_fp8_fused_kernel(
                            + static_cast<int64_t>(slot_in_block) * row_elems;
     }
 
-    for (int i = threadIdx.x; i < row_elems; i += blockDim.x) {
+    // Vectorized: load 4 FP16 (float2 = half4), convert+scale, store 4 FP8 (uint32_t)
+    const int vec_elems = row_elems / 4;
+    const float2* src4 = reinterpret_cast<const float2*>(src);
+    uint32_t* dst4 = reinterpret_cast<uint32_t*>(dst);
+    for (int i = threadIdx.x; i < vec_elems; i += blockDim.x) {
+        float2 h2 = src4[i];
+        const half* hp = reinterpret_cast<const half*>(&h2);
+        uint8_t fp8[4];
+        #pragma unroll
+        for (int j = 0; j < 4; j++) {
+            fp8[j] = static_cast<uint8_t>(__nv_fp8_e4m3(__half2float(hp[j]) * inv_scale).__x);
+        }
+        dst4[i] = *reinterpret_cast<uint32_t*>(fp8);
+    }
+    // Scalar tail for non-aligned remainder
+    for (int i = vec_elems * 4 + threadIdx.x; i < row_elems; i += blockDim.x) {
         dst[i] = __nv_fp8_e4m3(__half2float(src[i]) * inv_scale);
     }
 }
