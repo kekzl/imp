@@ -708,6 +708,8 @@ ImpError imp_context_reset(ImpContext ctx) {
     // scheduler removes it from active_ on the next schedule() call.
     if (ctx->active_request) {
         ctx->engine->kv_manager()->free_sequence(ctx->active_request->id);
+        // Evict all cached blocks to prevent prefix cache hits with stale data
+        while (ctx->engine->kv_manager()->evict_cached_block()) {}
         // Reset SSM state for hybrid models (Mamba2)
         ctx->engine->reset_ssm_state(ctx->active_request->id);
         ctx->active_request->status = imp::RequestStatus::CANCELLED;
@@ -715,9 +717,19 @@ ImpError imp_context_reset(ImpContext ctx) {
         ctx->consumed_output = 0;
     }
 
+    // Sync GPU to ensure all async operations from the previous request complete
+    // before resetting state. Without this, stale async graph loops or pending
+    // kernel launches can corrupt the next request's data.
+    cudaDeviceSynchronize();
+
     // Invalidate cached CUDA graphs — stale graph captures from the previous
     // request can produce non-deterministic output if replayed for a new request.
     ctx->engine->invalidate_graphs();
+
+    // Reset batch pool upload cache — the next request may reuse the same
+    // physical KV cache blocks, and stale cached block table pointers would
+    // cause the GPU to read from old KV data.
+    ctx->engine->reset_batch_pool_cache();
 
     return IMP_SUCCESS;
 }

@@ -169,10 +169,11 @@ TEST_F(DegenerationTest, LongGenerationStability) {
 
 // Test 4: Greedy (temp=0) should be deterministic across calls
 // Greedy (temp=0) should be deterministic across context resets.
-// KNOWN ISSUE: cuBLAS autotuner may select different GEMM algorithms
-// after context_reset (algorithm cache is per-matmul-shape, and the
-// first call after warmup may pick differently than subsequent calls).
-// Fixing requires CUBLAS_WORKSPACE_CONFIG=:4096:8 for deterministic mode.
+// DISABLED: cuBLAS on Blackwell (sm_120) selects different GEMM algorithms
+// on the second call within the same process, producing different FP16
+// rounding that cascades into completely different greedy output.
+// This is a fundamental cuBLAS behavior, not an imp bug.
+// Fix: set CUBLAS_WORKSPACE_CONFIG=:4096:8 before process start.
 TEST_F(DegenerationTest, DISABLED_GreedyDeterminism) {
     auto gen_greedy = [&](const std::string& prompt) {
         imp_context_reset(ctx_);

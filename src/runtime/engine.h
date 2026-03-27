@@ -130,6 +130,10 @@ public:
     // deterministic output — stale graph captures can produce different results)
     void invalidate_graphs();
 
+    // Reset batch pool upload cache (call on context_reset to prevent
+    // stale block table pointers when KV blocks are reused)
+    void reset_batch_pool_cache();
+
     // Vision: set image for next generation. Returns false if no mmproj loaded.
     [[nodiscard]] bool set_image(const std::string& path);
     [[nodiscard]] bool set_image_from_memory(const uint8_t* data, size_t len);

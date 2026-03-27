@@ -134,6 +134,10 @@ void Engine::reset_ssm_state(int seq_id) {
     }
 }
 
+void Engine::reset_batch_pool_cache() {
+    decode_batch_pool_.reset_upload_cache();
+}
+
 void Engine::invalidate_graphs() {
     for (int i = 0; i < kMaxGraphPoolSize; i++)
         decode_graph_pool_[i].invalidate();
