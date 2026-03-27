@@ -392,6 +392,16 @@ __global__ void paged_attention_decode_kernel(
         if (tok_start < effective_start) first_tok = effective_start - tok_start;
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
+            // Prefetch next token's K + V into L1 cache
+            if (t + 1 < (tok_end - tok_start)) {
+                const auto* K_next = K_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
+                const auto* V_next = V_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
+                if (lane_id == 0) {
+                    asm volatile("prefetch.global.L1 [%0];\n" :: "l"(K_next));
+                    asm volatile("prefetch.global.L1 [%0];\n" :: "l"(V_next));
+                }
+            }
+
             const half* K_tok = K_block + t * kv_slot_stride + kv_head * HEAD_DIM;
 
             // Vectorized Q.K dot product using half2 streaming loads
@@ -533,6 +543,16 @@ __global__ void paged_attention_decode_kernel_generic(
         if (tok_start < effective_start) first_tok = effective_start - tok_start;
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
+            // Prefetch next token's K + V into L1 cache
+            if (t + 1 < (tok_end - tok_start)) {
+                const auto* K_next = K_block + (t + 1) * kv_slot_stride + kv_head * head_dim;
+                const auto* V_next = V_block + (t + 1) * kv_slot_stride + kv_head * head_dim;
+                if (lane_id == 0) {
+                    asm volatile("prefetch.global.L1 [%0];\n" :: "l"(K_next));
+                    asm volatile("prefetch.global.L1 [%0];\n" :: "l"(V_next));
+                }
+            }
+
             const half* K_tok = K_block + t * kv_slot_stride + kv_head * head_dim;
 
             float dot = 0.0f;
@@ -710,6 +730,16 @@ __global__ void paged_attention_splitk_kernel(
         if (tok_start < effective_start) first_tok = effective_start - tok_start;
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
+            // Prefetch next token's K + V into L1 cache
+            if (t + 1 < (tok_end - tok_start)) {
+                const auto* K_next = K_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
+                const auto* V_next = V_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
+                if (lane_id == 0) {
+                    asm volatile("prefetch.global.L1 [%0];\n" :: "l"(K_next));
+                    asm volatile("prefetch.global.L1 [%0];\n" :: "l"(V_next));
+                }
+            }
+
             const half* K_tok = K_block + t * kv_slot_stride + kv_head * HEAD_DIM;
 
             // Vectorized Q.K dot product
