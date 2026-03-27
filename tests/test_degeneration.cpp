@@ -168,9 +168,11 @@ TEST_F(DegenerationTest, LongGenerationStability) {
 }
 
 // Test 4: Greedy (temp=0) should be deterministic across calls
-// KNOWN ISSUE: imp_context_reset doesn't fully reset CUDA graph state
-// or cuBLAS autotuner, causing non-deterministic output on second call.
-// TODO: fix context reset to ensure deterministic greedy across calls.
+// Greedy (temp=0) should be deterministic across context resets.
+// KNOWN ISSUE: cuBLAS autotuner may select different GEMM algorithms
+// after context_reset (algorithm cache is per-matmul-shape, and the
+// first call after warmup may pick differently than subsequent calls).
+// Fixing requires CUBLAS_WORKSPACE_CONFIG=:4096:8 for deterministic mode.
 TEST_F(DegenerationTest, DISABLED_GreedyDeterminism) {
     auto gen_greedy = [&](const std::string& prompt) {
         imp_context_reset(ctx_);
