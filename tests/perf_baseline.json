@@ -1,0 +1,24 @@
+{
+  "model": "Qwen3-8B-Q8_0.gguf",
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "cuda": "13.2",
+  "timestamp": "2026-03-27T17:02:56Z",
+  "reps": 5,
+  "metrics": {
+    "prefill_tps": {
+      "pp128": 7550.48,
+      "pp512": 15648.35
+    },
+    "decode_tps": {
+      "tg128": 258.04
+    },
+    "memory_mb": {
+      "model_weights": 8608
+    }
+  },
+  "thresholds": {
+    "decode_regression_pct": 3,
+    "prefill_regression_pct": 5,
+    "vram_increase_pct": 10
+  }
+}
