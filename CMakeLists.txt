@@ -347,6 +347,9 @@ if(IMP_BUILD_TESTS)
         tests/test_chat_template.cpp
         tests/test_hadamard.cu
         tests/test_attention_mxfp4.cu
+        tests/test_softmax.cu
+        tests/test_ssm.cu
+        tests/test_json_constrain.cu
     )
 
     add_executable(imp-tests ${IMP_TEST_SOURCES})
@@ -359,6 +362,22 @@ if(IMP_BUILD_TESTS)
 
     include(GoogleTest)
     gtest_discover_tests(imp-tests)
+
+    # --- CTest label infrastructure ---
+    # ctest -L unit  — CPU-only tests (no GPU required)
+    # ctest -L gpu   — GPU tests (require NVIDIA GPU)
+    # ctest -L perf  — Performance regression tests
+    add_test(NAME unit_tests COMMAND imp-tests
+        "--gtest_filter=TensorTest.*:GgufLoaderTest.*:TokenizerSPMTest.*:TokenizerGPT2Test.*:TokenizerDispatchTest.*:ChatTemplate*:BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*")
+    set_tests_properties(unit_tests PROPERTIES LABELS "unit")
+
+    add_test(NAME gpu_tests COMMAND imp-tests
+        "--gtest_filter=-TensorTest.*:GgufLoaderTest.*:TokenizerSPMTest.*:TokenizerGPT2Test.*:TokenizerDispatchTest.*:ChatTemplate*:BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*")
+    set_tests_properties(gpu_tests PROPERTIES LABELS "gpu")
+
+    add_test(NAME perf_tests COMMAND imp-tests
+        "--gtest_filter=*Perf*:*Bench*:*Throughput*")
+    set_tests_properties(perf_tests PROPERTIES LABELS "perf")
 endif()
 
 # --- Install ---
