@@ -491,7 +491,7 @@ void GraphExecutor::compute_shared_sizes(int max_tokens) {
                           + align256(static_cast<size_t>(max_tokens) * inner * es)           // y
                           + align256(static_cast<size_t>(max_tokens) * inner * es)           // z
                           + align256(static_cast<size_t>(max_tokens) * d * es)               // out
-                          + align256(static_cast<size_t>(max_tokens) * n_heads * es);        // dt
+                          + align256(static_cast<size_t>(max_tokens) * n_heads * (has_gdn_ ? 2 : 1) * es); // dt (2x for GDN: alpha + beta)
     }
 }
 
@@ -2041,8 +2041,11 @@ void GraphExecutor::configure_ssm_workspace(int max_tokens) {
                                           align256(static_cast<size_t>(max_tokens) * inner * es));
     ssm_out_buf_  = make_workspace_tensor(ptr, compute_dtype_, max_tokens, d,
                                           align256(static_cast<size_t>(max_tokens) * d * es));
-    ssm_dt_buf_   = make_workspace_tensor(ptr, compute_dtype_, max_tokens, n_heads,
-                                          align256(static_cast<size_t>(max_tokens) * n_heads * es));
+    // GDN layers store BOTH alpha and beta projections in ssm_dt_buf_ (sequentially).
+    // Allocate 2x n_heads to fit both. Non-GDN SSM only uses 1x (dt projection).
+    size_t dt_multiplier = has_gdn_ ? 2 : 1;
+    ssm_dt_buf_   = make_workspace_tensor(ptr, compute_dtype_, max_tokens, n_heads * dt_multiplier,
+                                          align256(static_cast<size_t>(max_tokens) * n_heads * dt_multiplier * es));
 }
 
 bool GraphExecutor::resize_workspace(int new_max_tokens, cudaStream_t stream) {
