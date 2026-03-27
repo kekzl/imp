@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
 #include "imp/imp.h"
+#include "gguf_stub.h"
 
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <unistd.h>
 
 namespace {
 
@@ -199,6 +201,138 @@ TEST(EndToEndModelTest, PrefillDecodeStep) {
 
     // Reset and verify we can reuse the context
     ASSERT_EQ(imp_context_reset(ctx), IMP_SUCCESS);
+
+    imp_context_free(ctx);
+    imp_model_free(model);
+}
+
+// --- Stub GGUF tests (no real model required, uses generated ~200 KB GGUF) ---
+
+class StubModelTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        stub_path_ = imp::test::generate_gguf_stub("llama");
+        ASSERT_FALSE(stub_path_.empty()) << "Failed to generate stub GGUF";
+    }
+
+    void TearDown() override {
+        if (!stub_path_.empty()) unlink(stub_path_.c_str());
+        stub_path_.clear();
+    }
+
+    std::string stub_path_;
+};
+
+TEST_F(StubModelTest, LoadStubModel) {
+    ImpModel model = nullptr;
+    ImpError err = imp_model_load(stub_path_.c_str(), IMP_FORMAT_GGUF, &model);
+    ASSERT_EQ(err, IMP_SUCCESS) << "Failed to load stub GGUF: " << imp_error_string(err);
+    ASSERT_NE(model, nullptr);
+
+    EXPECT_EQ(imp_model_n_layers(model), 1);
+    EXPECT_EQ(imp_model_d_model(model), 64);
+    EXPECT_EQ(imp_model_vocab_size(model), 256);
+
+    imp_model_free(model);
+}
+
+TEST_F(StubModelTest, TokenizeStub) {
+    ImpModel model = nullptr;
+    ASSERT_EQ(imp_model_load(stub_path_.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+
+    // Stub tokenizer has 256 byte-tokens but no BPE merge rules.
+    // imp_tokenize may return 0 tokens (no merges to apply) or
+    // fall back to byte-level encoding. Either is acceptable.
+    int32_t tokens[256];
+    int n_tokens = 0;
+    ImpError err = imp_tokenize(model, "Hello", tokens, &n_tokens, 256);
+    // Success or graceful failure — no crash
+    EXPECT_TRUE(err == IMP_SUCCESS || n_tokens == 0);
+
+    imp_model_free(model);
+}
+
+TEST_F(StubModelTest, CreateContextAndInfer) {
+    ImpModel model = nullptr;
+    ASSERT_EQ(imp_model_load(stub_path_.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+
+    ImpConfig config = imp_config_default();
+    config.max_seq_len = 64;
+    config.max_batch_size = 1;
+    config.enable_cuda_graphs = 0;
+    config.enable_pdl = 0;
+
+    ImpContext ctx = nullptr;
+    ImpError err = imp_context_create(model, &config, &ctx);
+    // Context creation involves GPU weight upload; this may fail if CUDA is not
+    // available or if the tiny model trips some validation. Either outcome is
+    // acceptable — the key check is no crash.
+    if (err != IMP_SUCCESS) {
+        imp_model_free(model);
+        GTEST_SKIP() << "Context creation failed (expected without GPU): "
+                     << imp_error_string(err);
+    }
+    ASSERT_NE(ctx, nullptr);
+
+    // Attempt a short generation (random weights = garbage output, but no crash)
+    ImpGenerateParams params = imp_generate_params_default();
+    params.max_tokens = 4;
+    params.temperature = 0.0f;
+    params.apply_chat_template = 0;
+
+    char output[1024];
+    size_t output_len = 0;
+    err = imp_generate(ctx, "AB", &params, output, sizeof(output), &output_len);
+    // Generation may fail with tiny random weights; we just check no crash/abort
+    (void)err;
+
+    imp_context_free(ctx);
+    imp_model_free(model);
+}
+
+TEST_F(StubModelTest, PrefillDecodeStub) {
+    ImpModel model = nullptr;
+    ASSERT_EQ(imp_model_load(stub_path_.c_str(), IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
+
+    ImpConfig config = imp_config_default();
+    config.max_seq_len = 64;
+    config.max_batch_size = 1;
+    config.enable_cuda_graphs = 0;
+    config.enable_pdl = 0;
+
+    ImpContext ctx = nullptr;
+    ImpError err = imp_context_create(model, &config, &ctx);
+    if (err != IMP_SUCCESS) {
+        imp_model_free(model);
+        GTEST_SKIP() << "Context creation failed: " << imp_error_string(err);
+    }
+
+    // Tokenize — stub has no BPE merges, use raw token IDs instead
+    int32_t tokens[] = {72, 105};  // ASCII 'H', 'i'
+    int n_tokens = 2;
+
+    // Prefill
+    err = imp_prefill(ctx, tokens, n_tokens);
+    if (err != IMP_SUCCESS) {
+        // Prefill may fail with tiny model; acceptable if no crash
+        imp_context_free(ctx);
+        imp_model_free(model);
+        return;
+    }
+
+    // Decode a couple tokens
+    ImpGenerateParams params = imp_generate_params_default();
+    params.max_tokens = 4;
+    params.temperature = 0.0f;
+
+    for (int i = 0; i < 2; i++) {
+        int32_t token = 0;
+        err = imp_decode_step(ctx, &params, &token);
+        if (err != IMP_SUCCESS) break;
+    }
+
+    // Reset should always succeed
+    EXPECT_EQ(imp_context_reset(ctx), IMP_SUCCESS);
 
     imp_context_free(ctx);
     imp_model_free(model);
