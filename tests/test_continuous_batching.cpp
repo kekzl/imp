@@ -1049,5 +1049,149 @@ TEST(SchedulerTest, NewPrefillWhileDecoding) {
     EXPECT_EQ(sched.active_count(), 5);
 }
 
+// ============================================================================
+// Edge Case Tests
+// ============================================================================
+
+// 31. Add 10 requests, cancel 5 immediately, add 5 more — no crash, remaining schedulable
+TEST(SchedulerTest, AddRemoveRapidly) {
+    Scheduler sched(16);
+
+    // Add 10 requests
+    std::vector<std::shared_ptr<Request>> reqs(10);
+    for (int i = 0; i < 10; i++) {
+        reqs[i] = std::make_shared<Request>();
+        reqs[i]->id = i;
+        reqs[i]->input_tokens = {1, 2, 3};
+        sched.add_request(reqs[i]);
+    }
+
+    // Schedule to promote all to active/prefill
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+    EXPECT_EQ(prefill.size(), 10u);
+
+    // Cancel 5 of them immediately
+    for (int i = 0; i < 5; i++) {
+        reqs[i]->status = RequestStatus::CANCELLED;
+    }
+
+    // Add 5 more requests
+    std::vector<std::shared_ptr<Request>> new_reqs(5);
+    for (int i = 0; i < 5; i++) {
+        new_reqs[i] = std::make_shared<Request>();
+        new_reqs[i]->id = 100 + i;
+        new_reqs[i]->input_tokens = {4, 5};
+        sched.add_request(new_reqs[i]);
+    }
+
+    // Transition surviving original requests to DECODING
+    for (int i = 5; i < 10; i++) {
+        reqs[i]->status = RequestStatus::DECODING;
+    }
+
+    // Schedule: cancelled removed, new ones prefill, survivors decode
+    sched.schedule(prefill, decode);
+    EXPECT_EQ(decode.size(), 5u);       // reqs[5..9] decoding
+    EXPECT_EQ(prefill.size(), 5u);      // new_reqs[0..4] prefilling
+    EXPECT_EQ(sched.active_count(), 10);
+    EXPECT_FALSE(sched.has_pending());
+}
+
+// 32. Empty scheduler: get_prefill_batch and get_decode_batch return empty
+TEST(SchedulerTest, EmptyBatch) {
+    Scheduler sched(8);
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+
+    // Multiple calls with no requests — all empty, no crash
+    for (int i = 0; i < 3; i++) {
+        sched.schedule(prefill, decode);
+        EXPECT_EQ(prefill.size(), 0u);
+        EXPECT_EQ(decode.size(), 0u);
+        EXPECT_EQ(sched.active_count(), 0);
+        EXPECT_FALSE(sched.has_pending());
+    }
+}
+
+// 33. Adding more requests than max_batch_size caps the batch, doesn't crash
+TEST(SchedulerTest, MaxBatchSize) {
+    Scheduler sched(3);  // small max batch
+
+    // Add 20 requests
+    for (int i = 0; i < 20; i++) {
+        auto req = std::make_shared<Request>();
+        req->id = i;
+        req->input_tokens = {1};
+        sched.add_request(req);
+    }
+
+    std::vector<std::shared_ptr<Request>> prefill, decode;
+    sched.schedule(prefill, decode);
+
+    // Only max_batch_size admitted
+    EXPECT_EQ(prefill.size(), 3u);
+    EXPECT_EQ(sched.active_count(), 3);
+    EXPECT_TRUE(sched.has_pending());
+
+    // Drain remaining: finish current, schedule again repeatedly
+    int total_admitted = 3;
+    for (auto& r : prefill) r->status = RequestStatus::FINISHED;
+
+    while (sched.has_pending()) {
+        sched.schedule(prefill, decode);
+        EXPECT_LE(static_cast<int>(prefill.size()), 3);
+        total_admitted += static_cast<int>(prefill.size());
+        for (auto& r : prefill) r->status = RequestStatus::FINISHED;
+    }
+
+    EXPECT_EQ(total_admitted, 20);
+}
+
+// 34. Build a batch with a single 1-token request — valid structure
+TEST(BatchBuilderTest, SingleToken) {
+    BatchBuilder builder;
+    builder.reset();
+
+    int32_t tokens[] = {42};
+    int bt[] = {0};
+    builder.add_prefill_sequence(tokens, 1, bt, 1, /*start_pos=*/0);
+
+    Batch batch = builder.build();
+
+    EXPECT_EQ(batch.n_sequences, 1);
+    EXPECT_EQ(batch.total_tokens, 1);
+    EXPECT_EQ(batch.max_blocks_per_seq, 1);
+
+    ASSERT_EQ(batch.token_ids.size(), 1u);
+    EXPECT_EQ(batch.token_ids[0], 42);
+
+    ASSERT_EQ(batch.positions.size(), 1u);
+    EXPECT_EQ(batch.positions[0], 0);
+
+    ASSERT_EQ(batch.context_lens.size(), 1u);
+    EXPECT_EQ(batch.context_lens[0], 1);  // start_pos(0) + n_tokens(1)
+
+    ASSERT_EQ(batch.block_tables.size(), 1u);
+    EXPECT_EQ(batch.block_tables[0], 0);
+
+    ASSERT_EQ(batch.seq_offsets.size(), 2u);
+    EXPECT_EQ(batch.seq_offsets[0], 0);
+    EXPECT_EQ(batch.seq_offsets[1], 1);
+}
+
+// 35. Newly created request has correct default state
+TEST(RequestTest, DefaultState) {
+    Request req;
+
+    EXPECT_EQ(req.status, RequestStatus::PENDING);
+    EXPECT_TRUE(req.output_tokens.empty());
+    EXPECT_EQ(req.prefill_offset, 0);
+    EXPECT_TRUE(req.input_tokens.empty());
+    EXPECT_EQ(req.id, 0);
+    EXPECT_EQ(req.max_tokens, 256);
+    EXPECT_EQ(req.context_len(), 0);
+}
+
 } // namespace
 } // namespace imp
