@@ -386,8 +386,13 @@ __global__ void write_kv_cache_kernel(
                            + static_cast<int64_t>(slot_in_block) * row_elems;
     const half* src = data_in + static_cast<int64_t>(token_idx) * row_elems;
 
-    for (int i = threadIdx.x; i < row_elems; i += blockDim.x) {
-        dst[i] = src[i];
+    // Vectorized 128-bit copy (8 FP16 per store) — row_elems is always a
+    // multiple of 8 (n_kv_heads * head_dim, where head_dim is power of 2).
+    const int vec_elems = row_elems / 8;
+    const float4* src4 = reinterpret_cast<const float4*>(src);
+    float4* dst4 = reinterpret_cast<float4*>(dst);
+    for (int i = threadIdx.x; i < vec_elems; i += blockDim.x) {
+        dst4[i] = src4[i];
     }
 }
 
@@ -431,8 +436,12 @@ __global__ void write_kv_cache_fused_kernel(
     half* dst = dst_base + static_cast<int64_t>(block_id) * block_stride
                          + static_cast<int64_t>(slot_in_block) * row_elems;
 
-    for (int i = threadIdx.x; i < row_elems; i += blockDim.x) {
-        dst[i] = src[i];
+    // Vectorized 128-bit copy (8 FP16 per store)
+    const int vec_elems = row_elems / 8;
+    const float4* src4 = reinterpret_cast<const float4*>(src);
+    float4* dst4 = reinterpret_cast<float4*>(dst);
+    for (int i = threadIdx.x; i < vec_elems; i += blockDim.x) {
+        dst4[i] = src4[i];
     }
 }
 
@@ -1340,12 +1349,15 @@ __global__ void write_kv_cache_rope_fused_kernel(
             }
         }
     } else {
-        // V path: direct copy (no RoPE)
+        // V path: vectorized 128-bit copy (no RoPE)
         const half* v_src = v_in + static_cast<int64_t>(token_idx) * row_elems;
         half* v_dst = v_cache_base + static_cast<int64_t>(block_id) * block_stride
                                    + static_cast<int64_t>(slot_in_block) * row_elems;
-        for (int i = threadIdx.x; i < row_elems; i += blockDim.x) {
-            v_dst[i] = v_src[i];
+        const int vec_elems = row_elems / 8;
+        const float4* vs4 = reinterpret_cast<const float4*>(v_src);
+        float4* vd4 = reinterpret_cast<float4*>(v_dst);
+        for (int i = threadIdx.x; i < vec_elems; i += blockDim.x) {
+            vd4[i] = vs4[i];
         }
     }
 }
