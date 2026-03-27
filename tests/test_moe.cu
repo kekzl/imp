@@ -418,5 +418,94 @@ TEST_F(MoERoutingTest, GatherScatter) {
     free_tensor(d_output);
 }
 
+// ---------------------------------------------------------------------------
+// Test 6: EmptyExpert — some experts get 0 tokens
+// ---------------------------------------------------------------------------
+TEST(MoERoutingEdgeTest, EmptyExpert) {
+    // 2 tokens, 8 experts, top_k=1 → experts 2,3 get 1 token each,
+    // the remaining 6 experts get 0 tokens.
+    constexpr int kN = 2;
+    constexpr int kE = 8;
+    constexpr int kK = 1;
+
+    // token 0 -> expert 2 (highest), token 1 -> expert 3 (highest)
+    std::vector<float> logits = {
+        0, 0, 10, 0, 0, 0, 0, 0,
+        0, 0,  0, 9, 0, 0, 0, 0,
+    };
+
+    int64_t shape[2] = {kN, kE};
+    Tensor d_gate = make_device_tensor(logits.data(), DType::FP32, 2, shape);
+
+    MoeRoutingResult routing{};
+    moe_topk_gating(d_gate, kK, routing, /*stream=*/nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    auto h_offsets = to_host<int32_t>(routing.expert_offsets);
+    ASSERT_EQ(h_offsets.size(), static_cast<size_t>(kE + 1));
+
+    // Total assigned = 2 tokens * top_k=1 = 2
+    EXPECT_EQ(h_offsets[0], 0);
+    EXPECT_EQ(h_offsets[kE], kN * kK);
+
+    // Experts 0,1,4,5,6,7 should have count 0
+    for (int e = 0; e < kE; e++) {
+        int count = h_offsets[e + 1] - h_offsets[e];
+        EXPECT_GE(count, 0);
+        if (e != 2 && e != 3) {
+            EXPECT_EQ(count, 0) << "Expert " << e << " should have 0 tokens";
+        }
+    }
+
+    // Experts 2 and 3 should each have exactly 1 token
+    EXPECT_EQ(h_offsets[3] - h_offsets[2], 1);
+    EXPECT_EQ(h_offsets[4] - h_offsets[3], 1);
+
+    free_tensor(d_gate);
+    free_routing(routing);
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: AllTokensSameExpert — all tokens route to expert 0
+// ---------------------------------------------------------------------------
+TEST(MoERoutingEdgeTest, AllTokensSameExpert) {
+    constexpr int kN = 8;
+    constexpr int kE = 4;
+    constexpr int kK = 1;
+
+    // Expert 0 has the highest logit for every token
+    std::vector<float> logits(kN * kE);
+    for (int t = 0; t < kN; t++) {
+        for (int e = 0; e < kE; e++) {
+            logits[t * kE + e] = (e == 0) ? 100.0f : 0.0f;
+        }
+    }
+
+    int64_t shape[2] = {kN, kE};
+    Tensor d_gate = make_device_tensor(logits.data(), DType::FP32, 2, shape);
+
+    MoeRoutingResult routing{};
+    moe_topk_gating(d_gate, kK, routing, /*stream=*/nullptr);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    auto h_offsets = to_host<int32_t>(routing.expert_offsets);
+    auto h_indices = to_host<int32_t>(routing.expert_indices);
+
+    // All tokens should select expert 0
+    for (int t = 0; t < kN; t++) {
+        EXPECT_EQ(h_indices[t], 0) << "Token " << t << " should route to expert 0";
+    }
+
+    // Expert 0 gets all N tokens, others get 0
+    EXPECT_EQ(h_offsets[1] - h_offsets[0], kN);
+    for (int e = 1; e < kE; e++) {
+        EXPECT_EQ(h_offsets[e + 1] - h_offsets[e], 0)
+            << "Expert " << e << " should have 0 tokens";
+    }
+
+    free_tensor(d_gate);
+    free_routing(routing);
+}
+
 } // namespace
 } // namespace imp
