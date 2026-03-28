@@ -195,32 +195,33 @@ Benchmarks for GEMM, attention, and end-to-end inference.
 ./build/imp-bench
 ```
 
-## Benchmark Results (v0.5, RTX 5090, 2026-03-28)
+## Benchmark Results (v0.5.1, RTX 5090, 2026-03-28)
 
-All benchmarks on a single NVIDIA RTX 5090 (32 GB GDDR7, Blackwell sm_120). CUDA 13.2. Models loaded from GGUF. imp uses NVFP4 decode cache + FP8 prefill cache + upfront VRAM budget planner. llama.cpp b8445 with flash attention enabled.
+All benchmarks on a single NVIDIA RTX 5090 (32 GB GDDR7, Blackwell sm_120). CUDA 13.2. Models loaded from GGUF. imp uses NVFP4 decode cache + FP16 prefill (GDN) / FP8 prefill (non-GDN) + upfront VRAM budget planner. llama.cpp b8445 with flash attention enabled.
 
 ### Decode Throughput (tg256, tok/s)
 
-| Model | Quant | imp v0.5 | llama.cpp | Speedup |
+| Model | Quant | imp v0.5.1 | llama.cpp | Speedup |
 |-------|-------|----------|-----------|---------|
-| Qwen3-4B | Q8_0 | **374** | 244 | **+53%** |
-| Qwen3-8B | Q8_0 | **251** | 157 | **+60%** |
+| Qwen3-4B | Q8_0 | **375** | 244 | **+54%** |
+| Qwen3-8B | Q8_0 | **255** | 157 | **+62%** |
 | Qwen3.5-4B (GDN) | Q8_0 | **308** | 180 | **+71%** |
-| Qwen3.5-9B (GDN) | Q8_0 | **132** | — | — |
-| Gemma-3-12B | Q8_0 | **125** | 98 | **+28%** |
+| Qwen3.5-9B (GDN) | Q8_0 | **134** | — | — |
+| Gemma-3-12B | Q8_0 | **129** | 98 | **+32%** |
 
 ### Prefill Throughput (pp512, tok/s)
 
-| Model | Quant | imp v0.5 | llama.cpp | Speedup |
+| Model | Quant | imp v0.5.1 | llama.cpp | Speedup |
 |-------|-------|----------|-----------|---------|
-| Qwen3-4B | Q8_0 | **20376** | 21337 | -4% |
-| Qwen3-8B | Q8_0 | **17633** | 14172 | **+24%** |
-| Qwen3.5-4B (GDN) | Q8_0 | **15971** | 11149 | **+43%** |
-| Qwen3.5-9B (GDN) | Q8_0 | **8386** | — | — |
-| Gemma-3-12B | Q8_0 | **7088** | 9269 | -24% |
+| Qwen3-4B | Q8_0 | **24055** | 21337 | **+13%** |
+| Qwen3-8B | Q8_0 | **17746** | 14172 | **+25%** |
+| Qwen3.5-4B (GDN) | Q8_0 | **14687** | 11149 | **+32%** |
+| Qwen3.5-9B (GDN) | Q8_0 | **8418** | — | — |
+| Gemma-3-12B | Q8_0 | **6998** | 9269 | -25% |
 
 **Notes:**
-- Qwen3.5 GDN output quality now matches llama.cpp (v0.5 fix: double post_attn_norm on attention layers).
+- Qwen3.5 GDN multi-turn chat now works correctly (v0.5.1 fix: FP16 prefill weights + chunked prefill state carry-forward).
+- GDN prefill uses FP16 weights instead of FP8 for numerical stability (~8% slower than FP8 but eliminates multi-turn degeneration).
 - Prefill numbers have high variance due to cuBLAS autotuning algorithm selection between container restarts (up to 2.6x range on Gemma-3). Decode numbers are stable. Compare decode only for reliable A/B testing.
 
 ## Code Conventions

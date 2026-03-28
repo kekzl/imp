@@ -575,12 +575,17 @@ bool Engine::init_kv_cache() {
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
 
     if (config_.use_prefix_caching) {
-        kv_manager_->set_prefix_caching_enabled(true);
-        IMP_LOG_INFO("Prefix caching enabled");
-        if (!config_.prefix_cache_path.empty()) {
-            int restored = kv_manager_->load_prefix_cache(config_.prefix_cache_path, stream_);
-            if (restored > 0)
-                IMP_LOG_INFO("Restored %d prefix cache blocks from %s", restored, config_.prefix_cache_path.c_str());
+        if (mcfg.ssm_inner_size > 0) {
+            IMP_LOG_WARN("Prefix caching disabled for recurrent model — "
+                         "SSM/GDN state requires full sequential prefill");
+        } else {
+            kv_manager_->set_prefix_caching_enabled(true);
+            IMP_LOG_INFO("Prefix caching enabled");
+            if (!config_.prefix_cache_path.empty()) {
+                int restored = kv_manager_->load_prefix_cache(config_.prefix_cache_path, stream_);
+                if (restored > 0)
+                    IMP_LOG_INFO("Restored %d prefix cache blocks from %s", restored, config_.prefix_cache_path.c_str());
+            }
         }
     }
 
@@ -632,8 +637,18 @@ bool Engine::init_kv_cache() {
         int n_gdn = 0;
         for (int i = 0; i < mcfg.n_layers; i++)
             if (model_->layer(i).gdn_gate.data != nullptr) n_gdn++;
-        if (n_gdn > 0)
+        if (n_gdn > 0) {
             IMP_LOG_INFO("GDN model: %d layers, CUDA graphs enabled (recurrent state in-place)", n_gdn);
+            // GDN recurrent state accumulates small precision errors per token.
+            // FP8 E4M3 (3-bit mantissa) amplifies these through the delta rule
+            // scan, causing degenerate output after ~50 special tokens in
+            // multi-turn chat.  Force FP16 weights for GDN prefill.
+            if (config_.use_fp8_prefill) {
+                IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)");
+                config_.use_fp8_prefill = 0;
+                executor_->disable_fp8_prefill();
+            }
+        }
     }
 
     // Dequant weights → FP16/FP8/NVFP4 caches
@@ -1233,11 +1248,10 @@ bool Engine::step() {
         upload_penalties(*req, state, pf_stream);
 
         // Recurrent state (SSM/GDN)
-        // Always reset for recurrent models — unlike KV cache, the recurrent
-        // state cannot be reused across requests via prefix caching.
-        // Without reset, the state from a previous request (or warmup) leaks
-        // into the new one, causing degenerate output after the first request.
-        fill_recurrent_state(*req, state, /*reset=*/true, pf_stream);
+        // Reset on the first chunk of a new request so previous-request state
+        // doesn't leak in.  Subsequent chunks must NOT reset — the recurrent
+        // state built during earlier chunks must carry forward.
+        fill_recurrent_state(*req, state, /*reset=*/(offset == 0), pf_stream);
 
         // Vision embeddings on first chunk
         if (vision_.has_input() && vision_.is_available() && offset == 0) {

@@ -3,7 +3,7 @@
 All benchmarks on a single **NVIDIA RTX 5090** (32 GB GDDR7, Blackwell sm_120).
 Models loaded from GGUF. Each test runs 3 repetitions; averages reported.
 
-- **imp v0.5** — NVFP4 decode cache + FP8 prefill cache, CUDA graphs, PDL, GDN fix
+- **imp v0.5.1** — NVFP4 decode cache + FP16 prefill (GDN) / FP8 prefill (non-GDN), CUDA graphs, PDL, multi-turn GDN fix
 - **llama.cpp** b8445 — flash attention enabled, full GPU offload (`-ngl 99`)
 
 ## Decode Throughput (tg256)
@@ -12,11 +12,11 @@ Tokens generated per second — the metric that determines how fast a model resp
 
 | Model | Params | Quant | imp | llama.cpp | Delta |
 |-------|-------:|-------|----:|----------:|------:|
-| Qwen3-4B | 4.0B | Q8_0 | **374** | 244 | **+53%** |
-| Qwen3-8B | 8.2B | Q8_0 | **251** | 157 | **+60%** |
+| Qwen3-4B | 4.0B | Q8_0 | **375** | 244 | **+54%** |
+| Qwen3-8B | 8.2B | Q8_0 | **255** | 157 | **+62%** |
 | Qwen3.5-4B (GDN) | 4.0B | Q8_0 | **308** | 180 | **+71%** |
-| Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **132** | — | — |
-| Gemma-3-12B | 11.8B | Q8_0 | **125** | 98 | **+28%** |
+| Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **134** | — | — |
+| Gemma-3-12B | 11.8B | Q8_0 | **129** | 98 | **+32%** |
 
 ## Prefill Throughput (pp512)
 
@@ -24,22 +24,26 @@ Tokens processed per second during the prompt ingestion phase.
 
 | Model | Params | Quant | imp | llama.cpp | Delta |
 |-------|-------:|-------|----:|----------:|------:|
-| Qwen3-4B | 4.0B | Q8_0 | **20376** | 21337 | -4% |
-| Qwen3-8B | 8.2B | Q8_0 | **17633** | 14172 | **+24%** |
-| Qwen3.5-4B (GDN) | 4.0B | Q8_0 | **15971** | 11149 | **+43%** |
-| Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **8386** | — | — |
-| Gemma-3-12B | 11.8B | Q8_0 | **7088** | 9269 | -24% |
+| Qwen3-4B | 4.0B | Q8_0 | **24055** | 21337 | **+13%** |
+| Qwen3-8B | 8.2B | Q8_0 | **17746** | 14172 | **+25%** |
+| Qwen3.5-4B (GDN) | 4.0B | Q8_0 | **14687** | 11149 | **+32%** |
+| Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **8418** | — | — |
+| Gemma-3-12B | 11.8B | Q8_0 | **6998** | 9269 | -25% |
 
-## Output Quality (Qwen3.5 GDN — fixed in v0.5)
+**Note**: GDN models now use FP16 prefill weights (v0.5.1) instead of FP8 for numerical stability. This reduces prefill throughput by ~8% vs v0.5 FP8 numbers but fixes multi-turn chat degeneration.
 
-| Prompt | imp v0.4 | imp v0.5 | llama.cpp |
-|--------|----------|----------|-----------|
-| "The capital of France is" | ❌ "a cultural" | ✅ "Paris" | ✅ "Paris" |
-| "What is 2+2?" (chat) | ❌ degenerate | ✅ "4" | ✅ "4" |
-| "Write a haiku" (chat) | ❌ garbage | ✅ coherent | ✅ coherent |
-| Quantum entanglement (9B) | ❌ newlines | ✅ correct | ✅ correct |
+## Multi-Turn Chat Quality (GDN — fixed in v0.5.1)
 
-**Root cause**: `post_attn_norm` was applied twice on Qwen3.5 attention layers (8 of 32). Fixed by detecting true sandwich norm (Gemma-3) vs FFN input norm (Qwen3.5).
+| Scenario | imp v0.5 | imp v0.5.1 | llama.cpp |
+|----------|----------|------------|-----------|
+| Single-turn | ✅ correct | ✅ correct | ✅ correct |
+| 2-turn chat | ❌ degenerate | ✅ correct | ✅ correct |
+| 5-turn chat (4B) | ❌ garbage | ✅ correct | ✅ correct |
+| 7-turn chat (9B) | ❌ garbage | ✅ correct | ✅ correct |
+
+**Root cause**: FP8 E4M3 weights (3-bit mantissa) introduce precision errors that accumulate through the GDN delta rule scan. Chat template special tokens (`<|im_start|>`, `<|im_end|>`) amplify the divergence because their embedding projections are more sensitive to quantization noise. After ~20-50 special tokens (3-7 turns), the recurrent state becomes numerically unstable.
+
+**Fix**: GDN models now automatically use FP16 weight cache for prefill. Additionally, chunked prefill state management was fixed to preserve recurrent state across chunk boundaries, and prefix caching is disabled for recurrent models.
 
 ## KV Cache Quantization (Qwen3-8B Q8_0)
 
@@ -50,15 +54,11 @@ Tokens processed per second during the prompt ingestion phase.
 | TurboQuant (PolarQuant + QJL) | 191 | 16006 | = FP8 |
 | TurboQuant Lite (QJL only) | 190 | 15417 | Degraded |
 
-## Known Issues
-
-- **Qwen3.5 multi-turn chat**: GDN models may degenerate on multi-turn conversations with chat template (single-turn works correctly). Under investigation — likely related to SSM state management with repeated special tokens.
-- **Prefill variance**: cuBLAS autotuning can cause up to 2.6x variance in prefill numbers between container restarts. Decode numbers are stable. Compare decode only for reliable A/B testing.
-
 ## Notes
 
-- **Qwen3.5 GDN**: Gated DeltaNet hybrid architecture (24 GDN + 8 attention + 32 FFN layers). Output quality now matches llama.cpp for single-turn prompts.
+- **Qwen3.5 GDN**: Gated DeltaNet hybrid architecture (24 GDN + 8 attention + 32 FFN layers). Output quality matches llama.cpp for both single-turn and multi-turn.
 - **TurboQuant**: PolarQuant INT4 K directions + QJL sketch correction + INT4 V. MXFP4 variant available on sm_120+.
+- **Prefill variance**: cuBLAS autotuning can cause up to 2.6x variance in prefill numbers between container restarts. Decode numbers are stable. Compare decode only for reliable A/B testing.
 - **MXFP4 Prefill**: CUTLASS block-scaled GEMM for prefill (`--mxfp4-prefill`). Currently ~10% slower than FP8 cuBLASLt for Q8_0 models due to activation quantization overhead.
 
 ## Hardware
