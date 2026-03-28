@@ -195,31 +195,32 @@ Benchmarks for GEMM, attention, and end-to-end inference.
 ./build/imp-bench
 ```
 
-## Benchmark Results (v0.4, RTX 5090, 2026-03-21)
+## Benchmark Results (v0.5, RTX 5090, 2026-03-28)
 
 All benchmarks on a single NVIDIA RTX 5090 (32 GB GDDR7, Blackwell sm_120). CUDA 13.2. Models loaded from GGUF. imp uses NVFP4 decode cache + FP8 prefill cache + upfront VRAM budget planner. llama.cpp b8445 with flash attention enabled.
 
-### Decode Throughput (tg128, tok/s)
+### Decode Throughput (tg256, tok/s)
 
-| Model | Quant | imp v0.4 | llama.cpp | Speedup |
+| Model | Quant | imp v0.5 | llama.cpp | Speedup |
 |-------|-------|----------|-----------|---------|
-| Qwen3-4B | Q8_0 | **390** | 244 | **+60%** |
-| Qwen3-8B | Q8_0 | **264** | 157 | **+68%** |
-| Qwen3.5-4B (GDN) | Q8_0 | **327** | 180 | **+82%** |
-| Gemma-3-12B | Q8_0 | **139** | 98 | **+42%** |
-| Qwen3-Coder-30B MoE | Q6_K | **265** | 251 | **+6%** |
+| Qwen3-4B | Q8_0 | **374** | 244 | **+53%** |
+| Qwen3-8B | Q8_0 | **251** | 157 | **+60%** |
+| Qwen3.5-4B (GDN) | Q8_0 | **308** | 180 | **+71%** |
+| Qwen3.5-9B (GDN) | Q8_0 | **132** | — | — |
+| Gemma-3-12B | Q8_0 | **125** | 98 | **+28%** |
 
 ### Prefill Throughput (pp512, tok/s)
 
-| Model | Quant | imp v0.4 | llama.cpp | Speedup |
+| Model | Quant | imp v0.5 | llama.cpp | Speedup |
 |-------|-------|----------|-----------|---------|
-| Qwen3-4B | Q8_0 | **25801** | 21337 | **+21%** |
-| Qwen3-8B | Q8_0 | **15819** | 14172 | **+12%** |
-| Qwen3.5-4B (GDN) | Q8_0 | **16017** | 11149 | **+44%** |
-| Gemma-3-12B | Q8_0 | **8479** | 9269 | -9% |
-| Qwen3-Coder-30B MoE | Q6_K | 5645 | **6090** | -7% |
+| Qwen3-4B | Q8_0 | **20376** | 21337 | -4% |
+| Qwen3-8B | Q8_0 | **17633** | 14172 | **+24%** |
+| Qwen3.5-4B (GDN) | Q8_0 | **15971** | 11149 | **+43%** |
+| Qwen3.5-9B (GDN) | Q8_0 | **8386** | — | — |
+| Gemma-3-12B | Q8_0 | **7088** | 9269 | -24% |
 
 **Notes:**
+- Qwen3.5 GDN output quality now matches llama.cpp (v0.5 fix: double post_attn_norm on attention layers).
 - Prefill numbers have high variance due to cuBLAS autotuning algorithm selection between container restarts (up to 2.6x range on Gemma-3). Decode numbers are stable. Compare decode only for reliable A/B testing.
 
 ## Code Conventions
@@ -295,6 +296,8 @@ Hybrid architecture: 24 GDN layers (recurrent) + 8 attention layers + 32 dense F
 - **Attention output gate**: Q+Gate interleaved projection, de-interleaved before attention, sigmoid gate applied before Wo projection.
 - **Partial RoPE**: Only first `rope_dim` (64) of `head_dim` (256) dimensions get rotary encoding.
 - **CUDA Graphs**: Enabled for GDN decode (recurrent state updated in-place with fixed pointers).
+- **Norm handling**: Qwen3.5 uses `post_attn_norm` as FFN input norm (NOT sandwich norm like Gemma-3). The `has_post_attn_norm` flag in `run_attention` requires BOTH `post_attn_norm` AND `ffn_norm` to distinguish true sandwich norm from FFN-input-norm pattern.
+- **V-head tiling**: GGUF converter reorders V heads to tiled order. Kernel uses `h % n_groups` for group mapping. All tensors (V, gate, alpha, beta, A_log, dt_bias, conv1d, ssm_out) are consistently tiled.
 
 ### CUDA 13.2 Features
 - **Green Contexts**: SM partitioning for concurrent prefill/decode (`green_ctx.cu`)
