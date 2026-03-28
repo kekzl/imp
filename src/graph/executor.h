@@ -225,6 +225,9 @@ public:
                             int max_batch_size = 1, int max_seq_len = 0, bool use_fp8_prefill = false,
                             int use_nvfp4_decode = 0, bool use_mxfp4_prefill = false);
 
+    // Disable FP8 weight cache (must be called before pre_dequant_weights).
+    void disable_fp8_prefill() { wcache_.use_fp8 = false; }
+
     // Phase 2: Allocate all GPU workspace buffers.
     // Call AFTER weight upload to maximize VRAM available for expert layers.
     // experts_on_host: if true, skip MoE batch dequant buffer allocation.
