@@ -464,7 +464,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     //    For prefill (n>1) with FP16 cache, use cuBLAS beta=1 to fuse residual
     //    into the wo projection GEMM — no separate residual save/add/copy needed.
     //    For FP32 accumulator path: residual is kept in fp32_hidden_, skip FP16 copy.
-    const bool has_post_attn_norm = (ly.post_attn_norm.data != nullptr);
+    // True sandwich norm: post_attn_norm applied inside run_attention AND separate
+    // ffn_norm for run_ffn (Gemma-3 pattern). When ffn_norm is absent (Qwen3.5),
+    // post_attn_norm serves as FFN input norm in run_ffn — NOT a sandwich norm.
+    // Without this check, post_attn_norm is applied TWICE (here + run_ffn fallback).
+    const bool has_post_attn_norm = (ly.post_attn_norm.data != nullptr && ly.ffn_norm.data != nullptr);
     const bool using_fp32_accum = (fp32_accum_buf_ != nullptr && has_post_attn_norm);
     bool will_fuse_o_nvfp4 = (!has_post_attn_norm && n == 1 && h.dtype == DType::FP16 &&
                                wcache_.nvfp4.count(ly.wo.data));
