@@ -90,6 +90,10 @@ Engine::~Engine() {
         cudaFree(async_d_block_tables_);
         async_d_block_tables_ = nullptr;
     }
+    if (async_d_banned_tokens_) {
+        cudaFree(async_d_banned_tokens_);
+        async_d_banned_tokens_ = nullptr;
+    }
     if (d_penalty_tokens_) {
         vram_alloc_.free(d_penalty_tokens_);
         d_penalty_tokens_ = nullptr;
@@ -811,14 +815,26 @@ bool Engine::init_features() {
         if (!is_kept(chat_template_.end_header_id()))
             add_if_valid(chat_template_.end_header_id());
 
-        // Scan vocab for <|...|> control tokens, excluding stop/EOS tokens
+        // Scan vocab for control tokens, excluding stop/EOS tokens.
+        // Matches both <|...|> (Qwen, Llama) and <...> (Gemma) patterns
+        // where the content is a known control-token keyword.
         if (tok) {
             int vocab_size = tok->vocab_size();
             for (int i = 0; i < vocab_size; i++) {
                 if (is_kept(static_cast<int32_t>(i))) continue;
                 const std::string& t = tok->token_text(i);
-                if (t.size() >= 4 && t[0] == '<' && t[1] == '|' &&
-                    t[t.size()-1] == '>' && t[t.size()-2] == '|') {
+                if (t.size() < 3 || t[0] != '<' || t.back() != '>') continue;
+                // <|...|> pattern (Qwen, Llama, Mistral)
+                if (t.size() >= 4 && t[1] == '|' && t[t.size()-2] == '|') {
+                    add_if_valid(static_cast<int32_t>(i));
+                    continue;
+                }
+                // <keyword> pattern (Gemma: <pad>, <unk>, <mask>, <start_of_turn>, etc.)
+                // Only ban known control keywords, not arbitrary <word> tokens.
+                if (t == "<pad>" || t == "<unk>" || t == "<mask>" ||
+                    t == "<unused0>" || t == "<start_of_turn>" ||
+                    t == "<end_of_turn>" || t == "<start_of_image>" ||
+                    t == "<end_of_image>") {
                     add_if_valid(static_cast<int32_t>(i));
                 }
             }
@@ -903,6 +919,7 @@ void Engine::warmup() {
     decode_batch_pool_.reset_upload_cache();
     if (async_graph_runner_.is_setup()) async_graph_runner_.cleanup();
     if (async_d_block_tables_) { cudaFree(async_d_block_tables_); async_d_block_tables_ = nullptr; }
+    if (async_d_banned_tokens_) { cudaFree(async_d_banned_tokens_); async_d_banned_tokens_ = nullptr; }
     async_graph_req_ = nullptr;
     async_pending_tokens_.clear();
     async_pending_cursor_ = 0;
@@ -1017,6 +1034,10 @@ bool Engine::step() {
         if (async_d_block_tables_) {
             cudaFree(async_d_block_tables_);
             async_d_block_tables_ = nullptr;
+        }
+        if (async_d_banned_tokens_) {
+            cudaFree(async_d_banned_tokens_);
+            async_d_banned_tokens_ = nullptr;
         }
         async_graph_req_ = nullptr;
         async_pending_tokens_.clear();
@@ -1946,19 +1967,34 @@ std::vector<int32_t> Engine::try_graph_loop_decode(
     state_template.max_blocks_per_seq = max_blocks_per_seq;
     state_template.is_prefill = false;
 
+    // Upload banned tokens for graph-captured logit masking
+    int32_t* d_banned = nullptr;
+    if (!banned_token_ids_.empty()) {
+        if (cudaMallocAsync(&d_banned, banned_token_ids_.size() * sizeof(int32_t), stream) == cudaSuccess) {
+            cudaMemcpyAsync(d_banned, banned_token_ids_.data(),
+                            banned_token_ids_.size() * sizeof(int32_t),
+                            cudaMemcpyHostToDevice, stream);
+            state_template.d_banned_tokens = d_banned;
+            state_template.n_d_banned_tokens = static_cast<int>(banned_token_ids_.size());
+        }
+    }
+
     auto gcfg = build_graph_config(*req, remaining);
 
     CudaGraphConditionalRunner runner;
     if (!runner.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
+        if (d_banned) cudaFreeAsync(d_banned, stream);
         cudaFreeAsync(d_block_tables, stream);
         return {};
     }
     if (!runner.launch(stream)) {
+        if (d_banned) cudaFreeAsync(d_banned, stream);
         cudaFreeAsync(d_block_tables, stream);
         return {};
     }
 
     auto tokens = runner.wait_and_get_tokens(stream);
+    if (d_banned) cudaFreeAsync(d_banned, stream);
     cudaFreeAsync(d_block_tables, stream);
     IMP_LOG_INFO("ConditionalGraph: generated %zu tokens in graph loop", tokens.size());
     runner.cleanup();
@@ -1988,20 +2024,37 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
     state_template.max_blocks_per_seq = max_blocks_per_seq;
     state_template.is_prefill = false;
 
+    // Upload banned tokens to device for graph-captured logit masking
+    int32_t* d_banned = nullptr;
+    if (!banned_token_ids_.empty()) {
+        if (cudaMalloc(&d_banned, banned_token_ids_.size() * sizeof(int32_t)) == cudaSuccess) {
+            cudaMemcpyAsync(d_banned, banned_token_ids_.data(),
+                            banned_token_ids_.size() * sizeof(int32_t),
+                            cudaMemcpyHostToDevice, stream);
+            state_template.d_banned_tokens = d_banned;
+            state_template.n_d_banned_tokens = static_cast<int>(banned_token_ids_.size());
+        }
+    }
+
     auto gcfg = build_graph_config(*req, remaining);
 
     if (!async_graph_runner_.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
+        if (d_banned) cudaFree(d_banned);
         cudaFree(d_bt);
         return false;
     }
     if (!async_graph_runner_.launch(stream)) {
         async_graph_runner_.cleanup();
+        if (d_banned) cudaFree(d_banned);
         cudaFree(d_bt);
         return false;
     }
 
     async_graph_req_ = req;
     async_d_block_tables_ = d_bt;
+    async_d_banned_tokens_ = d_banned;
+    IMP_LOG_DEBUG("AsyncGraphLoop: launched with %d banned tokens",
+                  state_template.n_d_banned_tokens);
     async_pending_tokens_.clear();
     async_pending_cursor_ = 0;
     IMP_LOG_INFO("AsyncGraphLoop: launched for %d remaining tokens", remaining);

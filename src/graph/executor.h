@@ -175,6 +175,8 @@ struct InferenceState {
     // Banned tokens: set logits to -inf before sampling (e.g. chat template special tokens)
     const int32_t* banned_tokens = nullptr;  // HOST pointer, small list
     int n_banned_tokens = 0;
+    const int32_t* d_banned_tokens = nullptr;  // DEVICE pointer (for CUDA graph path)
+    int n_d_banned_tokens = 0;
 
     // Force token: when >= 0, set ALL logits except this token to -inf.
     // Used by think-budget to force </think> generation via logit manipulation

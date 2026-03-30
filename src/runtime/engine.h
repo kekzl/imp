@@ -184,6 +184,7 @@ private:
     CudaGraphConditionalRunner async_graph_runner_;
     std::shared_ptr<Request> async_graph_req_;
     int* async_d_block_tables_ = nullptr;
+    int32_t* async_d_banned_tokens_ = nullptr;
     std::vector<int32_t> async_pending_tokens_;
     int async_pending_cursor_ = 0;
 
