@@ -431,6 +431,15 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
         if (offload_mgr_) offload_mgr_->release_layer(i);
     }
 
+    // ---- Step 2b: Final FP32→FP16 conversion (post-norm models) ----
+    // run_attention/run_ffn keep fp32_hidden_ in sync, but hidden_ (FP16) may
+    // lag behind. Convert now so the LM head reads correct values.
+    if (fp32_accum_buf_) {
+        fp32_to_fp16_rowscale_kernel<<<n, 256, 256 * sizeof(float), stream>>>(
+            static_cast<const float*>(view_tokens(fp32_hidden_, n).data),
+            static_cast<half*>(view_tokens(hidden_, n).data), n, cfg.d_model);
+    }
+
     // ---- Step 3: Final RMSNorm + LM head ----
     Tensor h_final = view_tokens(hidden_, n);
     Tensor lg = view_tokens(logits_, n);
@@ -479,6 +488,16 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
         Tensor no_final = view_tokens(norm_out_, n);
         rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
         gemm(no_final, model_->output_proj(), lg, 1.0f, 0.0f, stream);
+    }
+
+    // ---- Step 3b: Final logit soft-capping (Gemma-2/3) ----
+    if (cfg.final_logit_softcap > 0.0f) {
+        int64_t n_logits = static_cast<int64_t>(n) * cfg.vocab_size;
+        int sc_threads = 256;
+        int sc_blocks = static_cast<int>((n_logits + sc_threads - 1) / sc_threads);
+        logit_softcap_fp32_kernel<<<sc_blocks, sc_threads, 0, stream>>>(
+            static_cast<float*>(lg.data),
+            cfg.final_logit_softcap, 1.0f / cfg.final_logit_softcap, n_logits);
     }
 
     // ---- Step 4: Ban special tokens (device-side for CUDA graph capture) ----

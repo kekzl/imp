@@ -172,6 +172,11 @@ bool Engine::is_stop_token(int32_t token) const {
     for (int32_t stop_id : chat_template_.stop_token_ids()) {
         if (token == stop_id) return true;
     }
+    // Banned tokens (e.g. <pad>) should also trigger stop — they indicate
+    // the model has degenerated and continuing would produce garbage.
+    for (int32_t bid : banned_token_ids_) {
+        if (token == bid) return true;
+    }
     return false;
 }
 
@@ -1930,6 +1935,13 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(
     gcfg.initial_position = req.context_len() - 1;
     gcfg.eos_id = tok ? tok->eos_id() : -1;
     gcfg.stop_ids = chat_template_.stop_token_ids();
+    // Banned tokens (e.g. <pad>, <unk>) should also stop the graph loop.
+    // The ban_logits_kernel sets them to -1e30 before sampling, but if
+    // they still leak through (FP32 precision edge cases with 262K vocab),
+    // the stop check catches them as a safety net.
+    for (int32_t bid : banned_token_ids_) {
+        gcfg.stop_ids.push_back(bid);
+    }
     gcfg.temperature = req.temperature;
     gcfg.top_p = req.top_p;
     gcfg.top_k = req.top_k;

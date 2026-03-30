@@ -270,6 +270,36 @@ static void rebuild_layouts_for_m(GemmCacheEntry& entry,
     entry.desc_M = M;
 }
 
+// Re-select algorithm via heuristic after a cublasLtMatmul failure.
+// Called when the cached algo (benchmarked for a different M within the
+// same bucket) is invalid for the current M — e.g. FP8 algos on sm_120
+// are sensitive to exact dimensions.
+static void reselect_algo_for_entry(GemmCacheEntry& entry) {
+    cublasLtHandle_t lt = get_cublaslt_handle();
+    cublasLtMatmulPreference_t pref = nullptr;
+    cublasLtMatmulPreferenceCreate(&pref);
+    cublasLtMatmulPreferenceSetAttribute(pref,
+        CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+        &s_workspace_size, sizeof(s_workspace_size));
+
+    cublasLtMatmulHeuristicResult_t results[1];
+    int nresults = 0;
+    cublasLtMatmulAlgoGetHeuristic(lt, entry.opDesc, entry.Bdesc,
+        entry.Adesc, entry.Cdesc, entry.Cdesc,
+        pref, 1, results, &nresults);
+    cublasLtMatmulPreferenceDestroy(pref);
+
+    if (nresults > 0) {
+        entry.algo = results[0].algo;
+        entry.workspace_size = (results[0].workspaceSize <= s_workspace_size)
+                                   ? results[0].workspaceSize : 0;
+        entry.has_algo = true;
+    } else {
+        entry.has_algo = false;
+        entry.workspace_size = 0;
+    }
+}
+
 // Set per-call FP8 scale pointers on a matmul descriptor.
 static inline void set_gemm_scale_pointers(cublasLtMatmulDesc_t opDesc,
     const float* aScale, const float* bScale) {
@@ -530,27 +560,35 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C,
             entry->has_algo ? &entry->algo : nullptr,
             s_workspace, entry->workspace_size, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            // cuBLASLt failed (e.g. CUDA 13.2 status 7 for certain M/K/N on sm_120).
-            // Fall back to cublasGemmEx which uses a different algorithm path.
-            static int fallback_count = 0;
-            if (++fallback_count <= 10) {
-                IMP_LOG_WARN("gemm: cublasLtMatmul failed (status %d) M=%ld K=%ld N=%ld, "
-                             "falling back to cublasGemmEx",
-                             (int)st, (long)M, (long)K, (long)N);
+            // Stale algo from a different M within the same bucket.
+            // Re-select via heuristic and retry before falling back.
+            {
+                std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
+                reselect_algo_for_entry(*entry);
             }
-            cublasHandle_t fb_handle = get_cublas_handle();
-            cublasSetStream(fb_handle, stream);
-            cublasStatus_t fb_st = cublasGemmEx(fb_handle,
-                CUBLAS_OP_T, CUBLAS_OP_N,
-                (int)N, (int)M, (int)K,
-                &alpha,
-                B.data, cuda_dtype_B, (int)K,
-                A.data, cuda_dtype_A, (int)K,
-                &beta,
-                C.data, cuda_dtype_C, (int)N,
-                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-            if (fb_st != CUBLAS_STATUS_SUCCESS) {
-                IMP_LOG_ERROR("gemm: cublasGemmEx fallback also failed (status %d)", (int)fb_st);
+            st = cublasLtMatmul(lt, entry->opDesc,
+                &alpha, B.data, entry->Bdesc, A.data, entry->Adesc,
+                &beta,  C.data, entry->Cdesc, C.data, entry->Cdesc,
+                entry->has_algo ? &entry->algo : nullptr,
+                s_workspace, entry->workspace_size, stream);
+            if (st != CUBLAS_STATUS_SUCCESS) {
+                static int fallback_count = 0;
+                if (++fallback_count <= 10) {
+                    IMP_LOG_WARN("gemm: cublasLtMatmul failed (status %d) M=%ld K=%ld N=%ld "
+                                 "after algo reselect, falling back to cublasGemmEx",
+                                 (int)st, (long)M, (long)K, (long)N);
+                }
+                cublasHandle_t fb_handle = get_cublas_handle();
+                cublasSetStream(fb_handle, stream);
+                cublasGemmEx(fb_handle,
+                    CUBLAS_OP_T, CUBLAS_OP_N,
+                    (int)N, (int)M, (int)K,
+                    &alpha,
+                    B.data, cuda_dtype_B, (int)K,
+                    A.data, cuda_dtype_A, (int)K,
+                    &beta,
+                    C.data, cuda_dtype_C, (int)N,
+                    CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
             }
         }
     }
@@ -904,27 +942,40 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
         s_workspace, entry->workspace_size, stream);
 
     if (st != CUBLAS_STATUS_SUCCESS) {
-        static int fallback_count = 0;
-        if (++fallback_count <= 10) {
-            IMP_LOG_WARN("gemm_cublaslt: cublasLtMatmul failed (status %d) M=%ld K=%ld N=%ld, "
-                         "falling back to cublasGemmEx",
-                         (int)st, (long)M, (long)K, (long)N);
+        // The cached algo (benchmarked for a different M within the same bucket)
+        // may be invalid for the current M. Re-select via heuristic and retry.
+        {
+            std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
+            reselect_algo_for_entry(*entry);
         }
-        // Fall back to cublasGemmEx (no scale pointers — FP8 scales not supported,
-        // but better than silently returning corrupted data).
-        cublasHandle_t fb_handle = get_cublas_handle();
-        cublasSetStream(fb_handle, stream);
-        cublasStatus_t fb_st = cublasGemmEx(fb_handle,
-            CUBLAS_OP_T, CUBLAS_OP_N,
-            (int)N, (int)M, (int)K,
-            &alpha,
-            B.data, cuda_dtype_B, (int)K,
-            A.data, cuda_dtype_A, (int)K,
-            &beta,
-            C.data, cuda_dtype_C, (int)N,
-            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
-        if (fb_st != CUBLAS_STATUS_SUCCESS) {
-            IMP_LOG_ERROR("gemm_cublaslt: cublasGemmEx fallback also failed (status %d)", (int)fb_st);
+        set_gemm_scale_pointers(entry->opDesc, aScale, bScale);
+        st = cublasLtMatmul(lt, entry->opDesc,
+            &alpha, B.data, entry->Bdesc, A.data, entry->Adesc,
+            &beta,  C.data, entry->Cdesc, C.data, entry->Cdesc,
+            entry->has_algo ? &entry->algo : nullptr,
+            s_workspace, entry->workspace_size, stream);
+
+        if (st != CUBLAS_STATUS_SUCCESS) {
+            static int fallback_count = 0;
+            if (++fallback_count <= 10) {
+                IMP_LOG_WARN("gemm_cublaslt: cublasLtMatmul failed (status %d) M=%ld K=%ld N=%ld "
+                             "after algo reselect, falling back to cublasGemmEx",
+                             (int)st, (long)M, (long)K, (long)N);
+            }
+            cublasHandle_t fb_handle = get_cublas_handle();
+            cublasSetStream(fb_handle, stream);
+            cublasStatus_t fb_st = cublasGemmEx(fb_handle,
+                CUBLAS_OP_T, CUBLAS_OP_N,
+                (int)N, (int)M, (int)K,
+                &alpha,
+                B.data, cuda_dtype_B, (int)K,
+                A.data, cuda_dtype_A, (int)K,
+                &beta,
+                C.data, cuda_dtype_C, (int)N,
+                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+            if (fb_st != CUBLAS_STATUS_SUCCESS) {
+                IMP_LOG_ERROR("gemm_cublaslt: cublasGemmEx fallback also failed (status %d)", (int)fb_st);
+            }
         }
     }
 }
