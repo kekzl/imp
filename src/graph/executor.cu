@@ -13,6 +13,19 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 
+// Ban specific token IDs by setting their logits to -inf.
+// Used in the CUDA graph decode path where host-side logit manipulation
+// (cudaMemcpyAsync per token) is not possible during graph replay.
+__global__ void ban_logits_kernel(float* __restrict__ logits,
+                                   const int32_t* __restrict__ banned_ids,
+                                   int n_banned, int vocab_size) {
+    int i = threadIdx.x;
+    if (i < n_banned) {
+        int32_t tid = banned_ids[i];
+        if (tid >= 0 && tid < vocab_size) logits[tid] = -1e30f;
+    }
+}
+
 namespace imp {
 
 int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream) {
@@ -468,7 +481,17 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
         gemm(no_final, model_->output_proj(), lg, 1.0f, 0.0f, stream);
     }
 
-    // ---- Step 4: Async sampling → write to d_token_id + h_mapped ----
+    // ---- Step 4: Ban special tokens (device-side for CUDA graph capture) ----
+    if (state.d_banned_tokens && state.n_d_banned_tokens > 0) {
+        float* lp = static_cast<float*>(lg.data);
+        int vocab = static_cast<int>(lg.shape[lg.ndim - 1]);
+        int threads = ((state.n_d_banned_tokens + 31) / 32) * 32;
+        if (threads > 256) threads = 256;
+        ban_logits_kernel<<<1, threads, 0, stream>>>(
+            lp, state.d_banned_tokens, state.n_d_banned_tokens, vocab);
+    }
+
+    // ---- Step 5: Async sampling → write to d_token_id + h_mapped ----
     Tensor last_logits = lg.slice(0, 1);
     int64_t vocab_shape[1] = {last_logits.shape[1]};
     last_logits = last_logits.reshape(1, vocab_shape);
