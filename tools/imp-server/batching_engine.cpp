@@ -92,6 +92,17 @@ void BatchingEngine::worker_loop() {
                     ctx_->active_request = nullptr;
                 }
 
+                // Invalidate stale CUDA graphs and batch pool upload cache
+                // when a new request arrives. Without this, decode graphs
+                // captured for a previous request are replayed with baked-in
+                // kernel parameters (max_context_len, split-K grid dims) that
+                // no longer match the new request — causing corrupt logits
+                // on models with FP32 accumulator paths (Gemma-3).
+                // The CLI path does this via imp_context_reset(); the batching
+                // engine must do it explicitly per new request.
+                engine->invalidate_graphs();
+                engine->reset_batch_pool_cache();
+
                 // Initialize notified_count to current output size (usually 0)
                 sr->notified_count = sr->request->output_tokens.size();
 
