@@ -73,6 +73,12 @@ typedef struct {
     // MXFP4 prefill: use CUTLASS MXFP4 GEMM for prefill (converts NVFP4 cache to MXFP4 format)
     int use_mxfp4_prefill;         // 0 = off (default), 1 = on (requires sm_120 + NVFP4 cache)
 
+    // KV cache minimum context budget
+    int min_kv_tokens;             // Minimum KV cache capacity in tokens (0 = auto).
+                                   // Budget planner guarantees at least this many tokens
+                                   // before allocating weight caches. Default auto picks
+                                   // a reasonable minimum based on model size.
+
     // Prefix caching
     int use_prefix_caching;        // 0 = off (default), 1 = on — reuse KV blocks for shared prefixes
     char prefix_cache_path[512];   // path to save/load prefix cache (empty = disabled)
