@@ -715,16 +715,14 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         }
     }
 
-    // Determine thinking mode before tokenization (needed for /no_think injection).
-    // Default: enable thinking for think-capable models (matches llama.cpp behavior).
-    // Clients can override with "enable_thinking": false to suppress.
+    // Thinking mode: only enable when explicitly requested via "enable_thinking": true.
+    // The model is free to generate <think> on its own if it wants to reason —
+    // forcing <think> into the prompt breaks structured output (JSON) because the
+    // model enters reasoning mode instead of generating the requested format.
     bool enable_thinking = false;
-    if (snap_is_think_model && state.default_args.reasoning_format == "deepseek" &&
-        snap_think_start_id >= 0) {
-        enable_thinking = true;  // default ON for think models
-        if (body.contains("enable_thinking")) {
-            enable_thinking = body.value("enable_thinking", true);
-        }
+    if (snap_is_think_model && snap_think_start_id >= 0 &&
+        body.contains("enable_thinking")) {
+        enable_thinking = body.value("enable_thinking", false);
     }
     bool suppress_thinking = snap_is_think_model && !enable_thinking && think_budget <= 0.0f;
 
