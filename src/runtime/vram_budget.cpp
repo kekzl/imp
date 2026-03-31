@@ -184,6 +184,24 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
     budget.kv_max_blocks = std::min(budget.kv_max_blocks, target_blocks);
     budget.kv_max_blocks = std::max(budget.kv_max_blocks, 16);
 
+    // Enforce minimum KV token budget. Auto default: 16K tokens or 4x max_seq_len,
+    // whichever is smaller (capped to not exceed what VRAM can physically hold).
+    int min_kv_tok = config.min_kv_tokens;
+    if (min_kv_tok <= 0) {
+        min_kv_tok = std::min(16384, config.max_seq_len * 4);
+    }
+    int min_kv_blocks = (min_kv_tok + bs - 1) / bs;
+    int max_affordable = (per_block_total > 0)
+        ? static_cast<int>(available / per_block_total) : budget.kv_max_blocks;
+    // Don't exceed 80% of total affordable (leave room for weight caches)
+    min_kv_blocks = std::min(min_kv_blocks, static_cast<int>(max_affordable * 0.8));
+    if (budget.kv_max_blocks < min_kv_blocks) {
+        IMP_LOG_INFO("VRAM budget: raising KV from %d to %d blocks (min_kv_tokens=%d)",
+                     budget.kv_max_blocks, min_kv_blocks, min_kv_tok);
+        budget.kv_max_blocks = min_kv_blocks;
+        budget.kv_cache_bytes = static_cast<size_t>(min_kv_blocks) * per_block_total;
+    }
+
     const char* strat_name = (budget.strategy == VRAMBudget::FP8_PREFILL_NVFP4_DECODE)
         ? "FP8_PREFILL_NVFP4_DECODE"
         : (budget.strategy == VRAMBudget::NVFP4_DECODE_ONLY)

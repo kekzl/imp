@@ -70,6 +70,10 @@ struct EngineConfig {
     // NVFP4 decode weight cache: -1=auto, 0=off, 1=additive (FP16+NVFP4), 2=NVFP4 only
     int use_nvfp4_decode = -1;
 
+    // Minimum KV cache tokens. Budget planner guarantees at least this many
+    // tokens of KV capacity before allocating weight caches. 0 = auto.
+    int min_kv_tokens = 0;
+
     // MXFP4 prefill: CUTLASS MXFP4 GEMM for prefill (converts NVFP4 → MXFP4 format, sm_120)
     bool use_mxfp4_prefill = false;
 

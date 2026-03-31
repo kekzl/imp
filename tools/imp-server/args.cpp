@@ -93,6 +93,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.mxfp4_prefill = true;
         } else if (std::strcmp(arg, "--no-nvfp4") == 0) {
             args.decode_nvfp4 = 0;
+        } else if (std::strcmp(arg, "--min-kv-tokens") == 0 && i + 1 < argc) {
+            args.min_kv_tokens = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--mmproj") == 0 && i + 1 < argc) {
             args.mmproj_path = argv[++i];
         } else if (std::strcmp(arg, "--models-dir") == 0 && i + 1 < argc) {
