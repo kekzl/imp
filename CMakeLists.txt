@@ -117,6 +117,7 @@ set(IMP_MODEL_SOURCES
     src/model/weight_upload.cu
     src/model/tokenizer.cpp
     src/model/chat_template.cpp
+    src/model/jinja.cpp
 )
 
 set(IMP_QUANT_SOURCES
@@ -355,6 +356,7 @@ if(IMP_BUILD_TESTS)
         tests/test_reduce.cu
         tests/test_tokenizer.cpp
         tests/test_chat_template.cpp
+        tests/test_jinja.cpp
         tests/test_hadamard.cu
         tests/test_attention_mxfp4.cu
         tests/test_softmax.cu
