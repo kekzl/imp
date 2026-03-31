@@ -147,6 +147,7 @@ public:
     KVCache* kv_cache() const noexcept { return kv_cache_raw_; }
     Model* model() const noexcept { return model_.get(); }
     const ChatTemplate& chat_template() const noexcept { return chat_template_; }
+    const std::vector<int32_t>& banned_token_ids() const { return banned_token_ids_; }
     GraphExecutor* executor() const noexcept { return executor_.get(); }
     VRAMAllocator& vram_allocator() noexcept { return vram_alloc_; }
 

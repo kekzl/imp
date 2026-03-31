@@ -148,21 +148,39 @@ void BatchingEngine::worker_loop() {
                 if (is_last_token) {
                     // Determine finish reason
                     const char* reason = "length";
+                    bool is_stop_token = false;
                     if (req->status == imp::RequestStatus::CANCELLED) {
                         reason = "cancelled";
                     } else {
                         if (token == tok->eos_id()) {
                             reason = "stop";
+                            is_stop_token = true;
                         } else {
                             for (int32_t sid : stop_ids) {
                                 if (token == sid) {
                                     reason = "stop";
+                                    is_stop_token = true;
+                                    break;
+                                }
+                            }
+                        }
+                        // Banned tokens (e.g. <pad>) that triggered stop
+                        if (!is_stop_token) {
+                            for (int32_t bid : engine->banned_token_ids()) {
+                                if (token == bid) {
+                                    reason = "stop";
+                                    is_stop_token = true;
                                     break;
                                 }
                             }
                         }
                     }
-                    sr->push_token(token, true, reason);
+                    if (is_stop_token) {
+                        // Don't include stop/banned tokens in output text
+                        sr->push_finish(reason);
+                    } else {
+                        sr->push_token(token, true, reason);
+                    }
                 } else {
                     sr->push_token(token, false, nullptr);
                 }

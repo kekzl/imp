@@ -193,7 +193,7 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
 // Build ImpConfig from default args + optional JSON overrides.
 // Auto-detects optimal preset from model_path unless overridden.
 ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
-                       const json& overrides) {
+                       const json& overrides, ImpModel model = nullptr) {
     ImpConfig config = imp_config_default();
 
     // Resolve preset: explicit flag/override > auto-detect from model filename
@@ -215,7 +215,12 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
     config.device_id = args.device;
     if (!preset) {
         config.max_batch_size = 8;  // Allow concurrent requests for continuous batching
-        config.max_seq_len = overrides.value("max_seq_len", 4096);
+        // Use model's native context length (from GGUF metadata), clamped to a
+        // reasonable default. Without a preset, the VRAM budget planner will
+        // size the KV cache to fit whatever fits in GPU memory.
+        int model_ctx = imp_model_max_seq_len(model);
+        int default_ctx = (model_ctx > 0) ? std::min(model_ctx, 32768) : 8192;
+        config.max_seq_len = overrides.value("max_seq_len", default_ctx);
     } else if (overrides.contains("max_seq_len")) {
         config.max_seq_len = overrides.value("max_seq_len", config.max_seq_len);
     }
@@ -300,7 +305,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path,
     }
 
     // Create context (auto-detects preset from model path)
-    ImpConfig config = build_config(state.default_args, path, config_overrides);
+    ImpConfig config = build_config(state.default_args, path, config_overrides, state.model);
     err = imp_context_create(state.model, &config, &state.ctx);
     if (err != IMP_SUCCESS) {
         std::string msg = std::string("Failed to create context: ") + imp_error_string(err);
