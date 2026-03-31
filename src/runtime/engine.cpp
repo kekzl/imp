@@ -801,13 +801,22 @@ bool Engine::init_features() {
             if (id >= 0) banned_token_ids_.push_back(id);
         };
 
-        // Collect IDs that must NOT be banned (stop tokens + EOS).
-        // The model must be able to generate these to terminate output.
+        // Collect IDs that must NOT be banned (stop tokens + EOS + think tokens).
+        // The model must be able to generate these for correct operation.
         std::vector<int32_t> keep_ids;
         Tokenizer* tok = model_->tokenizer();
         if (tok) keep_ids.push_back(static_cast<int32_t>(tok->eos_id()));
         for (int32_t sid : chat_template_.stop_token_ids())
             keep_ids.push_back(sid);
+        // Think tokens (<think>/<\/think>) must not be banned — think models
+        // generate these to enter/exit reasoning mode. Banning them causes
+        // immediate stop on structured output prompts.
+        if (tok) {
+            int32_t ts = tok->find_token("<think>");
+            int32_t te = tok->find_token("</think>");
+            if (ts >= 0) keep_ids.push_back(ts);
+            if (te >= 0) keep_ids.push_back(te);
+        }
         auto is_kept = [&](int32_t id) {
             return std::find(keep_ids.begin(), keep_ids.end(), id) != keep_ids.end();
         };
@@ -821,26 +830,33 @@ bool Engine::init_features() {
             add_if_valid(chat_template_.end_header_id());
 
         // Scan vocab for control tokens, excluding stop/EOS tokens.
-        // Matches both <|...|> (Qwen, Llama) and <...> (Gemma) patterns
-        // where the content is a known control-token keyword.
         if (tok) {
             int vocab_size = tok->vocab_size();
-            for (int i = 0; i < vocab_size; i++) {
-                if (is_kept(static_cast<int32_t>(i))) continue;
-                const std::string& t = tok->token_text(i);
-                if (t.size() < 3 || t[0] != '<' || t.back() != '>') continue;
-                // <|...|> pattern (Qwen, Llama, Mistral)
-                if (t.size() >= 4 && t[1] == '|' && t[t.size()-2] == '|') {
-                    add_if_valid(static_cast<int32_t>(i));
-                    continue;
+            if (tok->has_token_types()) {
+                // Authoritative: use token_type metadata from GGUF.
+                // CONTROL=3 tokens are special tokens that should not appear in output.
+                for (int i = 0; i < vocab_size; i++) {
+                    if (is_kept(static_cast<int32_t>(i))) continue;
+                    if (tok->is_control_token(i)) {
+                        add_if_valid(static_cast<int32_t>(i));
+                    }
                 }
-                // <keyword> pattern (Gemma: <pad>, <unk>, <mask>, <start_of_turn>, etc.)
-                // Only ban known control keywords, not arbitrary <word> tokens.
-                if (t == "<pad>" || t == "<unk>" || t == "<mask>" ||
-                    t == "<unused0>" || t == "<start_of_turn>" ||
-                    t == "<end_of_turn>" || t == "<start_of_image>" ||
-                    t == "<end_of_image>") {
-                    add_if_valid(static_cast<int32_t>(i));
+            } else {
+                // Fallback: heuristic pattern matching for GGUF files without token_type.
+                for (int i = 0; i < vocab_size; i++) {
+                    if (is_kept(static_cast<int32_t>(i))) continue;
+                    const std::string& t = tok->token_text(i);
+                    if (t.size() < 3 || t[0] != '<' || t.back() != '>') continue;
+                    if (t.size() >= 4 && t[1] == '|' && t[t.size()-2] == '|') {
+                        add_if_valid(static_cast<int32_t>(i));
+                        continue;
+                    }
+                    if (t == "<pad>" || t == "<unk>" || t == "<mask>" ||
+                        t == "<unused0>" || t == "<start_of_turn>" ||
+                        t == "<end_of_turn>" || t == "<start_of_image>" ||
+                        t == "<end_of_image>") {
+                        add_if_valid(static_cast<int32_t>(i));
+                    }
                 }
             }
         }
@@ -858,17 +874,17 @@ bool Engine::init_features() {
     }
 
     // Cache think token IDs for stop-suppression during reasoning.
-    // Only treat as think model if <think> is a special token (high vocab ID),
-    // not a regular text piece. Nemotron has "<think>" at ID 12 as a normal
-    // text token — treating it as think-start breaks stop-token suppression.
+    // Only treat as think model if <think> is a CONTROL token (from GGUF metadata),
+    // not a regular text piece. Nemotron has "<think>" at ID 12 as normal text.
     {
         Tokenizer* ptok = model_->tokenizer();
         if (ptok) {
             int32_t ts = ptok->find_token("<think>");
             int32_t te = ptok->find_token("</think>");
             int vocab = ptok->vocab_size();
-            // Heuristic: special/added tokens are typically in the last 1% of vocab
-            bool is_special = (ts >= 0 && ts > vocab * 99 / 100);
+            bool is_special = (ts >= 0) && (ptok->has_token_types()
+                ? ptok->is_control_token(ts)
+                : ts > vocab * 99 / 100);
             if (is_special) {
                 think_start_id_ = ts;
                 think_end_id_ = te;

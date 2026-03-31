@@ -61,6 +61,17 @@ public:
     // Look up a token string in the vocabulary, returns -1 if not found
     int32_t find_token(const std::string& text) const;
 
+    // Token type metadata from GGUF (tokenizer.ggml.token_type).
+    // Types: NORMAL=1, UNKNOWN=2, CONTROL=3, USER_DEFINED=4, UNUSED=5, BYTE=6
+    void load_token_types(const std::vector<int32_t>& types) { token_types_ = types; }
+    bool has_token_types() const { return !token_types_.empty(); }
+    bool is_control_token(int id) const {
+        return id >= 0 && id < static_cast<int>(token_types_.size()) && token_types_[id] == 3;
+    }
+    bool is_special_token(int id) const {
+        return id >= 0 && id < static_cast<int>(token_types_.size()) && token_types_[id] != 1;
+    }
+
 private:
     // UTF-8 helper: returns byte length of character starting at c
     static int utf8_char_len(uint8_t c);
@@ -91,6 +102,9 @@ private:
 
     // GPT2 BPE merge ranks: "token1 token2" -> rank (lower = higher priority)
     std::unordered_map<std::string, int> merge_ranks_;
+
+    // Per-token type from GGUF (NORMAL=1, CONTROL=3, etc.). Empty if not available.
+    std::vector<int32_t> token_types_;
 };
 
 } // namespace imp
