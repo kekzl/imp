@@ -555,6 +555,13 @@ struct GetItemExpr : Expr {
     std::unique_ptr<Expr> key;
 };
 
+struct SliceExpr : Expr {
+    std::unique_ptr<Expr> object;
+    std::unique_ptr<Expr> start; // nullptr = beginning
+    std::unique_ptr<Expr> stop;  // nullptr = end
+    std::unique_ptr<Expr> step;  // nullptr = 1
+};
+
 struct FilterExpr : Expr {
     std::unique_ptr<Expr> value;
     std::string name;
@@ -949,60 +956,56 @@ private:
                 advance();
             } else if (check(TokenType::OP, "is")) {
                 advance();
-                // "is defined", "is none", "is not defined", "is not none"
-                if (check(TokenType::IDENT, "defined")) {
-                    advance();
-                    auto bin = std::make_unique<BinOpExpr>();
-                    bin->op = "is defined";
-                    bin->left = std::move(left);
-                    bin->right = nullptr;
-                    left = std::move(bin);
-                    continue;
-                } else if (check(TokenType::IDENT, "none")) {
-                    advance();
-                    auto bin = std::make_unique<BinOpExpr>();
-                    bin->op = "is none";
-                    bin->left = std::move(left);
-                    bin->right = nullptr;
-                    left = std::move(bin);
-                    continue;
-                } else {
-                    // Generic "is X" — treat as equality test
-                    auto right = parse_addition();
-                    auto bin = std::make_unique<BinOpExpr>();
-                    bin->op = "==";
-                    bin->left = std::move(left);
-                    bin->right = std::move(right);
-                    left = std::move(bin);
-                    continue;
+                // "is defined", "is none", "is string", "is iterable", "is mapping", "is number"
+                if (check(TokenType::IDENT)) {
+                    std::string test_name = peek().value;
+                    if (test_name == "defined" || test_name == "none" ||
+                        test_name == "string" || test_name == "iterable" ||
+                        test_name == "mapping" || test_name == "number" ||
+                        test_name == "integer" || test_name == "float" ||
+                        test_name == "boolean" || test_name == "sequence") {
+                        advance();
+                        auto bin = std::make_unique<BinOpExpr>();
+                        bin->op = "is " + test_name;
+                        bin->left = std::move(left);
+                        bin->right = nullptr;
+                        left = std::move(bin);
+                        continue;
+                    }
                 }
+                // Generic "is X" — treat as equality test
+                auto right = parse_addition();
+                auto bin = std::make_unique<BinOpExpr>();
+                bin->op = "==";
+                bin->left = std::move(left);
+                bin->right = std::move(right);
+                left = std::move(bin);
+                continue;
             } else if (check(TokenType::OP, "is not")) {
                 advance();
-                if (check(TokenType::IDENT, "defined")) {
-                    advance();
-                    auto bin = std::make_unique<BinOpExpr>();
-                    bin->op = "is not defined";
-                    bin->left = std::move(left);
-                    bin->right = nullptr;
-                    left = std::move(bin);
-                    continue;
-                } else if (check(TokenType::IDENT, "none")) {
-                    advance();
-                    auto bin = std::make_unique<BinOpExpr>();
-                    bin->op = "is not none";
-                    bin->left = std::move(left);
-                    bin->right = nullptr;
-                    left = std::move(bin);
-                    continue;
-                } else {
-                    auto right = parse_addition();
-                    auto bin = std::make_unique<BinOpExpr>();
-                    bin->op = "!=";
-                    bin->left = std::move(left);
-                    bin->right = std::move(right);
-                    left = std::move(bin);
-                    continue;
+                if (check(TokenType::IDENT)) {
+                    std::string test_name = peek().value;
+                    if (test_name == "defined" || test_name == "none" ||
+                        test_name == "string" || test_name == "iterable" ||
+                        test_name == "mapping" || test_name == "number" ||
+                        test_name == "integer" || test_name == "float" ||
+                        test_name == "boolean" || test_name == "sequence") {
+                        advance();
+                        auto bin = std::make_unique<BinOpExpr>();
+                        bin->op = "is not " + test_name;
+                        bin->left = std::move(left);
+                        bin->right = nullptr;
+                        left = std::move(bin);
+                        continue;
+                    }
                 }
+                auto right = parse_addition();
+                auto bin = std::make_unique<BinOpExpr>();
+                bin->op = "!=";
+                bin->left = std::move(left);
+                bin->right = std::move(right);
+                left = std::move(bin);
+                continue;
             } else {
                 break;
             }
@@ -1090,12 +1093,61 @@ private:
                 }
             } else if (check(TokenType::LBRACKET)) {
                 advance();
-                auto key = parse_expr();
-                if (check(TokenType::RBRACKET)) advance();
-                auto gi = std::make_unique<GetItemExpr>();
-                gi->object = std::move(expr);
-                gi->key = std::move(key);
-                expr = std::move(gi);
+                // Check for slice notation: [start:stop:step]
+                // Possible forms: [expr], [start:], [:stop], [start:stop], [::step], [start:stop:step], etc.
+                std::unique_ptr<Expr> first;
+                bool is_slice = false;
+
+                // Check if starts with ':' (no start)
+                if (check(TokenType::COLON)) {
+                    is_slice = true;
+                    first = nullptr;
+                } else if (check(TokenType::RBRACKET)) {
+                    // Empty brackets — shouldn't happen but handle gracefully
+                    advance();
+                    auto gi = std::make_unique<GetItemExpr>();
+                    gi->object = std::move(expr);
+                    gi->key = std::make_unique<LiteralExpr>(Value());
+                    expr = std::move(gi);
+                    continue;
+                } else {
+                    first = parse_expr();
+                    if (check(TokenType::COLON)) {
+                        is_slice = true;
+                    }
+                }
+
+                if (is_slice) {
+                    auto sl = std::make_unique<SliceExpr>();
+                    sl->object = std::move(expr);
+                    sl->start = std::move(first); // may be nullptr
+
+                    // Consume first ':'
+                    if (check(TokenType::COLON)) advance();
+
+                    // Parse stop (optional)
+                    if (!check(TokenType::COLON) && !check(TokenType::RBRACKET)) {
+                        sl->stop = parse_expr();
+                    }
+
+                    // Parse step (optional, after second ':')
+                    if (check(TokenType::COLON)) {
+                        advance();
+                        if (!check(TokenType::RBRACKET)) {
+                            sl->step = parse_expr();
+                        }
+                    }
+
+                    if (check(TokenType::RBRACKET)) advance();
+                    expr = std::move(sl);
+                } else {
+                    // Regular subscript
+                    if (check(TokenType::RBRACKET)) advance();
+                    auto gi = std::make_unique<GetItemExpr>();
+                    gi->object = std::move(expr);
+                    gi->key = std::move(first);
+                    expr = std::move(gi);
+                }
             } else if (check(TokenType::LPAREN)) {
                 // Function call on an expression
                 advance();
@@ -1473,6 +1525,9 @@ private:
             }
             return obj;
         }
+        if (auto* sl = dynamic_cast<const SliceExpr*>(&expr)) {
+            return eval_slice(*sl);
+        }
         return Value();
     }
 
@@ -1510,6 +1565,45 @@ private:
         if (bin.op == "is not none") {
             Value left = eval(*bin.left);
             return Value(!left.is_none());
+        }
+
+        // Type tests: is string, is iterable, is mapping, is number, etc.
+        auto eval_type_test = [&](const std::string& test_name, const Value& v) -> bool {
+            if (test_name == "string")   return v.is_string();
+            if (test_name == "iterable") return v.is_array() || v.is_string() || (v.is_object() && v.as_object());
+            if (test_name == "mapping")  return v.is_object() && v.as_object();
+            if (test_name == "number")   return v.is_number();
+            if (test_name == "integer")  return v.is_int();
+            if (test_name == "float")    return v.is_double();
+            if (test_name == "boolean")  return v.is_bool();
+            if (test_name == "sequence") return v.is_array() || v.is_string();
+            if (test_name == "defined")  return !v.is_none();
+            if (test_name == "none")     return v.is_none();
+            return false;
+        };
+
+        if (bin.op.size() > 3 && bin.op.substr(0, 3) == "is " && bin.op.substr(3, 4) != "not ") {
+            std::string test_name = bin.op.substr(3);
+            // For "is defined", check variable existence rather than value
+            if (test_name == "defined") {
+                if (auto* var = dynamic_cast<const VariableExpr*>(bin.left.get()))
+                    return Value(is_defined(var->name));
+                Value left = eval(*bin.left);
+                return Value(!left.is_none());
+            }
+            Value left = eval(*bin.left);
+            return Value(eval_type_test(test_name, left));
+        }
+        if (bin.op.size() > 7 && bin.op.substr(0, 7) == "is not ") {
+            std::string test_name = bin.op.substr(7);
+            if (test_name == "defined") {
+                if (auto* var = dynamic_cast<const VariableExpr*>(bin.left.get()))
+                    return Value(!is_defined(var->name));
+                Value left = eval(*bin.left);
+                return Value(left.is_none());
+            }
+            Value left = eval(*bin.left);
+            return Value(!eval_type_test(test_name, left));
         }
 
         Value left = eval(*bin.left);
@@ -1702,10 +1796,13 @@ private:
             }
             return val;
         }
+        if (f.name == "tojson") {
+            return Value(value_to_json(val));
+        }
         if (f.name == "selectattr" || f.name == "rejectattr" ||
             f.name == "map" || f.name == "select" || f.name == "reject" ||
             f.name == "batch" || f.name == "slice" || f.name == "sort" ||
-            f.name == "unique" || f.name == "groupby" || f.name == "tojson") {
+            f.name == "unique" || f.name == "groupby") {
             // Unsupported filters — return value as-is
             IMP_LOG_WARN("jinja: unsupported filter '%s'", f.name.c_str());
             return val;
@@ -1784,20 +1881,42 @@ private:
             const std::string& s = obj.as_string();
 
             if (m.method == "strip") {
+                std::string chars;
+                if (!m.args.empty()) chars = eval(*m.args[0]).to_string();
                 size_t start = 0;
-                while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) start++;
+                if (chars.empty()) {
+                    while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) start++;
+                } else {
+                    while (start < s.size() && chars.find(s[start]) != std::string::npos) start++;
+                }
                 size_t end = s.size();
-                while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1]))) end--;
+                if (chars.empty()) {
+                    while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1]))) end--;
+                } else {
+                    while (end > start && chars.find(s[end - 1]) != std::string::npos) end--;
+                }
                 return Value(s.substr(start, end - start));
             }
             if (m.method == "lstrip") {
+                std::string chars;
+                if (!m.args.empty()) chars = eval(*m.args[0]).to_string();
                 size_t start = 0;
-                while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) start++;
+                if (chars.empty()) {
+                    while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) start++;
+                } else {
+                    while (start < s.size() && chars.find(s[start]) != std::string::npos) start++;
+                }
                 return Value(s.substr(start));
             }
             if (m.method == "rstrip") {
+                std::string chars;
+                if (!m.args.empty()) chars = eval(*m.args[0]).to_string();
                 size_t end = s.size();
-                while (end > 0 && std::isspace(static_cast<unsigned char>(s[end - 1]))) end--;
+                if (chars.empty()) {
+                    while (end > 0 && std::isspace(static_cast<unsigned char>(s[end - 1]))) end--;
+                } else {
+                    while (end > 0 && chars.find(s[end - 1]) != std::string::npos) end--;
+                }
                 return Value(s.substr(0, end));
             }
             if (m.method == "startswith") {
@@ -1956,6 +2075,126 @@ private:
 
         IMP_LOG_WARN("jinja: unknown method '%s'", m.method.c_str());
         return Value();
+    }
+
+    Value eval_slice(const SliceExpr& sl) {
+        Value obj = eval(*sl.object);
+        int64_t len = obj.length();
+
+        // Resolve start/stop/step with Python-style defaults
+        int64_t step = sl.step ? static_cast<int64_t>(eval(*sl.step).to_number()) : 1;
+        if (step == 0) step = 1; // avoid infinite loop
+
+        int64_t start, stop;
+        if (step > 0) {
+            start = sl.start ? static_cast<int64_t>(eval(*sl.start).to_number()) : 0;
+            stop  = sl.stop  ? static_cast<int64_t>(eval(*sl.stop).to_number())  : len;
+        } else {
+            start = sl.start ? static_cast<int64_t>(eval(*sl.start).to_number()) : len - 1;
+            stop  = sl.stop  ? static_cast<int64_t>(eval(*sl.stop).to_number())  : -(len + 1);
+        }
+
+        // Normalize negative indices
+        if (start < 0) start += len;
+        if (stop < 0)  stop += len;
+
+        // Clamp
+        if (step > 0) {
+            if (start < 0) start = 0;
+            if (start > len) start = len;
+            if (stop < 0) stop = 0;
+            if (stop > len) stop = len;
+        } else {
+            if (start < -1) start = -1;
+            if (start >= len) start = len - 1;
+            if (stop < -1) stop = -1;
+            if (stop >= len) stop = len - 1;
+        }
+
+        if (obj.is_array()) {
+            auto& arr = obj.as_array();
+            Value::Array result;
+            if (step > 0) {
+                for (int64_t i = start; i < stop; i += step)
+                    result.push_back(arr[static_cast<size_t>(i)]);
+            } else {
+                for (int64_t i = start; i > stop; i += step)
+                    result.push_back(arr[static_cast<size_t>(i)]);
+            }
+            return Value(std::move(result));
+        }
+        if (obj.is_string()) {
+            auto& s = obj.as_string();
+            std::string result;
+            if (step > 0) {
+                for (int64_t i = start; i < stop; i += step)
+                    result += s[static_cast<size_t>(i)];
+            } else {
+                for (int64_t i = start; i > stop; i += step)
+                    result += s[static_cast<size_t>(i)];
+            }
+            return Value(std::move(result));
+        }
+        return Value();
+    }
+
+    static std::string value_to_json(const Value& val) {
+        if (val.is_none()) return "null";
+        if (val.is_bool()) return val.as_bool() ? "true" : "false";
+        if (val.is_int()) return std::to_string(val.as_int());
+        if (val.is_double()) {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%g", val.as_double());
+            // Ensure it looks like a number (has decimal or exponent)
+            std::string s(buf);
+            if (s.find('.') == std::string::npos && s.find('e') == std::string::npos && s.find('E') == std::string::npos)
+                s += ".0";
+            return s;
+        }
+        if (val.is_string()) {
+            std::string r = "\"";
+            for (char c : val.as_string()) {
+                switch (c) {
+                    case '"':  r += "\\\""; break;
+                    case '\\': r += "\\\\"; break;
+                    case '\n': r += "\\n"; break;
+                    case '\r': r += "\\r"; break;
+                    case '\t': r += "\\t"; break;
+                    default:
+                        if (static_cast<unsigned char>(c) < 0x20) {
+                            char hex[8];
+                            std::snprintf(hex, sizeof(hex), "\\u%04x", static_cast<unsigned char>(c));
+                            r += hex;
+                        } else {
+                            r += c;
+                        }
+                }
+            }
+            r += "\"";
+            return r;
+        }
+        if (val.is_array()) {
+            std::string r = "[";
+            auto& arr = val.as_array();
+            for (size_t i = 0; i < arr.size(); i++) {
+                if (i > 0) r += ", ";
+                r += value_to_json(arr[i]);
+            }
+            r += "]";
+            return r;
+        }
+        if (val.is_object() && val.as_object()) {
+            std::string r = "{";
+            bool first = true;
+            for (auto& [k, v] : *val.as_object()) {
+                if (!first) r += ", ";
+                r += "\"" + k + "\": " + value_to_json(v);
+                first = false;
+            }
+            r += "}";
+            return r;
+        }
+        return "null";
     }
 
     std::vector<Scope> scopes_;

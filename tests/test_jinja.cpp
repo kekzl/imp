@@ -334,3 +334,317 @@ TEST(JinjaChatTest, MultiTurnWithTrim) {
     // Trim should have removed the spaces
     EXPECT_EQ(result.find("  Hello  "), std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// Slice notation
+// ---------------------------------------------------------------------------
+
+TEST(JinjaTest, SliceFromStart) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% for x in items[1:] %}{{ x }}{% endfor %}"));
+    auto items = Value::array({Value(std::string("a")), Value(std::string("b")), Value(std::string("c"))});
+    EXPECT_EQ(tpl.render({{"items", items}}), "bc");
+}
+
+TEST(JinjaTest, SliceToEnd) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% for x in items[:2] %}{{ x }}{% endfor %}"));
+    auto items = Value::array({Value(std::string("a")), Value(std::string("b")), Value(std::string("c"))});
+    EXPECT_EQ(tpl.render({{"items", items}}), "ab");
+}
+
+TEST(JinjaTest, SliceStartStop) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% for x in items[0:3] %}{{ x }}{% endfor %}"));
+    auto items = Value::array({Value(std::string("a")), Value(std::string("b")), Value(std::string("c")), Value(std::string("d"))});
+    EXPECT_EQ(tpl.render({{"items", items}}), "abc");
+}
+
+TEST(JinjaTest, SliceNegativeIndex) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% for x in items[:-1] %}{{ x }}{% endfor %}"));
+    auto items = Value::array({Value(std::string("a")), Value(std::string("b")), Value(std::string("c"))});
+    EXPECT_EQ(tpl.render({{"items", items}}), "ab");
+}
+
+TEST(JinjaTest, SliceReverse) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% for x in items[::-1] %}{{ x }}{% endfor %}"));
+    auto items = Value::array({Value(std::string("a")), Value(std::string("b")), Value(std::string("c"))});
+    EXPECT_EQ(tpl.render({{"items", items}}), "cba");
+}
+
+TEST(JinjaTest, SliceString) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{{ text[1:4] }}"));
+    EXPECT_EQ(tpl.render({{"text", Value(std::string("hello"))}}), "ell");
+}
+
+TEST(JinjaTest, SliceInExpr) {
+    // Slice as an expression assigned via set
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{%- set sub = items[1:] -%}{% for x in sub %}{{ x }}{% endfor %}"));
+    auto items = Value::array({Value(std::string("a")), Value(std::string("b")), Value(std::string("c"))});
+    EXPECT_EQ(tpl.render({{"items", items}}), "bc");
+}
+
+// ---------------------------------------------------------------------------
+// Type tests (is string, is iterable, is defined, is none, etc.)
+// ---------------------------------------------------------------------------
+
+TEST(JinjaTest, IsString) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% if x is string %}yes{% else %}no{% endif %}"));
+    EXPECT_EQ(tpl.render({{"x", Value(std::string("hello"))}}), "yes");
+    EXPECT_EQ(tpl.render({{"x", Value(42)}}), "no");
+    EXPECT_EQ(tpl.render({{"x", Value::array({Value(1)})}}), "no");
+}
+
+TEST(JinjaTest, IsNotString) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% if x is not string %}yes{% else %}no{% endif %}"));
+    EXPECT_EQ(tpl.render({{"x", Value(42)}}), "yes");
+    EXPECT_EQ(tpl.render({{"x", Value(std::string("hello"))}}), "no");
+}
+
+TEST(JinjaTest, IsIterable) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% if x is iterable %}yes{% else %}no{% endif %}"));
+    EXPECT_EQ(tpl.render({{"x", Value::array({Value(1)})}}), "yes");
+    EXPECT_EQ(tpl.render({{"x", Value(std::string("abc"))}}), "yes");
+    EXPECT_EQ(tpl.render({{"x", Value(42)}}), "no");
+}
+
+TEST(JinjaTest, IsMapping) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% if x is mapping %}yes{% else %}no{% endif %}"));
+    EXPECT_EQ(tpl.render({{"x", Value::object({{"a", Value(1)}})}}), "yes");
+    EXPECT_EQ(tpl.render({{"x", Value(std::string("abc"))}}), "no");
+}
+
+TEST(JinjaTest, IsNumber) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{% if x is number %}yes{% else %}no{% endif %}"));
+    EXPECT_EQ(tpl.render({{"x", Value(42)}}), "yes");
+    EXPECT_EQ(tpl.render({{"x", Value(3.14)}}), "yes");
+    EXPECT_EQ(tpl.render({{"x", Value(std::string("42"))}}), "no");
+}
+
+// ---------------------------------------------------------------------------
+// String strip with character arguments
+// ---------------------------------------------------------------------------
+
+TEST(JinjaTest, StripWithChars) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{{ text.strip('xy') }}"));
+    EXPECT_EQ(tpl.render({{"text", Value(std::string("xyhelloyx"))}}), "hello");
+}
+
+TEST(JinjaTest, LstripWithChars) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{{ text.lstrip('ab') }}"));
+    EXPECT_EQ(tpl.render({{"text", Value(std::string("aabchello"))}}), "chello");
+}
+
+TEST(JinjaTest, RstripWithChars) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{{ text.rstrip('!.') }}"));
+    EXPECT_EQ(tpl.render({{"text", Value(std::string("hello!!.."))}}), "hello");
+}
+
+// ---------------------------------------------------------------------------
+// tojson filter
+// ---------------------------------------------------------------------------
+
+TEST(JinjaTest, TojsonString) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{{ text | tojson }}"));
+    EXPECT_EQ(tpl.render({{"text", Value(std::string("hello"))}}), "\"hello\"");
+}
+
+TEST(JinjaTest, TojsonNumber) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{{ x | tojson }}"));
+    EXPECT_EQ(tpl.render({{"x", Value(42)}}), "42");
+}
+
+TEST(JinjaTest, TojsonArray) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{{ items | tojson }}"));
+    auto items = Value::array({Value(1), Value(std::string("two")), Value(true)});
+    EXPECT_EQ(tpl.render({{"items", items}}), "[1, \"two\", true]");
+}
+
+TEST(JinjaTest, TojsonNone) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{{ x | tojson }}"));
+    EXPECT_EQ(tpl.render({}), "null");
+}
+
+TEST(JinjaTest, TojsonBool) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse("{{ x | tojson }}"));
+    EXPECT_EQ(tpl.render({{"x", Value(true)}}), "true");
+    EXPECT_EQ(tpl.render({{"x", Value(false)}}), "false");
+}
+
+// ---------------------------------------------------------------------------
+// Real Qwen3 chat template (with is string, system message, slice)
+// ---------------------------------------------------------------------------
+
+TEST(JinjaChatTest, Qwen3RealTemplate) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse(
+        "{%- if messages[0].role == 'system' %}"
+            "{{- '<|im_start|>system\\n' + messages[0].content + '<|im_end|>\\n' }}"
+        "{%- endif %}"
+        "{%- for message in messages %}"
+            "{%- if message.content is string %}"
+                "{%- set content = message.content %}"
+            "{%- else %}"
+                "{%- set content = '' %}"
+            "{%- endif %}"
+            "{%- if (message.role == \"user\") or (message.role == \"system\" and not loop.first) %}"
+                "{{- '<|im_start|>' + message.role + '\\n' + content + '<|im_end|>' + '\\n' }}"
+            "{%- elif message.role == \"assistant\" %}"
+                "{{- '<|im_start|>' + message.role + '\\n' + content + '<|im_end|>\\n' }}"
+            "{%- endif %}"
+        "{%- endfor %}"
+        "{%- if add_generation_prompt %}"
+            "{{- '<|im_start|>assistant\\n' }}"
+        "{%- endif %}"
+    ));
+
+    auto msgs = Value::array({
+        Value::object({{"role", Value(std::string("system"))}, {"content", Value(std::string("You are helpful."))}}),
+        Value::object({{"role", Value(std::string("user"))}, {"content", Value(std::string("Hello"))}}),
+    });
+
+    auto result = tpl.render({
+        {"messages", msgs},
+        {"add_generation_prompt", Value(true)},
+    });
+
+    EXPECT_NE(result.find("<|im_start|>system\nYou are helpful.<|im_end|>"), std::string::npos);
+    EXPECT_NE(result.find("<|im_start|>user\nHello<|im_end|>"), std::string::npos);
+    EXPECT_NE(result.find("<|im_start|>assistant\n"), std::string::npos);
+}
+
+TEST(JinjaChatTest, Qwen3IsStringWithNonStringContent) {
+    // Test that "is string" returns false for non-string content
+    Template tpl;
+    ASSERT_TRUE(tpl.parse(
+        "{%- for message in messages %}"
+            "{%- if message.content is string %}"
+                "{{- 'STR:' + message.content }}"
+            "{%- else %}"
+                "{{- 'OTHER' }}"
+            "{%- endif %}"
+        "{%- endfor %}"
+    ));
+
+    auto msgs = Value::array({
+        Value::object({{"role", Value(std::string("user"))}, {"content", Value(std::string("hello"))}}),
+        Value::object({{"role", Value(std::string("user"))}, {"content", Value(42)}}),
+    });
+
+    auto result = tpl.render({{"messages", msgs}});
+    EXPECT_EQ(result, "STR:helloOTHER");
+}
+
+// ---------------------------------------------------------------------------
+// Real Gemma chat template (with slice, is string, trim filter)
+// ---------------------------------------------------------------------------
+
+TEST(JinjaChatTest, GemmaRealTemplate) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse(
+        "{%- if messages[0]['role'] == 'system' -%}"
+            "{%- set first_user_prefix = messages[0]['content'] + '\\n\\n' -%}"
+            "{%- set loop_messages = messages[1:] -%}"
+        "{%- else -%}"
+            "{%- set first_user_prefix = \"\" -%}"
+            "{%- set loop_messages = messages -%}"
+        "{%- endif -%}"
+        "{%- for message in loop_messages -%}"
+            "{%- if (message['role'] == 'assistant') -%}"
+                "{%- set role = \"model\" -%}"
+            "{%- else -%}"
+                "{%- set role = message['role'] -%}"
+            "{%- endif -%}"
+            "{{ '<start_of_turn>' + role + '\\n' + (first_user_prefix if loop.first else \"\") }}"
+            "{%- if message['content'] is string -%}"
+                "{{ message['content'] | trim }}"
+            "{%- endif -%}"
+            "{{ '<end_of_turn>\\n' }}"
+        "{%- endfor -%}"
+        "{%- if add_generation_prompt -%}"
+            "{{'<start_of_turn>model\\n'}}"
+        "{%- endif -%}"
+    ));
+
+    // Test with system message (exercises messages[1:] slice)
+    auto msgs_with_sys = Value::array({
+        Value::object({{"role", Value(std::string("system"))}, {"content", Value(std::string("Be concise"))}}),
+        Value::object({{"role", Value(std::string("user"))}, {"content", Value(std::string("  Hello  "))}}),
+        Value::object({{"role", Value(std::string("assistant"))}, {"content", Value(std::string("  Hi  "))}}),
+        Value::object({{"role", Value(std::string("user"))}, {"content", Value(std::string("  Bye  "))}}),
+    });
+
+    auto result = tpl.render({
+        {"messages", msgs_with_sys},
+        {"add_generation_prompt", Value(true)},
+    });
+
+    // System message extracted as prefix for first user message
+    EXPECT_NE(result.find("<start_of_turn>user\nBe concise\n\nHello<end_of_turn>"), std::string::npos);
+    // Assistant mapped to model
+    EXPECT_NE(result.find("<start_of_turn>model\nHi<end_of_turn>"), std::string::npos);
+    // Second user message without system prefix
+    EXPECT_NE(result.find("<start_of_turn>user\nBye<end_of_turn>"), std::string::npos);
+    // Generation prompt
+    EXPECT_NE(result.find("<start_of_turn>model\n"), std::string::npos);
+    // trim filter should have removed spaces
+    EXPECT_EQ(result.find("  Hello  "), std::string::npos);
+}
+
+TEST(JinjaChatTest, GemmaRealTemplateNoSystem) {
+    Template tpl;
+    ASSERT_TRUE(tpl.parse(
+        "{%- if messages[0]['role'] == 'system' -%}"
+            "{%- set first_user_prefix = messages[0]['content'] + '\\n\\n' -%}"
+            "{%- set loop_messages = messages[1:] -%}"
+        "{%- else -%}"
+            "{%- set first_user_prefix = \"\" -%}"
+            "{%- set loop_messages = messages -%}"
+        "{%- endif -%}"
+        "{%- for message in loop_messages -%}"
+            "{%- if (message['role'] == 'assistant') -%}"
+                "{%- set role = \"model\" -%}"
+            "{%- else -%}"
+                "{%- set role = message['role'] -%}"
+            "{%- endif -%}"
+            "{{ '<start_of_turn>' + role + '\\n' + (first_user_prefix if loop.first else \"\") }}"
+            "{%- if message['content'] is string -%}"
+                "{{ message['content'] | trim }}"
+            "{%- endif -%}"
+            "{{ '<end_of_turn>\\n' }}"
+        "{%- endfor -%}"
+        "{%- if add_generation_prompt -%}"
+            "{{'<start_of_turn>model\\n'}}"
+        "{%- endif -%}"
+    ));
+
+    // Test without system message (loop_messages = messages, no slice needed)
+    auto msgs = Value::array({
+        Value::object({{"role", Value(std::string("user"))}, {"content", Value(std::string("Hello"))}}),
+    });
+
+    auto result = tpl.render({
+        {"messages", msgs},
+        {"add_generation_prompt", Value(true)},
+    });
+
+    EXPECT_NE(result.find("<start_of_turn>user\nHello<end_of_turn>"), std::string::npos);
+    EXPECT_NE(result.find("<start_of_turn>model\n"), std::string::npos);
+}
