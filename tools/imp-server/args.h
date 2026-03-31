@@ -25,7 +25,7 @@ struct ServerArgs {
     std::string models_dir;    // --models-dir: scan for .gguf files
     std::string api_key;       // --api-key: require Bearer token auth
     std::string reasoning_format = "deepseek";  // --reasoning-format: deepseek or none
-    float think_budget = 0.5f; // --think-budget: fraction of max_tokens for reasoning (0=disabled)
+    float think_budget = 1.0f; // --think-budget: fraction of max_tokens for reasoning (1.0=unlimited, 0=disabled)
     bool self_speculative = false;  // --self-speculative
     int self_spec_k = 2;
     int self_spec_exit_layer = -1;
