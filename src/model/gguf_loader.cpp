@@ -1161,6 +1161,12 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             }
         }
 
+        // Load per-token type metadata (NORMAL=1, CONTROL=3, etc.)
+        auto it_types = metadata.find("tokenizer.ggml.token_type");
+        if (it_types != metadata.end() && !it_types->second.int_array.empty()) {
+            tokenizer->load_token_types(it_types->second.int_array);
+        }
+
         // Extract chat template string (Jinja2) for template family detection
         auto it_tpl = metadata.find("tokenizer.chat_template");
         if (it_tpl != metadata.end() && !it_tpl->second.str_val.empty()) {
