@@ -2,9 +2,11 @@
 
 #include "model/tokenizer.h"
 #include "model/model_arch.h"
+#include "model/jinja.h"
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <memory>
 
 namespace imp {
 
@@ -39,8 +41,11 @@ public:
     // Default template family for a given model architecture (fallback)
     static ChatTemplateFamily default_family_for_arch(ModelArch arch);
 
-    // Initialize: resolve special token IDs via tokenizer
-    bool init(ChatTemplateFamily family, const Tokenizer& tokenizer);
+    // Initialize: resolve special token IDs via tokenizer.
+    // jinja_str: raw Jinja2 template from GGUF (optional). When provided and
+    // parseable, the engine renders via Jinja2 instead of hardcoded families.
+    bool init(ChatTemplateFamily family, const Tokenizer& tokenizer,
+              const std::string& jinja_str = "");
 
     // Build token ID vector: special tokens as raw IDs, text segments encoded
     // suppress_thinking: inject /no_think for Qwen3 models to prevent thinking
@@ -108,6 +113,20 @@ private:
     int32_t boi_id_ = -1;           // <start_of_image>
     int32_t eoi_id_ = -1;           // <end_of_image>
     int32_t img_soft_token_id_ = -1; // <image_soft_token>
+
+    // Jinja2 engine (set during init if template string provided)
+    std::shared_ptr<jinja::Template> jinja_tpl_;
+    bool use_jinja_ = false;
+
+    // Jinja2-based apply: render template, split on control tokens, encode
+    std::vector<int32_t> apply_jinja(const Tokenizer& tok,
+                                      const std::vector<ChatMessage>& msgs,
+                                      bool add_generation_prompt = true,
+                                      bool suppress_thinking = false) const;
+
+    // Build control token lookup table for splitting rendered output
+    void build_control_token_map(const Tokenizer& tok);
+    std::vector<std::pair<std::string, int32_t>> control_tokens_; // sorted longest-first
 
     // Template-specific apply methods
     std::vector<int32_t> apply_chatml(const Tokenizer& tok,
