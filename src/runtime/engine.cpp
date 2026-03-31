@@ -786,7 +786,7 @@ bool Engine::init_features() {
                              chat_template_family_name(family), model_arch_name(mcfg.arch));
         }
         if (family != ChatTemplateFamily::RAW)
-            chat_template_.init(family, *tok);
+            chat_template_.init(family, *tok, tok->chat_template_str());
     }
 
     // Build banned token list: special/control tokens that must never appear
