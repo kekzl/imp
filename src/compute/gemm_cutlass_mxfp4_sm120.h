@@ -55,6 +55,11 @@ void convert_nvfp4_to_mxfp4_hadamard(const NvFP4QuantResult& src,
 
 void free_cutlass_mxfp4_weight(CutlassMxFP4Weight& w);
 
+// Unpack native MXFP4 GGUF blocks (17 bytes each: 16 data + 1 scale)
+// into separate data and SfAtom scale arrays for CUTLASS GEMM.
+bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K,
+                         CutlassMxFP4Weight& dst, cudaStream_t stream);
+
 // Quantize FP16 activation [M,K] to MXFP4 in CUTLASS block-scaled format.
 // Uses absmax per 32 elements → UE8M0 scale.
 // Optionally applies Walsh-Hadamard rotation before quantization (hadamard_size > 0).

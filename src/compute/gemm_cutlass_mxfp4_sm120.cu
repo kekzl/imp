@@ -247,6 +247,89 @@ void convert_nvfp4_to_mxfp4_cutlass(const NvFP4QuantResult& src,
                   (long long)N, (long long)K, sf_bytes / (1024.0 * 1024.0));
 }
 
+// ---------------------------------------------------------------------------
+// Unpack native MXFP4 GGUF blocks into CUTLASS format.
+// GGUF block: [16 bytes E2M1 data | 1 byte UE8M0 scale] × N_blocks
+// Output: separate contiguous data array + SfAtom scale array.
+// ---------------------------------------------------------------------------
+
+__global__ void unpack_mxfp4_gguf_kernel(
+    const uint8_t* __restrict__ raw_blocks,  // [total_blocks × 17]
+    uint8_t*       __restrict__ data_out,     // [N × K/2] packed E2M1
+    uint8_t*       __restrict__ sf_out,       // SfAtom layout UE8M0
+    int N, int K, int blocks_per_row, int n_k_tiles)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_blocks = N * blocks_per_row;
+    if (idx >= total_blocks) return;
+
+    int row = idx / blocks_per_row;
+    int blk = idx % blocks_per_row;
+
+    // Read the 17-byte block
+    const uint8_t* block = raw_blocks + static_cast<size_t>(idx) * 17;
+
+    // Copy 16 data bytes to contiguous output
+    // Output data layout: row-major [N, K/2], each block writes 16 bytes at offset
+    size_t data_offset = static_cast<size_t>(row) * (blocks_per_row * 16) + blk * 16;
+    for (int b = 0; b < 16; b++) {
+        data_out[data_offset + b] = block[b];
+    }
+
+    // Write scale byte to SfAtom layout
+    uint8_t scale = block[16];
+    int sf_idx = mx_sfatom_offset(row, blk, n_k_tiles);
+    sf_out[sf_idx] = scale;
+}
+
+bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K,
+                         CutlassMxFP4Weight& dst, cudaStream_t stream)
+{
+    if (K % 32 != 0) {
+        IMP_LOG_WARN("unpack_mxfp4_gguf: K=%lld not multiple of 32", (long long)K);
+        return false;
+    }
+
+    int blocks_per_row = static_cast<int>(K) / 32;
+    int total_blocks = static_cast<int>(N) * blocks_per_row;
+
+    // Allocate output buffers
+    size_t data_bytes = static_cast<size_t>(N) * (K / 2);  // [N, K/2] packed nibbles
+    size_t sf_bytes = cutlass_mxfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
+
+    void* d_data = nullptr;
+    void* d_sf = nullptr;
+    if (cudaMalloc(&d_data, data_bytes) != cudaSuccess ||
+        cudaMalloc(&d_sf, sf_bytes) != cudaSuccess) {
+        if (d_data) cudaFree(d_data);
+        if (d_sf) cudaFree(d_sf);
+        return false;
+    }
+    cudaMemsetAsync(d_sf, 0, sf_bytes, stream);
+
+    int n_k_tiles = (static_cast<int>(K) + kMxAtomKElems - 1) / kMxAtomKElems;
+    int threads = 256;
+    int blocks = (total_blocks + threads - 1) / threads;
+    unpack_mxfp4_gguf_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const uint8_t*>(raw_gpu),
+        static_cast<uint8_t*>(d_data),
+        static_cast<uint8_t*>(d_sf),
+        static_cast<int>(N), static_cast<int>(K), blocks_per_row, n_k_tiles);
+
+    dst.data = d_data;
+    dst.scale_factors = d_sf;
+    dst.tensor_scale = 1.0f;
+    dst.N = N;
+    dst.K = K;
+    dst.sf_bytes = sf_bytes;
+    dst.owns_data = true;
+
+    IMP_LOG_DEBUG("unpack_mxfp4_gguf: N=%lld K=%lld data=%.2f MiB sf=%.2f MiB",
+                  (long long)N, (long long)K,
+                  data_bytes / (1024.0 * 1024.0), sf_bytes / (1024.0 * 1024.0));
+    return true;
+}
+
 // Forward declaration (defined below in activation quantization section)
 __global__ void quantize_fp16_mxfp4_cutlass_kernel(
     const half* __restrict__ input,

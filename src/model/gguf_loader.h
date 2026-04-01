@@ -62,6 +62,7 @@ enum class GGMLType : uint32_t {
     F64     = 28,
     IQ1_M   = 29,
     BF16    = 30,
+    MXFP4   = 31,  // 32 elements: 16 bytes E2M1 + 1 byte UE8M0 scale
 };
 
 // Block size (number of elements per quantization block)

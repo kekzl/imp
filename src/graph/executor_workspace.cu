@@ -1838,6 +1838,42 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                              ct_count, ct_total / (1024.0 * 1024.0));
             }
 
+            // Phase 3c-native: register MXFP4 GGUF weights directly in CUTLASS cache.
+            // These bypass NVFP4 entirely — the GGUF data is unpacked into
+            // separate E2M1 data + SfAtom UE8M0 scales on GPU.
+            if (qscratch_.mxfp4_act_sf != nullptr && cutlass_sm120_mxfp4_available()) {
+                int mx_native = 0;
+                size_t mx_native_bytes = 0;
+                auto register_if_mxfp4 = [&](const Tensor& w, GGMLQuantType qt) {
+                    if (qt != GGMLQuantType::MXFP4 || !w.data || !w.on_device) return;
+                    if (w.ndim < 2 || w.shape[1] % 32 != 0) return;
+                    CutlassMxFP4Weight mw;
+                    if (unpack_mxfp4_gguf(w.data, w.shape[0], w.shape[1], mw, stream)) {
+                        wcache_.cutlass_mxfp4[w.data] = mw;
+                        mx_native_bytes += mw.sf_bytes + static_cast<size_t>(w.shape[0]) * (w.shape[1] / 2);
+                        mx_native++;
+                    }
+                };
+                for (int i = 0; i < cfg.n_layers; i++) {
+                    const auto& L = model_->layer(i);
+                    register_if_mxfp4(L.wq, L.wq_qtype);
+                    register_if_mxfp4(L.wk, L.wk_qtype);
+                    register_if_mxfp4(L.wv, L.wv_qtype);
+                    register_if_mxfp4(L.wo, L.wo_qtype);
+                    register_if_mxfp4(L.w_up, L.w_up_qtype);
+                    register_if_mxfp4(L.w_gate, L.w_gate_qtype);
+                    register_if_mxfp4(L.w_down, L.w_down_qtype);
+                }
+                register_if_mxfp4(model_->output_proj(), model_->out_proj_qtype_);
+                if (mx_native > 0) {
+                    cudaStreamSynchronize(stream);
+                    wcache_.cutlass_mxfp4_bytes += mx_native_bytes;
+                    wcache_.use_mxfp4 = true;
+                    IMP_LOG_INFO("Native MXFP4 GGUF: %d tensors, %.2f MiB (direct → CUTLASS)",
+                                 mx_native, mx_native_bytes / (1024.0 * 1024.0));
+                }
+            }
+
             // Convert NVFP4 weights to MXFP4 (UE8M0 scales) if MXFP4 prefill is enabled.
             // Same packed FP4 data (borrowed), only allocates new scale factor buffers.
             // Note: Hadamard rotation requires MR-GPTQ pre-rotated weights (SafeTensors).
