@@ -37,7 +37,7 @@ Current gap vs FP8 baseline: -23% decode (191 vs 248 tok/s). This is algorithm-i
 - **EAGLE-3**: Dead end on single GPU (56 tok/s vs 306 baseline). Draft model shares same weights = 78% cost per layer.
 - **Self-speculative**: Dead end (50% of baseline). Memory-bound decode can't amortize.
 - **DFlash**: Not feasible — no draft model for Qwen3-32B, training requires datacenter GPUs.
-- **N-gram speculation**: Implemented (`src/runtime/ngram_spec.cpp`), viable for repetitive prompts. **WARNING:** Uses pseudo-prefill verify which has KV cache numerical divergence (Prefill CUTLASS FMHA vs Decode paged attention produce different KV values). Same bug as TurboDraft — needs multi-sequence decode verify to be correct.
+- **N-gram speculation**: Implemented (`src/runtime/ngram_spec.cpp`), uses multi-sequence decode verify. +10% on repetitive content, ~0% overhead on non-repetitive. CLI: `--ngram-spec`.
 - **TurboDraft (PPM + Classifier)**: Dead end. PPM 0% acceptance on real text; SVD classifier too lossy.
 - **Pseudo-prefill verify bug**: Fixed in NgramSpec — now uses multi-sequence decode verify.
 

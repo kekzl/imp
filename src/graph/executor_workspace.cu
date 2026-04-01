@@ -1841,6 +1841,56 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             // Phase 3c-native: register MXFP4 GGUF weights directly in CUTLASS cache.
             // These bypass NVFP4 entirely — the GGUF data is unpacked into
             // separate E2M1 data + SfAtom UE8M0 scales on GPU.
+            // For native MXFP4, allocate activation buffers if not already done.
+            if (cutlass_sm120_mxfp4_available()) {
+                // Check if any layer has MXFP4 weights
+                bool has_mxfp4 = false;
+                auto check_mxfp4 = [&](const Tensor&, GGMLQuantType qt) {
+                    if (qt == GGMLQuantType::MXFP4) has_mxfp4 = true;
+                };
+                for (int i = 0; i < cfg.n_layers && !has_mxfp4; i++) {
+                    const auto& L = model_->layer(i);
+                    check_mxfp4(L.wq, L.wq_qtype);
+                    check_mxfp4(L.wk, L.wk_qtype);
+                    check_mxfp4(L.w_gate, L.w_gate_qtype);
+                }
+
+                // Allocate MXFP4 scratch if needed and not already allocated
+                if (has_mxfp4 && !qscratch_.mxfp4_act_sf) {
+                    int max_k = 0, max_n = 0;
+                    for (int i = 0; i < cfg.n_layers; i++) {
+                        const auto& L = model_->layer(i);
+                        if (L.wq.data && L.wq.ndim >= 2) {
+                            max_n = std::max(max_n, (int)L.wq.shape[0]);
+                            max_k = std::max(max_k, (int)L.wq.shape[1]);
+                        }
+                        if (L.w_gate.data && L.w_gate.ndim >= 2) {
+                            max_n = std::max(max_n, (int)L.w_gate.shape[0]);
+                            max_k = std::max(max_k, (int)L.w_gate.shape[1]);
+                        }
+                        if (L.w_down.data && L.w_down.ndim >= 2) {
+                            max_n = std::max(max_n, (int)L.w_down.shape[0]);
+                            max_k = std::max(max_k, (int)L.w_down.shape[1]);
+                        }
+                    }
+                    if (max_k > 0) {
+                        qscratch_.mxfp4_act_sf_size = cutlass_mxfp4_sf_size(max_tokens_, max_k);
+                        qscratch_.mxfp4_workspace_size = gemm_mxfp4_cutlass_sm120_workspace(max_tokens_, max_n, max_k);
+                        qscratch_.mxfp4_act_sf = vram_alloc(vram_alloc_, qscratch_.mxfp4_act_sf_size, "mxfp4_act_sf");
+                        qscratch_.mxfp4_workspace = (qscratch_.mxfp4_workspace_size > 0)
+                            ? vram_alloc(vram_alloc_, qscratch_.mxfp4_workspace_size, "mxfp4_workspace")
+                            : nullptr;
+                        // Also need CUTLASS activation data buffer
+                        if (!qscratch_.cutlass_act_data) {
+                            qscratch_.cutlass_act_data_size = static_cast<size_t>(max_tokens_) * (max_k / 2);
+                            qscratch_.cutlass_act_data = vram_alloc(vram_alloc_, qscratch_.cutlass_act_data_size, "cutlass_act_data");
+                        }
+                        IMP_LOG_INFO("Native MXFP4: allocated activation scratch (sf=%.2f MiB)",
+                                     qscratch_.mxfp4_act_sf_size / (1024.0 * 1024.0));
+                    }
+                }
+            }
+
             if (qscratch_.mxfp4_act_sf != nullptr && cutlass_sm120_mxfp4_available()) {
                 int mx_native = 0;
                 size_t mx_native_bytes = 0;
