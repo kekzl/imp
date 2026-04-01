@@ -2,17 +2,13 @@
 
 ## Open Work
 
-### GDN / Qwen3.5 Output Quality
-Qwen3.5 Gated DeltaNet models produce degenerate output after ~15-30 tokens (repetition loops), while llama.cpp generates correct output with the same GGUF files. Benchmark throughput is correct (327 tok/s for 4B).
+### GDN / Qwen3.5 Output Quality — FIXED
+Root cause: Jinja2 engine lacked macro support. Qwen3.5's chat template uses
+`{% macro render_content() %}` — without macro support, user content rendered
+as "None", causing the model to ignore prompts entirely.
 
-**Fixed so far:**
-- SSM/GDN state reset between requests (prefix caching leak)
-- Shared memory race condition in fused multi-token scan kernel
-- L2 normalization epsilon (additive → max-based, matching llama.cpp)
-
-**Still broken:** Prefill logits diverge slightly from llama.cpp even for 2-token prompts. The divergence accumulates through 24 GDN layers. Code review found no math errors — needs layer-by-layer tensor dump comparison against llama.cpp.
-
-**Files:** `src/compute/gdn.cu`, `src/graph/executor_forward.cu` (run_gdn)
+Fix: Jinja2 macro support (MacroNode, parse_macro, call_macro). GDN kernels
+were correct all along. Both Qwen3.5-4B and 9B now produce coherent output.
 
 ### MXFP4 Native GGUF Weight Format
 Plan documented in `docs/MXFP4_GGUF_PLAN.md`. Native MXFP4 weights would feed directly into Blackwell tensor cores via CUTLASS — zero dequant overhead, expected 2-4x prefill speedup vs Q4_K_M.
@@ -42,8 +38,8 @@ Current gap vs FP8 baseline: -23% decode (191 vs 248 tok/s). This is algorithm-i
 - **Self-speculative**: Dead end (50% of baseline). Memory-bound decode can't amortize.
 - **DFlash**: Not feasible — no draft model for Qwen3-32B, training requires datacenter GPUs.
 - **N-gram speculation**: Implemented (`src/runtime/ngram_spec.cpp`), viable for repetitive prompts. **WARNING:** Uses pseudo-prefill verify which has KV cache numerical divergence (Prefill CUTLASS FMHA vs Decode paged attention produce different KV values). Same bug as TurboDraft — needs multi-sequence decode verify to be correct.
-- **TurboDraft (PPM + Classifier)**: Dead end. PPM 5-gram matching achieves 0% acceptance on real text — LLM token sequences are too complex for n-gram prediction. SVD-compressed classifier achieves 74-90% reconstruction error — too lossy for top-1 accuracy. Trainingsless drafting doesn't work for LLM inference.
-- **Pseudo-prefill verify bug**: Prefill-mode forward produces numerically different KV cache entries than decode-mode forward (different attention kernels: CUTLASS FMHA vs paged attention). Affects NgramSpec and any future pseudo-prefill verify. Fix: use multi-sequence decode verify (like SelfSpeculativeDecoder) or accept the divergence for short sequences.
+- **TurboDraft (PPM + Classifier)**: Dead end. PPM 0% acceptance on real text; SVD classifier too lossy.
+- **Pseudo-prefill verify bug**: Fixed in NgramSpec — now uses multi-sequence decode verify.
 
 ---
 
