@@ -92,7 +92,7 @@ def quantize_mxfp4_block(values: np.ndarray) -> tuple[bytes, int]:
 
 
 def quantize_tensor_mxfp4(tensor: torch.Tensor) -> bytes:
-    """Quantize a 2D tensor [N, K] to MXFP4 GGUF format.
+    """Quantize a 2D tensor [N, K] to MXFP4 GGUF format (vectorized).
 
     Returns raw bytes: N * (K/32) blocks of 17 bytes each.
     """
@@ -101,16 +101,46 @@ def quantize_tensor_mxfp4(tensor: torch.Tensor) -> bytes:
     assert K % 32 == 0, f"K={K} must be multiple of 32"
 
     data = tensor.float().numpy()
-    blocks_per_row = K // 32
-    result = bytearray()
+    n_blocks = N * (K // 32)
 
-    for row in range(N):
-        for blk in range(blocks_per_row):
-            values = data[row, blk * 32 : (blk + 1) * 32]
-            block_bytes, _ = quantize_mxfp4_block(values)
-            result.extend(block_bytes)
+    # Reshape to [n_blocks, 32]
+    blocks = data.reshape(n_blocks, 32)
 
-    return bytes(result)
+    # Compute per-block scales: UE8M0 = ceil_pow2(absmax / 6.0)
+    absmax = np.max(np.abs(blocks), axis=1)  # [n_blocks]
+    scale_float = absmax / 6.0
+    # UE8M0 encoding: pure exponent byte
+    scale_float = np.maximum(scale_float, 1e-38)
+    log2_scale = np.ceil(np.log2(scale_float)).astype(np.int32)
+    scale_bytes = np.clip(log2_scale + 127, 0, 254).astype(np.uint8)
+    # Decode scales back for quantization
+    scale_vals = np.ldexp(1.0, (scale_bytes.astype(np.int32) - 127))  # 2^(byte-127)
+    scale_vals[absmax == 0] = 1.0  # avoid div by zero
+
+    # Quantize: val/scale → nearest E2M1
+    scaled = blocks / scale_vals[:, None]  # [n_blocks, 32]
+
+    # E2M1 quantization: find nearest value in table
+    pos_table = E2M1_TABLE[:8]  # [0, 0.5, 1, 1.5, 2, 3, 4, 6]
+    signs = (scaled < 0).astype(np.uint8)
+    abs_scaled = np.abs(scaled)
+
+    # Vectorized nearest-neighbor: broadcast [n_blocks, 32, 1] vs [8]
+    diffs = np.abs(abs_scaled[:, :, None] - pos_table[None, None, :])
+    indices = np.argmin(diffs, axis=2).astype(np.uint8)  # [n_blocks, 32]
+    nibbles = indices | (signs << 3)  # [n_blocks, 32], 0-15
+
+    # Pack pairs of nibbles into bytes: [n_blocks, 16]
+    lo = nibbles[:, 0::2]  # even indices
+    hi = nibbles[:, 1::2]  # odd indices
+    packed = (lo | (hi << 4)).astype(np.uint8)  # [n_blocks, 16]
+
+    # Build output: [16 bytes data | 1 byte scale] per block
+    result = np.zeros((n_blocks, 17), dtype=np.uint8)
+    result[:, :16] = packed
+    result[:, 16] = scale_bytes
+
+    return result.tobytes()
 
 
 # ============================================================================
