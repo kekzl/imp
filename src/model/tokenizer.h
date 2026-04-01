@@ -36,6 +36,10 @@ public:
     void set_add_space_prefix(bool add) { add_space_prefix_ = add; }
     bool add_space_prefix() const { return add_space_prefix_; }
 
+    // Pre-tokenizer type from GGUF metadata (e.g. "default", "llama3", "deepseek-llm")
+    void set_pre_tokenizer(const std::string& pre) { pre_tokenizer_ = pre; }
+    const std::string& pre_tokenizer() const { return pre_tokenizer_; }
+
     // Chat template string from GGUF metadata (Jinja2 format, used for detection)
     void set_chat_template_str(const std::string& tpl) { chat_template_str_ = tpl; }
     const std::string& chat_template_str() const { return chat_template_str_; }
@@ -50,7 +54,16 @@ public:
 
     int vocab_size() const;
     int bos_id() const;
-    int eos_id() const;
+    int eos_id() const { return eos_ids_.empty() ? 2 : eos_ids_[0]; }
+    const std::vector<int32_t>& eos_ids() const { return eos_ids_; }
+    void add_eos_id(int32_t id) {
+        for (int32_t eid : eos_ids_) if (eid == id) return;
+        eos_ids_.push_back(id);
+    }
+    bool is_eos(int32_t id) const {
+        for (int32_t eid : eos_ids_) if (eid == id) return true;
+        return false;
+    }
 
     // Raw token text from vocabulary (for special token scanning)
     const std::string& token_text(int id) const {
@@ -93,9 +106,11 @@ private:
     std::vector<std::string> vocab_;
     std::vector<float> scores_;
     std::unordered_map<std::string, int32_t> token_to_id_;
-    int bos_id_ = 1, eos_id_ = 2;
+    int bos_id_ = 1;
+    std::vector<int32_t> eos_ids_ = {2};
 
     std::string type_ = "spm";  // "spm" or "gpt2"
+    std::string pre_tokenizer_;     // Pre-tokenizer type from GGUF tokenizer.ggml.pre
     bool add_bos_ = true;
     bool add_space_prefix_ = true;  // SentencePiece ▁ prefix (false for Gemma)
     std::string chat_template_str_;  // Raw Jinja2 template from GGUF

@@ -28,6 +28,12 @@ struct ChatMessage {
     std::string content;
 };
 
+struct ToolFunction {
+    std::string name;
+    std::string description;
+    std::string parameters_json;  // JSON string of parameters schema
+};
+
 class ChatTemplate {
 public:
     ChatTemplate() = default;
@@ -53,6 +59,14 @@ public:
                                const std::vector<ChatMessage>& messages,
                                bool suppress_thinking = false) const;
 
+    // Build token ID vector with tool definitions passed to Jinja2 context.
+    // Falls back to standard apply() if Jinja2 doesn't handle tools.
+    std::vector<int32_t> apply_with_tools(const Tokenizer& tok,
+                                           const std::vector<ChatMessage>& messages,
+                                           const std::vector<ToolFunction>& tools,
+                                           const std::string& tool_choice = "auto",
+                                           bool suppress_thinking = false) const;
+
     // Build token ID vector with image tokens inserted before the first user message.
     // Produces: <boi> <img_soft_token>*n_image_tokens <eoi> \n {text}
     std::vector<int32_t> apply_with_image(const Tokenizer& tok,
@@ -63,6 +77,7 @@ public:
     const std::vector<int32_t>& stop_token_ids() const { return stop_token_ids_; }
     ChatTemplateFamily family() const { return family_; }
     bool is_raw() const { return family_ == ChatTemplateFamily::RAW; }
+    bool supports_tools() const;
     const std::string& default_system_message() const { return default_system_message_; }
 
     // Special token accessors (for banned token list)
@@ -123,6 +138,21 @@ private:
                                       const std::vector<ChatMessage>& msgs,
                                       bool add_generation_prompt = true,
                                       bool suppress_thinking = false) const;
+
+    // Jinja2-based apply with tool definitions in context
+    std::vector<int32_t> apply_jinja_with_tools(const Tokenizer& tok,
+                                                 const std::vector<ChatMessage>& msgs,
+                                                 const std::vector<ToolFunction>& tools,
+                                                 const std::string& tool_choice,
+                                                 bool add_generation_prompt = true,
+                                                 bool suppress_thinking = false) const;
+
+    // Shared helper: split rendered string on control tokens and encode
+    std::vector<int32_t> tokenize_rendered(const Tokenizer& tok,
+                                            const std::string& rendered) const;
+
+    // Auto-detect stop tokens from a rendered Jinja2 context
+    void auto_detect_stop_tokens(const jinja::Context& ctx) const;
 
     // Build control token lookup table for splitting rendered output
     void build_control_token_map(const Tokenizer& tok);

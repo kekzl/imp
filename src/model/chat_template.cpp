@@ -2,6 +2,7 @@
 #include "core/logging.h"
 
 #include <algorithm>
+#include <functional>
 
 namespace imp {
 
@@ -52,6 +53,8 @@ ChatTemplateFamily ChatTemplate::default_family_for_arch(ModelArch arch) {
         case ModelArch::NEMOTRON_H_MOE: return ChatTemplateFamily::NEMOTRON;
         case ModelArch::QWEN3:          return ChatTemplateFamily::CHATML;
         case ModelArch::QWEN3_MOE:      return ChatTemplateFamily::CHATML;
+        case ModelArch::QWEN35:         return ChatTemplateFamily::CHATML;
+        case ModelArch::QWEN35_MOE:     return ChatTemplateFamily::CHATML;
         case ModelArch::GEMMA3:         return ChatTemplateFamily::GEMMA;
         case ModelArch::LLAMA4:         return ChatTemplateFamily::LLAMA3;
         default:                        return ChatTemplateFamily::RAW;
@@ -165,13 +168,10 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer,
             stop_token_ids_.push_back(static_cast<int32_t>(tokenizer.eos_id()));
 
             // Vision tokens (optional — only present in Gemma-3 multimodal)
+            // Resolved from vocabulary; stays -1 if not found (disables vision).
             boi_id_ = tokenizer.find_token("<start_of_image>");
             eoi_id_ = tokenizer.find_token("<end_of_image>");
             img_soft_token_id_ = tokenizer.find_token("<image_soft_token>");
-            // Fall back to well-known Gemma-3 IDs
-            if (boi_id_ < 0) boi_id_ = 255999;
-            if (eoi_id_ < 0) eoi_id_ = 256000;
-            if (img_soft_token_id_ < 0) img_soft_token_id_ = 262144;
             break;
         }
         case ChatTemplateFamily::DEEPSEEK_R1: {
@@ -668,41 +668,14 @@ void ChatTemplate::build_control_token_map(const Tokenizer& tok) {
               [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
 }
 
-std::vector<int32_t> ChatTemplate::apply_jinja(
+// ---------------------------------------------------------------------------
+// Shared helper: split rendered Jinja2 output on control tokens and encode
+// ---------------------------------------------------------------------------
+
+std::vector<int32_t> ChatTemplate::tokenize_rendered(
     const Tokenizer& tok,
-    const std::vector<ChatMessage>& msgs,
-    bool add_generation_prompt,
-    bool suppress_thinking) const
+    const std::string& rendered) const
 {
-    if (!jinja_tpl_) return {};
-
-    // Build Jinja2 context
-    jinja::Value::Array msg_arr;
-    for (const auto& m : msgs) {
-        std::string content = m.content;
-        if (suppress_thinking && m.role == "system") {
-            content += " /no_think";
-        }
-        msg_arr.push_back(jinja::Value::object({
-            {"role", jinja::Value(m.role)},
-            {"content", jinja::Value(content)},
-        }));
-    }
-
-    jinja::Context ctx;
-    ctx["messages"] = jinja::Value(std::move(msg_arr));
-    ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt);
-    ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
-    ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
-
-    // Render
-    std::string rendered = jinja_tpl_->render(ctx);
-    if (rendered.empty()) {
-        IMP_LOG_WARN("Jinja2 render returned empty string (error: %s)", jinja_tpl_->error().c_str());
-        return {};
-    }
-    IMP_LOG_DEBUG("Jinja2 rendered (%zu chars): %.200s", rendered.size(), rendered.c_str());
-
     // Split rendered string into tokens by finding control token boundaries.
     // Control tokens appear as literal text in the rendered output (e.g. "<|im_start|>").
     // We identify them via the control_tokens_ map (sorted longest-first).
@@ -743,29 +716,273 @@ std::vector<int32_t> ChatTemplate::apply_jinja(
         pos = next;
     }
 
-    // Auto-detect stop tokens: scan for the control token that closes assistant turns.
-    // If we don't have stop tokens yet from the hardcoded path, try to detect them.
-    if (stop_token_ids_.empty() && !control_tokens_.empty()) {
-        // Render without generation prompt to find the closing delimiter
-        jinja::Context ctx_no_gen = ctx;
-        ctx_no_gen["add_generation_prompt"] = jinja::Value(false);
-        std::string rendered_no_gen = jinja_tpl_->render(ctx_no_gen);
+    return result;
+}
 
-        // The difference between rendered (with gen prompt) and rendered_no_gen
-        // reveals what token closes the last turn. Find the last control token
-        // in rendered_no_gen — that's the stop token.
-        for (const auto& [text, id] : control_tokens_) {
-            size_t last = rendered_no_gen.rfind(text);
-            if (last != std::string::npos && last > rendered_no_gen.size() / 2) {
-                // Likely the end-of-turn delimiter
-                const_cast<ChatTemplate*>(this)->stop_token_ids_.push_back(id);
-                IMP_LOG_INFO("Jinja2: auto-detected stop token '%s' (id=%d)", text.c_str(), id);
-                break;
+// ---------------------------------------------------------------------------
+// Build Jinja2 messages array from ChatMessages
+// ---------------------------------------------------------------------------
+
+static jinja::Value::Array build_jinja_messages(
+    const std::vector<ChatMessage>& msgs, bool suppress_thinking)
+{
+    jinja::Value::Array msg_arr;
+    for (const auto& m : msgs) {
+        std::string content = m.content;
+        if (suppress_thinking && m.role == "system") {
+            content += " /no_think";
+        }
+        msg_arr.push_back(jinja::Value::object({
+            {"role", jinja::Value(m.role)},
+            {"content", jinja::Value(content)},
+        }));
+    }
+    return msg_arr;
+}
+
+// ---------------------------------------------------------------------------
+// Parse a JSON string into a jinja::Value (recursive)
+// ---------------------------------------------------------------------------
+
+static jinja::Value json_string_to_value(const std::string& json_str) {
+    // Minimal JSON parser for tool parameter schemas.
+    // Handles: objects, arrays, strings, numbers, booleans, null.
+    size_t pos = 0;
+    auto skip_ws = [&]() {
+        while (pos < json_str.size() && (json_str[pos] == ' ' || json_str[pos] == '\t' ||
+               json_str[pos] == '\n' || json_str[pos] == '\r'))
+            pos++;
+    };
+
+    std::function<jinja::Value()> parse_value;
+
+    auto parse_string = [&]() -> std::string {
+        if (pos >= json_str.size() || json_str[pos] != '"') return "";
+        pos++; // skip opening "
+        std::string result;
+        while (pos < json_str.size() && json_str[pos] != '"') {
+            if (json_str[pos] == '\\' && pos + 1 < json_str.size()) {
+                pos++;
+                switch (json_str[pos]) {
+                    case '"':  result += '"';  break;
+                    case '\\': result += '\\'; break;
+                    case '/':  result += '/';  break;
+                    case 'n':  result += '\n'; break;
+                    case 't':  result += '\t'; break;
+                    case 'r':  result += '\r'; break;
+                    default:   result += json_str[pos]; break;
+                }
+            } else {
+                result += json_str[pos];
             }
+            pos++;
+        }
+        if (pos < json_str.size()) pos++; // skip closing "
+        return result;
+    };
+
+    auto parse_object = [&]() -> jinja::Value {
+        pos++; // skip {
+        auto obj = jinja::Value::make_object();
+        skip_ws();
+        if (pos < json_str.size() && json_str[pos] == '}') { pos++; return obj; }
+        while (pos < json_str.size()) {
+            skip_ws();
+            std::string key = parse_string();
+            skip_ws();
+            if (pos < json_str.size() && json_str[pos] == ':') pos++;
+            skip_ws();
+            obj.set(key, parse_value());
+            skip_ws();
+            if (pos < json_str.size() && json_str[pos] == ',') { pos++; continue; }
+            if (pos < json_str.size() && json_str[pos] == '}') { pos++; break; }
+            break;
+        }
+        return obj;
+    };
+
+    auto parse_array = [&]() -> jinja::Value {
+        pos++; // skip [
+        jinja::Value::Array arr;
+        skip_ws();
+        if (pos < json_str.size() && json_str[pos] == ']') { pos++; return jinja::Value(std::move(arr)); }
+        while (pos < json_str.size()) {
+            skip_ws();
+            arr.push_back(parse_value());
+            skip_ws();
+            if (pos < json_str.size() && json_str[pos] == ',') { pos++; continue; }
+            if (pos < json_str.size() && json_str[pos] == ']') { pos++; break; }
+            break;
+        }
+        return jinja::Value(std::move(arr));
+    };
+
+    parse_value = [&]() -> jinja::Value {
+        skip_ws();
+        if (pos >= json_str.size()) return jinja::Value();
+        char c = json_str[pos];
+        if (c == '"') return jinja::Value(parse_string());
+        if (c == '{') return parse_object();
+        if (c == '[') return parse_array();
+        if (c == 't' && json_str.compare(pos, 4, "true") == 0)  { pos += 4; return jinja::Value(true); }
+        if (c == 'f' && json_str.compare(pos, 5, "false") == 0) { pos += 5; return jinja::Value(false); }
+        if (c == 'n' && json_str.compare(pos, 4, "null") == 0)  { pos += 4; return jinja::Value(); }
+        // Number
+        size_t start = pos;
+        bool is_float = false;
+        if (c == '-') pos++;
+        while (pos < json_str.size() && json_str[pos] >= '0' && json_str[pos] <= '9') pos++;
+        if (pos < json_str.size() && json_str[pos] == '.') { is_float = true; pos++; }
+        while (pos < json_str.size() && json_str[pos] >= '0' && json_str[pos] <= '9') pos++;
+        if (pos < json_str.size() && (json_str[pos] == 'e' || json_str[pos] == 'E')) {
+            is_float = true; pos++;
+            if (pos < json_str.size() && (json_str[pos] == '+' || json_str[pos] == '-')) pos++;
+            while (pos < json_str.size() && json_str[pos] >= '0' && json_str[pos] <= '9') pos++;
+        }
+        std::string num_str = json_str.substr(start, pos - start);
+        if (num_str.empty()) return jinja::Value();
+        if (is_float) return jinja::Value(std::stod(num_str));
+        return jinja::Value(static_cast<int64_t>(std::stoll(num_str)));
+    };
+
+    return parse_value();
+}
+
+// ---------------------------------------------------------------------------
+// Auto-detect stop tokens from Jinja2 rendering
+// ---------------------------------------------------------------------------
+
+void ChatTemplate::auto_detect_stop_tokens(const jinja::Context& ctx) const {
+    if (!stop_token_ids_.empty() || control_tokens_.empty()) return;
+
+    jinja::Context ctx_no_gen = ctx;
+    ctx_no_gen["add_generation_prompt"] = jinja::Value(false);
+    std::string rendered_no_gen = jinja_tpl_->render(ctx_no_gen);
+
+    for (const auto& [text, id] : control_tokens_) {
+        size_t last = rendered_no_gen.rfind(text);
+        if (last != std::string::npos && last > rendered_no_gen.size() / 2) {
+            const_cast<ChatTemplate*>(this)->stop_token_ids_.push_back(id);
+            IMP_LOG_INFO("Jinja2: auto-detected stop token '%s' (id=%d)", text.c_str(), id);
+            break;
         }
     }
+}
+
+std::vector<int32_t> ChatTemplate::apply_jinja(
+    const Tokenizer& tok,
+    const std::vector<ChatMessage>& msgs,
+    bool add_generation_prompt,
+    bool suppress_thinking) const
+{
+    if (!jinja_tpl_) return {};
+
+    // Build Jinja2 context
+    jinja::Context ctx;
+    ctx["messages"] = jinja::Value(build_jinja_messages(msgs, suppress_thinking));
+    ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt);
+    ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
+    ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
+
+    // Render
+    std::string rendered = jinja_tpl_->render(ctx);
+    if (rendered.empty()) {
+        IMP_LOG_WARN("Jinja2 render returned empty string (error: %s)", jinja_tpl_->error().c_str());
+        return {};
+    }
+    IMP_LOG_DEBUG("Jinja2 rendered (%zu chars): %.200s", rendered.size(), rendered.c_str());
+
+    auto result = tokenize_rendered(tok, rendered);
+
+    // Auto-detect stop tokens if needed
+    auto_detect_stop_tokens(ctx);
 
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Jinja2 rendering with tool definitions in context
+// ---------------------------------------------------------------------------
+
+std::vector<int32_t> ChatTemplate::apply_jinja_with_tools(
+    const Tokenizer& tok,
+    const std::vector<ChatMessage>& msgs,
+    const std::vector<ToolFunction>& tools,
+    const std::string& tool_choice,
+    bool add_generation_prompt,
+    bool suppress_thinking) const
+{
+    if (!jinja_tpl_) return {};
+
+    // Build tools array as Jinja2 values (OpenAI format: {type, function: {name, description, parameters}})
+    jinja::Value::Array tools_arr;
+    for (const auto& t : tools) {
+        // Parse parameters JSON into a proper Jinja2 object so templates can
+        // traverse properties, use tojson, etc.
+        jinja::Value params = t.parameters_json.empty()
+            ? jinja::Value::make_object()
+            : json_string_to_value(t.parameters_json);
+
+        tools_arr.push_back(jinja::Value::object({
+            {"type", jinja::Value(std::string("function"))},
+            {"function", jinja::Value::object({
+                {"name", jinja::Value(t.name)},
+                {"description", jinja::Value(t.description)},
+                {"parameters", std::move(params)},
+            })},
+        }));
+    }
+
+    // Build context
+    jinja::Context ctx;
+    ctx["messages"] = jinja::Value(build_jinja_messages(msgs, suppress_thinking));
+    ctx["tools"] = jinja::Value(std::move(tools_arr));
+    ctx["tool_choice"] = jinja::Value(tool_choice);
+    ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt);
+    ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
+    ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
+
+    // Render
+    std::string rendered = jinja_tpl_->render(ctx);
+    if (rendered.empty()) {
+        IMP_LOG_WARN("Jinja2 tools render returned empty string (error: %s)", jinja_tpl_->error().c_str());
+        return {};
+    }
+    IMP_LOG_DEBUG("Jinja2 tools rendered (%zu chars): %.200s", rendered.size(), rendered.c_str());
+
+    auto result = tokenize_rendered(tok, rendered);
+
+    // Auto-detect stop tokens if needed
+    auto_detect_stop_tokens(ctx);
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// Public: apply_with_tools — try Jinja2 tools path, fallback to standard apply
+// ---------------------------------------------------------------------------
+
+std::vector<int32_t> ChatTemplate::apply_with_tools(
+    const Tokenizer& tok,
+    const std::vector<ChatMessage>& messages,
+    const std::vector<ToolFunction>& tools,
+    const std::string& tool_choice,
+    bool suppress_thinking) const
+{
+    // Try Jinja2 tools-aware path. Returns empty if Jinja2 is unavailable or
+    // rendering fails, signaling the caller to fall back to text-based tool injection.
+    if (use_jinja_ && jinja_tpl_ && !tools.empty()) {
+        auto tokens = apply_jinja_with_tools(tok, messages, tools, tool_choice,
+                                              true, suppress_thinking);
+        if (!tokens.empty()) return tokens;
+        IMP_LOG_WARN("Jinja2 tools render failed, caller should inject text-based tool prompt");
+    }
+
+    return {};
+}
+
+bool ChatTemplate::supports_tools() const {
+    return use_jinja_ && jinja_tpl_ != nullptr;
 }
 
 } // namespace imp

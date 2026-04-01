@@ -3,6 +3,7 @@
 #include "tool_call.h"
 
 #include "api/imp_internal.h"
+#include "model/hf_hub.h"
 #include "runtime/presets.h"
 
 #include <chrono>
@@ -120,11 +121,20 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res,
 }
 
 // Find a GGUF file by name in models_dir. Returns full path or empty string.
+// Also tries HuggingFace resolution if name looks like a repo ID (contains '/').
 std::string find_model_path(const ServerState& state, const std::string& name) {
+    // First try local models directory
     auto available = scan_gguf_files(state.models_dir);
     for (const auto& [fname, fpath] : available) {
         if (fname == name) return fpath;
     }
+
+    // If it looks like a HuggingFace repo ID (contains '/'), try resolving
+    if (name.find('/') != std::string::npos) {
+        std::string resolved = imp::resolve_model_gguf(name);
+        if (!resolved.empty()) return resolved;
+    }
+
     return "";
 }
 
@@ -423,9 +433,9 @@ bool validate_sampling_params(const json& body, httplib::Response& res) {
 
     if (body.contains("n")) {
         int n = body["n"].get<int>();
-        if (n != 1) {
+        if (n < 1 || n > 4) {
             res.status = 400;
-            json err = {{"error", {{"message", "\"n\" must be 1. n > 1 is not supported."},
+            json err = {{"error", {{"message", "\"n\" must be between 1 and 4."},
                                     {"type", "invalid_request_error"}}}};
             res.set_content(err.dump(), "application/json");
             return false;
@@ -468,6 +478,18 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     int max_tokens = body.value("max_tokens", state.default_max_tokens);
     int seed = body.value("seed", -1);
     bool stream = body.value("stream", false);
+    int n_completions = body.value("n", 1);
+    if (n_completions < 1) n_completions = 1;
+
+    // Streaming with n > 1 is not supported
+    if (stream && n_completions > 1) {
+        res.status = 400;
+        json err = {{"error", {{"message", "streaming with n > 1 is not supported"},
+                                {"type", "invalid_request_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
     float min_p = body.value("min_p", 0.0f);
     float typical_p = body.value("typical_p", 1.0f);
     float repetition_penalty = body.value("repetition_penalty", 1.0f);
@@ -521,6 +543,20 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 if (js.contains("schema") && js["schema"].is_object()) {
                     json_schema_str = js["schema"].dump();
                 }
+            }
+        }
+    }
+
+    // Parse logit_bias: map of token_id (string) -> bias (float)
+    std::vector<std::pair<int32_t, float>> logit_bias;
+    if (body.contains("logit_bias") && body["logit_bias"].is_object()) {
+        for (auto& [key, val] : body["logit_bias"].items()) {
+            try {
+                int32_t token_id = std::stoi(key);
+                float bias = val.get<float>();
+                logit_bias.emplace_back(token_id, bias);
+            } catch (...) {
+                // Skip invalid entries
             }
         }
     }
@@ -668,27 +704,23 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         snap_has_vision = !image_data.empty() && state.ctx && state.ctx->engine->has_vision();
     }
 
-    // Inject tool definitions into system message
-    if (has_tools && snap_have_template) {
-        std::string tool_prompt = build_tool_prompt(tpl_family, tools, tool_choice);
-        if (!tool_prompt.empty()) {
-            // Find or create system message
-            bool found_system = false;
-            for (auto& m : chat_msgs) {
-                if (m.role == "system") {
-                    m.content += tool_prompt;
-                    found_system = true;
-                    break;
+    // Build tool definitions for Jinja2-native tool calling
+    std::vector<imp::ToolFunction> tool_defs;
+    if (has_tools && snap_have_template && snap_chat_tpl.supports_tools()) {
+        for (const auto& t : tools) {
+            if (t.contains("function") && t["function"].is_object()) {
+                imp::ToolFunction tf;
+                tf.name = t["function"].value("name", "");
+                tf.description = t["function"].value("description", "");
+                if (t["function"].contains("parameters")) {
+                    tf.parameters_json = t["function"]["parameters"].dump();
                 }
-            }
-            if (!found_system) {
-                std::string sys = snap_chat_tpl.default_system_message();
-                if (sys.empty()) sys = "You are a helpful assistant.";
-                sys += tool_prompt;
-                chat_msgs.insert(chat_msgs.begin(), {"system", sys});
+                tool_defs.push_back(std::move(tf));
             }
         }
     }
+    // tools_via_jinja tracks whether we'll attempt the Jinja2 tools path
+    bool tools_via_jinja = !tool_defs.empty();
 
     // Handle vision: requires exclusive lock since it modifies engine state
     bool has_vision_request = snap_has_vision;
@@ -730,7 +762,53 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     std::vector<int32_t> tokens;
     if (snap_have_template && has_vision_request) {
         tokens = snap_chat_tpl.apply_with_image(*snap_tok, chat_msgs, 256, suppress_thinking);
+    } else if (snap_have_template && tools_via_jinja) {
+        std::string tc_str = tool_choice.is_string() ? tool_choice.get<std::string>() : "auto";
+        tokens = snap_chat_tpl.apply_with_tools(*snap_tok, chat_msgs, tool_defs, tc_str,
+                                                 suppress_thinking);
+        // If Jinja2 tools render failed, fall back to text-based tool prompt injection
+        if (tokens.empty()) {
+            IMP_LOG_INFO("Jinja2 tools path failed, falling back to text-based tool prompt");
+            std::string tool_prompt = build_tool_prompt(tpl_family, tools, tool_choice);
+            if (!tool_prompt.empty()) {
+                bool found_system = false;
+                for (auto& m : chat_msgs) {
+                    if (m.role == "system") {
+                        m.content += tool_prompt;
+                        found_system = true;
+                        break;
+                    }
+                }
+                if (!found_system) {
+                    std::string sys = snap_chat_tpl.default_system_message();
+                    if (sys.empty()) sys = "You are a helpful assistant.";
+                    sys += tool_prompt;
+                    chat_msgs.insert(chat_msgs.begin(), {"system", sys});
+                }
+            }
+            tokens = snap_chat_tpl.apply(*snap_tok, chat_msgs, suppress_thinking);
+        }
     } else if (snap_have_template) {
+        // No tools, or no Jinja2 support — inject text-based tool prompt if tools present
+        if (has_tools) {
+            std::string tool_prompt = build_tool_prompt(tpl_family, tools, tool_choice);
+            if (!tool_prompt.empty()) {
+                bool found_system = false;
+                for (auto& m : chat_msgs) {
+                    if (m.role == "system") {
+                        m.content += tool_prompt;
+                        found_system = true;
+                        break;
+                    }
+                }
+                if (!found_system) {
+                    std::string sys = snap_chat_tpl.default_system_message();
+                    if (sys.empty()) sys = "You are a helpful assistant.";
+                    sys += tool_prompt;
+                    chat_msgs.insert(chat_msgs.begin(), {"system", sys});
+                }
+            }
+        }
         tokens = snap_chat_tpl.apply(*snap_tok, chat_msgs, suppress_thinking);
     } else {
         // Concatenate all message content as raw text
@@ -772,33 +850,43 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     // Start timing
     auto t_start = std::chrono::high_resolution_clock::now();
 
-    // Create an imp::Request for the batching engine
-    auto imp_req = std::make_shared<imp::Request>();
-    imp_req->input_tokens = std::move(tokens);
-    imp_req->max_tokens = max_tokens;
-    imp_req->temperature = temperature;
-    imp_req->top_p = top_p;
-    imp_req->top_k = top_k;
-    imp_req->seed = seed;
-    imp_req->min_p = min_p;
-    imp_req->typical_p = typical_p;
-    imp_req->repetition_penalty = repetition_penalty;
-    imp_req->frequency_penalty = frequency_penalty;
-    imp_req->presence_penalty = presence_penalty;
-    imp_req->repeat_last_n = repeat_last_n;
-    imp_req->dry_multiplier = dry_multiplier;
-    imp_req->dry_base = dry_base;
-    imp_req->dry_allowed_length = dry_allowed_length;
-    imp_req->dry_penalty_last_n = dry_penalty_last_n;
-    imp_req->mirostat = mirostat;
-    imp_req->mirostat_tau = mirostat_tau;
-    imp_req->mirostat_eta = mirostat_eta;
-    imp_req->logprobs = req_logprobs;
-    imp_req->top_logprobs = top_logprobs;
-    imp_req->json_mode = json_mode;
-    imp_req->json_schema = json_schema_str;
-    imp_req->think_budget = think_budget;
-    imp_req->status = imp::RequestStatus::PENDING;
+    // Save input tokens for potential reuse with n > 1
+    std::vector<int32_t> saved_tokens = tokens;
+
+    // Helper to create an imp::Request with the given completion index
+    auto make_imp_request = [&](int completion_idx) {
+        auto req = std::make_shared<imp::Request>();
+        req->input_tokens = saved_tokens;
+        req->max_tokens = max_tokens;
+        req->temperature = temperature;
+        req->top_p = top_p;
+        req->top_k = top_k;
+        req->seed = (seed != -1) ? seed + completion_idx : -1;
+        req->min_p = min_p;
+        req->typical_p = typical_p;
+        req->repetition_penalty = repetition_penalty;
+        req->frequency_penalty = frequency_penalty;
+        req->presence_penalty = presence_penalty;
+        req->repeat_last_n = repeat_last_n;
+        req->dry_multiplier = dry_multiplier;
+        req->dry_base = dry_base;
+        req->dry_allowed_length = dry_allowed_length;
+        req->dry_penalty_last_n = dry_penalty_last_n;
+        req->mirostat = mirostat;
+        req->mirostat_tau = mirostat_tau;
+        req->mirostat_eta = mirostat_eta;
+        req->logprobs = req_logprobs;
+        req->top_logprobs = top_logprobs;
+        req->json_mode = json_mode;
+        req->json_schema = json_schema_str;
+        req->logit_bias = logit_bias;
+        req->think_budget = think_budget;
+        req->status = imp::RequestStatus::PENDING;
+        return req;
+    };
+
+    // Create first request
+    auto imp_req = make_imp_request(0);
 
     // Create a ServerRequest wrapper and submit to the batching engine
     auto server_req = std::make_shared<ServerRequest>();
@@ -1636,207 +1724,226 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         );
     } else {
         // Non-streaming: decode all tokens, return complete response
-        auto active_req = server_req->request;
-        std::vector<int32_t> output_ids;
-        const char* finish = nullptr;
-        std::string output_text;  // accumulated output for stop matching
-        bool ns_in_think = false;   // non-streaming think budget tracking
-        int ns_think_tokens = 0;
+        // For n > 1, run multiple independent generations sequentially
+        json choices = json::array();
+        int total_output_tokens = 0;
 
-        auto ns_request_start = std::chrono::steady_clock::now();
-        for (;;) {
-            // Check request timeout
-            if (state.request_timeout > 0) {
-                auto elapsed = std::chrono::steady_clock::now() - ns_request_start;
-                if (elapsed > std::chrono::seconds(state.request_timeout)) {
-                    server_req->cancel();
-                    finish = "length";
-                    break;
-                }
-            }
-
-            // Read next token from the batching engine
-            TokenEvent evt;
-            if (!server_req->pop_token(evt)) {
-                continue;  // timeout — loop back to check request timeout
-            }
-
-            if (evt.token_id < 0) {
-                finish = evt.finish_reason ? evt.finish_reason : "stop";
-                break;
-            }
-
-            int32_t token = evt.token_id;
-
-            // Check stop conditions
-            if (evt.is_last) {
-                if (token == snap_tok->eos_id()) {
-                    finish = evt.finish_reason ? evt.finish_reason : "stop";
-                    break;
-                }
-                bool is_stop = false;
-                if (snap_have_template) {
-                    for (int32_t stop_id : snap_stop_token_ids) {
-                        if (token == stop_id) { is_stop = true; break; }
+        for (int ci = 0; ci < n_completions; ci++) {
+            // For subsequent completions, create a new request and submit it
+            if (ci > 0) {
+                imp_req = make_imp_request(ci);
+                server_req = std::make_shared<ServerRequest>();
+                server_req->request = imp_req;
+                {
+                    std::lock_guard<std::timed_mutex> lock(state.mtx);
+                    if (!state.batching || !state.batching->is_running()) {
+                        break;
                     }
-                }
-                if (is_stop) {
-                    finish = evt.finish_reason ? evt.finish_reason : "stop";
-                    break;
-                }
-                finish = evt.finish_reason ? evt.finish_reason : "length";
-            }
-
-            // Track think tokens for usage reporting (no forced cap — model
-            // decides when to stop thinking, matching llama.cpp behavior).
-            if (snap_is_think_model && snap_think_end_id >= 0 &&
-                state.default_args.reasoning_format == "deepseek") {
-                if (token == snap_think_start_id) {
-                    ns_in_think = true;
-                } else if (token == snap_think_end_id) {
-                    ns_in_think = false;
-                } else if (ns_in_think) {
-                    ns_think_tokens++;
+                    state.batching->submit(server_req);
                 }
             }
 
-            output_ids.push_back(token);
+            auto active_req = server_req->request;
+            std::vector<int32_t> output_ids;
+            const char* finish = nullptr;
+            std::string output_text;  // accumulated output for stop matching
+            bool ns_in_think = false;   // non-streaming think budget tracking
+            int ns_think_tokens = 0;
 
-            // Check text-level stop sequences
-            if (!stop_sequences.empty()) {
-                output_text += snap_tok->decode_token(token);
-                bool stop_found = false;
-                for (const auto& stop : stop_sequences) {
-                    auto pos = output_text.find(stop);
-                    if (pos != std::string::npos) {
-                        output_text = output_text.substr(0, pos);
-                        stop_found = true;
+            auto ns_request_start = std::chrono::steady_clock::now();
+            for (;;) {
+                // Check request timeout
+                if (state.request_timeout > 0) {
+                    auto elapsed = std::chrono::steady_clock::now() - ns_request_start;
+                    if (elapsed > std::chrono::seconds(state.request_timeout)) {
+                        server_req->cancel();
+                        finish = "length";
                         break;
                     }
                 }
-                if (stop_found) {
-                    finish = "stop";
+
+                // Read next token from the batching engine
+                TokenEvent evt;
+                if (!server_req->pop_token(evt)) {
+                    continue;  // timeout — loop back to check request timeout
+                }
+
+                if (evt.token_id < 0) {
+                    finish = evt.finish_reason ? evt.finish_reason : "stop";
                     break;
                 }
+
+                int32_t token = evt.token_id;
+
+                // Check stop conditions
+                if (evt.is_last) {
+                    if (token == snap_tok->eos_id()) {
+                        finish = evt.finish_reason ? evt.finish_reason : "stop";
+                        break;
+                    }
+                    bool is_stop = false;
+                    if (snap_have_template) {
+                        for (int32_t stop_id : snap_stop_token_ids) {
+                            if (token == stop_id) { is_stop = true; break; }
+                        }
+                    }
+                    if (is_stop) {
+                        finish = evt.finish_reason ? evt.finish_reason : "stop";
+                        break;
+                    }
+                    finish = evt.finish_reason ? evt.finish_reason : "length";
+                }
+
+                // Track think tokens for usage reporting (no forced cap — model
+                // decides when to stop thinking, matching llama.cpp behavior).
+                if (snap_is_think_model && snap_think_end_id >= 0 &&
+                    state.default_args.reasoning_format == "deepseek") {
+                    if (token == snap_think_start_id) {
+                        ns_in_think = true;
+                    } else if (token == snap_think_end_id) {
+                        ns_in_think = false;
+                    } else if (ns_in_think) {
+                        ns_think_tokens++;
+                    }
+                }
+
+                output_ids.push_back(token);
+
+                // Check text-level stop sequences
+                if (!stop_sequences.empty()) {
+                    output_text += snap_tok->decode_token(token);
+                    bool stop_found = false;
+                    for (const auto& stop : stop_sequences) {
+                        auto pos = output_text.find(stop);
+                        if (pos != std::string::npos) {
+                            output_text = output_text.substr(0, pos);
+                            stop_found = true;
+                            break;
+                        }
+                    }
+                    if (stop_found) {
+                        finish = "stop";
+                        break;
+                    }
+                }
+
+                // Break after processing the last non-EOS token
+                if (finish) break;
             }
 
-            // Break after processing the last non-EOS token
-            if (finish) break;
-        }
+            if (!finish) finish = "length";
 
-        if (!finish) finish = "length";
+            int n_output_tokens = static_cast<int>(output_ids.size());
+            total_output_tokens += n_output_tokens;
+            std::string content = !stop_sequences.empty()
+                ? output_text : snap_tok->decode(output_ids);
 
-        int n_output_tokens = static_cast<int>(output_ids.size());
-        std::string content = !stop_sequences.empty()
-            ? output_text : snap_tok->decode(output_ids);
+            // Extract reasoning content (DeepSeek format) or strip think blocks
+            std::string reasoning_content;
+            if (snap_is_think_model &&
+                state.default_args.reasoning_format == "deepseek") {
+                auto [reasoning, cleaned] = extract_reasoning(content);
+                reasoning_content = reasoning;
+                content = cleaned;
+            } else if (snap_is_think_model &&
+                       state.default_args.reasoning_format != "none") {
+                strip_think_block(content);
+            }
 
-        // Extract reasoning content (DeepSeek format) or strip think blocks
-        std::string reasoning_content;
-        if (snap_is_think_model &&
-            state.default_args.reasoning_format == "deepseek") {
-            auto [reasoning, cleaned] = extract_reasoning(content);
-            reasoning_content = reasoning;
-            content = cleaned;
-        } else if (snap_is_think_model &&
-                   state.default_args.reasoning_format != "none") {
-            strip_think_block(content);
-        }
-
-        // Log request
-        auto t_end = std::chrono::high_resolution_clock::now();
-        double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
-        fprintf(stderr, "[%s] %d prompt + %d completion tokens, %.1f ms\n",
-                comp_id.c_str(), n_prompt_tokens, n_output_tokens, ms);
-        state.metrics.requests_total++;
-        state.metrics.tokens_prompt_total += n_prompt_tokens;
-        state.metrics.tokens_completion_total += n_output_tokens;
-        state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
-
-        // Build logprobs object if requested
-        json logprobs_obj = nullptr;
-        if (req_logprobs && active_req) {
-            const auto& lp_data = active_req->output_logprobs;
-            json content_logprobs = json::array();
-            for (size_t idx = 0; idx < lp_data.size() && idx < output_ids.size(); idx++) {
-                const auto& lp = lp_data[idx];
-                json top_arr = json::array();
-                for (const auto& t : lp.top) {
-                    top_arr.push_back({
-                        {"token", safe_token_json(t.text)},
-                        {"logprob", t.logprob},
-                        {"bytes", token_bytes_json(t.text)}
+            // Build logprobs object if requested
+            json logprobs_obj = nullptr;
+            if (req_logprobs && active_req) {
+                const auto& lp_data = active_req->output_logprobs;
+                json content_logprobs = json::array();
+                for (size_t idx = 0; idx < lp_data.size() && idx < output_ids.size(); idx++) {
+                    const auto& lp = lp_data[idx];
+                    json top_arr = json::array();
+                    for (const auto& t : lp.top) {
+                        top_arr.push_back({
+                            {"token", safe_token_json(t.text)},
+                            {"logprob", t.logprob},
+                            {"bytes", token_bytes_json(t.text)}
+                        });
+                    }
+                    content_logprobs.push_back({
+                        {"token", safe_token_json(lp.text)},
+                        {"logprob", lp.logprob},
+                        {"bytes", token_bytes_json(lp.text)},
+                        {"top_logprobs", top_arr}
                     });
                 }
-                content_logprobs.push_back({
-                    {"token", safe_token_json(lp.text)},
-                    {"logprob", lp.logprob},
-                    {"bytes", token_bytes_json(lp.text)},
-                    {"top_logprobs", top_arr}
-                });
+                logprobs_obj = {{"content", content_logprobs}};
             }
-            logprobs_obj = {{"content", content_logprobs}};
+
+            // Parse tool calls from model output
+            std::vector<ParsedToolCall> tool_calls;
+            if (has_tools && strcmp(finish, "length") != 0) {
+                auto [pre_content, parsed_calls] = parse_tool_calls(tpl_family, content, state.next_tool_call_id);
+                if (!parsed_calls.empty()) {
+                    tool_calls = std::move(parsed_calls);
+                    content = pre_content;
+                    finish = "tool_calls";
+                }
+            }
+
+            json msg = {{"role", "assistant"}};
+            if (!tool_calls.empty()) {
+                // content is null when only tool calls (no preceding text)
+                msg["content"] = content.empty() ? json(nullptr) : json(content);
+                json tc_array = json::array();
+                for (const auto& tc : tool_calls) {
+                    tc_array.push_back({
+                        {"id", tc.id},
+                        {"type", "function"},
+                        {"function", {{"name", tc.name}, {"arguments", tc.arguments}}}
+                    });
+                }
+                msg["tool_calls"] = tc_array;
+            } else {
+                msg["content"] = content;
+            }
+            if (!reasoning_content.empty()) {
+                msg["reasoning_content"] = reasoning_content;
+            }
+
+            json choice = {
+                {"index", ci},
+                {"message", msg},
+                {"finish_reason", finish}
+            };
+            if (!logprobs_obj.is_null()) {
+                choice["logprobs"] = logprobs_obj;
+            }
+
+            choices.push_back(choice);
+
+            // Log each completion
+            fprintf(stderr, "[%s] completion %d/%d: %d tokens\n",
+                    comp_id.c_str(), ci + 1, n_completions, n_output_tokens);
         }
 
-        // Parse tool calls from model output
-        std::vector<ParsedToolCall> tool_calls;
-        if (has_tools && strcmp(finish, "length") != 0) {
-            auto [pre_content, parsed_calls] = parse_tool_calls(tpl_family, content, state.next_tool_call_id);
-            if (!parsed_calls.empty()) {
-                tool_calls = std::move(parsed_calls);
-                content = pre_content;
-                finish = "tool_calls";
-            }
-        }
-
-        json msg = {{"role", "assistant"}};
-        if (!tool_calls.empty()) {
-            // content is null when only tool calls (no preceding text)
-            msg["content"] = content.empty() ? json(nullptr) : json(content);
-            json tc_array = json::array();
-            for (const auto& tc : tool_calls) {
-                tc_array.push_back({
-                    {"id", tc.id},
-                    {"type", "function"},
-                    {"function", {{"name", tc.name}, {"arguments", tc.arguments}}}
-                });
-            }
-            msg["tool_calls"] = tc_array;
-        } else {
-            msg["content"] = content;
-        }
-        if (!reasoning_content.empty()) {
-            msg["reasoning_content"] = reasoning_content;
-        }
-
-        json choice = {
-            {"index", 0},
-            {"message", msg},
-            {"finish_reason", finish}
-        };
-        if (!logprobs_obj.is_null()) {
-            choice["logprobs"] = logprobs_obj;
-        }
+        // Log aggregate request
+        auto t_end = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+        fprintf(stderr, "[%s] %d prompt + %d completion tokens (%d choices), %.1f ms\n",
+                comp_id.c_str(), n_prompt_tokens, total_output_tokens, n_completions, ms);
+        state.metrics.requests_total++;
+        state.metrics.tokens_prompt_total += n_prompt_tokens;
+        state.metrics.tokens_completion_total += total_output_tokens;
+        state.metrics.last_request_duration_ms = static_cast<int64_t>(ms);
 
         json usage = {
             {"prompt_tokens", n_prompt_tokens},
-            {"completion_tokens", n_output_tokens},
-            {"total_tokens", n_prompt_tokens + n_output_tokens}
+            {"completion_tokens", total_output_tokens},
+            {"total_tokens", n_prompt_tokens + total_output_tokens}
         };
-        if (!reasoning_content.empty()) {
-            // Use actual tracked count if available, otherwise estimate
-            int n_reasoning_tokens = (ns_think_tokens > 0) ? ns_think_tokens + 2
-                : static_cast<int>(snap_tok->encode(reasoning_content).size()) + 2;
-            usage["completion_tokens_details"] = {
-                {"reasoning_tokens", n_reasoning_tokens}
-            };
-        }
 
         json response = {
             {"id", comp_id},
             {"object", "chat.completion"},
             {"created", created},
             {"model", snap_model_name},
-            {"choices", json::array({choice})},
+            {"choices", choices},
             {"usage", usage}
         };
 
@@ -1915,6 +2022,20 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
     size_t max_stop_len = 0;
     for (const auto& s : stop_sequences) max_stop_len = std::max(max_stop_len, s.size());
 
+    // Parse logit_bias: map of token_id (string) -> bias (float)
+    std::vector<std::pair<int32_t, float>> logit_bias;
+    if (body.contains("logit_bias") && body["logit_bias"].is_object()) {
+        for (auto& [key, val] : body["logit_bias"].items()) {
+            try {
+                int32_t token_id = std::stoi(key);
+                float bias = val.get<float>();
+                logit_bias.emplace_back(token_id, bias);
+            } catch (...) {
+                // Skip invalid entries
+            }
+        }
+    }
+
     // Parse stream_options for include_usage
     bool include_usage = false;
     if (body.contains("stream_options") && body["stream_options"].is_object()) {
@@ -1992,6 +2113,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
     imp_req->mirostat_eta = mirostat_eta;
     imp_req->logprobs = req_logprobs;
     imp_req->top_logprobs = top_logprobs;
+    imp_req->logit_bias = std::move(logit_bias);
     imp_req->think_budget = body.value("think_budget", state.default_think_budget);
     imp_req->status = imp::RequestStatus::PENDING;
 
@@ -2486,14 +2608,29 @@ void handle_load_model(const httplib::Request& req, httplib::Response& res,
     }
 
     json config_overrides = body.value("config", json::object());
+    std::string revision = body.value("revision", "");
+
+    // Resolve model path: supports local files, directories, and HuggingFace repo IDs
+    std::string resolved = imp::resolve_model_gguf(path, revision);
+    if (resolved.empty()) {
+        res.status = 400;
+        json err = {{"error", {{"message", "Failed to resolve model: " + path},
+                                {"type", "invalid_request_error"}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+    if (resolved != path) {
+        printf("Resolved model: %s -> %s\n", path.c_str(), resolved.c_str());
+        fflush(stdout);
+    }
 
     // Block inference during model swap
     std::lock_guard<std::timed_mutex> lock(state.mtx);
 
-    printf("Loading model: %s\n", path.c_str());
+    printf("Loading model: %s\n", resolved.c_str());
     fflush(stdout);
 
-    std::string error = load_model_into_state(state, path, config_overrides);
+    std::string error = load_model_into_state(state, resolved, config_overrides);
     if (!error.empty()) {
         res.status = 500;
         json err = {{"error", {{"message", error}, {"type", "server_error"}}}};

@@ -9,7 +9,8 @@ void print_server_usage(const char* prog) {
         "Usage: %s [options]\n"
         "\n"
         "Options:\n"
-        "  --model <path>        Path to model file (optional; load later via API)\n"
+        "  --model <path>        Path to model file or HuggingFace repo ID (optional)\n"
+        "  --revision <rev>      HuggingFace model revision (branch, tag, or commit hash)\n"
         "  --host <addr>         Listen address (default: 127.0.0.1)\n"
         "  --port <n>            Listen port (default: 8080)\n"
         "  --max-tokens <n>      Default max tokens (default: 8192)\n"
@@ -55,6 +56,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             std::exit(0);
         } else if (std::strcmp(arg, "--model") == 0 && i + 1 < argc) {
             args.model_path = argv[++i];
+        } else if (std::strcmp(arg, "--revision") == 0 && i + 1 < argc) {
+            args.revision = argv[++i];
         } else if (std::strcmp(arg, "--host") == 0 && i + 1 < argc) {
             args.host = argv[++i];
         } else if (std::strcmp(arg, "--port") == 0 && i + 1 < argc) {

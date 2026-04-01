@@ -70,6 +70,9 @@ struct Request {
     bool json_mode = false;                         // Constrain output to valid JSON
     std::string json_schema;                        // JSON Schema string (empty = disabled)
 
+    // Logit bias: token_id -> bias value, added to logits before sampling
+    std::vector<std::pair<int32_t, float>> logit_bias;
+
     int context_len() const {
         return static_cast<int>(input_tokens.size() + output_tokens.size());
     }

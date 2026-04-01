@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
 
 #ifdef __linux__
 #include <sys/mman.h>
@@ -79,21 +80,44 @@ const char* model_arch_name(ModelArch arch) {
 }
 
 ModelArch parse_model_arch(const std::string& s) {
-    if (s == "llama")                        return ModelArch::LLAMA;
-    if (s == "mistral")                      return ModelArch::MISTRAL;
-    if (s == "mixtral")                      return ModelArch::MIXTRAL;
-    if (s == "deepseek" || s == "deepseek2") return ModelArch::DEEPSEEK;
-    if (s == "nemotron_h_moe")               return ModelArch::NEMOTRON_H_MOE;
-    if (s == "qwen3")                        return ModelArch::QWEN3;
-    if (s == "qwen3moe")                     return ModelArch::QWEN3_MOE;
-    if (s == "qwen35")                       return ModelArch::QWEN35;
-    if (s == "qwen35moe")                    return ModelArch::QWEN35_MOE;
-    if (s == "gemma3")                       return ModelArch::GEMMA3;
-    if (s == "gemma" || s == "gemma2")       return ModelArch::GEMMA3;  // treat all gemma as gemma3
-    if (s == "llama4")                       return ModelArch::LLAMA4;
-    if (s == "qwen2")                        return ModelArch::LLAMA;
-    if (s == "phi3")                         return ModelArch::LLAMA;
-    return ModelArch::GENERIC;
+    static const std::unordered_map<std::string, ModelArch> registry = {
+        // GGUF architecture strings
+        {"llama", ModelArch::LLAMA},
+        {"mistral", ModelArch::MISTRAL},
+        {"mixtral", ModelArch::MIXTRAL},
+        {"deepseek", ModelArch::DEEPSEEK},
+        {"deepseek2", ModelArch::DEEPSEEK},
+        {"nemotron_h_moe", ModelArch::NEMOTRON_H_MOE},
+        {"qwen3", ModelArch::QWEN3},
+        {"qwen3moe", ModelArch::QWEN3_MOE},
+        {"qwen35", ModelArch::QWEN35},
+        {"qwen35moe", ModelArch::QWEN35_MOE},
+        {"gemma3", ModelArch::GEMMA3},
+        {"gemma", ModelArch::GEMMA3},
+        {"gemma2", ModelArch::GEMMA3},
+        {"llama4", ModelArch::LLAMA4},
+        {"qwen2", ModelArch::LLAMA},
+        {"phi3", ModelArch::LLAMA},
+        // HuggingFace architecture class names (from config.json "architectures")
+        {"LlamaForCausalLM", ModelArch::LLAMA},
+        {"MistralForCausalLM", ModelArch::MISTRAL},
+        {"MixtralForCausalLM", ModelArch::MIXTRAL},
+        {"Qwen2ForCausalLM", ModelArch::QWEN3},
+        {"Qwen2MoeForCausalLM", ModelArch::QWEN3_MOE},
+        {"Gemma2ForCausalLM", ModelArch::GEMMA3},
+        {"GemmaForCausalLM", ModelArch::GEMMA3},
+        {"Gemma3ForCausalLM", ModelArch::GEMMA3},
+        {"DeepseekV2ForCausalLM", ModelArch::DEEPSEEK},
+        {"DeepseekV3ForCausalLM", ModelArch::DEEPSEEK},
+        {"PhiForCausalLM", ModelArch::LLAMA},
+        {"Phi3ForCausalLM", ModelArch::LLAMA},
+        {"Phi3SmallForCausalLM", ModelArch::LLAMA},
+        {"InternLM2ForCausalLM", ModelArch::LLAMA},
+        {"Starcoder2ForCausalLM", ModelArch::LLAMA},
+        {"CohereForCausalLM", ModelArch::LLAMA},
+    };
+    auto it = registry.find(s);
+    return (it != registry.end()) ? it->second : ModelArch::GENERIC;
 }
 
 void apply_arch_defaults(ModelConfig& cfg) {

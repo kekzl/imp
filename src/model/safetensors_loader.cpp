@@ -1,6 +1,7 @@
 #include "model/safetensors_loader.h"
 #include "model/model_arch.h"
 #include "model/weight_map.h"
+#include "model/hf_config_loader.h"
 #include "core/logging.h"
 
 #include <fcntl.h>
@@ -9,6 +10,9 @@
 #include <unistd.h>
 
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <set>
 #include <unordered_map>
 #include <vector>
 #include <string>
@@ -241,6 +245,7 @@ static ModelArch detect_arch_from_weights(
     bool has_mlp_experts = false;
     bool has_ssm = false;
     bool has_layers = false;
+    bool has_gptq = false;
 
     for (const auto& kv : tensors) {
         const auto& name = kv.first;
@@ -253,6 +258,12 @@ static ModelArch detect_arch_from_weights(
         if (name.find("mamba") != std::string::npos ||
             name.find("ssm") != std::string::npos)
             has_ssm = true;
+        if (name.find(".qweight") != std::string::npos)
+            has_gptq = true;
+    }
+
+    if (has_gptq) {
+        IMP_LOG_INFO("Detected GPTQ quantized weights");
     }
 
     if (has_ssm)              return ModelArch::NEMOTRON_H_MOE;
@@ -296,62 +307,61 @@ static int infer_n_layers(const std::unordered_map<std::string, Tensor>& tensors
 
 static void infer_config(ModelConfig& cfg,
                          const std::unordered_map<std::string, Tensor>& tensors) {
-    cfg.n_layers = infer_n_layers(tensors);
+    // Only infer fields that are still at their default (zero) values.
+    // config.json (via HFConfigLoader) is authoritative when present.
+
+    if (cfg.n_layers == 0)
+        cfg.n_layers = infer_n_layers(tensors);
 
     // token embedding: shape = [vocab_size, d_model]
     auto it = tensors.find("model.embed_tokens.weight");
     if (it != tensors.end() && it->second.ndim == 2) {
-        cfg.vocab_size = static_cast<int>(it->second.shape[0]);
-        cfg.d_model = static_cast<int>(it->second.shape[1]);
+        if (cfg.vocab_size == 0) cfg.vocab_size = static_cast<int>(it->second.shape[0]);
+        if (cfg.d_model == 0) cfg.d_model = static_cast<int>(it->second.shape[1]);
     }
 
-    // q_proj.weight on layer 0: shape = [n_heads * head_dim, d_model]
-    // k_proj.weight on layer 0: shape = [n_kv_heads * head_dim, d_model]
-    auto it_q = tensors.find("model.layers.0.self_attn.q_proj.weight");
-    auto it_k = tensors.find("model.layers.0.self_attn.k_proj.weight");
-    if (it_q != tensors.end() && it_q->second.ndim == 2 && cfg.d_model > 0) {
-        int q_out = static_cast<int>(it_q->second.shape[0]);
-        int head_dim = cfg.d_model > 0 ? cfg.d_model : q_out;
-        // Standard: q_out == d_model, head_dim = d_model / n_heads
-        // Try common head dimensions: 128, 64, 96
-        for (int hd : {128, 64, 96, 80, 256}) {
-            if (q_out % hd == 0) {
-                cfg.n_heads = q_out / hd;
-                head_dim = hd;
-                break;
+    // Only infer heads from weights if config.json didn't set them
+    if (cfg.n_heads == 0) {
+        auto it_q = tensors.find("model.layers.0.self_attn.q_proj.weight");
+        auto it_k = tensors.find("model.layers.0.self_attn.k_proj.weight");
+        if (it_q != tensors.end() && it_q->second.ndim == 2 && cfg.d_model > 0) {
+            int q_out = static_cast<int>(it_q->second.shape[0]);
+            int head_dim = cfg.d_model;
+            for (int hd : {128, 64, 96, 80, 256}) {
+                if (q_out % hd == 0) {
+                    cfg.n_heads = q_out / hd;
+                    head_dim = hd;
+                    break;
+                }
+            }
+            if (cfg.n_kv_heads == 0 && it_k != tensors.end() && it_k->second.ndim == 2 && head_dim > 0) {
+                cfg.n_kv_heads = static_cast<int>(it_k->second.shape[0]) / head_dim;
             }
         }
+    }
 
-        if (it_k != tensors.end() && it_k->second.ndim == 2 && head_dim > 0) {
-            int k_out = static_cast<int>(it_k->second.shape[0]);
-            cfg.n_kv_heads = k_out / head_dim;
-        } else {
-            cfg.n_kv_heads = cfg.n_heads;
+    if (cfg.d_ff == 0) {
+        auto it_gate = tensors.find("model.layers.0.mlp.gate_proj.weight");
+        if (it_gate != tensors.end() && it_gate->second.ndim == 2) {
+            cfg.d_ff = static_cast<int>(it_gate->second.shape[0]);
         }
     }
 
-    // gate_proj.weight on layer 0: shape = [d_ff, d_model]
-    auto it_gate = tensors.find("model.layers.0.mlp.gate_proj.weight");
-    if (it_gate != tensors.end() && it_gate->second.ndim == 2) {
-        cfg.d_ff = static_cast<int>(it_gate->second.shape[0]);
+    // MoE inference (only if not set by config.json)
+    if (cfg.n_experts == 0) {
+        auto it_moe = tensors.find("model.layers.0.block_sparse_moe.gate.weight");
+        if (it_moe != tensors.end() && it_moe->second.ndim == 2) {
+            cfg.n_experts = static_cast<int>(it_moe->second.shape[0]);
+            cfg.n_experts_active = std::min(2, cfg.n_experts);
+        }
     }
 
-    // MoE: check for expert weights
-    // Pattern: model.layers.0.block_sparse_moe.experts.0.w1.weight
-    auto it_moe_gate = tensors.find("model.layers.0.block_sparse_moe.gate.weight");
-    if (it_moe_gate != tensors.end() && it_moe_gate->second.ndim == 2) {
-        cfg.n_experts = static_cast<int>(it_moe_gate->second.shape[0]);
-        cfg.n_experts_active = std::min(2, cfg.n_experts);  // common default
+    if (cfg.expert_d_ff == 0 && cfg.n_experts > 0) {
+        auto it_expert = tensors.find("model.layers.0.block_sparse_moe.experts.0.w1.weight");
+        if (it_expert != tensors.end() && it_expert->second.ndim == 2) {
+            cfg.expert_d_ff = static_cast<int>(it_expert->second.shape[0]);
+        }
     }
-
-    // MoE expert d_ff: model.layers.0.block_sparse_moe.experts.0.w1.weight -> [expert_d_ff, d_model]
-    auto it_expert = tensors.find("model.layers.0.block_sparse_moe.experts.0.w1.weight");
-    if (it_expert != tensors.end() && it_expert->second.ndim == 2) {
-        cfg.expert_d_ff = static_cast<int>(it_expert->second.shape[0]);
-    }
-
-    // sliding_window: not inferrable from tensor shapes; set from config.json
-    // or leave as 0 (disabled). The GGUF loader reads this from metadata.
 
     // Defaults for fields we couldn't infer
     if (cfg.max_seq_len == 0) cfg.max_seq_len = 4096;
@@ -430,132 +440,76 @@ static bool assign_tensor_hf(Model& model, const std::string& name,
     return false;
 }
 
-// ---- Main SafeTensors loader ----
+// ---- Per-shard loading helper ----
 
-std::unique_ptr<Model> load_safetensors(const std::string& path) {
-    // 1. Open and mmap the file
+struct ShardInfo {
+    void* mmap_base = nullptr;
+    size_t mmap_size = 0;
+};
+
+static bool load_shard(const std::string& path,
+                       std::unordered_map<std::string, Tensor>& tensor_map,
+                       ShardInfo& shard) {
     int fd = open(path.c_str(), O_RDONLY);
-    if (fd < 0) {
-        IMP_LOG_ERROR("Failed to open SafeTensors file: %s", path.c_str());
-        return nullptr;
-    }
+    if (fd < 0) { IMP_LOG_ERROR("Failed to open: %s", path.c_str()); return false; }
 
     struct stat st;
-    if (fstat(fd, &st) != 0) {
-        IMP_LOG_ERROR("Failed to stat SafeTensors file: %s", path.c_str());
-        close(fd);
-        return nullptr;
-    }
+    if (fstat(fd, &st) != 0) { close(fd); return false; }
     size_t file_size = static_cast<size_t>(st.st_size);
-
-    if (file_size < 8) {
-        IMP_LOG_ERROR("SafeTensors file too small: %s (%zu bytes)", path.c_str(), file_size);
-        close(fd);
-        return nullptr;
-    }
+    if (file_size < 8) { close(fd); return false; }
 
     void* mmap_base = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
-
-    if (mmap_base == MAP_FAILED) {
-        IMP_LOG_ERROR("Failed to mmap SafeTensors file: %s (size=%zu)", path.c_str(), file_size);
-        return nullptr;
-    }
-
+    if (mmap_base == MAP_FAILED) return false;
     madvise(mmap_base, file_size, MADV_SEQUENTIAL);
 
-    auto data = reinterpret_cast<const uint8_t*>(mmap_base);
+    shard.mmap_base = mmap_base;
+    shard.mmap_size = file_size;
 
-    // 2. Read 8-byte header size (little-endian uint64_t)
+    auto data = reinterpret_cast<const uint8_t*>(mmap_base);
     uint64_t header_size = 0;
     std::memcpy(&header_size, data, sizeof(uint64_t));
+    if (8 + header_size > file_size) { munmap(mmap_base, file_size); return false; }
 
-    if (8 + header_size > file_size) {
-        IMP_LOG_ERROR("SafeTensors header size (%lu) exceeds file size (%zu)",
-                      (unsigned long)header_size, file_size);
-        munmap(mmap_base, file_size);
-        return nullptr;
-    }
-
-    IMP_LOG_INFO("SafeTensors header: %lu bytes", (unsigned long)header_size);
-
-    // 3. Parse JSON header
     const char* json_data = reinterpret_cast<const char*>(data + 8);
     JsonParser parser(json_data, static_cast<size_t>(header_size));
     JValue root = parser.parse();
+    if (!parser.ok() || root.type != JType::OBJECT) { munmap(mmap_base, file_size); return false; }
 
-    if (!parser.ok() || root.type != JType::OBJECT) {
-        IMP_LOG_ERROR("Failed to parse SafeTensors JSON header");
-        munmap(mmap_base, file_size);
-        return nullptr;
-    }
-
-    // Tensor data begins right after the header
     size_t tensor_data_offset = 8 + static_cast<size_t>(header_size);
     uint8_t* tensor_data_base = const_cast<uint8_t*>(data + tensor_data_offset);
-
-    // 4. Create Tensor descriptors from JSON metadata
-    std::unordered_map<std::string, Tensor> tensor_map;
 
     for (const auto& kv : root.obj) {
         const std::string& tensor_name = kv.first;
         const JValue& tensor_meta = kv.second;
 
-        // Skip __metadata__ entry
         if (tensor_name == "__metadata__") continue;
+        if (tensor_meta.type != JType::OBJECT) continue;
 
-        if (tensor_meta.type != JType::OBJECT) {
-            IMP_LOG_WARN("Skipping non-object entry: %s", tensor_name.c_str());
-            continue;
-        }
-
-        // Extract dtype
         const JValue* dtype_val = jobj_find(tensor_meta, "dtype");
-        if (!dtype_val || dtype_val->type != JType::STRING) {
-            IMP_LOG_WARN("Tensor '%s' missing dtype, skipping", tensor_name.c_str());
-            continue;
-        }
+        if (!dtype_val || dtype_val->type != JType::STRING) continue;
         DType dtype = safetensors_dtype(dtype_val->str_val);
 
-        // Extract shape
         const JValue* shape_val = jobj_find(tensor_meta, "shape");
-        if (!shape_val || shape_val->type != JType::ARRAY) {
-            IMP_LOG_WARN("Tensor '%s' missing shape, skipping", tensor_name.c_str());
-            continue;
-        }
+        if (!shape_val || shape_val->type != JType::ARRAY) continue;
 
         int ndim = static_cast<int>(shape_val->arr.size());
-        if (ndim > kMaxDims) {
-            IMP_LOG_WARN("Tensor '%s' has %d dims (max %d), skipping",
-                         tensor_name.c_str(), ndim, kMaxDims);
-            continue;
-        }
+        if (ndim > kMaxDims) continue;
 
         int64_t shape[kMaxDims] = {};
         for (int d = 0; d < ndim; d++) {
             shape[d] = shape_val->arr[d].as_int();
         }
 
-        // Extract data_offsets [start, end]
         const JValue* offsets_val = jobj_find(tensor_meta, "data_offsets");
-        if (!offsets_val || offsets_val->type != JType::ARRAY || offsets_val->arr.size() != 2) {
-            IMP_LOG_WARN("Tensor '%s' missing data_offsets, skipping", tensor_name.c_str());
-            continue;
-        }
+        if (!offsets_val || offsets_val->type != JType::ARRAY || offsets_val->arr.size() != 2) continue;
 
         uint64_t offset_start = static_cast<uint64_t>(offsets_val->arr[0].as_int());
         uint64_t offset_end = static_cast<uint64_t>(offsets_val->arr[1].as_int());
 
-        // Validate offsets fit within file
-        if (tensor_data_offset + offset_end > file_size) {
-            IMP_LOG_WARN("Tensor '%s' data offset out of bounds [%lu, %lu], skipping",
-                         tensor_name.c_str(),
-                         (unsigned long)offset_start, (unsigned long)offset_end);
-            continue;
-        }
+        if (tensor_data_offset + offset_end > file_size) continue;
 
         void* tensor_ptr = tensor_data_base + offset_start;
-
         Tensor t(tensor_ptr, dtype, ndim, shape, /*on_device=*/false);
         tensor_map.emplace(tensor_name, t);
 
@@ -567,34 +521,156 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
                       (unsigned long)offset_start, (unsigned long)offset_end);
     }
 
-    IMP_LOG_INFO("Parsed %zu tensors from SafeTensors header", tensor_map.size());
+    return true;
+}
 
-    // 5. Detect architecture from weight names
-    ModelArch arch = detect_arch_from_weights(tensor_map);
+// ---- Sharded SafeTensors loading ----
 
-    // 6. Create model and infer config from weight shapes
+static bool load_sharded(const std::string& model_dir,
+                         std::unordered_map<std::string, Tensor>& tensor_map,
+                         std::vector<ShardInfo>& shards) {
+    std::string index_path = model_dir + "/model.safetensors.index.json";
+
+    // Read the index file
+    std::ifstream ifs(index_path);
+    if (!ifs.is_open()) {
+        IMP_LOG_ERROR("Failed to open index: %s", index_path.c_str());
+        return false;
+    }
+    std::string index_json((std::istreambuf_iterator<char>(ifs)),
+                            std::istreambuf_iterator<char>());
+    ifs.close();
+
+    JsonParser parser(index_json.data(), index_json.size());
+    JValue root = parser.parse();
+    if (!parser.ok() || root.type != JType::OBJECT) {
+        IMP_LOG_ERROR("Failed to parse index JSON: %s", index_path.c_str());
+        return false;
+    }
+
+    const JValue* weight_map = jobj_find(root, "weight_map");
+    if (!weight_map || weight_map->type != JType::OBJECT) {
+        IMP_LOG_ERROR("No weight_map in index: %s", index_path.c_str());
+        return false;
+    }
+
+    // Collect unique shard filenames
+    std::set<std::string> shard_files;
+    for (const auto& kv : weight_map->obj) {
+        if (kv.second.type == JType::STRING) {
+            shard_files.insert(kv.second.str_val);
+        }
+    }
+
+    IMP_LOG_INFO("Sharded SafeTensors: %zu shards", shard_files.size());
+
+    // Load each shard
+    for (const auto& filename : shard_files) {
+        std::string shard_path = model_dir + "/" + filename;
+        ShardInfo shard;
+        if (!load_shard(shard_path, tensor_map, shard)) {
+            IMP_LOG_ERROR("Failed to load shard: %s", shard_path.c_str());
+            return false;
+        }
+        shards.push_back(shard);
+        IMP_LOG_INFO("Loaded shard: %s (%zu tensors total)", filename.c_str(), tensor_map.size());
+    }
+
+    return true;
+}
+
+// ---- Main SafeTensors loader ----
+
+std::unique_ptr<Model> load_safetensors(const std::string& path) {
+    namespace fs = std::filesystem;
+
+    std::string model_dir;
+    std::string single_file;
+
+    if (fs::is_directory(path)) {
+        model_dir = path;
+    } else if (fs::is_regular_file(path)) {
+        single_file = path;
+        model_dir = fs::path(path).parent_path().string();
+    } else {
+        IMP_LOG_ERROR("Path does not exist: %s", path.c_str());
+        return nullptr;
+    }
+
+    std::unordered_map<std::string, Tensor> tensor_map;
+    std::vector<ShardInfo> shards;
+
+    // Try loading tensors
+    bool loaded = false;
+
+    if (!single_file.empty()) {
+        // Single file mode
+        ShardInfo shard;
+        loaded = load_shard(single_file, tensor_map, shard);
+        if (loaded) shards.push_back(shard);
+    } else {
+        // Directory mode: try sharded first, then single
+        std::string index_path = model_dir + "/model.safetensors.index.json";
+        if (fs::exists(index_path)) {
+            loaded = load_sharded(model_dir, tensor_map, shards);
+        }
+        if (!loaded) {
+            std::string st_path = model_dir + "/model.safetensors";
+            if (fs::exists(st_path)) {
+                ShardInfo shard;
+                loaded = load_shard(st_path, tensor_map, shard);
+                if (loaded) shards.push_back(shard);
+            }
+        }
+    }
+
+    if (!loaded || tensor_map.empty()) {
+        IMP_LOG_ERROR("Failed to load SafeTensors from %s", path.c_str());
+        return nullptr;
+    }
+
+    IMP_LOG_INFO("Parsed %zu tensors from SafeTensors", tensor_map.size());
+
+    // Create model
     auto model = std::make_unique<Model>();
-    model->mmap_base_ = mmap_base;
-    model->mmap_size_ = file_size;
+
+    // Store mmap info for cleanup
+    model->mmap_base_ = shards[0].mmap_base;
+    model->mmap_size_ = shards[0].mmap_size;
+    for (size_t i = 1; i < shards.size(); i++) {
+        model->split_mmaps_.emplace_back(shards[i].mmap_base, shards[i].mmap_size);
+    }
 
     ModelConfig& cfg = model->config_;
-    cfg.arch = arch;
+
+    // 1. Try config.json (authoritative for all hyperparams)
+    bool has_config = HFConfigLoader::load_config(model_dir, cfg);
+
+    // 2. Detect architecture from weights if config.json didn't provide it
+    if (!has_config || cfg.arch == ModelArch::GENERIC) {
+        ModelArch detected = detect_arch_from_weights(tensor_map);
+        if (cfg.arch == ModelArch::GENERIC && detected != ModelArch::GENERIC) {
+            cfg.arch = detected;
+        }
+    }
+
+    // 3. Infer remaining config from weight shapes (fills fields still at defaults)
     infer_config(cfg, tensor_map);
+
+    // 4. Apply arch-specific defaults
     apply_arch_defaults(cfg);
 
     IMP_LOG_INFO("Architecture: %s", model_arch_name(cfg.arch));
     IMP_LOG_INFO("Config: layers=%d d_model=%d d_ff=%d heads=%d kv_heads=%d vocab=%d ctx=%d",
                  cfg.n_layers, cfg.d_model, cfg.d_ff, cfg.n_heads, cfg.n_kv_heads,
                  cfg.vocab_size, cfg.max_seq_len);
-
     if (cfg.n_experts > 0) {
         IMP_LOG_INFO("MoE: %d experts, %d active, expert_d_ff=%d",
                      cfg.n_experts, cfg.n_experts_active, cfg.expert_d_ff);
     }
 
-    // 7. Allocate layers and expert vectors
+    // 5. Allocate layers and expert vectors
     model->layers_.resize(cfg.n_layers);
-
     if (cfg.n_experts > 0) {
         for (auto& layer : model->layers_) {
             layer.expert_w_gate.resize(cfg.n_experts);
@@ -603,33 +679,60 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
         }
     }
 
-    // 8. Assign tensors to model fields
-    // Try the WeightMap first (for architecture-aware mapping)
-    WeightMap wmap(arch);
-    bool wmap_ok = wmap.apply_weights(*model, tensor_map);
+    // 6. Assign tensors via WeightMap
+    WeightMap wmap(cfg.arch);
+    wmap.apply_weights(*model, tensor_map);
 
-    if (!wmap_ok) {
-        // Fall back to direct HuggingFace name assignment
-        IMP_LOG_DEBUG("WeightMap did not assign weights, using direct HF name mapping");
-
-        int assigned = 0, skipped = 0;
-
-        for (const auto& kv : tensor_map) {
-            if (assign_tensor_hf(*model, kv.first, kv.second)) {
-                assigned++;
-            } else {
-                IMP_LOG_DEBUG("Unassigned tensor: %s", kv.first.c_str());
-                skipped++;
+    // 6b. GPTQ config: set bit width and group size on all GPTQ weight structs
+    HFConfigLoader::GPTQConfig gptq_cfg;
+    bool is_gptq = HFConfigLoader::load_gptq_config(model_dir, gptq_cfg);
+    if (is_gptq) {
+        for (auto& layer : model->layers_) {
+            for (auto* gw : {&layer.gptq_q, &layer.gptq_k, &layer.gptq_v, &layer.gptq_o,
+                             &layer.gptq_gate, &layer.gptq_up, &layer.gptq_down}) {
+                gw->bits = gptq_cfg.bits;
+                gw->group_size = gptq_cfg.group_size;
             }
         }
-
-        IMP_LOG_INFO("Weights: %d assigned, %d skipped (direct mapping)", assigned, skipped);
+        IMP_LOG_INFO("GPTQ model: %d-bit, group_size=%d, desc_act=%s",
+                     gptq_cfg.bits, gptq_cfg.group_size,
+                     gptq_cfg.desc_act ? "true" : "false");
     }
 
-    // If output projection wasn't found, tie it to token embedding
+    // 7. Tie output projection if not found
     if (model->out_proj_.data == nullptr && model->tok_emb_.data != nullptr) {
         model->out_proj_ = model->tok_emb_;
         IMP_LOG_INFO("Tied output projection to token embedding");
+    }
+
+    // 8. Load chat template from tokenizer_config.json
+    if (!model_dir.empty()) {
+        std::string chat_tpl = HFConfigLoader::load_chat_template(model_dir);
+        if (!chat_tpl.empty()) {
+            if (!model->tokenizer_) {
+                auto tok = std::make_unique<Tokenizer>();
+                tok->set_chat_template_str(chat_tpl);
+                model->set_tokenizer(std::move(tok));
+            } else {
+                model->tokenizer_->set_chat_template_str(chat_tpl);
+            }
+        }
+    }
+
+    // 9. Load tokenizer from tokenizer.json (if available)
+    if (!model_dir.empty()) {
+        std::string tok_json_path = model_dir + "/tokenizer.json";
+        if (std::filesystem::exists(tok_json_path)) {
+            auto tok = std::make_unique<Tokenizer>();
+            if (tok->load(tok_json_path)) {
+                // Preserve chat template if already set
+                if (model->tokenizer_ && !model->tokenizer_->chat_template_str().empty()) {
+                    tok->set_chat_template_str(model->tokenizer_->chat_template_str());
+                }
+                model->set_tokenizer(std::move(tok));
+                IMP_LOG_INFO("Loaded tokenizer from %s", tok_json_path.c_str());
+            }
+        }
     }
 
     // Re-infer vocab_size from token embedding if needed

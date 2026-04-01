@@ -1114,6 +1114,13 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     }
     tokenizer->set_type(tok_type);
 
+    // Pre-tokenizer type (e.g. "default", "llama3", "deepseek-llm", "qwen2")
+    auto it_pre = metadata.find("tokenizer.ggml.pre");
+    if (it_pre != metadata.end() && !it_pre->second.str_val.empty()) {
+        tokenizer->set_pre_tokenizer(it_pre->second.str_val);
+        IMP_LOG_INFO("Tokenizer pre-tokenizer: %s", it_pre->second.str_val.c_str());
+    }
+
     // add_bos_token flag (Qwen3: 0, LLaMA: 1)
     auto it_add_bos = metadata.find("tokenizer.ggml.add_bos_token");
     if (it_add_bos != metadata.end()) {
@@ -1174,8 +1181,23 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             IMP_LOG_INFO("Chat template: %zu chars", it_tpl->second.str_val.size());
         }
 
-        IMP_LOG_INFO("Tokenizer: type=%s, %d tokens, bos=%d, eos=%d, add_bos=%d",
+        // Load additional EOS-like token IDs (EOT, end-of-generation, etc.)
+        // Some models define multiple stop tokens beyond the primary eos_token_id.
+        for (const char* key : {"tokenizer.ggml.eot_token_id",
+                                 "tokenizer.ggml.eog_token_id"}) {
+            auto it_extra = metadata.find(key);
+            if (it_extra != metadata.end()) {
+                int32_t extra_id = static_cast<int32_t>(val_uint(it_extra->second));
+                if (extra_id >= 0) {
+                    tokenizer->add_eos_id(extra_id);
+                    IMP_LOG_INFO("Tokenizer: additional EOS from %s: %d", key, extra_id);
+                }
+            }
+        }
+
+        IMP_LOG_INFO("Tokenizer: type=%s, %d tokens, bos=%d, eos=%d (%zu total), add_bos=%d",
                      tok_type.c_str(), tokenizer->vocab_size(), bos_id, eos_id,
+                     tokenizer->eos_ids().size(),
                      tokenizer->add_bos() ? 1 : 0);
     } else {
         IMP_LOG_WARN("No tokenizer data found in GGUF metadata");

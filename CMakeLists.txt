@@ -113,6 +113,8 @@ set(IMP_MODEL_SOURCES
     src/model/model.cpp
     src/model/gguf_loader.cpp
     src/model/safetensors_loader.cpp
+    src/model/hf_config_loader.cpp
+    src/model/hf_hub.cpp
     src/model/weight_map.cpp
     src/model/weight_upload.cu
     src/model/tokenizer.cpp
@@ -130,6 +132,7 @@ set(IMP_QUANT_SOURCES
     src/quant/nvfp4_quant.cu
     src/quant/nvfp4_gemm.cu
     src/quant/turboquant.cu
+    src/quant/dequant_gptq.cu
 )
 
 set(IMP_COMPUTE_SOURCES
@@ -365,6 +368,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gdn.cu
         tests/test_gemm_dp4a.cu
         tests/test_degeneration.cpp
+        tests/test_tokenizer_compat.cpp
         tests/gguf_stub.cpp
     )
 

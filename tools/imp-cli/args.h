@@ -5,6 +5,7 @@
 
 struct CliArgs {
     std::string model_path;
+    std::string revision;      // --revision: HuggingFace model revision (branch/tag/commit)
     std::string prompt;
     int max_tokens = 256;
     float temperature = 0.7f;

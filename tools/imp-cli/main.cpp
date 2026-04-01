@@ -1,6 +1,7 @@
 #include "api/imp_internal.h"
 #include "args.h"
 #include "model/chat_template.h"
+#include "model/hf_hub.h"
 #include "model/tokenizer.h"
 #include "runtime/presets.h"
 
@@ -29,12 +30,23 @@ int main(int argc, char** argv) {
     }
 
     printf("IMP Inference Engine %s\n", imp_version());
-    printf("Loading model: %s\n", args.model_path.c_str());
+
+    // Resolve model path: supports local files, directories, and HuggingFace repo IDs
+    std::string resolved_model = imp::resolve_model_gguf(args.model_path, args.revision);
+    if (resolved_model.empty()) {
+        fprintf(stderr, "Failed to resolve model: %s\n", args.model_path.c_str());
+        return 1;
+    }
+    if (resolved_model != args.model_path) {
+        printf("Resolved model: %s -> %s\n", args.model_path.c_str(), resolved_model.c_str());
+    }
+
+    printf("Loading model: %s\n", resolved_model.c_str());
 
     auto t_init_start = std::chrono::high_resolution_clock::now();
 
     ImpModel model = nullptr;
-    ImpError err = imp_model_load(args.model_path.c_str(), IMP_FORMAT_GGUF, &model);
+    ImpError err = imp_model_load(resolved_model.c_str(), IMP_FORMAT_GGUF, &model);
     if (err != IMP_SUCCESS) {
         fprintf(stderr, "Error loading model: %s\n", imp_error_string(err));
         return 1;
@@ -54,7 +66,7 @@ int main(int argc, char** argv) {
             return 1;
         }
     } else {
-        preset = imp::detect_preset(args.model_path);
+        preset = imp::detect_preset(resolved_model);
     }
 
     if (preset) {

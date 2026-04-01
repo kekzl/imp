@@ -9,7 +9,8 @@ void print_usage(const char* prog) {
         "Usage: %s [options]\n"
         "\n"
         "Options:\n"
-        "  --model <path>        Path to model file (required)\n"
+        "  --model <path>        Path to model file or HuggingFace repo ID (required)\n"
+        "  --revision <rev>      HuggingFace model revision (branch, tag, or commit hash)\n"
         "  --prompt <text>       Input prompt for generation\n"
         "  --max-tokens <n>      Maximum tokens to generate (default: 256)\n"
         "  --temperature <f>     Sampling temperature (default: 0.7)\n"
@@ -76,6 +77,8 @@ CliArgs parse_args(int argc, char** argv) {
             std::exit(0);
         } else if (std::strcmp(arg, "--model") == 0 && i + 1 < argc) {
             args.model_path = argv[++i];
+        } else if (std::strcmp(arg, "--revision") == 0 && i + 1 < argc) {
+            args.revision = argv[++i];
         } else if (std::strcmp(arg, "--prompt") == 0 && i + 1 < argc) {
             args.prompt = argv[++i];
         } else if (std::strcmp(arg, "--max-tokens") == 0 && i + 1 < argc) {

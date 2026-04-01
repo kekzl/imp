@@ -126,6 +126,18 @@ struct TransformerLayer {
 
     // Router bias (Nemotron MoE)
     Tensor moe_router_bias;
+
+    // GPTQ quantized weights (temporary — dequantized to FP16 during upload)
+    struct GPTQWeight {
+        Tensor qweight;   // packed INT32
+        Tensor qzeros;    // zero points
+        Tensor scales;    // per-group scales (FP16)
+        Tensor g_idx;     // group index (optional, for desc_act)
+        int bits = 0;
+        int group_size = 128;
+    };
+    GPTQWeight gptq_q, gptq_k, gptq_v, gptq_o;
+    GPTQWeight gptq_gate, gptq_up, gptq_down;
 };
 
 } // namespace imp

@@ -10,6 +10,7 @@
 #include <cctype>
 #include <charconv>
 #include <cmath>
+#include <ctime>
 #include <sstream>
 #include <unordered_map>
 
@@ -1864,6 +1865,17 @@ private:
                 if (!call.args.empty()) sep = eval(*call.args[0]).to_string();
                 // Can't truly implement callable — return empty
                 return Value(sep);
+            }
+            if (var->name == "strftime_now") {
+                // strftime_now(format_string) — returns current time formatted
+                // Used by some chat templates to inject current date/time
+                std::string fmt = "%Y-%m-%d %H:%M:%S";
+                if (!call.args.empty()) fmt = eval(*call.args[0]).to_string();
+                std::time_t now = std::time(nullptr);
+                std::tm* tm = std::localtime(&now);
+                char buf[256];
+                std::strftime(buf, sizeof(buf), fmt.c_str(), tm);
+                return Value(std::string(buf));
             }
         }
 

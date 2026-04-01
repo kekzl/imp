@@ -127,10 +127,10 @@ std::string WeightMap::map_name(const std::string& name) const {
             }
         }
 
-        // DeepSeek MoE router: mlp.gate.weight
-        if (parts.size() >= 6 && parts[3] == "mlp" &&
-            parts[4] == "gate" && parts[5] == "weight") {
-            return prefix + "moe_gate";
+        // DeepSeek MoE router: mlp.gate.weight / mlp.gate.bias
+        if (parts.size() >= 6 && parts[3] == "mlp" && parts[4] == "gate") {
+            if (parts[5] == "weight") return prefix + "moe_gate";
+            if (parts[5] == "bias")   return prefix + "moe_router_bias";
         }
 
         // DeepSeek MoE experts: mlp.experts.{e}.{gate_proj,up_proj,down_proj}.weight
@@ -143,6 +143,76 @@ std::string WeightMap::map_name(const std::string& name) const {
                 if (parts[6] == "up_proj")   return ep + "w_up";
                 if (parts[6] == "down_proj") return ep + "w_down";
             }
+        }
+
+        // Shared expert: mlp.shared_expert.{gate,up,down}_proj.weight
+        if (parts.size() >= 7 && parts[3] == "mlp" &&
+            parts[4] == "shared_expert" && parts[6] == "weight") {
+            if (parts[5] == "gate_proj") return prefix + "w_gate_shared";
+            if (parts[5] == "up_proj")   return prefix + "w_up_shared";
+            if (parts[5] == "down_proj") return prefix + "w_down_shared";
+        }
+
+        // Attention biases: self_attn.{q,k,v}_proj.bias
+        if (parts.size() >= 6 && parts[3] == "self_attn" && parts[5] == "bias") {
+            if (parts[4] == "q_proj") return prefix + "q_bias";
+            if (parts[4] == "k_proj") return prefix + "k_bias";
+            if (parts[4] == "v_proj") return prefix + "v_bias";
+        }
+
+        // QK-Norm: self_attn.{q,k}_norm.weight
+        if (parts.size() >= 6 && parts[3] == "self_attn" && parts[5] == "weight") {
+            if (parts[4] == "q_norm") return prefix + "attn_q_norm";
+            if (parts[4] == "k_norm") return prefix + "attn_k_norm";
+        }
+
+        // Post-layer norms (Gemma-3)
+        if (parts.size() >= 5 && parts[4] == "weight") {
+            if (parts[3] == "post_feedforward_layernorm") return prefix + "post_ffn_norm";
+            if (parts[3] == "pre_feedforward_layernorm")  return prefix + "ffn_norm";
+        }
+
+        // Mixtral MoE router bias: block_sparse_moe.gate.bias
+        if (parts.size() >= 6 && parts[3] == "block_sparse_moe" &&
+            parts[4] == "gate" && parts[5] == "bias") {
+            return prefix + "moe_router_bias";
+        }
+
+        // GPTQ weights: self_attn.{q,k,v,o}_proj.{qweight,qzeros,scales,g_idx}
+        if (parts.size() >= 6 && parts[3] == "self_attn") {
+            const std::string& field = parts[5];
+            if (field == "qweight" || field == "qzeros" || field == "scales" || field == "g_idx") {
+                return prefix + parts[4] + "." + field;
+            }
+        }
+        // GPTQ weights: mlp.{gate,up,down}_proj.{qweight,qzeros,scales,g_idx}
+        if (parts.size() >= 6 && parts[3] == "mlp") {
+            const std::string& field = parts[5];
+            if (field == "qweight" || field == "qzeros" || field == "scales" || field == "g_idx") {
+                return prefix + parts[4] + "." + field;
+            }
+        }
+
+        // GDN (Gated DeltaNet / Qwen3.5): temporal_block.{gate_proj,alpha,beta}.weight
+        if (parts.size() >= 6 && parts[3] == "temporal_block" && parts[5] == "weight") {
+            if (parts[4] == "gate_proj") return prefix + "gdn_gate";
+            if (parts[4] == "alpha")     return prefix + "gdn_alpha";
+            if (parts[4] == "beta")      return prefix + "gdn_beta";
+        }
+
+        // SSM (Mamba2 / Nemotron-H)
+        if (parts[3] == "mamba") {
+            if (parts.size() >= 6 && parts[5] == "weight") {
+                if (parts[4] == "in_proj")  return prefix + "ssm_in";
+                if (parts[4] == "out_proj") return prefix + "ssm_out";
+                if (parts[4] == "conv1d")   return prefix + "ssm_conv1d_w";
+                if (parts[4] == "norm")     return prefix + "ssm_norm_w";
+            }
+            if (parts.size() >= 6 && parts[4] == "conv1d" && parts[5] == "bias")
+                return prefix + "ssm_conv1d_b";
+            if (parts.size() >= 5 && parts[4] == "dt_bias") return prefix + "ssm_dt_b";
+            if (parts.size() >= 5 && parts[4] == "A_log")   return prefix + "ssm_a";
+            if (parts.size() >= 5 && parts[4] == "D")       return prefix + "ssm_d";
         }
     }
 
@@ -263,9 +333,11 @@ bool WeightMap::apply_weights(
         // -----------------------------------------------------------------
         // MoE weights -- DeepSeek style
         //   mlp.gate.weight                              -> moe_gate
+        //   mlp.gate.bias                                -> moe_router_bias
         //   mlp.experts.{e}.gate_proj.weight             -> expert_w_gate[e]
         //   mlp.experts.{e}.up_proj.weight               -> expert_w_up[e]
         //   mlp.experts.{e}.down_proj.weight             -> expert_w_down[e]
+        //   mlp.shared_expert.{gate,up,down}_proj.weight -> w_{gate,up,down}_shared
         // -----------------------------------------------------------------
         if (!matched && parts[3] == "mlp") {
             // MoE router: mlp.gate.weight
@@ -274,6 +346,11 @@ bool WeightMap::apply_weights(
             // parts[4]=="gate_proj").
             if (parts.size() >= 6 && parts[4] == "gate" && parts[5] == "weight") {
                 layer.moe_gate = tensor;
+                matched = true;
+            }
+            // MoE router bias: mlp.gate.bias
+            else if (parts.size() >= 6 && parts[4] == "gate" && parts[5] == "bias") {
+                layer.moe_router_bias = tensor;
                 matched = true;
             }
             // MoE experts: mlp.experts.{e}.{gate_proj,up_proj,down_proj}.weight
@@ -286,6 +363,140 @@ bool WeightMap::apply_weights(
                     else if (proj == "up_proj") { layer.expert_w_up[expert_idx] = tensor; matched = true; }
                     else if (proj == "down_proj") { layer.expert_w_down[expert_idx] = tensor; matched = true; }
                 }
+            }
+            // Shared expert: mlp.shared_expert.{gate,up,down}_proj.weight
+            else if (parts.size() >= 7 && parts[4] == "shared_expert" && parts[6] == "weight") {
+                const std::string& proj = parts[5];
+                if (proj == "gate_proj") { layer.w_gate_shared = tensor; matched = true; }
+                else if (proj == "up_proj") { layer.w_up_shared = tensor; matched = true; }
+                else if (proj == "down_proj") { layer.w_down_shared = tensor; matched = true; }
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // MoE router bias -- Mixtral style: block_sparse_moe.gate.bias
+        // -----------------------------------------------------------------
+        if (!matched && parts[3] == "block_sparse_moe" &&
+            parts.size() >= 6 && parts[4] == "gate" && parts[5] == "bias") {
+            layer.moe_router_bias = tensor;
+            matched = true;
+        }
+
+        // -----------------------------------------------------------------
+        // Attention biases -- Qwen2-style: self_attn.{q,k,v}_proj.bias
+        // -----------------------------------------------------------------
+        if (!matched && parts.size() >= 6 && parts[3] == "self_attn" && parts[5] == "bias") {
+            const std::string& proj = parts[4];
+            if (proj == "q_proj") { layer.q_bias = tensor; matched = true; }
+            else if (proj == "k_proj") { layer.k_bias = tensor; matched = true; }
+            else if (proj == "v_proj") { layer.v_bias = tensor; matched = true; }
+        }
+
+        // -----------------------------------------------------------------
+        // QK-Norm -- Qwen3-style: self_attn.{q,k}_norm.weight
+        // -----------------------------------------------------------------
+        if (!matched && parts.size() >= 6 && parts[3] == "self_attn" && parts[5] == "weight") {
+            const std::string& proj = parts[4];
+            if (proj == "q_norm") { layer.attn_q_norm = tensor; matched = true; }
+            else if (proj == "k_norm") { layer.attn_k_norm = tensor; matched = true; }
+        }
+
+        // -----------------------------------------------------------------
+        // Post-layer norms -- Gemma-3 style
+        //   post_feedforward_layernorm.weight  -> post_ffn_norm
+        //   pre_feedforward_layernorm.weight   -> ffn_norm (Gemma variant)
+        //   post_attention_layernorm.weight     (already handled as ffn_norm above)
+        // -----------------------------------------------------------------
+        if (!matched && parts.size() >= 5 && parts[4] == "weight") {
+            if (parts[3] == "post_feedforward_layernorm") {
+                layer.post_ffn_norm = tensor;
+                matched = true;
+            } else if (parts[3] == "pre_feedforward_layernorm") {
+                layer.ffn_norm = tensor;
+                matched = true;
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // GPTQ weights: self_attn.{q,k,v,o}_proj.{qweight,qzeros,scales,g_idx}
+        //               mlp.{gate,up,down}_proj.{qweight,qzeros,scales,g_idx}
+        // -----------------------------------------------------------------
+        if (!matched && parts.size() >= 6 && parts[3] == "self_attn") {
+            const std::string& proj = parts[4];
+            const std::string& field = parts[5];
+            TransformerLayer::GPTQWeight* gptq = nullptr;
+            if (proj == "q_proj") gptq = &layer.gptq_q;
+            else if (proj == "k_proj") gptq = &layer.gptq_k;
+            else if (proj == "v_proj") gptq = &layer.gptq_v;
+            else if (proj == "o_proj") gptq = &layer.gptq_o;
+
+            if (gptq) {
+                if (field == "qweight") { gptq->qweight = tensor; matched = true; }
+                else if (field == "qzeros") { gptq->qzeros = tensor; matched = true; }
+                else if (field == "scales") { gptq->scales = tensor; matched = true; }
+                else if (field == "g_idx") { gptq->g_idx = tensor; matched = true; }
+            }
+        }
+
+        if (!matched && parts.size() >= 6 && parts[3] == "mlp") {
+            const std::string& proj = parts[4];
+            const std::string& field = parts[5];
+            TransformerLayer::GPTQWeight* gptq = nullptr;
+            if (proj == "gate_proj") gptq = &layer.gptq_gate;
+            else if (proj == "up_proj") gptq = &layer.gptq_up;
+            else if (proj == "down_proj") gptq = &layer.gptq_down;
+
+            if (gptq) {
+                if (field == "qweight") { gptq->qweight = tensor; matched = true; }
+                else if (field == "qzeros") { gptq->qzeros = tensor; matched = true; }
+                else if (field == "scales") { gptq->scales = tensor; matched = true; }
+                else if (field == "g_idx") { gptq->g_idx = tensor; matched = true; }
+            }
+        }
+
+        // -----------------------------------------------------------------
+        // GDN (Gated DeltaNet / Qwen3.5) weights
+        //   temporal_block.gate_proj.weight  -> gdn_gate
+        //   temporal_block.alpha.weight      -> gdn_alpha
+        //   temporal_block.beta.weight       -> gdn_beta
+        // -----------------------------------------------------------------
+        if (!matched && parts.size() >= 6 && parts[3] == "temporal_block" && parts[5] == "weight") {
+            const std::string& proj = parts[4];
+            if (proj == "gate_proj") { layer.gdn_gate = tensor; matched = true; }
+            else if (proj == "alpha") { layer.gdn_alpha = tensor; matched = true; }
+            else if (proj == "beta") { layer.gdn_beta = tensor; matched = true; }
+        }
+
+        // -----------------------------------------------------------------
+        // SSM (Mamba2 / Nemotron-H) weights
+        //   mamba.in_proj.weight   -> ssm_in
+        //   mamba.out_proj.weight  -> ssm_out
+        //   mamba.conv1d.weight    -> ssm_conv1d_w
+        //   mamba.conv1d.bias      -> ssm_conv1d_b
+        //   mamba.dt_bias          -> ssm_dt_b
+        //   mamba.A_log            -> ssm_a
+        //   mamba.D                -> ssm_d
+        //   mamba.norm.weight      -> ssm_norm_w
+        // -----------------------------------------------------------------
+        if (!matched && parts[3] == "mamba") {
+            if (parts.size() >= 6 && parts[5] == "weight") {
+                const std::string& proj = parts[4];
+                if (proj == "in_proj") { layer.ssm_in = tensor; matched = true; }
+                else if (proj == "out_proj") { layer.ssm_out = tensor; matched = true; }
+                else if (proj == "conv1d") { layer.ssm_conv1d_w = tensor; matched = true; }
+                else if (proj == "norm") { layer.ssm_norm_w = tensor; matched = true; }
+            } else if (parts.size() >= 6 && parts[4] == "conv1d" && parts[5] == "bias") {
+                layer.ssm_conv1d_b = tensor;
+                matched = true;
+            } else if (parts.size() >= 5 && parts[4] == "dt_bias") {
+                layer.ssm_dt_b = tensor;
+                matched = true;
+            } else if (parts.size() >= 5 && parts[4] == "A_log") {
+                layer.ssm_a = tensor;
+                matched = true;
+            } else if (parts.size() >= 5 && parts[4] == "D") {
+                layer.ssm_d = tensor;
+                matched = true;
             }
         }
 
