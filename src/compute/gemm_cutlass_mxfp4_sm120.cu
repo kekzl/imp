@@ -330,6 +330,69 @@ bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K,
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Dequantize MXFP4 → FP16 for decode fallback (GEMV needs FP16 weights).
+// ---------------------------------------------------------------------------
+
+// E2M1 dequant table: 16 FP32 values for 4-bit indices 0-15.
+// E2M1: sign(1) + exp(2) + mantissa(1), bias=1
+__device__ __constant__ float kE2M1Table[16] = {
+    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,     // positive
+    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f  // negative
+};
+
+__global__ void dequant_mxfp4_kernel(
+    const uint8_t* __restrict__ packed_data,  // [N, K/2]
+    const uint8_t* __restrict__ sf_data,      // SfAtom layout UE8M0
+    half*          __restrict__ out,           // [N, K]
+    int N, int K, int n_k_tiles)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total_pairs = N * (K / 2);
+    if (idx >= total_pairs) return;
+
+    int row = idx / (K / 2);
+    int pair = idx % (K / 2);
+    int col0 = pair * 2;
+    int col1 = col0 + 1;
+
+    uint8_t packed = packed_data[idx];
+    int nib_lo = packed & 0xF;
+    int nib_hi = (packed >> 4) & 0xF;
+
+    // UE8M0 scale for this 32-element group
+    int group0 = col0 / 32;  // kMxSFVecSize = 32
+    int sf_idx = mx_sfatom_offset(row, group0, n_k_tiles);
+    uint8_t ue8m0 = sf_data[sf_idx];
+    // UE8M0 → float: 2^(bits - 127)
+    float scale;
+    uint32_t fbits = static_cast<uint32_t>(ue8m0) << 23;
+    memcpy(&scale, &fbits, sizeof(float));
+
+    float val0 = kE2M1Table[nib_lo] * scale;
+    float val1 = kE2M1Table[nib_hi] * scale;
+
+    out[row * K + col0] = __float2half(val0);
+    out[row * K + col1] = __float2half(val1);
+}
+
+void dequant_mxfp4_to_fp16(const CutlassMxFP4Weight& src, void* dst_fp16,
+                             cudaStream_t stream)
+{
+    int N = static_cast<int>(src.N);
+    int K = static_cast<int>(src.K);
+    int total_pairs = N * (K / 2);
+    int n_k_tiles = (K + kMxAtomKElems - 1) / kMxAtomKElems;
+
+    int threads = 256;
+    int blocks = (total_pairs + threads - 1) / threads;
+    dequant_mxfp4_kernel<<<blocks, threads, 0, stream>>>(
+        static_cast<const uint8_t*>(src.data),
+        static_cast<const uint8_t*>(src.scale_factors),
+        static_cast<half*>(dst_fp16),
+        N, K, n_k_tiles);
+}
+
 // Forward declaration (defined below in activation quantization section)
 __global__ void quantize_fp16_mxfp4_cutlass_kernel(
     const half* __restrict__ input,

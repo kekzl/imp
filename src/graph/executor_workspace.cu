@@ -1871,6 +1871,25 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     wcache_.use_mxfp4 = true;
                     IMP_LOG_INFO("Native MXFP4 GGUF: %d tensors, %.2f MiB (direct → CUTLASS)",
                                  mx_native, mx_native_bytes / (1024.0 * 1024.0));
+
+                    // Dequant MXFP4 → FP16 for decode path (GEMV needs FP16).
+                    // CUTLASS MXFP4 GEMM only works for M>1 (prefill).
+                    size_t fp16_total = 0;
+                    for (auto& [ptr, mw] : wcache_.cutlass_mxfp4) {
+                        if (wcache_.fp16.count(ptr)) continue;  // already have FP16
+                        size_t fp16_bytes = static_cast<size_t>(mw.N) * mw.K * sizeof(half);
+                        void* d_fp16 = nullptr;
+                        if (cudaMalloc(&d_fp16, fp16_bytes) != cudaSuccess) continue;
+                        dequant_mxfp4_to_fp16(mw, d_fp16, stream);
+                        int64_t shape[2] = {mw.N, mw.K};
+                        wcache_.fp16[ptr] = Tensor(d_fp16, DType::FP16, 2, shape, true);
+                        fp16_total += fp16_bytes;
+                    }
+                    if (fp16_total > 0) {
+                        cudaStreamSynchronize(stream);
+                        IMP_LOG_INFO("MXFP4 decode fallback: dequant → FP16 cache %.2f MiB",
+                                     fp16_total / (1024.0 * 1024.0));
+                    }
                 }
             }
 
