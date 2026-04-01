@@ -31,6 +31,8 @@ struct ServerArgs {
     int self_spec_k = 2;
     int self_spec_exit_layer = -1;
     int self_spec_skip_n = -1;
+    bool ngram_spec = false;        // --ngram-spec
+    int ngram_spec_k = 5;           // --ngram-spec-k
     int min_kv_tokens = 0;     // --min-kv-tokens: minimum KV cache capacity (0=auto)
     std::string preset;        // --preset: named model preset (e.g. qwen3-32b)
     std::string presets_file;  // --presets-file: custom presets.toml path
