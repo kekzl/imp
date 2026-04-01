@@ -59,6 +59,8 @@ void print_usage(const char* prog) {
         "  --self-spec-k <n>     Draft tokens per self-spec step (default: 2)\n"
         "  --self-spec-exit-layer <n>  Layers to run in draft (-1 = auto)\n"
         "  --self-spec-skip-n <n>  Layers to skip in draft (-1 = auto)\n"
+        "  --ngram-spec          N-gram speculative decoding (draft from token history)\n"
+        "  --ngram-spec-k <n>    N-gram max draft tokens per step (default: 5)\n"
         "  --preset <name|none>  Override auto-detected preset, or 'none' to disable\n"
         "                        Use --preset list to show all available presets\n"
         "  --presets-file <path> Custom presets.toml path\n"
@@ -184,6 +186,10 @@ CliArgs parse_args(int argc, char** argv) {
             args.self_spec_exit_layer = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--self-spec-skip-n") == 0 && i + 1 < argc) {
             args.self_spec_skip_n = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--ngram-spec") == 0) {
+            args.ngram_spec = true;
+        } else if (std::strcmp(arg, "--ngram-spec-k") == 0 && i + 1 < argc) {
+            args.ngram_spec_k = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--preset") == 0 && i + 1 < argc) {
             args.preset = argv[++i];
         } else if (std::strcmp(arg, "--presets-file") == 0 && i + 1 < argc) {

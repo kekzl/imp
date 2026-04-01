@@ -394,6 +394,8 @@ bool Engine::init_weights() {
         int eff_batch = config_.max_batch_size;
         if (config_.enable_self_speculative)
             eff_batch = std::max(eff_batch, config_.self_spec_k + 1);
+        if (config_.enable_ngram_spec)
+            eff_batch = std::max(eff_batch, config_.ngram_spec_k + 1);
         if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl,
                              eff_batch, config_.max_seq_len,
                              config_.use_fp8_prefill, config_.use_nvfp4_decode,
@@ -772,6 +774,10 @@ bool Engine::init_features() {
         }
     }
     if (config_.enable_ngram_spec && !config_.enable_speculative && !config_.enable_self_speculative) {
+        if (config_.use_cuda_graphs) {
+            IMP_LOG_INFO("Disabling CUDA graphs: n-gram speculative decoding active");
+            config_.use_cuda_graphs = false;
+        }
         int n_kv = 0;
         for (int i = 0; i < mcfg.n_layers; i++)
             if (model_->layer(i).wq.data && !model_->layer(i).gdn_gate.data) n_kv++;

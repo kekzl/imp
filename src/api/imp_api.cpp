@@ -68,6 +68,8 @@ ImpConfig imp_config_default(void) {
     config.self_spec_k = 2;            // default draft tokens
     config.self_spec_exit_layer = -1;   // auto
     config.self_spec_skip_n = -1;       // auto
+    config.enable_ngram_spec = 0;       // no n-gram speculation
+    config.ngram_spec_k = 5;            // default draft tokens
     config.mmproj_path = NULL;          // no vision model
     config.turboquant_sketch_multiplier = 2; // sketch_dim = 2 * head_dim
     return config;
@@ -269,6 +271,8 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
         ecfg.self_spec_exit_layer = config->self_spec_exit_layer;
         ecfg.self_spec_skip_n = config->self_spec_skip_n;
         ecfg.turboquant_sketch_multiplier = config->turboquant_sketch_multiplier;
+        ecfg.enable_ngram_spec = (config->enable_ngram_spec != 0);
+        ecfg.ngram_spec_k = config->ngram_spec_k;
         if (config->mmproj_path)
             ecfg.mmproj_path = config->mmproj_path;
 

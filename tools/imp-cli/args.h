@@ -58,6 +58,8 @@ struct CliArgs {
     int self_spec_k = 2;            // --self-spec-k: draft tokens per step
     int self_spec_exit_layer = -1;  // --self-spec-exit-layer: -1 = n_layers/2
     int self_spec_skip_n = -1;      // --self-spec-skip-n: layers to skip (-1 = auto)
+    bool ngram_spec = false;        // --ngram-spec: n-gram speculative decoding
+    int ngram_spec_k = 5;           // --ngram-spec-k: max draft tokens
     std::string preset;        // --preset: named model preset (e.g. qwen3-32b)
     std::string presets_file;  // --presets-file: custom presets.toml path
 };

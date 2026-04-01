@@ -41,7 +41,9 @@ Current gap vs FP8 baseline: -23% decode (191 vs 248 tok/s). This is algorithm-i
 - **EAGLE-3**: Dead end on single GPU (56 tok/s vs 306 baseline). Draft model shares same weights = 78% cost per layer.
 - **Self-speculative**: Dead end (50% of baseline). Memory-bound decode can't amortize.
 - **DFlash**: Not feasible — no draft model for Qwen3-32B, training requires datacenter GPUs.
-- **N-gram speculation**: Implemented (`src/runtime/ngram_spec.cpp`), viable for repetitive prompts.
+- **N-gram speculation**: Implemented (`src/runtime/ngram_spec.cpp`), viable for repetitive prompts. **WARNING:** Uses pseudo-prefill verify which has KV cache numerical divergence (Prefill CUTLASS FMHA vs Decode paged attention produce different KV values). Same bug as TurboDraft — needs multi-sequence decode verify to be correct.
+- **TurboDraft (PPM + Classifier)**: Dead end. PPM 5-gram matching achieves 0% acceptance on real text — LLM token sequences are too complex for n-gram prediction. SVD-compressed classifier achieves 74-90% reconstruction error — too lossy for top-1 accuracy. Trainingsless drafting doesn't work for LLM inference.
+- **Pseudo-prefill verify bug**: Prefill-mode forward produces numerically different KV cache entries than decode-mode forward (different attention kernels: CUTLASS FMHA vs paged attention). Affects NgramSpec and any future pseudo-prefill verify. Fix: use multi-sequence decode verify (like SelfSpeculativeDecoder) or accept the divergence for short sequences.
 
 ---
 
@@ -86,19 +88,12 @@ Current gap vs FP8 baseline: -23% decode (191 vs 248 tok/s). This is algorithm-i
 
 ---
 
-## Upgrade Path: CUTLASS 4.4.2 + PTX 9.2
+## CUTLASS 4.4.2 (DONE) + PTX 9.2
 
-### CUTLASS 4.4.1 → 4.4.2
-We're on CUTLASS v4.4.1 (FetchContent). Upgrade to 4.4.2 brings:
-- **SM120f compilation** for examples and NVFP4/MX Grouped GEMM profiler
-- **Hopper FMHA causal perf fix**: unnecessary convergence barriers in mbarrier sync
-- **SM120 memory fence fix** for CLC scheduler Pingpong kernel
-- **SM120 SMEM alignment fix** for scale factors (was causing garbage output)
-- **SM120 PDL fix** for Grouped GEMM
-- **Example 87**: SM120 Blockwise GEMM (reference for GGUF-dequant GEMM)
-- **Example 92**: MoE low-latency kernels (TMA weights, CPASYNC tokens)
-- **Block-scaled sparse kernels** for SM100/SM120
-- **Heuristics-based autotuning** via nvidia-matmul-heuristics
+### CUTLASS 4.4.2 — Upgraded
+Already on v4.4.2. SM120 fixes (SMEM alignment, memory fence, PDL, Hopper FMHA perf) are automatic via headers.
+
+**Remaining opportunity:** MoE Grouped GEMM uses CUTLASS 2.x API with D2H sync workaround (`gemm_cutlass_grouped_sm120.cu:115-131`). Migration to CUTLASS 3.x device-side problem shapes would eliminate 2 cudaStreamSynchronize() per MoE forward. Low priority — only matters at MoE-heavy workloads.
 
 SM120 GEMM architecture notes:
 - Pingpong (2×4 MMA warps) and Cooperative (1×8 MMA warps) schedules
