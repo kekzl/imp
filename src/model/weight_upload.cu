@@ -237,6 +237,29 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
     int64_t n_elements = weight.numel();
     if (n_elements == 0) return true;
 
+    // ---- MXFP4 (native) ----
+    // Block layout in GGUF: [16 bytes E2M1 data | 1 byte UE8M0 scale] × N_blocks
+    // Upload raw to GPU — separation into data + SfAtom scales done later
+    // in executor_workspace.cu (Phase 2c: native MXFP4 cache registration).
+    if (qtype == GGMLQuantType::MXFP4) {
+        if (weight.ndim < 2) return false;
+        int64_t N = weight.shape[0];
+        int64_t K = weight.shape[1];
+        // 17 bytes per 32 elements: (K/32)*17 bytes per row
+        size_t row_bytes = static_cast<size_t>((K + 31) / 32) * 17;
+        size_t raw_bytes = static_cast<size_t>(N) * row_bytes;
+        void* d_data = nullptr;
+        checked_cuda_malloc(&d_data, raw_bytes);
+        if (!d_data) return false;
+        h2d_copy(d_data, weight.data, raw_bytes, stream);
+        gpu_allocs.push_back(d_data);
+        int64_t new_shape[4] = {N, K, 0, 0};
+        weight = Tensor(d_data, DType::INT4, 2, new_shape, true);
+        IMP_LOG_DEBUG("  MXFP4 raw upload: [%lld, %lld] %zu bytes",
+                     (long long)N, (long long)K, raw_bytes);
+        return true;
+    }
+
     // ---- Q4_0 ----
     if (qtype == GGMLQuantType::Q4_0) {
         if (weight.ndim < 2) {

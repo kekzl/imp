@@ -50,6 +50,7 @@ int ggml_blck_size(GGMLType type) {
         case GGMLType::IQ1_S:   return 256;
         case GGMLType::IQ1_M:   return 256;
         case GGMLType::IQ4_XS:  return 256;
+        case GGMLType::MXFP4:   return 32;
         default: return 0;
     }
 }
@@ -85,6 +86,7 @@ size_t ggml_type_size(GGMLType type) {
         case GGMLType::IQ1_M:   return 56;
         case GGMLType::IQ4_NL:  return 18;
         case GGMLType::IQ4_XS:  return 136;
+        case GGMLType::MXFP4:   return 17;   // 32*4/8 + 1 (UE8M0 scale)
         default: return 0;
     }
 }
@@ -105,6 +107,7 @@ DType ggml_type_to_dtype(GGMLType type) {
         // Quantized types: use INT4 for 4-bit, INT8 as proxy for others
         case GGMLType::Q4_0: case GGMLType::Q4_1:
         case GGMLType::Q4_K: case GGMLType::IQ4_NL: case GGMLType::IQ4_XS:
+        case GGMLType::MXFP4:
             return DType::INT4;
         default:
             return DType::INT8;  // other quantized types stored as blocks
