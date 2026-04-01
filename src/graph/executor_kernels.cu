@@ -1754,7 +1754,7 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
         } else {
             gemm(input, weight, output, 1.0f, 0.0f, stream);
         }
-    } else if (fp16_cache != nullptr && dequant_gpu_supported(qtype)) {
+    } else if (fp16_cache != nullptr && (dequant_gpu_supported(qtype) || qtype == GGMLQuantType::MXFP4)) {
         // Pre-dequantized FP16 cache: zero per-GEMM dequant overhead
         auto it = fp16_cache->find(weight.data);
         if (it != fp16_cache->end()) {

@@ -1948,7 +1948,13 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             Tensor no_last = view_tokens(norm_out_, 1);
             rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
             debug_tensor_stats("after_final_rmsnorm", no_last, stream);
-            gemm(no_last, model_->output_proj(), lg, 1.0f, 0.0f, stream);
+            // Check FP16 weight cache for quantized output projections (MXFP4, etc.)
+            auto fp16_lm = wcache_.fp16.find(model_->output_proj().data);
+            if (fp16_lm != wcache_.fp16.end()) {
+                gemm(no_last, fp16_lm->second, lg, 1.0f, 0.0f, stream);
+            } else {
+                gemm(no_last, model_->output_proj(), lg, 1.0f, 0.0f, stream);
+            }
         }
         logits_out = lg;
         debug_top_logits(lg, stream);

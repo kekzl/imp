@@ -147,7 +147,7 @@ def quantize_tensor_mxfp4(tensor: torch.Tensor) -> bytes:
 # GGUF Writer (minimal, for MXFP4 type)
 # ============================================================================
 
-GGUF_MAGIC = 0x46475547  # 'GGUF'
+GGUF_MAGIC = 0x46554747  # 'GGUF' little-endian (bytes: G G U F)
 GGUF_VERSION = 3
 
 # GGML types
