@@ -112,7 +112,7 @@ gdn_scan_fused_kernel(
                 if (d < stride) s_reduce[d] += s_reduce[d + stride];
                 __syncthreads();
             }
-            float k_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
+            float k_inv = rsqrtf(s_reduce[0] + 1e-6f);
 
             s_reduce[d] = q_sq;
             __syncthreads();
@@ -120,7 +120,7 @@ gdn_scan_fused_kernel(
                 if (d < stride) s_reduce[d] += s_reduce[d + stride];
                 __syncthreads();
             }
-            float q_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
+            float q_inv = rsqrtf(s_reduce[0] + 1e-6f);
 
             // Normalize in-place
             if (d < SS) {

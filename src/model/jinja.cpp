@@ -635,6 +635,16 @@ struct SetNode : Node {
     std::unique_ptr<Expr> value;
 };
 
+struct MacroNode : Node {
+    std::string name;
+    struct Param {
+        std::string name;
+        std::unique_ptr<Expr> default_value; // nullptr if no default
+    };
+    std::vector<Param> params;
+    std::vector<std::unique_ptr<Node>> body;
+};
+
 // ============================================================================
 // Parser
 // ============================================================================
@@ -716,6 +726,7 @@ private:
         if (check(TokenType::IDENT, "for")) return parse_for();
         if (check(TokenType::IDENT, "if")) return parse_if();
         if (check(TokenType::IDENT, "set")) return parse_set();
+        if (check(TokenType::IDENT, "macro")) return parse_macro();
         // Unknown statement — skip to %}
         while (!at_end() && !check(TokenType::STMT_CLOSE)) advance();
         if (check(TokenType::STMT_CLOSE)) advance();
@@ -774,6 +785,47 @@ private:
             } else {
                 pos_ = saved; // restore
             }
+        }
+
+        return node;
+    }
+
+    std::unique_ptr<Node> parse_macro() {
+        advance(); // 'macro'
+        auto node = std::make_unique<MacroNode>();
+
+        // macro name
+        node->name = peek().value;
+        advance();
+
+        // (param1, param2=default, ...)
+        if (check(TokenType::LPAREN)) {
+            advance(); // '('
+            while (!check(TokenType::RPAREN) && !at_end()) {
+                MacroNode::Param param;
+                param.name = peek().value;
+                advance();
+                // Optional default: =expr
+                if (check(TokenType::OP, "=")) {
+                    advance();
+                    param.default_value = parse_expr();
+                }
+                node->params.push_back(std::move(param));
+                if (check(TokenType::COMMA)) advance();
+            }
+            if (check(TokenType::RPAREN)) advance(); // ')'
+        }
+
+        if (check(TokenType::STMT_CLOSE)) advance();
+
+        // Parse body until endmacro
+        parse_body(node->body, {"endmacro"});
+
+        // Consume {% endmacro %}
+        if (check(TokenType::STMT_OPEN)) {
+            advance();
+            if (check(TokenType::IDENT, "endmacro")) advance();
+            if (check(TokenType::STMT_CLOSE)) advance();
         }
 
         return node;
@@ -1357,6 +1409,8 @@ private:
             render_if(*if_node, out);
         } else if (auto* set_node = dynamic_cast<const SetNode*>(&node)) {
             render_set(*set_node);
+        } else if (auto* macro_node = dynamic_cast<const MacroNode*>(&node)) {
+            register_macro(*macro_node);
         }
     }
 
@@ -1813,9 +1867,50 @@ private:
         return val;
     }
 
+    void register_macro(const MacroNode& node) {
+        macros_[node.name] = &node;
+    }
+
+    Value call_macro(const MacroNode& macro, const CallExpr& call) {
+        push_scope();
+        // Bind positional args
+        for (size_t i = 0; i < macro.params.size(); i++) {
+            if (i < call.args.size()) {
+                set_var(macro.params[i].name, eval(*call.args[i]));
+            } else {
+                // Check kwargs
+                bool found = false;
+                for (auto& [k, v] : call.kwargs) {
+                    if (k == macro.params[i].name) {
+                        set_var(k, eval(*v));
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found && macro.params[i].default_value) {
+                    set_var(macro.params[i].name, eval(*macro.params[i].default_value));
+                } else if (!found) {
+                    set_var(macro.params[i].name, Value());
+                }
+            }
+        }
+        // Render macro body
+        std::string result;
+        for (auto& node : macro.body) {
+            render_node(*node, result);
+        }
+        pop_scope();
+        return Value(result);
+    }
+
     Value eval_call(const CallExpr& call) {
-        // Check if callee is a variable name (built-in function)
+        // Check if callee is a variable name (built-in function or macro)
         if (auto* var = dynamic_cast<const VariableExpr*>(call.callee.get())) {
+            // Check macros first
+            auto macro_it = macros_.find(var->name);
+            if (macro_it != macros_.end()) {
+                return call_macro(*macro_it->second, call);
+            }
             if (var->name == "namespace") {
                 auto obj = Value::make_object();
                 // Initialize with keyword args
@@ -2210,6 +2305,7 @@ private:
     }
 
     std::vector<Scope> scopes_;
+    std::map<std::string, const MacroNode*> macros_;
 };
 
 } // namespace detail

@@ -890,7 +890,7 @@ std::vector<int32_t> ChatTemplate::apply_jinja(
         IMP_LOG_WARN("Jinja2 render returned empty string (error: %s)", jinja_tpl_->error().c_str());
         return {};
     }
-    IMP_LOG_DEBUG("Jinja2 rendered (%zu chars): %.200s", rendered.size(), rendered.c_str());
+    IMP_LOG_DEBUG("Jinja2 rendered (%zu chars)", rendered.size());
 
     auto result = tokenize_rendered(tok, rendered);
 
