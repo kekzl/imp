@@ -168,7 +168,7 @@ size_t Engine::effective_free_vram() const {
 
 bool Engine::is_stop_token(int32_t token) const {
     Tokenizer* tok = model_->tokenizer();
-    if (tok && token == tok->eos_id()) return true;
+    if (tok && tok->is_eos(token)) return true;
     for (int32_t stop_id : chat_template_.stop_token_ids()) {
         if (token == stop_id) return true;
     }
@@ -215,6 +215,12 @@ void Engine::fill_sampling_params(const Request& req, InferenceState& state) con
     state.mirostat_tau = req.mirostat_tau;
     state.mirostat_eta = req.mirostat_eta;
     state.mirostat_mu = req.mirostat_mu;
+
+    // Logit bias
+    if (!req.logit_bias.empty()) {
+        state.logit_bias = req.logit_bias.data();
+        state.n_logit_bias = static_cast<int>(req.logit_bias.size());
+    }
 
     // Banned tokens (chat template special tokens that must not be generated)
     if (!banned_token_ids_.empty()) {
@@ -805,7 +811,9 @@ bool Engine::init_features() {
         // The model must be able to generate these for correct operation.
         std::vector<int32_t> keep_ids;
         Tokenizer* tok = model_->tokenizer();
-        if (tok) keep_ids.push_back(static_cast<int32_t>(tok->eos_id()));
+        if (tok) {
+            for (int32_t eid : tok->eos_ids()) keep_ids.push_back(eid);
+        }
         for (int32_t sid : chat_template_.stop_token_ids())
             keep_ids.push_back(sid);
         // Think tokens (<think>/<\/think>) must not be banned — think models

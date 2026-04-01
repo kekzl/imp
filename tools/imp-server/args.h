@@ -4,6 +4,7 @@
 
 struct ServerArgs {
     std::string model_path;
+    std::string revision;      // --revision: HuggingFace model revision (branch/tag/commit)
     std::string host = "127.0.0.1";
     int port = 8080;
     int max_tokens = 8192;

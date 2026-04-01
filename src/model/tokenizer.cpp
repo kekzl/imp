@@ -1,11 +1,266 @@
 #include "model/tokenizer.h"
+#include "core/logging.h"
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <climits>
+#include <cstring>
 #include <queue>
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 namespace imp {
+
+// ---- Minimal JSON parser (local copy — handles \uXXXX for tokenizer.json) ----
+
+namespace {
+
+enum class JType { NUL, STRING, NUMBER, ARRAY, OBJECT };
+
+struct JValue {
+    JType type = JType::NUL;
+    std::string str_val;
+    double num_val = 0.0;
+    std::vector<JValue> arr;
+    std::vector<std::pair<std::string, JValue>> obj;
+};
+
+class JsonParser {
+public:
+    explicit JsonParser(const char* data, size_t len)
+        : data_(data), len_(len), pos_(0) {}
+
+    JValue parse() {
+        skip_ws();
+        return parse_value();
+    }
+
+    bool ok() const { return !error_; }
+
+private:
+    const char* data_;
+    size_t len_;
+    size_t pos_;
+    bool error_ = false;
+
+    char peek() const {
+        if (pos_ >= len_) return '\0';
+        return data_[pos_];
+    }
+
+    char advance() {
+        if (pos_ >= len_) { error_ = true; return '\0'; }
+        return data_[pos_++];
+    }
+
+    void skip_ws() {
+        while (pos_ < len_ && (data_[pos_] == ' ' || data_[pos_] == '\t' ||
+                                data_[pos_] == '\n' || data_[pos_] == '\r')) {
+            pos_++;
+        }
+    }
+
+    bool expect(char c) {
+        skip_ws();
+        if (peek() == c) { advance(); return true; }
+        error_ = true;
+        return false;
+    }
+
+    static int hex_digit(char c) {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return 10 + c - 'a';
+        if (c >= 'A' && c <= 'F') return 10 + c - 'A';
+        return -1;
+    }
+
+    uint32_t parse_u4() {
+        uint32_t v = 0;
+        for (int i = 0; i < 4; i++) {
+            if (pos_ >= len_) { error_ = true; return 0; }
+            int d = hex_digit(data_[pos_++]);
+            if (d < 0) { error_ = true; return 0; }
+            v = (v << 4) | d;
+        }
+        return v;
+    }
+
+    static void append_codepoint_utf8(std::string& s, uint32_t cp) {
+        if (cp < 0x80) {
+            s += static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            s += static_cast<char>(0xC0 | (cp >> 6));
+            s += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            s += static_cast<char>(0xE0 | (cp >> 12));
+            s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            s += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x110000) {
+            s += static_cast<char>(0xF0 | (cp >> 18));
+            s += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            s += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+    }
+
+    JValue parse_value() {
+        skip_ws();
+        if (error_) return {};
+        char c = peek();
+        if (c == '"') return parse_string_value();
+        if (c == '{') return parse_object();
+        if (c == '[') return parse_array();
+        if (c == 't' || c == 'f') return parse_bool();
+        if (c == 'n') return parse_null();
+        if (c == '-' || (c >= '0' && c <= '9')) return parse_number();
+        error_ = true;
+        return {};
+    }
+
+    JValue parse_string_value() {
+        JValue v;
+        v.type = JType::STRING;
+        v.str_val = parse_string_raw();
+        return v;
+    }
+
+    std::string parse_string_raw() {
+        if (!expect('"')) return "";
+        std::string s;
+        while (pos_ < len_) {
+            char c = advance();
+            if (c == '"') return s;
+            if (c == '\\') {
+                if (pos_ >= len_) { error_ = true; return s; }
+                char esc = advance();
+                switch (esc) {
+                    case '"':  s += '"'; break;
+                    case '\\': s += '\\'; break;
+                    case '/':  s += '/'; break;
+                    case 'b':  s += '\b'; break;
+                    case 'f':  s += '\f'; break;
+                    case 'n':  s += '\n'; break;
+                    case 'r':  s += '\r'; break;
+                    case 't':  s += '\t'; break;
+                    case 'u': {
+                        uint32_t cp = parse_u4();
+                        // Handle UTF-16 surrogate pairs
+                        if (cp >= 0xD800 && cp <= 0xDBFF) {
+                            if (pos_ + 1 < len_ && data_[pos_] == '\\' && data_[pos_+1] == 'u') {
+                                pos_ += 2;
+                                uint32_t lo = parse_u4();
+                                if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                                    cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                                }
+                            }
+                        }
+                        append_codepoint_utf8(s, cp);
+                        break;
+                    }
+                    default: s += esc; break;
+                }
+            } else {
+                s += c;
+            }
+        }
+        error_ = true;
+        return s;
+    }
+
+    JValue parse_number() {
+        JValue v;
+        v.type = JType::NUMBER;
+        size_t start = pos_;
+        if (peek() == '-') advance();
+        while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9') advance();
+        if (pos_ < len_ && data_[pos_] == '.') {
+            advance();
+            while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9') advance();
+        }
+        if (pos_ < len_ && (data_[pos_] == 'e' || data_[pos_] == 'E')) {
+            advance();
+            if (pos_ < len_ && (data_[pos_] == '+' || data_[pos_] == '-')) advance();
+            while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9') advance();
+        }
+        std::string num_str(data_ + start, pos_ - start);
+        v.num_val = std::stod(num_str);
+        return v;
+    }
+
+    JValue parse_object() {
+        JValue v;
+        v.type = JType::OBJECT;
+        if (!expect('{')) return v;
+        skip_ws();
+        if (peek() == '}') { advance(); return v; }
+        while (!error_) {
+            skip_ws();
+            std::string key = parse_string_raw();
+            if (!expect(':')) break;
+            JValue val = parse_value();
+            v.obj.emplace_back(std::move(key), std::move(val));
+            skip_ws();
+            if (peek() == ',') { advance(); continue; }
+            break;
+        }
+        expect('}');
+        return v;
+    }
+
+    JValue parse_array() {
+        JValue v;
+        v.type = JType::ARRAY;
+        if (!expect('[')) return v;
+        skip_ws();
+        if (peek() == ']') { advance(); return v; }
+        while (!error_) {
+            v.arr.push_back(parse_value());
+            skip_ws();
+            if (peek() == ',') { advance(); continue; }
+            break;
+        }
+        expect(']');
+        return v;
+    }
+
+    JValue parse_bool() {
+        JValue v;
+        v.type = JType::NUMBER;
+        if (peek() == 't') {
+            for (int i = 0; i < 4 && pos_ < len_; i++) advance();
+            v.num_val = 1.0;
+        } else {
+            for (int i = 0; i < 5 && pos_ < len_; i++) advance();
+            v.num_val = 0.0;
+        }
+        return v;
+    }
+
+    JValue parse_null() {
+        JValue v;
+        v.type = JType::NUL;
+        for (int i = 0; i < 4 && pos_ < len_; i++) advance();
+        return v;
+    }
+};
+
+const JValue* jobj_find(const JValue& obj, const std::string& key) {
+    for (const auto& kv : obj.obj) {
+        if (kv.first == key) return &kv.second;
+    }
+    return nullptr;
+}
+
+bool jobj_get_string(const JValue& obj, const std::string& key, std::string& out) {
+    const JValue* v = jobj_find(obj, key);
+    if (!v || v->type != JType::STRING) return false;
+    out = v->str_val;
+    return true;
+}
+
+} // anonymous namespace
 
 // ---- UTF-8 helpers ----
 
@@ -190,8 +445,201 @@ static std::vector<std::string> gpt2_pre_tokenize(const std::string& text) {
 // ---- Load vocabulary ----
 
 bool Tokenizer::load(const std::string& path) {
-    (void)path;
-    return false;
+    // Read file
+    int fd = open(path.c_str(), O_RDONLY);
+    if (fd < 0) return false;
+    struct stat st;
+    if (fstat(fd, &st) != 0) { close(fd); return false; }
+    std::string file_data(st.st_size, '\0');
+    ssize_t n = ::read(fd, file_data.data(), st.st_size);
+    close(fd);
+    if (n != st.st_size) return false;
+
+    // Parse JSON
+    JsonParser parser(file_data.c_str(), file_data.size());
+    JValue root = parser.parse();
+    if (!parser.ok() || root.type != JType::OBJECT) {
+        IMP_LOG_WARN("failed to parse tokenizer.json: %s", path.c_str());
+        return false;
+    }
+
+    // Extract model object
+    const JValue* model = jobj_find(root, "model");
+    if (!model || model->type != JType::OBJECT) {
+        IMP_LOG_WARN("tokenizer.json missing 'model' object");
+        return false;
+    }
+
+    // Model type
+    std::string model_type;
+    jobj_get_string(*model, "type", model_type);
+
+    // Extract vocabulary from model.vocab
+    const JValue* vocab = jobj_find(*model, "vocab");
+    if (vocab && vocab->type == JType::OBJECT) {
+        // Find max id to size the vocab vector
+        int max_id = 0;
+        for (const auto& [token, val] : vocab->obj) {
+            if (val.type == JType::NUMBER) {
+                int id = static_cast<int>(val.num_val);
+                if (id > max_id) max_id = id;
+            }
+        }
+        vocab_.resize(max_id + 1);
+        scores_.resize(max_id + 1, 0.0f);
+
+        token_to_id_.clear();
+        token_to_id_.reserve(vocab->obj.size());
+        for (const auto& [token, val] : vocab->obj) {
+            if (val.type != JType::NUMBER) continue;
+            int id = static_cast<int>(val.num_val);
+            vocab_[id] = token;
+            token_to_id_[token] = id;
+        }
+
+        IMP_LOG_INFO("tokenizer.json: loaded %zu vocab entries (type=%s)",
+                     vocab->obj.size(), model_type.c_str());
+    }
+
+    // Extract merges (BPE only)
+    const JValue* merges = jobj_find(*model, "merges");
+    if (merges && merges->type == JType::ARRAY) {
+        std::vector<std::string> merge_strs;
+        merge_strs.reserve(merges->arr.size());
+        for (const auto& m : merges->arr) {
+            if (m.type == JType::STRING) merge_strs.push_back(m.str_val);
+        }
+        load_merges(merge_strs);
+        IMP_LOG_INFO("tokenizer.json: loaded %zu merges", merge_strs.size());
+    }
+
+    // Extract added_tokens — may extend vocab and mark special tokens
+    const JValue* added = jobj_find(root, "added_tokens");
+    if (added && added->type == JType::ARRAY) {
+        token_types_.resize(vocab_.size(), 1);  // default NORMAL=1
+
+        for (const auto& tok : added->arr) {
+            if (tok.type != JType::OBJECT) continue;
+            const JValue* id_v = jobj_find(tok, "id");
+            const JValue* content_v = jobj_find(tok, "content");
+            const JValue* special_v = jobj_find(tok, "special");
+
+            if (!id_v || !content_v) continue;
+            if (id_v->type != JType::NUMBER || content_v->type != JType::STRING) continue;
+            int id = static_cast<int>(id_v->num_val);
+            const std::string& content = content_v->str_val;
+            bool is_special = special_v && special_v->type == JType::NUMBER &&
+                              special_v->num_val != 0.0;
+
+            // Ensure vectors are large enough
+            if (id >= static_cast<int>(vocab_.size())) {
+                vocab_.resize(id + 1);
+                scores_.resize(id + 1, 0.0f);
+                token_types_.resize(id + 1, 1);
+            }
+
+            vocab_[id] = content;
+            token_to_id_[content] = id;
+            if (is_special) token_types_[id] = 3;  // CONTROL
+
+            // Detect BOS/EOS tokens
+            if (content == "<s>" || content == "<|begin_of_text|>" ||
+                content == "<|startoftext|>") {
+                bos_id_ = id;
+            }
+            if (content == "</s>" || content == "<|end_of_text|>" ||
+                content == "<|endoftext|>" || content == "<|eot_id|>") {
+                if (eos_ids_.size() == 1 && eos_ids_[0] == 2) {
+                    // Replace default
+                    eos_ids_ = {static_cast<int32_t>(id)};
+                } else {
+                    add_eos_id(static_cast<int32_t>(id));
+                }
+            }
+        }
+    }
+
+    // Detect pre-tokenizer type
+    const JValue* pre_tok = jobj_find(root, "pre_tokenizer");
+    if (pre_tok && pre_tok->type == JType::OBJECT) {
+        std::string pt_type;
+        jobj_get_string(*pre_tok, "type", pt_type);
+
+        if (pt_type == "ByteLevel") {
+            type_ = "gpt2";
+            const JValue* prefix = jobj_find(*pre_tok, "add_prefix_space");
+            if (prefix && prefix->type == JType::NUMBER)
+                add_space_prefix_ = (prefix->num_val != 0.0);
+            else
+                add_space_prefix_ = false;
+        } else if (pt_type == "Metaspace") {
+            type_ = "spm";
+            const JValue* prefix = jobj_find(*pre_tok, "add_prefix_space");
+            if (prefix && prefix->type == JType::NUMBER)
+                add_space_prefix_ = (prefix->num_val != 0.0);
+        } else if (pt_type == "Sequence") {
+            // Check inner pre-tokenizers for ByteLevel or Metaspace
+            const JValue* pretoks = jobj_find(*pre_tok, "pretokenizers");
+            if (pretoks && pretoks->type == JType::ARRAY) {
+                for (const auto& pt : pretoks->arr) {
+                    if (pt.type != JType::OBJECT) continue;
+                    std::string inner_type;
+                    jobj_get_string(pt, "type", inner_type);
+                    if (inner_type == "ByteLevel") {
+                        type_ = "gpt2";
+                        const JValue* prefix = jobj_find(pt, "add_prefix_space");
+                        if (prefix && prefix->type == JType::NUMBER)
+                            add_space_prefix_ = (prefix->num_val != 0.0);
+                        else
+                            add_space_prefix_ = false;
+                        break;
+                    }
+                    if (inner_type == "Metaspace") {
+                        type_ = "spm";
+                        const JValue* prefix = jobj_find(pt, "add_prefix_space");
+                        if (prefix && prefix->type == JType::NUMBER)
+                            add_space_prefix_ = (prefix->num_val != 0.0);
+                        break;
+                    }
+                }
+            }
+        }
+    } else if (model_type == "BPE") {
+        // No pre_tokenizer specified but model is BPE — default to gpt2
+        type_ = "gpt2";
+        add_space_prefix_ = false;
+    } else if (model_type == "Unigram") {
+        type_ = "spm";
+    }
+
+    // For Unigram models, populate scores from model.vocab (array of [token, score])
+    // Some Unigram tokenizer.json have vocab as array instead of object
+    if (model_type == "Unigram") {
+        const JValue* uni_vocab = jobj_find(*model, "vocab");
+        if (uni_vocab && uni_vocab->type == JType::ARRAY) {
+            int max_id = static_cast<int>(uni_vocab->arr.size()) - 1;
+            vocab_.resize(max_id + 1);
+            scores_.resize(max_id + 1, 0.0f);
+            token_to_id_.clear();
+            token_to_id_.reserve(uni_vocab->arr.size());
+            for (size_t i = 0; i < uni_vocab->arr.size(); i++) {
+                const auto& entry = uni_vocab->arr[i];
+                if (entry.type == JType::ARRAY && entry.arr.size() >= 2) {
+                    vocab_[i] = entry.arr[0].str_val;
+                    scores_[i] = static_cast<float>(entry.arr[1].num_val);
+                    token_to_id_[vocab_[i]] = static_cast<int32_t>(i);
+                }
+            }
+            IMP_LOG_INFO("tokenizer.json: loaded %zu Unigram vocab entries",
+                         uni_vocab->arr.size());
+        }
+    }
+
+    IMP_LOG_INFO("tokenizer.json: type=%s vocab_size=%d bos=%d eos=%d add_prefix=%s",
+                 type_.c_str(), static_cast<int>(vocab_.size()), bos_id_,
+                 eos_ids_.empty() ? -1 : eos_ids_[0],
+                 add_space_prefix_ ? "true" : "false");
+    return true;
 }
 
 bool Tokenizer::load_vocab(const std::vector<std::string>& tokens,
@@ -203,7 +651,7 @@ bool Tokenizer::load_vocab(const std::vector<std::string>& tokens,
     scores_ = scores;
     scores_.resize(vocab_.size(), 0.0f);
     bos_id_ = bos_id;
-    eos_id_ = eos_id;
+    eos_ids_ = {eos_id};
 
     token_to_id_.clear();
     token_to_id_.reserve(vocab_.size());
@@ -358,11 +806,98 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_pref
 
 // ---- BPE Encode (GPT2 byte-level style) ----
 
+// ---- Llama3 pre-tokenizer ----
+// Key differences from default:
+//  - Contractions like 's, 't, 're etc. split separately
+//  - Spaces are individual tokens (not attached to next word)
+//  - Digits are split individually (not groups of 3)
+
+static std::vector<std::string> llama3_pre_tokenize(const std::string& text) {
+    std::vector<std::string> result;
+    if (text.empty()) return result;
+
+    // Common English contractions that get their own tokens
+    static const char* contractions[] = {
+        "'s", "'t", "'re", "'ve", "'m", "'ll", "'d",
+        "\xe2\x80\x99s", "\xe2\x80\x99t", "\xe2\x80\x99re",
+        "\xe2\x80\x99ve", "\xe2\x80\x99m", "\xe2\x80\x99ll", "\xe2\x80\x99d",
+    };
+
+    size_t i = 0;
+    while (i < text.size()) {
+        unsigned char c = static_cast<unsigned char>(text[i]);
+
+        // Check for contractions
+        bool found_contraction = false;
+        if (c == '\'' || (c == 0xe2 && i + 2 < text.size() &&
+            text[i+1] == '\x80' && text[i+2] == '\x99')) {
+            for (const char* ctr : contractions) {
+                size_t len = std::strlen(ctr);
+                if (i + len <= text.size() && text.compare(i, len, ctr) == 0) {
+                    result.push_back(text.substr(i, len));
+                    i += len;
+                    found_contraction = true;
+                    break;
+                }
+            }
+        }
+        if (found_contraction) continue;
+
+        if (c == ' ' || c == '\t') {
+            // Space: attach to following word (like GPT2)
+            std::string chunk;
+            chunk += text[i++];
+            while (i < text.size()) {
+                unsigned char cc = static_cast<unsigned char>(text[i]);
+                if (cc == ' ' || cc == '\t' || cc == '\n' || cc == '\r') break;
+                if (std::ispunct(cc) && cc != '\'') break;
+                int len = 1;
+                if ((cc & 0xE0) == 0xC0) len = 2;
+                else if ((cc & 0xF0) == 0xE0) len = 3;
+                else if ((cc & 0xF8) == 0xF0) len = 4;
+                for (int j = 0; j < len && i < text.size(); j++)
+                    chunk += text[i++];
+            }
+            result.push_back(std::move(chunk));
+        } else if (c == '\n' || c == '\r') {
+            std::string chunk;
+            while (i < text.size() && (text[i] == '\n' || text[i] == '\r'))
+                chunk += text[i++];
+            result.push_back(std::move(chunk));
+        } else if (std::isalpha(c) || c >= 128) {
+            std::string chunk;
+            while (i < text.size()) {
+                unsigned char cc = static_cast<unsigned char>(text[i]);
+                if (!std::isalpha(cc) && cc < 128) break;
+                int len = 1;
+                if ((cc & 0xE0) == 0xC0) len = 2;
+                else if ((cc & 0xF0) == 0xE0) len = 3;
+                else if ((cc & 0xF8) == 0xF0) len = 4;
+                for (int j = 0; j < len && i < text.size(); j++)
+                    chunk += text[i++];
+            }
+            result.push_back(std::move(chunk));
+        } else if (std::isdigit(c)) {
+            // Digits: one at a time (llama3 splits individual digits)
+            result.push_back(std::string(1, text[i++]));
+        } else {
+            result.push_back(std::string(1, text[i++]));
+        }
+    }
+    return result;
+}
+
 std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
     if (text.empty() || vocab_.empty()) return {};
 
-    // 1. Pre-tokenize into chunks
-    std::vector<std::string> chunks = gpt2_pre_tokenize(text);
+    // 1. Pre-tokenize into chunks (dispatch based on pre-tokenizer type)
+    std::vector<std::string> chunks;
+    if (pre_tokenizer_ == "llama3" || pre_tokenizer_ == "llama-v3" ||
+        pre_tokenizer_ == "llama-bpe") {
+        chunks = llama3_pre_tokenize(text);
+    } else {
+        chunks = gpt2_pre_tokenize(text);
+    }
 
     std::vector<int32_t> all_ids;
     all_ids.reserve(text.size());  // rough estimate
@@ -474,13 +1009,265 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
     return all_ids;
 }
 
+// ---- NFC Normalization ----
+// Handles the most common combining sequences for Latin scripts.
+// Covers: accented Latin characters (é, ñ, ü, etc.) which are the vast
+// majority of NFC normalization cases in real-world text.
+
+namespace {
+
+// Composition table: (base_codepoint, combining_codepoint) → composed_codepoint
+struct NfcEntry {
+    uint32_t base;
+    uint32_t combining;
+    uint32_t composed;
+};
+
+// Most common Latin composition pairs (base + combining mark → precomposed)
+// Combining marks: 0x0300 (grave), 0x0301 (acute), 0x0302 (circumflex),
+//   0x0303 (tilde), 0x0304 (macron), 0x0308 (diaeresis), 0x030C (caron)
+static const NfcEntry kNfcTable[] = {
+    // Grave accent (0x0300)
+    {0x0041, 0x0300, 0x00C0}, // À
+    {0x0045, 0x0300, 0x00C8}, // È
+    {0x0049, 0x0300, 0x00CC}, // Ì
+    {0x004F, 0x0300, 0x00D2}, // Ò
+    {0x0055, 0x0300, 0x00D9}, // Ù
+    {0x0061, 0x0300, 0x00E0}, // à
+    {0x0065, 0x0300, 0x00E8}, // è
+    {0x0069, 0x0300, 0x00EC}, // ì
+    {0x006F, 0x0300, 0x00F2}, // ò
+    {0x0075, 0x0300, 0x00F9}, // ù
+
+    // Acute accent (0x0301)
+    {0x0041, 0x0301, 0x00C1}, // Á
+    {0x0043, 0x0301, 0x0106}, // Ć
+    {0x0045, 0x0301, 0x00C9}, // É
+    {0x0049, 0x0301, 0x00CD}, // Í
+    {0x004C, 0x0301, 0x0139}, // Ĺ
+    {0x004E, 0x0301, 0x0143}, // Ń
+    {0x004F, 0x0301, 0x00D3}, // Ó
+    {0x0052, 0x0301, 0x0154}, // Ŕ
+    {0x0053, 0x0301, 0x015A}, // Ś
+    {0x0055, 0x0301, 0x00DA}, // Ú
+    {0x0059, 0x0301, 0x00DD}, // Ý
+    {0x005A, 0x0301, 0x0179}, // Ź
+    {0x0061, 0x0301, 0x00E1}, // á
+    {0x0063, 0x0301, 0x0107}, // ć
+    {0x0065, 0x0301, 0x00E9}, // é
+    {0x0069, 0x0301, 0x00ED}, // í
+    {0x006C, 0x0301, 0x013A}, // ĺ
+    {0x006E, 0x0301, 0x0144}, // ń
+    {0x006F, 0x0301, 0x00F3}, // ó
+    {0x0072, 0x0301, 0x0155}, // ŕ
+    {0x0073, 0x0301, 0x015B}, // ś
+    {0x0075, 0x0301, 0x00FA}, // ú
+    {0x0079, 0x0301, 0x00FD}, // ý
+    {0x007A, 0x0301, 0x017A}, // ź
+
+    // Circumflex (0x0302)
+    {0x0041, 0x0302, 0x00C2}, // Â
+    {0x0043, 0x0302, 0x0108}, // Ĉ
+    {0x0045, 0x0302, 0x00CA}, // Ê
+    {0x0047, 0x0302, 0x011C}, // Ĝ
+    {0x0048, 0x0302, 0x0124}, // Ĥ
+    {0x0049, 0x0302, 0x00CE}, // Î
+    {0x004A, 0x0302, 0x0134}, // Ĵ
+    {0x004F, 0x0302, 0x00D4}, // Ô
+    {0x0053, 0x0302, 0x015C}, // Ŝ
+    {0x0055, 0x0302, 0x00DB}, // Û
+    {0x0057, 0x0302, 0x0174}, // Ŵ
+    {0x0059, 0x0302, 0x0176}, // Ŷ
+    {0x0061, 0x0302, 0x00E2}, // â
+    {0x0063, 0x0302, 0x0109}, // ĉ
+    {0x0065, 0x0302, 0x00EA}, // ê
+    {0x0067, 0x0302, 0x011D}, // ĝ
+    {0x0068, 0x0302, 0x0125}, // ĥ
+    {0x0069, 0x0302, 0x00EE}, // î
+    {0x006A, 0x0302, 0x0135}, // ĵ
+    {0x006F, 0x0302, 0x00F4}, // ô
+    {0x0073, 0x0302, 0x015D}, // ŝ
+    {0x0075, 0x0302, 0x00FB}, // û
+    {0x0077, 0x0302, 0x0175}, // ŵ
+    {0x0079, 0x0302, 0x0177}, // ŷ
+
+    // Tilde (0x0303)
+    {0x0041, 0x0303, 0x00C3}, // Ã
+    {0x004E, 0x0303, 0x00D1}, // Ñ
+    {0x004F, 0x0303, 0x00D5}, // Õ
+    {0x0061, 0x0303, 0x00E3}, // ã
+    {0x006E, 0x0303, 0x00F1}, // ñ
+    {0x006F, 0x0303, 0x00F5}, // õ
+
+    // Diaeresis/Umlaut (0x0308)
+    {0x0041, 0x0308, 0x00C4}, // Ä
+    {0x0045, 0x0308, 0x00CB}, // Ë
+    {0x0049, 0x0308, 0x00CF}, // Ï
+    {0x004F, 0x0308, 0x00D6}, // Ö
+    {0x0055, 0x0308, 0x00DC}, // Ü
+    {0x0059, 0x0308, 0x0178}, // Ÿ
+    {0x0061, 0x0308, 0x00E4}, // ä
+    {0x0065, 0x0308, 0x00EB}, // ë
+    {0x0069, 0x0308, 0x00EF}, // ï
+    {0x006F, 0x0308, 0x00F6}, // ö
+    {0x0075, 0x0308, 0x00FC}, // ü
+    {0x0079, 0x0308, 0x00FF}, // ÿ
+
+    // Caron/Háček (0x030C)
+    {0x0043, 0x030C, 0x010C}, // Č
+    {0x0044, 0x030C, 0x010E}, // Ď
+    {0x0045, 0x030C, 0x011A}, // Ě
+    {0x004E, 0x030C, 0x0147}, // Ň
+    {0x0052, 0x030C, 0x0158}, // Ř
+    {0x0053, 0x030C, 0x0160}, // Š
+    {0x0054, 0x030C, 0x0164}, // Ť
+    {0x005A, 0x030C, 0x017D}, // Ž
+    {0x0063, 0x030C, 0x010D}, // č
+    {0x0064, 0x030C, 0x010F}, // ď
+    {0x0065, 0x030C, 0x011B}, // ě
+    {0x006E, 0x030C, 0x0148}, // ň
+    {0x0072, 0x030C, 0x0159}, // ř
+    {0x0073, 0x030C, 0x0161}, // š
+    {0x0074, 0x030C, 0x0165}, // ť
+    {0x007A, 0x030C, 0x017E}, // ž
+
+    // Cedilla (0x0327)
+    {0x0043, 0x0327, 0x00C7}, // Ç
+    {0x0063, 0x0327, 0x00E7}, // ç
+    {0x0053, 0x0327, 0x015E}, // Ş
+    {0x0073, 0x0327, 0x015F}, // ş
+
+    // Ring above (0x030A)
+    {0x0041, 0x030A, 0x00C5}, // Å
+    {0x0061, 0x030A, 0x00E5}, // å
+    {0x0055, 0x030A, 0x016E}, // Ů
+    {0x0075, 0x030A, 0x016F}, // ů
+
+    // Macron (0x0304)
+    {0x0041, 0x0304, 0x0100}, // Ā
+    {0x0045, 0x0304, 0x0112}, // Ē
+    {0x0049, 0x0304, 0x012A}, // Ī
+    {0x004F, 0x0304, 0x014C}, // Ō
+    {0x0055, 0x0304, 0x016A}, // Ū
+    {0x0061, 0x0304, 0x0101}, // ā
+    {0x0065, 0x0304, 0x0113}, // ē
+    {0x0069, 0x0304, 0x012B}, // ī
+    {0x006F, 0x0304, 0x014D}, // ō
+    {0x0075, 0x0304, 0x016B}, // ū
+};
+
+static constexpr int kNfcTableSize = sizeof(kNfcTable) / sizeof(kNfcTable[0]);
+
+// Decode one UTF-8 codepoint from text at position pos, advance pos
+static uint32_t nfc_decode_utf8(const std::string& s, size_t& pos) {
+    uint8_t c = static_cast<uint8_t>(s[pos]);
+    uint32_t cp;
+    int len;
+    if ((c & 0x80) == 0) { cp = c; len = 1; }
+    else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; len = 2; }
+    else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; len = 3; }
+    else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; len = 4; }
+    else { pos++; return 0xFFFD; }
+    for (int i = 1; i < len && pos + i < s.size(); i++) {
+        cp = (cp << 6) | (static_cast<uint8_t>(s[pos + i]) & 0x3F);
+    }
+    pos += len;
+    return cp;
+}
+
+// Encode a Unicode codepoint to UTF-8 and append to result
+static void nfc_encode_utf8(std::string& out, uint32_t cp) {
+    if (cp < 0x80) {
+        out += static_cast<char>(cp);
+    } else if (cp < 0x800) {
+        out += static_cast<char>(0xC0 | (cp >> 6));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else if (cp < 0x10000) {
+        out += static_cast<char>(0xE0 | (cp >> 12));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    } else {
+        out += static_cast<char>(0xF0 | (cp >> 18));
+        out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+        out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out += static_cast<char>(0x80 | (cp & 0x3F));
+    }
+}
+
+// Check if a codepoint is a combining mark (Unicode General Category Mn/Mc/Me)
+// Simplified: only checks the combining diacritical marks block (0x0300-0x036F)
+// which covers the vast majority of combining marks in practice.
+static bool is_combining_mark(uint32_t cp) {
+    return (cp >= 0x0300 && cp <= 0x036F);
+}
+
+// Look up composition in table
+static uint32_t try_compose(uint32_t base, uint32_t combining) {
+    for (int i = 0; i < kNfcTableSize; i++) {
+        if (kNfcTable[i].base == base && kNfcTable[i].combining == combining) {
+            return kNfcTable[i].composed;
+        }
+    }
+    return 0; // no composition found
+}
+
+// Normalize a UTF-8 string to NFC form (basic Latin coverage)
+static std::string normalize_nfc(const std::string& text) {
+    if (text.empty()) return text;
+
+    // Quick check: if no bytes in the combining mark range (0xCC-0xCD in UTF-8),
+    // the text has no combining marks and is already NFC.
+    bool has_combining = false;
+    for (size_t i = 0; i + 1 < text.size(); i++) {
+        uint8_t c = static_cast<uint8_t>(text[i]);
+        if (c == 0xCC || c == 0xCD) { has_combining = true; break; }
+    }
+    if (!has_combining) return text;
+
+    // Decode to codepoints, compose adjacent base+combining pairs
+    std::vector<uint32_t> codepoints;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        codepoints.push_back(nfc_decode_utf8(text, pos));
+    }
+
+    // Compose: scan for base + combining mark pairs
+    std::string result;
+    result.reserve(text.size());
+
+    size_t i = 0;
+    while (i < codepoints.size()) {
+        uint32_t cp = codepoints[i];
+
+        // Try to compose with following combining marks
+        while (i + 1 < codepoints.size() && is_combining_mark(codepoints[i + 1])) {
+            uint32_t composed = try_compose(cp, codepoints[i + 1]);
+            if (composed != 0) {
+                cp = composed;
+                i++;
+            } else {
+                break; // can't compose further
+            }
+        }
+
+        nfc_encode_utf8(result, cp);
+        i++;
+    }
+
+    return result;
+}
+
+} // anonymous namespace
+
 // ---- Encode dispatch ----
 
 std::vector<int32_t> Tokenizer::encode(const std::string& text, bool no_prefix) const {
+    // NFC normalization: compose decomposed Unicode sequences
+    std::string normalized = normalize_nfc(text);
     if (type_ == "gpt2") {
-        return encode_gpt2(text);
+        return encode_gpt2(normalized);
     }
-    return encode_spm(text, no_prefix);
+    return encode_spm(normalized, no_prefix);
 }
 
 // ---- Decode (SentencePiece) ----
@@ -578,9 +1365,7 @@ int Tokenizer::bos_id() const {
     return bos_id_;
 }
 
-int Tokenizer::eos_id() const {
-    return eos_id_;
-}
+// eos_id() is now inline in tokenizer.h
 
 int32_t Tokenizer::find_token(const std::string& text) const {
     auto it = token_to_id_.find(text);

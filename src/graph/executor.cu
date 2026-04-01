@@ -98,6 +98,21 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
         }
     }
 
+    // Apply logit bias
+    if (state.n_logit_bias > 0 && state.logit_bias != nullptr) {
+        for (int i = 0; i < state.n_logit_bias; i++) {
+            int32_t tid = state.logit_bias[i].first;
+            float bias = state.logit_bias[i].second;
+            if (tid >= 0 && tid < vocab_size) {
+                float logit;
+                cudaMemcpy(&logit, logits_ptr + tid, sizeof(float), cudaMemcpyDeviceToHost);
+                logit += bias;
+                cudaMemcpyAsync(logits_ptr + tid, &logit, sizeof(float),
+                                cudaMemcpyHostToDevice, stream);
+            }
+        }
+    }
+
     // Force token: set all logits except force_token to -inf.
     // Used by think-budget to force </think> via logit manipulation
     // so the model generates it naturally into the KV cache (NVIDIA NIM approach).
@@ -209,6 +224,19 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits,
                               st.dry_allowed_length, st.dry_penalty_last_n,
                               stream);
         }
+        if (st.n_logit_bias > 0 && st.logit_bias != nullptr) {
+            for (int i = 0; i < st.n_logit_bias; i++) {
+                int32_t tid = st.logit_bias[i].first;
+                float bias = st.logit_bias[i].second;
+                if (tid >= 0 && tid < vocab) {
+                    float logit;
+                    cudaMemcpy(&logit, lp + tid, sizeof(float), cudaMemcpyDeviceToHost);
+                    logit += bias;
+                    cudaMemcpyAsync(lp + tid, &logit, sizeof(float),
+                                    cudaMemcpyHostToDevice, stream);
+                }
+            }
+        }
         if (st.schema_constrainer) {
             st.schema_constrainer->apply_mask(lp, vocab, stream);
         } else if (st.json_constrainer) {
@@ -318,6 +346,20 @@ int32_t GraphExecutor::sample_single_from_logits(const Tensor& logits,
             if (tid >= 0 && tid < vocab)
                 cudaMemcpyAsync(lp + tid, &neg_inf, sizeof(float),
                                 cudaMemcpyHostToDevice, stream);
+        }
+    }
+    // Apply logit bias
+    if (state.n_logit_bias > 0 && state.logit_bias != nullptr) {
+        for (int i = 0; i < state.n_logit_bias; i++) {
+            int32_t tid = state.logit_bias[i].first;
+            float bias = state.logit_bias[i].second;
+            if (tid >= 0 && tid < vocab) {
+                float logit;
+                cudaMemcpy(&logit, lp + tid, sizeof(float), cudaMemcpyDeviceToHost);
+                logit += bias;
+                cudaMemcpyAsync(lp + tid, &logit, sizeof(float),
+                                cudaMemcpyHostToDevice, stream);
+            }
         }
     }
     // Force token (think-budget)

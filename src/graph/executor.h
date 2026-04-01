@@ -19,6 +19,7 @@
 #include <cuda_fp16.h>
 #include <vector>
 #include <unordered_map>
+#include <utility>
 #include <list>
 
 namespace imp {
@@ -171,6 +172,10 @@ struct InferenceState {
     // JSON mode: when non-null, apply logit mask before sampling
     JsonConstrainer* json_constrainer = nullptr;
     SchemaConstrainer* schema_constrainer = nullptr;
+
+    // Logit bias (host-side, applied via cudaMemcpy before sampling)
+    const std::pair<int32_t, float>* logit_bias = nullptr;
+    int n_logit_bias = 0;
 
     // Banned tokens: set logits to -inf before sampling (e.g. chat template special tokens)
     const int32_t* banned_tokens = nullptr;  // HOST pointer, small list

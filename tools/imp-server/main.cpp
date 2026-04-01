@@ -1,5 +1,6 @@
 #include "args.h"
 #include "handlers.h"
+#include "model/hf_hub.h"
 #include "runtime/presets.h"
 
 #include <httplib.h>
@@ -51,11 +52,24 @@ int main(int argc, char** argv) {
     state.default_think_budget = args.think_budget;
     state.default_args = args;
 
+    // Resolve model path early (needed for models_dir fallback)
+    std::string resolved_model;
+    if (!args.model_path.empty()) {
+        resolved_model = imp::resolve_model_gguf(args.model_path, args.revision);
+        if (resolved_model.empty()) {
+            fprintf(stderr, "Failed to resolve model: %s\n", args.model_path.c_str());
+            return 1;
+        }
+        if (resolved_model != args.model_path) {
+            printf("Resolved model: %s -> %s\n", args.model_path.c_str(), resolved_model.c_str());
+        }
+    }
+
     // Set models directory (explicit flag → model parent → /models → HF cache)
     if (!args.models_dir.empty()) {
         state.models_dir = args.models_dir;
-    } else if (!args.model_path.empty()) {
-        auto parent = std::filesystem::path(args.model_path).parent_path().string();
+    } else if (!resolved_model.empty()) {
+        auto parent = std::filesystem::path(resolved_model).parent_path().string();
         if (!parent.empty()) state.models_dir = parent;
     } else if (std::filesystem::is_directory("/models")) {
         state.models_dir = "/models";
@@ -70,9 +84,9 @@ int main(int argc, char** argv) {
     }
 
     // Load model at startup if provided
-    if (!args.model_path.empty()) {
-        printf("Loading model: %s\n", args.model_path.c_str());
-        std::string error = load_model_into_state(state, args.model_path);
+    if (!resolved_model.empty()) {
+        printf("Loading model: %s\n", resolved_model.c_str());
+        std::string error = load_model_into_state(state, resolved_model);
         if (!error.empty()) {
             fprintf(stderr, "%s\n", error.c_str());
             return 1;

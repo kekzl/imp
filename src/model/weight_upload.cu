@@ -1,6 +1,7 @@
 #include "model/model.h"
 #include "model/gguf_loader.h"
 #include "quant/dequant_gpu.h"
+#include "quant/dequant_gptq.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -706,15 +707,127 @@ static bool upload_embeddings_and_output(
 }
 
 // ---------------------------------------------------------------------------
+// upload_gptq_weight: dequantize a GPTQ-packed weight to FP16 on GPU.
+// Uploads qweight/qzeros/scales/g_idx to temporary GPU buffers, runs the
+// dequant kernel, then frees the temporaries.  Sets output tensor to point
+// to the resulting FP16 weight on GPU.
+// ---------------------------------------------------------------------------
+static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq,
+                               Tensor& output,
+                               cudaStream_t stream,
+                               std::vector<void*>& gpu_allocs) {
+    if (!gptq.qweight.data || !gptq.scales.data) return false;
+    if (gptq.bits != 4) {
+        IMP_LOG_ERROR("GPTQ: only 4-bit supported (got %d)", gptq.bits);
+        return false;
+    }
+
+    // qweight shape: [K/8, N] for 4-bit (8 values packed per INT32)
+    int pack_factor = 32 / gptq.bits;  // 8 for 4-bit
+    int K_packed = static_cast<int>(gptq.qweight.shape[0]);
+    int N = static_cast<int>(gptq.qweight.shape[1]);
+    int K = K_packed * pack_factor;
+
+    // 1. Upload qweight to GPU
+    size_t qw_bytes = static_cast<size_t>(K_packed) * N * sizeof(int32_t);
+    int32_t* d_qweight = nullptr;
+    if (checked_cuda_malloc(reinterpret_cast<void**>(&d_qweight), qw_bytes) != cudaSuccess || !d_qweight) {
+        IMP_LOG_ERROR("GPTQ: failed to allocate qweight (%zu bytes)", qw_bytes);
+        return false;
+    }
+    h2d_copy(d_qweight, gptq.qweight.data, qw_bytes, stream);
+
+    // 2. Upload qzeros to GPU
+    int32_t* d_qzeros = nullptr;
+    if (gptq.qzeros.data) {
+        size_t qz_bytes = static_cast<size_t>(gptq.qzeros.shape[0]) * gptq.qzeros.shape[1] * sizeof(int32_t);
+        if (checked_cuda_malloc(reinterpret_cast<void**>(&d_qzeros), qz_bytes) != cudaSuccess || !d_qzeros) {
+            IMP_LOG_ERROR("GPTQ: failed to allocate qzeros");
+            cudaFree(d_qweight);
+            return false;
+        }
+        h2d_copy(d_qzeros, gptq.qzeros.data, qz_bytes, stream);
+    }
+
+    // 3. Upload scales to GPU
+    size_t sc_bytes = static_cast<size_t>(gptq.scales.shape[0]) * gptq.scales.shape[1] * sizeof(half);
+    half* d_scales = nullptr;
+    if (checked_cuda_malloc(reinterpret_cast<void**>(&d_scales), sc_bytes) != cudaSuccess || !d_scales) {
+        IMP_LOG_ERROR("GPTQ: failed to allocate scales");
+        cudaFree(d_qweight);
+        if (d_qzeros) cudaFree(d_qzeros);
+        return false;
+    }
+    h2d_copy(d_scales, gptq.scales.data, sc_bytes, stream);
+
+    // 4. Upload g_idx to GPU (optional, for desc_act reordering)
+    int32_t* d_g_idx = nullptr;
+    if (gptq.g_idx.data) {
+        size_t gi_bytes = static_cast<size_t>(K) * sizeof(int32_t);
+        if (checked_cuda_malloc(reinterpret_cast<void**>(&d_g_idx), gi_bytes) != cudaSuccess || !d_g_idx) {
+            IMP_LOG_WARN("GPTQ: failed to allocate g_idx, falling back to sequential groups");
+        } else {
+            h2d_copy(d_g_idx, gptq.g_idx.data, gi_bytes, stream);
+        }
+    }
+
+    // 5. Allocate FP16 output [N, K]
+    size_t out_bytes = static_cast<size_t>(N) * K * sizeof(half);
+    half* d_out = nullptr;
+    if (checked_cuda_malloc(reinterpret_cast<void**>(&d_out), out_bytes) != cudaSuccess || !d_out) {
+        IMP_LOG_ERROR("GPTQ: failed to allocate output (%zu bytes)", out_bytes);
+        cudaFree(d_qweight);
+        if (d_qzeros) cudaFree(d_qzeros);
+        cudaFree(d_scales);
+        if (d_g_idx) cudaFree(d_g_idx);
+        return false;
+    }
+
+    // 6. Run dequantization kernel
+    dequant_gptq4(d_out, d_qweight, d_qzeros, d_scales, d_g_idx,
+                  N, K, gptq.group_size, stream);
+
+    // 7. Sync and free temporary GPU buffers
+    cudaStreamSynchronize(stream);
+    cudaFree(d_qweight);
+    if (d_qzeros) cudaFree(d_qzeros);
+    cudaFree(d_scales);
+    if (d_g_idx) cudaFree(d_g_idx);
+
+    // 8. Set output tensor
+    int64_t out_shape[4] = {N, K, 0, 0};
+    output = Tensor(d_out, DType::FP16, 2, out_shape, true);
+    gpu_allocs.push_back(d_out);
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // upload_layer_attention_weights: wq/wk/wv/wo + norms + biases for one layer
 // ---------------------------------------------------------------------------
 static bool upload_layer_attention_weights(TransformerLayer& L, int i,
                                            const UploadCtx& ctx) {
-    // Attention weights
+    // Attention weights — try regular upload first, fall back to GPTQ dequant
     UPLOAD_OR_FAIL(L.wq, L.wq_qtype, L.wq_scales, "wq", i, ctx);
     UPLOAD_OR_FAIL(L.wk, L.wk_qtype, L.wk_scales, "wk", i, ctx);
     UPLOAD_OR_FAIL(L.wv, L.wv_qtype, L.wv_scales, "wv", i, ctx);
     UPLOAD_OR_FAIL(L.wo, L.wo_qtype, L.wo_scales, "wo", i, ctx);
+
+    // GPTQ fallback: if regular weight is missing but GPTQ tensors are present
+    struct { Tensor& w; TransformerLayer::GPTQWeight& gptq; const char* name; } attn_gptq[] = {
+        {L.wq, L.gptq_q, "q_proj"}, {L.wk, L.gptq_k, "k_proj"},
+        {L.wv, L.gptq_v, "v_proj"}, {L.wo, L.gptq_o, "o_proj"},
+    };
+    for (auto& [w, gptq, name] : attn_gptq) {
+        if (!w.on_device && gptq.qweight.data) {
+            if (!upload_gptq_weight(gptq, w, ctx.stream, ctx.gpu_allocs)) {
+                IMP_LOG_ERROR("Failed to dequant GPTQ %s for layer %d", name, i);
+                return false;
+            }
+            IMP_LOG_DEBUG("GPTQ dequant %s layer %d -> [%lld, %lld] FP16",
+                         name, i, w.shape[0], w.shape[1]);
+        }
+    }
 
     // Attention norm (typically F32/F16, no quant)
     UPLOAD_UNQUANT_OR_FAIL(L.attn_norm, "attn_norm", i, ctx);
@@ -760,6 +873,23 @@ static bool upload_layer_ffn_weights(TransformerLayer& L, int i,
     UPLOAD_OR_FAIL(L.w_gate, L.w_gate_qtype, L.w_gate_scales, "w_gate", i, ctx);
     UPLOAD_OR_FAIL(L.w_up, L.w_up_qtype, L.w_up_scales, "w_up", i, ctx);
     UPLOAD_OR_FAIL(L.w_down, L.w_down_qtype, L.w_down_scales, "w_down", i, ctx);
+
+    // GPTQ fallback for FFN weights
+    struct { Tensor& w; TransformerLayer::GPTQWeight& gptq; const char* name; } ffn_gptq[] = {
+        {L.w_gate, L.gptq_gate, "gate_proj"},
+        {L.w_up, L.gptq_up, "up_proj"},
+        {L.w_down, L.gptq_down, "down_proj"},
+    };
+    for (auto& [w, gptq, name] : ffn_gptq) {
+        if (!w.on_device && gptq.qweight.data) {
+            if (!upload_gptq_weight(gptq, w, ctx.stream, ctx.gpu_allocs)) {
+                IMP_LOG_ERROR("Failed to dequant GPTQ %s for layer %d", name, i);
+                return false;
+            }
+            IMP_LOG_DEBUG("GPTQ dequant %s layer %d -> [%lld, %lld] FP16",
+                         name, i, w.shape[0], w.shape[1]);
+        }
+    }
 
     // FFN norm (typically F32/F16, no quant)
     UPLOAD_UNQUANT_OR_FAIL(L.ffn_norm, "ffn_norm", i, ctx);
