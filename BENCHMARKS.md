@@ -3,32 +3,32 @@
 All benchmarks on a single **NVIDIA RTX 5090** (32 GB GDDR7, Blackwell sm_120).
 Models loaded from GGUF. Each test runs 3 repetitions; averages reported.
 
-- **imp v0.5.1** — NVFP4 decode cache + FP16 prefill (GDN) / FP8 prefill (non-GDN), CUDA graphs, PDL, multi-turn GDN fix
+- **imp v0.6** — NVFP4 decode + FP8 prefill, CUDA 13.2, CUTLASS v4.4.2, Jinja2 macros
 - **llama.cpp** b8445 — flash attention enabled, full GPU offload (`-ngl 99`)
 
 ## Decode Throughput (tg256)
 
 Tokens generated per second — the metric that determines how fast a model responds.
 
-| Model | Params | Quant | imp | llama.cpp | Delta |
+| Model | Params | Quant | imp v0.6 | llama.cpp | Delta |
 |-------|-------:|-------|----:|----------:|------:|
-| Qwen3-4B | 4.0B | Q8_0 | **375** | 244 | **+54%** |
+| Qwen3-4B | 4.0B | Q8_0 | **377** | 244 | **+55%** |
 | Qwen3-8B | 8.2B | Q8_0 | **255** | 157 | **+62%** |
-| Qwen3.5-4B (GDN) | 4.0B | Q8_0 | **308** | 180 | **+71%** |
+| Qwen3.5-4B (GDN) | 4.0B | Q8_0 | **306** | 180 | **+70%** |
 | Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **134** | — | — |
-| Gemma-3-12B | 11.8B | Q8_0 | **129** | 98 | **+32%** |
+| Llama-3.2-3B | 3.2B | Q8_0 | **208** | — | — |
 
 ## Prefill Throughput (pp512)
 
 Tokens processed per second during the prompt ingestion phase.
 
-| Model | Params | Quant | imp | llama.cpp | Delta |
+| Model | Params | Quant | imp v0.6 | llama.cpp | Delta |
 |-------|-------:|-------|----:|----------:|------:|
-| Qwen3-4B | 4.0B | Q8_0 | **24055** | 21337 | **+13%** |
-| Qwen3-8B | 8.2B | Q8_0 | **17746** | 14172 | **+25%** |
-| Qwen3.5-4B (GDN) | 4.0B | Q8_0 | **14687** | 11149 | **+32%** |
-| Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **8418** | — | — |
-| Gemma-3-12B | 11.8B | Q8_0 | **6998** | 9269 | -25% |
+| Qwen3-4B | 4.0B | Q8_0 | **27201** | 21337 | **+27%** |
+| Qwen3-8B | 8.2B | Q8_0 | **17636** | 14172 | **+24%** |
+| Qwen3.5-4B (GDN) | 4.0B | Q8_0 | **14823** | 11149 | **+33%** |
+| Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **8520** | — | — |
+| Llama-3.2-3B | 3.2B | Q8_0 | **22544** | — | — |
 
 **Note**: GDN models now use FP16 prefill weights (v0.5.1) instead of FP8 for numerical stability. This reduces prefill throughput by ~8% vs v0.5 FP8 numbers but fixes multi-turn chat degeneration.
 
@@ -41,9 +41,9 @@ Tokens processed per second during the prompt ingestion phase.
 | 5-turn chat (4B) | ❌ garbage | ✅ correct | ✅ correct |
 | 7-turn chat (9B) | ❌ garbage | ✅ correct | ✅ correct |
 
-**Root cause**: FP8 E4M3 weights (3-bit mantissa) introduce precision errors that accumulate through the GDN delta rule scan. Chat template special tokens (`<|im_start|>`, `<|im_end|>`) amplify the divergence because their embedding projections are more sensitive to quantization noise. After ~20-50 special tokens (3-7 turns), the recurrent state becomes numerically unstable.
+**v0.5.1 root cause**: FP8 weight precision + chunked prefill state management.
 
-**Fix**: GDN models now automatically use FP16 weight cache for prefill. Additionally, chunked prefill state management was fixed to preserve recurrent state across chunk boundaries, and prefix caching is disabled for recurrent models.
+**v0.6 root cause (Qwen3.5 "broken" output)**: The Jinja2 engine lacked `{% macro %}` support. Qwen3.5's chat template uses a `render_content` macro for multimodal content handling — without macro support, user content rendered as `"None"`, causing the model to ignore prompts. Fixed in v0.6 with full Jinja2 macro support.
 
 ## KV Cache Quantization (Qwen3-8B Q8_0)
 
