@@ -81,11 +81,11 @@ bool gemm_mxfp4_cutlass_sm120(const void* a_data, const void* a_sf,
 
 size_t gemm_mxfp4_cutlass_sm120_workspace(int M, int N, int K);
 
-// Dequantize MXFP4 packed data + UE8M0 scales to FP16.
-// Input: data [N, K/2] packed E2M1, scales in SfAtom layout.
+// Dequantize raw MXFP4 GGUF blocks to FP16.
+// Input: raw interleaved blocks (17 bytes each: 16 E2M1 + 1 UE8M0).
 // Output: [N, K] FP16 on device (caller allocates).
-void dequant_mxfp4_to_fp16(const CutlassMxFP4Weight& src, void* dst_fp16,
-                             cudaStream_t stream);
+void dequant_mxfp4_to_fp16(const void* raw_mxfp4_data, int64_t N, int64_t K,
+                             void* dst_fp16, cudaStream_t stream);
 
 bool cutlass_sm120_mxfp4_available();
 

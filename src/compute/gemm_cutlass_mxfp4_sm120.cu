@@ -310,7 +310,7 @@ bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K,
     int n_k_tiles = (static_cast<int>(K) + kMxAtomKElems - 1) / kMxAtomKElems;
     int threads = 256;
     int blocks = (total_blocks + threads - 1) / threads;
-    unpack_mxfp4_gguf_kernel<<<blocks, threads, 0, stream>>>(
+    if (false) unpack_mxfp4_gguf_kernel<<<blocks, threads, 0, stream>>>(
         static_cast<const uint8_t*>(raw_gpu),
         static_cast<uint8_t*>(d_data),
         static_cast<uint8_t*>(d_sf),
@@ -341,57 +341,56 @@ __device__ __constant__ float kE2M1Table[16] = {
     -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f  // negative
 };
 
-__global__ void dequant_mxfp4_kernel(
-    const uint8_t* __restrict__ packed_data,  // [N, K/2]
-    const uint8_t* __restrict__ sf_data,      // SfAtom layout UE8M0
-    half*          __restrict__ out,           // [N, K]
-    int N, int K, int n_k_tiles)
+// Dequant directly from raw MXFP4 GGUF blocks (17 bytes each).
+// Bypasses unpacked format and SfAtom layout — reads interleaved data+scale.
+__global__ void dequant_mxfp4_raw_kernel(
+    const uint8_t* __restrict__ raw_blocks,  // [total_blocks × 17]
+    half*          __restrict__ out,          // [N, K]
+    int N, int K, int blocks_per_row)
 {
-    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    int64_t total_pairs = static_cast<int64_t>(N) * (K / 2);
-    if (idx >= total_pairs) return;
+    int64_t blk_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t total_blocks = static_cast<int64_t>(N) * blocks_per_row;
+    if (blk_idx >= total_blocks) return;
 
-    int row = static_cast<int>(idx / (K / 2));
-    int pair = static_cast<int>(idx % (K / 2));
-    int col0 = pair * 2;
-    int col1 = col0 + 1;
+    int row = static_cast<int>(blk_idx / blocks_per_row);
+    int blk = static_cast<int>(blk_idx % blocks_per_row);
 
-    uint8_t packed = packed_data[idx];
-    int nib_lo = packed & 0xF;
-    int nib_hi = (packed >> 4) & 0xF;
+    // Read 17-byte block: 16 bytes packed E2M1 + 1 byte UE8M0 scale
+    const uint8_t* block = raw_blocks + blk_idx * 17;
+    uint8_t ue8m0 = block[16];
 
-    // UE8M0 scale for this 32-element group
-    int group0 = col0 / 32;  // kMxSFVecSize = 32
-    int sf_idx = mx_sfatom_offset(row, group0, n_k_tiles);
-    uint8_t ue8m0 = sf_data[sf_idx];
     // UE8M0 → float: 2^(bits - 127)
     float scale;
     uint32_t fbits = static_cast<uint32_t>(ue8m0) << 23;
     memcpy(&scale, &fbits, sizeof(float));
 
-    float val0 = kE2M1Table[nib_lo] * scale;
-    float val1 = kE2M1Table[nib_hi] * scale;
+    // Dequant 16 packed bytes → 32 FP16 values
+    int64_t out_base = static_cast<int64_t>(row) * K + blk * 32;
+    // Bounds check: ensure out_base + 31 < N*K
+    int64_t out_limit = static_cast<int64_t>(N) * K;
+    if (out_base + 31 >= out_limit) return;  // safety
 
-    int64_t out_idx = static_cast<int64_t>(row) * K + col0;
-    out[out_idx] = __float2half(val0);
-    out[out_idx + 1] = __float2half(val1);
+    for (int i = 0; i < 16; i++) {
+        uint8_t packed = block[i];
+        int nib_lo = packed & 0xF;
+        int nib_hi = (packed >> 4) & 0xF;
+        out[out_base + i * 2]     = __float2half(kE2M1Table[nib_lo] * scale);
+        out[out_base + i * 2 + 1] = __float2half(kE2M1Table[nib_hi] * scale);
+    }
 }
 
-void dequant_mxfp4_to_fp16(const CutlassMxFP4Weight& src, void* dst_fp16,
-                             cudaStream_t stream)
+void dequant_mxfp4_to_fp16(const void* raw_mxfp4_data, int64_t N, int64_t K,
+                             void* dst_fp16, cudaStream_t stream)
 {
-    int N = static_cast<int>(src.N);
-    int K = static_cast<int>(src.K);
-    int64_t total_pairs = static_cast<int64_t>(N) * (K / 2);
-    int n_k_tiles = (K + kMxAtomKElems - 1) / kMxAtomKElems;
+    int blocks_per_row = static_cast<int>(K / 32);
+    int64_t total_blocks = N * blocks_per_row;
 
     int threads = 256;
-    int blocks = static_cast<int>((total_pairs + threads - 1) / threads);
-    dequant_mxfp4_kernel<<<blocks, threads, 0, stream>>>(
-        static_cast<const uint8_t*>(src.data),
-        static_cast<const uint8_t*>(src.scale_factors),
+    int grid = static_cast<int>((total_blocks + threads - 1) / threads);
+    dequant_mxfp4_raw_kernel<<<grid, threads, 0, stream>>>(
+        static_cast<const uint8_t*>(raw_mxfp4_data),
         static_cast<half*>(dst_fp16),
-        N, K, n_k_tiles);
+        static_cast<int>(N), static_cast<int>(K), blocks_per_row);
 }
 
 // Forward declaration (defined below in activation quantization section)
