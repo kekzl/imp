@@ -38,9 +38,15 @@ elseif(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${IMP_SM120_FLAGS}")
     message(STATUS "CUDA architectures: 90a + 100 + 120f (default)")
 else()
-    # User-provided archs — add 120f unless user explicitly set something
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${IMP_SM120_FLAGS}")
-    message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES} + 120f")
+    # User-provided archs — add 120f unless 120 is already in the list
+    # (having both 120 and 120f causes nvcc "same GPU code" fatal error)
+    string(FIND "${CMAKE_CUDA_ARCHITECTURES}" "120" _has_120)
+    if(_has_120 EQUAL -1)
+        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${IMP_SM120_FLAGS}")
+        message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES} + 120f")
+    else()
+        message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES} (120 present, skipping 120f)")
+    endif()
 endif()
 
 # --- Options ---
