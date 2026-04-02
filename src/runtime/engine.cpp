@@ -670,6 +670,7 @@ bool Engine::init_kv_cache() {
 
     // Dequant weights → FP16/FP8/NVFP4 caches
     executor_->pre_dequant_weights(stream_, vram_budget);
+    dequant_done_ = true;
     cudaStreamSynchronize(stream_);
     if (config_.use_fp8_prefill)
         IMP_LOG_INFO("Weight cache: FP8 E4M3 (2x prefill throughput on sm_120)");
@@ -1052,11 +1053,6 @@ bool Engine::step() {
     // Ensure all async weight dequant / upload operations are complete.
     // Without this, MXFP4 CPU-side dequant H2D copies may race with
     // prefill memcpy on the same device memory (first call only).
-    if (!dequant_done_) {
-        cudaDeviceSynchronize();
-        cudaGetLastError();  // clear any stale errors from init
-        dequant_done_ = true;
-    }
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
 
     // ====================================================================
