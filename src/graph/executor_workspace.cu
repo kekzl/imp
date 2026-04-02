@@ -1919,7 +1919,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         }
 
         // Native MXFP4 GGUF: unpack and register directly in CUTLASS cache.
-        // Runs unconditionally (not inside the NVFP4 block).
+        // TEMPORARILY DISABLED — debugging illegal memory access
         if (qscratch_.mxfp4_act_sf != nullptr && cutlass_sm120_mxfp4_available()) {
             int mx_native = 0;
             size_t mx_native_bytes = 0;
@@ -1934,7 +1934,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     mx_native++;
                 }
             };
-            for (int i = 0; i < cfg.n_layers; i++) {
+            for (int i = 0; i < 0; i++) {
                 const auto& L = model_->layer(i);
                 register_if_mxfp4(L.wq, L.wq_qtype);
                 register_if_mxfp4(L.wk, L.wk_qtype);
@@ -1959,8 +1959,12 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
                 // Dequant MXFP4 → FP16 for decode (GEMV needs FP16)
                 size_t fp16_total = 0;
+                int dq_count = 0;
                 for (auto& [ptr, mw] : wcache_.cutlass_mxfp4) {
+                    if (dq_count >= 2) break;  // limit for debugging
                     if (wcache_.fp16.count(ptr)) continue;
+                    // Skip the huge output.weight — test with smaller tensors
+                    if (mw.N > 10000) { dq_count++; continue; }
                     size_t fp16_bytes = static_cast<size_t>(mw.N) * mw.K * sizeof(half);
                     void* d_fp16 = nullptr;
                     cudaError_t err = cudaMalloc(&d_fp16, fp16_bytes);
@@ -1969,19 +1973,52 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                                      cudaGetErrorString(err), fp16_bytes / (1024.0 * 1024.0));
                         continue;
                     }
-                    dequant_mxfp4_to_fp16(mw, d_fp16, stream);
-                    cudaStreamSynchronize(stream);
-                    { cudaError_t e2 = cudaGetLastError();
-                      if (e2 != cudaSuccess) {
-                          IMP_LOG_ERROR("MXFP4 dequant kernel failed: %s [N=%lld K=%lld]",
-                                       cudaGetErrorString(e2), (long long)mw.N, (long long)mw.K);
-                          cudaFree(d_fp16);
-                          continue;
-                      }
+                    // TEST: just zero-fill the FP16 buffer (bypass all dequant logic)
+                    cudaMemsetAsync(d_fp16, 0, fp16_bytes, stream);
+                    if (false)
+                    // CPU-side dequant: download raw, dequant on CPU, upload FP16.
+                    // GPU kernel has mysterious illegal memory access — using CPU as workaround.
+                    {
+                        int64_t N = mw.N, K = mw.K;
+                        int bpr = static_cast<int>(K / 32);
+                        size_t raw_bytes = static_cast<size_t>(N) * bpr * 17;
+                        std::vector<uint8_t> h_raw(raw_bytes);
+                        cudaMemcpy(h_raw.data(), ptr, raw_bytes, cudaMemcpyDeviceToHost);
+
+                        std::vector<uint16_t> h_fp16(static_cast<size_t>(N) * K);  // raw FP16 bits
+                        static const float e2m1[16] = {
+                            0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
+                            -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f};
+
+                        for (int64_t r = 0; r < N; r++) {
+                            for (int b = 0; b < bpr; b++) {
+                                const uint8_t* blk = h_raw.data() + (r * bpr + b) * 17;
+                                uint8_t ue8m0 = blk[16];
+                                // UE8M0 → float
+                                uint32_t fbits = static_cast<uint32_t>(ue8m0) << 23;
+                                float scale;
+                                memcpy(&scale, &fbits, sizeof(float));
+
+                                int64_t base = r * K + b * 32;
+                                for (int i = 0; i < 16; i++) {
+                                    int lo = blk[i] & 0xF;
+                                    int hi = (blk[i] >> 4) & 0xF;
+                                    float v0 = e2m1[lo] * scale;
+                                    float v1 = e2m1[hi] * scale;
+                                    // Float→FP16 bit conversion
+                                    __half h0 = __float2half(v0);
+                                    __half h1 = __float2half(v1);
+                                    memcpy(&h_fp16[base + i*2], &h0, 2);
+                                    memcpy(&h_fp16[base + i*2+1], &h1, 2);
+                                }
+                            }
+                        }
+                        cudaMemcpy(d_fp16, h_fp16.data(), fp16_bytes, cudaMemcpyHostToDevice);
                     }
                     int64_t shape[2] = {mw.N, mw.K};
                     wcache_.fp16[ptr] = Tensor(d_fp16, DType::FP16, 2, shape, true);
                     fp16_total += fp16_bytes;
+                    dq_count++;
                 }
                 if (fp16_total > 0) {
                     cudaStreamSynchronize(stream);
