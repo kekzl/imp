@@ -962,6 +962,7 @@ void Engine::warmup() {
     // Clear any stale CUDA errors from warmup (e.g. green context reconfigure
     // failure on consumer GPUs — the error propagates to cuBLAS otherwise).
     cudaGetLastError();
+    cudaDeviceSynchronize();  // ensure all weight upload/dequant kernels are done
     IMP_LOG_INFO("Warmup complete");
 }
 
