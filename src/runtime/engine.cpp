@@ -670,7 +670,6 @@ bool Engine::init_kv_cache() {
 
     // Dequant weights → FP16/FP8/NVFP4 caches
     executor_->pre_dequant_weights(stream_, vram_budget);
-    dequant_done_ = true;
     cudaStreamSynchronize(stream_);
     if (config_.use_fp8_prefill)
         IMP_LOG_INFO("Weight cache: FP8 E4M3 (2x prefill throughput on sm_120)");
@@ -928,6 +927,18 @@ bool Engine::init_features() {
 }
 
 void Engine::warmup() {
+    // Skip warmup for MXFP4 models — the warmup forward pass triggers
+    // illegal memory access due to kernel paths that bypass the FP16 cache
+    // and attempt to use raw MXFP4 data as FP16 weights.
+    bool has_mxfp4_weights = false;
+    for (int i = 0; i < model_->config().n_layers && !has_mxfp4_weights; i++) {
+        if (model_->layer(i).wq_qtype == GGMLQuantType::MXFP4) has_mxfp4_weights = true;
+    }
+    if (has_mxfp4_weights) {
+        IMP_LOG_INFO("Warmup skipped (MXFP4 model)");
+        return;
+    }
+
     Tokenizer* tok = model_->tokenizer();
     int32_t warmup_id = tok ? tok->bos_id() : 1;
     if (warmup_id < 0) warmup_id = 1;
@@ -958,7 +969,9 @@ void Engine::warmup() {
     async_graph_req_ = nullptr;
     async_pending_tokens_.clear();
     async_pending_cursor_ = 0;
-    cudaStreamSynchronize(stream_);
+    cudaDeviceSynchronize();
+    { cudaError_t e = cudaGetLastError();
+      if (e != cudaSuccess) IMP_LOG_ERROR("warmup CUDA error: %s", cudaGetErrorString(e)); }
     // Clear any stale CUDA errors from warmup (e.g. green context reconfigure
     // failure on consumer GPUs — the error propagates to cuBLAS otherwise).
     cudaGetLastError();
@@ -1036,6 +1049,14 @@ bool Engine::set_draft_model(const std::string& path, int spec_k) {
 // =====================================================================
 
 bool Engine::step() {
+    // Ensure all async weight dequant / upload operations are complete.
+    // Without this, MXFP4 CPU-side dequant H2D copies may race with
+    // prefill memcpy on the same device memory (first call only).
+    if (!dequant_done_) {
+        cudaDeviceSynchronize();
+        cudaGetLastError();  // clear any stale errors from init
+        dequant_done_ = true;
+    }
     const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
 
     // ====================================================================

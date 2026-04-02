@@ -2032,6 +2032,30 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                       if (e != cudaSuccess) IMP_LOG_ERROR("MXFP4 dequant kernel error: %s", cudaGetErrorString(e)); }
                     IMP_LOG_INFO("MXFP4 decode fallback: dequant → FP16 cache %.2f MiB",
                                  fp16_total / (1024.0 * 1024.0));
+
+                    // Replace model weight tensor pointers with FP16 data.
+                    // This ensures ALL code paths (GEMV, direct gemm, etc.) see
+                    // valid FP16 data instead of raw MXFP4 blocks.
+                    auto replace_weight = [&](Tensor& w, GGMLQuantType& qt) {
+                        auto it = wcache_.fp16.find(w.data);
+                        if (it != wcache_.fp16.end() && qt == GGMLQuantType::MXFP4) {
+                            w = it->second;
+                            qt = GGMLQuantType::F16;
+                        }
+                    };
+                    for (int i = 0; i < cfg.n_layers; i++) {
+                        TransformerLayer& L = const_cast<Model*>(model_)->layer(i);
+                        replace_weight(L.wq, L.wq_qtype);
+                        replace_weight(L.wk, L.wk_qtype);
+                        replace_weight(L.wv, L.wv_qtype);
+                        replace_weight(L.wo, L.wo_qtype);
+                        replace_weight(L.w_up, L.w_up_qtype);
+                        replace_weight(L.w_gate, L.w_gate_qtype);
+                        replace_weight(L.w_down, L.w_down_qtype);
+                    }
+                    replace_weight(const_cast<Model*>(model_)->out_proj_,
+                                   const_cast<Model*>(model_)->out_proj_qtype_);
+                    IMP_LOG_INFO("MXFP4 → FP16: replaced %d weight tensor pointers", (int)wcache_.fp16.size());
                 }
             }
         }
