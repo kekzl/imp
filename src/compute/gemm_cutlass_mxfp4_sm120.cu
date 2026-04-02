@@ -347,12 +347,12 @@ __global__ void dequant_mxfp4_kernel(
     half*          __restrict__ out,           // [N, K]
     int N, int K, int n_k_tiles)
 {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_pairs = N * (K / 2);
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t total_pairs = static_cast<int64_t>(N) * (K / 2);
     if (idx >= total_pairs) return;
 
-    int row = idx / (K / 2);
-    int pair = idx % (K / 2);
+    int row = static_cast<int>(idx / (K / 2));
+    int pair = static_cast<int>(idx % (K / 2));
     int col0 = pair * 2;
     int col1 = col0 + 1;
 
@@ -372,8 +372,9 @@ __global__ void dequant_mxfp4_kernel(
     float val0 = kE2M1Table[nib_lo] * scale;
     float val1 = kE2M1Table[nib_hi] * scale;
 
-    out[row * K + col0] = __float2half(val0);
-    out[row * K + col1] = __float2half(val1);
+    int64_t out_idx = static_cast<int64_t>(row) * K + col0;
+    out[out_idx] = __float2half(val0);
+    out[out_idx + 1] = __float2half(val1);
 }
 
 void dequant_mxfp4_to_fp16(const CutlassMxFP4Weight& src, void* dst_fp16,
@@ -381,11 +382,11 @@ void dequant_mxfp4_to_fp16(const CutlassMxFP4Weight& src, void* dst_fp16,
 {
     int N = static_cast<int>(src.N);
     int K = static_cast<int>(src.K);
-    int total_pairs = N * (K / 2);
+    int64_t total_pairs = static_cast<int64_t>(N) * (K / 2);
     int n_k_tiles = (K + kMxAtomKElems - 1) / kMxAtomKElems;
 
     int threads = 256;
-    int blocks = (total_pairs + threads - 1) / threads;
+    int blocks = static_cast<int>((total_pairs + threads - 1) / threads);
     dequant_mxfp4_kernel<<<blocks, threads, 0, stream>>>(
         static_cast<const uint8_t*>(src.data),
         static_cast<const uint8_t*>(src.scale_factors),
