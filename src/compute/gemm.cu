@@ -157,8 +157,7 @@ static cudaDataType_t dtype_to_cuda(DType dt) {
         case DType::INT32:    return CUDA_R_32I;
         default:
             fprintf(stderr, "imp::gemm: unsupported dtype %d\n", (int)dt);
-            // For MXFP4 (dtype 6 = INT4): this shouldn't be reached — check FP16 cache
-            return CUDA_R_16F;
+            return CUDA_R_16F;  // fallback (caller guard should prevent reaching here)
     }
 }
 
@@ -597,6 +596,15 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C,
 
 void gemm(const Tensor& A, const Tensor& B, Tensor& C,
           float alpha, float beta, cudaStream_t stream) {
+    // Guard against quantized weight tensors (e.g. MXFP4 with dtype=INT4)
+    // that should have been handled by the FP16 weight cache path.
+    // Passing raw quantized data to cuBLAS causes illegal memory access
+    // (cuBLAS reads sizeof(FP16)*numel bytes but only sizeof(quant)*numel exist).
+    if (B.dtype == DType::INT4) {
+        // This should never be reached — FP16 cache or gemm_dispatch should
+        // handle quantized weights. If we get here, output will be zero (safe).
+        return;
+    }
     if (gemm_try_gemv(A, B, C, alpha, beta, stream)) return;
     if (gemm_try_sgemm(A, B, C, alpha, beta, stream)) return;
     gemm_cublaslt_generic(A, B, C, alpha, beta, stream);

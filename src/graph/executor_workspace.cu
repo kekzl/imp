@@ -1934,7 +1934,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     mx_native++;
                 }
             };
-            for (int i = 0; i < 0; i++) {
+            for (int i = 0; i < cfg.n_layers; i++) {
                 const auto& L = model_->layer(i);
                 register_if_mxfp4(L.wq, L.wq_qtype);
                 register_if_mxfp4(L.wk, L.wk_qtype);
@@ -1957,25 +1957,31 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 { cudaError_t e = cudaGetLastError();
                   if (e != cudaSuccess) IMP_LOG_ERROR("MXFP4 unpack error: %s", cudaGetErrorString(e)); }
 
-                // Dequant MXFP4 → FP16 for decode (GEMV needs FP16)
+                // Dequant MXFP4 → FP16 for decode (GEMV needs FP16).
+                // Single bulk allocation to avoid CUDA heap fragmentation.
                 size_t fp16_total = 0;
-                int dq_count = 0;
-                for (auto& [ptr, mw] : wcache_.cutlass_mxfp4) {
-                    if (dq_count >= 2) break;  // limit for debugging
-                    if (wcache_.fp16.count(ptr)) continue;
-                    // Skip the huge output.weight — test with smaller tensors
-                    if (mw.N > 10000) { dq_count++; continue; }
-                    size_t fp16_bytes = static_cast<size_t>(mw.N) * mw.K * sizeof(half);
-                    void* d_fp16 = nullptr;
-                    cudaError_t err = cudaMalloc(&d_fp16, fp16_bytes);
-                    if (err != cudaSuccess) {
-                        IMP_LOG_WARN("MXFP4 FP16 dequant alloc failed: %s (%.1f MiB)",
-                                     cudaGetErrorString(err), fp16_bytes / (1024.0 * 1024.0));
-                        continue;
+                for (auto& [p, m] : wcache_.cutlass_mxfp4)
+                    if (!wcache_.fp16.count(p))
+                        fp16_total += static_cast<size_t>(m.N) * m.K * sizeof(half);
+
+                void* d_fp16_bulk = nullptr;
+                if (fp16_total > 0) {
+                    cudaError_t ae = cudaMalloc(&d_fp16_bulk, fp16_total);
+                    if (ae != cudaSuccess) {
+                        IMP_LOG_ERROR("MXFP4 FP16 bulk alloc failed: %s (%.1f MiB)",
+                                     cudaGetErrorString(ae), fp16_total / (1024.0*1024.0));
+                        d_fp16_bulk = nullptr;
                     }
-                    // TEST: just zero-fill the FP16 buffer (bypass all dequant logic)
-                    cudaMemsetAsync(d_fp16, 0, fp16_bytes, stream);
-                    if (false)
+                }
+
+                if (d_fp16_bulk) {
+                    size_t offset = 0;
+                    for (auto& [ptr, mw] : wcache_.cutlass_mxfp4) {
+                        if (wcache_.fp16.count(ptr)) continue;
+                        size_t fp16_bytes = static_cast<size_t>(mw.N) * mw.K * sizeof(half);
+                        void* d_fp16 = static_cast<char*>(d_fp16_bulk) + offset;
+                        offset += fp16_bytes;
+
                     // CPU-side dequant: download raw, dequant on CPU, upload FP16.
                     // GPU kernel has mysterious illegal memory access — using CPU as workaround.
                     {
@@ -2017,9 +2023,9 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     }
                     int64_t shape[2] = {mw.N, mw.K};
                     wcache_.fp16[ptr] = Tensor(d_fp16, DType::FP16, 2, shape, true);
-                    fp16_total += fp16_bytes;
-                    dq_count++;
-                }
+                    }
+                }  // end if (d_fp16_bulk)
+
                 if (fp16_total > 0) {
                     cudaStreamSynchronize(stream);
                     { cudaError_t e = cudaGetLastError();
