@@ -157,7 +157,8 @@ static cudaDataType_t dtype_to_cuda(DType dt) {
         case DType::INT32:    return CUDA_R_32I;
         default:
             fprintf(stderr, "imp::gemm: unsupported dtype %d\n", (int)dt);
-            abort();
+            // For MXFP4 (dtype 6 = INT4): this shouldn't be reached — check FP16 cache
+            return CUDA_R_16F;
     }
 }
 

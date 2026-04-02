@@ -1759,7 +1759,7 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
         auto it = fp16_cache->find(weight.data);
         if (it != fp16_cache->end()) {
             gemm(input, it->second, output, 1.0f, 0.0f, stream);
-        } else if (dequant_scratch != nullptr) {
+        } else if (dequant_scratch != nullptr && qtype != GGMLQuantType::MXFP4) {
             // Cache miss (shouldn't happen) — fall back to on-the-fly dequant
             int rows = static_cast<int>(weight.shape[0]);
             int cols = static_cast<int>(weight.shape[1]);
