@@ -342,6 +342,8 @@ def convert_model(model_path: str, output_path: str):
     writer.add_uint32(f"{arch}.block_count", config.num_hidden_layers)
     writer.add_uint32(f"{arch}.attention.head_count", config.num_attention_heads)
     writer.add_uint32(f"{arch}.attention.head_count_kv", getattr(config, 'num_key_value_heads', config.num_attention_heads))
+
+    # head_dim will be derived from Q proj shape after model load
     writer.add_float32(f"{arch}.attention.layer_norm_rms_epsilon", getattr(config, 'rms_norm_eps', 1e-6))
     writer.add_uint32(f"{arch}.vocab_size", config.vocab_size)
 
@@ -351,6 +353,16 @@ def convert_model(model_path: str, output_path: str):
 
     # Quantize and add tensors
     state_dict = model.state_dict()
+
+    # Derive head_dim from Q projection shape (handles QK-norm models)
+    q_proj_key = 'model.layers.0.self_attn.q_proj.weight'
+    if q_proj_key in state_dict:
+        q_out_dim = state_dict[q_proj_key].shape[0]
+        head_dim = q_out_dim // config.num_attention_heads
+        writer.add_uint32(f"{arch}.attention.key_length", head_dim)
+        writer.add_uint32(f"{arch}.attention.value_length", head_dim)
+        print(f"  head_dim={head_dim} (from Q proj [{q_out_dim}, {config.hidden_size}])")
+
     n_quantized = 0
     n_fp16 = 0
 
