@@ -310,7 +310,7 @@ bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K,
     int n_k_tiles = (static_cast<int>(K) + kMxAtomKElems - 1) / kMxAtomKElems;
     int threads = 256;
     int blocks = (total_blocks + threads - 1) / threads;
-    if (false) unpack_mxfp4_gguf_kernel<<<blocks, threads, 0, stream>>>(
+    unpack_mxfp4_gguf_kernel<<<blocks, threads, 0, stream>>>(
         static_cast<const uint8_t*>(raw_gpu),
         static_cast<uint8_t*>(d_data),
         static_cast<uint8_t*>(d_sf),
