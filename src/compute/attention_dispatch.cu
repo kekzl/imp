@@ -6,6 +6,7 @@
 
 #ifdef IMP_USE_CUTLASS
 #include "compute/attention_cutlass_fmha.h"
+#include "compute/attention_fmha_sm120.h"
 #include "compute/attention_mxfp4_prefill.h"
 #endif
 
@@ -39,6 +40,17 @@ void attention_prefill_dispatch(
     // Uses O(seq²) memory — falls back for long sequences or unsupported configs.
     if (attention_mxfp4_available() && sm >= 120 && !sw_active) {
         if (attention_mxfp4_prefill(Q, K, V, O, scale, causal, softcap, stream)) {
+            return;
+        }
+    }
+
+    // Native sm_120 FMHA: WGMMA for Blackwell with sliding window support.
+    // Preferred over CUTLASS Hopper FMHA on sm_120+ (native scheduling,
+    // supports sliding window which CUTLASS FMHA does not).
+    // Set IMP_NO_FMHA_SM120=1 to skip and use CUTLASS/WMMA fallback.
+    static bool use_fmha_sm120 = !getenv("IMP_NO_FMHA_SM120");
+    if (use_fmha_sm120 && sm >= 120) {
+        if (fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream)) {
             return;
         }
     }
