@@ -181,6 +181,7 @@ if(IMP_USE_CUTLASS)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_mxfp4_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_grouped_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_cutlass_fmha.cu)
+    list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxfp4_prefill.cu)
 endif()
 
@@ -367,6 +368,7 @@ if(IMP_BUILD_TESTS)
         tests/test_chat_template.cpp
         tests/test_jinja.cpp
         tests/test_hadamard.cu
+        tests/test_attention_fmha_sm120.cu
         tests/test_attention_mxfp4.cu
         tests/test_softmax.cu
         tests/test_ssm.cu
