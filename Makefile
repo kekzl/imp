@@ -26,6 +26,14 @@ test-all: build
 	$(DOCKER_RUN) imp-tests
 	$(DOCKER_RUN) test-gdn
 
+# E2E model tests: load real models, generate, verify output
+# Uses Qwen3-4B (dense) + Qwen3.5-4B (GDN hybrid) from ./models/
+test-e2e: build
+	docker run --rm --gpus all -v $(PWD)/models:/models \
+		-e IMP_TEST_MODEL=/models/Qwen3-4B-Instruct-2507-Q8_0.gguf \
+		-e IMP_TEST_MODEL_GDN=/models/Qwen3.5-4B-Q8_0.gguf \
+		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*"
+
 # Performance regression (needs baseline in tests/perf_baseline.json)
 test-perf: build
 	$(DOCKER_RUN) imp-cli --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 128 --temperature 0
