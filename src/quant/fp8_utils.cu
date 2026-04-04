@@ -1,6 +1,7 @@
 #include "quant/fp8_utils.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_fp8.h>
 #include <cstdint>
 #include <cstdio>
 
@@ -17,9 +18,8 @@ namespace imp {
 //   NaN            : e=15, m != 0    (no infinity in E4M3)
 //   max normal     : +/- 448  (e=14, m=7 -> 2^7 * 1.875)
 //
-// When CUDA 12 native FP8 types are available (__CUDA_FP8_TYPES_EXIST__ or
-// sm_89+) we delegate to the hardware-backed __nv_fp8_e4m3.  Otherwise a
-// portable software path is used.
+// We use the CUDA native __nv_fp8_e4m3 type (CUDA 12+).  Software fallback
+// helpers are kept below for host-side unit tests only.
 // ---------------------------------------------------------------------------
 
 // ---- Software fallback helpers (always compiled for host-side unit tests) --
@@ -171,21 +171,10 @@ __global__ void cast_fp16_to_fp8_kernel(
     const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
     if (base >= n) return;
 
-#if defined(__CUDA_FP8_TYPES_EXIST__)
-    // ---- Native FP8 path (CUDA 12+ with fp8 header) -----------------------
     for (int i = 0; i < kElemsPerThread && base + i < n; ++i) {
         __nv_fp8_e4m3 fp8_val = __nv_fp8_e4m3(__half2float(input[base + i]));
         memcpy(&output[base + i], &fp8_val, 1);
     }
-#else
-    // ---- Software fallback -------------------------------------------------
-    for (int i = 0; i < kElemsPerThread && base + i < n; ++i) {
-        uint16_t hbits;
-        half hval = input[base + i];
-        memcpy(&hbits, &hval, sizeof(uint16_t));
-        output[base + i] = fp16_bits_to_fp8_e4m3(hbits);
-    }
-#endif
 }
 
 __global__ void cast_fp8_to_fp16_kernel(
@@ -196,20 +185,11 @@ __global__ void cast_fp8_to_fp16_kernel(
     const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
     if (base >= n) return;
 
-#if defined(__CUDA_FP8_TYPES_EXIST__)
-    // ---- Native FP8 path ---------------------------------------------------
     for (int i = 0; i < kElemsPerThread && base + i < n; ++i) {
         __nv_fp8_e4m3 fp8_val;
         memcpy(&fp8_val, &input[base + i], 1);
         output[base + i] = __float2half((float)fp8_val);
     }
-#else
-    // ---- Software fallback -------------------------------------------------
-    for (int i = 0; i < kElemsPerThread && base + i < n; ++i) {
-        uint16_t hbits = fp8_e4m3_to_fp16_bits(input[base + i]);
-        memcpy(&output[base + i], &hbits, sizeof(uint16_t));
-    }
-#endif
 }
 
 // ---------------------------------------------------------------------------

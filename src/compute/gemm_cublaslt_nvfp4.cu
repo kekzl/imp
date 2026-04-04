@@ -28,13 +28,7 @@
 #include <cuda_fp16.h>
 #include <mutex>
 
-// CUDA_R_4F_E2M1 and VEC16_UE4M3 block-scale enums were added in CUDA 12.8.
-// Use CUDART_VERSION to guard since these are enum values (not preprocessor macros).
-#define IMP_HAS_CUBLASLT_NVFP4 (CUDART_VERSION >= 12080)
-
 namespace imp {
-
-#if IMP_HAS_CUBLASLT_NVFP4
 
 // Guard for one-time availability probe
 static std::once_flag s_probe_flag;
@@ -283,18 +277,5 @@ bool gemm_nvfp4_cublaslt(const void* a_data, const void* a_sf,
 
     return true;
 }
-
-#else // CUDART_VERSION < 12080
-
-bool cublaslt_nvfp4_available() { return false; }
-
-bool gemm_nvfp4_cublaslt(const void*, const void*,
-                          const CutlassNvFP4Weight&,
-                          void*, int, int, int,
-                          cudaStream_t) {
-    return false;
-}
-
-#endif // IMP_HAS_CUBLASLT_NVFP4
 
 } // namespace imp

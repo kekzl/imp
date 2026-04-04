@@ -4,11 +4,9 @@
 #include <cuda_runtime.h>
 #include <cstdlib>
 
-#ifdef IMP_USE_CUTLASS
 #include "compute/attention_cutlass_fmha.h"
 #include "compute/attention_fmha_sm120.h"
 #include "compute/attention_mxfp4_prefill.h"
-#endif
 
 namespace imp {
 
@@ -30,7 +28,6 @@ void attention_prefill_dispatch(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
     float scale, bool causal, int sliding_window, float softcap, cudaStream_t stream) {
     int sm = get_device_sm_version();
-#ifdef IMP_USE_CUTLASS
     // sliding_window that covers entire seq_kv doesn't restrict attention
     int seq_kv = static_cast<int>(K.shape[1]);
     bool sw_active = (sliding_window > 0 && sliding_window < seq_kv);
@@ -67,7 +64,6 @@ void attention_prefill_dispatch(
         int hd = static_cast<int>(Q.shape[3]);
         IMP_LOG_DEBUG("CUTLASS FMHA unavailable (hd=%d, softcap=%.1f), using WMMA fallback", hd, softcap);
     }
-#endif
 
     if (sm >= 120) {
         // Optimized WMMA kernel with 128x64 tiles for Blackwell (sm_120+).

@@ -5,11 +5,9 @@
 #include "compute/layernorm.h"
 #include "compute/rope.h"
 #include "compute/gemm.h"
-#ifdef IMP_USE_CUTLASS
 #include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/attention_cutlass_fmha.h"
-#endif
 #include "compute/activation.h"
 #include "compute/moe_routing.h"
 #include "compute/sampling.h"
@@ -23,9 +21,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
-#ifdef __CUDA_FP8_TYPES_EXIST__
 #include <cuda_fp8.h>
-#endif
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
@@ -296,14 +292,12 @@ size_t GraphExecutor::workspace_estimate() const {
     // Safety margin for FP8 act buffers, misc (reduced for MoE to save VRAM)
     auxiliary += is_moe ? (8ULL << 20) : (32ULL << 20);
 
-#ifdef IMP_USE_CUTLASS
     // CUTLASS FMHA workspace (LSE buffer + kernel cooperative workspace)
     // Skip for MoE models where prefill uses cuBLAS (compute-light attention)
     if (!is_moe) {
         int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
         auxiliary += cutlass_fmha_workspace_estimate(1, max_tokens_, cfg.n_heads, hd);
     }
-#endif
 
     return persistent + shared + fp32_accum + auxiliary;
 }
@@ -644,7 +638,6 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (VRAM-constrained, using WMMA/TCGEN05 fallback)");
     }
 
-#ifdef IMP_USE_CUTLASS
     // CUTLASS FMHA workspace: pre-allocate LSE + kernel workspace at max dimensions.
     // This ensures the allocations are tracked in the VRAM budget instead of happening
     // lazily (which would cause untracked VRAM growth and potential shared memory swapping).
@@ -657,7 +650,6 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                          fmha_bytes / (1024.0 * 1024.0));
         }
     }
-#endif
 
     // MoE dequant and staging buffers
     if (has_moe_) {
@@ -973,9 +965,7 @@ void GraphExecutor::free_buffers() {
     }
     vfree(attn_scores_buf_);
     attn_scores_buf_size_ = 0;
-#ifdef IMP_USE_CUTLASS
     cutlass_fmha_free_workspace();
-#endif
     vfree(shared_workspace_);
     shared_workspace_size_ = 0;
     vfree(persistent_workspace_);

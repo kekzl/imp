@@ -3,11 +3,9 @@
 #include "graph/executor.h"
 #include "compute/gemm.h"
 #include "compute/gemm_q6k.h"
-#ifdef IMP_USE_CUTLASS
 #include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
-#endif
 #include "compute/hadamard.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
@@ -434,7 +432,6 @@ __global__ __launch_bounds__(256) void write_kv_cache_fused_kernel(
 }
 
 // FP16 -> FP8 E4M3 quantization + write to paged KV cache
-#ifdef __CUDA_FP8_TYPES_EXIST__
 __global__ __launch_bounds__(256) void write_kv_cache_fp8_kernel(
     const half* __restrict__ data_in,
     const int* __restrict__ positions,
@@ -480,76 +477,6 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_kernel(
         dst[i] = __nv_fp8_e4m3(__half2float(src[i]) * inv_scale);
     }
 }
-#else
-// Software fallback: clamp FP16 to FP8 E4M3 range and pack to uint8_t
-__global__ __launch_bounds__(256) void write_kv_cache_fp8_kernel(
-    const half* __restrict__ data_in,
-    const int* __restrict__ positions,
-    const int* __restrict__ block_tables,
-    uint8_t* __restrict__ cache_base,        // FP8 cache (as raw bytes)
-    float inv_scale,            // 1.0 / kv_scale
-    int block_stride,
-    int row_elems,
-    int block_size,
-    int n_tokens,
-    int max_blocks_per_seq,
-    int n_sequences
-) {
-    int token_idx = blockIdx.x;
-    if (token_idx >= n_tokens) return;
-
-    int pos = positions[token_idx];
-    int slot_in_block;
-    int block_id = kv_resolve_slot(block_tables, pos, block_size,
-                                   token_idx, max_blocks_per_seq, n_sequences,
-                                   slot_in_block);
-
-    uint8_t* dst = cache_base + static_cast<int64_t>(block_id) * block_stride
-                               + static_cast<int64_t>(slot_in_block) * row_elems;
-    const half* src = data_in + static_cast<int64_t>(token_idx) * row_elems;
-
-    // FP8 E4M3 range: [-448, 448]
-    const float fp8_max = 448.0f;
-
-    // Vectorized: load 4 FP16 (float2 = half4), convert+scale+clamp, store 4 FP8 (uint32_t)
-    const int vec_elems = row_elems / 4;
-    const float2* src4 = reinterpret_cast<const float2*>(src);
-    uint32_t* dst4 = reinterpret_cast<uint32_t*>(dst);
-
-    auto fp16_to_fp8_sw = [&] __device__ (half h) -> uint8_t {
-        float val = __half2float(h) * inv_scale;
-        val = fminf(fmaxf(val, -fp8_max), fp8_max);
-        // Sign(1) | Exponent(4) | Mantissa(3)
-        uint32_t bits = __float_as_uint(val);
-        uint8_t sign = (bits >> 24) & 0x80;
-        int exponent = ((bits >> 23) & 0xFF) - 127 + 7; // rebias to E4M3
-        uint8_t mantissa = (bits >> 20) & 0x07;
-        if (exponent <= 0) {
-            exponent = 0;
-            mantissa = 0;
-        } else if (exponent >= 15) {
-            exponent = 15;
-            mantissa = 0x06; // max finite for E4M3 (no inf/nan encoding)
-        }
-        return sign | (static_cast<uint8_t>(exponent) << 3) | mantissa;
-    };
-
-    for (int i = threadIdx.x; i < vec_elems; i += blockDim.x) {
-        float2 h2 = src4[i];
-        const half* hp = reinterpret_cast<const half*>(&h2);
-        uint8_t fp8[4];
-        #pragma unroll
-        for (int j = 0; j < 4; j++) {
-            fp8[j] = fp16_to_fp8_sw(hp[j]);
-        }
-        dst4[i] = *reinterpret_cast<uint32_t*>(fp8);
-    }
-    // Scalar tail for non-aligned remainder
-    for (int i = vec_elems * 4 + threadIdx.x; i < row_elems; i += blockDim.x) {
-        dst[i] = fp16_to_fp8_sw(src[i]);
-    }
-}
-#endif
 
 // ---------------------------------------------------------------------------
 // FP16 -> INT8 quantization + write to paged KV cache with per-head scales.

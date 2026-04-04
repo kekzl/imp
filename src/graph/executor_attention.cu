@@ -12,11 +12,9 @@
 #include "compute/gemm_moe_fused.h"
 #include "compute/gemm_moe_fused_tc.h"
 #include "compute/gemm_q6k.h"
-#ifdef IMP_USE_CUTLASS
 #include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/attention_cutlass_fmha.h"
-#endif
 #include "compute/activation.h"
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"

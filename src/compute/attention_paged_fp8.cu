@@ -13,31 +13,9 @@ namespace imp {
 // FP8 E4M3 helper: convert a single FP8 byte to float
 // ---------------------------------------------------------------------------
 __device__ __forceinline__ float fp8_e4m3_to_float(uint8_t bits) {
-#ifdef __CUDA_FP8_TYPES_EXIST__
     __nv_fp8_e4m3 val;
     memcpy(&val, &bits, 1);
     return static_cast<float>(val);
-#else
-    // Software fallback: E4M3 (1 sign, 4 exponent, 3 mantissa, bias=7)
-    uint32_t sign = (bits >> 7) & 1u;
-    uint32_t exp  = (bits >> 3) & 0xFu;
-    uint32_t mant = bits & 0x7u;
-
-    if (exp == 0 && mant == 0) return sign ? -0.0f : 0.0f;
-
-    float result;
-    if (exp == 0) {
-        // Subnormal: value = (-1)^sign * 2^(1-bias) * (0.mantissa)
-        result = ldexpf((float)mant / 8.0f, 1 - 7);
-    } else if (exp == 0xFu && mant == 0x7u) {
-        // NaN in E4M3 (no inf; max exp with max mantissa = NaN)
-        result = __int_as_float(0x7FC00000);  // quiet NaN
-    } else {
-        // Normal: value = (-1)^sign * 2^(exp-bias) * (1 + mantissa/8)
-        result = ldexpf(1.0f + (float)mant / 8.0f, (int)exp - 7);
-    }
-    return sign ? -result : result;
-#endif
 }
 // ---------------------------------------------------------------------------
 // Pipelined Split-K: FP8 E4M3 variant

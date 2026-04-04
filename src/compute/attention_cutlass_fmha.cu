@@ -8,8 +8,6 @@
 #include "compute/attention_cutlass_fmha.h"
 #include "core/logging.h"
 
-#if defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED) || defined(__CUDA_ARCH__) || defined(IMP_USE_CUTLASS)
-
 #include "cute/tensor.hpp"
 #include "cutlass/cutlass.h"
 #include "cutlass/kernel_hardware_info.h"
@@ -345,22 +343,3 @@ bool cutlass_fmha_prefill(
 }
 
 } // namespace imp
-
-#else  // !CUTLASS_ARCH_MMA_SM90_SUPPORTED && !IMP_USE_CUTLASS
-
-namespace imp {
-
-bool cutlass_fmha_prefill(
-    const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, float softcap, cudaStream_t stream)
-{
-    return false;  // CUTLASS FMHA not available
-}
-
-size_t cutlass_fmha_workspace_estimate(int, int, int, int) { return 0; }
-size_t cutlass_fmha_init_workspace(int, int, int, int) { return 0; }
-void cutlass_fmha_free_workspace() {}
-
-} // namespace imp
-
-#endif

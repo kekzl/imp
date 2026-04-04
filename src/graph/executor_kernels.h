@@ -76,7 +76,6 @@ __global__ __launch_bounds__(256) void write_kv_cache_fused_kernel(
     int max_blocks_per_seq,
     int n_sequences);
 
-#ifdef __CUDA_FP8_TYPES_EXIST__
 __global__ __launch_bounds__(256) void write_kv_cache_fp8_kernel(
     const half* __restrict__ data_in,
     const int* __restrict__ positions,
@@ -89,20 +88,6 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_kernel(
     int n_tokens,
     int max_blocks_per_seq,
     int n_sequences);
-#else
-__global__ __launch_bounds__(256) void write_kv_cache_fp8_kernel(
-    const half* __restrict__ data_in,
-    const int* __restrict__ positions,
-    const int* __restrict__ block_tables,
-    uint8_t* __restrict__ cache_base,
-    float inv_scale,
-    int block_stride,
-    int row_elems,
-    int block_size,
-    int n_tokens,
-    int max_blocks_per_seq,
-    int n_sequences);
-#endif
 
 __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
     const half* __restrict__ k_in,

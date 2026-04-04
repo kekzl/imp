@@ -20,8 +20,6 @@
 #include <cstdio>
 #include <vector>
 
-#ifdef IMP_USE_CUTLASS
-
 #include "cutlass/cutlass.h"
 #include "cutlass/gemm/gemm.h"
 #include "cutlass/gemm/device/gemm_grouped.h"
@@ -239,21 +237,3 @@ size_t gemm_grouped_cutlass_sm120_workspace(int max_problems, int max_M, int N, 
 }
 
 } // namespace imp
-
-#else // !IMP_USE_CUTLASS
-
-namespace imp {
-
-bool gemm_grouped_cutlass_sm120(
-    const void* const*, const void* const*, void* const*,
-    const int*, int, int, int, void*, size_t, cudaStream_t) {
-    return false;
-}
-
-size_t gemm_grouped_cutlass_sm120_workspace(int, int, int, int) { return 0; }
-
-bool cutlass_grouped_gemm_sm120_available() { return false; }
-
-} // namespace imp
-
-#endif // IMP_USE_CUTLASS
