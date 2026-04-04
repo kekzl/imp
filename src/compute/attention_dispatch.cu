@@ -41,9 +41,19 @@ void attention_prefill_dispatch(
         }
     }
 
-    // Native sm_120 FMHA: WGMMA for Blackwell with sliding window support.
-    // Preferred over CUTLASS Hopper FMHA on sm_120+ (native scheduling,
-    // supports sliding window which CUTLASS FMHA does not).
+    // Native sm_120 FP8 FMHA: QK^T in FP8 E4M3 (m16n8k32) for 2x score throughput.
+    // PV stays FP16. Set IMP_NO_FP8_FMHA=1 to force FP16 path.
+    static bool use_fp8_fmha = !getenv("IMP_NO_FP8_FMHA");
+    if (use_fp8_fmha && sm >= 120) {
+        bool fp8_ok = fmha_sm120_fp8_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream);
+        if (fp8_ok) {
+            IMP_LOG_DEBUG("FMHA dispatch: using FP8 sm120 kernel (hd=%d)", static_cast<int>(Q.shape[3]));
+            return;
+        }
+    }
+
+    // Native sm_120 FP16 FMHA: WMMA for Blackwell with sliding window support.
+    // Fallback when FP8 is disabled or unsupported config.
     // Set IMP_NO_FMHA_SM120=1 to skip and use CUTLASS/WMMA fallback.
     static bool use_fmha_sm120 = !getenv("IMP_NO_FMHA_SM120");
     if (use_fmha_sm120 && sm >= 120) {
