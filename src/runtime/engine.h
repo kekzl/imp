@@ -263,6 +263,36 @@ private:
     bool try_speculative_decode(std::vector<std::shared_ptr<Request>>& valid_decode,
                                  cudaStream_t stream);
 
+    // ── step() sub-phases ─────────────────────────────────────────────
+    // Returns: 0 = no async graph active, 1 = still running (step returns true),
+    //         -1 = graph exhausted/generation done (check scheduler for more work)
+    int step_async_graph_resume();
+
+    // Schedule prefill/decode batches and reconfigure green contexts.
+    // Returns true if there is work to do (batches non-empty).
+    bool step_schedule();
+
+    // Process all prefill requests in sched_prefill_batch_.
+    void step_prefill(cudaStream_t stream);
+
+    // Process one prefill request (called from step_prefill).
+    void step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk,
+                          cudaStream_t stream);
+
+    // Process all decode requests in sched_decode_batch_.
+    void step_decode(cudaStream_t stream);
+
+    // Build batched decode state, run forward pass, sample tokens.
+    void step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_decode,
+                             cudaStream_t stream);
+
+    // Extract logprobs from decode logits and distribute tokens to requests.
+    void step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& valid_decode,
+                                     const std::vector<int32_t>& tokens,
+                                     const Tensor& decode_logits_out,
+                                     bool needs_logprobs, bool needs_json_mode,
+                                     bool needs_schema_mode, cudaStream_t stream);
+
     // ── CUDA graph helpers ───────────────────────────────────────────
     // Pre-allocate KV blocks and check preconditions for graph loop.
     // Returns remaining tokens (>0 = ok, <=0 = cannot use graph).
