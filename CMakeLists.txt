@@ -25,8 +25,9 @@ add_compile_definitions(IMP_CUDA_13_1=1)
 #
 # Blackwell gencode flags:
 #   -gencode arch=compute_120f,code=sm_120    (SASS cubin with family features)
-#   -gencode arch=compute_120,code=compute_120 (PTX for forward compatibility)
-set(IMP_SM120_FLAGS "--generate-code=arch=compute_120f,code=sm_120 --generate-code=arch=compute_120,code=compute_120")
+# Note: generic compute_120 PTX removed — it lacks FP8 MMA (.kind::f8f6f4)
+# and all target GPUs (RTX 5090) run sm_120f SASS directly.
+set(IMP_SM120_FLAGS "--generate-code=arch=compute_120f,code=sm_120")
 
 option(IMP_NATIVE_SM120 "Build exclusively for sm_120f (RTX 5090)" OFF)
 if(IMP_NATIVE_SM120)
