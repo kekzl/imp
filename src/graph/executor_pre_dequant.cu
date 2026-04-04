@@ -250,6 +250,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     // for ALL dense projection weights.  FP8 is 50% smaller than FP16 and uses
     // FP8×FP8 cuBLASLt with 2x tensor core throughput on sm_120.
     // Uses qscratch_.dequant as FP16 staging buffer (stream ordering ensures safety).
+    //
+    // Budget cap: respect budget.fp8_cache_bytes to leave room for NVFP4 decode cache.
+    // Without this cap, large models (Gemma-3-12B) exhaust VRAM on FP8 prefill,
+    // leaving too little for NVFP4 decode → runtime dequant fallback → 10x slowdown.
+    size_t fp8_budget = std::min(remaining_budget, budget.fp8_cache_bytes);
     if (wcache_.use_fp8) {
         size_t fp8_total = 0;
         int fp8_count = 0;
@@ -273,11 +278,13 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             size_t n_elems = static_cast<size_t>(w.shape[0]) * w.shape[1];
             size_t fp8_bytes = n_elems;
 
-            if (fp8_total + fp8_bytes + sizeof(float) > remaining_budget) {
+            if (fp8_total + fp8_bytes + sizeof(float) > fp8_budget) {
                 fp8_exhausted = true;
-                IMP_LOG_INFO("FP8 overflow: budget reached after %d tensors (%.1f / %.1f MiB)",
+                IMP_LOG_INFO("FP8 cache: budget reached after %d tensors (%.1f / %.1f MiB, "
+                             "saving %.1f MiB for NVFP4 decode)",
                              fp8_count, fp8_total / (1024.0 * 1024.0),
-                             remaining_budget / (1024.0 * 1024.0));
+                             fp8_budget / (1024.0 * 1024.0),
+                             (remaining_budget - fp8_budget) / (1024.0 * 1024.0));
                 return;
             }
 
