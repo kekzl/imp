@@ -287,6 +287,20 @@ void elementwise_add_store(const Tensor& a, const Tensor& b, Tensor& out,
 
 void add_bias(Tensor& out, const Tensor& bias, cudaStream_t stream);
 
+// Fused 3-way bias add: out_a += bias_a, out_b += bias_b, out_c += bias_c in one launch.
+// Skips any output where bias.data == nullptr.
+void add_bias_3way(Tensor& out_a, const Tensor& bias_a,
+                   Tensor& out_b, const Tensor& bias_b,
+                   Tensor& out_c, const Tensor& bias_c,
+                   cudaStream_t stream);
+
+// Fused residual add + RMSNorm: hidden += residual; output = rmsnorm(hidden, weight).
+// Saves 1 kernel launch + 1 DRAM round-trip vs separate add + norm.
+void residual_add_rmsnorm(Tensor& hidden, const Tensor& residual,
+                          const Tensor& weight, Tensor& output,
+                          float eps, cudaStream_t stream,
+                          float weight_offset = 0.0f);
+
 Tensor slice_rows(const Tensor& buf, int n_tokens);
 
 // New: simplified dispatch via GemmContext (preferred for new code)

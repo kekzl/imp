@@ -271,10 +271,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             }
         }
 
-        // Apply Q/K/V biases if present (Qwen2)
-        add_bias(qv, ly.q_bias, stream);
-        add_bias(kk, ly.k_bias, stream);
-        add_bias(vv, ly.v_bias, stream);
+        // Apply Q/K/V biases if present (Qwen2) — fused 3-way for 1 launch
+        add_bias_3way(qv, ly.q_bias, kk, ly.k_bias, vv, ly.v_bias, stream);
     }
     if (debug_attn_steps) {
         debug_tensor_stats("L0_step1_after_qkv_q", qv, stream);
