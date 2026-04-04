@@ -1,5 +1,6 @@
 #include "graph/executor.h"
 #include "graph/executor_kernels.h"
+#include "graph/executor_helpers.h"
 #include "compute/embedding.h"
 #include "compute/layernorm.h"
 #include "compute/rope.h"
@@ -32,34 +33,8 @@
 
 namespace imp {
 
-// Helper: round up to 256-byte alignment (used throughout for workspace layout).
-static inline size_t align256(size_t x) { return (x + 255) & ~size_t(255); }
-
-// Helper: create a 2D Tensor view at `ptr` and advance ptr by `aligned_sz`.
-// Used by configure_*_workspace() and allocate_persistent_workspace() to lay out
-// tensors in a contiguous buffer.
-static Tensor make_workspace_tensor(char*& ptr, DType dtype, int64_t rows, int64_t cols, size_t aligned_sz) {
-    int64_t shape[2] = {rows, cols};
-    Tensor t(ptr, dtype, 2, shape, true);
-    ptr += aligned_sz;
-    return t;
-}
-
-// Helper: allocate GPU memory through VRAMAllocator if available, else cudaMalloc.
-// Frees through the same path. Used for large persistent allocations.
-static void* vram_alloc(VRAMAllocator* alloc, size_t bytes, const char* tag) {
-    if (bytes == 0) return nullptr;
-    if (alloc) return alloc->allocate(bytes, tag);
-    void* ptr = nullptr;
-    if (cudaMalloc(&ptr, bytes) != cudaSuccess) return nullptr;
-    return ptr;
-}
-
-static void vram_free(VRAMAllocator* alloc, void* ptr) {
-    if (!ptr) return;
-    if (alloc) alloc->free(ptr);
-    else IMP_CUDA_CHECK_LOG(cudaFree(ptr));
-}
+// Shared helpers (align256, make_workspace_tensor, vram_alloc, vram_free)
+// are defined in executor_helpers.h
 
 // ---------------------------------------------------------------------------
 // GraphExecutor lifetime
