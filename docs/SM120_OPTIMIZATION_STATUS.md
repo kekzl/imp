@@ -34,7 +34,7 @@ This means:
 
 1. **Smaller KV cache** (INT4, TurboQuant) — already implemented, ~2x bandwidth reduction
 2. **Speculative decoding** (TurboDraft) — amortizes weight loads over N tokens
-3. **GPU clock boost** — if the GPU ran at 3090 MHz instead of 1432 MHz, decode would ~2x
+3. **GPU clock boost** — RTX 5090 boosts correctly to ~2445 MHz under load (max 3090 MHz)
 4. **Batch>1 decode** — multiple sequences share weight loads, increases arithmetic intensity
 
 ## Open Items
