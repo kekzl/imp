@@ -1,5 +1,6 @@
 #include "graph/executor.h"
 #include "graph/executor_kernels.h"
+#include "graph/executor_helpers.h"
 #include "graph/executor_debug.h"
 #include "graph/gemm_context.h"
 #include "compute/embedding.h"
@@ -46,14 +47,10 @@
 namespace imp {
 
 // ---------------------------------------------------------------------------
-// Quant type dispatch helpers (file-local)
+// Quant type dispatch helpers
 // ---------------------------------------------------------------------------
-
-// is_dp4a_qtype() and dispatch_dp4a_gemv() are defined in executor_kernels.h
-
-// dispatch_gemv_qkv_fused: moved to executor_attention.cu
-
-// dispatch_gemv_residual: moved to executor_attention.cu / executor_ffn.cu
+// Shared helpers: executor_helpers.h (get_kv_layer, vram_alloc, etc.)
+// Layer methods: executor_attention.cu, executor_ffn.cu, executor_ssm_gdn.cu
 
 // LM head dp4a GEMV dispatch: y = W @ x (FP32 output for logits).
 static void dispatch_gemv_fp32(GGMLQuantType qtype,
@@ -69,13 +66,6 @@ static void dispatch_gemv_fp32(GGMLQuantType qtype,
         default:                  gemv_q8_0_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
     }
 }
-
-// Map global layer index to KV cache layer index (-1 if not an attention layer).
-static inline int get_kv_layer(const std::vector<int>& kv_layer_map, int layer) {
-    return kv_layer_map.empty() ? layer : kv_layer_map[layer];
-}
-
-// get_ssm_layer: moved to executor_ssm_gdn.cu
 
 // ---------------------------------------------------------------------------
 // KV cache write

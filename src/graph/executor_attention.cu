@@ -1,5 +1,7 @@
 #include "graph/executor.h"
 #include "graph/executor_kernels.h"
+#include "graph/executor_helpers.h"
+#include "graph/executor_gemv_helpers.h"
 #include "graph/executor_debug.h"
 #include "graph/gemm_context.h"
 #include "compute/embedding.h"
@@ -69,26 +71,8 @@ static void dispatch_gemv_qkv_fused(GGMLQuantType qtype,
     }
 }
 
-// Residual-fused GEMV dispatch by quant type: y[i] = dot(W[i], x) + residual[i].
-static void dispatch_gemv_residual(GGMLQuantType qtype,
-                                    const void* W, const block_q8_1* q8_1, const float* d8,
-                                    half* y, const half* residual,
-                                    int M, int K, cudaStream_t stream) {
-    switch (qtype) {
-        case GGMLQuantType::Q6_K: gemv_q6k_q8_1_residual(W, q8_1, d8, y, residual, M, K, stream); break;
-        case GGMLQuantType::Q4_0: gemv_q4_0_q8_1_residual(W, q8_1, d8, y, residual, M, K, stream); break;
-        case GGMLQuantType::Q4_K: gemv_q4_k_q8_1_residual(W, q8_1, d8, y, residual, M, K, stream); break;
-        case GGMLQuantType::Q5_K: gemv_q5_k_q8_1_residual(W, q8_1, d8, y, residual, M, K, stream); break;
-        case GGMLQuantType::Q2_K: gemv_q2_k_q8_1_residual(W, q8_1, d8, y, residual, M, K, stream); break;
-        case GGMLQuantType::Q3_K: gemv_q3_k_q8_1_residual(W, q8_1, d8, y, residual, M, K, stream); break;
-        default:                  gemv_q8_0_q8_1_residual(W, q8_1, d8, y, residual, M, K, stream); break;
-    }
-}
-
-// Map global layer index to KV cache layer index (-1 if not an attention layer).
-static inline int get_kv_layer(const std::vector<int>& kv_layer_map, int layer) {
-    return kv_layer_map.empty() ? layer : kv_layer_map[layer];
-}
+// dispatch_gemv_residual: from executor_gemv_helpers.h
+// get_kv_layer: from executor_helpers.h
 
 // ---------------------------------------------------------------------------
 // Attention sub-pass for one layer
