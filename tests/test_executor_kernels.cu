@@ -407,5 +407,57 @@ TEST(ExecutorKernelsTest, ResidualAddRMSNorm) {
     free_tensor(weight); free_tensor(output);
 }
 
+// =========================================================================
+// add_rmsnorm_inplace: h = rmsnorm(a + b, weight)
+// =========================================================================
+
+TEST(ExecutorKernelsTest, AddRMSNormInplace) {
+    const int d = 128;
+    // a = 1.0, b = 1.0, weight = 1.0
+    // sum = 2.0, rms = sqrt(4.0) = 2.0, output = 2.0/2.0 * 1.0 = 1.0
+    std::vector<float> h_a(d, 1.0f), h_b(d, 1.0f), h_w(d, 1.0f);
+
+    Tensor a = make_gpu_fp16(h_a.data(), {1, d});
+    Tensor b = make_gpu_fp16(h_b.data(), {1, d});
+    Tensor h = alloc_gpu(DType::FP16, {1, d});
+    Tensor w = make_gpu_fp16(h_w.data(), {d});
+
+    add_rmsnorm_inplace(a, b, h, w, 1e-5f, nullptr);
+    cudaDeviceSynchronize();
+
+    auto result = read_fp16(h);
+    for (int i = 0; i < d; i++) {
+        EXPECT_NEAR(result[i], 1.0f, 0.01f) << "mismatch at " << i;
+    }
+
+    free_tensor(a); free_tensor(b); free_tensor(h); free_tensor(w);
+}
+
+// =========================================================================
+// rmsnorm_add_residual: output = rmsnorm(input) + residual
+// =========================================================================
+
+TEST(ExecutorKernelsTest, RMSNormAddResidual) {
+    const int d = 128;
+    // input = 2.0, weight = 1.0, residual = 5.0
+    // rms = sqrt(4.0) = 2.0, norm = 2.0/2.0 = 1.0, output = 1.0 + 5.0 = 6.0
+    std::vector<float> h_in(d, 2.0f), h_w(d, 1.0f), h_r(d, 5.0f);
+
+    Tensor input = make_gpu_fp16(h_in.data(), {1, d});
+    Tensor w = make_gpu_fp16(h_w.data(), {d});
+    Tensor r = make_gpu_fp16(h_r.data(), {1, d});
+    Tensor output = alloc_gpu(DType::FP16, {1, d});
+
+    rmsnorm_add_residual(input, w, r, output, 1e-5f, nullptr);
+    cudaDeviceSynchronize();
+
+    auto result = read_fp16(output);
+    for (int i = 0; i < d; i++) {
+        EXPECT_NEAR(result[i], 6.0f, 0.05f) << "mismatch at " << i;
+    }
+
+    free_tensor(input); free_tensor(w); free_tensor(r); free_tensor(output);
+}
+
 } // anonymous namespace
 } // namespace imp

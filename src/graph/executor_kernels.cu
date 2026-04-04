@@ -1646,6 +1646,144 @@ void residual_add_rmsnorm(Tensor& hidden, const Tensor& residual,
         d_model, eps, weight_offset);
 }
 
+// Fused add-store + RMSNorm in-place: hidden = rmsnorm(a + b, weight).
+// Saves 2 kernel launches + 1 memcpy vs separate add_store + rmsnorm + copy.
+// Launch: <<<n_rows, 256>>>
+__global__ __launch_bounds__(256) void add_rmsnorm_inplace_kernel(
+    const half* __restrict__ a,        // [n, d_model]
+    const half* __restrict__ b,        // [n, d_model]
+    half* __restrict__ hidden,         // [n, d_model] — output (a + b, then normalized)
+    const half* __restrict__ weight,   // [d_model] RMSNorm weight
+    int d_model, float eps, float weight_offset) {
+
+    __shared__ float warp_reduce[kWarpSize];
+    const int tid = threadIdx.x;
+    const int row = blockIdx.x;
+
+    const half* a_row = a + static_cast<int64_t>(row) * d_model;
+    const half* b_row = b + static_cast<int64_t>(row) * d_model;
+    half* h_row = hidden + static_cast<int64_t>(row) * d_model;
+
+    // Phase 1: Compute a+b and sum of squares in one pass
+    float sum_sq = 0.0f;
+    for (int d = tid; d < d_model; d += blockDim.x) {
+        float h = __half2float(a_row[d]) + __half2float(b_row[d]);
+        h_row[d] = __float2half(h);  // store sum for phase 2
+        sum_sq += h * h;
+    }
+
+    // Warp-level reduction
+    #pragma unroll
+    for (int off = kWarpSize / 2; off > 0; off >>= 1)
+        sum_sq += __shfl_xor_sync(0xFFFFFFFF, sum_sq, off);
+
+    int warp_id = tid / kWarpSize;
+    int lane = tid % kWarpSize;
+    if (lane == 0) warp_reduce[warp_id] = sum_sq;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        int n_warps = blockDim.x / kWarpSize;
+        float total = (lane < n_warps) ? warp_reduce[lane] : 0.0f;
+        #pragma unroll
+        for (int off = kWarpSize / 2; off > 0; off >>= 1)
+            total += __shfl_xor_sync(0xFFFFFFFF, total, off);
+        if (lane == 0)
+            warp_reduce[0] = rsqrtf(total / static_cast<float>(d_model) + eps);
+    }
+    __syncthreads();
+    float inv_rms = warp_reduce[0];
+
+    // Phase 2: Normalize in-place
+    for (int d = tid; d < d_model; d += blockDim.x) {
+        float h = __half2float(h_row[d]);
+        float w = __half2float(weight[d]) + weight_offset;
+        h_row[d] = __float2half(h * inv_rms * w);
+    }
+}
+
+void add_rmsnorm_inplace(const Tensor& a, const Tensor& b,
+                         Tensor& hidden, const Tensor& weight,
+                         float eps, cudaStream_t stream,
+                         float weight_offset) {
+    int n = static_cast<int>(a.shape[0]);
+    int d_model = static_cast<int>(a.shape[a.ndim - 1]);
+    add_rmsnorm_inplace_kernel<<<n, 256, 0, stream>>>(
+        static_cast<const half*>(a.data),
+        static_cast<const half*>(b.data),
+        static_cast<half*>(hidden.data),
+        static_cast<const half*>(weight.data),
+        d_model, eps, weight_offset);
+}
+
+// Fused RMSNorm + residual add: output = rmsnorm(input, weight) + residual.
+// Launch: <<<n_rows, 256>>>
+__global__ __launch_bounds__(256) void rmsnorm_add_residual_kernel(
+    const half* __restrict__ input,    // [n, d_model]
+    const half* __restrict__ weight,   // [d_model]
+    const half* __restrict__ residual, // [n, d_model]
+    half* __restrict__ output,         // [n, d_model]
+    int d_model, float eps, float weight_offset) {
+
+    __shared__ float warp_reduce[kWarpSize];
+    const int tid = threadIdx.x;
+    const int row = blockIdx.x;
+
+    const half* in_row = input + static_cast<int64_t>(row) * d_model;
+    const half* r_row  = residual + static_cast<int64_t>(row) * d_model;
+    half* o_row = output + static_cast<int64_t>(row) * d_model;
+
+    // Phase 1: Compute sum of squares of input
+    float sum_sq = 0.0f;
+    for (int d = tid; d < d_model; d += blockDim.x) {
+        float v = __half2float(in_row[d]);
+        sum_sq += v * v;
+    }
+
+    #pragma unroll
+    for (int off = kWarpSize / 2; off > 0; off >>= 1)
+        sum_sq += __shfl_xor_sync(0xFFFFFFFF, sum_sq, off);
+
+    int warp_id = tid / kWarpSize;
+    int lane = tid % kWarpSize;
+    if (lane == 0) warp_reduce[warp_id] = sum_sq;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        int n_warps = blockDim.x / kWarpSize;
+        float total = (lane < n_warps) ? warp_reduce[lane] : 0.0f;
+        #pragma unroll
+        for (int off = kWarpSize / 2; off > 0; off >>= 1)
+            total += __shfl_xor_sync(0xFFFFFFFF, total, off);
+        if (lane == 0)
+            warp_reduce[0] = rsqrtf(total / static_cast<float>(d_model) + eps);
+    }
+    __syncthreads();
+    float inv_rms = warp_reduce[0];
+
+    // Phase 2: Normalize + add residual
+    for (int d = tid; d < d_model; d += blockDim.x) {
+        float v = __half2float(in_row[d]);
+        float w = __half2float(weight[d]) + weight_offset;
+        float r = __half2float(r_row[d]);
+        o_row[d] = __float2half(v * inv_rms * w + r);
+    }
+}
+
+void rmsnorm_add_residual(const Tensor& input, const Tensor& weight,
+                          const Tensor& residual, Tensor& output,
+                          float eps, cudaStream_t stream,
+                          float weight_offset) {
+    int n = static_cast<int>(input.shape[0]);
+    int d_model = static_cast<int>(input.shape[input.ndim - 1]);
+    rmsnorm_add_residual_kernel<<<n, 256, 0, stream>>>(
+        static_cast<const half*>(input.data),
+        static_cast<const half*>(weight.data),
+        static_cast<const half*>(residual.data),
+        static_cast<half*>(output.data),
+        d_model, eps, weight_offset);
+}
+
 // Create a view of the first n_tokens rows from a [max_tokens, cols] buffer.
 // Never modifies the source tensor.
 Tensor slice_rows(const Tensor& buf, int n_tokens) {

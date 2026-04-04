@@ -301,6 +301,22 @@ void residual_add_rmsnorm(Tensor& hidden, const Tensor& residual,
                           float eps, cudaStream_t stream,
                           float weight_offset = 0.0f);
 
+// Fused add-store + RMSNorm: hidden = a + b; hidden = rmsnorm(hidden, weight).
+// Replaces: elementwise_add_store(a, b, h) + rmsnorm(h, w, no) + memcpy(h, no).
+// 3 ops → 1 kernel. Used by sandwich-norm post-attention and post-FFN paths.
+void add_rmsnorm_inplace(const Tensor& a, const Tensor& b,
+                         Tensor& hidden, const Tensor& weight,
+                         float eps, cudaStream_t stream,
+                         float weight_offset = 0.0f);
+
+// Fused RMSNorm + residual add: output = rmsnorm(input, weight) + residual.
+// Replaces: rmsnorm(in, w, out) + elementwise_add(out, r).
+// 2 ops → 1 kernel. Used by sandwich-norm post-FFN path.
+void rmsnorm_add_residual(const Tensor& input, const Tensor& weight,
+                          const Tensor& residual, Tensor& output,
+                          float eps, cudaStream_t stream,
+                          float weight_offset = 0.0f);
+
 Tensor slice_rows(const Tensor& buf, int n_tokens);
 
 // New: simplified dispatch via GemmContext (preferred for new code)
