@@ -72,6 +72,27 @@ static void dispatch_gemv_qkv_fused(GGMLQuantType qtype,
 // dispatch_gemv_residual: from executor_gemv_helpers.h
 // get_kv_layer: from executor_helpers.h
 
+// Set L2 persistence hint for KV cache data on the given stream.
+// Tells the GPU to prioritize keeping this address range in L2 cache.
+// Resets automatically when the stream attribute is overwritten next layer.
+static void set_l2_persist_kv(cudaStream_t stream, const void* kv_ptr, size_t kv_bytes) {
+    if (!kv_ptr || kv_bytes == 0 || !stream) return;
+    cudaStreamAttrValue attr = {};
+    attr.accessPolicyWindow.base_ptr = const_cast<void*>(kv_ptr);
+    attr.accessPolicyWindow.num_bytes = kv_bytes;
+    attr.accessPolicyWindow.hitRatio = 1.0f;
+    attr.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
+    attr.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
+    cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr);
+}
+
+static void clear_l2_persist(cudaStream_t stream) {
+    if (!stream) return;
+    cudaStreamAttrValue attr = {};
+    attr.accessPolicyWindow.num_bytes = 0;
+    cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr);
+}
+
 // ---------------------------------------------------------------------------
 // Attention sub-pass for one layer
 // ---------------------------------------------------------------------------
@@ -493,6 +514,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         Tensor k_c(cache->k_ptr(kv_layer, 0), cache_dtype, 4, cs, true);
         Tensor v_c(cache->v_ptr(kv_layer, 0), cache_dtype, 4, cs, true);
 
+        // L2 persistence hint: keep this layer's KV cache in L2 during attention.
+        // RTX 5090 has 96 MB L2 — enough for ~3K tokens of KV at FP8.
+        set_l2_persist_kv(stream, k_c.data, k_c.nbytes() + v_c.nbytes());
+
         if (cache_dtype == DType::TURBOQUANT_LITE) {
             // TurboQuant Lite paged attention: QJL sketch-only K + INT4 V (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
@@ -565,6 +590,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                     layer_sliding_window, cfg.attn_logit_softcap, stream,
                                     state.max_blocks_per_seq);
         }
+
+        // Clear L2 persistence hint (weights loaded next need L2 space)
+        clear_l2_persist(stream);
     }
 
 
