@@ -355,9 +355,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                         static_cast<half*>(h.data),
                         cfg.d_model, eps, norm_w_off_);
                 } else if (has_post_ffn_norm) {
-                    // Post-FFN norm → residual add (norm directly to h, no copies)
-                    rmsnorm(fo, ly.post_ffn_norm, h, eps, stream, norm_w_off_);
-                    elementwise_add(h, r, stream);
+                    // Post-FFN norm + residual: h = rmsnorm(fo) + r
+                    // Fused: 2 ops → 1 kernel
+                    rmsnorm_add_residual(fo, ly.post_ffn_norm, r, h,
+                                         eps, stream, norm_w_off_);
                 } else {
                     // No post-norm: h = fo + residual (fused add-store, no copy)
                     elementwise_add_store(fo, r, h, stream);

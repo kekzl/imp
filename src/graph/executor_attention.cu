@@ -648,12 +648,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                 static_cast<half*>(h.data),
                 model_->config().d_model, eps, norm_w_off_);
         } else if (has_post_attn_norm) {
-            // Sandwich norm without FP32 accumulator: add + norm → h
-            elementwise_add_store(po, r, h, stream);
-            Tensor no = view_tokens(norm_out_, n);
-            rmsnorm(h, ly.post_attn_norm, no, model_->config().rms_norm_eps, stream, norm_w_off_);
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h.data, no.data, h.nbytes(),
-                            cudaMemcpyDeviceToDevice, stream));
+            // Sandwich norm without FP32 accumulator: h = rmsnorm(po + r)
+            // Fused: 3 ops (add_store + rmsnorm + memcpy) → 1 kernel
+            add_rmsnorm_inplace(po, r, h, ly.post_attn_norm,
+                                model_->config().rms_norm_eps, stream, norm_w_off_);
         } else {
             // Standard pre-norm: h = attn_out + residual
             elementwise_add_store(po, r, h, stream);
