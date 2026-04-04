@@ -335,5 +335,77 @@ TEST(ExecutorKernelsTest, SliceRows) {
     free_tensor(buf);
 }
 
+// =========================================================================
+// add_bias_3way: 3 biases in 1 kernel launch
+// =========================================================================
+
+TEST(ExecutorKernelsTest, AddBias3Way) {
+    const int rows = 2, cols = 64;
+    std::vector<float> h_a(rows * cols, 1.0f), h_b(rows * cols, 2.0f), h_c(rows * cols, 3.0f);
+    std::vector<float> h_ba(cols), h_bb(cols), h_bc(cols);
+    for (int j = 0; j < cols; j++) {
+        h_ba[j] = 0.1f;
+        h_bb[j] = 0.2f;
+        h_bc[j] = 0.3f;
+    }
+
+    Tensor a = make_gpu_fp16(h_a.data(), {rows, cols});
+    Tensor b = make_gpu_fp16(h_b.data(), {rows, cols});
+    Tensor c = make_gpu_fp16(h_c.data(), {rows, cols});
+    Tensor ba = make_gpu_fp16(h_ba.data(), {cols});
+    Tensor bb = make_gpu_fp16(h_bb.data(), {cols});
+    Tensor bc = make_gpu_fp16(h_bc.data(), {cols});
+
+    add_bias_3way(a, ba, b, bb, c, bc, nullptr);
+    cudaDeviceSynchronize();
+
+    auto ra = read_fp16(a);
+    auto rb = read_fp16(b);
+    auto rc = read_fp16(c);
+    for (int i = 0; i < rows * cols; i++) {
+        EXPECT_NEAR(ra[i], 1.1f, 0.02f) << "a mismatch at " << i;
+        EXPECT_NEAR(rb[i], 2.2f, 0.02f) << "b mismatch at " << i;
+        EXPECT_NEAR(rc[i], 3.3f, 0.02f) << "c mismatch at " << i;
+    }
+
+    free_tensor(a); free_tensor(b); free_tensor(c);
+    free_tensor(ba); free_tensor(bb); free_tensor(bc);
+}
+
+// =========================================================================
+// residual_add_rmsnorm: fused residual + norm
+// =========================================================================
+
+TEST(ExecutorKernelsTest, ResidualAddRMSNorm) {
+    const int d = 128;
+    std::vector<float> h_hidden(d, 1.0f), h_residual(d, 1.0f), h_weight(d, 1.0f);
+
+    Tensor hidden = make_gpu_fp16(h_hidden.data(), {1, d});
+    Tensor residual = make_gpu_fp16(h_residual.data(), {1, d});
+    Tensor weight = make_gpu_fp16(h_weight.data(), {d});
+    Tensor output = alloc_gpu(DType::FP16, {1, d});
+
+    residual_add_rmsnorm(hidden, residual, weight, output, 1e-5f, nullptr);
+    cudaDeviceSynchronize();
+
+    // After: hidden = 1.0 + 1.0 = 2.0 for all elements
+    // RMSNorm(2.0, 2.0, ...) with weight=1.0:
+    //   rms = sqrt(mean(4.0)) = 2.0
+    //   output = 2.0 / 2.0 * 1.0 = 1.0
+    auto result = read_fp16(output);
+    for (int i = 0; i < d; i++) {
+        EXPECT_NEAR(result[i], 1.0f, 0.01f) << "norm mismatch at " << i;
+    }
+
+    // Verify hidden was modified in-place (should be 2.0)
+    auto h_check = read_fp16(hidden);
+    for (int i = 0; i < d; i++) {
+        EXPECT_NEAR(h_check[i], 2.0f, 0.01f) << "hidden not updated at " << i;
+    }
+
+    free_tensor(hidden); free_tensor(residual);
+    free_tensor(weight); free_tensor(output);
+}
+
 } // anonymous namespace
 } // namespace imp

@@ -1516,6 +1516,136 @@ void add_bias(Tensor& out, const Tensor& bias, cudaStream_t stream) {
 }
 
 
+// Fused 3-way bias add: applies up to 3 biases in a single kernel launch.
+// blockIdx.y selects which output/bias pair (0, 1, or 2).
+__global__ __launch_bounds__(256) void add_bias_3way_kernel(
+    half* __restrict__ out0, const half* __restrict__ bias0, int cols0,
+    half* __restrict__ out1, const half* __restrict__ bias1, int cols1,
+    half* __restrict__ out2, const half* __restrict__ bias2, int cols2,
+    int rows) {
+    int which = blockIdx.y;
+    half* out;
+    const half* bias;
+    int cols;
+    if (which == 0)      { out = out0; bias = bias0; cols = cols0; }
+    else if (which == 1) { out = out1; bias = bias1; cols = cols1; }
+    else                 { out = out2; bias = bias2; cols = cols2; }
+    if (!out || !bias) return;
+
+    int total = rows * cols;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < total; i += blockDim.x * gridDim.x) {
+        int col = i % cols;
+        out[i] = __hadd(out[i], bias[col]);
+    }
+}
+
+void add_bias_3way(Tensor& out_a, const Tensor& bias_a,
+                   Tensor& out_b, const Tensor& bias_b,
+                   Tensor& out_c, const Tensor& bias_c,
+                   cudaStream_t stream) {
+    // Count how many actually have biases
+    int n_active = (bias_a.data ? 1 : 0) + (bias_b.data ? 1 : 0) + (bias_c.data ? 1 : 0);
+    if (n_active == 0) return;
+
+    // Fall back to individual calls if only 1-2 biases
+    if (n_active <= 2) {
+        add_bias(out_a, bias_a, stream);
+        add_bias(out_b, bias_b, stream);
+        add_bias(out_c, bias_c, stream);
+        return;
+    }
+
+    int rows = static_cast<int>(out_a.shape[0]);
+    int cols_a = bias_a.data ? static_cast<int>(bias_a.shape[0]) : 0;
+    int cols_b = bias_b.data ? static_cast<int>(bias_b.shape[0]) : 0;
+    int cols_c = bias_c.data ? static_cast<int>(bias_c.shape[0]) : 0;
+
+    int max_cols = std::max({cols_a, cols_b, cols_c});
+    int total = rows * max_cols;
+    int threads = 256;
+    int blocks_x = (total + threads - 1) / threads;
+    dim3 grid(blocks_x, 3);
+
+    add_bias_3way_kernel<<<grid, threads, 0, stream>>>(
+        bias_a.data ? static_cast<half*>(out_a.data) : nullptr,
+        bias_a.data ? static_cast<const half*>(bias_a.data) : nullptr, cols_a,
+        bias_b.data ? static_cast<half*>(out_b.data) : nullptr,
+        bias_b.data ? static_cast<const half*>(bias_b.data) : nullptr, cols_b,
+        bias_c.data ? static_cast<half*>(out_c.data) : nullptr,
+        bias_c.data ? static_cast<const half*>(bias_c.data) : nullptr, cols_c,
+        rows);
+}
+
+// Fused residual add + RMSNorm: hidden += residual; output = rmsnorm(hidden, weight).
+// Saves 1 DRAM round-trip: reads hidden+residual+weight, writes hidden+output.
+// Launch: <<<n_rows, 256>>>
+__global__ __launch_bounds__(256) void residual_add_rmsnorm_kernel(
+    half* __restrict__ hidden,         // [n, d_model] — modified in-place (residual added)
+    const half* __restrict__ residual, // [n, d_model]
+    const half* __restrict__ weight,   // [d_model] RMSNorm weight
+    half* __restrict__ output,         // [n, d_model] normalized output
+    int d_model, float eps, float weight_offset) {
+
+    __shared__ float warp_reduce[kWarpSize];
+    const int tid = threadIdx.x;
+    const int row = blockIdx.x;
+
+    half* h_row = hidden + static_cast<int64_t>(row) * d_model;
+    const half* r_row = residual + static_cast<int64_t>(row) * d_model;
+    half* o_row = output + static_cast<int64_t>(row) * d_model;
+
+    // Phase 1: Add residual to hidden + compute sum of squares
+    float sum_sq = 0.0f;
+    for (int d = tid; d < d_model; d += blockDim.x) {
+        float h = __half2float(h_row[d]) + __half2float(r_row[d]);
+        h_row[d] = __float2half(h);
+        sum_sq += h * h;
+    }
+
+    // Warp-level reduction
+    #pragma unroll
+    for (int off = kWarpSize / 2; off > 0; off >>= 1)
+        sum_sq += __shfl_xor_sync(0xFFFFFFFF, sum_sq, off);
+
+    int warp_id = tid / kWarpSize;
+    int lane = tid % kWarpSize;
+    if (lane == 0) warp_reduce[warp_id] = sum_sq;
+    __syncthreads();
+
+    if (warp_id == 0) {
+        int n_warps = blockDim.x / kWarpSize;
+        float total = (lane < n_warps) ? warp_reduce[lane] : 0.0f;
+        #pragma unroll
+        for (int off = kWarpSize / 2; off > 0; off >>= 1)
+            total += __shfl_xor_sync(0xFFFFFFFF, total, off);
+        if (lane == 0)
+            warp_reduce[0] = rsqrtf(total / static_cast<float>(d_model) + eps);
+    }
+    __syncthreads();
+    float inv_rms = warp_reduce[0];
+
+    // Phase 2: Apply normalization
+    for (int d = tid; d < d_model; d += blockDim.x) {
+        float h = __half2float(h_row[d]);
+        float w = __half2float(weight[d]) + weight_offset;
+        o_row[d] = __float2half(h * inv_rms * w);
+    }
+}
+
+void residual_add_rmsnorm(Tensor& hidden, const Tensor& residual,
+                          const Tensor& weight, Tensor& output,
+                          float eps, cudaStream_t stream,
+                          float weight_offset) {
+    int n = static_cast<int>(hidden.shape[0]);
+    int d_model = static_cast<int>(hidden.shape[hidden.ndim - 1]);
+    residual_add_rmsnorm_kernel<<<n, 256, 0, stream>>>(
+        static_cast<half*>(hidden.data),
+        static_cast<const half*>(residual.data),
+        static_cast<const half*>(weight.data),
+        static_cast<half*>(output.data),
+        d_model, eps, weight_offset);
+}
+
 // Create a view of the first n_tokens rows from a [max_tokens, cols] buffer.
 // Never modifies the source tensor.
 Tensor slice_rows(const Tensor& buf, int n_tokens) {
