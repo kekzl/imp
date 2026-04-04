@@ -37,7 +37,7 @@ __global__ __launch_bounds__(256) void fp32_to_fp16_rowscale_kernel(const float*
                                              half* __restrict__ out,
                                              int rows, int cols);
 
-__global__ __launch_bounds__(256) void rmsnorm_fp32_accum_to_fp16_kernel(
+__global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
         const half* __restrict__ input,
         const half* __restrict__ norm_w,
         float* __restrict__ fp32_accum,
