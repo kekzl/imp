@@ -410,6 +410,33 @@ static bool assign_tensor_hf(Model& model, const std::string& name,
     else if (suffix == "mlp.up_proj.weight")   { layer.w_up = tensor; return true; }
     else if (suffix == "mlp.down_proj.weight") { layer.w_down = tensor; return true; }
 
+    // NVFP4 scale tensors (Model Optimizer): weight_scale, weight_scale_2, input_scale
+    else if (suffix == "self_attn.q_proj.weight_scale")   { layer.nvfp4_q.weight_scale = tensor; return true; }
+    else if (suffix == "self_attn.q_proj.weight_scale_2") { layer.nvfp4_q.weight_scale_2 = tensor; return true; }
+    else if (suffix == "self_attn.q_proj.input_scale")    { layer.nvfp4_q.input_scale = tensor; return true; }
+    else if (suffix == "self_attn.k_proj.weight_scale")   { layer.nvfp4_k.weight_scale = tensor; return true; }
+    else if (suffix == "self_attn.k_proj.weight_scale_2") { layer.nvfp4_k.weight_scale_2 = tensor; return true; }
+    else if (suffix == "self_attn.k_proj.input_scale")    { layer.nvfp4_k.input_scale = tensor; return true; }
+    else if (suffix == "self_attn.v_proj.weight_scale")   { layer.nvfp4_v.weight_scale = tensor; return true; }
+    else if (suffix == "self_attn.v_proj.weight_scale_2") { layer.nvfp4_v.weight_scale_2 = tensor; return true; }
+    else if (suffix == "self_attn.v_proj.input_scale")    { layer.nvfp4_v.input_scale = tensor; return true; }
+    else if (suffix == "self_attn.o_proj.weight_scale")   { layer.nvfp4_o.weight_scale = tensor; return true; }
+    else if (suffix == "self_attn.o_proj.weight_scale_2") { layer.nvfp4_o.weight_scale_2 = tensor; return true; }
+    else if (suffix == "self_attn.o_proj.input_scale")    { layer.nvfp4_o.input_scale = tensor; return true; }
+    else if (suffix == "mlp.gate_proj.weight_scale")      { layer.nvfp4_gate.weight_scale = tensor; return true; }
+    else if (suffix == "mlp.gate_proj.weight_scale_2")    { layer.nvfp4_gate.weight_scale_2 = tensor; return true; }
+    else if (suffix == "mlp.gate_proj.input_scale")       { layer.nvfp4_gate.input_scale = tensor; return true; }
+    else if (suffix == "mlp.up_proj.weight_scale")        { layer.nvfp4_up.weight_scale = tensor; return true; }
+    else if (suffix == "mlp.up_proj.weight_scale_2")      { layer.nvfp4_up.weight_scale_2 = tensor; return true; }
+    else if (suffix == "mlp.up_proj.input_scale")         { layer.nvfp4_up.input_scale = tensor; return true; }
+    else if (suffix == "mlp.down_proj.weight_scale")      { layer.nvfp4_down.weight_scale = tensor; return true; }
+    else if (suffix == "mlp.down_proj.weight_scale_2")    { layer.nvfp4_down.weight_scale_2 = tensor; return true; }
+    else if (suffix == "mlp.down_proj.input_scale")       { layer.nvfp4_down.input_scale = tensor; return true; }
+
+    // KV cache FP8 scales (from Model Optimizer)
+    else if (suffix == "self_attn.k_proj.k_scale")        { /* KV FP8 scale — stored elsewhere */ return true; }
+    else if (suffix == "self_attn.v_proj.v_scale")        { /* KV FP8 scale — stored elsewhere */ return true; }
+
     // MoE router gate
     else if (suffix == "block_sparse_moe.gate.weight") { layer.moe_gate = tensor; return true; }
 
@@ -697,6 +724,36 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
         IMP_LOG_INFO("GPTQ model: %d-bit, group_size=%d, desc_act=%s",
                      gptq_cfg.bits, gptq_cfg.group_size,
                      gptq_cfg.desc_act ? "true" : "false");
+    }
+
+    // 6c. NVFP4 config: link weight tensors to NvFP4PreQuantWeight structs
+    HFConfigLoader::NvFP4Config nvfp4_cfg;
+    bool is_nvfp4 = HFConfigLoader::load_nvfp4_config(model_dir, nvfp4_cfg);
+    if (is_nvfp4) {
+        cfg.is_nvfp4_prequant = true;
+        cfg.nvfp4_group_size = nvfp4_cfg.group_size;
+        // Link the main weight tensors to nvfp4 structs (they share the same data pointer)
+        for (auto& layer : model->layers_) {
+            auto link = [](TransformerLayer::NvFP4PreQuantWeight& nw, const Tensor& w) {
+                if (nw.weight_scale.data != nullptr) nw.weight = w;
+            };
+            link(layer.nvfp4_q, layer.wq);
+            link(layer.nvfp4_k, layer.wk);
+            link(layer.nvfp4_v, layer.wv);
+            link(layer.nvfp4_o, layer.wo);
+            link(layer.nvfp4_gate, layer.w_gate);
+            link(layer.nvfp4_up, layer.w_up);
+            link(layer.nvfp4_down, layer.w_down);
+        }
+        int nvfp4_count = 0;
+        for (const auto& layer : model->layers_) {
+            for (const auto* nw : {&layer.nvfp4_q, &layer.nvfp4_k, &layer.nvfp4_v, &layer.nvfp4_o,
+                                   &layer.nvfp4_gate, &layer.nvfp4_up, &layer.nvfp4_down}) {
+                if (nw->valid()) nvfp4_count++;
+            }
+        }
+        IMP_LOG_INFO("NVFP4 pre-quantized: %d weight tensors (group_size=%d)",
+                     nvfp4_count, nvfp4_cfg.group_size);
     }
 
     // 7. Tie output projection if not found
