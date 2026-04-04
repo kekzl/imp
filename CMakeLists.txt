@@ -380,6 +380,7 @@ if(IMP_BUILD_TESTS)
         tests/test_forward_pass.cu
         tests/test_hadamard.cu
         tests/test_attention_fmha_sm120.cu
+        tests/test_fmha_fp8.cu
         tests/test_attention_mxfp4.cu
         tests/test_softmax.cu
         tests/test_ssm.cu

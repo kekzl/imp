@@ -521,7 +521,9 @@ bool fmha_sm120_prefill(
 // FP8 FMHA requires sm_120f for .kind::f8f6f4 MMA instructions.
 // CUTE_ARCH_F8F6F4_MMA_ENABLED is defined by CUTLASS config.hpp for sm_120f.
 // !defined(__CUDA_ARCH__) allows host-side code (launcher) to compile unconditionally.
-#if defined(CUTE_ARCH_F8F6F4_MMA_ENABLED) || !defined(__CUDA_ARCH__)
+// FP8 FMHA: QK^T in FP8 E4M3, PV in FP16 WMMA.
+// The inline PTX (.kind::f8f6f4) is guarded with __CUDA_ARCH__ >= 1200
+// inside the kernel so it compiles cleanly for sm_90/sm_100 too.
 
 // Device helper: convert 4 FP16 values to 4 FP8 E4M3 packed in uint32
 __device__ __forceinline__ uint32_t cvt_4xfp16_to_4xe4m3(const half* src) {
@@ -712,7 +714,8 @@ fmha_sm120_fp8_kernel(
                     b1 = k_ptr0[4];  // +16 bytes
                 }
 
-                // FP8 MMA: d += A × B^T
+                // FP8 MMA: d += A × B^T (SM120+ only)
+#if __CUDA_ARCH__ >= 1200
                 asm volatile(
                     "mma.sync.aligned.kind::f8f6f4.m16n8k32.row.col.f32.e4m3.e4m3.f32 "
                     "{%0, %1, %2, %3},"
@@ -723,6 +726,7 @@ fmha_sm120_fp8_kernel(
                     : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
                       "r"(b0), "r"(b1),
                       "f"(d0), "f"(d1), "f"(d2), "f"(d3));
+#endif
             }
 
             // Store 16×8 result to S_tile
@@ -952,14 +956,5 @@ bool fmha_sm120_fp8_prefill(
     return false;
 }
 
-#else // !CUTE_ARCH_F8F6F4_MMA_ENABLED — stub for generic compute_120
-
-bool fmha_sm120_fp8_prefill(
-    const Tensor&, const Tensor&, const Tensor&, Tensor&,
-    float, bool, int, float, cudaStream_t) {
-    return false;  // FP8 MMA not available on generic sm_120
-}
-
-#endif // CUTE_ARCH_F8F6F4_MMA_ENABLED
 
 } // namespace imp
