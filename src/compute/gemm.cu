@@ -6,6 +6,7 @@
 #include <cublasLt.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_fp8.h>
 #include <cuda_bf16.h>
 #include <cstdio>
 #include <cstdlib>
@@ -30,20 +31,6 @@ __device__ __forceinline__ float warp_reduce_sum(float val) {
     for (int offset = 16; offset > 0; offset >>= 1)
         val += __shfl_down_sync(0xFFFFFFFF, val, offset);
     return val;
-}
-
-// FP8 E4M3 software dequantization (fallback when __CUDA_FP8_TYPES_EXIST__ is not defined).
-// Extracts sign/exponent/mantissa from raw bits, handles subnormals and NaN→0.
-__device__ __forceinline__ float dequant_fp8_e4m3(uint8_t bits, float scale) {
-    uint8_t sign = (bits >> 7) & 1;
-    int exp = (int)((bits >> 3) & 0x0F);
-    uint8_t man = bits & 0x07;
-    float val;
-    if (exp == 0 && man == 0) val = 0.0f;
-    else if (exp == 0) val = ldexpf((float)man / 8.0f, -6);
-    else if (exp == 15 && man != 0) val = 0.0f; // NaN -> 0
-    else val = ldexpf(1.0f + (float)man / 8.0f, exp - 7);
-    return sign ? (-val * scale) : (val * scale);
 }
 
 // GEMV launch constants: 256 threads = 8 warps per block.
@@ -1033,7 +1020,6 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A,
 
         // Dequant and accumulate 16 FP8 values in two groups of 8,
         // avoiding per-element j<8 branch for x_lo vs x_hi selection.
-#if defined(__CUDA_FP8_TYPES_EXIST__)
         #pragma unroll
         for (int j = 0; j < 8; ++j) {
             __nv_fp8_e4m3 fp8_val;
@@ -1048,26 +1034,14 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A,
             float a_val = (float)fp8_val * scale;
             sum += a_val * __half2float(x_hi[j]);
         }
-#else
-        #pragma unroll
-        for (int j = 0; j < 8; ++j)
-            sum += dequant_fp8_e4m3(a_bytes[j], scale) * __half2float(x_lo[j]);
-        #pragma unroll
-        for (int j = 0; j < 8; ++j)
-            sum += dequant_fp8_e4m3(a_bytes[8 + j], scale) * __half2float(x_hi[j]);
-#endif
     }
 
     // Handle remainder
     int base = K_vec * 16;
     for (int i = base + lane; i < K; i += 32) {
-#if defined(__CUDA_FP8_TYPES_EXIST__)
         __nv_fp8_e4m3 fp8_val;
         memcpy(&fp8_val, &A_row[i], 1);
         float a_val = (float)fp8_val * scale;
-#else
-        float a_val = dequant_fp8_e4m3(A_row[i], scale);
-#endif
         sum += a_val * __half2float(*(reinterpret_cast<const half*>(x) + i));
     }
 

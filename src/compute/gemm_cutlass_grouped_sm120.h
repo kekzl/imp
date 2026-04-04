@@ -1,7 +1,5 @@
 #pragma once
 
-#ifdef IMP_USE_CUTLASS
-
 #include <cuda_runtime.h>
 #include <cstdint>
 #include <cstddef>
@@ -37,5 +35,3 @@ size_t gemm_grouped_cutlass_sm120_workspace(int max_problems, int max_M, int N, 
 bool cutlass_grouped_gemm_sm120_available();
 
 } // namespace imp
-
-#endif // IMP_USE_CUTLASS

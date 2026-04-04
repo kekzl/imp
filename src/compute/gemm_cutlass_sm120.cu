@@ -27,9 +27,6 @@
 #include <cstdint>
 #include <cassert>
 
-// CUTLASS headers — only included under IMP_USE_CUTLASS
-#ifdef IMP_USE_CUTLASS
-
 #include "cutlass/cutlass.h"
 #include "cute/tensor.hpp"
 #include "cutlass/tensor_ref.h"
@@ -42,8 +39,6 @@
 #include "cutlass/util/packed_stride.hpp"
 
 using namespace cute;
-
-#if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED)
 
 // ---------------------------------------------------------------------------
 // CUTLASS GEMM type configuration: NVFP4 × NVFP4 → FP16
@@ -113,8 +108,6 @@ using Sm1xxBlkScaledConfig = typename Gemm::GemmKernel::CollectiveMainloop::Sm1x
 static_assert(Gemm::GemmKernel::CollectiveMainloop::TiledMma::Traits::SFVecSize == 16,
               "CUTLASS SFVecSize mismatch — expected 16 for nv_float4_t");
 
-#endif // CUTLASS_ARCH_MMA_SM120_SUPPORTED
-#endif // IMP_USE_CUTLASS
 
 namespace imp {
 
@@ -463,8 +456,6 @@ void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data,
 // CUTLASS GEMM execution
 // ---------------------------------------------------------------------------
 
-#if defined(IMP_USE_CUTLASS) && defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED)
-
 // Persistent workspace and GEMM instance
 static void* s_cutlass_workspace = nullptr;
 static size_t s_cutlass_workspace_size = 0;
@@ -579,21 +570,5 @@ bool cutlass_sm120_nvfp4_available() {
     return true;
 }
 
-#else // !CUTLASS_ARCH_MMA_SM120_SUPPORTED || !IMP_USE_CUTLASS
-
-// Stubs when CUTLASS sm_120 is not compiled
-size_t gemm_nvfp4_cutlass_sm120_workspace(int, int, int) { return 0; }
-
-bool gemm_nvfp4_cutlass_sm120(const void*, const void*,
-                               const CutlassNvFP4Weight&,
-                               void*, int, int, int,
-                               void*, size_t,
-                               cudaStream_t) {
-    return false;
-}
-
-bool cutlass_sm120_nvfp4_available() { return false; }
-
-#endif
 
 } // namespace imp

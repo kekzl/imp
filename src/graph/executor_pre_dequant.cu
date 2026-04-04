@@ -2,10 +2,8 @@
 #include "graph/executor_kernels.h"
 #include "graph/executor_helpers.h"
 #include "compute/gemm.h"
-#ifdef IMP_USE_CUTLASS
 #include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
-#endif
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
@@ -15,9 +13,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
-#ifdef __CUDA_FP8_TYPES_EXIST__
 #include <cuda_fp8.h>
-#endif
 #include <cstring>
 #include <cstdlib>
 #include <cmath>

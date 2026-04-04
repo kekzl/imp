@@ -1,9 +1,7 @@
 #include "compute/gemm_grouped.h"
 #include "core/logging.h"
 
-#ifdef IMP_USE_CUTLASS
 #include "compute/gemm_cutlass_grouped_sm120.h"
-#endif
 
 #include <cublas_v2.h>
 #include <cublasLt.h>
@@ -205,7 +203,6 @@ void gemm_moe_batched(const void* a_base, void* c_base,
     (void)b_scales;  // reserved for future cuBLASLt per-expert B scale support
     if (n_experts == 0) return;
 
-#ifdef IMP_USE_CUTLASS
     // -----------------------------------------------------------------------
     // CUTLASS grouped GEMM: single persistent kernel for all experts.
     // Only applies to FP16 without per-expert scales (non-FP8 path).
@@ -294,7 +291,6 @@ void gemm_moe_batched(const void* a_base, void* c_base,
             // Fall through to cuBLAS on failure
         }
     }
-#endif
 
     cublasHandle_t handle = get_cublas_handle();
     cublasSetStream(handle, stream);

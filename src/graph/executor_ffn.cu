@@ -5,10 +5,8 @@
 #include "compute/layernorm.h"
 #include "compute/gemm.h"
 #include "compute/gemm_q6k.h"
-#ifdef IMP_USE_CUTLASS
 #include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
-#endif
 #include "compute/activation.h"
 #include "compute/hadamard.h"
 #include "compute/gemm_cublaslt_nvfp4.h"
