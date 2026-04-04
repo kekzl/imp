@@ -216,4 +216,119 @@ __device__ __forceinline__ void apply_score_masks(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Cross-warp reduction: merge per-warp softmax states (m_w, l_w, o_reg)
+// into final output. Shared by all paged attention decode kernels.
+//
+// Non-split variant: writes normalized FP16 output directly to O[].
+// Requires shared memory: float[NUM_WARPS + NUM_WARPS + NUM_WARPS * HEAD_DIM].
+// Only the first warp (warp_id==0) writes to global memory.
+// ---------------------------------------------------------------------------
+template<int HEAD_DIM>
+__device__ __forceinline__ void crosswarp_reduce_and_write(
+    float* smem_base,      // shared memory region (warp_max | warp_l | warp_o)
+    float m_w, float l_w,  // per-warp softmax state
+    const float* o_reg,    // per-thread O accumulator [ELEMS]
+    int warp_id, int lane_id, int lane_offset,
+    half* O, int batch_idx, int n_heads, int head_idx) {
+
+    constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
+    float* warp_max = smem_base;
+    float* warp_l   = warp_max + NUM_WARPS;
+    float* warp_o   = warp_l   + NUM_WARPS;
+
+    if (lane_id == 0) {
+        warp_max[warp_id] = m_w;
+        warp_l[warp_id]   = l_w;
+    }
+    #pragma unroll
+    for (int i = 0; i < ELEMS; i++)
+        warp_o[warp_id * HEAD_DIM + lane_offset + i] = o_reg[i];
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float global_max = -FLT_MAX;
+        for (int w = 0; w < NUM_WARPS; w++)
+            global_max = fmaxf(global_max, warp_max[w]);
+
+        float global_l = 0.0f;
+        for (int w = 0; w < NUM_WARPS; w++)
+            global_l += expf(warp_max[w] - global_max) * warp_l[w];
+
+        #pragma unroll
+        for (int i = 0; i < ELEMS; i++) {
+            int d = lane_offset + i;
+            float o_val = 0.0f;
+            for (int w = 0; w < NUM_WARPS; w++) {
+                float weight = expf(warp_max[w] - global_max) * warp_l[w];
+                o_val += weight * warp_o[w * HEAD_DIM + d];
+            }
+            if (global_l > 0.0f) o_val /= global_l;
+
+            int out_idx = batch_idx * n_heads * HEAD_DIM
+                        + head_idx * HEAD_DIM + d;
+            stcs_half(&O[out_idx], __float2half(o_val));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-warp reduction for Split-K: writes partial result
+// (global_max, global_l, O_unnormalized) to partial_out buffer.
+// The split-K reduction kernel merges partials into final output.
+// ---------------------------------------------------------------------------
+template<int HEAD_DIM>
+__device__ __forceinline__ void crosswarp_reduce_splitk(
+    float* smem_base,
+    float m_w, float l_w,
+    const float* o_reg,
+    int warp_id, int lane_id, int lane_offset,
+    float* partial_out, int batch_idx, int n_heads, int head_idx,
+    int num_splits, int split_idx) {
+
+    constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
+    float* warp_max = smem_base;
+    float* warp_l   = warp_max + NUM_WARPS;
+    float* warp_o   = warp_l   + NUM_WARPS;
+
+    if (lane_id == 0) {
+        warp_max[warp_id] = m_w;
+        warp_l[warp_id]   = l_w;
+    }
+    #pragma unroll
+    for (int i = 0; i < ELEMS; i++)
+        warp_o[warp_id * HEAD_DIM + lane_offset + i] = o_reg[i];
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float global_max = -FLT_MAX;
+        for (int w = 0; w < NUM_WARPS; w++)
+            global_max = fmaxf(global_max, warp_max[w]);
+
+        float global_l = 0.0f;
+        for (int w = 0; w < NUM_WARPS; w++)
+            global_l += expf(warp_max[w] - global_max) * warp_l[w];
+
+        int partial_idx = ((batch_idx * n_heads + head_idx) * num_splits + split_idx);
+        constexpr int partial_stride = 2 + HEAD_DIM;
+        float* out = partial_out + (int64_t)partial_idx * partial_stride;
+
+        if (lane_id == 0) {
+            out[0] = global_max;
+            out[1] = global_l;
+        }
+
+        #pragma unroll
+        for (int i = 0; i < ELEMS; i++) {
+            int d = lane_offset + i;
+            float o_val = 0.0f;
+            for (int w = 0; w < NUM_WARPS; w++) {
+                float weight = expf(warp_max[w] - global_max) * warp_l[w];
+                o_val += weight * warp_o[w * HEAD_DIM + d];
+            }
+            out[2 + d] = o_val;
+        }
+    }
+}
+
 } // namespace imp
