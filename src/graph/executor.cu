@@ -16,7 +16,7 @@
 // Ban specific token IDs by setting their logits to -inf.
 // Used in the CUDA graph decode path where host-side logit manipulation
 // (cudaMemcpyAsync per token) is not possible during graph replay.
-__global__ void ban_logits_kernel(float* __restrict__ logits,
+__global__ __launch_bounds__(256) void ban_logits_kernel(float* __restrict__ logits,
                                    const int32_t* __restrict__ banned_ids,
                                    int n_banned, int vocab_size) {
     int i = threadIdx.x;

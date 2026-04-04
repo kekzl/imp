@@ -1837,8 +1837,10 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 IMP_LOG_INFO("CUTLASS sm_120 NVFP4 weight cache: %d tensors, %.2f MiB",
                              ct_count, ct_total / (1024.0 * 1024.0));
             }
+        }
 
-            // Phase 3c-native: register MXFP4 GGUF weights directly in CUTLASS cache.
+        // Phase 3c-native: register MXFP4 GGUF weights directly in CUTLASS cache.
+        {
             // These bypass NVFP4 entirely — the GGUF data is unpacked into
             // separate E2M1 data + SfAtom UE8M0 scales on GPU.
             // For native MXFP4, allocate activation buffers if not already done.
@@ -1853,6 +1855,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     check_mxfp4(L.wq, L.wq_qtype);
                     check_mxfp4(L.wk, L.wk_qtype);
                     check_mxfp4(L.w_gate, L.w_gate_qtype);
+                    check_mxfp4(L.ssm_in, L.ssm_in_qtype);
+                    check_mxfp4(L.ssm_out, L.ssm_out_qtype);
                 }
 
                 // Allocate MXFP4 scratch if needed and not already allocated
@@ -1871,6 +1875,14 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                         if (L.w_down.data && L.w_down.ndim >= 2) {
                             max_n = std::max(max_n, (int)L.w_down.shape[0]);
                             max_k = std::max(max_k, (int)L.w_down.shape[1]);
+                        }
+                        if (L.ssm_in.data && L.ssm_in.ndim >= 2) {
+                            max_n = std::max(max_n, (int)L.ssm_in.shape[0]);
+                            max_k = std::max(max_k, (int)L.ssm_in.shape[1]);
+                        }
+                        if (L.ssm_out.data && L.ssm_out.ndim >= 2) {
+                            max_n = std::max(max_n, (int)L.ssm_out.shape[0]);
+                            max_k = std::max(max_k, (int)L.ssm_out.shape[1]);
                         }
                     }
                     if (max_k > 0) {
@@ -1923,12 +1935,13 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         if (qscratch_.mxfp4_act_sf != nullptr && cutlass_sm120_mxfp4_available()) {
             int mx_native = 0;
             size_t mx_native_bytes = 0;
-            auto register_if_mxfp4 = [&](const Tensor& w, GGMLQuantType qt) {
+            auto register_if_mxfp4 = [&](const Tensor& w, GGMLQuantType qt, bool is_attn = true) {
                 if (qt != GGMLQuantType::MXFP4 || !w.data || !w.on_device) return;
                 if (w.ndim < 2 || w.shape[1] % 32 != 0) return;
                 if (wcache_.cutlass_mxfp4.count(w.data)) return;  // already registered
                 CutlassMxFP4Weight mw;
                 if (unpack_mxfp4_gguf(w.data, w.shape[0], w.shape[1], mw, stream)) {
+                    mw.hadamard_bs = is_attn ? cfg.mxfp4_hadamard_attn : cfg.mxfp4_hadamard_ffn;
                     wcache_.cutlass_mxfp4[w.data] = mw;
                     mx_native_bytes += mw.sf_bytes + static_cast<size_t>(w.shape[0]) * (w.shape[1] / 2);
                     mx_native++;
@@ -1936,13 +1949,19 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             };
             for (int i = 0; i < cfg.n_layers; i++) {
                 const auto& L = model_->layer(i);
-                register_if_mxfp4(L.wq, L.wq_qtype);
-                register_if_mxfp4(L.wk, L.wk_qtype);
-                register_if_mxfp4(L.wv, L.wv_qtype);
-                register_if_mxfp4(L.wo, L.wo_qtype);
-                register_if_mxfp4(L.w_up, L.w_up_qtype);
-                register_if_mxfp4(L.w_gate, L.w_gate_qtype);
-                register_if_mxfp4(L.w_down, L.w_down_qtype);
+                register_if_mxfp4(L.wq, L.wq_qtype, true);
+                register_if_mxfp4(L.wk, L.wk_qtype, true);
+                register_if_mxfp4(L.wv, L.wv_qtype, true);
+                register_if_mxfp4(L.wo, L.wo_qtype, true);
+                register_if_mxfp4(L.w_up, L.w_up_qtype, false);
+                register_if_mxfp4(L.w_gate, L.w_gate_qtype, false);
+                register_if_mxfp4(L.w_down, L.w_down_qtype, false);
+                // GDN-specific weights (Qwen3.5)
+                register_if_mxfp4(L.ssm_in, L.ssm_in_qtype, true);
+                register_if_mxfp4(L.ssm_out, L.ssm_out_qtype, true);
+                register_if_mxfp4(L.gdn_gate, L.gdn_gate_qtype, true);
+                register_if_mxfp4(L.gdn_alpha, L.gdn_alpha_qtype, true);
+                register_if_mxfp4(L.gdn_beta, L.gdn_beta_qtype, true);
             }
             register_if_mxfp4(model_->output_proj(), model_->out_proj_qtype_);
             if (mx_native > 0) {
@@ -1957,12 +1976,28 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 { cudaError_t e = cudaGetLastError();
                   if (e != cudaSuccess) IMP_LOG_ERROR("MXFP4 unpack error: %s", cudaGetErrorString(e)); }
 
-                // Dequant MXFP4 → FP16 for decode (GEMV needs FP16).
+                // Check if MXFP4 GEMV is available (linear_scales populated).
+                // GDN models need FP16 fallback because GDN forward reads weights
+                // directly (ssm_in, ssm_out, gdn_gate, etc.) — not through gemm_dispatch.
+                bool force_fallback = (std::getenv("IMP_MXFP4_FP16_FALLBACK") != nullptr);
+                bool has_gdn = (cfg.ssm_inner_size > 0);
+                bool mxfp4_gemv_available = !force_fallback && !has_gdn;
+                for (auto& [p, m] : wcache_.cutlass_mxfp4)
+                    if (!m.linear_scales) { mxfp4_gemv_available = false; break; }
+
+                if (mxfp4_gemv_available) {
+                    IMP_LOG_INFO("MXFP4 GEMV: all %d weights have linear_scales, skipping FP16 fallback",
+                                 mx_native);
+                }
+
+                // Dequant MXFP4 → FP16 for decode (only when MXFP4 GEMV not available).
                 // Single bulk allocation to avoid CUDA heap fragmentation.
                 size_t fp16_total = 0;
+                if (!mxfp4_gemv_available) {
                 for (auto& [p, m] : wcache_.cutlass_mxfp4)
                     if (!wcache_.fp16.count(p))
                         fp16_total += static_cast<size_t>(m.N) * m.K * sizeof(half);
+                }
 
                 void* d_fp16_bulk = nullptr;
                 if (fp16_total > 0) {
@@ -2052,6 +2087,12 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                         replace_weight(L.w_up, L.w_up_qtype);
                         replace_weight(L.w_gate, L.w_gate_qtype);
                         replace_weight(L.w_down, L.w_down_qtype);
+                        // GDN-specific weights (Qwen3.5)
+                        replace_weight(L.ssm_in, L.ssm_in_qtype);
+                        replace_weight(L.ssm_out, L.ssm_out_qtype);
+                        replace_weight(L.gdn_gate, L.gdn_gate_qtype);
+                        replace_weight(L.gdn_alpha, L.gdn_alpha_qtype);
+                        replace_weight(L.gdn_beta, L.gdn_beta_qtype);
                     }
                     replace_weight(const_cast<Model*>(model_)->out_proj_,
                                    const_cast<Model*>(model_)->out_proj_qtype_);
@@ -2125,6 +2166,134 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                          nvfp4_moe_count, nvfp4_moe_total / (1024.0 * 1024.0));
         } else if (wcache_.nvfp4.empty()) {
             IMP_LOG_INFO("NVFP4 decode: no eligible weights found (all ≤ 4.5 bits/elem)");
+        }
+    }
+
+    // --- Phase 3c (standalone): Native MXFP4 GGUF when NVFP4 decode is disabled ---
+    // This runs for GDN models where NVFP4 is auto-disabled but weights are MXFP4.
+    if (wcache_.nvfp4_decode_mode == 0 && wcache_.cutlass_mxfp4.empty() &&
+        cutlass_sm120_mxfp4_available()) {
+        // Check if any layer has MXFP4 weights
+        bool has_mxfp4 = false;
+        for (int i = 0; i < cfg.n_layers && !has_mxfp4; i++) {
+            const auto& L = model_->layer(i);
+            if (L.wq_qtype == GGMLQuantType::MXFP4 || L.w_gate_qtype == GGMLQuantType::MXFP4 ||
+                L.ssm_in_qtype == GGMLQuantType::MXFP4 || L.ssm_out_qtype == GGMLQuantType::MXFP4)
+                has_mxfp4 = true;
+        }
+        if (has_mxfp4) {
+            // Allocate MXFP4 scratch
+            int max_k = 0, max_n = 0;
+            for (int i = 0; i < cfg.n_layers; i++) {
+                const auto& L = model_->layer(i);
+                auto check = [&](const Tensor& w) {
+                    if (w.data && w.ndim >= 2) {
+                        max_n = std::max(max_n, (int)w.shape[0]);
+                        max_k = std::max(max_k, (int)w.shape[1]);
+                    }
+                };
+                check(L.wq); check(L.wk); check(L.w_gate); check(L.w_down);
+                check(L.ssm_in); check(L.ssm_out); check(L.gdn_gate);
+            }
+            if (max_k > 0 && !qscratch_.mxfp4_act_sf) {
+                qscratch_.mxfp4_act_sf_size = cutlass_mxfp4_sf_size(max_tokens_, max_k);
+                qscratch_.mxfp4_act_sf = vram_alloc(vram_alloc_, qscratch_.mxfp4_act_sf_size, "mxfp4_act_sf");
+                if (!qscratch_.cutlass_act_data) {
+                    qscratch_.cutlass_act_data_size = static_cast<size_t>(max_tokens_) * (max_k / 2);
+                    qscratch_.cutlass_act_data = vram_alloc(vram_alloc_, qscratch_.cutlass_act_data_size, "cutlass_act_data");
+                }
+            }
+            // FIRST: dequant alpha/beta to FP16 BEFORE in-place unpack
+            // (dequant_mxfp4_to_fp16 reads raw 17-byte blocks which get compacted by unpack)
+            {
+                size_t fp16_total = 0;
+                struct SmallWeight { const void* ptr; int64_t N, K; };
+                std::vector<SmallWeight> small_weights;
+                for (int i = 0; i < cfg.n_layers; i++) {
+                    const auto& L = model_->layer(i);
+                    auto collect = [&](const Tensor& w, GGMLQuantType qt) {
+                        if (qt != GGMLQuantType::MXFP4 || !w.data) return;
+                        small_weights.push_back({w.data, w.shape[0], w.shape[1]});
+                        fp16_total += static_cast<size_t>(w.shape[0]) * w.shape[1] * sizeof(half);
+                    };
+                    collect(L.gdn_alpha, L.gdn_alpha_qtype);
+                    collect(L.gdn_beta, L.gdn_beta_qtype);
+                }
+                if (fp16_total > 0) {
+                    void* d_fp16_bulk = nullptr;
+                    cudaMalloc(&d_fp16_bulk, fp16_total);
+                    if (d_fp16_bulk) {
+                        size_t offset = 0;
+                        for (auto& sw : small_weights) {
+                            size_t bytes = static_cast<size_t>(sw.N) * sw.K * sizeof(half);
+                            void* d_fp16 = static_cast<char*>(d_fp16_bulk) + offset;
+                            offset += bytes;
+                            dequant_mxfp4_to_fp16(sw.ptr, sw.N, sw.K, d_fp16, stream);
+                            int64_t shape[2] = {sw.N, sw.K};
+                            wcache_.fp16[sw.ptr] = Tensor(d_fp16, DType::FP16, 2, shape, true);
+                        }
+                        cudaStreamSynchronize(stream);
+                        IMP_LOG_INFO("MXFP4 → FP16 (alpha/beta): %.2f MiB (%d tensors)",
+                                     fp16_total / (1024.0 * 1024.0), (int)small_weights.size());
+                        for (int i = 0; i < cfg.n_layers; i++) {
+                            TransformerLayer& L = const_cast<Model*>(model_)->layer(i);
+                            auto replace = [&](Tensor& w, GGMLQuantType& qt) {
+                                auto it = wcache_.fp16.find(w.data);
+                                if (it != wcache_.fp16.end() && qt == GGMLQuantType::MXFP4) {
+                                    w = it->second; qt = GGMLQuantType::F16;
+                                }
+                            };
+                            replace(L.gdn_alpha, L.gdn_alpha_qtype);
+                            replace(L.gdn_beta, L.gdn_beta_qtype);
+                        }
+                    }
+                }
+            }
+
+            // THEN: register + unpack MXFP4 weights (in-place compaction)
+            int mx_count = 0;
+            auto register_mx = [&](const Tensor& w, GGMLQuantType qt, bool is_attn) {
+                if (qt != GGMLQuantType::MXFP4 || !w.data || !w.on_device) return;
+                if (w.ndim < 2 || w.shape[1] % 32 != 0) return;
+                if (wcache_.cutlass_mxfp4.count(w.data)) return;
+                CutlassMxFP4Weight mw;
+                if (unpack_mxfp4_gguf(w.data, w.shape[0], w.shape[1], mw, stream)) {
+                    mw.hadamard_bs = is_attn ? cfg.mxfp4_hadamard_attn : cfg.mxfp4_hadamard_ffn;
+                    wcache_.cutlass_mxfp4[w.data] = mw;
+                    mx_count++;
+                }
+            };
+            for (int i = 0; i < cfg.n_layers; i++) {
+                const auto& L = model_->layer(i);
+                register_mx(L.wq, L.wq_qtype, true);
+                register_mx(L.wk, L.wk_qtype, true);
+                register_mx(L.wv, L.wv_qtype, true);
+                register_mx(L.wo, L.wo_qtype, true);
+                register_mx(L.w_up, L.w_up_qtype, false);
+                register_mx(L.w_gate, L.w_gate_qtype, false);
+                register_mx(L.w_down, L.w_down_qtype, false);
+                register_mx(L.ssm_in, L.ssm_in_qtype, true);
+                register_mx(L.ssm_out, L.ssm_out_qtype, true);
+                register_mx(L.gdn_gate, L.gdn_gate_qtype, true);
+                register_mx(L.gdn_alpha, L.gdn_alpha_qtype, true);
+                register_mx(L.gdn_beta, L.gdn_beta_qtype, true);
+            }
+            register_mx(model_->output_proj(), model_->out_proj_qtype_, true);
+            if (mx_count > 0) {
+                cudaStreamSynchronize(stream);
+                wcache_.use_mxfp4 = true;
+
+                // In-place unpack: raw blocks are compacted to [N, K/2] within the
+                // SAME buffer. No separate data allocation, no free needed.
+                // The raw buffer tail (scale bytes) is wasted (~6% overhead) but
+                // avoids the 50% peak VRAM spike of out-of-place unpack.
+                cudaStreamSynchronize(stream);
+                { cudaError_t e = cudaGetLastError();
+                  if (e != cudaSuccess) IMP_LOG_ERROR("MXFP4 registration CUDA error: %s", cudaGetErrorString(e)); }
+                IMP_LOG_INFO("Native MXFP4 GGUF (standalone): %d tensors registered (in-place)", mx_count);
+
+                // Alpha/beta FP16 dequant was done BEFORE in-place unpack (above).
+            }
         }
     }
 }

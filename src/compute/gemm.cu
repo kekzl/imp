@@ -490,6 +490,10 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C,
     const int64_t K = A.shape[1];
     const int64_t N = B.shape[0];
 
+    if (N == 0 || !B.data) {
+        return;  // Skip empty weight
+    }
+
     cudaDataType_t cuda_dtype_A = dtype_to_cuda(A.dtype);
     cudaDataType_t cuda_dtype_B = dtype_to_cuda(B.dtype);
     cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.dtype);

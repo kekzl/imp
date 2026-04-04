@@ -65,3 +65,15 @@ void log_message(LogLevel level, const char* file, int line, const char* fmt, ..
             return false;                                                     \
         }                                                                     \
     } while (0)
+
+// Check + return void: for void-returning functions.
+#define IMP_CUDA_CHECK_VOID(call)                                             \
+    do {                                                                      \
+        cudaError_t err_ = (call);                                            \
+        if (err_ != cudaSuccess) {                                            \
+            IMP_LOG_ERROR("CUDA error: %s at %s:%d — %s",                    \
+                          #call, __FILE__, __LINE__,                          \
+                          cudaGetErrorString(err_));                           \
+            return;                                                           \
+        }                                                                     \
+    } while (0)

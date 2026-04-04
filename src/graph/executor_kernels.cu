@@ -1,4 +1,5 @@
 #include "graph/executor_kernels.h"
+#include "graph/gemm_context.h"
 #include "graph/executor.h"
 #include "compute/gemm.h"
 #include "compute/gemm_q6k.h"
@@ -12,8 +13,12 @@
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
+#include "quant/mxfp4_gemm.h"
+#include "compute/hadamard.h"
 #include "compute/gemm_cublaslt_nvfp4.h"
 #include "runtime/pdl.h"
+#include "compute/ptx92_utils.cuh"
+#include "compute/warp_reduce.cuh"  // kWarpSize
 
 namespace imp {
 
@@ -47,23 +52,8 @@ __device__ __forceinline__ int kv_resolve_slot(
 // dp4a GEMV dispatch helper (file-local)
 // ---------------------------------------------------------------------------
 
-namespace {
-
-// Returns true if the quant type supports dp4a (Q8_1-input) GEMV kernels.
-inline bool is_dp4a_qtype(GGMLQuantType qt) {
-    switch (qt) {
-        case GGMLQuantType::Q6_K: case GGMLQuantType::Q8_0:
-        case GGMLQuantType::Q4_0: case GGMLQuantType::Q4_K:
-        case GGMLQuantType::Q5_K: case GGMLQuantType::Q2_K:
-        case GGMLQuantType::Q3_K:
-            return true;
-        default:
-            return false;
-    }
-}
-
 // Dispatch dp4a GEMV by quant type: y = W @ q8_1 (FP16 output).
-// All variants share the same signature.
+// Defined here, declared in executor_kernels.h for use by executor_forward.cu.
 void dispatch_dp4a_gemv(GGMLQuantType qtype,
                         const void* W, const block_q8_1* q8_1, const float* d8,
                         half* y, int M, int K, cudaStream_t stream) {
@@ -78,14 +68,12 @@ void dispatch_dp4a_gemv(GGMLQuantType qtype,
     }
 }
 
-} // anonymous namespace
-
 // ---------------------------------------------------------------------------
 // Small CUDA kernels used by the executor
 // ---------------------------------------------------------------------------
 
 // Broadcast bias addition: out[row, col] += bias[col] for rows x cols elements
-__global__ void broadcast_add_bias_fp16_kernel(half* out, const half* bias,
+__global__ __launch_bounds__(256) void broadcast_add_bias_fp16_kernel(half* __restrict__ out, const half* __restrict__ bias,
                                                 int rows, int cols) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = rows * cols;
@@ -97,7 +85,7 @@ __global__ void broadcast_add_bias_fp16_kernel(half* out, const half* bias,
 
 
 // Element-wise scale: out[i] *= scale, for FP16 data (Gemma embedding scaling)
-__global__ void scale_fp16_kernel(half* data, half scale, int64_t n) {
+__global__ __launch_bounds__(256) void scale_fp16_kernel(half* __restrict__ data, half scale, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t n2 = n / 2;
     half2 s2 = __half2half2(scale);
@@ -112,7 +100,7 @@ __global__ void scale_fp16_kernel(half* data, half scale, int64_t n) {
 }
 
 // Element-wise addition: a[i] += b[i], for FP16 data
-__global__ void elementwise_add_fp16_kernel(half* a, const half* b, int64_t n) {
+__global__ __launch_bounds__(256) void elementwise_add_fp16_kernel(half* __restrict__ a, const half* __restrict__ b, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t n2 = n / 2;
     if (idx < n2) {
@@ -126,8 +114,8 @@ __global__ void elementwise_add_fp16_kernel(half* a, const half* b, int64_t n) {
 }
 
 // Element-wise add-store: out[i] = a[i] + b[i], for FP16 data
-__global__ void elementwise_add_store_fp16_kernel(const half* a, const half* b,
-                                                   half* out, int64_t n) {
+__global__ __launch_bounds__(256) void elementwise_add_store_fp16_kernel(const half* __restrict__ a, const half* __restrict__ b,
+                                                   half* __restrict__ out, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t n2 = n / 2;
     if (idx < n2) {
@@ -142,7 +130,7 @@ __global__ void elementwise_add_store_fp16_kernel(const half* a, const half* b,
 }
 
 // FP32 accumulator += FP16 branch: accum[i] += __half2float(branch[i])
-__global__ void fp32_accum_add_fp16_kernel(float* accum, const half* branch, int64_t n) {
+__global__ __launch_bounds__(256) void fp32_accum_add_fp16_kernel(float* __restrict__ accum, const half* __restrict__ branch, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) {
         accum[idx] += __half2float(branch[idx]);
@@ -155,7 +143,7 @@ __global__ void fp32_accum_add_fp16_kernel(float* accum, const half* branch, int
 // scale-invariant per row, this produces correct normalized output even
 // when the FP32 residual stream far exceeds FP16 range.
 // Launch: <<<n_rows, 256, 256 * sizeof(float)>>>
-__global__ void fp32_to_fp16_rowscale_kernel(const float* __restrict__ in,
+__global__ __launch_bounds__(256) void fp32_to_fp16_rowscale_kernel(const float* __restrict__ in,
                                              half* __restrict__ out,
                                              int rows, int cols) {
     extern __shared__ float smem[];
@@ -193,7 +181,7 @@ __global__ void fp32_to_fp16_rowscale_kernel(const float* __restrict__ in,
 // Saves 2 kernel launches + 2 DRAM round-trips per invocation.
 // Uses same register-cached, warp-level reduction pattern as rmsnorm_quantize_q8_1.
 // Launch: <<<n_rows, 256>>>
-__global__ void rmsnorm_fp32_accum_to_fp16_kernel(
+__global__ __launch_bounds__(256) void rmsnorm_fp32_accum_to_fp16_kernel(
         const half* __restrict__ input,     // [n, d_model] pre-norm data (e.g. GEMV output)
         const half* __restrict__ norm_w,    // [d_model] RMSNorm weights
         float* __restrict__ fp32_accum,     // [n, d_model] FP32 accumulator (read-modify-write)
@@ -201,14 +189,14 @@ __global__ void rmsnorm_fp32_accum_to_fp16_kernel(
         int d_model,
         float eps,
         float weight_offset) {
-    __shared__ float warp_reduce[32];  // support up to 1024 threads (32 warps)
+    __shared__ float warp_reduce[kWarpSize];  // support up to 1024 threads (32 warps)
     __shared__ float s_inv_rms;
     __shared__ float s_row_max;
 
     const int tid = threadIdx.x;
-    const int lane = tid & 31;
-    const int warp_id = tid >> 5;
-    const int n_warps = blockDim.x >> 5;
+    const int lane = tid % kWarpSize;
+    const int warp_id = tid / kWarpSize;
+    const int n_warps = blockDim.x / kWarpSize;
     const int row = blockIdx.x;
 
     // Vectorized: process 8 halfs (1 float4 = 2 half2) per iteration.
@@ -335,7 +323,7 @@ __global__ void rmsnorm_fp32_accum_to_fp16_kernel(
 }
 
 // Convert FP16 → FP32: out[i] = __half2float(in[i])
-__global__ void fp16_to_fp32_kernel(const half* in, float* out, int64_t n) {
+__global__ __launch_bounds__(256) void fp16_to_fp32_kernel(const half* __restrict__ in, float* __restrict__ out, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) {
         out[idx] = __half2float(in[idx]);
@@ -343,7 +331,7 @@ __global__ void fp16_to_fp32_kernel(const half* in, float* out, int64_t n) {
 }
 
 // Element-wise addition: a[i] += b[i], for FP32 data
-__global__ void elementwise_add_fp32_kernel(float* a, const float* b, int64_t n) {
+__global__ __launch_bounds__(256) void elementwise_add_fp32_kernel(float* __restrict__ a, const float* __restrict__ b, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     for (int64_t i = idx; i < n; i += static_cast<int64_t>(blockDim.x) * gridDim.x) {
         a[i] += b[i];
@@ -361,11 +349,11 @@ __global__ void elementwise_add_fp32_kernel(float* a, const float* b, int64_t n)
 // row_elems:        n_kv_heads * head_dim (elements per token)
 // max_blocks_per_seq: stride for 2D block table (0 = legacy flat)
 // n_sequences:      number of sequences in the batch
-__global__ void write_kv_cache_kernel(
-    const half* data_in,
-    const int* positions,
-    const int* block_tables,
-    half* cache_base,
+__global__ __launch_bounds__(256) void write_kv_cache_kernel(
+    const half* __restrict__ data_in,
+    const int* __restrict__ positions,
+    const int* __restrict__ block_tables,
+    half* __restrict__ cache_base,
     int block_stride,
     int row_elems,
     int block_size,
@@ -399,13 +387,13 @@ __global__ void write_kv_cache_kernel(
 // Fused K+V write to paged KV cache in a single launch.
 // blockIdx.x = token index, blockIdx.y = 0 (K) or 1 (V).
 // Saves one kernel launch per attention layer.
-__global__ void write_kv_cache_fused_kernel(
-    const half* k_in,        // [n_tokens, n_kv_heads * head_dim]
-    const half* v_in,        // [n_tokens, n_kv_heads * head_dim]
-    const int* positions,
-    const int* block_tables,
-    half* k_cache_base,
-    half* v_cache_base,
+__global__ __launch_bounds__(256) void write_kv_cache_fused_kernel(
+    const half* __restrict__ k_in,        // [n_tokens, n_kv_heads * head_dim]
+    const half* __restrict__ v_in,        // [n_tokens, n_kv_heads * head_dim]
+    const int* __restrict__ positions,
+    const int* __restrict__ block_tables,
+    half* __restrict__ k_cache_base,
+    half* __restrict__ v_cache_base,
     int block_stride,
     int row_elems,
     int block_size,
@@ -447,11 +435,11 @@ __global__ void write_kv_cache_fused_kernel(
 
 // FP16 -> FP8 E4M3 quantization + write to paged KV cache
 #ifdef __CUDA_FP8_TYPES_EXIST__
-__global__ void write_kv_cache_fp8_kernel(
-    const half* data_in,
-    const int* positions,
-    const int* block_tables,
-    __nv_fp8_e4m3* cache_base,  // FP8 cache
+__global__ __launch_bounds__(256) void write_kv_cache_fp8_kernel(
+    const half* __restrict__ data_in,
+    const int* __restrict__ positions,
+    const int* __restrict__ block_tables,
+    __nv_fp8_e4m3* __restrict__ cache_base,  // FP8 cache
     float inv_scale,            // 1.0 / kv_scale
     int block_stride,
     int row_elems,
@@ -473,19 +461,19 @@ __global__ void write_kv_cache_fp8_kernel(
                                      + static_cast<int64_t>(slot_in_block) * row_elems;
     const half* src = data_in + static_cast<int64_t>(token_idx) * row_elems;
 
-    // Vectorized: load 4 FP16 (float2 = half4), convert+scale, store 4 FP8 (uint32_t)
+    // Packed PTX cvt: 2 paired conversions per 4 elements (half→e4m3x2).
+    // Scale applied in FP16 before conversion — sufficient precision for E4M3.
+    const half inv_scale_h = __float2half(inv_scale);
+    const half2 inv_scale_h2 = make_half2(inv_scale_h, inv_scale_h);
     const int vec_elems = row_elems / 4;
-    const float2* src4 = reinterpret_cast<const float2*>(src);
+    const half2* src2 = reinterpret_cast<const half2*>(src);
     uint32_t* dst4 = reinterpret_cast<uint32_t*>(dst);
     for (int i = threadIdx.x; i < vec_elems; i += blockDim.x) {
-        float2 h2 = src4[i];
-        const half* hp = reinterpret_cast<const half*>(&h2);
-        uint8_t fp8[4];
-        #pragma unroll
-        for (int j = 0; j < 4; j++) {
-            fp8[j] = static_cast<uint8_t>(__nv_fp8_e4m3(__half2float(hp[j]) * inv_scale).__x);
-        }
-        dst4[i] = *reinterpret_cast<uint32_t*>(fp8);
+        half2 lo = __hmul2(src2[2 * i],     inv_scale_h2);
+        half2 hi = __hmul2(src2[2 * i + 1], inv_scale_h2);
+        uint16_t e4m3_lo = cvt_f16x2_to_e4m3x2(*reinterpret_cast<uint32_t*>(&lo));
+        uint16_t e4m3_hi = cvt_f16x2_to_e4m3x2(*reinterpret_cast<uint32_t*>(&hi));
+        dst4[i] = static_cast<uint32_t>(e4m3_lo) | (static_cast<uint32_t>(e4m3_hi) << 16);
     }
     // Scalar tail for non-aligned remainder
     for (int i = vec_elems * 4 + threadIdx.x; i < row_elems; i += blockDim.x) {
@@ -494,11 +482,11 @@ __global__ void write_kv_cache_fp8_kernel(
 }
 #else
 // Software fallback: clamp FP16 to FP8 E4M3 range and pack to uint8_t
-__global__ void write_kv_cache_fp8_kernel(
-    const half* data_in,
-    const int* positions,
-    const int* block_tables,
-    uint8_t* cache_base,        // FP8 cache (as raw bytes)
+__global__ __launch_bounds__(256) void write_kv_cache_fp8_kernel(
+    const half* __restrict__ data_in,
+    const int* __restrict__ positions,
+    const int* __restrict__ block_tables,
+    uint8_t* __restrict__ cache_base,        // FP8 cache (as raw bytes)
     float inv_scale,            // 1.0 / kv_scale
     int block_stride,
     int row_elems,
@@ -571,7 +559,7 @@ __global__ void write_kv_cache_fp8_kernel(
 // blockIdx.x = token_idx, blockIdx.y = 0 (K) or 1 (V).
 // blockDim.x = 256 (8 warps). Each warp loops over heads.
 // ---------------------------------------------------------------------------
-__global__ void write_kv_cache_int8_kernel(
+__global__ __launch_bounds__(256) void write_kv_cache_int8_kernel(
     const half* __restrict__ k_in,        // [n_tokens, n_kv_heads * head_dim]
     const half* __restrict__ v_in,
     const int* __restrict__ positions,
@@ -610,9 +598,9 @@ __global__ void write_kv_cache_int8_kernel(
     half* scale_dst = scale_base + static_cast<int64_t>(block_id) * scale_block_stride
                                  + static_cast<int64_t>(slot_in_block) * n_kv_heads;
 
-    const int warp_id = threadIdx.x / 32;
-    const int lane_id = threadIdx.x % 32;
-    const int num_warps = blockDim.x / 32;
+    const int warp_id = threadIdx.x / kWarpSize;
+    const int lane_id = threadIdx.x % kWarpSize;
+    const int num_warps = blockDim.x / kWarpSize;
 
     // Each warp processes one head at a time, looping over heads
     for (int h = warp_id; h < n_kv_heads; h += num_warps) {
@@ -623,7 +611,7 @@ __global__ void write_kv_cache_int8_kernel(
         // head_dim is always even (64, 128, 256).
         float amax = 0.0f;
         const half2* src2 = reinterpret_cast<const half2*>(src + head_offset);
-        for (int d = lane_id; d < head_dim / 2; d += 32) {
+        for (int d = lane_id; d < head_dim / 2; d += kWarpSize) {
             half2 h2 = src2[d];
             amax = fmaxf(amax, fabsf(__half2float(h2.x)));
             amax = fmaxf(amax, fabsf(__half2float(h2.y)));
@@ -666,7 +654,7 @@ __global__ void write_kv_cache_int8_kernel(
 // Range: [-8, 7] symmetric. Scale = absmax / 7.0.
 // blockIdx.x = token, blockIdx.y = 0 (K) or 1 (V).
 // ---------------------------------------------------------------------------
-__global__ void write_kv_cache_int4_kernel(
+__global__ __launch_bounds__(256) void write_kv_cache_int4_kernel(
     const half* __restrict__ k_in,
     const half* __restrict__ v_in,
     const int* __restrict__ positions,
@@ -705,16 +693,16 @@ __global__ void write_kv_cache_int4_kernel(
     half* scale_dst = scale_base + static_cast<int64_t>(block_id) * scale_block_stride
                                  + static_cast<int64_t>(slot_in_block) * n_kv_heads;
 
-    const int warp_id = threadIdx.x / 32;
-    const int lane_id = threadIdx.x % 32;
-    const int num_warps = blockDim.x / 32;
+    const int warp_id = threadIdx.x / kWarpSize;
+    const int lane_id = threadIdx.x % kWarpSize;
+    const int num_warps = blockDim.x / kWarpSize;
 
     for (int h = warp_id; h < n_kv_heads; h += num_warps) {
         const int head_offset = h * head_dim;
 
         // Step 1: Per-head absmax
         float amax = 0.0f;
-        for (int d = lane_id; d < head_dim; d += 32) {
+        for (int d = lane_id; d < head_dim; d += kWarpSize) {
             float val = __half2float(src[head_offset + d]);
             amax = fmaxf(amax, fabsf(val));
         }
@@ -729,7 +717,7 @@ __global__ void write_kv_cache_int4_kernel(
         // Step 3: Quantize and pack pairs into bytes
         // Each lane handles 2 elements at a time (d, d+1) → 1 byte
         const int head_byte_offset = h * head_dim / 2;
-        for (int d = lane_id * 2; d < head_dim; d += 64) {
+        for (int d = lane_id * 2; d < head_dim; d += 2 * kWarpSize) {
             float v0 = __half2float(src[head_offset + d]);
             float v1 = (d + 1 < head_dim) ? __half2float(src[head_offset + d + 1]) : 0.0f;
 
@@ -763,7 +751,7 @@ __global__ void write_kv_cache_int4_kernel(
 //
 // V path (blockIdx.y == 1): Standard INT4 per-head quantization (same as INT4 kernel)
 // ---------------------------------------------------------------------------
-__global__ void write_kv_cache_turboquant_kernel(
+__global__ __launch_bounds__(256) void write_kv_cache_turboquant_kernel(
     const half* __restrict__ k_in,
     const half* __restrict__ v_in,
     const int* __restrict__ positions,
@@ -808,9 +796,9 @@ __global__ void write_kv_cache_turboquant_kernel(
         uint8_t* sketch_dst = k_sketch_base + static_cast<int64_t>(block_id) * sketch_block_stride
                               + static_cast<int64_t>(slot_in_block) * sketch_row_bytes;
 
-        const int warp_id = threadIdx.x / 32;
-        const int lane_id = threadIdx.x % 32;
-        const int num_warps = blockDim.x / 32;
+        const int warp_id = threadIdx.x / kWarpSize;
+        const int lane_id = threadIdx.x % kWarpSize;
+        const int num_warps = blockDim.x / kWarpSize;
         const int bytes_per_row_qjl = head_dim / 8;
 
         for (int h = warp_id; h < n_kv_heads; h += num_warps) {
@@ -818,7 +806,7 @@ __global__ void write_kv_cache_turboquant_kernel(
 
             // Step 1: Compute L2 norm squared
             float norm_sq = 0.0f;
-            for (int d = lane_id; d < head_dim; d += 32) {
+            for (int d = lane_id; d < head_dim; d += kWarpSize) {
                 float val = __half2float(src[head_offset + d]);
                 norm_sq += val * val;
             }
@@ -831,7 +819,7 @@ __global__ void write_kv_cache_turboquant_kernel(
 
             // Step 2: Quantize normalized direction to INT4
             const int head_byte_offset = h * head_dim / 2;
-            for (int d = lane_id * 2; d < head_dim; d += 64) {
+            for (int d = lane_id * 2; d < head_dim; d += 2 * kWarpSize) {
                 float v0 = __half2float(src[head_offset + d]) * inv_norm;
                 float v1 = (d + 1 < head_dim) ? __half2float(src[head_offset + d + 1]) * inv_norm : 0.0f;
 
@@ -857,7 +845,7 @@ __global__ void write_kv_cache_turboquant_kernel(
             const int sketch_byte_offset = h * (sketch_dim / 8);
 
             // Each lane computes a subset of sketch rows
-            for (int sr = lane_id; sr < sketch_dim; sr += 32) {
+            for (int sr = lane_id; sr < sketch_dim; sr += kWarpSize) {
                 const uint8_t* R_row = qjl_matrix + sr * bytes_per_row_qjl;
 
                 // Compute sign(R[sr] . k[h])
@@ -894,16 +882,16 @@ __global__ void write_kv_cache_turboquant_kernel(
         half* scale_dst = v_scale_base + static_cast<int64_t>(block_id) * scale_block_stride
                           + static_cast<int64_t>(slot_in_block) * n_kv_heads;
 
-        const int warp_id = threadIdx.x / 32;
-        const int lane_id = threadIdx.x % 32;
-        const int num_warps = blockDim.x / 32;
+        const int warp_id = threadIdx.x / kWarpSize;
+        const int lane_id = threadIdx.x % kWarpSize;
+        const int num_warps = blockDim.x / kWarpSize;
 
         for (int h = warp_id; h < n_kv_heads; h += num_warps) {
             const int head_offset = h * head_dim;
 
             // Per-head absmax
             float amax = 0.0f;
-            for (int d = lane_id; d < head_dim; d += 32) {
+            for (int d = lane_id; d < head_dim; d += kWarpSize) {
                 float val = __half2float(src[head_offset + d]);
                 amax = fmaxf(amax, fabsf(val));
             }
@@ -916,7 +904,7 @@ __global__ void write_kv_cache_turboquant_kernel(
 
             // Quantize and pack INT4
             const int head_byte_offset = h * head_dim / 2;
-            for (int d = lane_id * 2; d < head_dim; d += 64) {
+            for (int d = lane_id * 2; d < head_dim; d += 2 * kWarpSize) {
                 float v0 = __half2float(src[head_offset + d]);
                 float v1 = (d + 1 < head_dim) ? __half2float(src[head_offset + d + 1]) : 0.0f;
 
@@ -961,7 +949,7 @@ namespace imp {
 //
 // V path (blockIdx.y == 1): Standard INT4 per-head quantization (identical)
 // ---------------------------------------------------------------------------
-__global__ void write_kv_cache_turboquant_mxfp4_kernel(
+__global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
     const half* __restrict__ k_in,
     const half* __restrict__ v_in,
     const int* __restrict__ positions,
@@ -1013,9 +1001,9 @@ __global__ void write_kv_cache_turboquant_mxfp4_kernel(
         uint8_t* mscale_dst = k_mscale_base + static_cast<int64_t>(block_id) * mscale_block_stride
                               + static_cast<int64_t>(slot_in_block) * mscale_row_bytes;
 
-        const int warp_id = threadIdx.x / 32;
-        const int lane_id = threadIdx.x % 32;
-        const int num_warps = blockDim.x / 32;
+        const int warp_id = threadIdx.x / kWarpSize;
+        const int lane_id = threadIdx.x % kWarpSize;
+        const int num_warps = blockDim.x / kWarpSize;
         const int bytes_per_row_qjl = head_dim / 8;
 
         for (int h = warp_id; h < n_kv_heads; h += num_warps) {
@@ -1023,7 +1011,7 @@ __global__ void write_kv_cache_turboquant_mxfp4_kernel(
 
             // Step 1: Compute L2 norm
             float norm_sq = 0.0f;
-            for (int d = lane_id; d < head_dim; d += 32) {
+            for (int d = lane_id; d < head_dim; d += kWarpSize) {
                 float val = __half2float(src[head_offset + d]);
                 norm_sq += val * val;
             }
@@ -1049,7 +1037,7 @@ __global__ void write_kv_cache_turboquant_mxfp4_kernel(
 
                 // 3a: Find per-group absmax of normalized direction
                 float group_amax = 0.0f;
-                for (int d = lane_id; d < GROUP_SIZE; d += 32) {
+                for (int d = lane_id; d < GROUP_SIZE; d += kWarpSize) {
                     float dir_val = __half2float(src[head_offset + g_start + d]) * inv_norm;
                     group_amax = fmaxf(group_amax, fabsf(dir_val));
                 }
@@ -1070,7 +1058,7 @@ __global__ void write_kv_cache_turboquant_mxfp4_kernel(
                 }
 
                 // 3d: Quantize direction elements to signed FP4 E2M1
-                for (int d = lane_id * 2; d < GROUP_SIZE; d += 64) {
+                for (int d = lane_id * 2; d < GROUP_SIZE; d += 2 * kWarpSize) {
                     float v0 = __half2float(src[head_offset + g_start + d]) * inv_norm;
                     float v1 = (d + 1 < GROUP_SIZE)
                         ? __half2float(src[head_offset + g_start + d + 1]) * inv_norm
@@ -1085,8 +1073,6 @@ __global__ void write_kv_cache_turboquant_mxfp4_kernel(
                     uint8_t code1 = tq_float_abs_to_fp4(fabsf(s1));
                     uint8_t fp4_0 = (sign0 << 3) | code0;
                     uint8_t fp4_1 = (sign1 << 3) | code1;
-
-                    // Pack: low nibble = even, high nibble = odd
                     uint8_t packed = fp4_0 | (fp4_1 << 4);
                     dir_dst[head_byte_offset + (g_start + d) / 2] = packed;
                 }
@@ -1094,7 +1080,7 @@ __global__ void write_kv_cache_turboquant_mxfp4_kernel(
 
             // Step 4: QJL sketch (identical to non-MXFP4 path)
             const int sketch_byte_offset = h * (sketch_dim / 8);
-            for (int sr = lane_id; sr < sketch_dim; sr += 32) {
+            for (int sr = lane_id; sr < sketch_dim; sr += kWarpSize) {
                 const uint8_t* R_row = qjl_matrix + sr * bytes_per_row_qjl;
                 float dot = 0.0f;
                 for (int d = 0; d < head_dim; d += 8) {
@@ -1123,14 +1109,14 @@ __global__ void write_kv_cache_turboquant_mxfp4_kernel(
         half* scale_dst = v_scale_base + static_cast<int64_t>(block_id) * scale_block_stride
                           + static_cast<int64_t>(slot_in_block) * n_kv_heads;
 
-        const int warp_id = threadIdx.x / 32;
-        const int lane_id = threadIdx.x % 32;
-        const int num_warps = blockDim.x / 32;
+        const int warp_id = threadIdx.x / kWarpSize;
+        const int lane_id = threadIdx.x % kWarpSize;
+        const int num_warps = blockDim.x / kWarpSize;
 
         for (int h = warp_id; h < n_kv_heads; h += num_warps) {
             const int head_offset = h * head_dim;
             float amax = 0.0f;
-            for (int d = lane_id; d < head_dim; d += 32) {
+            for (int d = lane_id; d < head_dim; d += kWarpSize) {
                 float val = __half2float(src[head_offset + d]);
                 amax = fmaxf(amax, fabsf(val));
             }
@@ -1142,7 +1128,7 @@ __global__ void write_kv_cache_turboquant_mxfp4_kernel(
             float inv_sc = (amax > 1e-8f) ? (7.0f / amax) : 0.0f;
 
             const int head_byte_offset = h * head_dim / 2;
-            for (int d = lane_id * 2; d < head_dim; d += 64) {
+            for (int d = lane_id * 2; d < head_dim; d += 2 * kWarpSize) {
                 float v0 = __half2float(src[head_offset + d]);
                 float v1 = (d + 1 < head_dim) ? __half2float(src[head_offset + d + 1]) : 0.0f;
                 int q0 = __float2int_rn(v0 * inv_sc);
@@ -1170,7 +1156,7 @@ __global__ void write_kv_cache_turboquant_mxfp4_kernel(
 //
 // V path (blockIdx.y == 1): Standard INT4 per-head quantization (same as INT4/TQ kernel)
 // ---------------------------------------------------------------------------
-__global__ void write_kv_cache_turboquant_lite_kernel(
+__global__ __launch_bounds__(256) void write_kv_cache_turboquant_lite_kernel(
     const half* __restrict__ k_in,
     const half* __restrict__ v_in,
     const int* __restrict__ positions,
@@ -1211,9 +1197,9 @@ __global__ void write_kv_cache_turboquant_lite_kernel(
         uint8_t* sketch_dst = k_sketch_base + static_cast<int64_t>(block_id) * sketch_block_stride
                               + static_cast<int64_t>(slot_in_block) * sketch_row_bytes;
 
-        const int warp_id = threadIdx.x / 32;
-        const int lane_id = threadIdx.x % 32;
-        const int num_warps = blockDim.x / 32;
+        const int warp_id = threadIdx.x / kWarpSize;
+        const int lane_id = threadIdx.x % kWarpSize;
+        const int num_warps = blockDim.x / kWarpSize;
         const int bytes_per_row_qjl = head_dim / 8;
 
         for (int h = warp_id; h < n_kv_heads; h += num_warps) {
@@ -1221,7 +1207,7 @@ __global__ void write_kv_cache_turboquant_lite_kernel(
 
             // Step 1: Compute L2 norm
             float norm_sq = 0.0f;
-            for (int d = lane_id; d < head_dim; d += 32) {
+            for (int d = lane_id; d < head_dim; d += kWarpSize) {
                 float val = __half2float(src[head_offset + d]);
                 norm_sq += val * val;
             }
@@ -1239,7 +1225,7 @@ __global__ void write_kv_cache_turboquant_lite_kernel(
             // Step 3: QJL sketch = sign(R @ k) for each sketch row
             const int sketch_byte_offset = h * (sketch_dim / 8);
 
-            for (int sr = lane_id; sr < sketch_dim; sr += 32) {
+            for (int sr = lane_id; sr < sketch_dim; sr += kWarpSize) {
                 const uint8_t* R_row = qjl_matrix + sr * bytes_per_row_qjl;
 
                 float dot = 0.0f;
@@ -1271,15 +1257,15 @@ __global__ void write_kv_cache_turboquant_lite_kernel(
         half* scale_dst = v_scale_base + static_cast<int64_t>(block_id) * scale_block_stride
                           + static_cast<int64_t>(slot_in_block) * n_kv_heads;
 
-        const int warp_id = threadIdx.x / 32;
-        const int lane_id = threadIdx.x % 32;
-        const int num_warps = blockDim.x / 32;
+        const int warp_id = threadIdx.x / kWarpSize;
+        const int lane_id = threadIdx.x % kWarpSize;
+        const int num_warps = blockDim.x / kWarpSize;
 
         for (int h = warp_id; h < n_kv_heads; h += num_warps) {
             const int head_offset = h * head_dim;
 
             float amax = 0.0f;
-            for (int d = lane_id; d < head_dim; d += 32) {
+            for (int d = lane_id; d < head_dim; d += kWarpSize) {
                 float val = __half2float(src[head_offset + d]);
                 amax = fmaxf(amax, fabsf(val));
             }
@@ -1291,7 +1277,7 @@ __global__ void write_kv_cache_turboquant_lite_kernel(
             float inv_sc = (amax > 1e-8f) ? (7.0f / amax) : 0.0f;
 
             const int head_byte_offset = h * head_dim / 2;
-            for (int d = lane_id * 2; d < head_dim; d += 64) {
+            for (int d = lane_id * 2; d < head_dim; d += 2 * kWarpSize) {
                 float v0 = __half2float(src[head_offset + d]);
                 float v1 = (d + 1 < head_dim) ? __half2float(src[head_offset + d + 1]) : 0.0f;
 
@@ -1315,13 +1301,13 @@ __global__ void write_kv_cache_turboquant_lite_kernel(
 // Fused KV cache write with RoPE on K: applies RoPE to K during write, copies V directly.
 // blockIdx.x = token index, blockIdx.y = 0 (K+RoPE) or 1 (V copy).
 // Eliminates the separate RoPE kernel launch for K in the decode path.
-__global__ void write_kv_cache_rope_fused_kernel(
+__global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
     const half* __restrict__ k_in,       // [n_tokens, n_kv_heads * head_dim] raw K (no RoPE)
     const half* __restrict__ v_in,       // [n_tokens, n_kv_heads * head_dim]
     const int* __restrict__ positions,
     const int* __restrict__ block_tables,
-    half* k_cache_base,
-    half* v_cache_base,
+    half* __restrict__ k_cache_base,
+    half* __restrict__ v_cache_base,
     int block_stride,
     int row_elems,
     int block_size,
@@ -1410,13 +1396,13 @@ __global__ void write_kv_cache_rope_fused_kernel(
 
 // Fused K+V FP8 write: combines K and V quantize+write into one kernel launch.
 // blockIdx.x = token index, blockIdx.y = 0 (K) or 1 (V).
-__global__ void write_kv_cache_fp8_fused_kernel(
+__global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
     const half* __restrict__ k_in,
     const half* __restrict__ v_in,
     const int* __restrict__ positions,
     const int* __restrict__ block_tables,
-    __nv_fp8_e4m3* k_cache_base,
-    __nv_fp8_e4m3* v_cache_base,
+    __nv_fp8_e4m3* __restrict__ k_cache_base,
+    __nv_fp8_e4m3* __restrict__ v_cache_base,
     float inv_scale,
     int block_stride,
     int row_elems,
@@ -1446,19 +1432,18 @@ __global__ void write_kv_cache_fp8_fused_kernel(
                            + static_cast<int64_t>(slot_in_block) * row_elems;
     }
 
-    // Vectorized: load 4 FP16 (float2 = half4), convert+scale, store 4 FP8 (uint32_t)
+    // Packed PTX cvt: 2 paired conversions per 4 elements (half→e4m3x2).
+    const half inv_scale_h = __float2half(inv_scale);
+    const half2 inv_scale_h2 = make_half2(inv_scale_h, inv_scale_h);
     const int vec_elems = row_elems / 4;
-    const float2* src4 = reinterpret_cast<const float2*>(src);
+    const half2* src2 = reinterpret_cast<const half2*>(src);
     uint32_t* dst4 = reinterpret_cast<uint32_t*>(dst);
     for (int i = threadIdx.x; i < vec_elems; i += blockDim.x) {
-        float2 h2 = src4[i];
-        const half* hp = reinterpret_cast<const half*>(&h2);
-        uint8_t fp8[4];
-        #pragma unroll
-        for (int j = 0; j < 4; j++) {
-            fp8[j] = static_cast<uint8_t>(__nv_fp8_e4m3(__half2float(hp[j]) * inv_scale).__x);
-        }
-        dst4[i] = *reinterpret_cast<uint32_t*>(fp8);
+        half2 lo = __hmul2(src2[2 * i],     inv_scale_h2);
+        half2 hi = __hmul2(src2[2 * i + 1], inv_scale_h2);
+        uint16_t e4m3_lo = cvt_f16x2_to_e4m3x2(*reinterpret_cast<uint32_t*>(&lo));
+        uint16_t e4m3_hi = cvt_f16x2_to_e4m3x2(*reinterpret_cast<uint32_t*>(&hi));
+        dst4[i] = static_cast<uint32_t>(e4m3_lo) | (static_cast<uint32_t>(e4m3_hi) << 16);
     }
     // Scalar tail for non-aligned remainder
     for (int i = vec_elems * 4 + threadIdx.x; i < row_elems; i += blockDim.x) {
@@ -1468,7 +1453,7 @@ __global__ void write_kv_cache_fp8_fused_kernel(
 
 // Q-only RoPE for decode (n=1): applies RoPE to Q in-place.
 // Grid: (1, n_heads), Block: rope_pairs.
-__global__ void rope_q_only_fp16_kernel(
+__global__ __launch_bounds__(256) void rope_q_only_fp16_kernel(
     half* __restrict__ Q,       // [n_heads * head_dim]
     const int* __restrict__ positions,
     int n_heads,
@@ -1508,7 +1493,7 @@ __global__ void rope_q_only_fp16_kernel(
 
 // Add FP16 bias to each row of FP32 matrix: out[i,j] += bias[j]
 // Grid: n_tokens, Block: 256, each thread handles multiple expert indices.
-__global__ void add_fp16_bias_to_fp32_kernel(float* __restrict__ data,
+__global__ __launch_bounds__(256) void add_fp16_bias_to_fp32_kernel(float* __restrict__ data,
                                               const half* __restrict__ bias,
                                               int n_tokens, int n_cols) {
     int token = blockIdx.x;
@@ -1520,7 +1505,7 @@ __global__ void add_fp16_bias_to_fp32_kernel(float* __restrict__ data,
 }
 
 // Scale FP32 expert weights in-place: weights[i] *= scale
-__global__ void scale_fp32_kernel(float* __restrict__ data, float scale, int64_t n) {
+__global__ __launch_bounds__(256) void scale_fp32_kernel(float* __restrict__ data, float scale, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) {
         data[idx] *= scale;
@@ -1528,7 +1513,7 @@ __global__ void scale_fp32_kernel(float* __restrict__ data, float scale, int64_t
 }
 
 // Logit soft-capping: logit = softcap * tanh(logit / softcap)  (Gemma-2/3)
-__global__ void logit_softcap_fp32_kernel(float* __restrict__ data,
+__global__ __launch_bounds__(256) void logit_softcap_fp32_kernel(float* __restrict__ data,
                                           float softcap, float inv_softcap,
                                           int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -1538,7 +1523,7 @@ __global__ void logit_softcap_fp32_kernel(float* __restrict__ data,
 }
 
 // FP32 -> FP16 conversion kernel (for scatter output back to compute_dtype)
-__global__ void fp32_to_fp16_kernel(const float* __restrict__ in,
+__global__ __launch_bounds__(256) void fp32_to_fp16_kernel(const float* __restrict__ in,
                                     half* __restrict__ out,
                                     int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -1643,6 +1628,39 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
                            void* mxfp4_act_sf,
                            void* mxfp4_workspace,
                            size_t mxfp4_workspace_size) {
+    // Native MXFP4 GGUF: GEMV for M=1, CUTLASS for M>1.
+    if (mxfp4_cache != nullptr && input.dtype == DType::FP16) {
+        auto mx_it = mxfp4_cache->find(weight.data);
+        if (mx_it != mxfp4_cache->end() && mx_it->second.linear_scales) {
+            if (input.shape[0] == 1) {
+                // MXFP4 GEMV decode — apply Hadamard online rotation if needed
+                int hbs = mx_it->second.hadamard_bs;
+                if (hbs > 0 && hadamard_block_size_valid(hbs)) {
+                    int K = static_cast<int>(mx_it->second.K);
+                    hadamard_transform_fp16(
+                        reinterpret_cast<const half*>(input.data),
+                        reinterpret_cast<half*>(input.data),  // in-place
+                        1, K, hbs, stream);
+                }
+                gemv_mxfp4_kpar(mx_it->second,
+                                reinterpret_cast<const half*>(input.data),
+                                reinterpret_cast<half*>(output.data),
+                                static_cast<int>(mx_it->second.N),
+                                static_cast<int>(mx_it->second.K), stream);
+                return;
+            } else if (dequant_scratch != nullptr) {
+                // MXFP4 prefill (M>1): dequant to FP16 scratch → cuBLAS GEMM
+                int N = static_cast<int>(mx_it->second.N);
+                int K = static_cast<int>(mx_it->second.K);
+                size_t fp16_bytes = static_cast<size_t>(N) * K * sizeof(half);
+                dequant_mxfp4_to_fp16(mx_it->second.data, N, K, dequant_scratch, stream);
+                int64_t w_shape[2] = {N, K};
+                Tensor w_fp16(dequant_scratch, DType::FP16, 2, w_shape, true);
+                gemm(input, w_fp16, output, 1.0f, 0.0f, stream);
+                return;
+            }
+        }
+    }
     // NVFP4 cache path: GEMV for M=1 (decode), CUTLASS/dequant for M>1 (prefill).
     if (nvfp4_cache != nullptr && input.dtype == DType::FP16) {
         auto it = nvfp4_cache->find(weight.data);
@@ -1782,5 +1800,34 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
     }
 }
 
+// ---------------------------------------------------------------------------
+// New GemmContext-based dispatch: delegates to the legacy 23-parameter version.
+// Callers use this simplified interface; the legacy version will be inlined
+// once all call sites are migrated.
+// ---------------------------------------------------------------------------
+void gemm_dispatch(const Tensor& input, const Tensor& weight,
+                   GGMLQuantType qtype, Tensor& output,
+                   const GemmContext& ctx) {
+    const auto* wc = ctx.wcache;
+    const auto* qs = ctx.qscratch;
+    if (!wc || !qs) return;
+
+    const auto* fp16  = &wc->fp16;
+    const auto* fp8   = (wc->use_fp8 && !ctx.force_fp16) ? &wc->fp8 : nullptr;
+    const auto* nv4   = (wc->nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->nvfp4;
+    const auto* ct4   = (wc->cutlass_nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_nvfp4;
+    const auto* mx4   = (wc->cutlass_mxfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_mxfp4;
+
+    gemm_dispatch(input, weight, Tensor(), qtype, output,
+                  qs->dequant, ctx.stream,
+                  static_cast<block_q8_1*>(qs->q8_1_buf), qs->d8_buf,
+                  fp16, fp8,
+                  qs->fp8_act, qs->d_act_scale,
+                  qs->d_fp8_block_maxes, qs->d_fp8_absmax, qs->fp8_max_grid,
+                  nv4, ct4,
+                  qs->cutlass_act_data, qs->cutlass_act_sf,
+                  qs->cutlass_workspace, qs->cutlass_workspace_size,
+                  mx4, qs->mxfp4_act_sf, qs->mxfp4_workspace, qs->mxfp4_workspace_size);
+}
 
 } // namespace imp

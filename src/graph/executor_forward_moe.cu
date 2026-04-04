@@ -145,8 +145,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         ly.w_up_shared.data == nullptr;  // must not have shared expert for full residual fusion
 
     if (!will_skip_residual_copy) {
-        cudaMemcpyAsync(r.data, h.data, h.nbytes(),
-                        cudaMemcpyDeviceToDevice, stream);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(),
+                        cudaMemcpyDeviceToDevice, stream));
     }
     // Fused RMSNorm + Q8_1: skip for NVFP4-covered layers (NVFP4 takes FP16 directly)
     bool moe_fused_norm_q8 = (n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
@@ -213,9 +213,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     static_cast<float*>(gate_logits_f32.data),
                     numel);
             } else {
-                cudaMemcpyAsync(gate_logits_f32.data, gate_logits_tmp.data,
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(gate_logits_f32.data, gate_logits_tmp.data,
                                 static_cast<size_t>(numel) * sizeof(float),
-                                cudaMemcpyDeviceToDevice, stream);
+                                cudaMemcpyDeviceToDevice, stream));
             }
         }
 
@@ -700,9 +700,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
         // One D2H sync per layer for expert offsets
         std::vector<int32_t> h_offsets(ne + 1);
-        cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
                         static_cast<size_t>(ne + 1) * sizeof(int32_t),
-                        cudaMemcpyDeviceToHost, stream);
+                        cudaMemcpyDeviceToHost, stream));
         cudaStreamSynchronize(stream);
 
         char* buf = static_cast<char*>(moe_.batch_dequant_buf);
@@ -806,9 +806,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                             cudaMemcpyDeviceToHost, stream);
             std::vector<float> h_act_scales(ne, 1.0f);
             if (moe_.d_fp8_scales) {
-                cudaMemcpyAsync(h_act_scales.data(), moe_.d_fp8_scales,
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_act_scales.data(), moe_.d_fp8_scales,
                                 static_cast<size_t>(ne) * sizeof(float),
-                                cudaMemcpyDeviceToHost, stream);
+                                cudaMemcpyDeviceToHost, stream));
             }
             cudaStreamSynchronize(stream);
             std::vector<const void*> weight_ptrs(ne);
@@ -863,9 +863,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                       n, expanded);
 
         std::vector<int32_t> h_offsets(ne + 1);
-        cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
                         static_cast<size_t>(ne + 1) * sizeof(int32_t),
-                        cudaMemcpyDeviceToHost, stream);
+                        cudaMemcpyDeviceToHost, stream));
         cudaStreamSynchronize(stream);
 
         char* buf = static_cast<char*>(moe_.batch_dequant_buf);
@@ -925,9 +925,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                   n, expanded);
     {
     std::vector<int32_t> h_offsets(ne + 1);
-    cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
                     static_cast<size_t>(ne + 1) * sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
+                    cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
     // Helper: dequant one expert's weight from packed tensor into dequant scratch slot 0.
@@ -971,8 +971,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 void* cached = expert_cache_.get_or_load(ck, host_ptr, expert_raw, stream);
                 src = static_cast<const char*>(cached);
             } else if (moe_.raw_staging_buf) {
-                cudaMemcpyAsync(moe_.raw_staging_buf, host_ptr, expert_raw,
-                                cudaMemcpyHostToDevice, stream);
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.raw_staging_buf, host_ptr, expert_raw,
+                                cudaMemcpyHostToDevice, stream));
                 src = static_cast<const char*>(moe_.raw_staging_buf);
             } else {
                 IMP_LOG_ERROR("dequant_expert: no staging buffer for host expert %d", expert_idx);
@@ -1271,8 +1271,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             Tensor expert_down_view(moe_.expert_down.data, compute_dtype_,
                                     2, expert_out_shape, true);
             Tensor scatter_out = slice_rows(moe_.scatter_out, n);
-            cudaMemsetAsync(scatter_out.data, 0,
-                            static_cast<size_t>(n) * d * sizeof(float), stream);
+            IMP_CUDA_CHECK_LOG(cudaMemsetAsync(scatter_out.data, 0,
+                            static_cast<size_t>(n) * d * sizeof(float), stream));
             moe_scatter(expert_down_view, routing, scatter_out, stream);
 
             int64_t numel = static_cast<int64_t>(n) * d;
@@ -1284,9 +1284,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     static_cast<half*>(h.data),
                     numel);
             } else {
-                cudaMemcpyAsync(h.data, moe_.scatter_out.data,
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h.data, moe_.scatter_out.data,
                                 static_cast<size_t>(numel) * sizeof(float),
-                                cudaMemcpyDeviceToDevice, stream);
+                                cudaMemcpyDeviceToDevice, stream));
             }
         }
     }
@@ -1360,10 +1360,10 @@ moe_after_experts:
     // 10. Free routing result tensors only if allocated by moe_topk_gating.
     //     When using pre-allocated buffers, memory belongs to moe_.routing_buffers.
     if (routing.owns_memory) {
-        cudaFree(routing.expert_indices.data);
-        cudaFree(routing.expert_weights.data);
-        cudaFree(routing.sorted_token_ids.data);
-        cudaFree(routing.expert_offsets.data);
+        IMP_CUDA_CHECK_LOG(cudaFree(routing.expert_indices.data));
+        IMP_CUDA_CHECK_LOG(cudaFree(routing.expert_weights.data));
+        IMP_CUDA_CHECK_LOG(cudaFree(routing.sorted_token_ids.data));
+        IMP_CUDA_CHECK_LOG(cudaFree(routing.expert_offsets.data));
     }
 }
 

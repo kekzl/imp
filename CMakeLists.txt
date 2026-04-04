@@ -137,6 +137,7 @@ set(IMP_QUANT_SOURCES
     src/quant/fp8_quant.cu
     src/quant/nvfp4_quant.cu
     src/quant/nvfp4_gemm.cu
+    src/quant/mxfp4_gemm.cu
     src/quant/turboquant.cu
     src/quant/dequant_gptq.cu
 )
@@ -194,6 +195,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/request.cpp
     src/runtime/batch.cpp
     src/runtime/engine.cpp
+    src/runtime/engine_speculative.cpp
     src/runtime/vision_pipeline.cpp
     src/runtime/constraint_manager.cpp
     src/runtime/vram_budget.cpp
@@ -211,7 +213,10 @@ set(IMP_GRAPH_SOURCES
     src/graph/executor.cu
     src/graph/executor_kernels.cu
     src/graph/executor_workspace.cu
+    src/graph/executor_attention.cu
     src/graph/executor_forward.cu
+    src/graph/executor_ffn.cu
+    src/graph/executor_ssm_gdn.cu
     src/graph/executor_forward_moe.cu
     src/graph/expert_cache.cu
     src/graph/weight_cache_manager.cu

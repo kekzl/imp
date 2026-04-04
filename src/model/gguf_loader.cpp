@@ -835,6 +835,12 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         cfg.attn_logit_softcap = static_cast<float>(get_float("attention.logit_softcapping", 0.0));
     cfg.final_logit_softcap = static_cast<float>(get_float("final_logit_softcapping", 0.0));
 
+    // MXFP4 Hadamard rotation metadata
+    cfg.mxfp4_hadamard_attn = static_cast<int>(get_uint("mxfp4.hadamard_block_size_attn", 0));
+    cfg.mxfp4_hadamard_ffn  = static_cast<int>(get_uint("mxfp4.hadamard_block_size_ffn", 0));
+    if (cfg.mxfp4_hadamard_attn > 0 || cfg.mxfp4_hadamard_ffn > 0)
+        IMP_LOG_INFO("MXFP4 Hadamard: attn_bs=%d ffn_bs=%d", cfg.mxfp4_hadamard_attn, cfg.mxfp4_hadamard_ffn);
+
     cfg.sliding_window   = static_cast<int>(get_uint("attention.sliding_window", 0));
 
     cfg.n_experts        = static_cast<int>(get_uint("expert_count", 0));

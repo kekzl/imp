@@ -2,6 +2,7 @@
 #include "quant/nvfp4_quant.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 
 namespace imp {
@@ -9,7 +10,7 @@ namespace imp {
 static void vram_free_wc(VRAMAllocator* alloc, void* ptr) {
     if (!ptr) return;
     if (alloc) alloc->free(ptr);
-    else cudaFree(ptr);
+    else IMP_CUDA_CHECK_LOG(cudaFree(ptr));
 }
 
 void WeightCacheManager::free(VRAMAllocator* alloc) {
@@ -85,7 +86,7 @@ void WeightCacheManager::free(VRAMAllocator* alloc) {
     fp8_bytes = 0;
 
     if (fp8_migrated_scales) {
-        cudaFree(fp8_migrated_scales);
+        IMP_CUDA_CHECK_LOG(cudaFree(fp8_migrated_scales));
         fp8_migrated_scales = nullptr;
         fp8_migrated_count = 0;
     }
@@ -95,7 +96,7 @@ void WeightCacheManager::free(VRAMAllocator* alloc) {
         fp8_migrated_data_size = 0;
     }
     if (fp8_overflow_scales) {
-        cudaFree(fp8_overflow_scales);
+        IMP_CUDA_CHECK_LOG(cudaFree(fp8_overflow_scales));
         fp8_overflow_scales = nullptr;
         fp8_overflow_count = 0;
     }

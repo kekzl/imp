@@ -180,6 +180,7 @@ __device__ __forceinline__ float fp8_e4m3_to_float(uint8_t bits) {
 __global__ void convert_nvfp4_to_mxfp4_scales_kernel(
     const uint8_t* __restrict__ src_ms,     // [N, K/16] NVFP4 UE4M3
     uint8_t*       __restrict__ dst_sf,     // SfAtom MXFP4 UE8M0
+    uint8_t*       __restrict__ dst_linear, // [N, K/32] row-major UE8M0 (for GEMV)
     float tensor_scale,                      // NVFP4 tensor scale
     int N, int K, int n_k_tiles)
 {
@@ -208,6 +209,7 @@ __global__ void convert_nvfp4_to_mxfp4_scales_kernel(
 
     int sf_idx = mx_sfatom_offset(n, mx_group, n_k_tiles);
     dst_sf[sf_idx] = ue8m0;
+    if (dst_linear) dst_linear[static_cast<size_t>(n) * K_groups_mx + mx_group] = ue8m0;
 }
 
 void convert_nvfp4_to_mxfp4_cutlass(const NvFP4QuantResult& src,
@@ -220,11 +222,15 @@ void convert_nvfp4_to_mxfp4_cutlass(const NvFP4QuantResult& src,
     assert(K % kMxSFVecSize == 0 && "K must be multiple of 32 for MXFP4");
 
     size_t sf_bytes = cutlass_mxfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
+    int K_groups_mx = static_cast<int>(K) / kMxSFVecSize;
+    size_t linear_sf_bytes = static_cast<size_t>(N) * K_groups_mx;
+
     void* d_sf = nullptr;
+    void* d_linear_sf = nullptr;
     cudaMalloc(&d_sf, sf_bytes);
+    cudaMalloc(&d_linear_sf, linear_sf_bytes);
     cudaMemsetAsync(d_sf, 0, sf_bytes, stream);
 
-    int K_groups_mx = static_cast<int>(K) / kMxSFVecSize;
     int total = static_cast<int>(N) * K_groups_mx;
     int n_k_tiles = (static_cast<int>(K) + kMxAtomKElems - 1) / kMxAtomKElems;
 
@@ -233,18 +239,21 @@ void convert_nvfp4_to_mxfp4_cutlass(const NvFP4QuantResult& src,
     convert_nvfp4_to_mxfp4_scales_kernel<<<blocks, threads, 0, stream>>>(
         reinterpret_cast<const uint8_t*>(src.micro_scales),
         reinterpret_cast<uint8_t*>(d_sf),
+        reinterpret_cast<uint8_t*>(d_linear_sf),
         src.tensor_scale,
         static_cast<int>(N), static_cast<int>(K), n_k_tiles);
 
     dst.data = src.packed_data;
     dst.scale_factors = d_sf;
+    dst.linear_scales = d_linear_sf;
     dst.tensor_scale = 1.0f;  // absorbed into UE8M0 scales (unlike NVFP4 path)
     dst.N = N;
     dst.K = K;
     dst.sf_bytes = sf_bytes;
 
-    IMP_LOG_DEBUG("convert_nvfp4_to_mxfp4: N=%lld K=%lld sf=%.2f MiB",
-                  (long long)N, (long long)K, sf_bytes / (1024.0 * 1024.0));
+    IMP_LOG_DEBUG("convert_nvfp4_to_mxfp4: N=%lld K=%lld sf=%.2f MiB linear_sf=%.2f MiB",
+                  (long long)N, (long long)K, sf_bytes / (1024.0 * 1024.0),
+                  linear_sf_bytes / (1024.0 * 1024.0));
 }
 
 // ---------------------------------------------------------------------------
@@ -253,33 +262,22 @@ void convert_nvfp4_to_mxfp4_cutlass(const NvFP4QuantResult& src,
 // Output: separate contiguous data array + SfAtom scale array.
 // ---------------------------------------------------------------------------
 
-__global__ void unpack_mxfp4_gguf_kernel(
-    const uint8_t* __restrict__ raw_blocks,  // [total_blocks × 17]
-    uint8_t*       __restrict__ data_out,     // [N × K/2] packed E2M1
-    uint8_t*       __restrict__ sf_out,       // SfAtom layout UE8M0
-    int N, int K, int blocks_per_row, int n_k_tiles)
+// Build SfAtom + linear scale layouts from pre-split scale bytes.
+// Input: linear_scales at gpu_buf + data_bytes (already [N, K/32] row-major)
+// Output: SfAtom layout for CUTLASS + copy to separate linear buffer
+__global__ void build_mxfp4_scales_kernel(
+    const uint8_t* __restrict__ linear_src,  // [total_blocks] row-major scales
+    uint8_t*       __restrict__ sf_out,      // SfAtom layout
+    uint8_t*       __restrict__ linear_out,  // [N, K/32] separate linear buffer
+    int total_blocks, int blocks_per_row, int n_k_tiles)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total_blocks = N * blocks_per_row;
     if (idx >= total_blocks) return;
-
     int row = idx / blocks_per_row;
     int blk = idx % blocks_per_row;
-
-    // Read the 17-byte block
-    const uint8_t* block = raw_blocks + static_cast<size_t>(idx) * 17;
-
-    // Copy 16 data bytes to contiguous output
-    // Output data layout: row-major [N, K/2], each block writes 16 bytes at offset
-    size_t data_offset = static_cast<size_t>(row) * (blocks_per_row * 16) + blk * 16;
-    for (int b = 0; b < 16; b++) {
-        data_out[data_offset + b] = block[b];
-    }
-
-    // Write scale byte to SfAtom layout
-    uint8_t scale = block[16];
-    int sf_idx = mx_sfatom_offset(row, blk, n_k_tiles);
-    sf_out[sf_idx] = scale;
+    uint8_t scale = linear_src[idx];
+    sf_out[mx_sfatom_offset(row, blk, n_k_tiles)] = scale;
+    linear_out[idx] = scale;
 }
 
 bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K,
@@ -293,40 +291,41 @@ bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K,
     int blocks_per_row = static_cast<int>(K) / 32;
     int total_blocks = static_cast<int>(N) * blocks_per_row;
 
-    // Allocate output buffers
-    size_t data_bytes = static_cast<size_t>(N) * (K / 2);  // [N, K/2] packed nibbles
+    // Input from weight_upload: [data(N×K/2) | scales(total_blocks)] in one buffer.
+    // Data is already contiguous. Build SfAtom + linear scale layouts from appended scales.
+    size_t data_bytes = static_cast<size_t>(N) * (K / 2);
     size_t sf_bytes = cutlass_mxfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
+    size_t linear_sf_bytes = static_cast<size_t>(total_blocks);
 
-    void* d_data = nullptr;
     void* d_sf = nullptr;
-    if (cudaMalloc(&d_data, data_bytes) != cudaSuccess ||
-        cudaMalloc(&d_sf, sf_bytes) != cudaSuccess) {
-        if (d_data) cudaFree(d_data);
+    void* d_linear_sf = nullptr;
+    if (cudaMalloc(&d_sf, sf_bytes) != cudaSuccess ||
+        cudaMalloc(&d_linear_sf, linear_sf_bytes) != cudaSuccess) {
         if (d_sf) cudaFree(d_sf);
+        if (d_linear_sf) cudaFree(d_linear_sf);
         return false;
     }
     cudaMemsetAsync(d_sf, 0, sf_bytes, stream);
 
+    const uint8_t* scale_src = static_cast<const uint8_t*>(raw_gpu) + data_bytes;
     int n_k_tiles = (static_cast<int>(K) + kMxAtomKElems - 1) / kMxAtomKElems;
     int threads = 256;
-    int blocks = (total_blocks + threads - 1) / threads;
-    unpack_mxfp4_gguf_kernel<<<blocks, threads, 0, stream>>>(
-        static_cast<const uint8_t*>(raw_gpu),
-        static_cast<uint8_t*>(d_data),
-        static_cast<uint8_t*>(d_sf),
-        static_cast<int>(N), static_cast<int>(K), blocks_per_row, n_k_tiles);
+    int grid = (total_blocks + threads - 1) / threads;
+    build_mxfp4_scales_kernel<<<grid, threads, 0, stream>>>(
+        scale_src, static_cast<uint8_t*>(d_sf), static_cast<uint8_t*>(d_linear_sf),
+        total_blocks, blocks_per_row, n_k_tiles);
 
-    dst.data = d_data;
+    dst.data = raw_gpu;  // data at start of buffer (contiguous packed nibbles)
     dst.scale_factors = d_sf;
+    dst.linear_scales = d_linear_sf;
     dst.tensor_scale = 1.0f;
     dst.N = N;
     dst.K = K;
     dst.sf_bytes = sf_bytes;
-    dst.owns_data = true;
+    dst.owns_data = false;
 
-    IMP_LOG_DEBUG("unpack_mxfp4_gguf: N=%lld K=%lld data=%.2f MiB sf=%.2f MiB",
-                  (long long)N, (long long)K,
-                  data_bytes / (1024.0 * 1024.0), sf_bytes / (1024.0 * 1024.0));
+    IMP_LOG_DEBUG("unpack_mxfp4_gguf: N=%lld K=%lld sf=%.2f MiB (pre-split)",
+                  (long long)N, (long long)K, sf_bytes / (1024.0 * 1024.0));
     return true;
 }
 
@@ -341,11 +340,12 @@ __device__ __constant__ float kE2M1Table[16] = {
     -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f  // negative
 };
 
-// Dequant directly from raw MXFP4 GGUF blocks (17 bytes each).
-// Bypasses unpacked format and SfAtom layout — reads interleaved data+scale.
-__global__ void dequant_mxfp4_raw_kernel(
-    const uint8_t* __restrict__ raw_blocks,  // [total_blocks × 17]
-    half*          __restrict__ out,          // [N, K]
+// Dequant from split MXFP4 layout: [data(N×K/2) | scales(total_blocks)].
+// Used for alpha/beta FP16 dequant before MXFP4 registration.
+__global__ void dequant_mxfp4_split_kernel(
+    const uint8_t* __restrict__ data,    // [N × K/2] packed E2M1
+    const uint8_t* __restrict__ scales,  // [total_blocks] UE8M0
+    half*          __restrict__ out,     // [N, K]
     int N, int K, int blocks_per_row)
 {
     int64_t blk_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -355,27 +355,20 @@ __global__ void dequant_mxfp4_raw_kernel(
     int row = static_cast<int>(blk_idx / blocks_per_row);
     int blk = static_cast<int>(blk_idx % blocks_per_row);
 
-    // Read 17-byte block: 16 bytes packed E2M1 + 1 byte UE8M0 scale
-    const uint8_t* block = raw_blocks + blk_idx * 17;
-    uint8_t ue8m0 = block[16];
-
-    // UE8M0 → float: 2^(bits - 127)
+    uint8_t ue8m0 = scales[blk_idx];
     float scale;
     uint32_t fbits = static_cast<uint32_t>(ue8m0) << 23;
     memcpy(&scale, &fbits, sizeof(float));
 
-    // Dequant 16 packed bytes → 32 FP16 values
+    const uint8_t* block_data = data + blk_idx * 16;
     int64_t out_base = static_cast<int64_t>(row) * K + blk * 32;
-    // Bounds check: ensure out_base + 31 < N*K
     int64_t out_limit = static_cast<int64_t>(N) * K;
-    if (out_base + 31 >= out_limit) return;  // safety
+    if (out_base + 31 >= out_limit) return;
 
     for (int i = 0; i < 16; i++) {
-        uint8_t packed = block[i];
-        int nib_lo = packed & 0xF;
-        int nib_hi = (packed >> 4) & 0xF;
-        out[out_base + i * 2]     = __float2half(kE2M1Table[nib_lo] * scale);
-        out[out_base + i * 2 + 1] = __float2half(kE2M1Table[nib_hi] * scale);
+        uint8_t packed = block_data[i];
+        out[out_base + i * 2]     = __float2half(kE2M1Table[packed & 0xF] * scale);
+        out[out_base + i * 2 + 1] = __float2half(kE2M1Table[(packed >> 4) & 0xF] * scale);
     }
 }
 
@@ -384,11 +377,16 @@ void dequant_mxfp4_to_fp16(const void* raw_mxfp4_data, int64_t N, int64_t K,
 {
     int blocks_per_row = static_cast<int>(K / 32);
     int64_t total_blocks = N * blocks_per_row;
+    size_t data_bytes = static_cast<size_t>(N) * (K / 2);
+
+    // Split layout: [data(N×K/2) | scales(total_blocks)]
+    const uint8_t* data_ptr = static_cast<const uint8_t*>(raw_mxfp4_data);
+    const uint8_t* scale_ptr = data_ptr + data_bytes;
 
     int threads = 256;
     int grid = static_cast<int>((total_blocks + threads - 1) / threads);
-    dequant_mxfp4_raw_kernel<<<grid, threads, 0, stream>>>(
-        static_cast<const uint8_t*>(raw_mxfp4_data),
+    dequant_mxfp4_split_kernel<<<grid, threads, 0, stream>>>(
+        data_ptr, scale_ptr,
         static_cast<half*>(dst_fp16),
         static_cast<int>(N), static_cast<int>(K), blocks_per_row);
 }
@@ -468,6 +466,7 @@ void free_cutlass_mxfp4_weight(CutlassMxFP4Weight& w) {
     }
     w.data = nullptr;
     if (w.scale_factors) { cudaFree(w.scale_factors); w.scale_factors = nullptr; }
+    if (w.linear_scales) { cudaFree(w.linear_scales); w.linear_scales = nullptr; }
     w.N = w.K = 0;
     w.sf_bytes = 0;
     w.owns_data = false;
