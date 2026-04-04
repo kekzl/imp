@@ -190,9 +190,9 @@ template<> struct DequantTraits<QType::Q6_K> {
     static __device__ __forceinline__ float
     dp4a_block(const uint8_t* bp, int sub,
                const int* xi, float dq, float /*q8_sum*/) {
-        float d_w = __half2float(*(const half*)(bp + 208));
+        float d_w = __half2float(*reinterpret_cast<const half*>(bp + 208));
         return q6k_dp4a_group_preloaded(
-            bp, bp + 128, (const int8_t*)(bp + 192), d_w, xi, dq, sub);
+            bp, bp + 128, reinterpret_cast<const int8_t*>(bp + 192), d_w, xi, dq, sub);
     }
 };
 
@@ -280,8 +280,8 @@ template<> struct DequantTraits<QType::Q4_K> {
     static __device__ __forceinline__ float
     dp4a_block(const uint8_t* bp, int sub,
                const int* xi, float dq, float /*q8_sum*/) {
-        float d_super = __half2float(*(const half*)bp);
-        float dmin_super = __half2float(*(const half*)(bp + 2));
+        float d_super = __half2float(*reinterpret_cast<const half*>(bp));
+        float dmin_super = __half2float(*reinterpret_cast<const half*>(bp + 2));
         const uint8_t* sc = bp + 4;
         const uint8_t* qs = bp + 16;
 
@@ -305,8 +305,8 @@ template<> struct DequantTraits<QType::Q5_K> {
     static __device__ __forceinline__ float
     dp4a_block(const uint8_t* bp, int sub,
                const int* xi, float dq, float /*q8_sum*/) {
-        float d_super = __half2float(*(const half*)bp);
-        float dmin_super = __half2float(*(const half*)(bp + 2));
+        float d_super = __half2float(*reinterpret_cast<const half*>(bp));
+        float dmin_super = __half2float(*reinterpret_cast<const half*>(bp + 2));
         const uint8_t* sc = bp + 4;
         const uint8_t* qh = bp + 16;
         const uint8_t* qs = bp + 48;
@@ -341,8 +341,8 @@ template<> struct DequantTraits<QType::Q2_K> {
                const int* xi, float dq, float /*q8_sum*/) {
         const uint8_t* scales = bp;
         const uint8_t* qs     = bp + 16;
-        float d_w    = __half2float(*(const half*)(bp + 80));
-        float dmin_w = __half2float(*(const half*)(bp + 82));
+        float d_w    = __half2float(*reinterpret_cast<const half*>(bp + 80));
+        float dmin_w = __half2float(*reinterpret_cast<const half*>(bp + 82));
 
         int half_idx = sub / 4;
         int shift    = (sub % 4) * 2;
@@ -406,7 +406,7 @@ template<> struct DequantTraits<QType::Q3_K> {
         const uint8_t* hmask  = bp;
         const uint8_t* qs     = bp + 32;
         const uint8_t* sc_raw = bp + 96;
-        float d_all = __half2float(*(const half*)(bp + 108));
+        float d_all = __half2float(*reinterpret_cast<const half*>(bp + 108));
 
         int half_idx = sub / 4;
         int shift    = (sub % 4) * 2;
@@ -734,8 +734,8 @@ __global__ void gemv_dp4a_kernel(
     const size_t row_bytes = (size_t)(K / QT::kBlockElems) * QT::kBlockBytes;
 
     extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + total_q8 * 36);
+    int* smem_qs = reinterpret_cast<int*>(smem_q8);
+    float* smem_d = reinterpret_cast<float*>(smem_q8 + total_q8 * 36);
 
     for (int i = threadIdx.x; i < total_q8 * 8; i += blockDim.x) {
         int blk = i >> 3, w = i & 7;
@@ -743,7 +743,7 @@ __global__ void gemv_dp4a_kernel(
         smem_qs[blk * kSmemQ8Stride + w] = val;
     }
     if constexpr (QT::kNeedsQ8Sum) {
-        half* smem_s = (half*)(smem_q8 + total_q8 * 40);
+        half* smem_s = reinterpret_cast<half*>(smem_q8 + total_q8 * 40);
         for (int i = threadIdx.x; i < total_q8; i += blockDim.x) {
             smem_d[i] = d8[i];
             smem_s[i] = q8_1[i].s;
@@ -766,7 +766,7 @@ __global__ void gemv_dp4a_kernel(
         float dq = smem_d[b];
         float q8_sum = 0.0f;
         if constexpr (QT::kNeedsQ8Sum) {
-            half* smem_s = (half*)(smem_q8 + total_q8 * 40);
+            half* smem_s = reinterpret_cast<half*>(smem_q8 + total_q8 * 40);
             q8_sum = __half2float(smem_s[b]);
         }
 
@@ -818,7 +818,7 @@ static void launch_gemv_dp4a(const uint8_t* W, const block_q8_1* q8_1, const flo
             else
                 pdl::launch(gemv_dp4a_kpar_kernel<QT, false>,
                     dim3(M), dim3(128), size_t(0), stream,
-                    W, q8_1, d8, y, (const half*)nullptr, M, K);
+                    W, q8_1, d8, y, static_cast<const half*>(nullptr), M, K);
             return;
         }
     }
@@ -838,7 +838,7 @@ static void launch_gemv_dp4a(const uint8_t* W, const block_q8_1* q8_1, const flo
         else
             pdl::launch(gemv_dp4a_kernel<QT, NR, false>,
                 dim3(blocks), dim3(threads_per_block), smem_size, stream,
-                W, q8_1, d8, y, (const half*)nullptr, M, K);
+                W, q8_1, d8, y, static_cast<const half*>(nullptr), M, K);
     };
 
     // Dispatch NR based on kMaxNRows (caps NR to avoid register pressure)
@@ -874,8 +874,8 @@ __global__ void gemv_dp4a_fp32_kernel(
     const size_t row_bytes = (size_t)(K / QT::kBlockElems) * QT::kBlockBytes;
 
     extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + total_q8 * 36);
+    int* smem_qs = reinterpret_cast<int*>(smem_q8);
+    float* smem_d = reinterpret_cast<float*>(smem_q8 + total_q8 * 36);
 
     for (int i = threadIdx.x; i < total_q8 * 8; i += blockDim.x) {
         int blk = i >> 3, w = i & 7;
@@ -883,7 +883,7 @@ __global__ void gemv_dp4a_fp32_kernel(
         smem_qs[blk * kSmemQ8Stride + w] = val;
     }
     if constexpr (QT::kNeedsQ8Sum) {
-        half* smem_s = (half*)(smem_q8 + total_q8 * 40);
+        half* smem_s = reinterpret_cast<half*>(smem_q8 + total_q8 * 40);
         for (int i = threadIdx.x; i < total_q8; i += blockDim.x) {
             smem_d[i] = d8[i];
             smem_s[i] = q8_1[i].s;
@@ -906,7 +906,7 @@ __global__ void gemv_dp4a_fp32_kernel(
         float dq = smem_d[b];
         float q8_sum = 0.0f;
         if constexpr (QT::kNeedsQ8Sum) {
-            half* smem_s = (half*)(smem_q8 + total_q8 * 40);
+            half* smem_s = reinterpret_cast<half*>(smem_q8 + total_q8 * 40);
             q8_sum = __half2float(smem_s[b]);
         }
 
@@ -997,8 +997,8 @@ __global__ void gemv_dp4a_qkv_kernel(
     const size_t row_bytes = (size_t)(K / QT::kBlockElems) * QT::kBlockBytes;
 
     extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + total_q8 * 36);
+    int* smem_qs = reinterpret_cast<int*>(smem_q8);
+    float* smem_d = reinterpret_cast<float*>(smem_q8 + total_q8 * 36);
 
     for (int i = threadIdx.x; i < total_q8 * 8; i += blockDim.x) {
         int blk = i >> 3, w = i & 7;
@@ -1006,7 +1006,7 @@ __global__ void gemv_dp4a_qkv_kernel(
         smem_qs[blk * kSmemQ8Stride + w] = val;
     }
     if constexpr (QT::kNeedsQ8Sum) {
-        half* smem_s = (half*)(smem_q8 + total_q8 * 40);
+        half* smem_s = reinterpret_cast<half*>(smem_q8 + total_q8 * 40);
         for (int i = threadIdx.x; i < total_q8; i += blockDim.x) {
             smem_d[i] = d8[i];
             smem_s[i] = q8_1[i].s;
@@ -1029,7 +1029,7 @@ __global__ void gemv_dp4a_qkv_kernel(
         float dq = smem_d[b];
         float q8_sum = 0.0f;
         if constexpr (QT::kNeedsQ8Sum) {
-            half* smem_s = (half*)(smem_q8 + total_q8 * 40);
+            half* smem_s = reinterpret_cast<half*>(smem_q8 + total_q8 * 40);
             q8_sum = __half2float(smem_s[b]);
         }
 
@@ -1154,8 +1154,8 @@ __global__ void gemv_dp4a_gate_up_kernel(
     const size_t row_bytes = (size_t)(K / QT::kBlockElems) * QT::kBlockBytes;
 
     extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + total_q8 * 36);
+    int* smem_qs = reinterpret_cast<int*>(smem_q8);
+    float* smem_d = reinterpret_cast<float*>(smem_q8 + total_q8 * 36);
 
     for (int i = threadIdx.x; i < total_q8 * 8; i += blockDim.x) {
         int blk = i >> 3, w = i & 7;
@@ -1163,7 +1163,7 @@ __global__ void gemv_dp4a_gate_up_kernel(
         smem_qs[blk * kSmemQ8Stride + w] = val;
     }
     if constexpr (QT::kNeedsQ8Sum) {
-        half* smem_s = (half*)(smem_q8 + total_q8 * 40);
+        half* smem_s = reinterpret_cast<half*>(smem_q8 + total_q8 * 40);
         for (int i = threadIdx.x; i < total_q8; i += blockDim.x) {
             smem_d[i] = d8[i];
             smem_s[i] = q8_1[i].s;
@@ -1190,7 +1190,7 @@ __global__ void gemv_dp4a_gate_up_kernel(
         float dq = smem_d[b];
         float q8_sum = 0.0f;
         if constexpr (QT::kNeedsQ8Sum) {
-            half* smem_s = (half*)(smem_q8 + total_q8 * 40);
+            half* smem_s = reinterpret_cast<half*>(smem_q8 + total_q8 * 40);
             q8_sum = __half2float(smem_s[b]);
         }
 
@@ -1251,8 +1251,8 @@ __global__ void gemv_dp4a_moe_decode_kernel(
     const float* x_d8 = d8 + expert_slot * d8_stride;
 
     extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + total_q8 * 36);
+    int* smem_qs = reinterpret_cast<int*>(smem_q8);
+    float* smem_d = reinterpret_cast<float*>(smem_q8 + total_q8 * 36);
 
     for (int i = threadIdx.x; i < total_q8 * 8; i += blockDim.x) {
         int blk = i >> 3, w = i & 7;
@@ -1260,7 +1260,7 @@ __global__ void gemv_dp4a_moe_decode_kernel(
         smem_qs[blk * kSmemQ8Stride + w] = val;
     }
     if constexpr (QT::kNeedsQ8Sum) {
-        half* smem_s = (half*)(smem_q8 + total_q8 * 40);
+        half* smem_s = reinterpret_cast<half*>(smem_q8 + total_q8 * 40);
         for (int i = threadIdx.x; i < total_q8; i += blockDim.x) {
             smem_d[i] = x_d8[i];
             smem_s[i] = x_q8[i].s;
@@ -1287,7 +1287,7 @@ __global__ void gemv_dp4a_moe_decode_kernel(
         float dq = smem_d[b];
         float q8_sum = 0.0f;
         if constexpr (QT::kNeedsQ8Sum) {
-            half* smem_s = (half*)(smem_q8 + total_q8 * 40);
+            half* smem_s = reinterpret_cast<half*>(smem_q8 + total_q8 * 40);
             q8_sum = __half2float(smem_s[b]);
         }
 
@@ -1385,8 +1385,8 @@ __global__ void gemv_dp4a_moe_gate_up_kernel(
     const float* x_d8 = d8 + expert_slot * d8_stride;
 
     extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + total_q8 * 36);
+    int* smem_qs = reinterpret_cast<int*>(smem_q8);
+    float* smem_d = reinterpret_cast<float*>(smem_q8 + total_q8 * 36);
 
     for (int i = threadIdx.x; i < total_q8 * 8; i += blockDim.x) {
         int blk = i >> 3, w = i & 7;
@@ -1394,7 +1394,7 @@ __global__ void gemv_dp4a_moe_gate_up_kernel(
         smem_qs[blk * kSmemQ8Stride + w] = val;
     }
     if constexpr (QT::kNeedsQ8Sum) {
-        half* smem_s = (half*)(smem_q8 + total_q8 * 40);
+        half* smem_s = reinterpret_cast<half*>(smem_q8 + total_q8 * 40);
         for (int i = threadIdx.x; i < total_q8; i += blockDim.x) {
             smem_d[i] = x_d8[i];
             smem_s[i] = x_q8[i].s;
@@ -1421,7 +1421,7 @@ __global__ void gemv_dp4a_moe_gate_up_kernel(
         float dq = smem_d[b];
         float q8_sum = 0.0f;
         if constexpr (QT::kNeedsQ8Sum) {
-            half* smem_s = (half*)(smem_q8 + total_q8 * 40);
+            half* smem_s = reinterpret_cast<half*>(smem_q8 + total_q8 * 40);
             q8_sum = __half2float(smem_s[b]);
         }
 
@@ -1475,8 +1475,8 @@ __global__ void gemv_dp4a_moe_gate_up_mr_kernel(
     const float* x_d8 = d8 + expert_slot * d8_stride;
 
     extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + total_q8 * 36);
+    int* smem_qs = reinterpret_cast<int*>(smem_q8);
+    float* smem_d = reinterpret_cast<float*>(smem_q8 + total_q8 * 36);
 
     for (int i = threadIdx.x; i < total_q8 * 8; i += blockDim.x) {
         int blk = i >> 3, w = i & 7;
@@ -1484,7 +1484,7 @@ __global__ void gemv_dp4a_moe_gate_up_mr_kernel(
         smem_qs[blk * kSmemQ8Stride + w] = val;
     }
     if constexpr (QT::kNeedsQ8Sum) {
-        half* smem_s = (half*)(smem_q8 + total_q8 * 40);
+        half* smem_s = reinterpret_cast<half*>(smem_q8 + total_q8 * 40);
         for (int i = threadIdx.x; i < total_q8; i += blockDim.x) {
             smem_d[i] = x_d8[i];
             smem_s[i] = x_q8[i].s;
@@ -1520,7 +1520,7 @@ __global__ void gemv_dp4a_moe_gate_up_mr_kernel(
         float dq = smem_d[b];
         float q8_sum = 0.0f;
         if constexpr (QT::kNeedsQ8Sum) {
-            half* smem_s = (half*)(smem_q8 + total_q8 * 40);
+            half* smem_s = reinterpret_cast<half*>(smem_q8 + total_q8 * 40);
             q8_sum = __half2float(smem_s[b]);
         }
 
@@ -1597,8 +1597,8 @@ __global__ void gemv_dp4a_inline_quant_kernel(
 
     // Shared memory layout: [qs: total_q8 * 36 bytes (padded)] [d: total_q8 * 4 bytes]
     extern __shared__ char smem_q8[];
-    int* smem_qs = (int*)smem_q8;
-    float* smem_d = (float*)(smem_q8 + total_q8 * 36);
+    int* smem_qs = reinterpret_cast<int*>(smem_q8);
+    float* smem_d = reinterpret_cast<float*>(smem_q8 + total_q8 * 36);
 
     // Cooperative FP16 → Q8_1 quantization directly into shared memory.
     // Each iteration processes one Q8_1 block (32 FP16 elements).
@@ -1626,7 +1626,7 @@ __global__ void gemv_dp4a_inline_quant_kernel(
         // smem_qs layout: [blk * 8 + word] where each word is 4 packed int8s
         // We need smem_qs[blk * 8 + t/4] |= (q << (t%4)*8)
         // Simpler: write to a byte array, then the reads will use memcpy
-        int8_t* smem_bytes = (int8_t*)smem_q8;
+        int8_t* smem_bytes = reinterpret_cast<int8_t*>(smem_q8);
 
         // For kQ8PerWeight > 1 (Q6_K, Q4_K, Q5_K): each weight super-block
         // consumes kQ8PerWeight Q8_1 blocks. blk maps 1:1 to Q8_1 blocks.
@@ -1694,7 +1694,7 @@ static void launch_gemv_dp4a_inline_quant(
         else
             pdl::launch(gemv_dp4a_inline_quant_kernel<QT, NR, false>,
                 dim3(blocks), dim3(threads_per_block), smem_size, stream,
-                W, x_fp16, y, (const half*)nullptr, M, K);
+                W, x_fp16, y, static_cast<const half*>(nullptr), M, K);
     };
 
     // Dispatch NR based on kMaxNRows

@@ -70,6 +70,10 @@ struct ModelConfig {
     bool moe_sigmoid_gating = false;   // Nemotron-H uses sigmoid instead of softmax
     float attn_logit_softcap = 0.0f;   // Gemma-2/3: tanh(score/cap)*cap before softmax (0=disabled)
     float final_logit_softcap = 0.0f;  // Gemma-2/3: tanh(logit/cap)*cap on output logits (0=disabled)
+
+    // MXFP4 Hadamard rotation (set by converter via GGUF metadata)
+    int mxfp4_hadamard_attn = 0;  // block size for attention weights (0=disabled)
+    int mxfp4_hadamard_ffn = 0;   // block size for FFN weights (0=disabled)
 };
 
 struct TransformerLayer {

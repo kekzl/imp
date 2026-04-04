@@ -466,6 +466,7 @@ bool fmha_sm120_prefill(
             case 64:  LAUNCH_FMHA_SM120(128, 64);  return true;
             case 96:  LAUNCH_FMHA_SM120(128, 96);  return true;
             case 128: LAUNCH_FMHA_SM120(128, 128); return true;
+            case 256: LAUNCH_FMHA_SM120(128, 256); return true;
             default: break;
         }
     } else {
