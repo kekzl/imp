@@ -1,11 +1,8 @@
 #pragma once
 
-#include "graph/executor.h"
-#include "compute/gemm.h"
-#include "quant/quant_gemm.h"
-#include "quant/nvfp4_quant.h"
-#include "compute/gemm_cutlass_sm120.h"
-#include "compute/gemm_cutlass_mxfp4_sm120.h"
+#include "core/tensor.h"
+#include "model/model_config.h" // GGMLQuantType (Q6_K, Q4_0, etc.)
+#include "compute/gemm.h"       // block_q8_1
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -13,6 +10,12 @@
 #include <unordered_map>
 
 namespace imp {
+
+// Forward declarations for legacy gemm_dispatch parameters
+struct FP8CacheEntry;
+struct NvFP4QuantResult;
+struct CutlassNvFP4Weight;
+struct CutlassMxFP4Weight;
 
 // ---------------------------------------------------------------------------
 // CUDA kernels used by the executor

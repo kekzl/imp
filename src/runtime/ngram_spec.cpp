@@ -9,10 +9,10 @@
 namespace imp {
 
 NgramSpecDecoder::~NgramSpecDecoder() {
-    if (d_tokens_) cudaFree(d_tokens_);
-    if (d_positions_) cudaFree(d_positions_);
-    if (d_block_table_) cudaFree(d_block_table_);
-    if (d_ctx_len_) cudaFree(d_ctx_len_);
+    if (d_tokens_) IMP_CUDA_CHECK_LOG(cudaFree(d_tokens_));
+    if (d_positions_) IMP_CUDA_CHECK_LOG(cudaFree(d_positions_));
+    if (d_block_table_) IMP_CUDA_CHECK_LOG(cudaFree(d_block_table_));
+    if (d_ctx_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_ctx_len_));
 }
 
 bool NgramSpecDecoder::init(GraphExecutor* executor, KVCacheManager* kv_manager,
@@ -145,28 +145,28 @@ NgramSpecDecoder::VerifyResult NgramSpecDecoder::verify(
     for (int i = 0; i < n_verify; i++)
         h_ctx_lens[i] = position + i + 1;
 
-    cudaMemcpyAsync(d_tokens_, h_tokens.data(), n_verify * sizeof(int32_t),
-                    cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_positions_, h_positions.data(), n_verify * sizeof(int),
-                    cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_ctx_len_, h_ctx_lens.data(), n_verify * sizeof(int),
-                    cudaMemcpyHostToDevice, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_tokens_, h_tokens.data(), n_verify * sizeof(int32_t),
+                    cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_positions_, h_positions.data(), n_verify * sizeof(int),
+                    cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_ctx_len_, h_ctx_lens.data(), n_verify * sizeof(int),
+                    cudaMemcpyHostToDevice, stream));
 
     // Replicated block table: n_verify identical copies
     const auto& block_table = kv_manager_->block_table(seq_id);
     int n_blocks = static_cast<int>(block_table.size());
     int bt_total = n_verify * n_blocks;
     if (bt_total > d_block_table_cap_) {
-        if (d_block_table_) cudaFree(d_block_table_);
+        if (d_block_table_) IMP_CUDA_CHECK_LOG(cudaFree(d_block_table_));
         d_block_table_cap_ = bt_total * 2;
-        cudaMalloc(&d_block_table_, d_block_table_cap_ * sizeof(int));
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_table_, d_block_table_cap_ * sizeof(int)));
     }
     std::vector<int> h_bt(bt_total, 0);
     for (int c = 0; c < n_verify; c++)
         for (int b = 0; b < n_blocks; b++)
             h_bt[c * n_blocks + b] = block_table[b];
-    cudaMemcpyAsync(d_block_table_, h_bt.data(), bt_total * sizeof(int),
-                    cudaMemcpyHostToDevice, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_table_, h_bt.data(), bt_total * sizeof(int),
+                    cudaMemcpyHostToDevice, stream));
 
     executor_->resize_workspace(n_verify, stream);
 

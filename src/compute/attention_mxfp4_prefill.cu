@@ -274,7 +274,7 @@ static void ensure_workspace(int seq_q, int seq_kv, int hd) {
         return;
 
     // Free existing
-    auto safe_free = [](void*& p) { if (p) { cudaFree(p); p = nullptr; } };
+    auto safe_free = [](void*& p) { if (p) { IMP_CUDA_CHECK_LOG(cudaFree(p)); p = nullptr; } };
     safe_free(s_ws.q_packed);
     safe_free(s_ws.q_sf);
     safe_free(s_ws.k_packed);
@@ -288,15 +288,15 @@ static void ensure_workspace(int seq_q, int seq_kv, int hd) {
     size_t k_sf_bytes = cutlass_mxfp4_sf_size(seq_kv, hd);
     size_t s_bytes = (size_t)seq_q * seq_kv * sizeof(half);
 
-    cudaMalloc(&s_ws.q_packed, q_packed_bytes);
-    cudaMalloc(&s_ws.q_sf,     q_sf_bytes);
-    cudaMalloc(&s_ws.k_packed, k_packed_bytes);
-    cudaMalloc(&s_ws.k_sf,     k_sf_bytes);
-    cudaMalloc(&s_ws.s_matrix, s_bytes);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.q_packed, q_packed_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.q_sf,     q_sf_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.k_packed, k_packed_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.k_sf,     k_sf_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.s_matrix, s_bytes));
 
     size_t gws = gemm_mxfp4_cutlass_sm120_workspace(seq_q, seq_kv, hd);
     if (gws > 0) {
-        cudaMalloc(&s_ws.gemm_ws, gws);
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.gemm_ws, gws));
         s_ws.gemm_ws_size = gws;
     }
 
@@ -403,7 +403,7 @@ bool attention_mxfp4_prefill(
             // ---- Quantize K for this KV head ----
             const half* K_head = K_b + g * hd;
 
-            cudaMemsetAsync(s_ws.k_sf, 0, k_sf_bytes, stream);
+            IMP_CUDA_CHECK_LOG(cudaMemsetAsync(s_ws.k_sf, 0, k_sf_bytes, stream));
             quantize_fp16_mxfp4_strided_kernel<<<k_blocks, 256, 0, stream>>>(
                 K_head, kv_row_stride,
                 static_cast<uint8_t*>(s_ws.k_packed),
@@ -416,7 +416,7 @@ bool attention_mxfp4_prefill(
 
                 // Quantize Q for this head
                 const half* Q_head = Q_b + h * hd;
-                cudaMemsetAsync(s_ws.q_sf, 0, q_sf_bytes, stream);
+                IMP_CUDA_CHECK_LOG(cudaMemsetAsync(s_ws.q_sf, 0, q_sf_bytes, stream));
                 quantize_fp16_mxfp4_strided_kernel<<<q_blocks, 256, 0, stream>>>(
                     Q_head, q_row_stride,
                     static_cast<uint8_t*>(s_ws.q_packed),

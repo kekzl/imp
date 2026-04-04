@@ -303,8 +303,8 @@ float calibrate_fp8_scale(const Tensor& input, cudaStream_t stream)
     // Allocate temporary buffer for per-block absmax values + final scalar.
     float* d_block_maxes = nullptr;
     float* d_result = nullptr;
-    cudaMalloc(&d_block_maxes, (size_t)grid * sizeof(float));
-    cudaMalloc(&d_result, sizeof(float));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_maxes, (size_t)grid * sizeof(float)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_result, sizeof(float)));
 
     // First-level reduction: per-block absmax.
     absmax_reduce_kernel<<<grid, kBlockSize, 0, stream>>>(
@@ -320,11 +320,11 @@ float calibrate_fp8_scale(const Tensor& input, cudaStream_t stream)
 
     // Copy result back to host.
     float absmax = 0.0f;
-    cudaMemcpyAsync(&absmax, d_result, sizeof(float), cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&absmax, d_result, sizeof(float), cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 
-    cudaFree(d_block_maxes);
-    cudaFree(d_result);
+    IMP_CUDA_CHECK_LOG(cudaFree(d_block_maxes));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_result));
 
     // Avoid division by zero.
     if (absmax == 0.0f) {
@@ -418,8 +418,8 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
 
     float* d_block_maxes = nullptr;
     float* d_scale_device = nullptr;
-    cudaMalloc(&d_block_maxes, (size_t)grid * sizeof(float));
-    cudaMalloc(&d_scale_device, sizeof(float));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_maxes, (size_t)grid * sizeof(float)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_scale_device, sizeof(float)));
 
     absmax_reduce_kernel<<<grid, kBlockSize, 0, stream>>>(
         static_cast<const half*>(input.data),
@@ -432,14 +432,14 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
         grid);
 
     float absmax = 0.0f;
-    cudaMemcpyAsync(&absmax, d_scale_device, sizeof(float), cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&absmax, d_scale_device, sizeof(float), cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 
     float scale = (absmax > 0.0f) ? (absmax / kFP8E4M3Max) : 1.0f;
     float inv_scale = 1.0f / scale;
 
     if (d_scale_out != nullptr) {
-        cudaMemcpyAsync(d_scale_out, &scale, sizeof(float), cudaMemcpyHostToDevice, stream);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_scale_out, &scale, sizeof(float), cudaMemcpyHostToDevice, stream));
     }
 
     quantize_fp16_to_fp8_scaled_kernel<<<grid, kBlockSize, 0, stream>>>(
@@ -454,8 +454,8 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
                       cudaGetErrorString(err));
     }
 
-    cudaFree(d_block_maxes);
-    cudaFree(d_scale_device);
+    IMP_CUDA_CHECK_LOG(cudaFree(d_block_maxes));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_scale_device));
 
     IMP_LOG_DEBUG("quantize_fp16_to_fp8_e4m3: n=%d  scale=%.6f", n, scale);
 }

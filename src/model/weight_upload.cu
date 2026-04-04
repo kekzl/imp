@@ -95,7 +95,7 @@ struct PinnedStager {
     void destroy() {
         for (int i = 0; i < 2; i++) {
             if (done[i]) { cudaEventSynchronize(done[i]); cudaEventDestroy(done[i]); done[i] = nullptr; }
-            if (buf[i]) { cudaFreeHost(buf[i]); buf[i] = nullptr; }
+            if (buf[i]) { IMP_CUDA_CHECK_LOG(cudaFreeHost(buf[i])); buf[i] = nullptr; }
         }
     }
 };
@@ -340,7 +340,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         void* d_scales = nullptr;
         size_t scales_bytes = scales_count * sizeof(uint16_t);
         checked_cuda_malloc(&d_scales, scales_bytes);
-        if (!d_scales) { cudaFree(d_nibbles); return false; }
+        if (!d_scales) { IMP_CUDA_CHECK_LOG(cudaFree(d_nibbles)); return false; }
         h2d_copy(d_scales, h_scales.data(), scales_bytes, stream);
         gpu_allocs.push_back(d_scales);
 
@@ -527,12 +527,12 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
             size_t fp16_bytes = static_cast<size_t>(N) * K * sizeof(uint16_t);
             void* d_fp16 = nullptr;
             checked_cuda_malloc(&d_fp16, fp16_bytes);
-            if (!d_fp16) { cudaFree(d_raw); return false; }
+            if (!d_fp16) { IMP_CUDA_CHECK_LOG(cudaFree(d_raw)); return false; }
 
             dequant_gpu(d_raw, d_fp16, qtype, static_cast<int>(N),
                         static_cast<int>(K), stream);
-            cudaStreamSynchronize(stream);
-            cudaFree(d_raw);
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+            IMP_CUDA_CHECK_LOG(cudaFree(d_raw));
             gpu_allocs.push_back(d_fp16);
 
             weight = Tensor(d_fp16, DType::FP16, weight.ndim, weight.shape, true);
@@ -779,7 +779,7 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq,
         size_t qz_bytes = static_cast<size_t>(gptq.qzeros.shape[0]) * gptq.qzeros.shape[1] * sizeof(int32_t);
         if (checked_cuda_malloc(reinterpret_cast<void**>(&d_qzeros), qz_bytes) != cudaSuccess || !d_qzeros) {
             IMP_LOG_ERROR("GPTQ: failed to allocate qzeros");
-            cudaFree(d_qweight);
+            IMP_CUDA_CHECK_LOG(cudaFree(d_qweight));
             return false;
         }
         h2d_copy(d_qzeros, gptq.qzeros.data, qz_bytes, stream);
@@ -790,8 +790,8 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq,
     half* d_scales = nullptr;
     if (checked_cuda_malloc(reinterpret_cast<void**>(&d_scales), sc_bytes) != cudaSuccess || !d_scales) {
         IMP_LOG_ERROR("GPTQ: failed to allocate scales");
-        cudaFree(d_qweight);
-        if (d_qzeros) cudaFree(d_qzeros);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_qweight));
+        if (d_qzeros) IMP_CUDA_CHECK_LOG(cudaFree(d_qzeros));
         return false;
     }
     h2d_copy(d_scales, gptq.scales.data, sc_bytes, stream);
@@ -812,10 +812,10 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq,
     half* d_out = nullptr;
     if (checked_cuda_malloc(reinterpret_cast<void**>(&d_out), out_bytes) != cudaSuccess || !d_out) {
         IMP_LOG_ERROR("GPTQ: failed to allocate output (%zu bytes)", out_bytes);
-        cudaFree(d_qweight);
-        if (d_qzeros) cudaFree(d_qzeros);
-        cudaFree(d_scales);
-        if (d_g_idx) cudaFree(d_g_idx);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_qweight));
+        if (d_qzeros) IMP_CUDA_CHECK_LOG(cudaFree(d_qzeros));
+        IMP_CUDA_CHECK_LOG(cudaFree(d_scales));
+        if (d_g_idx) IMP_CUDA_CHECK_LOG(cudaFree(d_g_idx));
         return false;
     }
 
@@ -824,11 +824,11 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq,
                   N, K, gptq.group_size, stream);
 
     // 7. Sync and free temporary GPU buffers
-    cudaStreamSynchronize(stream);
-    cudaFree(d_qweight);
-    if (d_qzeros) cudaFree(d_qzeros);
-    cudaFree(d_scales);
-    if (d_g_idx) cudaFree(d_g_idx);
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_qweight));
+    if (d_qzeros) IMP_CUDA_CHECK_LOG(cudaFree(d_qzeros));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_scales));
+    if (d_g_idx) IMP_CUDA_CHECK_LOG(cudaFree(d_g_idx));
 
     // 8. Set output tensor
     int64_t out_shape[4] = {N, K, 0, 0};
@@ -1128,7 +1128,7 @@ static bool upload_expert_weights(
                         cudaError_t cpy_err = h2d_copy(gpu_ptr, packed.data, total_raw, ctx.stream);
                         if (cpy_err != cudaSuccess) {
                             IMP_LOG_ERROR("  %s: h2d_copy failed: %s", name, cudaGetErrorString(cpy_err));
-                            cudaFree(gpu_ptr);
+                            IMP_CUDA_CHECK_LOG(cudaFree(gpu_ptr));
                             return false;
                         }
                         packed.data = gpu_ptr;

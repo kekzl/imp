@@ -49,13 +49,13 @@ PinnedAllocator::PinnedAllocator(size_t pool_size) {
 PinnedAllocator::~PinnedAllocator() {
     // Free every outstanding fallback allocation.
     for (void* ptr : fallback_allocs_) {
-        cudaFreeHost(ptr);
+        IMP_CUDA_CHECK_LOG(cudaFreeHost(ptr));
     }
     fallback_allocs_.clear();
 
     // Free the pool itself.
     if (pool_base_) {
-        cudaFreeHost(pool_base_);
+        IMP_CUDA_CHECK_LOG(cudaFreeHost(pool_base_));
         pool_base_ = nullptr;
     }
 
@@ -160,7 +160,7 @@ void PinnedAllocator::deallocate(void* ptr) {
     } else {
         // Fallback allocation -- release to the OS immediately.
         fallback_allocs_.erase(ptr);
-        cudaFreeHost(ptr);
+        IMP_CUDA_CHECK_LOG(cudaFreeHost(ptr));
     }
 }
 

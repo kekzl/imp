@@ -1,4 +1,5 @@
 #include "compute/gemm_grouped.h"
+#include "core/logging.h"
 
 #ifdef IMP_USE_CUTLASS
 #include "compute/gemm_cutlass_grouped_sm120.h"
@@ -257,20 +258,20 @@ void gemm_moe_batched(const void* a_base, void* c_base,
                 d_B_ptrs_cu = d_work_ptrs + n_experts;
                 d_C_ptrs_cu = d_work_ptrs + 2 * n_experts;
                 // M values: allocate separately (d_work_ptrs may not have extra room)
-                cudaMallocAsync(&d_M_values, m_bytes, stream);
+                IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_M_values, m_bytes, stream));
                 owns_cu_ptrs = true;  // only owns d_M_values
             } else {
-                cudaMallocAsync(reinterpret_cast<void**>(&d_A_ptrs_cu), ptr_bytes, stream);
-                cudaMallocAsync(reinterpret_cast<void**>(&d_B_ptrs_cu), ptr_bytes, stream);
-                cudaMallocAsync(reinterpret_cast<void**>(&d_C_ptrs_cu), ptr_bytes, stream);
-                cudaMallocAsync(reinterpret_cast<void**>(&d_M_values), m_bytes, stream);
+                IMP_CUDA_CHECK_LOG(cudaMallocAsync(reinterpret_cast<void**>(&d_A_ptrs_cu), ptr_bytes, stream));
+                IMP_CUDA_CHECK_LOG(cudaMallocAsync(reinterpret_cast<void**>(&d_B_ptrs_cu), ptr_bytes, stream));
+                IMP_CUDA_CHECK_LOG(cudaMallocAsync(reinterpret_cast<void**>(&d_C_ptrs_cu), ptr_bytes, stream));
+                IMP_CUDA_CHECK_LOG(cudaMallocAsync(reinterpret_cast<void**>(&d_M_values), m_bytes, stream));
                 owns_cu_ptrs = true;
             }
 
-            cudaMemcpyAsync(d_A_ptrs_cu, h_A.data(), ptr_bytes, cudaMemcpyHostToDevice, stream);
-            cudaMemcpyAsync(d_B_ptrs_cu, h_B.data(), ptr_bytes, cudaMemcpyHostToDevice, stream);
-            cudaMemcpyAsync(d_C_ptrs_cu, h_C.data(), ptr_bytes, cudaMemcpyHostToDevice, stream);
-            cudaMemcpyAsync(d_M_values, h_M.data(), m_bytes, cudaMemcpyHostToDevice, stream);
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_A_ptrs_cu, h_A.data(), ptr_bytes, cudaMemcpyHostToDevice, stream));
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_B_ptrs_cu, h_B.data(), ptr_bytes, cudaMemcpyHostToDevice, stream));
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_C_ptrs_cu, h_C.data(), ptr_bytes, cudaMemcpyHostToDevice, stream));
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_M_values, h_M.data(), m_bytes, cudaMemcpyHostToDevice, stream));
 
             bool ok = gemm_grouped_cutlass_sm120(
                 reinterpret_cast<const void* const*>(d_A_ptrs_cu),
@@ -282,11 +283,11 @@ void gemm_moe_batched(const void* a_base, void* c_base,
                 stream);
 
             // Cleanup async allocations
-            cudaFreeAsync(d_M_values, stream);
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_M_values, stream));
             if (owns_cu_ptrs && !d_work_ptrs) {
-                cudaFreeAsync(d_A_ptrs_cu, stream);
-                cudaFreeAsync(d_B_ptrs_cu, stream);
-                cudaFreeAsync(d_C_ptrs_cu, stream);
+                IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_A_ptrs_cu, stream));
+                IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_B_ptrs_cu, stream));
+                IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_C_ptrs_cu, stream));
             }
 
             if (ok) return;  // Success — skip cuBLAS path
@@ -408,17 +409,17 @@ void gemm_moe_batched(const void* a_base, void* c_base,
     } else {
         // Allocate once for all groups (not per-group)
         size_t ptr_bytes = n_active * sizeof(void*);
-        cudaMallocAsync(&d_A_ptrs, ptr_bytes, stream);
-        cudaMallocAsync(&d_B_ptrs, ptr_bytes, stream);
-        cudaMallocAsync(&d_C_ptrs, ptr_bytes, stream);
+        IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_A_ptrs, ptr_bytes, stream));
+        IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_B_ptrs, ptr_bytes, stream));
+        IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_C_ptrs, ptr_bytes, stream));
         owns_ptrs = true;
     }
 
     // Single upload of all pointer arrays
     size_t active_bytes = n_active * sizeof(void*);
-    cudaMemcpyAsync(d_A_ptrs, h_A.data(), active_bytes, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_B_ptrs, h_B.data(), active_bytes, cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_C_ptrs, h_C.data(), active_bytes, cudaMemcpyHostToDevice, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_A_ptrs, h_A.data(), active_bytes, cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_B_ptrs, h_B.data(), active_bytes, cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_C_ptrs, h_C.data(), active_bytes, cudaMemcpyHostToDevice, stream));
 
     // Use cublasGemmGroupedBatchedEx: single cuBLAS call for ALL groups.
     // This eliminates per-group launch overhead (critical for 61+ groups with 128 experts).
@@ -482,9 +483,9 @@ void gemm_moe_batched(const void* a_base, void* c_base,
     }
 
     if (owns_ptrs) {
-        cudaFreeAsync(d_A_ptrs, stream);
-        cudaFreeAsync(d_B_ptrs, stream);
-        cudaFreeAsync(d_C_ptrs, stream);
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_A_ptrs, stream));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_B_ptrs, stream));
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_C_ptrs, stream));
     }
 }
 
@@ -513,7 +514,7 @@ static size_t s_grouped_workspace_size = 0;
 
 void gemm_grouped_cleanup() {
     if (s_grouped_workspace) {
-        cudaFree(s_grouped_workspace);
+        IMP_CUDA_CHECK_LOG(cudaFree(s_grouped_workspace));
         s_grouped_workspace = nullptr;
         s_grouped_workspace_size = 0;
     }
@@ -599,9 +600,9 @@ void gemm_moe_device_grouped(
     const void** d_a_ptrs = nullptr;
     void** d_c_ptrs = nullptr;
 
-    cudaMallocAsync(&d_M_values, n_experts * sizeof(int32_t), stream);
-    cudaMallocAsync(&d_a_ptrs, n_experts * sizeof(void*), stream);
-    cudaMallocAsync(&d_c_ptrs, n_experts * sizeof(void*), stream);
+    IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_M_values, n_experts * sizeof(int32_t), stream));
+    IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_a_ptrs, n_experts * sizeof(void*), stream));
+    IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_c_ptrs, n_experts * sizeof(void*), stream));
 
     // Compute per-expert params on GPU (no host sync!)
     int threads = 256;
@@ -700,33 +701,33 @@ void gemm_moe_device_grouped(
         // We need host-side M values for the per-expert fallback.
         // Since we want to avoid host sync, we use a stream-ordered memcpy.
         std::vector<int32_t> h_M(n_experts);
-        cudaMemcpyAsync(h_M.data(), d_M_values,
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_M.data(), d_M_values,
                          n_experts * sizeof(int32_t),
-                         cudaMemcpyDeviceToHost, stream);
+                         cudaMemcpyDeviceToHost, stream));
 
         // Also need host-side pointers
         std::vector<const void*> h_a_ptrs(n_experts);
         std::vector<void*> h_c_ptrs(n_experts);
-        cudaMemcpyAsync(h_a_ptrs.data(), d_a_ptrs,
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_a_ptrs.data(), d_a_ptrs,
                          n_experts * sizeof(void*),
-                         cudaMemcpyDeviceToHost, stream);
-        cudaMemcpyAsync(h_c_ptrs.data(), d_c_ptrs,
+                         cudaMemcpyDeviceToHost, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_c_ptrs.data(), d_c_ptrs,
                          n_experts * sizeof(void*),
-                         cudaMemcpyDeviceToHost, stream);
+                         cudaMemcpyDeviceToHost, stream));
 
         // Need host B pointers too
         std::vector<const void*> h_b_ptrs(n_experts);
-        cudaMemcpyAsync(h_b_ptrs.data(), d_b_ptrs,
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_b_ptrs.data(), d_b_ptrs,
                          n_experts * sizeof(void*),
-                         cudaMemcpyDeviceToHost, stream);
+                         cudaMemcpyDeviceToHost, stream));
 
         // Optional: host-side scales
         std::vector<float> h_a_scales;
         if (a_scales) {
             h_a_scales.resize(n_experts);
-            cudaMemcpyAsync(h_a_scales.data(), a_scales,
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_a_scales.data(), a_scales,
                              n_experts * sizeof(float),
-                             cudaMemcpyDeviceToHost, stream);
+                             cudaMemcpyDeviceToHost, stream));
         }
 
         cudaStreamSynchronize(stream);
@@ -763,9 +764,9 @@ void gemm_moe_device_grouped(
     cublasLtMatrixLayoutDestroy(Cdesc);
     cublasLtMatmulDescDestroy(opDesc);
 
-    cudaFreeAsync(d_M_values, stream);
-    cudaFreeAsync(d_a_ptrs, stream);
-    cudaFreeAsync(d_c_ptrs, stream);
+    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_M_values, stream));
+    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_a_ptrs, stream));
+    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_c_ptrs, stream));
 }
 
 #endif  // IMP_CUDA_13_1

@@ -388,9 +388,9 @@ bool CudaGraphConditionalRunner::setup(
     if (!config_.stop_ids.empty()) {
         err = cudaMalloc(&d_stop_ids_, config_.stop_ids.size() * sizeof(int32_t));
         if (err != cudaSuccess) goto fail;
-        cudaMemcpyAsync(d_stop_ids_, config_.stop_ids.data(),
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_stop_ids_, config_.stop_ids.data(),
                          config_.stop_ids.size() * sizeof(int32_t),
-                         cudaMemcpyHostToDevice, stream);
+                         cudaMemcpyHostToDevice, stream));
     }
 
     // Think budget counters (device-side)
@@ -401,8 +401,8 @@ bool CudaGraphConditionalRunner::setup(
         if (err != cudaSuccess) goto fail;
         int zero = 0;
         int init_think = config_.initial_in_think ? 1 : 0;
-        cudaMemcpyAsync(d_think_count_, &zero, sizeof(int), cudaMemcpyHostToDevice, stream);
-        cudaMemcpyAsync(d_in_think_, &init_think, sizeof(int), cudaMemcpyHostToDevice, stream);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_think_count_, &zero, sizeof(int), cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_in_think_, &init_think, sizeof(int), cudaMemcpyHostToDevice, stream));
     }
 
     // ---- Allocate mapped pinned memory for ring buffer ----
@@ -428,14 +428,14 @@ bool CudaGraphConditionalRunner::setup(
         *h_step_counter_ = 0;
         memset(h_ring_buffer_, 0, config_.max_steps * sizeof(int32_t));
 
-        cudaMemcpyAsync(d_token_id_, &first_token, sizeof(int32_t),
-                         cudaMemcpyHostToDevice, stream);
-        cudaMemcpyAsync(d_position_, &init_pos, sizeof(int),
-                         cudaMemcpyHostToDevice, stream);
-        cudaMemcpyAsync(d_context_len_, &init_ctx, sizeof(int),
-                         cudaMemcpyHostToDevice, stream);
-        cudaMemcpyAsync(d_step_counter_, &init_step, sizeof(int),
-                         cudaMemcpyHostToDevice, stream);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_id_, &first_token, sizeof(int32_t),
+                         cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_position_, &init_pos, sizeof(int),
+                         cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_context_len_, &init_ctx, sizeof(int),
+                         cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_step_counter_, &init_step, sizeof(int),
+                         cudaMemcpyHostToDevice, stream));
     }
 
     // ---- Build InferenceState for graph body (uses our device pointers) ----
@@ -618,17 +618,17 @@ void CudaGraphConditionalRunner::cleanup() {
     if (exec_) { cudaGraphExecDestroy(exec_); exec_ = nullptr; }
     if (graph_) { cudaGraphDestroy(graph_); graph_ = nullptr; }
 
-    if (d_token_id_) { cudaFree(d_token_id_); d_token_id_ = nullptr; }
-    if (d_position_) { cudaFree(d_position_); d_position_ = nullptr; }
-    if (d_context_len_) { cudaFree(d_context_len_); d_context_len_ = nullptr; }
-    if (d_step_counter_) { cudaFree(d_step_counter_); d_step_counter_ = nullptr; }
-    if (d_stop_ids_) { cudaFree(d_stop_ids_); d_stop_ids_ = nullptr; }
-    if (d_think_count_) { cudaFree(d_think_count_); d_think_count_ = nullptr; }
-    if (d_in_think_) { cudaFree(d_in_think_); d_in_think_ = nullptr; }
+    if (d_token_id_) { IMP_CUDA_CHECK_LOG(cudaFree(d_token_id_)); d_token_id_ = nullptr; }
+    if (d_position_) { IMP_CUDA_CHECK_LOG(cudaFree(d_position_)); d_position_ = nullptr; }
+    if (d_context_len_) { IMP_CUDA_CHECK_LOG(cudaFree(d_context_len_)); d_context_len_ = nullptr; }
+    if (d_step_counter_) { IMP_CUDA_CHECK_LOG(cudaFree(d_step_counter_)); d_step_counter_ = nullptr; }
+    if (d_stop_ids_) { IMP_CUDA_CHECK_LOG(cudaFree(d_stop_ids_)); d_stop_ids_ = nullptr; }
+    if (d_think_count_) { IMP_CUDA_CHECK_LOG(cudaFree(d_think_count_)); d_think_count_ = nullptr; }
+    if (d_in_think_) { IMP_CUDA_CHECK_LOG(cudaFree(d_in_think_)); d_in_think_ = nullptr; }
 
-    if (h_ring_buffer_) { cudaFreeHost(h_ring_buffer_); h_ring_buffer_ = nullptr; }
+    if (h_ring_buffer_) { IMP_CUDA_CHECK_LOG(cudaFreeHost(h_ring_buffer_)); h_ring_buffer_ = nullptr; }
     d_ring_buffer_ = nullptr;
-    if (h_step_counter_) { cudaFreeHost(h_step_counter_); h_step_counter_ = nullptr; }
+    if (h_step_counter_) { IMP_CUDA_CHECK_LOG(cudaFreeHost(h_step_counter_)); h_step_counter_ = nullptr; }
     d_step_counter_mapped_ = nullptr;
 
     launched_ = false;

@@ -8,6 +8,7 @@
 
 #include "compute/gemm_cutlass.h"
 #include "core/tensor.h"
+#include "core/logging.h"
 
 #include "cutlass/cutlass.h"
 #include "cutlass/gemm/gemm.h"
@@ -140,21 +141,21 @@ void gemm_moe_cutlass(const void* a_base, void* c_base,
     size_t total = align8(o6 + n_active * sizeof(int64_t));
 
     if (total > s_staging_sz) {
-        if (s_staging) cudaFree(s_staging);
-        cudaMalloc(&s_staging, total);
+        if (s_staging) IMP_CUDA_CHECK_LOG(cudaFree(s_staging));
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&s_staging, total));
         s_staging_sz = total;
     }
 
     char* dv = static_cast<char*>(s_staging);
 
     // H2D copies (pageable → synchronous from host, ordered on stream)
-    cudaMemcpyAsync(dv+o0, h_sizes.data(), n_active*sizeof(GemmCoord), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(dv+o1, h_a.data(),     n_active*sizeof(ElemA*),    cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(dv+o2, h_b.data(),     n_active*sizeof(ElemB*),    cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(dv+o3, h_d.data(),     n_active*sizeof(ElemC*),    cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(dv+o4, h_lda.data(),   n_active*sizeof(int64_t),   cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(dv+o5, h_ldb.data(),   n_active*sizeof(int64_t),   cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(dv+o6, h_ldd.data(),   n_active*sizeof(int64_t),   cudaMemcpyHostToDevice, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dv+o0, h_sizes.data(), n_active*sizeof(GemmCoord), cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dv+o1, h_a.data(),     n_active*sizeof(ElemA*),    cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dv+o2, h_b.data(),     n_active*sizeof(ElemB*),    cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dv+o3, h_d.data(),     n_active*sizeof(ElemC*),    cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dv+o4, h_lda.data(),   n_active*sizeof(int64_t),   cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dv+o5, h_ldb.data(),   n_active*sizeof(int64_t),   cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dv+o6, h_ldd.data(),   n_active*sizeof(int64_t),   cudaMemcpyHostToDevice, stream));
 
     // 4. Compute threadblock count
     int tb_count = GDev::sufficient(h_sizes.data(), n_active);
@@ -190,8 +191,8 @@ void gemm_moe_cutlass(const void* a_base, void* c_base,
     // 7. Workspace
     size_t ws = GDev::get_workspace_size(args);
     if (ws > s_workspace_sz) {
-        if (s_workspace) cudaFree(s_workspace);
-        cudaMalloc(&s_workspace, ws);
+        if (s_workspace) IMP_CUDA_CHECK_LOG(cudaFree(s_workspace));
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&s_workspace, ws));
         s_workspace_sz = ws;
     }
 

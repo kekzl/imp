@@ -65,7 +65,7 @@ static void* vram_alloc(VRAMAllocator* alloc, size_t bytes, const char* tag) {
 static void vram_free(VRAMAllocator* alloc, void* ptr) {
     if (!ptr) return;
     if (alloc) alloc->free(ptr);
-    else cudaFree(ptr);
+    else IMP_CUDA_CHECK_LOG(cudaFree(ptr));
 }
 
 // Helper: create a fused weight pair by concatenating two FP16 cached weights.
@@ -105,11 +105,11 @@ static bool create_fused_weight_pair(
         return false;
     }
 
-    cudaMemcpyAsync(fused_buf, it_a->second.data, one_sz,
-                     cudaMemcpyDeviceToDevice, stream);
-    cudaMemcpyAsync(static_cast<char*>(fused_buf) + one_sz,
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(fused_buf, it_a->second.data, one_sz,
+                     cudaMemcpyDeviceToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(static_cast<char*>(fused_buf) + one_sz,
                      it_b->second.data, one_sz,
-                     cudaMemcpyDeviceToDevice, stream);
+                     cudaMemcpyDeviceToDevice, stream));
 
     int64_t shape[2] = {2 * a_rows, static_cast<int64_t>(K)};
     out_map[layer_idx] = Tensor(fused_buf, DType::FP16, 2, shape, true);
@@ -308,8 +308,8 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
             if (longrope_long_freqs_)  { cudaFree(longrope_long_freqs_);  longrope_long_freqs_ = nullptr; }
             return false;
         }
-        cudaMemcpy(longrope_short_freqs_, short_freqs.data(), pairs * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemcpy(longrope_long_freqs_,  long_freqs.data(),  pairs * sizeof(float), cudaMemcpyHostToDevice);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(longrope_short_freqs_, short_freqs.data(), pairs * sizeof(float), cudaMemcpyHostToDevice));
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(longrope_long_freqs_,  long_freqs.data(),  pairs * sizeof(float), cudaMemcpyHostToDevice));
 
         IMP_LOG_INFO("LongRoPE: %d freq pairs, orig_max_pos=%d", pairs, longrope_orig_max_pos_);
     }
@@ -834,7 +834,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 // KV cache + weight caches (FP8/NVFP4) need the remaining VRAM,
                 // so expert cache must not over-commit.
                 size_t free_mem = 0, total_mem = 0;
-                cudaMemGetInfo(&free_mem, &total_mem);
+                IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total_mem));
                 size_t safety = 128 << 20;  // 128 MiB reserve
                 size_t budget = (free_mem > safety) ? free_mem - safety : 0;
                 budget = static_cast<size_t>(budget * 0.15);  // 15% of available
@@ -1055,8 +1055,8 @@ void GraphExecutor::free_buffers() {
     qjl_destroy(qjl_proj_);
 
     // Free LongRoPE frequency tables
-    if (longrope_short_freqs_) { cudaFree(longrope_short_freqs_); longrope_short_freqs_ = nullptr; }
-    if (longrope_long_freqs_)  { cudaFree(longrope_long_freqs_);  longrope_long_freqs_  = nullptr; }
+    if (longrope_short_freqs_) { IMP_CUDA_CHECK_LOG(cudaFree(longrope_short_freqs_)); longrope_short_freqs_ = nullptr; }
+    if (longrope_long_freqs_)  { IMP_CUDA_CHECK_LOG(cudaFree(longrope_long_freqs_));  longrope_long_freqs_  = nullptr; }
     longrope_n_pairs_ = 0;
     longrope_orig_max_pos_ = 0;
 
@@ -1068,15 +1068,15 @@ void GraphExecutor::free_buffers() {
     moe_.free(vram_alloc_);
     expert_cache_.destroy();
     if (d_sample_result_) {
-        cudaFree(d_sample_result_);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_sample_result_));
         d_sample_result_ = nullptr;
     }
     if (h_sample_pinned_) {
-        cudaFreeHost(h_sample_pinned_);
+        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_sample_pinned_));
         h_sample_pinned_ = nullptr;
     }
     if (h_logits_pinned_) {
-        cudaFreeHost(h_logits_pinned_);
+        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_logits_pinned_));
         h_logits_pinned_ = nullptr;
         h_logits_pinned_size_ = 0;
     }
@@ -1110,7 +1110,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     // This preserves the existing per-phase budget tracking while the VRAMBudget
     // struct controls strategy-level decisions (which phases to skip).
     size_t free_vram = 0, total_vram = 0;
-    cudaMemGetInfo(&free_vram, &total_vram);
+    IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_vram, &total_vram));
     // Reserve at least 10% of total VRAM as headroom to avoid shared/system
     // memory fallback on WSL2 (not visible via nvidia-smi).
     size_t min_reserve = std::max(budget.reserve_bytes, total_vram / 10);
@@ -1237,7 +1237,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         }
 
         if (cached_count > 0) {
-            cudaStreamSynchronize(stream);
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
             wcache_.fp16_bytes = total_cache_bytes;
             IMP_LOG_INFO("FP16 weight cache: %d tensors, %.2f MiB (incl. %d fused KV, %d fused gate+up)",
                          cached_count, total_cache_bytes / (1024.0 * 1024.0),
@@ -1306,9 +1306,9 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             float* d_block_maxes = nullptr;
             float* d_absmax = nullptr;
             float* d_scales_all = nullptr;
-            cudaMalloc(&d_block_maxes, (size_t)max_grid * sizeof(float));
-            cudaMalloc(&d_absmax, sizeof(float));
-            cudaMalloc(&d_scales_all, fp8_entries.size() * sizeof(float));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_maxes, (size_t)max_grid * sizeof(float)));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax, sizeof(float)));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_scales_all, fp8_entries.size() * sizeof(float)));
 
             // Bulk-allocate all FP8 data
             uint8_t* d_fp8_bulk = static_cast<uint8_t*>(
@@ -1344,11 +1344,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             }
 
             if (actual_count > 0) {
-                cudaStreamSynchronize(stream);
+                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                 // Read back scales
                 std::vector<float> h_scales(actual_count);
-                cudaMemcpy(h_scales.data(), d_scales_all, actual_count * sizeof(float),
-                           cudaMemcpyDeviceToHost);
+                IMP_CUDA_CHECK_LOG(cudaMemcpy(h_scales.data(), d_scales_all, actual_count * sizeof(float),
+                           cudaMemcpyDeviceToHost));
                 for (int i = 0; i < actual_count; i++) {
                     auto it = wcache_.fp8.find(fp8_entries[i].orig_ptr);
                     if (it != wcache_.fp8.end()) {
@@ -1357,8 +1357,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 }
             }
 
-            cudaFree(d_block_maxes);
-            cudaFree(d_absmax);
+            IMP_CUDA_CHECK_LOG(cudaFree(d_block_maxes));
+            IMP_CUDA_CHECK_LOG(cudaFree(d_absmax));
             // Track bulk buffers for cleanup
             wcache_.fp8_overflow_scales = d_scales_all;
             wcache_.fp8_overflow_count = actual_count;
@@ -1435,8 +1435,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
             float* d_absmax_buf = nullptr;
             float* d_tscale_buf = nullptr;
-            cudaMalloc(&d_absmax_buf, sizeof(float));
-            cudaMalloc(&d_tscale_buf, sizeof(float));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf, sizeof(float)));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscale_buf, sizeof(float)));
 
             int actual_count = 0;
             size_t actual_bytes = 0;
@@ -1451,7 +1451,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
                 // Check actual free VRAM (10% of total as safety margin)
                 size_t free_mem = 0, total_mem = 0;
-                cudaMemGetInfo(&free_mem, &total_mem);
+                IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total_mem));
                 size_t nvfp4_safety = std::max(total_mem / 10, static_cast<size_t>(1024 * 1024));
                 if (free_mem < nvfp4_bytes + nvfp4_safety) {
                     IMP_LOG_INFO("NVFP4 incremental: VRAM exhausted after %d tensors "
@@ -1485,16 +1485,16 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                                               d_absmax_buf, d_tscale_buf, stream);
 
                 // Sync immediately so we can read tensor_scale and free FP16
-                cudaStreamSynchronize(stream);
+                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 
                 float h_tscale;
-                cudaMemcpy(&h_tscale, d_tscale_buf, sizeof(float), cudaMemcpyDeviceToHost);
+                IMP_CUDA_CHECK_LOG(cudaMemcpy(&h_tscale, d_tscale_buf, sizeof(float), cudaMemcpyDeviceToHost));
                 result.tensor_scale = h_tscale;
                 wcache_.nvfp4[e.orig_ptr] = result;
                 actual_bytes += nvfp4_bytes;
                 actual_count++;
 
-                if (tmp_buf) cudaFree(tmp_buf);
+                if (tmp_buf) IMP_CUDA_CHECK_LOG(cudaFree(tmp_buf));
 
                 // Free FP16 cache entry to reclaim VRAM for next weight
                 if (!e.from_scratch) {
@@ -1511,8 +1511,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 }
             }
 
-            cudaFree(d_absmax_buf);
-            cudaFree(d_tscale_buf);
+            IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
+            IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf));
 
             wcache_.nvfp4_bytes = actual_bytes;
             IMP_LOG_INFO("NVFP4 decode cache: %d tensors, %.2f MiB "
@@ -1548,10 +1548,10 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             }
 
             float* d_absmax_buf = nullptr;
-            cudaMalloc(&d_absmax_buf, sizeof(float));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf, sizeof(float)));
 
             float* d_tscales_all = nullptr;
-            cudaMalloc(&d_tscales_all, budgeted.size() * sizeof(float));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscales_all, budgeted.size() * sizeof(float)));
 
             std::vector<void*> tmp_bufs;
             for (size_t i = 0; i < budgeted.size(); i++) {
@@ -1587,13 +1587,13 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 wcache_.nvfp4[e.orig_ptr] = result;
             }
 
-            cudaStreamSynchronize(stream);
-            for (void* p : tmp_bufs) cudaFree(p);
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+            for (void* p : tmp_bufs) IMP_CUDA_CHECK_LOG(cudaFree(p));
 
             std::vector<float> h_tscales(budgeted.size());
-            cudaMemcpy(h_tscales.data(), d_tscales_all,
+            IMP_CUDA_CHECK_LOG(cudaMemcpy(h_tscales.data(), d_tscales_all,
                        budgeted.size() * sizeof(float),
-                       cudaMemcpyDeviceToHost);
+                       cudaMemcpyDeviceToHost));
             for (size_t i = 0; i < budgeted.size(); i++) {
                 auto it = wcache_.nvfp4.find(budgeted[i].orig_ptr);
                 if (it != wcache_.nvfp4.end()) {
@@ -1601,8 +1601,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 }
             }
 
-            cudaFree(d_absmax_buf);
-            cudaFree(d_tscales_all);
+            IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf));
+            IMP_CUDA_CHECK_LOG(cudaFree(d_tscales_all));
 
             wcache_.nvfp4_bytes = budget_used;
             if (nvfp4_from_scratch > 0) {
@@ -1646,11 +1646,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
                     float* d_block_maxes = nullptr;
                     float* d_absmax = nullptr;
-                    cudaMalloc(&d_block_maxes, (size_t)max_grid * sizeof(float));
-                    cudaMalloc(&d_absmax, sizeof(float));
+                    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_maxes, (size_t)max_grid * sizeof(float)));
+                    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax, sizeof(float)));
 
                     float* d_scales_all = nullptr;
-                    cudaMalloc(&d_scales_all, to_migrate.size() * sizeof(float));
+                    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_scales_all, to_migrate.size() * sizeof(float)));
 
                     uint8_t* d_fp8_bulk = nullptr;
                     d_fp8_bulk = static_cast<uint8_t*>(
@@ -1683,10 +1683,10 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     wcache_.fp8_migrated_data_size = total_fp8_bytes;
 
                     if (migrated > 0) {
-                        cudaStreamSynchronize(stream);
+                        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                         std::vector<float> h_scales(migrated);
-                        cudaMemcpy(h_scales.data(), d_scales_all, migrated * sizeof(float),
-                                   cudaMemcpyDeviceToHost);
+                        IMP_CUDA_CHECK_LOG(cudaMemcpy(h_scales.data(), d_scales_all, migrated * sizeof(float),
+                                   cudaMemcpyDeviceToHost));
                         int idx = 0;
                         for (size_t i = 0; i < to_migrate.size() && idx < migrated; i++, idx++) {
                             auto it = wcache_.fp8.find(to_migrate[i].orig_ptr);
@@ -1696,8 +1696,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                         }
                     }
 
-                    cudaFree(d_block_maxes);
-                    cudaFree(d_absmax);
+                    IMP_CUDA_CHECK_LOG(cudaFree(d_block_maxes));
+                    IMP_CUDA_CHECK_LOG(cudaFree(d_absmax));
                     wcache_.fp8_migrated_scales = d_scales_all;
                     wcache_.fp8_migrated_count = migrated;
                 }
@@ -1733,8 +1733,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         if (budget.nvfp4_second_pass && !nvfp4_entries.empty()) {
             float* d_absmax_buf2 = nullptr;
             float* d_tscale_buf2 = nullptr;
-            cudaMalloc(&d_absmax_buf2, sizeof(float));
-            cudaMalloc(&d_tscale_buf2, sizeof(float));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_absmax_buf2, sizeof(float)));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tscale_buf2, sizeof(float)));
 
             int second_count = 0;
             size_t second_bytes = 0;
@@ -1747,7 +1747,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                                      static_cast<size_t>(rows) * cols / 16 + 4;
 
                 size_t free_mem2 = 0, total_mem2 = 0;
-                cudaMemGetInfo(&free_mem2, &total_mem2);
+                IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem2, &total_mem2));
                 size_t nvfp4_safety2 = std::max(total_mem2 / 10, static_cast<size_t>(1024 * 1024));
                 if (free_mem2 < nvfp4_bytes + nvfp4_safety2) break;
 
@@ -1767,20 +1767,20 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 NvFP4QuantResult result;
                 quantize_fp16_to_nvfp4_async(fp16_view, result,
                                               d_absmax_buf2, d_tscale_buf2, stream);
-                cudaStreamSynchronize(stream);
+                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 
                 float h_tscale;
-                cudaMemcpy(&h_tscale, d_tscale_buf2, sizeof(float), cudaMemcpyDeviceToHost);
+                IMP_CUDA_CHECK_LOG(cudaMemcpy(&h_tscale, d_tscale_buf2, sizeof(float), cudaMemcpyDeviceToHost));
                 result.tensor_scale = h_tscale;
                 wcache_.nvfp4[e.orig_ptr] = result;
                 second_bytes += nvfp4_bytes;
                 second_count++;
 
-                if (tmp_buf) cudaFree(tmp_buf);
+                if (tmp_buf) IMP_CUDA_CHECK_LOG(cudaFree(tmp_buf));
             }
 
-            cudaFree(d_absmax_buf2);
-            cudaFree(d_tscale_buf2);
+            IMP_CUDA_CHECK_LOG(cudaFree(d_absmax_buf2));
+            IMP_CUDA_CHECK_LOG(cudaFree(d_tscale_buf2));
 
             if (second_count > 0) {
                 wcache_.nvfp4_bytes += second_bytes;
@@ -1797,9 +1797,9 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             // After incremental mode, remaining_budget is stale.  Use actual free VRAM.
             size_t ct_budget;
             if (wcache_.nvfp4_decode_mode == 2) {
-                cudaStreamSynchronize(stream);
+                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                 size_t free_mem = 0, total_mem = 0;
-                cudaMemGetInfo(&free_mem, &total_mem);
+                IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total_mem));
                 size_t kCtReserve = std::max(total_mem / 10, static_cast<size_t>(256ULL * 1024 * 1024));
                 ct_budget = (free_mem > kCtReserve) ? (free_mem - kCtReserve) : 0;
             } else {
@@ -1831,7 +1831,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 }
             }
             if (ct_count > 0) {
-                cudaStreamSynchronize(stream);
+                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                 wcache_.cutlass_nvfp4_bytes = ct_total;
                 deduct_budget(remaining_budget, ct_total + wcache_.nvfp4_bytes);
                 IMP_LOG_INFO("CUTLASS sm_120 NVFP4 weight cache: %d tensors, %.2f MiB",
@@ -1922,7 +1922,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     }
                 }
                 if (mx_count > 0) {
-                    cudaStreamSynchronize(stream);
+                    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                     wcache_.cutlass_mxfp4_bytes = mx_total;
                     IMP_LOG_INFO("CUTLASS sm_120 MXFP4 weight cache: %d tensors, %.2f MiB",
                                  mx_count, mx_total / (1024.0 * 1024.0));
@@ -1965,14 +1965,14 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             }
             register_if_mxfp4(model_->output_proj(), model_->out_proj_qtype_);
             if (mx_native > 0) {
-                cudaStreamSynchronize(stream);
+                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                 wcache_.cutlass_mxfp4_bytes += mx_native_bytes;
                 wcache_.use_mxfp4 = true;
                 IMP_LOG_INFO("Native MXFP4 GGUF: %d tensors, %.2f MiB (direct → CUTLASS)",
                              mx_native, mx_native_bytes / (1024.0 * 1024.0));
 
                 // Sync and check for errors from unpack kernels
-                cudaStreamSynchronize(stream);
+                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                 { cudaError_t e = cudaGetLastError();
                   if (e != cudaSuccess) IMP_LOG_ERROR("MXFP4 unpack error: %s", cudaGetErrorString(e)); }
 
@@ -2024,7 +2024,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                         int bpr = static_cast<int>(K / 32);
                         size_t raw_bytes = static_cast<size_t>(N) * bpr * 17;
                         std::vector<uint8_t> h_raw(raw_bytes);
-                        cudaMemcpy(h_raw.data(), ptr, raw_bytes, cudaMemcpyDeviceToHost);
+                        IMP_CUDA_CHECK_LOG(cudaMemcpy(h_raw.data(), ptr, raw_bytes, cudaMemcpyDeviceToHost));
 
                         std::vector<uint16_t> h_fp16(static_cast<size_t>(N) * K);  // raw FP16 bits
                         static const float e2m1[16] = {
@@ -2054,7 +2054,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                                 }
                             }
                         }
-                        cudaMemcpy(d_fp16, h_fp16.data(), fp16_bytes, cudaMemcpyHostToDevice);
+                        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_fp16, h_fp16.data(), fp16_bytes, cudaMemcpyHostToDevice));
                     }
                     int64_t shape[2] = {mw.N, mw.K};
                     wcache_.fp16[ptr] = Tensor(d_fp16, DType::FP16, 2, shape, true);
@@ -2062,7 +2062,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 }  // end if (d_fp16_bulk)
 
                 if (fp16_total > 0) {
-                    cudaStreamSynchronize(stream);
+                    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                     { cudaError_t e = cudaGetLastError();
                       if (e != cudaSuccess) IMP_LOG_ERROR("MXFP4 dequant kernel error: %s", cudaGetErrorString(e)); }
                     IMP_LOG_INFO("MXFP4 decode fallback: dequant → FP16 cache %.2f MiB",
@@ -2107,7 +2107,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         size_t moe_budget;
         if (wcache_.nvfp4_decode_mode == 2) {
             size_t free_mem = 0, total_mem = 0;
-            cudaMemGetInfo(&free_mem, &total_mem);
+            IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total_mem));
             constexpr size_t kMoeReserve = 128ULL * 1024 * 1024;
             moe_budget = (free_mem > kMoeReserve) ? (free_mem - kMoeReserve) : 0;
         } else {
@@ -2221,7 +2221,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 }
                 if (fp16_total > 0) {
                     void* d_fp16_bulk = nullptr;
-                    cudaMalloc(&d_fp16_bulk, fp16_total);
+                    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_fp16_bulk, fp16_total));
                     if (d_fp16_bulk) {
                         size_t offset = 0;
                         for (auto& sw : small_weights) {
@@ -2232,7 +2232,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                             int64_t shape[2] = {sw.N, sw.K};
                             wcache_.fp16[sw.ptr] = Tensor(d_fp16, DType::FP16, 2, shape, true);
                         }
-                        cudaStreamSynchronize(stream);
+                        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                         IMP_LOG_INFO("MXFP4 → FP16 (alpha/beta): %.2f MiB (%d tensors)",
                                      fp16_total / (1024.0 * 1024.0), (int)small_weights.size());
                         for (int i = 0; i < cfg.n_layers; i++) {
@@ -2280,14 +2280,14 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             }
             register_mx(model_->output_proj(), model_->out_proj_qtype_, true);
             if (mx_count > 0) {
-                cudaStreamSynchronize(stream);
+                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                 wcache_.use_mxfp4 = true;
 
                 // In-place unpack: raw blocks are compacted to [N, K/2] within the
                 // SAME buffer. No separate data allocation, no free needed.
                 // The raw buffer tail (scale bytes) is wasted (~6% overhead) but
                 // avoids the 50% peak VRAM spike of out-of-place unpack.
-                cudaStreamSynchronize(stream);
+                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                 { cudaError_t e = cudaGetLastError();
                   if (e != cudaSuccess) IMP_LOG_ERROR("MXFP4 registration CUDA error: %s", cudaGetErrorString(e)); }
                 IMP_LOG_INFO("Native MXFP4 GGUF (standalone): %d tensors registered (in-place)", mx_count);
@@ -2430,7 +2430,7 @@ bool GraphExecutor::resize_workspace(int new_max_tokens, cudaStream_t stream) {
         // Only reallocate when growing — reuse existing buffer if large enough.
         // This avoids expensive cudaMallocAsync/cudaFreeAsync on every batch size change.
         if (shared_workspace_) {
-            cudaFreeAsync(shared_workspace_, stream);
+            IMP_CUDA_CHECK_LOG(cudaFreeAsync(shared_workspace_, stream));
         }
         cudaError_t err = cudaMallocAsync(&shared_workspace_, new_shared, stream);
         if (err != cudaSuccess) {
@@ -2593,8 +2593,8 @@ Tensor GraphExecutor::view_tokens(const Tensor& buf, int n_tokens) const {
 
 void GraphExecutor::ensure_logits_pinned(int total_floats) {
     if (h_logits_pinned_ && h_logits_pinned_size_ >= total_floats) return;
-    if (h_logits_pinned_) cudaFreeHost(h_logits_pinned_);
-    cudaHostAlloc(&h_logits_pinned_, total_floats * sizeof(float), cudaHostAllocDefault);
+    if (h_logits_pinned_) IMP_CUDA_CHECK_LOG(cudaFreeHost(h_logits_pinned_));
+    IMP_CUDA_CHECK_LOG(cudaHostAlloc(&h_logits_pinned_, total_floats * sizeof(float), cudaHostAllocDefault));
     h_logits_pinned_size_ = total_floats;
 }
 
