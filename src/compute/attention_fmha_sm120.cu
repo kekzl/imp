@@ -16,8 +16,10 @@
 // data loading when not in WGMMA.
 //
 // Tile sizes (Bq selected dynamically based on smem fit):
-//   HD=64:          Bq=128, Bkv=64
-//   HD={96,128,256}: Bq=64, Bkv=64
+//   HD=64:      Bq=128, Bkv=64  (89 KB smem)
+//   HD=96:      Bq=64,  Bkv=64  (65 KB smem)
+//   HD=128:     Bq=64,  Bkv=64  (81 KB smem)
+//   HD=256:     Bq=32,  Bkv=64  (88 KB smem)
 //
 // Shared memory layout:
 //   Q_tile:  half[Bq  x HD]   -- loaded once via cooperative global loads
@@ -419,13 +421,16 @@ bool fmha_sm120_prefill(
     {
         size_t smem_128 = compute_smem_sm120(128, SM120_Bkv, head_dim);
         size_t smem_64  = compute_smem_sm120(64,  SM120_Bkv, head_dim);
+        size_t smem_32  = compute_smem_sm120(32,  SM120_Bkv, head_dim);
         if (smem_128 <= (size_t)max_smem) {
             Bq = 128;
         } else if (smem_64 <= (size_t)max_smem) {
             Bq = 64;
+        } else if (smem_32 <= (size_t)max_smem) {
+            Bq = 32;
         } else {
-            IMP_LOG_DEBUG("FMHA sm120: no Bq fits smem (hd=%d, smem_64=%zu, max=%d)",
-                          head_dim, smem_64, max_smem);
+            IMP_LOG_DEBUG("FMHA sm120: no Bq fits smem (hd=%d, smem_32=%zu, max=%d)",
+                          head_dim, smem_32, max_smem);
             return false;
         }
     }
@@ -469,12 +474,21 @@ bool fmha_sm120_prefill(
             case 256: LAUNCH_FMHA_SM120(128, 256); return true;
             default: break;
         }
-    } else {
+    } else if (Bq == 64) {
         switch (head_dim) {
             case 64:  LAUNCH_FMHA_SM120(64, 64);   return true;
             case 96:  LAUNCH_FMHA_SM120(64, 96);   return true;
             case 128: LAUNCH_FMHA_SM120(64, 128);  return true;
             case 256: LAUNCH_FMHA_SM120(64, 256);  return true;
+            default: break;
+        }
+    } else {
+        // Bq=32: for large head_dim (256) where Bq=64 exceeds smem
+        switch (head_dim) {
+            case 64:  LAUNCH_FMHA_SM120(32, 64);   return true;
+            case 96:  LAUNCH_FMHA_SM120(32, 96);   return true;
+            case 128: LAUNCH_FMHA_SM120(32, 128);  return true;
+            case 256: LAUNCH_FMHA_SM120(32, 256);  return true;
             default: break;
         }
     }
