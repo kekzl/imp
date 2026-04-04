@@ -452,10 +452,15 @@ bool fmha_sm120_prefill(
                   Bq, Bkv, smem, causal, sliding_window, softcap);
 
     #define LAUNCH_FMHA_SM120(BQ, HD) do { \
-        cudaFuncSetAttribute( \
+        cudaError_t attr_err = cudaFuncSetAttribute( \
             fmha_sm120_kernel<BQ, HD>, \
             cudaFuncAttributeMaxDynamicSharedMemorySize, \
             static_cast<int>(smem)); \
+        if (attr_err != cudaSuccess) { \
+            IMP_LOG_WARN("FMHA sm120: cudaFuncSetAttribute failed for Bq=%d HD=%d smem=%zu: %s", \
+                         BQ, HD, smem, cudaGetErrorString(attr_err)); \
+            return false; \
+        } \
         fmha_sm120_kernel<BQ, HD><<<grid, block, smem, stream>>>( \
             reinterpret_cast<const half*>(Q.data), \
             reinterpret_cast<const half*>(K.data), \
