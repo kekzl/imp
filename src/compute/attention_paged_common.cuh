@@ -18,11 +18,23 @@ __device__ __forceinline__ void cp_async_ca_8(void* smem, const void* glob) {
     asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" :: "r"(s), "l"(glob));
 }
 
+// 16-byte async copy: loads 8 halves (128 bits) in one instruction.
+// 2× bandwidth per instruction vs 8-byte variant. Requires 16-byte aligned addresses.
+__device__ __forceinline__ void cp_async_ca_16(void* smem, const void* glob) {
+    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 16;\n" :: "r"(s), "l"(glob));
+}
+
 // Streaming variant: cache at global level only (skip L1), evict-first from L2.
 // Used for KV cache loads that have no intra-step reuse across kernels.
 __device__ __forceinline__ void cp_async_cg_8(void* smem, const void* glob) {
     uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
     asm volatile("cp.async.cg.shared.global [%0], [%1], 8;\n" :: "r"(s), "l"(glob));
+}
+
+__device__ __forceinline__ void cp_async_cg_16(void* smem, const void* glob) {
+    uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(s), "l"(glob));
 }
 
 // ---------------------------------------------------------------------------
