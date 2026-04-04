@@ -1,4 +1,5 @@
 #include "graph/weight_cache_manager.h"
+#include "graph/executor_helpers.h"
 #include "quant/nvfp4_quant.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
@@ -7,28 +8,22 @@
 
 namespace imp {
 
-static void vram_free_wc(VRAMAllocator* alloc, void* ptr) {
-    if (!ptr) return;
-    if (alloc) alloc->free(ptr);
-    else IMP_CUDA_CHECK_LOG(cudaFree(ptr));
-}
-
 void WeightCacheManager::free(VRAMAllocator* alloc) {
     // Free fused KV weight cache
     for (auto& [idx, tensor] : fused_kv) {
-        if (tensor.data) vram_free_wc(alloc, tensor.data);
+        if (tensor.data) vram_free(alloc, tensor.data);
     }
     fused_kv.clear();
 
     // Free fused gate+up weight cache
     for (auto& [idx, tensor] : fused_gate_up) {
-        if (tensor.data) vram_free_wc(alloc, tensor.data);
+        if (tensor.data) vram_free(alloc, tensor.data);
     }
     fused_gate_up.clear();
 
     // Free FP16 weight cache
     for (auto& [ptr, tensor] : fp16) {
-        vram_free_wc(alloc, tensor.data);
+        vram_free(alloc, tensor.data);
     }
     fp16.clear();
     fp16_bytes = 0;
@@ -91,7 +86,7 @@ void WeightCacheManager::free(VRAMAllocator* alloc) {
         fp8_migrated_count = 0;
     }
     if (fp8_migrated_data) {
-        vram_free_wc(alloc, fp8_migrated_data);
+        vram_free(alloc, fp8_migrated_data);
         fp8_migrated_data = nullptr;
         fp8_migrated_data_size = 0;
     }
@@ -101,7 +96,7 @@ void WeightCacheManager::free(VRAMAllocator* alloc) {
         fp8_overflow_count = 0;
     }
     if (fp8_overflow_data) {
-        vram_free_wc(alloc, fp8_overflow_data);
+        vram_free(alloc, fp8_overflow_data);
         fp8_overflow_data = nullptr;
         fp8_overflow_data_size = 0;
     }
