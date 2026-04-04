@@ -77,6 +77,15 @@ static void dispatch_gemv_qkv_fused(GGMLQuantType qtype,
 // Resets automatically when the stream attribute is overwritten next layer.
 static void set_l2_persist_kv(cudaStream_t stream, const void* kv_ptr, size_t kv_bytes) {
     if (!kv_ptr || kv_bytes == 0 || !stream) return;
+    // Clamp to device's persisting L2 cache limit
+    static size_t max_persist = 0;
+    if (max_persist == 0) {
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, 0);
+        max_persist = prop.persistingL2CacheMaxSize;
+        if (max_persist == 0) return;  // L2 persistence not supported
+    }
+    if (kv_bytes > max_persist) kv_bytes = max_persist;
     cudaStreamAttrValue attr = {};
     attr.accessPolicyWindow.base_ptr = const_cast<void*>(kv_ptr);
     attr.accessPolicyWindow.num_bytes = kv_bytes;
