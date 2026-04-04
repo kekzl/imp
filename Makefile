@@ -1,11 +1,26 @@
 # imp test runner targets
-# Usage: make test-unit, make test-gpu, make test-all
+# Usage: make test-unit, make test-gpu, make test-all, make bench
 
 DOCKER_IMG ?= imp:test
 DOCKER_RUN = docker run --rm --gpus all -v $(PWD)/models:/models $(DOCKER_IMG)
 BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 
-.PHONY: build test-unit test-gpu test-fast test-all test-perf test-golden
+.PHONY: build test-unit test-gpu test-fast test-all test-perf test-golden bench check-gpu
+
+# Check that no other process is using the GPU (games, other inference, etc.)
+check-gpu:
+	@GPU_PROCS=$$(nvidia-smi --query-compute-apps=pid,name,used_gpu_memory --format=csv,noheader 2>/dev/null | grep -v "^$$"); \
+	if [ -n "$$GPU_PROCS" ]; then \
+		echo "ERROR: GPU is in use — benchmarks will be unreliable:"; \
+		echo "$$GPU_PROCS"; \
+		echo "Close other GPU processes first (games, other inference, etc.)"; \
+		exit 1; \
+	fi; \
+	GPU_UTIL=$$(nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null | head -1); \
+	if [ "$$GPU_UTIL" -gt 5 ] 2>/dev/null; then \
+		echo "WARNING: GPU utilization at $${GPU_UTIL}% — results may be noisy"; \
+	fi; \
+	echo "GPU is free (utilization: $${GPU_UTIL:-0}%)"
 
 build:
 	docker build $(BUILD_ARGS) -t $(DOCKER_IMG) .
@@ -34,9 +49,28 @@ test-e2e: build
 		-e IMP_TEST_MODEL_GDN=/models/Qwen3.5-4B-Q8_0.gguf \
 		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*"
 
-# Performance regression (needs baseline in tests/perf_baseline.json)
-test-perf: build
-	$(DOCKER_RUN) imp-cli --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 128 --temperature 0
+# Full benchmark suite: all baseline models (requires GPU to be free)
+bench: build check-gpu
+	@echo "=== imp benchmark suite (RTX 5090) ==="
+	@echo ""
+	@echo "--- Qwen3-4B Q8_0 ---"
+	$(DOCKER_RUN) imp-cli --model /models/Qwen3-4B-Instruct-2507-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	@echo ""
+	@echo "--- Qwen3-8B Q8_0 ---"
+	$(DOCKER_RUN) imp-cli --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	@echo ""
+	@echo "--- Qwen3.5-4B GDN Q8_0 ---"
+	$(DOCKER_RUN) imp-cli --model /models/Qwen3.5-4B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	@echo ""
+	@echo "--- Qwen3.5-9B GDN Q8_0 ---"
+	$(DOCKER_RUN) imp-cli --model /models/Qwen3.5-9B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+	@echo ""
+	@echo "--- Qwen3-4B MXFP4 ---"
+	$(DOCKER_RUN) imp-cli --model /models/qwen3-4b-instruct-2507-mxfp4.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
+
+# Single model benchmark (quick check)
+test-perf: build check-gpu
+	$(DOCKER_RUN) imp-cli --model /models/Qwen3-8B-Q8_0.gguf --bench --bench-pp 512 --bench-reps 5 --max-tokens 256 --temperature 0
 
 # Golden output comparison (greedy, temp=0)
 test-golden: build
