@@ -179,7 +179,7 @@ __global__ __launch_bounds__(256) void fp32_to_fp16_rowscale_kernel(const float*
 // Saves 2 kernel launches + 2 DRAM round-trips per invocation.
 // Uses same register-cached, warp-level reduction pattern as rmsnorm_quantize_q8_1.
 // Launch: <<<n_rows, 256>>>
-__global__ __launch_bounds__(256) void rmsnorm_fp32_accum_to_fp16_kernel(
+__global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
         const half* __restrict__ input,     // [n, d_model] pre-norm data (e.g. GEMV output)
         const half* __restrict__ norm_w,    // [d_model] RMSNorm weights
         float* __restrict__ fp32_accum,     // [n, d_model] FP32 accumulator (read-modify-write)
