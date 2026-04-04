@@ -1,6 +1,7 @@
 #include "compute/embedding.h"
 #include "model/model_config.h"  // GGMLQuantType
 #include "core/tensor.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
@@ -353,9 +354,9 @@ void embedding_lookup_from_device(const Tensor& table, const int32_t* d_token_id
         // For FP32 tables, fall back to regular path with a device-to-host copy
         // (FP32 embedding tables are uncommon in quantized models)
         int32_t h_token;
-        cudaMemcpyAsync(&h_token, d_token_id, sizeof(int32_t),
-                         cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_token, d_token_id, sizeof(int32_t),
+                         cudaMemcpyDeviceToHost, stream));
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
         embedding_lookup(table, &h_token, 1, out, stream);
     }
 }

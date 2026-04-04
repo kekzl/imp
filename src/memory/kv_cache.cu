@@ -72,7 +72,7 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
     }
 
     // Zero-initialize the pool so fresh blocks start clean
-    cudaMemset(pool_, 0, total);
+    IMP_CUDA_CHECK_LOG(cudaMemset(pool_, 0, total));
 
     // Allocate separate scale buffer for INT8/INT4/TURBOQUANT/TURBOQUANT_LITE KV cache
     // For TURBOQUANT_LITE: K scales = FP16 norms, V scales = INT4 per-head scales
@@ -88,7 +88,7 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
             if (serr != cudaSuccess) scale_pool_ = nullptr;
         }
         if (!scale_pool_) {
-            if (alloc_) alloc_->free(pool_); else cudaFree(pool_);
+            if (alloc_) alloc_->free(pool_); else IMP_CUDA_CHECK_LOG(cudaFree(pool_));
             pool_ = nullptr;
             char msg[256];
             std::snprintf(msg, sizeof(msg),
@@ -97,7 +97,7 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
                           static_cast<double>(scale_total) / (1024.0 * 1024.0));
             throw std::runtime_error(msg);
         }
-        cudaMemset(scale_pool_, 0, scale_total);
+        IMP_CUDA_CHECK_LOG(cudaMemset(scale_pool_, 0, scale_total));
     }
 
     // Allocate QJL 1-bit sketch buffer for TurboQuant / TurboQuant Lite K-cache
@@ -112,8 +112,8 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
             if (serr != cudaSuccess) sketch_pool_ = nullptr;
         }
         if (!sketch_pool_) {
-            if (scale_pool_) { if (alloc_) alloc_->free(scale_pool_); else cudaFree(scale_pool_); scale_pool_ = nullptr; }
-            if (alloc_) alloc_->free(pool_); else cudaFree(pool_);
+            if (scale_pool_) { if (alloc_) alloc_->free(scale_pool_); else IMP_CUDA_CHECK_LOG(cudaFree(scale_pool_)); scale_pool_ = nullptr; }
+            if (alloc_) alloc_->free(pool_); else IMP_CUDA_CHECK_LOG(cudaFree(pool_));
             pool_ = nullptr;
             char msg[256];
             std::snprintf(msg, sizeof(msg),
@@ -122,7 +122,7 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
                           static_cast<double>(sketch_total) / (1024.0 * 1024.0));
             throw std::runtime_error(msg);
         }
-        cudaMemset(sketch_pool_, 0, sketch_total);
+        IMP_CUDA_CHECK_LOG(cudaMemset(sketch_pool_, 0, sketch_total));
 
         IMP_LOG_INFO("KVCache: %s sketch_dim=%d, sketch pool %.2f MiB (%d layers, %d blocks)",
                      dtype_name(dtype), sketch_dim_,
@@ -149,7 +149,7 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
                          static_cast<double>(mscale_total) / 1024.0);
             use_mxfp4_ = false;
         } else {
-            cudaMemset(mscale_pool_, 0, mscale_total);
+            IMP_CUDA_CHECK_LOG(cudaMemset(mscale_pool_, 0, mscale_total));
             IMP_LOG_INFO("KVCache: MXFP4 micro-scales enabled for K directions "
                          "(%d groups/head, %.1f KiB)",
                          n_groups_per_head,
@@ -167,19 +167,19 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
 
 KVCache::~KVCache() {
     if (mscale_pool_) {
-        if (alloc_) alloc_->free(mscale_pool_); else cudaFree(mscale_pool_);
+        if (alloc_) alloc_->free(mscale_pool_); else IMP_CUDA_CHECK_LOG(cudaFree(mscale_pool_));
         mscale_pool_ = nullptr;
     }
     if (sketch_pool_) {
-        if (alloc_) alloc_->free(sketch_pool_); else cudaFree(sketch_pool_);
+        if (alloc_) alloc_->free(sketch_pool_); else IMP_CUDA_CHECK_LOG(cudaFree(sketch_pool_));
         sketch_pool_ = nullptr;
     }
     if (scale_pool_) {
-        if (alloc_) alloc_->free(scale_pool_); else cudaFree(scale_pool_);
+        if (alloc_) alloc_->free(scale_pool_); else IMP_CUDA_CHECK_LOG(cudaFree(scale_pool_));
         scale_pool_ = nullptr;
     }
     if (pool_) {
-        if (alloc_) alloc_->free(pool_); else cudaFree(pool_);
+        if (alloc_) alloc_->free(pool_); else IMP_CUDA_CHECK_LOG(cudaFree(pool_));
         pool_ = nullptr;
     }
 }

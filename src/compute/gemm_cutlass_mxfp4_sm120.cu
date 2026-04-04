@@ -227,9 +227,9 @@ void convert_nvfp4_to_mxfp4_cutlass(const NvFP4QuantResult& src,
 
     void* d_sf = nullptr;
     void* d_linear_sf = nullptr;
-    cudaMalloc(&d_sf, sf_bytes);
-    cudaMalloc(&d_linear_sf, linear_sf_bytes);
-    cudaMemsetAsync(d_sf, 0, sf_bytes, stream);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_sf, sf_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_linear_sf, linear_sf_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_sf, 0, sf_bytes, stream));
 
     int total = static_cast<int>(N) * K_groups_mx;
     int n_k_tiles = (static_cast<int>(K) + kMxAtomKElems - 1) / kMxAtomKElems;
@@ -305,7 +305,7 @@ bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K,
         if (d_linear_sf) cudaFree(d_linear_sf);
         return false;
     }
-    cudaMemsetAsync(d_sf, 0, sf_bytes, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_sf, 0, sf_bytes, stream));
 
     const uint8_t* scale_src = static_cast<const uint8_t*>(raw_gpu) + data_bytes;
     int n_k_tiles = (static_cast<int>(K) + kMxAtomKElems - 1) / kMxAtomKElems;
@@ -430,9 +430,9 @@ void convert_nvfp4_to_mxfp4_hadamard(const NvFP4QuantResult& src,
 
     void* d_packed = nullptr;
     void* d_sf = nullptr;
-    cudaMalloc(&d_packed, packed_bytes);
-    cudaMalloc(&d_sf, sf_bytes);
-    cudaMemsetAsync(d_sf, 0, sf_bytes, stream);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_packed, packed_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_sf, sf_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_sf, 0, sf_bytes, stream));
 
     int K_groups = static_cast<int>(K) / kMxSFVecSize;
     int total_mb = static_cast<int>(N) * K_groups;
@@ -462,11 +462,11 @@ void convert_nvfp4_to_mxfp4_hadamard(const NvFP4QuantResult& src,
 
 void free_cutlass_mxfp4_weight(CutlassMxFP4Weight& w) {
     if (w.owns_data && w.data) {
-        cudaFree(const_cast<void*>(w.data));
+        IMP_CUDA_CHECK_LOG(cudaFree(const_cast<void*>(w.data)));
     }
     w.data = nullptr;
-    if (w.scale_factors) { cudaFree(w.scale_factors); w.scale_factors = nullptr; }
-    if (w.linear_scales) { cudaFree(w.linear_scales); w.linear_scales = nullptr; }
+    if (w.scale_factors) { IMP_CUDA_CHECK_LOG(cudaFree(w.scale_factors)); w.scale_factors = nullptr; }
+    if (w.linear_scales) { IMP_CUDA_CHECK_LOG(cudaFree(w.linear_scales)); w.linear_scales = nullptr; }
     w.N = w.K = 0;
     w.sf_bytes = 0;
     w.owns_data = false;
@@ -558,7 +558,7 @@ void quantize_fp16_to_mxfp4_cutlass(const void* src_fp16, void* dst_data,
     assert(K % kMxSFVecSize == 0 && "K must be multiple of 32 for MXFP4");
 
     size_t sf_bytes = cutlass_mxfp4_sf_size(M, K);
-    cudaMemsetAsync(dst_sf, 0, sf_bytes, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(dst_sf, 0, sf_bytes, stream));
 
     int K_groups = K / kMxSFVecSize;
     int total_mb = M * K_groups;
@@ -657,8 +657,8 @@ bool gemm_mxfp4_cutlass_sm120(const void* a_data, const void* a_sf,
     void* ws = workspace;
     if (needed > workspace_size) {
         if (needed > s_mxfp4_workspace_size) {
-            if (s_mxfp4_workspace) cudaFree(s_mxfp4_workspace);
-            cudaMalloc(&s_mxfp4_workspace, needed);
+            if (s_mxfp4_workspace) IMP_CUDA_CHECK_LOG(cudaFree(s_mxfp4_workspace));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&s_mxfp4_workspace, needed));
             s_mxfp4_workspace_size = needed;
         }
         ws = s_mxfp4_workspace;

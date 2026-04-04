@@ -196,11 +196,11 @@ int32_t sample_greedy(const Tensor& logits, cudaStream_t stream) {
     argmax_kernel<<<1, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, d_result);
 
     int32_t h_result = 0;
-    cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
-    cudaFree(d_result);
+    IMP_CUDA_CHECK_LOG(cudaFree(d_result));
     return h_result;
 }
 
@@ -222,8 +222,8 @@ int32_t sample_greedy(const Tensor& logits, int32_t* d_result,
         partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
 
     int32_t h_result = 0;
-    cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
     return h_result;
@@ -706,12 +706,12 @@ struct CubSortScratch {
     }
 
     void free() {
-        if (d_keys_in)  { cudaFree(d_keys_in);  d_keys_in  = nullptr; }
-        if (d_keys_out) { cudaFree(d_keys_out); d_keys_out = nullptr; }
-        if (d_vals_in)  { cudaFree(d_vals_in);  d_vals_in  = nullptr; }
-        if (d_vals_out) { cudaFree(d_vals_out); d_vals_out = nullptr; }
-        if (d_max_sum)  { cudaFree(d_max_sum);  d_max_sum  = nullptr; }
-        if (d_temp)     { cudaFree(d_temp);     d_temp     = nullptr; }
+        if (d_keys_in)  { IMP_CUDA_CHECK_LOG(cudaFree(d_keys_in));  d_keys_in  = nullptr; }
+        if (d_keys_out) { IMP_CUDA_CHECK_LOG(cudaFree(d_keys_out)); d_keys_out = nullptr; }
+        if (d_vals_in)  { IMP_CUDA_CHECK_LOG(cudaFree(d_vals_in));  d_vals_in  = nullptr; }
+        if (d_vals_out) { IMP_CUDA_CHECK_LOG(cudaFree(d_vals_out)); d_vals_out = nullptr; }
+        if (d_max_sum)  { IMP_CUDA_CHECK_LOG(cudaFree(d_max_sum));  d_max_sum  = nullptr; }
+        if (d_temp)     { IMP_CUDA_CHECK_LOG(cudaFree(d_temp));     d_temp     = nullptr; }
         temp_bytes = 0;
         capacity = 0;
     }
@@ -736,11 +736,11 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size,
     float neg_inf_val = -FLT_MAX;
     int neg_inf_bits;
     std::memcpy(&neg_inf_bits, &neg_inf_val, sizeof(int));
-    cudaMemcpyAsync(sc.d_max_sum, &neg_inf_bits, sizeof(int),
-                    cudaMemcpyHostToDevice, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(sc.d_max_sum, &neg_inf_bits, sizeof(int),
+                    cudaMemcpyHostToDevice, stream));
     float zero = 0.0f;
-    cudaMemcpyAsync(sc.d_max_sum + 1, &zero, sizeof(float),
-                    cudaMemcpyHostToDevice, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(sc.d_max_sum + 1, &zero, sizeof(float),
+                    cudaMemcpyHostToDevice, stream));
 
     int stats_blocks = std::min((vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE, 128);
 
@@ -750,8 +750,8 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size,
 
     // Read back max (need sync before phase 2)
     float gmax;
-    cudaMemcpyAsync(&gmax, sc.d_max_sum, sizeof(float),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&gmax, sc.d_max_sum, sizeof(float),
+                    cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
     // Phase 2: sum of exp (uses host-side gmax as kernel arg — no race)
@@ -759,8 +759,8 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size,
         d_logits, vocab_size, inv_temperature, gmax, sc.d_max_sum + 1);
 
     float h_sum;
-    cudaMemcpyAsync(&h_sum, sc.d_max_sum + 1, sizeof(float),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_sum, sc.d_max_sum + 1, sizeof(float),
+                    cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
     float inv_sum = 1.0f / h_sum;
@@ -784,8 +784,8 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size,
         top_k, top_p, seed, d_result);
 
     int32_t h_result = 0;
-    cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
     return h_result;
@@ -803,7 +803,7 @@ static int32_t sample_topk_topp_impl(
         int32_t result = sample_topk_topp_cub(
             d_logits, vocab_size, top_k, top_p, inv_temperature, seed,
             d_result, stream);
-        if (owns_result) cudaFree(d_result);
+        if (owns_result) IMP_CUDA_CHECK_LOG(cudaFree(d_result));
         return result;
     }
 
@@ -813,11 +813,11 @@ static int32_t sample_topk_topp_impl(
         d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result);
 
     int32_t h_result = 0;
-    cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
-    if (owns_result) cudaFree(d_result);
+    if (owns_result) IMP_CUDA_CHECK_LOG(cudaFree(d_result));
     return h_result;
 }
 
@@ -877,8 +877,8 @@ void sample_greedy_device(const Tensor& logits, int32_t* d_result,
         partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
 
     // Async copy to mapped pinned memory — no sync needed.
-    cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream));
 }
 
 void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p,
@@ -902,8 +902,8 @@ void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p,
         d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result);
 
     // Async copy to mapped pinned memory — no sync needed.
-    cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream));
 }
 
 // ===========================================================================
@@ -1114,26 +1114,26 @@ void apply_dry_penalty(float* d_logits, int vocab_size,
     if (needed > s_dry_buf_cap) {
         // Grow buffers (sync stream first to ensure previous work is done)
         cudaStreamSynchronize(stream);
-        if (s_dry_tokens_buf) cudaFree(s_dry_tokens_buf);
-        if (s_dry_values_buf) cudaFree(s_dry_values_buf);
+        if (s_dry_tokens_buf) IMP_CUDA_CHECK_LOG(cudaFree(s_dry_tokens_buf));
+        if (s_dry_values_buf) IMP_CUDA_CHECK_LOG(cudaFree(s_dry_values_buf));
         // Over-allocate to reduce future reallocations
         size_t new_cap = std::max(needed, s_dry_buf_cap * 2);
         new_cap = std::max(new_cap, static_cast<size_t>(256));
         if (cudaMalloc(&s_dry_tokens_buf, new_cap * sizeof(int32_t)) != cudaSuccess ||
             cudaMalloc(&s_dry_values_buf, new_cap * sizeof(float)) != cudaSuccess) {
             IMP_LOG_ERROR("apply_dry_penalty: cudaMalloc failed");
-            if (s_dry_tokens_buf) { cudaFree(s_dry_tokens_buf); s_dry_tokens_buf = nullptr; }
-            if (s_dry_values_buf) { cudaFree(s_dry_values_buf); s_dry_values_buf = nullptr; }
+            if (s_dry_tokens_buf) { IMP_CUDA_CHECK_LOG(cudaFree(s_dry_tokens_buf)); s_dry_tokens_buf = nullptr; }
+            if (s_dry_values_buf) { IMP_CUDA_CHECK_LOG(cudaFree(s_dry_values_buf)); s_dry_values_buf = nullptr; }
             s_dry_buf_cap = 0;
             return;
         }
         s_dry_buf_cap = new_cap;
     }
 
-    cudaMemcpyAsync(s_dry_tokens_buf, h_tokens.data(), n * sizeof(int32_t),
-                    cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(s_dry_values_buf, h_values.data(), n * sizeof(float),
-                    cudaMemcpyHostToDevice, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_dry_tokens_buf, h_tokens.data(), n * sizeof(int32_t),
+                    cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_dry_values_buf, h_values.data(), n * sizeof(float),
+                    cudaMemcpyHostToDevice, stream));
 
     int grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
     apply_dry_sparse_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
@@ -1428,13 +1428,13 @@ static int32_t sample_mirostat_v2_impl(
     // Read results
     int32_t h_result = 0;
     float h_surprise = 0.0f;
-    cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
-    cudaMemcpyAsync(&h_surprise, d_surprise, sizeof(float),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_surprise, d_surprise, sizeof(float),
+                    cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
-    if (owns_result) cudaFree(d_result);
+    if (owns_result) IMP_CUDA_CHECK_LOG(cudaFree(d_result));
 
     // Update mu: mu = mu - eta * (surprise - tau)
     *mu = *mu - eta * (h_surprise - tau);

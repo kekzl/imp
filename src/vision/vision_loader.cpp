@@ -181,7 +181,7 @@ bool upload_tensor_fp16(const void* src, GGMLType type,
     gpu_allocs.push_back(d_ptr);
 
     if (type == GGMLType::F16) {
-        cudaMemcpy(d_ptr, src, fp16_bytes, cudaMemcpyHostToDevice);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_ptr, src, fp16_bytes, cudaMemcpyHostToDevice));
     } else if (type == GGMLType::F32) {
         // Convert F32 -> F16 on host, then upload
         const float* f32 = static_cast<const float*>(src);
@@ -189,7 +189,7 @@ bool upload_tensor_fp16(const void* src, GGMLType type,
         for (int64_t i = 0; i < n_elements; i++) {
             h_fp16[i] = __float2half(f32[i]);
         }
-        cudaMemcpy(d_ptr, h_fp16.data(), fp16_bytes, cudaMemcpyHostToDevice);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_ptr, h_fp16.data(), fp16_bytes, cudaMemcpyHostToDevice));
     } else if (type == GGMLType::BF16) {
         // Convert BF16 -> FP16 on host
         const uint16_t* bf16 = static_cast<const uint16_t*>(src);
@@ -201,7 +201,7 @@ bool upload_tensor_fp16(const void* src, GGMLType type,
             std::memcpy(&f, &bits, sizeof(float));
             h_fp16[i] = __float2half(f);
         }
-        cudaMemcpy(d_ptr, h_fp16.data(), fp16_bytes, cudaMemcpyHostToDevice);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_ptr, h_fp16.data(), fp16_bytes, cudaMemcpyHostToDevice));
     } else {
         IMP_LOG_ERROR("Vision: unsupported GGML type %u for tensor upload",
                       static_cast<uint32_t>(type));

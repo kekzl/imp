@@ -1,5 +1,6 @@
 #include "model/model.h"
 #include "model/model_arch.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <cmath>
@@ -15,7 +16,7 @@ Model::~Model() {
     // Free all GPU-side weight buffers.
     for (void* ptr : gpu_allocations_) {
         if (ptr) {
-            cudaFree(ptr);
+            IMP_CUDA_CHECK_LOG(cudaFree(ptr));
         }
     }
     gpu_allocations_.clear();
@@ -23,7 +24,7 @@ Model::~Model() {
     // Unpin host-registered expert weight regions before munmap.
     for (void* ptr : host_pinned_) {
         if (ptr) {
-            cudaHostUnregister(ptr);
+            IMP_CUDA_CHECK_LOG(cudaHostUnregister(ptr));
         }
     }
     host_pinned_.clear();
@@ -31,7 +32,7 @@ Model::~Model() {
     // Free cudaHostAlloc'd expert buffers (WSL2 DMA path).
     for (void* ptr : host_pinned_allocs_) {
         if (ptr) {
-            cudaFreeHost(ptr);
+            IMP_CUDA_CHECK_LOG(cudaFreeHost(ptr));
         }
     }
     host_pinned_allocs_.clear();

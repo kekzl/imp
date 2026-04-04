@@ -114,20 +114,20 @@ bool gemm_grouped_cutlass_sm120(
 
     // D2H copy for per-expert M values (prefill path).
     std::vector<int> h_M(n_problems);
-    cudaMemcpyAsync(h_M.data(), d_problem_m, n_problems * sizeof(int),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_M.data(), d_problem_m, n_problems * sizeof(int),
+                    cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
     // Also need host-side data pointers (d_A_ptrs etc are device arrays)
     std::vector<const void*> h_A(n_problems);
     std::vector<const void*> h_B(n_problems);
     std::vector<void*>       h_C(n_problems);
-    cudaMemcpyAsync(h_A.data(), d_A_ptrs, n_problems * sizeof(void*),
-                    cudaMemcpyDeviceToHost, stream);
-    cudaMemcpyAsync(h_B.data(), d_B_ptrs, n_problems * sizeof(void*),
-                    cudaMemcpyDeviceToHost, stream);
-    cudaMemcpyAsync(h_C.data(), d_C_ptrs, n_problems * sizeof(void*),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_A.data(), d_A_ptrs, n_problems * sizeof(void*),
+                    cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_B.data(), d_B_ptrs, n_problems * sizeof(void*),
+                    cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_C.data(), d_C_ptrs, n_problems * sizeof(void*),
+                    cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
     // Build CUTLASS 2.x GemmGrouped host arrays
@@ -162,20 +162,20 @@ bool gemm_grouped_cutlass_sm120(
     size_t total = align8(o6 + n_problems * sizeof(int64_t));
 
     if (total > s_staging_sz) {
-        if (s_staging) cudaFree(s_staging);
-        cudaMalloc(&s_staging, total);
+        if (s_staging) IMP_CUDA_CHECK_LOG(cudaFree(s_staging));
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&s_staging, total));
         s_staging_sz = total;
     }
 
     char* dv = static_cast<char*>(s_staging);
 
-    cudaMemcpyAsync(dv+o0, h_sizes.data(), n_problems*sizeof(GemmCoord), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(dv+o1, h_a.data(),     n_problems*sizeof(GrpElemA*), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(dv+o2, h_b.data(),     n_problems*sizeof(GrpElemB*), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(dv+o3, h_d.data(),     n_problems*sizeof(GrpElemC*), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(dv+o4, h_lda.data(),   n_problems*sizeof(int64_t),   cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(dv+o5, h_ldb.data(),   n_problems*sizeof(int64_t),   cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(dv+o6, h_ldd.data(),   n_problems*sizeof(int64_t),   cudaMemcpyHostToDevice, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dv+o0, h_sizes.data(), n_problems*sizeof(GemmCoord), cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dv+o1, h_a.data(),     n_problems*sizeof(GrpElemA*), cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dv+o2, h_b.data(),     n_problems*sizeof(GrpElemB*), cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dv+o3, h_d.data(),     n_problems*sizeof(GrpElemC*), cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dv+o4, h_lda.data(),   n_problems*sizeof(int64_t),   cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dv+o5, h_ldb.data(),   n_problems*sizeof(int64_t),   cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dv+o6, h_ldd.data(),   n_problems*sizeof(int64_t),   cudaMemcpyHostToDevice, stream));
 
     // Compute threadblock count
     int tb_count = GrpGDev::sufficient(h_sizes.data(), n_problems);
@@ -211,8 +211,8 @@ bool gemm_grouped_cutlass_sm120(
     // Workspace
     size_t ws = GrpGDev::get_workspace_size(args);
     if (ws > s_workspace_sz) {
-        if (s_workspace) cudaFree(s_workspace);
-        cudaMalloc(&s_workspace, ws);
+        if (s_workspace) IMP_CUDA_CHECK_LOG(cudaFree(s_workspace));
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&s_workspace, ws));
         s_workspace_sz = ws;
     }
 

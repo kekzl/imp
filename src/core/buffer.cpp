@@ -140,9 +140,9 @@ void* Buffer::release() {
 void Buffer::reset() {
     if (!data_) return;
     if (on_device_) {
-        cudaFree(data_);
+        IMP_CUDA_CHECK_LOG(cudaFree(data_));
     } else if (pinned_) {
-        cudaFreeHost(data_);
+        IMP_CUDA_CHECK_LOG(cudaFreeHost(data_));
     } else {
         std::free(data_);
     }

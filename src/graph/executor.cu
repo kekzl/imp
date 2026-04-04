@@ -92,8 +92,8 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
         for (int bi = 0; bi < state.n_banned_tokens; bi++) {
             int32_t tid = state.banned_tokens[bi];
             if (tid >= 0 && tid < vocab_size) {
-                cudaMemcpyAsync(logits_ptr + tid, &neg_inf, sizeof(float),
-                                cudaMemcpyHostToDevice, stream);
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(logits_ptr + tid, &neg_inf, sizeof(float),
+                                cudaMemcpyHostToDevice, stream));
             }
         }
     }
@@ -105,10 +105,10 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
             float bias = state.logit_bias[i].second;
             if (tid >= 0 && tid < vocab_size) {
                 float logit;
-                cudaMemcpy(&logit, logits_ptr + tid, sizeof(float), cudaMemcpyDeviceToHost);
+                IMP_CUDA_CHECK_LOG(cudaMemcpy(&logit, logits_ptr + tid, sizeof(float), cudaMemcpyDeviceToHost));
                 logit += bias;
-                cudaMemcpyAsync(logits_ptr + tid, &logit, sizeof(float),
-                                cudaMemcpyHostToDevice, stream);
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(logits_ptr + tid, &logit, sizeof(float),
+                                cudaMemcpyHostToDevice, stream));
             }
         }
     }
@@ -230,10 +230,10 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits,
                 float bias = st.logit_bias[i].second;
                 if (tid >= 0 && tid < vocab) {
                     float logit;
-                    cudaMemcpy(&logit, lp + tid, sizeof(float), cudaMemcpyDeviceToHost);
+                    IMP_CUDA_CHECK_LOG(cudaMemcpy(&logit, lp + tid, sizeof(float), cudaMemcpyDeviceToHost));
                     logit += bias;
-                    cudaMemcpyAsync(lp + tid, &logit, sizeof(float),
-                                    cudaMemcpyHostToDevice, stream);
+                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(lp + tid, &logit, sizeof(float),
+                                    cudaMemcpyHostToDevice, stream));
                 }
             }
         }
@@ -344,8 +344,8 @@ int32_t GraphExecutor::sample_single_from_logits(const Tensor& logits,
         for (int bi = 0; bi < state.n_banned_tokens; bi++) {
             int32_t tid = state.banned_tokens[bi];
             if (tid >= 0 && tid < vocab)
-                cudaMemcpyAsync(lp + tid, &neg_inf, sizeof(float),
-                                cudaMemcpyHostToDevice, stream);
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(lp + tid, &neg_inf, sizeof(float),
+                                cudaMemcpyHostToDevice, stream));
         }
     }
     // Apply logit bias
@@ -355,10 +355,10 @@ int32_t GraphExecutor::sample_single_from_logits(const Tensor& logits,
             float bias = state.logit_bias[i].second;
             if (tid >= 0 && tid < vocab) {
                 float logit;
-                cudaMemcpy(&logit, lp + tid, sizeof(float), cudaMemcpyDeviceToHost);
+                IMP_CUDA_CHECK_LOG(cudaMemcpy(&logit, lp + tid, sizeof(float), cudaMemcpyDeviceToHost));
                 logit += bias;
-                cudaMemcpyAsync(lp + tid, &logit, sizeof(float),
-                                cudaMemcpyHostToDevice, stream);
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(lp + tid, &logit, sizeof(float),
+                                cudaMemcpyHostToDevice, stream));
             }
         }
     }

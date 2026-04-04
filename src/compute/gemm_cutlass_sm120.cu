@@ -400,8 +400,8 @@ void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src,
     // Allocate SfAtom scale buffer
     size_t sf_bytes = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
     void* d_sf = nullptr;
-    cudaMalloc(&d_sf, sf_bytes);
-    cudaMemsetAsync(d_sf, 0, sf_bytes, stream);  // zero-init for padding
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_sf, sf_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_sf, 0, sf_bytes, stream));  // zero-init for padding
 
     // Convert scales to SfAtom layout (micro_scale only, tensor_scale deferred to GEMM alpha)
     {
@@ -431,7 +431,7 @@ void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src,
 void free_cutlass_nvfp4_weight(CutlassNvFP4Weight& w) {
     // data is borrowed from NvFP4QuantResult — do NOT free it
     w.data = nullptr;
-    if (w.scale_factors) { cudaFree(w.scale_factors); w.scale_factors = nullptr; }
+    if (w.scale_factors) { IMP_CUDA_CHECK_LOG(cudaFree(w.scale_factors)); w.scale_factors = nullptr; }
     w.N = w.K = 0;
     w.sf_bytes = 0;
 }
@@ -444,7 +444,7 @@ void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data,
 
     // Zero the SF buffer for padding safety
     size_t sf_bytes = cutlass_nvfp4_sf_size(M, K);
-    cudaMemsetAsync(dst_sf, 0, sf_bytes, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(dst_sf, 0, sf_bytes, stream));
 
     int K_groups = K / kSFVecSize;
     int total_mb = M * K_groups;
@@ -552,8 +552,8 @@ bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf,
     void* ws = workspace;
     if (needed > workspace_size) {
         if (needed > s_cutlass_workspace_size) {
-            if (s_cutlass_workspace) cudaFree(s_cutlass_workspace);
-            cudaMalloc(&s_cutlass_workspace, needed);
+            if (s_cutlass_workspace) IMP_CUDA_CHECK_LOG(cudaFree(s_cutlass_workspace));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&s_cutlass_workspace, needed));
             s_cutlass_workspace_size = needed;
         }
         ws = s_cutlass_workspace;
