@@ -59,21 +59,14 @@ __constant__ float kFP4E2M1Dequant[8] = {
 // ---------------------------------------------------------------------------
 __device__ __forceinline__ uint8_t float_abs_to_fp4_e2m1(float abs_val)
 {
-    // Clamp to representable range.
-    if (abs_val <= 0.0f) return 0;
-    if (abs_val >= 6.0f) return 7;  // saturate to max
-
-    // Thresholds are midpoints between consecutive representable values:
+    // Branchless: count of midpoint thresholds exceeded gives the E2M1 code.
+    // Thresholds between adjacent representable values:
     //   0    0.5    1.0    1.5    2.0    3.0    4.0    6.0
     //     0.25  0.75  1.25  1.75  2.5   3.5    5.0
-    if (abs_val < 0.25f)  return 0;   // -> 0.0
-    if (abs_val < 0.75f)  return 1;   // -> 0.5
-    if (abs_val < 1.25f)  return 2;   // -> 1.0
-    if (abs_val < 1.75f)  return 3;   // -> 1.5
-    if (abs_val < 2.5f)   return 4;   // -> 2.0
-    if (abs_val < 3.5f)   return 5;   // -> 3.0
-    if (abs_val < 5.0f)   return 6;   // -> 4.0
-    return 7;                          // -> 6.0
+    uint8_t code = (abs_val >= 0.25f) + (abs_val >= 0.75f) + (abs_val >= 1.25f)
+                 + (abs_val >= 1.75f) + (abs_val >= 2.5f)  + (abs_val >= 3.5f)
+                 + (abs_val >= 5.0f);
+    return code;  // 0..7
 }
 
 // float_to_fp8_e4m3() and fp8_e4m3_to_float() are provided by fp8_utils.cuh.
@@ -97,15 +90,17 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4(
     int64_t                  num_mb_per_row,
     int64_t                  K)
 {
-    // Step 1: Load 16 FP16 values and find local absmax.
+    // Step 1: Load 16 FP16 values via vectorized half2 loads and find local absmax.
     float vals[kMicroBlockSize];
     float local_absmax = 0.0f;
 
+    const half2* src_h2 = reinterpret_cast<const half2*>(input + base);
     #pragma unroll
-    for (int i = 0; i < kMicroBlockSize; i++) {
-        vals[i] = __half2float(input[base + i]);
-        float av = fabsf(vals[i]);
-        if (av > local_absmax) local_absmax = av;
+    for (int i = 0; i < kMicroBlockSize / 2; i++) {
+        half2 h2 = src_h2[i];
+        vals[i * 2]     = __half2float(h2.x);
+        vals[i * 2 + 1] = __half2float(h2.y);
+        local_absmax = fmaxf(local_absmax, fmaxf(fabsf(vals[i * 2]), fabsf(vals[i * 2 + 1])));
     }
 
     // Step 2: Compute micro-scale = local_absmax / (tensor_scale * 6.0).

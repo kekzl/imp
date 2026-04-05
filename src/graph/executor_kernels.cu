@@ -936,11 +936,13 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
         for (int h = warp_id; h < n_kv_heads; h += num_warps) {
             const int head_offset = h * head_dim;
 
-            // Step 1: Compute L2 norm
+            // Step 1: Compute L2 norm (vectorized half2 loads)
             float norm_sq = 0.0f;
-            for (int d = lane_id; d < head_dim; d += kWarpSize) {
-                float val = __half2float(src[head_offset + d]);
-                norm_sq += val * val;
+            for (int d = lane_id; d < head_dim / 2; d += kWarpSize) {
+                half2 h2 = reinterpret_cast<const half2*>(src + head_offset)[d];
+                float v0 = __half2float(h2.x);
+                float v1 = __half2float(h2.y);
+                norm_sq += v0 * v0 + v1 * v1;
             }
             #pragma unroll
             for (int offset = 16; offset > 0; offset >>= 1)
@@ -962,11 +964,14 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
             for (int g = 0; g < n_groups; g++) {
                 int g_start = g * GROUP_SIZE;
 
-                // 3a: Find per-group absmax of normalized direction
+                // 3a: Find per-group absmax of normalized direction (vectorized half2 loads)
                 float group_amax = 0.0f;
-                for (int d = lane_id; d < GROUP_SIZE; d += kWarpSize) {
-                    float dir_val = __half2float(src[head_offset + g_start + d]) * inv_norm;
-                    group_amax = fmaxf(group_amax, fabsf(dir_val));
+                const half2* src_h2 = reinterpret_cast<const half2*>(src + head_offset + g_start);
+                for (int d = lane_id; d < GROUP_SIZE / 2; d += kWarpSize) {
+                    half2 h2 = src_h2[d];
+                    float v0 = __half2float(h2.x) * inv_norm;
+                    float v1 = __half2float(h2.y) * inv_norm;
+                    group_amax = fmaxf(group_amax, fmaxf(fabsf(v0), fabsf(v1)));
                 }
                 #pragma unroll
                 for (int offset = 16; offset > 0; offset >>= 1)
@@ -984,24 +989,15 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
                     mscale_dst[head_mscale_offset + g] = ue8m0;
                 }
 
-                // 3d: Quantize direction elements to signed FP4 E2M1
-                for (int d = lane_id * 2; d < GROUP_SIZE; d += 2 * kWarpSize) {
-                    float v0 = __half2float(src[head_offset + g_start + d]) * inv_norm;
-                    float v1 = (d + 1 < GROUP_SIZE)
-                        ? __half2float(src[head_offset + g_start + d + 1]) * inv_norm
-                        : 0.0f;
-
-                    // Scale to FP4 range and quantize
-                    float s0 = v0 * inv_scale;
-                    float s1 = v1 * inv_scale;
-                    uint8_t sign0 = (s0 < 0.0f) ? 1u : 0u;
-                    uint8_t sign1 = (s1 < 0.0f) ? 1u : 0u;
-                    uint8_t code0 = tq_float_abs_to_fp4(fabsf(s0));
-                    uint8_t code1 = tq_float_abs_to_fp4(fabsf(s1));
-                    uint8_t fp4_0 = (sign0 << 3) | code0;
-                    uint8_t fp4_1 = (sign1 << 3) | code1;
-                    uint8_t packed = fp4_0 | (fp4_1 << 4);
-                    dir_dst[head_byte_offset + (g_start + d) / 2] = packed;
+                // 3d: Quantize direction elements to signed FP4 E2M1 (vectorized)
+                // Each lane processes a half2 pair, packs to one byte
+                float combined_inv = inv_norm * inv_scale;
+                for (int d = lane_id; d < GROUP_SIZE / 2; d += kWarpSize) {
+                    half2 h2 = src_h2[d];
+                    float s0 = __half2float(h2.x) * combined_inv;
+                    float s1 = __half2float(h2.y) * combined_inv;
+                    dir_dst[head_byte_offset + (g_start + d * 2) / 2] =
+                        tq_fp4_pack_pair(s0, s1);
                 }
             }
 
@@ -1042,10 +1038,13 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
 
         for (int h = warp_id; h < n_kv_heads; h += num_warps) {
             const int head_offset = h * head_dim;
+            // Vectorized absmax reduction using half2 loads
+            const half2* src_h2 = reinterpret_cast<const half2*>(src + head_offset);
             float amax = 0.0f;
-            for (int d = lane_id; d < head_dim; d += kWarpSize) {
-                float val = __half2float(src[head_offset + d]);
-                amax = fmaxf(amax, fabsf(val));
+            for (int d = lane_id; d < head_dim / 2; d += kWarpSize) {
+                half2 h2 = src_h2[d];
+                amax = fmaxf(amax, fmaxf(fabsf(__half2float(h2.x)),
+                                          fabsf(__half2float(h2.y))));
             }
             #pragma unroll
             for (int offset = 16; offset > 0; offset >>= 1)
@@ -1054,17 +1053,19 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
             float sc = amax / 7.0f;
             float inv_sc = (amax > 1e-8f) ? (7.0f / amax) : 0.0f;
 
+            // Vectorized INT4 quantization: each lane loads half2, packs one byte
             const int head_byte_offset = h * head_dim / 2;
-            for (int d = lane_id * 2; d < head_dim; d += 2 * kWarpSize) {
-                float v0 = __half2float(src[head_offset + d]);
-                float v1 = (d + 1 < head_dim) ? __half2float(src[head_offset + d + 1]) : 0.0f;
+            for (int d = lane_id; d < head_dim / 2; d += kWarpSize) {
+                half2 h2 = src_h2[d];
+                float v0 = __half2float(h2.x);
+                float v1 = __half2float(h2.y);
                 int q0 = __float2int_rn(v0 * inv_sc);
                 int q1 = __float2int_rn(v1 * inv_sc);
                 q0 = max(-8, min(7, q0));
                 q1 = max(-8, min(7, q1));
                 uint8_t packed = (static_cast<uint8_t>(q0 & 0xF)) |
                                  (static_cast<uint8_t>(q1 & 0xF) << 4);
-                dst[head_byte_offset + d / 2] = packed;
+                dst[head_byte_offset + d] = packed;
             }
             if (lane_id == 0) {
                 scale_dst[h] = __float2half(sc);

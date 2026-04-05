@@ -17,17 +17,26 @@ static __constant__ float kTQFP4DequantLUT[8] = {
 };
 
 // Quantize float magnitude → FP4 E2M1 3-bit code (round-to-nearest)
+// Branchless version: sum of comparisons against midpoint thresholds.
+// Thresholds between adjacent E2M1 values: 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0
+// The code equals the count of thresholds the value exceeds.
 __device__ __forceinline__ uint8_t tq_fp4_quantize_abs(float abs_val) {
-    if (abs_val <= 0.0f) return 0;
-    if (abs_val >= 6.0f) return 7;
-    if (abs_val < 0.25f)  return 0;
-    if (abs_val < 0.75f)  return 1;
-    if (abs_val < 1.25f)  return 2;
-    if (abs_val < 1.75f)  return 3;
-    if (abs_val < 2.5f)   return 4;
-    if (abs_val < 3.5f)   return 5;
-    if (abs_val < 5.0f)   return 6;
-    return 7;
+    uint8_t code = (abs_val >= 0.25f) + (abs_val >= 0.75f) + (abs_val >= 1.25f)
+                 + (abs_val >= 1.75f) + (abs_val >= 2.5f)  + (abs_val >= 3.5f)
+                 + (abs_val >= 5.0f);
+    return code;  // 0..7 maps directly to E2M1 magnitude codes
+}
+
+// Quantize a float (signed) to packed 4-bit FP4 E2M1 nibble [sign:1 | code:3]
+__device__ __forceinline__ uint8_t tq_fp4_quantize_signed(float val) {
+    uint8_t sign = (val < 0.0f) ? 1u : 0u;
+    uint8_t code = tq_fp4_quantize_abs(fabsf(val));
+    return (sign << 3) | code;
+}
+
+// Pack two signed FP4 nibbles into one byte (lo=even, hi=odd)
+__device__ __forceinline__ uint8_t tq_fp4_pack_pair(float v0, float v1) {
+    return tq_fp4_quantize_signed(v0) | (tq_fp4_quantize_signed(v1) << 4);
 }
 
 // Float → UE8M0 (pure-exponent, value = 2^(bits-127), rounds up to next pow2)
