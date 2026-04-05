@@ -587,6 +587,21 @@ __global__ void softmax_to_pairs_kernel(
     d_values[idx] = idx;
 }
 
+// Kernel: compute softmax probabilities reading max/sum from device memory.
+// d_max_sum[0] = global_max, d_max_sum[1] = sum. Avoids 2 D2H syncs.
+__global__ void softmax_to_pairs_device_kernel(
+        const float* __restrict__ logits, int vocab_size,
+        float inv_temperature, const float* __restrict__ d_max_sum,
+        float* __restrict__ d_keys, int32_t* __restrict__ d_values) {
+    float global_max = d_max_sum[0];
+    float inv_sum = 1.0f / d_max_sum[1];
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= vocab_size) return;
+    float prob = expf((logits[idx] - global_max) * inv_temperature) * inv_sum;
+    d_keys[idx] = prob;
+    d_values[idx] = idx;
+}
+
 // Kernel: find global max of logits (Phase 1)
 __global__ void softmax_max_kernel(
         const float* __restrict__ logits, int vocab_size,
@@ -619,6 +634,32 @@ __global__ void softmax_sum_kernel(
         float* __restrict__ d_sum) {
     __shared__ float s_sum[BLOCK_SIZE / WARP_SIZE];
 
+    float local_sum = 0.0f;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < vocab_size;
+         i += blockDim.x * gridDim.x) {
+        local_sum += expf((logits[i] - global_max) * inv_temperature);
+    }
+    local_sum = warp_reduce_sum(local_sum);
+    int warp_id = threadIdx.x / WARP_SIZE;
+    int lane_id = threadIdx.x % WARP_SIZE;
+    if (lane_id == 0) s_sum[warp_id] = local_sum;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float sm = 0.0f;
+        for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; w++) sm += s_sum[w];
+        atomicAdd(d_sum, sm);
+    }
+}
+
+// Kernel: compute sum of exp(logits - max) reading max from device memory.
+// Avoids D2H sync between max and sum phases.
+__global__ void softmax_sum_device_max_kernel(
+        const float* __restrict__ logits, int vocab_size,
+        float inv_temperature, const float* __restrict__ d_max,
+        float* __restrict__ d_sum) {
+    __shared__ float s_sum[BLOCK_SIZE / WARP_SIZE];
+
+    float global_max = *d_max;
     float local_sum = 0.0f;
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < vocab_size;
          i += blockDim.x * gridDim.x) {
@@ -731,8 +772,9 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size,
 
     auto& sc = s_cub_scratch;
 
-    // Step 1: Compute softmax stats (max, then sum) using two separate kernels
-    // to avoid a race between the max reduction and the sum computation.
+    // Step 1: Compute softmax stats (max, then sum) entirely on device.
+    // All intermediate values stay in d_max_sum — no D2H syncs needed.
+    // d_max_sum[0] = global max, d_max_sum[1] = sum of exp.
     float neg_inf_val = -FLT_MAX;
     int neg_inf_bits;
     std::memcpy(&neg_inf_bits, &neg_inf_val, sizeof(int));
@@ -744,31 +786,18 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size,
 
     int stats_blocks = std::min((vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE, 128);
 
-    // Phase 1: global max
+    // Phase 1: global max (result in d_max_sum[0])
     softmax_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(
         d_logits, vocab_size, sc.d_max_sum);
 
-    // Read back max (need sync before phase 2)
-    float gmax;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&gmax, sc.d_max_sum, sizeof(float),
-                    cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
+    // Phase 2: sum of exp — reads max from device memory (no D2H sync)
+    softmax_sum_device_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(
+        d_logits, vocab_size, inv_temperature, sc.d_max_sum, sc.d_max_sum + 1);
 
-    // Phase 2: sum of exp (uses host-side gmax as kernel arg — no race)
-    softmax_sum_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, inv_temperature, gmax, sc.d_max_sum + 1);
-
-    float h_sum;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_sum, sc.d_max_sum + 1, sizeof(float),
-                    cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
-
-    float inv_sum = 1.0f / h_sum;
-
-    // Step 2: Compute probabilities into key/value arrays
+    // Step 2: Compute probabilities reading max/sum from device memory (no D2H sync)
     int pair_blocks = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    softmax_to_pairs_kernel<<<pair_blocks, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, inv_temperature, gmax, inv_sum,
+    softmax_to_pairs_device_kernel<<<pair_blocks, BLOCK_SIZE, 0, stream>>>(
+        d_logits, vocab_size, inv_temperature, sc.d_max_sum,
         sc.d_keys_in, sc.d_vals_in);
 
     // Step 3: CUB radix sort descending
