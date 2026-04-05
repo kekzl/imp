@@ -1864,7 +1864,7 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     // Think budget is now enforced device-side in post_decode_step_kernel.
     // Penalties are applied device-side via apply_penalties_device_count in the graph loop.
     if (req->status == RequestStatus::DECODING && !req->output_tokens.empty() &&
-        config_.use_cuda_graphs && !offload_mgr_ && !ssm_state_ && !gdn_state_ &&
+        config_.use_cuda_graphs && !offload_mgr_ && !ssm_state_ &&
         !config_.enable_speculative && !req->ignore_eos) {
         int32_t first_token = req->output_tokens.back();
         Tokenizer* gtok = model_->tokenizer();

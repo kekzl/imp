@@ -334,8 +334,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     // 5. Run delta rule scan
     Tensor y_buf = view_tokens(ssm_y_buf_, n);
 
-    void* h_st = (state.ssm_state && ssm_idx >= 0)
-                 ? state.ssm_state->h_state(state.ssm_seq_id, ssm_idx)
+    void* h_st = (state.gdn_state && ssm_idx >= 0)
+                 ? state.gdn_state->s_state(state.gdn_seq_id, ssm_idx)
                  : nullptr;
 
     // Gate projection — computed before scan, used after in RMSNormGated
