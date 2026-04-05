@@ -143,8 +143,16 @@ void Engine::reset_batch_pool_cache() {
 }
 
 void Engine::invalidate_graphs() {
-    for (int i = 0; i < kMaxGraphPoolSize; i++)
-        decode_graph_pool_[i].invalidate();
+    // Preserve decode_graph_pool_ across context resets — the decode step
+    // topology (forward_logits) doesn't change between requests. Inputs
+    // (token IDs, positions, block tables) are uploaded fresh each step via
+    // the batch pool. Per-entry invalidation already handles max_blocks_per_seq
+    // changes in step_decode_forward(). Re-capturing on every benchmark rep
+    // adds ~100ms overhead per reset.
+    //
+    // The conditional graph runner MUST be invalidated: it captures the full
+    // decode loop including token feedback, stop conditions, and request-specific
+    // KV block pointers.
     if (async_graph_runner_.is_setup()) {
         async_graph_runner_.cleanup();
     }
