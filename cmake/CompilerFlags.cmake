@@ -14,3 +14,5 @@ set(CMAKE_CUDA_FLAGS_RELWITHDEBINFO "-O2 -g -lineinfo -DNDEBUG")
 
 # Suppress noisy CUDA warnings
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --diag_suppress=esa_on_defaulted_function_ignored")
+# CUTLASS sm100/sm103 headers use [=] lambdas that implicitly capture 'this' (deprecated in C++20)
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --diag-suppress=2908")
