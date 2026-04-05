@@ -1099,6 +1099,14 @@ void apply_min_p(float* logits, int vocab_size, float min_p,
 // DRY (Don't Repeat Yourself) repetition penalty
 // ===========================================================================
 
+// File-scope persistent GPU buffers for DRY penalty application.
+// Promoted from function-local statics so sampling_preallocate_dry() can
+// pre-allocate them at engine init time and avoid cudaStreamSynchronize on
+// first use during inference.
+static int32_t* s_dry_tokens_buf = nullptr;
+static float*   s_dry_values_buf = nullptr;
+static size_t   s_dry_buf_cap    = 0;
+
 // Sparse penalty application kernel: subtracts penalty from each listed token.
 __global__ void apply_dry_sparse_kernel(
         float* __restrict__ logits,
@@ -1167,10 +1175,7 @@ void apply_dry_penalty(float* d_logits, int vocab_size,
     }
 
     // Upload to GPU and apply — reuse persistent buffers to avoid per-call cudaMalloc
-    static int32_t* s_dry_tokens_buf = nullptr;
-    static float* s_dry_values_buf = nullptr;
-    static size_t s_dry_buf_cap = 0;
-
+    // (buffers are file-scope; pre-allocated by sampling_preallocate_dry at engine init)
     size_t needed = static_cast<size_t>(n);
     if (needed > s_dry_buf_cap) {
         // Grow buffers (sync stream first to ensure previous work is done)
@@ -1592,8 +1597,32 @@ void compute_logprobs_cpu(const float* logits, int vocab_size,
     }
 }
 
+void sampling_preallocate_dry(int max_seq_len, cudaStream_t /*stream*/) {
+    if (max_seq_len <= 0) return;
+    size_t cap = static_cast<size_t>(max_seq_len);
+    if (cap <= s_dry_buf_cap) return;  // already large enough
+
+    // Free existing (if any) before re-allocating
+    if (s_dry_tokens_buf) { cudaFree(s_dry_tokens_buf); s_dry_tokens_buf = nullptr; }
+    if (s_dry_values_buf) { cudaFree(s_dry_values_buf); s_dry_values_buf = nullptr; }
+    s_dry_buf_cap = 0;
+
+    if (cudaMalloc(&s_dry_tokens_buf, cap * sizeof(int32_t)) != cudaSuccess ||
+        cudaMalloc(&s_dry_values_buf, cap * sizeof(float)) != cudaSuccess) {
+        IMP_LOG_ERROR("sampling_preallocate_dry: cudaMalloc failed for %zu elements", cap);
+        if (s_dry_tokens_buf) { cudaFree(s_dry_tokens_buf); s_dry_tokens_buf = nullptr; }
+        if (s_dry_values_buf) { cudaFree(s_dry_values_buf); s_dry_values_buf = nullptr; }
+        return;
+    }
+    s_dry_buf_cap = cap;
+    IMP_LOG_DEBUG("sampling_preallocate_dry: pre-allocated %zu DRY penalty slots", cap);
+}
+
 void sampling_cleanup() {
     s_cub_scratch.free();
+    if (s_dry_tokens_buf) { cudaFree(s_dry_tokens_buf); s_dry_tokens_buf = nullptr; }
+    if (s_dry_values_buf) { cudaFree(s_dry_values_buf); s_dry_values_buf = nullptr; }
+    s_dry_buf_cap = 0;
 }
 
 } // namespace imp
