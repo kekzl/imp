@@ -21,6 +21,13 @@ enum class ModelArch {
 
 const char* model_arch_name(ModelArch arch);
 
+// C API enum value for this architecture.
+int model_arch_c_api_id(ModelArch arch);
+
+// Sampling defaults from registry.
+struct SamplingDefaults;
+void model_arch_sampling_defaults(ModelArch arch, float& temperature, float& top_p, int& top_k);
+
 // Parse architecture string (e.g. from GGUF "general.architecture")
 ModelArch parse_model_arch(const std::string& arch_str);
 
