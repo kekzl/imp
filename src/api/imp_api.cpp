@@ -184,19 +184,7 @@ ImpModelArch imp_model_arch(ImpModel model) {
     if (!model || !model->model) {
         return IMP_ARCH_GENERIC;
     }
-    switch (model->model->config().arch) {
-        case imp::ModelArch::LLAMA:          return IMP_ARCH_LLAMA;
-        case imp::ModelArch::MISTRAL:        return IMP_ARCH_MISTRAL;
-        case imp::ModelArch::MIXTRAL:        return IMP_ARCH_MIXTRAL;
-        case imp::ModelArch::DEEPSEEK:       return IMP_ARCH_DEEPSEEK;
-        case imp::ModelArch::NEMOTRON_H_MOE: return IMP_ARCH_NEMOTRON_H_MOE;
-        case imp::ModelArch::QWEN3:          return IMP_ARCH_QWEN3;
-        case imp::ModelArch::QWEN3_MOE:      return IMP_ARCH_QWEN3_MOE;
-        case imp::ModelArch::GEMMA3:         return IMP_ARCH_GEMMA3;
-        case imp::ModelArch::LLAMA4:         return IMP_ARCH_LLAMA4;
-        case imp::ModelArch::GENERIC:        return IMP_ARCH_GENERIC;
-    }
-    return IMP_ARCH_GENERIC;
+    return static_cast<ImpModelArch>(imp::model_arch_c_api_id(model->model->config().arch));
 }
 
 int imp_model_n_layers(ImpModel model) {
