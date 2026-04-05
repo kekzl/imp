@@ -117,6 +117,7 @@ public:
         int32_t think_start_id = -1;     // <think> token ID
         int32_t think_end_id = -1;       // </think> token ID
         bool initial_in_think = false;   // true if already inside <think> block
+        bool ignore_eos = false;         // don't stop on EOS/stop tokens (benchmark mode)
     };
 
     // Build the conditional graph and all device state.

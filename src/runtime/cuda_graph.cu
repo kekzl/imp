@@ -311,6 +311,7 @@ __global__ void post_decode_step_kernel(
         int32_t think_end_id,
         int* __restrict__ d_think_count,             // [1] reasoning token counter
         int* __restrict__ d_in_think,                // [1] think block flag
+        int ignore_eos,                              // 1 = don't stop on EOS/stop tokens
         cudaGraphConditionalHandle handle) {
     int step = *d_step_counter;
     int32_t token = *d_token_id;
@@ -340,7 +341,7 @@ __global__ void post_decode_step_kernel(
     // the model may emit them during reasoning, stopping prematurely.
     bool in_think = (think_budget_limit > 0 && d_in_think && *d_in_think);
     bool should_stop = (step + 1 >= max_steps);
-    if (!in_think) {
+    if (!in_think && !ignore_eos) {
         if (token == eos_id) should_stop = true;
         for (int i = 0; i < n_stop_ids; i++) {
             if (token == d_stop_ids[i]) should_stop = true;
@@ -521,6 +522,7 @@ bool CudaGraphConditionalRunner::setup(
             d_stop_ids_, static_cast<int>(config_.stop_ids.size()),
             config_.think_budget_limit, config_.think_start_id, config_.think_end_id,
             d_think_count_, d_in_think_,
+            config_.ignore_eos ? 1 : 0,
             handle_);
 
         // 5c. End capture

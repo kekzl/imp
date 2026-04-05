@@ -182,6 +182,7 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(
     gcfg.top_p = req.top_p;
     gcfg.top_k = req.top_k;
     gcfg.seed = req.seed;
+    gcfg.ignore_eos = req.ignore_eos;
     // Think budget: device-side enforcement in post_decode_step_kernel
     if (req.think_budget > 0.0f && think_end_id_ >= 0) {
         gcfg.think_budget_limit = static_cast<int>(req.max_tokens * req.think_budget);

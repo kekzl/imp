@@ -1777,7 +1777,7 @@ void Engine::step_decode_process_outputs(
                                    dreq->frequency_penalty != 0.0f ||
                                    dreq->presence_penalty != 0.0f);
         if (dreq->status == RequestStatus::DECODING &&
-            !dreq->output_tokens.empty() && !dreq->ignore_eos &&
+            !dreq->output_tokens.empty() &&
             !dreq_has_penalties) {
             int32_t last_token = dreq->output_tokens.back();
             try_launch_async_graph_loop(dreq, last_token, dec_stream);
