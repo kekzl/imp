@@ -37,11 +37,11 @@ ImpConfig imp_config_default(void) {
     config.device_id = 0;
     config.gpu_memory_pool_size = 0;    // auto
     config.kv_cache_max_blocks = 0;     // auto
-    config.max_batch_size = 32;
-    config.max_seq_len = 4096;
+    config.max_batch_size = 0;          // auto (engine detects from model size)
+    config.max_seq_len = 0;             // auto (engine detects from model metadata + VRAM)
     config.compute_dtype = IMP_DTYPE_FP16;
-    config.temperature = 1.0f;
-    config.top_p = 1.0f;
+    config.temperature = 0.6f;
+    config.top_p = 0.95f;
     config.top_k = 0;
     config.max_tokens = 256;
     config.enable_green_contexts = 0;

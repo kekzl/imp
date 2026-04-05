@@ -4,7 +4,6 @@
 
 #include "api/imp_internal.h"
 #include "model/hf_hub.h"
-#include "runtime/presets.h"
 
 #include <chrono>
 #include <cmath>
@@ -201,44 +200,25 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
 }
 
 // Build ImpConfig from default args + optional JSON overrides.
-// Auto-detects optimal preset from model_path unless overridden.
+// Engine auto-detects max_seq_len, max_batch_size, KV dtype, FP8 prefill, NVFP4 decode.
 ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
                        const json& overrides, ImpModel model = nullptr) {
     ImpConfig config = imp_config_default();
 
-    // Resolve preset: explicit flag/override > auto-detect from model filename
-    const imp::PresetConfig* preset = nullptr;
-    std::string preset_str = overrides.value("preset", args.preset);
-    if (preset_str == "none") {
-        // Explicitly disabled
-    } else if (!preset_str.empty()) {
-        preset = imp::find_preset(preset_str);
-    } else if (!model_path.empty()) {
-        preset = imp::detect_preset(model_path);
-    }
-
-    if (preset) {
-        imp::apply_preset(preset, config);
-        printf("Preset: %s\n", preset->description.c_str());
-    }
-
     config.device_id = args.device;
-    if (!preset) {
-        config.max_batch_size = 8;  // Allow concurrent requests for continuous batching
-        // Use model's native context length (from GGUF metadata), clamped to a
-        // reasonable default. Without a preset, the VRAM budget planner will
-        // size the KV cache to fit whatever fits in GPU memory.
-        int model_ctx = imp_model_max_seq_len(model);
-        int default_ctx = (model_ctx > 0) ? std::min(model_ctx, 32768) : 8192;
-        config.max_seq_len = overrides.value("max_seq_len", default_ctx);
-    } else if (overrides.contains("max_seq_len")) {
-        config.max_seq_len = overrides.value("max_seq_len", config.max_seq_len);
-    }
+
+    // max_seq_len / max_batch_size: 0 = auto-detect in engine.
+    // Override only if explicitly provided via JSON overrides.
+    if (overrides.contains("max_seq_len"))
+        config.max_seq_len = overrides.value("max_seq_len", 0);
+    if (overrides.contains("max_batch_size"))
+        config.max_batch_size = overrides.value("max_batch_size", 0);
+
     config.gpu_layers = args.gpu_layers;
     if (args.ssm_fp16) config.ssm_state_dtype = IMP_DTYPE_FP16;
     if (args.no_cuda_graphs) config.enable_cuda_graphs = 0;
 
-    // KV cache dtype: explicit overrides only (preset already set optimal value)
+    // KV cache dtype: explicit overrides only (engine auto-detects FP8 on sm_90+)
     bool kv_fp8 = overrides.value("kv_fp8", args.kv_fp8);
     bool kv_int8 = overrides.value("kv_int8", args.kv_int8);
     bool kv_int4 = overrides.value("kv_int4", args.kv_int4);
@@ -259,8 +239,7 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
     config.prefill_chunk_size = chunk;
 
     int nvfp4 = overrides.value("decode_nvfp4", args.decode_nvfp4);
-    if (nvfp4 != -1 || !preset)
-        config.use_nvfp4_decode = nvfp4;
+    config.use_nvfp4_decode = nvfp4;
 
     if (args.mxfp4_prefill) config.use_mxfp4_prefill = 1;
     if (args.dual_path_quant) config.dual_path_quant = 1;
@@ -321,7 +300,7 @@ std::string load_model_into_state(ServerState& state, const std::string& path,
         return msg;
     }
 
-    // Create context (auto-detects preset from model path)
+    // Create context (engine auto-detects config from model metadata)
     ImpConfig config = build_config(state.default_args, path, config_overrides, state.model);
     err = imp_context_create(state.model, &config, &state.ctx);
     if (err != IMP_SUCCESS) {

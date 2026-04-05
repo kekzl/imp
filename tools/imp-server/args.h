@@ -35,9 +35,6 @@ struct ServerArgs {
     bool ngram_spec = false;        // --ngram-spec
     int ngram_spec_k = 5;           // --ngram-spec-k
     int min_kv_tokens = 0;     // --min-kv-tokens: minimum KV cache capacity (0=auto)
-    std::string preset;        // --preset: named model preset (e.g. qwen3-32b)
-    std::string presets_file;  // --presets-file: custom presets.toml path
-
     // Server limits
     int max_concurrent = 64;   // --max-concurrent: max simultaneous requests (0=unlimited)
     int request_timeout = 300; // --request-timeout: per-request timeout in seconds (0=unlimited)

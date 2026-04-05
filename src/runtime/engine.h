@@ -27,8 +27,8 @@
 namespace imp {
 
 struct EngineConfig {
-    int max_batch_size = 32;
-    int max_seq_len = 4096;
+    int max_batch_size = 0;   // 0 = auto (engine detects from model size vs VRAM)
+    int max_seq_len = 0;      // 0 = auto (engine detects from model metadata + VRAM)
     int kv_cache_max_blocks = 0;  // 0 = auto
     bool use_green_contexts = false;
     float green_ctx_prefill_ratio = 0.8f;
