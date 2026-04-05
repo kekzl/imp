@@ -95,6 +95,7 @@ int main(int argc, char** argv) {
     if (args.prefill_chunk_size > 0) config.prefill_chunk_size = args.prefill_chunk_size;
     if (args.prefill_fp8) config.use_fp8_prefill = 1;
     if (args.mxfp4_prefill) config.use_mxfp4_prefill = 1;
+    if (args.dual_path_quant) config.dual_path_quant = 1;
     if (args.prefix_caching) config.use_prefix_caching = 1;
     if (args.decode_nvfp4 != -1 || !preset)
         config.use_nvfp4_decode = args.decode_nvfp4;

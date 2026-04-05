@@ -364,6 +364,19 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
     }
 
+    // Dual-path quant validation: requires NVFP4 decode + FP8 prefill.
+    // If either is missing, auto-enable or warn.
+    if (config_.dual_path_quant) {
+        if (config_.use_nvfp4_decode <= 0) {
+            IMP_LOG_WARN("Dual-path quant requires NVFP4 decode — enabling mode 2 (NVFP4 only)");
+            config_.use_nvfp4_decode = 2;
+        }
+        if (!config_.use_fp8_prefill) {
+            IMP_LOG_INFO("Dual-path quant: auto-enabling FP8 prefill for attention weight quality");
+            config_.use_fp8_prefill = true;
+        }
+    }
+
     // --- Core initialization ---
     // 5% headroom (was 10%) — MoE models (30B Q6_K) need every MiB on 32GB.
     // WSL2/WDDM has ~500 MiB driver overhead, 5% of 32GB = 1.6 GB covers it.
@@ -401,6 +414,11 @@ bool Engine::init_weights() {
                              config_.use_fp8_prefill, config_.use_nvfp4_decode,
                              config_.use_mxfp4_prefill))
             return false;
+
+        if (config_.dual_path_quant) {
+            executor_->set_dual_path_quant(true);
+            IMP_LOG_INFO("Dual-path quant: attention weights → FP8, FFN weights → NVFP4");
+        }
     }
 
     // Reserve L2 persisting cache for decode GEMV

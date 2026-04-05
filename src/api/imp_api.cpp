@@ -56,6 +56,7 @@ ImpConfig imp_config_default(void) {
     config.use_fp8_prefill = 0;         // FP16 weight cache by default
     config.use_nvfp4_decode = -1;       // auto (sm_120→mode2, sm_90→mode1)
     config.use_mxfp4_prefill = 0;       // off by default
+    config.dual_path_quant = 0;         // off by default
     config.min_kv_tokens = 0;           // auto (pick reasonable minimum based on model)
     config.use_prefix_caching = 0;      // off by default
     config.prefix_cache_path[0] = '\0'; // no persistence by default
@@ -263,6 +264,7 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
         ecfg.use_nvfp4_decode = config->use_nvfp4_decode;
         ecfg.min_kv_tokens = config->min_kv_tokens;
         ecfg.use_mxfp4_prefill = (config->use_mxfp4_prefill != 0);
+        ecfg.dual_path_quant = (config->dual_path_quant != 0);
         ecfg.use_prefix_caching = (config->use_prefix_caching != 0);
         if (config->prefix_cache_path[0] != '\0')
             ecfg.prefix_cache_path = config->prefix_cache_path;

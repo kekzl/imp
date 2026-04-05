@@ -77,6 +77,9 @@ typedef struct {
     // MXFP4 prefill: use CUTLASS MXFP4 GEMM for prefill (converts NVFP4 cache to MXFP4 format)
     int use_mxfp4_prefill;         // 0 = off (default), 1 = on (requires sm_120 + NVFP4 cache)
 
+    // Dual-path quantization: FP8 for attention weights (WQ/WK/WV/WO), NVFP4 for FFN weights
+    int dual_path_quant;           // 0 = off (default), 1 = on (attention stays FP8, FFN gets NVFP4)
+
     // KV cache minimum context budget
     int min_kv_tokens;             // Minimum KV cache capacity in tokens (0 = auto).
                                    // Budget planner guarantees at least this many tokens

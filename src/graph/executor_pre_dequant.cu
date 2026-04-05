@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cmath>
 #include <algorithm>
+#include <unordered_set>
 
 namespace imp {
 
@@ -397,6 +398,22 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     if (wcache_.nvfp4_decode_mode > 0) {
         const char* mode_str = (wcache_.nvfp4_decode_mode == 1) ? "additive" : "only";
 
+        // Dual-path mode: build set of attention weight pointers to exclude from NVFP4.
+        // Attention weights (WQ/WK/WV/WO) stay at FP8 for higher quality; only FFN
+        // weights (gate/up/down) get NVFP4 quantization for bandwidth reduction.
+        std::unordered_set<const void*> attn_weight_ptrs;
+        if (wcache_.dual_path_quant) {
+            for (int i = 0; i < cfg.n_layers; i++) {
+                const auto& L = model_->layer(i);
+                if (L.wq.data) attn_weight_ptrs.insert(L.wq.data);
+                if (L.wk.data) attn_weight_ptrs.insert(L.wk.data);
+                if (L.wv.data) attn_weight_ptrs.insert(L.wv.data);
+                if (L.wo.data) attn_weight_ptrs.insert(L.wo.data);
+            }
+            IMP_LOG_INFO("Dual-path quant: excluding %zu attention weights from NVFP4 cache",
+                         attn_weight_ptrs.size());
+        }
+
         // Collect eligible weights first, then process.
         struct NvFP4Entry {
             const void* orig_ptr;
@@ -410,6 +427,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             if (!w.data) return;
             if (!nvfp4_beneficial(qtype)) return;
             if (wcache_.nvfp4.count(w.data)) return;
+            // Dual-path: skip attention weights — they stay at FP8
+            if (wcache_.dual_path_quant && attn_weight_ptrs.count(w.data)) return;
 
             int cols = static_cast<int>(w.shape[1]);
             if (cols % 16 != 0) return;

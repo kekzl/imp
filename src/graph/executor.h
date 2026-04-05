@@ -235,6 +235,10 @@ public:
     // Disable FP8 weight cache (must be called before pre_dequant_weights).
     void disable_fp8_prefill() { wcache_.use_fp8 = false; }
 
+    // Enable dual-path quantization: attention weights stay FP8, FFN weights get NVFP4.
+    // Must be called before pre_dequant_weights().
+    void set_dual_path_quant(bool enable) { wcache_.dual_path_quant = enable; }
+
     // Phase 2: Allocate all GPU workspace buffers.
     // Call AFTER weight upload to maximize VRAM available for expert layers.
     // experts_on_host: if true, skip MoE batch dequant buffer allocation.

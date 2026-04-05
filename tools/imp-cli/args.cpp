@@ -48,6 +48,7 @@ void print_usage(const char* prog) {
         "  --decode-nvfp4-only   NVFP4 decode cache (replacement: saves VRAM, slower prefill)\n"
         "  --prefix-caching      Reuse KV cache blocks for shared token prefixes\n"
         "  --mxfp4-prefill       Use CUTLASS MXFP4 GEMM for prefill (sm_120, requires NVFP4)\n"
+        "  --dual-path-quant     FP8 attention + NVFP4 FFN (higher quality attention, faster FFN)\n"
         "  --no-nvfp4            Disable NVFP4 decode cache (override auto-detection)\n"
         "  --stop <str>          Stop sequence (can specify multiple times, max 4)\n"
         "  --bench               Synthetic benchmark mode (like llama-bench)\n"
@@ -161,6 +162,8 @@ CliArgs parse_args(int argc, char** argv) {
             args.prefix_caching = true;
         } else if (std::strcmp(arg, "--mxfp4-prefill") == 0) {
             args.mxfp4_prefill = true;
+        } else if (std::strcmp(arg, "--dual-path-quant") == 0) {
+            args.dual_path_quant = true;
         } else if (std::strcmp(arg, "--no-nvfp4") == 0) {
             args.decode_nvfp4 = 0;
         } else if (std::strcmp(arg, "--stop") == 0 && i + 1 < argc) {
