@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        cuda: ['13.1']
+        cuda: ['13.2']
         build_type: [Release]
 
     container:
@@ -41,7 +41,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: imp-build-cuda${{ matrix.cuda }}
+          name: imp-build
           path: |
             build/imp-cli
             build/imp-bench
@@ -63,7 +63,7 @@ jobs:
       - name: Download build
         uses: actions/download-artifact@v4
         with:
-          name: imp-build-cuda13.1
+          name: imp-build
           path: build/
 
       - name: Run tests
