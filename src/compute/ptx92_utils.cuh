@@ -67,4 +67,24 @@ __device__ __forceinline__ void cvt_e4m3x4_to_f32x4(
     f3 = __half2float(h2_hi->y);
 }
 
+// ---------------------------------------------------------------------------
+// Packed FP4 E2M1 conversion helpers
+//
+// NOTE: cvt.rn.satfinite.e2m1x2.f16x2 is documented in PTX ISA 9.2 but
+// REJECTED by ptxas in CUDA 13.2.0. The PTX instruction would convert
+// 2 FP16 values to 2 packed FP4 E2M1 nibbles in a single instruction.
+// Once a future CUDA release supports it, enable the #if block below.
+//
+// Until then, the branchless scalar fallback in turboquant_fp4.cuh
+// (tq_fp4_quantize_abs using comparison sums) provides the quantization.
+// ---------------------------------------------------------------------------
+
+#if 0  // BLOCKED: ptxas rejects in CUDA 13.2 — retry with CUDA 13.3+
+__device__ __forceinline__ uint16_t cvt_f16x2_to_e2m1x2(uint32_t f16x2) {
+    uint16_t result;
+    asm("cvt.rn.satfinite.e2m1x2.f16x2 %0, %1;" : "=h"(result) : "r"(f16x2));
+    return result;
+}
+#endif
+
 } // namespace imp

@@ -471,16 +471,11 @@ void free_cutlass_mxfp4_weight(CutlassMxFP4Weight& w) {
 // ---------------------------------------------------------------------------
 
 __device__ __forceinline__ uint8_t quantize_abs_to_fp4_mx(float abs_val) {
-    if (abs_val <= 0.0f)  return 0;
-    if (abs_val >= 6.0f)  return 7;
-    if (abs_val < 0.25f)  return 0;
-    if (abs_val < 0.75f)  return 1;
-    if (abs_val < 1.25f)  return 2;
-    if (abs_val < 1.75f)  return 3;
-    if (abs_val < 2.5f)   return 4;
-    if (abs_val < 3.5f)   return 5;
-    if (abs_val < 5.0f)   return 6;
-    return 7;
+    // Branchless: count of midpoint thresholds exceeded gives the E2M1 code.
+    uint8_t code = (abs_val >= 0.25f) + (abs_val >= 0.75f) + (abs_val >= 1.25f)
+                 + (abs_val >= 1.75f) + (abs_val >= 2.5f)  + (abs_val >= 3.5f)
+                 + (abs_val >= 5.0f);
+    return code;  // 0..7
 }
 
 __device__ __forceinline__ float ue8m0_to_float(uint8_t bits) {
@@ -506,14 +501,16 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(
     int k_group = mb_idx % K_groups;
     int base = row * K + k_group * kMxSFVecSize;
 
-    // Load 32 values and find absmax
+    // Load 32 values via vectorized half2 loads and find absmax
     float vals[32];
     float local_absmax = 0.0f;
+    const half2* src_h2 = reinterpret_cast<const half2*>(input + base);
     #pragma unroll
-    for (int i = 0; i < 32; i++) {
-        vals[i] = __half2float(input[base + i]);
-        float av = fabsf(vals[i]);
-        if (av > local_absmax) local_absmax = av;
+    for (int i = 0; i < 16; i++) {
+        half2 h2 = src_h2[i];
+        vals[i * 2]     = __half2float(h2.x);
+        vals[i * 2 + 1] = __half2float(h2.y);
+        local_absmax = fmaxf(local_absmax, fmaxf(fabsf(vals[i * 2]), fabsf(vals[i * 2 + 1])));
     }
 
     // Compute UE8M0 scale = ceil_pow2(absmax / 6.0)
