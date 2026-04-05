@@ -679,7 +679,8 @@ bool Engine::init_kv_cache() {
             // scan, causing degenerate output after ~50 special tokens in
             // multi-turn chat.  Force FP16 weights for GDN prefill.
             if (config_.use_fp8_prefill) {
-                IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)");
+                IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)%s",
+                             config_.dual_path_quant ? " — dual-path attention will use FP16 instead of FP8" : "");
                 config_.use_fp8_prefill = 0;
                 executor_->disable_fp8_prefill();
             }
