@@ -1,7 +1,6 @@
 #include "args.h"
 #include "handlers.h"
 #include "model/hf_hub.h"
-#include "runtime/presets.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -27,23 +26,6 @@ static std::string resolve_hf_cache_dir() {
 
 int main(int argc, char** argv) {
     ServerArgs args = parse_server_args(argc, argv);
-
-    // Load presets (TOML file or built-in fallback)
-    imp::load_presets(args.presets_file);
-
-    // Handle --preset list
-    if (args.preset == "list") {
-        imp::print_presets();
-        return 0;
-    }
-
-    // Validate preset name early (allow "none" to disable auto-detection)
-    if (!args.preset.empty() && args.preset != "none" &&
-        !imp::find_preset(args.preset)) {
-        fprintf(stderr, "Unknown preset: %s (use --preset list to see available presets)\n",
-                args.preset.c_str());
-        return 1;
-    }
 
     printf("IMP Server %s\n", imp_version());
 

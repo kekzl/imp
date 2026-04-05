@@ -333,6 +333,74 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     const auto& mcfg = model_->config();
 
+    // --- Auto-detect max_seq_len and max_batch_size if not set ---
+    if (config_.max_seq_len <= 0) {
+        int model_ctx = mcfg.max_seq_len;  // from GGUF metadata
+        // Cap based on available VRAM: reserve ~30% for KV cache
+        size_t free_vram = 0, total_vram = 0;
+        cudaMemGetInfo(&free_vram, &total_vram);
+        int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
+        int kv_bytes_per_token = mcfg.n_kv_heads * head_dim * 2 * mcfg.n_layers * 2;  // K+V, FP16
+        int max_by_vram = (kv_bytes_per_token > 0)
+            ? static_cast<int>(free_vram * 0.3 / kv_bytes_per_token)
+            : 131072;
+        config_.max_seq_len = std::min(model_ctx, std::max(max_by_vram, 4096));
+        IMP_LOG_INFO("max_seq_len: auto → %d (model=%d, vram_cap=%d)",
+                     config_.max_seq_len, model_ctx, max_by_vram);
+    }
+
+    if (config_.max_batch_size <= 0) {
+        // Estimate model weight size from config to determine batch capacity.
+        // Rough heuristic: 2 bytes/param for FP16. d_model * d_model * n_layers * ~12 gives
+        // approximate total weight bytes for a dense transformer.
+        size_t approx_weight_bytes = static_cast<size_t>(mcfg.d_model) * mcfg.d_model
+                                     * mcfg.n_layers * 12;  // ~12 matrices per layer
+        if (mcfg.n_experts > 0) {
+            // MoE: expert weights dominate
+            approx_weight_bytes += static_cast<size_t>(mcfg.n_experts) * mcfg.expert_d_ff
+                                   * mcfg.d_model * mcfg.n_layers * 2;
+        }
+        if (approx_weight_bytes > 20ULL * 1024 * 1024 * 1024)
+            config_.max_batch_size = 1;   // >20GB models
+        else if (approx_weight_bytes > 10ULL * 1024 * 1024 * 1024)
+            config_.max_batch_size = 4;   // 10-20GB
+        else if (approx_weight_bytes > 5ULL * 1024 * 1024 * 1024)
+            config_.max_batch_size = 8;   // 5-10GB
+        else
+            config_.max_batch_size = 16;  // <5GB
+        IMP_LOG_INFO("max_batch_size: auto → %d (approx_weights=%.1f GB)",
+                     config_.max_batch_size,
+                     approx_weight_bytes / (1024.0 * 1024.0 * 1024.0));
+    }
+
+    // --- Auto-detect SSM state dtype for hybrid models ---
+    // Nemotron-H and similar: use FP16 for SSM h_state (~50% VRAM savings)
+    if (config_.ssm_state_dtype == DType::FP32 && mcfg.ssm_state_size > 0) {
+        config_.ssm_state_dtype = DType::FP16;
+        IMP_LOG_INFO("SSM state dtype: auto → FP16 (hybrid SSM model, state_size=%d)",
+                     mcfg.ssm_state_size);
+    }
+
+    // --- Auto-detect KV cache dtype ---
+    // Default to FP8 E4M3 on sm_90+ for ~50% KV VRAM savings
+    if (config_.kv_cache_dtype == DType::FP16) {
+        int sm = get_device_sm_version();
+        if (sm >= 90) {
+            config_.kv_cache_dtype = DType::FP8_E4M3;
+            IMP_LOG_INFO("KV cache dtype: auto → FP8_E4M3 (sm_%d)", sm);
+        }
+    }
+
+    // --- Auto-detect FP8 prefill ---
+    // Enable by default on sm_90+ unless already set
+    if (!config_.use_fp8_prefill) {
+        int sm = get_device_sm_version();
+        if (sm >= 90) {
+            config_.use_fp8_prefill = true;
+            IMP_LOG_INFO("FP8 prefill: auto → enabled (sm_%d)", sm);
+        }
+    }
+
     // --- Resolve auto-detection flags ---
     // NVFP4 decode mode
     int n_gdn_auto = 0;
@@ -341,9 +409,21 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     if (config_.use_nvfp4_decode < 0) {
         int sm = get_device_sm_version();
-        if (n_gdn_auto > 0) {
-            config_.use_nvfp4_decode = 0;
-            IMP_LOG_INFO("NVFP4 decode: auto → disabled (GDN model, %d recurrent layers)", n_gdn_auto);
+        if (n_gdn_auto > 0 && mcfg.d_model >= 4096) {
+            // GDN models with large d_model: enable NVFP4 for attention + FFN weights,
+            // but SSM/GDN projections (ssm_in/ssm_out) will be excluded in
+            // pre_dequant_weights to preserve recurrent state precision.
+            if (sm >= 120) {
+                config_.use_nvfp4_decode = 2;
+                IMP_LOG_INFO("NVFP4 decode: auto → mode 2 (GDN model, %d recurrent layers — "
+                             "ssm_in/ssm_out excluded for precision)", n_gdn_auto);
+            } else if (sm >= 90) {
+                config_.use_nvfp4_decode = 1;
+                IMP_LOG_INFO("NVFP4 decode: auto → mode 1 (GDN model, %d recurrent layers — "
+                             "ssm_in/ssm_out excluded for precision)", n_gdn_auto);
+            } else {
+                config_.use_nvfp4_decode = 0;
+            }
         } else if (mcfg.d_model < 4096 && mcfg.n_experts == 0) {
             config_.use_nvfp4_decode = 0;
             IMP_LOG_INFO("NVFP4 decode: auto → disabled (d_model=%d < 4096)", mcfg.d_model);

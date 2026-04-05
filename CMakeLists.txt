@@ -102,7 +102,6 @@ set(IMP_CORE_SOURCES
     src/core/allocator.cpp
     src/core/logging.cpp
     src/core/threading.cpp
-    src/core/toml_parser.cpp
 )
 
 set(IMP_MEMORY_SOURCES
