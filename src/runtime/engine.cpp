@@ -1871,9 +1871,12 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     // Decode — try conditional graph loop, fall back to step()
     // Think budget is now enforced device-side in post_decode_step_kernel.
     // Penalties are applied device-side via apply_penalties_device_count in the graph loop.
+    bool req_has_penalties = (req->repetition_penalty != 1.0f ||
+                              req->frequency_penalty != 0.0f ||
+                              req->presence_penalty != 0.0f);
     if (req->status == RequestStatus::DECODING && !req->output_tokens.empty() &&
-        config_.use_cuda_graphs && !offload_mgr_ && !ssm_state_ && !gdn_state_ &&
-        !config_.enable_speculative && !req->ignore_eos) {
+        config_.use_cuda_graphs && !offload_mgr_ && !ssm_state_ &&
+        !config_.enable_speculative) {
         int32_t first_token = req->output_tokens.back();
         Tokenizer* gtok = model_->tokenizer();
         auto graph_tokens = try_graph_loop_decode(req, first_token, decode_stream());
