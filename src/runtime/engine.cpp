@@ -947,6 +947,10 @@ bool Engine::init_features() {
     if (!decode_done_)
         decode_done_.create(cudaEventDisableTiming);
 
+    // Pre-allocate DRY penalty buffers to avoid cudaStreamSynchronize on first
+    // use during inference (the lazy-alloc path blocks the decode stream).
+    sampling_preallocate_dry(config_.max_seq_len, decode_stream());
+
     return true;
 }
 

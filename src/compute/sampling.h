@@ -122,6 +122,11 @@ void compute_logprobs_cpu(const float* logits, int vocab_size,
                           int32_t sampled_token, int top_n,
                           LogprobResult* out);
 
+// Pre-allocate DRY penalty GPU buffers at engine init time to avoid
+// cudaStreamSynchronize on first use during inference.
+// max_seq_len: maximum sequence length (context + generation tokens).
+void sampling_preallocate_dry(int max_seq_len, cudaStream_t stream = nullptr);
+
 // Free persistent CUB sort scratch (call at engine shutdown).
 void sampling_cleanup();
 
