@@ -398,20 +398,34 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     if (wcache_.nvfp4_decode_mode > 0) {
         const char* mode_str = (wcache_.nvfp4_decode_mode == 1) ? "additive" : "only";
 
-        // Dual-path mode: build set of attention weight pointers to exclude from NVFP4.
-        // Attention weights (WQ/WK/WV/WO) stay at FP8 for higher quality; only FFN
-        // weights (gate/up/down) get NVFP4 quantization for bandwidth reduction.
-        std::unordered_set<const void*> attn_weight_ptrs;
+        // Build exclusion sets for weights that should NOT get NVFP4 quantization.
+        std::unordered_set<const void*> nvfp4_exclude_ptrs;
+
+        // Dual-path mode: attention weights stay at FP8 for quality.
         if (wcache_.dual_path_quant) {
             for (int i = 0; i < cfg.n_layers; i++) {
                 const auto& L = model_->layer(i);
-                if (L.wq.data) attn_weight_ptrs.insert(L.wq.data);
-                if (L.wk.data) attn_weight_ptrs.insert(L.wk.data);
-                if (L.wv.data) attn_weight_ptrs.insert(L.wv.data);
-                if (L.wo.data) attn_weight_ptrs.insert(L.wo.data);
+                if (L.wq.data) nvfp4_exclude_ptrs.insert(L.wq.data);
+                if (L.wk.data) nvfp4_exclude_ptrs.insert(L.wk.data);
+                if (L.wv.data) nvfp4_exclude_ptrs.insert(L.wv.data);
+                if (L.wo.data) nvfp4_exclude_ptrs.insert(L.wo.data);
             }
             IMP_LOG_INFO("Dual-path quant: excluding %zu attention weights from NVFP4 cache",
-                         attn_weight_ptrs.size());
+                         nvfp4_exclude_ptrs.size());
+        }
+
+        // GDN/SSM models: exclude ssm_in/ssm_out projections from NVFP4.
+        // These feed the recurrent scan which accumulates quantization error
+        // in state H across tokens. 4-bit degrades quality on 9B+ models.
+        {
+            int n_ssm_excluded = 0;
+            for (int i = 0; i < cfg.n_layers; i++) {
+                const auto& L = model_->layer(i);
+                if (L.ssm_in.data)  { nvfp4_exclude_ptrs.insert(L.ssm_in.data); n_ssm_excluded++; }
+                if (L.ssm_out.data) { nvfp4_exclude_ptrs.insert(L.ssm_out.data); n_ssm_excluded++; }
+            }
+            if (n_ssm_excluded > 0)
+                IMP_LOG_INFO("GDN/SSM: excluding %d recurrent projections from NVFP4 cache", n_ssm_excluded);
         }
 
         // Collect eligible weights first, then process.
@@ -427,8 +441,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             if (!w.data) return;
             if (!nvfp4_beneficial(qtype)) return;
             if (wcache_.nvfp4.count(w.data)) return;
-            // Dual-path: skip attention weights — they stay at FP8
-            if (wcache_.dual_path_quant && attn_weight_ptrs.count(w.data)) return;
+            // Skip excluded weights (dual-path attention, GDN/SSM recurrent projections)
+            if (nvfp4_exclude_ptrs.count(w.data)) return;
 
             int cols = static_cast<int>(w.shape[1]);
             if (cols % 16 != 0) return;
