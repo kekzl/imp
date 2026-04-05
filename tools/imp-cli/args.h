@@ -47,6 +47,7 @@ struct CliArgs {
     bool prefill_fp8 = false;  // --prefill-fp8: use FP8 E4M3 weight cache for prefill
     int decode_nvfp4 = -1;     // -1=auto, 0=off, 1=additive, 2=NVFP4-only
     bool mxfp4_prefill = false;  // --mxfp4-prefill: CUTLASS MXFP4 GEMM for prefill
+    bool dual_path_quant = false; // --dual-path-quant: FP8 attention + NVFP4 FFN
     bool prefix_caching = false;  // --prefix-caching: reuse KV blocks for shared prefixes
     std::vector<std::string> stop_sequences;  // --stop: text-level stop strings
     bool bench = false;        // --bench: synthetic benchmark mode
