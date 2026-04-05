@@ -283,7 +283,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             gemv_nvfp4_kpar(wd_nvfp4, static_cast<const half*>(so.data),
                              static_cast<half*>(fo.data), M_d, K_d, stream);
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
-            rmsnorm_fp32_accum_to_fp16_kernel<<<n, 512, 0, stream>>>(
+            rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
                 static_cast<const half*>(fo.data),
                 static_cast<const half*>(ly.post_ffn_norm.data),
                 static_cast<float*>(fp32_h.data),
@@ -308,7 +308,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             dispatch_dp4a_gemv(ly.w_down_qtype, ly.w_down.data, q8, qscratch_.d8_buf,
                                fo_ptr, M_d, K_d, stream);
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
-            rmsnorm_fp32_accum_to_fp16_kernel<<<n, 512, 0, stream>>>(
+            rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
                 static_cast<const half*>(fo.data),
                 static_cast<const half*>(ly.post_ffn_norm.data),
                 static_cast<float*>(fp32_h.data),
@@ -348,7 +348,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 if (has_post_ffn_norm && using_fp32_accum) {
                     // Post-FFN norm → FP32 accumulation (no D2D copy needed)
                     Tensor fp32_h = view_tokens(fp32_hidden_, n);
-                    rmsnorm_fp32_accum_to_fp16_kernel<<<n, 512, 0, stream>>>(
+                    rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
                         static_cast<const half*>(fo.data),
                         static_cast<const half*>(ly.post_ffn_norm.data),
                         static_cast<float*>(fp32_h.data),

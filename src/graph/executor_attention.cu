@@ -678,7 +678,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             float eps = model_->config().rms_norm_eps;
             // Add attn output to FP32 accumulator, apply post_attn_norm, write FP16
-            rmsnorm_fp32_accum_to_fp16_kernel<<<n, 512, 0, stream>>>(
+            // 256 threads: d_model_v = d_model/8 (e.g. 480 for Gemma-3 3840),
+            // so 2 iterations/thread. 512 wastes half the threads on idle lanes.
+            rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
                 static_cast<const half*>(po.data),
                 static_cast<const half*>(ly.post_attn_norm.data),
                 static_cast<float*>(fp32_h.data),
