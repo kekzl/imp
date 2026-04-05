@@ -1876,7 +1876,7 @@ void Engine::step_decode_process_outputs(
     // Try async graph loop after first decode step.
     // Think budget is now handled device-side in post_decode_step_kernel.
     if (decode_graph_pool_[0].is_ready() && valid_decode.size() == 1 &&
-        !offload_mgr_ && (!ssm_state_ || !has_pure_ssm_layers_) &&
+        !offload_mgr_ && !ssm_state_ &&
         !config_.enable_speculative &&
         config_.use_cuda_graphs && !async_graph_runner_.is_setup() &&
         !needs_logprobs && !needs_json_mode && !needs_schema_mode) {
@@ -1972,7 +1972,7 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
                               req->presence_penalty != 0.0f);
     if (req->status == RequestStatus::DECODING && !req->output_tokens.empty() &&
         config_.use_cuda_graphs && !offload_mgr_ &&
-        (!ssm_state_ || !has_pure_ssm_layers_) &&
+        !ssm_state_ &&
         !config_.enable_speculative) {
         int32_t first_token = req->output_tokens.back();
         Tokenizer* gtok = model_->tokenizer();
