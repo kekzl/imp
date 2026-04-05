@@ -32,7 +32,7 @@ struct EngineConfig {
     int kv_cache_max_blocks = 0;  // 0 = auto
     bool use_green_contexts = false;
     float green_ctx_prefill_ratio = 0.8f;
-    bool use_cuda_graphs = false;
+    bool use_cuda_graphs = true;
     bool use_pdl = true;
     DType compute_dtype = DType::FP16;
 
@@ -181,7 +181,7 @@ private:
     // ── CUDA Graphs ──────────────────────────────────────────────────
     // Per-batch-size graph pool: avoids re-capture when batch size changes
     // during continuous batching (key = n_sequences).
-    static constexpr int kMaxGraphPoolSize = 8;
+    static constexpr int kMaxGraphPoolSize = 32;
     CudaGraphRunner decode_graph_pool_[kMaxGraphPoolSize];  // index = n_sequences - 1
     int last_decode_max_blocks_per_graph_[kMaxGraphPoolSize] = {};
     int32_t* h_sample_pinned_ = nullptr;
