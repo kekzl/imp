@@ -200,6 +200,7 @@ private:
     // ── Model-specific state ─────────────────────────────────────────
     std::unique_ptr<SSMState> ssm_state_;
     std::unique_ptr<GDNState> gdn_state_;
+    bool has_pure_ssm_layers_ = false;  // true if model has Mamba2 SSM layers (not GDN)
     std::unique_ptr<LayerOffloadManager> offload_mgr_;
     bool experts_on_host_ = false;
     bool dequant_done_ = false;
