@@ -213,6 +213,8 @@ set(IMP_GRAPH_SOURCES
     src/graph/executor.cu
     src/graph/executor_kernels.cu
     src/graph/executor_workspace.cu
+    src/graph/executor_workspace_buffers.cu
+    src/graph/executor_kv_write.cu
     src/graph/executor_pre_dequant.cu
     src/graph/executor_workspace_config.cu
     src/graph/executor_attention.cu
