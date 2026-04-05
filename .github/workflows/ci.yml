@@ -19,7 +19,7 @@ jobs:
       image: nvidia/cuda:${{ matrix.cuda }}.0-devel-ubuntu24.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install dependencies
         run: |
@@ -39,7 +39,7 @@ jobs:
         run: cmake --build build -j$(nproc)
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: imp-build
           path: |
@@ -58,10 +58,10 @@ jobs:
     if: false  # Skip until GPU runner is configured
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download build
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: imp-build
           path: build/
