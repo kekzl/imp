@@ -107,7 +107,6 @@ __global__ void hadamard_64_kernel(
     float val = __half2float(input[base + tid]);
 
     // Stages 0-4: intra-warp butterfly via shuffle
-    int lane = tid & 31;
     #pragma unroll
     for (int s = 0; s < 5; s++) {
         val = warp_butterfly(val, s);
