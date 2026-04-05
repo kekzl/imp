@@ -137,7 +137,7 @@ std::vector<int32_t> SpeculativeDecoder::draft_tokens(int32_t last_token,
         int needed_blocks = (cur_pos + block_size) / block_size;
         int have_blocks = static_cast<int>(draft_kv_manager_->block_table(seq_id).size());
         if (needed_blocks > have_blocks) {
-            draft_kv_manager_->append_block(seq_id);
+            (void)draft_kv_manager_->append_block(seq_id);
         }
     }
 
@@ -200,7 +200,7 @@ SpeculativeDecoder::verify(const std::vector<int32_t>& draft,
     int needed_blocks = (final_pos + block_size) / block_size;
     int have_blocks = static_cast<int>(target_kv_manager_->block_table(seq_id).size());
     while (needed_blocks > have_blocks) {
-        target_kv_manager_->append_block(seq_id);
+        (void)target_kv_manager_->append_block(seq_id);
         have_blocks++;
     }
 

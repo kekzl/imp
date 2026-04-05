@@ -181,9 +181,8 @@ void quant_gemm_int4(const Tensor& A, const Tensor& B_quant,
     const int M = static_cast<int>(A.shape[0]);
     const int K = static_cast<int>(A.shape[1]);
     const int N = static_cast<int>(B_quant.shape[0]);
-    const int half_K = static_cast<int>(B_quant.shape[1]);
 
-    assert(half_K == K / 2 && "B_quant.shape[1] must be K/2");
+    assert(static_cast<int>(B_quant.shape[1]) == K / 2 && "B_quant.shape[1] must be K/2");
     assert(C.shape[0] == M && C.shape[1] == N);
 
     const int num_groups = static_cast<int>(scales.shape[1]);

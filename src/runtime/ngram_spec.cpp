@@ -168,7 +168,7 @@ NgramSpecDecoder::VerifyResult NgramSpecDecoder::verify(
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_table_, h_bt.data(), bt_total * sizeof(int),
                     cudaMemcpyHostToDevice, stream));
 
-    executor_->resize_workspace(n_verify, stream);
+    (void)executor_->resize_workspace(n_verify, stream);
 
     InferenceState state;
     state.token_ids = d_tokens_;
@@ -187,7 +187,7 @@ NgramSpecDecoder::VerifyResult NgramSpecDecoder::verify(
 
     std::vector<int32_t> targets = executor_->forward_batch(state, stream);
 
-    executor_->resize_workspace(1, stream);
+    (void)executor_->resize_workspace(1, stream);
 
     // Acceptance: targets[i] vs draft[i]
     VerifyResult result;
@@ -214,6 +214,7 @@ NgramSpecDecoder::StepResult NgramSpecDecoder::step(
     std::shared_ptr<Request> req, int32_t last_token,
     int position, int seq_id, cudaStream_t stream)
 {
+    (void)last_token;
     total_steps_++;
 
     // Try to draft tokens from n-gram history

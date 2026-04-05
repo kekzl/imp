@@ -257,6 +257,11 @@ SelfSpeculativeDecoder::verify(const std::vector<int32_t>& draft,
                                 int32_t last_token, int position, int seq_id,
                                 float temperature, float top_p_val, int top_k_val,
                                 int seed, cudaStream_t stream) {
+    (void)temperature;
+    (void)top_p_val;
+    (void)top_k_val;
+    (void)seed;
+
     VerifyResult result;
     const int K = static_cast<int>(draft.size());
     if (K == 0) return result;
@@ -299,7 +304,7 @@ SelfSpeculativeDecoder::verify(const std::vector<int32_t>& draft,
                n_verify * sizeof(int), cudaMemcpyHostToDevice, stream));
 
     // Resize workspace for K+1 tokens BEFORE the batched forward
-    executor_->resize_workspace(n_verify, stream);
+    (void)executor_->resize_workspace(n_verify, stream);
 
     // Build inference state for batched decode
     InferenceState state;
@@ -322,7 +327,7 @@ SelfSpeculativeDecoder::verify(const std::vector<int32_t>& draft,
     std::vector<int32_t> targets = executor_->forward_batch(state, stream);
 
     // Resize workspace back to 1 for subsequent draft passes
-    executor_->resize_workspace(1, stream);
+    (void)executor_->resize_workspace(1, stream);
 
     // Acceptance: compare target[i] with draft[i]
     int n_accepted = 0;
@@ -355,7 +360,7 @@ std::vector<int32_t> SelfSpeculativeDecoder::step(
     }
 
     // Resize workspace for single-token draft passes
-    executor_->resize_workspace(1, stream);
+    (void)executor_->resize_workspace(1, stream);
 
     // 1. Draft K tokens with layer skip/early exit
     std::vector<int32_t> draft = draft_tokens(last_token, position, seq_id, stream);

@@ -91,7 +91,6 @@ __global__ void hadamard_64_kernel(
     int M, int K)
 {
     constexpr int BLOCK_SIZE = 64;
-    constexpr int LOG2_BS = 6;
 
     // Each CTA = 64 threads = 2 warps. One CTA per block of 64 elements.
     int block_id = blockIdx.x;

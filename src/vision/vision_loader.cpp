@@ -153,19 +153,7 @@ uint64_t val_uint(const VGGUFValue& v) {
     }
 }
 
-double val_float(const VGGUFValue& v) {
-    switch (v.type) {
-        case VGGUFValueType::FLOAT32: case VGGUFValueType::FLOAT64:
-            return v.float_val;
-        case VGGUFValueType::UINT8: case VGGUFValueType::UINT16:
-        case VGGUFValueType::UINT32: case VGGUFValueType::UINT64:
-            return static_cast<double>(v.uint_val);
-        case VGGUFValueType::INT8: case VGGUFValueType::INT16:
-        case VGGUFValueType::INT32: case VGGUFValueType::INT64:
-            return static_cast<double>(v.int_val);
-        default: return 0.0;
-    }
-}
+
 
 // Upload raw tensor data to GPU as FP16.
 // Handles F32 -> FP16 conversion and F16 passthrough.
@@ -328,11 +316,6 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
         auto it = metadata.find(key);
         return (it != metadata.end()) ? val_uint(it->second) : def;
     };
-    auto get_float = [&](const std::string& key, double def = 0.0) -> double {
-        auto it = metadata.find(key);
-        return (it != metadata.end()) ? val_float(it->second) : def;
-    };
-
     cfg.image_size  = static_cast<int>(get_uint("clip.vision.image_size", 896));
     cfg.patch_size  = static_cast<int>(get_uint("clip.vision.patch_size", 14));
     cfg.hidden_size = static_cast<int>(get_uint("clip.vision.embedding_length", 1152));
