@@ -552,6 +552,20 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
             lp, state.d_banned_tokens, state.n_d_banned_tokens, vocab);
     }
 
+    // ---- Step 4b: Apply penalties (repetition/frequency/presence) ----
+    // In the CUDA graph loop, d_n_penalty_tokens points to a device counter
+    // that grows each iteration as tokens are generated.
+    if (state.penalty_tokens != nullptr && state.d_n_penalty_tokens != nullptr) {
+        float* lp = static_cast<float*>(lg.data);
+        int vocab = static_cast<int>(lg.shape[lg.ndim - 1]);
+        apply_penalties_device_count(lp, vocab, state.penalty_tokens,
+                                     state.d_n_penalty_tokens,
+                                     state.repeat_last_n,
+                                     state.repetition_penalty,
+                                     state.frequency_penalty,
+                                     state.presence_penalty, stream);
+    }
+
     // ---- Step 5: Async sampling → write to d_token_id + h_mapped ----
     Tensor last_logits = lg.slice(0, 1);
     int64_t vocab_shape[1] = {last_logits.shape[1]};

@@ -312,6 +312,10 @@ __global__ void post_decode_step_kernel(
         int* __restrict__ d_think_count,             // [1] reasoning token counter
         int* __restrict__ d_in_think,                // [1] think block flag
         int ignore_eos,                              // 1 = don't stop on EOS/stop tokens
+        // Penalty ring buffer: d_penalty_ring[prefix_len + step] = token
+        int32_t* __restrict__ d_penalty_ring,        // may be null if no penalties
+        int penalty_prefix_len,
+        int* __restrict__ d_penalty_count,           // [1] total penalty token count
         cudaGraphConditionalHandle handle) {
     int step = *d_step_counter;
     int32_t token = *d_token_id;
@@ -325,6 +329,12 @@ __global__ void post_decode_step_kernel(
 
     // Write token to ring buffer (visible to host via mapped memory)
     d_ring_buffer[step] = token;
+
+    // Write token to penalty ring buffer (for next iteration's penalty application)
+    if (d_penalty_ring) {
+        d_penalty_ring[penalty_prefix_len + step] = token;
+        *d_penalty_count = penalty_prefix_len + step + 1;
+    }
 
     // Increment counters
     int new_pos = *d_position + 1;
@@ -406,6 +416,30 @@ bool CudaGraphConditionalRunner::setup(
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_in_think_, &init_think, sizeof(int), cudaMemcpyHostToDevice, stream));
     }
 
+    // ---- Allocate penalty ring buffer (prefix history + generated tokens) ----
+    {
+        bool has_penalties = (config_.repetition_penalty != 1.0f ||
+                              config_.frequency_penalty != 0.0f ||
+                              config_.presence_penalty != 0.0f);
+        if (has_penalties) {
+            penalty_prefix_len_ = static_cast<int>(config_.penalty_history.size());
+            int total_penalty_slots = penalty_prefix_len_ + config_.max_steps;
+            err = cudaMalloc(&d_penalty_ring_, total_penalty_slots * sizeof(int32_t));
+            if (err != cudaSuccess) goto fail;
+            err = cudaMalloc(&d_penalty_count_, sizeof(int));
+            if (err != cudaSuccess) goto fail;
+            // Copy prefix history to the beginning of the penalty ring
+            if (penalty_prefix_len_ > 0) {
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_ring_, config_.penalty_history.data(),
+                                 penalty_prefix_len_ * sizeof(int32_t),
+                                 cudaMemcpyHostToDevice, stream));
+            }
+            // Initialize penalty count to prefix length (before any generation)
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_count_, &penalty_prefix_len_, sizeof(int),
+                             cudaMemcpyHostToDevice, stream));
+        }
+    }
+
     // ---- Allocate mapped pinned memory for ring buffer ----
     {
         err = cudaHostAlloc(&h_ring_buffer_,
@@ -456,6 +490,16 @@ bool CudaGraphConditionalRunner::setup(
         body_state.seed = config_.seed;
         // max_context_len is set to cover the full generation
         body_state.max_context_len = config_.initial_context_len + config_.max_steps;
+
+        // Penalty parameters for device-side application in forward_decode_async
+        if (d_penalty_ring_) {
+            body_state.penalty_tokens = d_penalty_ring_;
+            body_state.d_n_penalty_tokens = d_penalty_count_;
+            body_state.repetition_penalty = config_.repetition_penalty;
+            body_state.frequency_penalty = config_.frequency_penalty;
+            body_state.presence_penalty = config_.presence_penalty;
+            body_state.repeat_last_n = config_.repeat_last_n;
+        }
 
         // ---- Construct CUDA graph with conditional WHILE node ----
         // 1. Create top-level graph
@@ -523,6 +567,7 @@ bool CudaGraphConditionalRunner::setup(
             config_.think_budget_limit, config_.think_start_id, config_.think_end_id,
             d_think_count_, d_in_think_,
             config_.ignore_eos ? 1 : 0,
+            d_penalty_ring_, penalty_prefix_len_, d_penalty_count_,
             handle_);
 
         // 5c. End capture
@@ -627,6 +672,9 @@ void CudaGraphConditionalRunner::cleanup() {
     if (d_stop_ids_) { IMP_CUDA_CHECK_LOG(cudaFree(d_stop_ids_)); d_stop_ids_ = nullptr; }
     if (d_think_count_) { IMP_CUDA_CHECK_LOG(cudaFree(d_think_count_)); d_think_count_ = nullptr; }
     if (d_in_think_) { IMP_CUDA_CHECK_LOG(cudaFree(d_in_think_)); d_in_think_ = nullptr; }
+    if (d_penalty_ring_) { IMP_CUDA_CHECK_LOG(cudaFree(d_penalty_ring_)); d_penalty_ring_ = nullptr; }
+    if (d_penalty_count_) { IMP_CUDA_CHECK_LOG(cudaFree(d_penalty_count_)); d_penalty_count_ = nullptr; }
+    penalty_prefix_len_ = 0;
 
     if (h_ring_buffer_) { IMP_CUDA_CHECK_LOG(cudaFreeHost(h_ring_buffer_)); h_ring_buffer_ = nullptr; }
     d_ring_buffer_ = nullptr;

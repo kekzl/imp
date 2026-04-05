@@ -952,6 +952,50 @@ __global__ void apply_penalties_kernel(
     logits[idx] = logit;
 }
 
+// Variant: reads n_tokens from a device pointer (for CUDA graph loop where count changes).
+// repeat_last_n: when > 0, only scan the last N tokens in the history.
+__global__ void apply_penalties_device_count_kernel(
+        float* __restrict__ logits,
+        const int32_t* __restrict__ token_ids,
+        const int* __restrict__ d_n_tokens,       // [1] device-side token count
+        int vocab_size,
+        int repeat_last_n,
+        float repetition_penalty,
+        float frequency_penalty,
+        float presence_penalty) {
+    int n_tokens = *d_n_tokens;
+    if (n_tokens <= 0) return;
+
+    // Apply repeat_last_n window
+    int start = 0;
+    if (repeat_last_n > 0 && n_tokens > repeat_last_n) {
+        start = n_tokens - repeat_last_n;
+    }
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= vocab_size) return;
+
+    int count = 0;
+    for (int i = start; i < n_tokens; i++) {
+        if (token_ids[i] == idx) count++;
+    }
+    if (count == 0) return;
+
+    float logit = logits[idx];
+
+    if (repetition_penalty != 1.0f) {
+        if (logit > 0.0f)
+            logit /= repetition_penalty;
+        else
+            logit *= repetition_penalty;
+    }
+
+    logit -= frequency_penalty * static_cast<float>(count);
+    logit -= presence_penalty;
+
+    logits[idx] = logit;
+}
+
 // Force a single token: set all logits to -inf except the given token.
 // Used by think-budget to force </think> generation via logit manipulation.
 __global__ void force_single_token_kernel(float* logits, int vocab_size, int32_t keep_token) {
@@ -978,6 +1022,23 @@ void apply_penalties(float* logits, int vocab_size,
     int blocks = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
     apply_penalties_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
         logits, token_ids, n_tokens, vocab_size,
+        repetition_penalty, frequency_penalty, presence_penalty);
+}
+
+void apply_penalties_device_count(float* logits, int vocab_size,
+                                  const int32_t* token_ids,
+                                  const int* d_n_tokens,
+                                  int repeat_last_n,
+                                  float repetition_penalty,
+                                  float frequency_penalty,
+                                  float presence_penalty,
+                                  cudaStream_t stream) {
+    if (repetition_penalty == 1.0f && frequency_penalty == 0.0f && presence_penalty == 0.0f)
+        return;
+
+    int blocks = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    apply_penalties_device_count_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
+        logits, token_ids, d_n_tokens, vocab_size, repeat_last_n,
         repetition_penalty, frequency_penalty, presence_penalty);
 }
 

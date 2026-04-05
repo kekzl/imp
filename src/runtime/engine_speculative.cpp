@@ -183,6 +183,18 @@ CudaGraphConditionalRunner::Config Engine::build_graph_config(
     gcfg.top_k = req.top_k;
     gcfg.seed = req.seed;
     gcfg.ignore_eos = req.ignore_eos;
+    // Penalty parameters for device-side application inside the graph loop
+    gcfg.repetition_penalty = req.repetition_penalty;
+    gcfg.frequency_penalty = req.frequency_penalty;
+    gcfg.presence_penalty = req.presence_penalty;
+    gcfg.repeat_last_n = req.repeat_last_n;
+    // Seed penalty history from existing output tokens
+    if (req.repetition_penalty != 1.0f || req.frequency_penalty != 0.0f ||
+        req.presence_penalty != 0.0f) {
+        if (!req.output_tokens.empty()) {
+            gcfg.penalty_history = req.output_tokens;
+        }
+    }
     // Think budget: device-side enforcement in post_decode_step_kernel
     if (req.think_budget > 0.0f && think_end_id_ >= 0) {
         gcfg.think_budget_limit = static_cast<int>(req.max_tokens * req.think_budget);

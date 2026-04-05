@@ -1773,12 +1773,8 @@ void Engine::step_decode_process_outputs(
         config_.use_cuda_graphs && !async_graph_runner_.is_setup() &&
         !needs_logprobs && !needs_json_mode && !needs_schema_mode) {
         auto& dreq = valid_decode[0];
-        bool dreq_has_penalties = (dreq->repetition_penalty != 1.0f ||
-                                   dreq->frequency_penalty != 0.0f ||
-                                   dreq->presence_penalty != 0.0f);
         if (dreq->status == RequestStatus::DECODING &&
-            !dreq->output_tokens.empty() &&
-            !dreq_has_penalties) {
+            !dreq->output_tokens.empty()) {
             int32_t last_token = dreq->output_tokens.back();
             try_launch_async_graph_loop(dreq, last_token, dec_stream);
         }
@@ -1861,13 +1857,11 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     }
 
     // Decode — try conditional graph loop, fall back to step()
-    bool req_has_penalties = (req->repetition_penalty != 1.0f ||
-                              req->frequency_penalty != 0.0f ||
-                              req->presence_penalty != 0.0f);
     // Think budget is now enforced device-side in post_decode_step_kernel.
+    // Penalties are applied device-side via apply_penalties_device_count in the graph loop.
     if (req->status == RequestStatus::DECODING && !req->output_tokens.empty() &&
         config_.use_cuda_graphs && !offload_mgr_ && !ssm_state_ && !gdn_state_ &&
-        !config_.enable_speculative && !req->ignore_eos && !req_has_penalties) {
+        !config_.enable_speculative && !req->ignore_eos) {
         int32_t first_token = req->output_tokens.back();
         Tokenizer* gtok = model_->tokenizer();
         auto graph_tokens = try_graph_loop_decode(req, first_token, decode_stream());

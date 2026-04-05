@@ -164,6 +164,10 @@ struct InferenceState {
     // Token history for penalty computation (device pointer, owned by engine)
     const int32_t* penalty_tokens = nullptr;
     int n_penalty_tokens = 0;
+    // Device-side penalty token count (for CUDA graph loop where count grows
+    // each iteration). When non-null, forward_decode_async reads the count
+    // from *d_n_penalty_tokens instead of n_penalty_tokens.
+    const int* d_n_penalty_tokens = nullptr;
 
     // Logprobs: when true, forward() copies logits to h_logits_pinned_ for CPU extraction
     bool logprobs = false;
