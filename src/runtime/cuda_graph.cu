@@ -232,7 +232,9 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
 
         if (!graph_.begin_capture(stream)) {
             // Capture failed -- fall back to direct execution permanently
-            IMP_LOG_WARN("CudaGraphRunner: capture begin failed, disabling graph capture");
+            IMP_LOG_ERROR("CudaGraphRunner: capture failed — falling back to per-step decode "
+                          "(up to 15x slower). Check for unsupported CUDA operations in the "
+                          "forward pass.");
             capture_failed_ = true;
             decode_fn_(stream);
             step_count_++;
@@ -242,7 +244,9 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
         decode_fn_(stream);
 
         if (!graph_.end_capture()) {
-            IMP_LOG_WARN("CudaGraphRunner: capture end failed, disabling graph capture");
+            IMP_LOG_ERROR("CudaGraphRunner: capture failed — falling back to per-step decode "
+                          "(up to 15x slower). Check for unsupported CUDA operations in the "
+                          "forward pass.");
             graph_.reset();
             capture_failed_ = true;
             // end_capture consumed the stream work; must re-execute for actual results
@@ -256,7 +260,8 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
         // During graph capture the kernels are recorded but NOT executed.
         // Replay immediately so this step produces actual results.
         if (!graph_.replay(stream)) {
-            IMP_LOG_WARN("CudaGraphRunner: first replay after capture failed");
+            IMP_LOG_ERROR("CudaGraphRunner: first replay after capture failed — falling back "
+                          "to per-step decode (up to 15x slower).");
             graph_.reset();
             return false;
         }
@@ -266,7 +271,8 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
 
     // Phase 3: Replay the captured graph
     if (!graph_.replay(stream)) {
-        IMP_LOG_WARN("CudaGraphRunner: replay failed, invalidating graph");
+        IMP_LOG_ERROR("CudaGraphRunner: replay failed — invalidating graph and falling back "
+                      "to per-step decode (up to 15x slower). Will attempt re-capture.");
         graph_.reset();
         step_count_ = 0;  // restart warmup
         // Fall back to direct execution
@@ -505,8 +511,10 @@ bool CudaGraphConditionalRunner::setup(
         // 1. Create top-level graph
         err = cudaGraphCreate(&graph_, 0);
         if (err != cudaSuccess) {
-            IMP_LOG_WARN("ConditionalRunner: cudaGraphCreate failed: %s",
-                         cudaGetErrorString(err));
+            IMP_LOG_ERROR("ConditionalRunner: cudaGraphCreate failed: %s — falling back to "
+                          "per-step decode (up to 15x slower). Check for unsupported CUDA "
+                          "operations in the forward pass.",
+                          cudaGetErrorString(err));
             goto fail;
         }
 
@@ -514,8 +522,10 @@ bool CudaGraphConditionalRunner::setup(
         err = cudaGraphConditionalHandleCreate(&handle_, graph_, 1,
                                                 cudaGraphCondAssignDefault);
         if (err != cudaSuccess) {
-            IMP_LOG_WARN("ConditionalRunner: handle create failed: %s",
-                         cudaGetErrorString(err));
+            IMP_LOG_ERROR("ConditionalRunner: handle create failed: %s — falling back to "
+                          "per-step decode (up to 15x slower). Requires CUDA 12.4+ with "
+                          "conditional graph support.",
+                          cudaGetErrorString(err));
             goto fail;
         }
 
@@ -529,8 +539,9 @@ bool CudaGraphConditionalRunner::setup(
         cudaGraphNode_t cond_node;
         err = cudaGraphAddNode(&cond_node, graph_, nullptr, nullptr, 0, &cond_params);
         if (err != cudaSuccess) {
-            IMP_LOG_WARN("ConditionalRunner: add conditional node failed: %s",
-                         cudaGetErrorString(err));
+            IMP_LOG_ERROR("ConditionalRunner: add conditional node failed: %s — falling back "
+                          "to per-step decode (up to 15x slower).",
+                          cudaGetErrorString(err));
             goto fail;
         }
 
@@ -545,8 +556,10 @@ bool CudaGraphConditionalRunner::setup(
                                               nullptr, nullptr, 0,
                                               cudaStreamCaptureModeGlobal);
         if (err != cudaSuccess) {
-            IMP_LOG_WARN("ConditionalRunner: begin capture to graph failed: %s",
-                         cudaGetErrorString(err));
+            IMP_LOG_ERROR("ConditionalRunner: capture failed — falling back to per-step decode "
+                          "(up to 15x slower). Check for unsupported CUDA operations in the "
+                          "forward pass. Error: %s",
+                          cudaGetErrorString(err));
             goto fail;
         }
 
@@ -574,8 +587,10 @@ bool CudaGraphConditionalRunner::setup(
         cudaGraph_t captured_body = nullptr;
         err = cudaStreamEndCapture(stream, &captured_body);
         if (err != cudaSuccess) {
-            IMP_LOG_WARN("ConditionalRunner: end capture failed: %s",
-                         cudaGetErrorString(err));
+            IMP_LOG_ERROR("ConditionalRunner: capture failed — falling back to per-step decode "
+                          "(up to 15x slower). Check for unsupported CUDA operations in the "
+                          "forward pass. Error: %s",
+                          cudaGetErrorString(err));
             goto fail;
         }
 
@@ -591,8 +606,9 @@ bool CudaGraphConditionalRunner::setup(
         // 6. Instantiate the top-level graph
         err = cudaGraphInstantiate(&exec_, graph_, 0);
         if (err != cudaSuccess) {
-            IMP_LOG_WARN("ConditionalRunner: instantiate failed: %s",
-                         cudaGetErrorString(err));
+            IMP_LOG_ERROR("ConditionalRunner: graph instantiation failed: %s — falling back "
+                          "to per-step decode (up to 15x slower).",
+                          cudaGetErrorString(err));
             goto fail;
         }
 
@@ -604,7 +620,8 @@ bool CudaGraphConditionalRunner::setup(
     return true;
 
 fail:
-    IMP_LOG_WARN("ConditionalRunner: setup failed, will fall back to per-step decode");
+    IMP_LOG_ERROR("ConditionalRunner: setup failed — falling back to per-step decode "
+                  "(up to 15x slower). Check logs above for the specific failure.");
     cleanup();
     return false;
 }
