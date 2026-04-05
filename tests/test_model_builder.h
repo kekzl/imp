@@ -284,5 +284,146 @@ struct MoETestModel {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Q8_0 weight creation (for FP8/NVFP4 pre-dequant tests)
+// Q8_0 format: 34 bytes per 32 elements = half(scale) + int8_t[32]
+// cols must be divisible by 32.
+// ---------------------------------------------------------------------------
+inline Tensor make_q8_0_weight(int64_t rows, int64_t cols,
+                                std::mt19937& rng, float scale = 0.5f) {
+    assert(cols % 32 == 0);
+    std::normal_distribution<float> dist(0.0f, scale);
+    int64_t n_blocks_per_row = cols / 32;
+    int64_t total_blocks = rows * n_blocks_per_row;
+    size_t block_bytes = 34;  // 2 (fp16 scale) + 32 (int8 quants)
+    size_t total_bytes = total_blocks * block_bytes;
+
+    std::vector<uint8_t> data(total_bytes);
+    for (int64_t b = 0; b < total_blocks; b++) {
+        // Generate 32 random float values for this block
+        float vals[32];
+        float amax = 0.0f;
+        for (int j = 0; j < 32; j++) {
+            vals[j] = dist(rng);
+            amax = std::max(amax, std::abs(vals[j]));
+        }
+        float d = amax / 127.0f;
+        half d_fp16 = __float2half(d);
+
+        uint8_t* block_ptr = data.data() + b * block_bytes;
+        // Write scale (2 bytes, little-endian half)
+        memcpy(block_ptr, &d_fp16, 2);
+        // Write quantized int8 values
+        int8_t* qs = reinterpret_cast<int8_t*>(block_ptr + 2);
+        float id = (d > 0.0f) ? 1.0f / d : 0.0f;
+        for (int j = 0; j < 32; j++) {
+            int v = static_cast<int>(roundf(vals[j] * id));
+            qs[j] = static_cast<int8_t>(std::max(-127, std::min(127, v)));
+        }
+    }
+
+    Tensor t;
+    t.dtype = DType::FP16;  // logical dtype for shape computation
+    t.ndim = 2;
+    t.shape[0] = rows;
+    t.shape[1] = cols;
+    t.compute_strides();
+    t.on_device = true;
+
+    cudaMalloc(&t.data, total_bytes);
+    cudaMemcpy(t.data, data.data(), total_bytes, cudaMemcpyHostToDevice);
+    return t;
+}
+
+// ---------------------------------------------------------------------------
+// Dense model with Q8_0 weights (for testing FP8/NVFP4 pre-dequant paths)
+// Embedding, norms, and output projection stay FP16 (like real models).
+// Attention and FFN weights are Q8_0.
+// ---------------------------------------------------------------------------
+struct Q8DenseTestModel {
+    std::shared_ptr<Model> model;
+    std::vector<Tensor> all_tensors;
+
+    static Q8DenseTestModel create(int d_model, int d_ff, int vocab_size,
+                                    int n_layers, int n_heads, int n_kv_heads,
+                                    int max_seq_len = 512, int seed = 42) {
+        Q8DenseTestModel result;
+        result.model = std::make_shared<Model>();
+        auto& cfg = result.model->config_;
+        cfg.arch = ModelArch::LLAMA;
+        cfg.n_layers = n_layers;
+        cfg.n_heads = n_heads;
+        cfg.n_kv_heads = n_kv_heads;
+        cfg.d_model = d_model;
+        cfg.d_ff = d_ff;
+        cfg.vocab_size = vocab_size;
+        cfg.max_seq_len = max_seq_len;
+        cfg.rope_theta = 10000.0f;
+        cfg.rms_norm_eps = 1e-5f;
+        cfg.n_experts = 0;
+        cfg.n_experts_active = 0;
+        cfg.expert_d_ff = 0;
+
+        std::mt19937 rng(seed);
+        int head_dim = d_model / n_heads;
+
+        // Embedding and output stay FP16 (not quantized in real models either)
+        result.model->tok_emb_ = make_random_weight(vocab_size, d_model, rng);
+        result.all_tensors.push_back(result.model->tok_emb_);
+
+        result.model->out_norm_ = make_norm_weight(d_model);
+        result.all_tensors.push_back(result.model->out_norm_);
+
+        result.model->out_proj_ = make_random_weight(vocab_size, d_model, rng);
+        result.model->out_proj_qtype_ = GGMLQuantType::NONE;
+        result.all_tensors.push_back(result.model->out_proj_);
+
+        result.model->layers_.resize(n_layers);
+        for (int i = 0; i < n_layers; i++) {
+            auto& ly = result.model->layers_[i];
+
+            // Attention weights: Q8_0
+            ly.wq = make_q8_0_weight(n_heads * head_dim, d_model, rng);
+            ly.wk = make_q8_0_weight(n_kv_heads * head_dim, d_model, rng);
+            ly.wv = make_q8_0_weight(n_kv_heads * head_dim, d_model, rng);
+            ly.wo = make_q8_0_weight(d_model, n_heads * head_dim, rng);
+            ly.wq_qtype = GGMLQuantType::Q8_0;
+            ly.wk_qtype = GGMLQuantType::Q8_0;
+            ly.wv_qtype = GGMLQuantType::Q8_0;
+            ly.wo_qtype = GGMLQuantType::Q8_0;
+
+            // Norms stay FP16
+            ly.attn_norm = make_norm_weight(d_model);
+            ly.ffn_norm = make_norm_weight(d_model);
+
+            // FFN weights: Q8_0
+            ly.w_gate = make_q8_0_weight(d_ff, d_model, rng);
+            ly.w_up = make_q8_0_weight(d_ff, d_model, rng);
+            ly.w_down = make_q8_0_weight(d_model, d_ff, rng);
+            ly.w_gate_qtype = GGMLQuantType::Q8_0;
+            ly.w_up_qtype = GGMLQuantType::Q8_0;
+            ly.w_down_qtype = GGMLQuantType::Q8_0;
+
+            result.all_tensors.push_back(ly.wq);
+            result.all_tensors.push_back(ly.wk);
+            result.all_tensors.push_back(ly.wv);
+            result.all_tensors.push_back(ly.wo);
+            result.all_tensors.push_back(ly.attn_norm);
+            result.all_tensors.push_back(ly.ffn_norm);
+            result.all_tensors.push_back(ly.w_gate);
+            result.all_tensors.push_back(ly.w_up);
+            result.all_tensors.push_back(ly.w_down);
+        }
+
+        result.model->gpu_weights_ready_ = true;
+        return result;
+    }
+
+    void cleanup() {
+        for (auto& t : all_tensors) free_tensor(t);
+        all_tensors.clear();
+    }
+};
+
 } // namespace test
 } // namespace imp
