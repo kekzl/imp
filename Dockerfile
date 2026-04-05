@@ -9,7 +9,10 @@ ARG CUDA_ARCHITECTURES="90a;100"
 ARG CMAKE_BUILD_TYPE=Release
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        cmake g++ git ninja-build ca-certificates python3 \
+        g++ git ninja-build ca-certificates python3 wget \
+    && wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v4.3.1/cmake-4.3.1-linux-x86_64.sh \
+    && sh /tmp/cmake.sh --skip-license --prefix=/usr/local \
+    && rm /tmp/cmake.sh \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
