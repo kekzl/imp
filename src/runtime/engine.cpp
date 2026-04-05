@@ -783,6 +783,17 @@ bool Engine::init_kv_cache() {
         }
     }
 
+    // Detect pure Mamba2 SSM layers (layers with ssm_in but without gdn_gate).
+    // GDN-only models (Qwen3.5) are graph-compatible; pure SSM (Nemotron-H) is not yet.
+    {
+        int n_pure_ssm = 0;
+        for (int i = 0; i < mcfg.n_layers; i++)
+            if (model_->layer(i).ssm_in.data != nullptr &&
+                model_->layer(i).gdn_gate.data == nullptr)
+                n_pure_ssm++;
+        has_pure_ssm_layers_ = (n_pure_ssm > 0);
+    }
+
     // Dequant weights → FP16/FP8/NVFP4 caches
     executor_->pre_dequant_weights(stream_, vram_budget);
     dequant_done_ = true;
@@ -1865,7 +1876,8 @@ void Engine::step_decode_process_outputs(
     // Try async graph loop after first decode step.
     // Think budget is now handled device-side in post_decode_step_kernel.
     if (decode_graph_pool_[0].is_ready() && valid_decode.size() == 1 &&
-        !offload_mgr_ && !ssm_state_ && !config_.enable_speculative &&
+        !offload_mgr_ && (!ssm_state_ || !has_pure_ssm_layers_) &&
+        !config_.enable_speculative &&
         config_.use_cuda_graphs && !async_graph_runner_.is_setup() &&
         !needs_logprobs && !needs_json_mode && !needs_schema_mode) {
         auto& dreq = valid_decode[0];
@@ -1959,7 +1971,8 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
                               req->frequency_penalty != 0.0f ||
                               req->presence_penalty != 0.0f);
     if (req->status == RequestStatus::DECODING && !req->output_tokens.empty() &&
-        config_.use_cuda_graphs && !offload_mgr_ && !ssm_state_ &&
+        config_.use_cuda_graphs && !offload_mgr_ &&
+        (!ssm_state_ || !has_pure_ssm_layers_) &&
         !config_.enable_speculative) {
         int32_t first_token = req->output_tokens.back();
         Tokenizer* gtok = model_->tokenizer();
