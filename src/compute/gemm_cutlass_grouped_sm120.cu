@@ -110,23 +110,21 @@ bool gemm_grouped_cutlass_sm120(
     (void)workspace_size;
     if (n_problems == 0) return true;
 
-    // D2H copy for per-expert M values (prefill path).
+    // D2H copy: batch ALL device arrays into a single async transfer + single sync.
+    // Previously this was 2 separate syncs (one for M, one for pointers).
     std::vector<int> h_M(n_problems);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_M.data(), d_problem_m, n_problems * sizeof(int),
-                    cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
-
-    // Also need host-side data pointers (d_A_ptrs etc are device arrays)
     std::vector<const void*> h_A(n_problems);
     std::vector<const void*> h_B(n_problems);
     std::vector<void*>       h_C(n_problems);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_M.data(), d_problem_m, n_problems * sizeof(int),
+                    cudaMemcpyDeviceToHost, stream));
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_A.data(), d_A_ptrs, n_problems * sizeof(void*),
                     cudaMemcpyDeviceToHost, stream));
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_B.data(), d_B_ptrs, n_problems * sizeof(void*),
                     cudaMemcpyDeviceToHost, stream));
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_C.data(), d_C_ptrs, n_problems * sizeof(void*),
                     cudaMemcpyDeviceToHost, stream));
-    cudaStreamSynchronize(stream);
+    cudaStreamSynchronize(stream);  // single sync for all D2H copies
 
     // Build CUTLASS 2.x GemmGrouped host arrays
     using GemmCoord = cutlass::gemm::GemmCoord;
