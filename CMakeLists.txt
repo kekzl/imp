@@ -377,6 +377,7 @@ if(IMP_BUILD_TESTS)
         tests/test_executor_kernels.cu
         tests/test_kv_cache_write.cu
         tests/test_forward_pass.cu
+        tests/test_engine_integration.cu
         tests/test_hadamard.cu
         tests/test_attention_fmha_sm120.cu
         tests/test_fmha_fp8.cu
