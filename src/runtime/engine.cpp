@@ -409,10 +409,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     if (config_.use_nvfp4_decode < 0) {
         int sm = get_device_sm_version();
-        if (n_gdn_auto > 0) {
+        if (n_gdn_auto > 0 && mcfg.d_model >= 3072) {
             // GDN models with large d_model: enable NVFP4 for attention + FFN weights,
             // but SSM/GDN projections (ssm_in/ssm_out) will be excluded in
             // pre_dequant_weights to preserve recurrent state precision.
+            // Small GDN models (d_model<3072, e.g. Qwen3.5-4B d_model=2560) are
+            // ~2% slower with NVFP4 — only ~40% of weights benefit (attention+FFN)
+            // and the GEMV overhead doesn't pay off at small dimensions.
             if (sm >= 120) {
                 config_.use_nvfp4_decode = 2;
                 IMP_LOG_INFO("NVFP4 decode: auto → mode 2 (GDN model, %d recurrent layers — "
@@ -424,6 +427,10 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             } else {
                 config_.use_nvfp4_decode = 0;
             }
+        } else if (n_gdn_auto > 0) {
+            // Small GDN model (d_model < 3072): NVFP4 overhead exceeds savings
+            config_.use_nvfp4_decode = 0;
+            IMP_LOG_INFO("NVFP4 decode: auto → disabled (GDN model, d_model=%d < 3072)", mcfg.d_model);
         } else if (sm >= 120) {
             config_.use_nvfp4_decode = 2;
             IMP_LOG_INFO("NVFP4 decode: auto → mode %d (sm_%d)", config_.use_nvfp4_decode, sm);
