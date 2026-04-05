@@ -47,6 +47,7 @@ struct CliArgs {
     bool prefill_fp8 = false;  // --prefill-fp8: use FP8 E4M3 weight cache for prefill
     int decode_nvfp4 = -1;     // -1=auto, 0=off, 1=additive, 2=NVFP4-only
     bool mxfp4_prefill = false;  // --mxfp4-prefill: CUTLASS MXFP4 GEMM for prefill
+    bool dual_path_quant = false; // --dual-path-quant: FP8 attention + NVFP4 FFN
     bool prefix_caching = false;  // --prefix-caching: reuse KV blocks for shared prefixes
     std::vector<std::string> stop_sequences;  // --stop: text-level stop strings
     bool bench = false;        // --bench: synthetic benchmark mode
@@ -60,8 +61,6 @@ struct CliArgs {
     int self_spec_skip_n = -1;      // --self-spec-skip-n: layers to skip (-1 = auto)
     bool ngram_spec = false;        // --ngram-spec: n-gram speculative decoding
     int ngram_spec_k = 5;           // --ngram-spec-k: max draft tokens
-    std::string preset;        // --preset: named model preset (e.g. qwen3-32b)
-    std::string presets_file;  // --presets-file: custom presets.toml path
 };
 
 CliArgs parse_args(int argc, char** argv);

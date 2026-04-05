@@ -59,21 +59,14 @@ __constant__ float kFP4E2M1Dequant[8] = {
 // ---------------------------------------------------------------------------
 __device__ __forceinline__ uint8_t float_abs_to_fp4_e2m1(float abs_val)
 {
-    // Clamp to representable range.
-    if (abs_val <= 0.0f) return 0;
-    if (abs_val >= 6.0f) return 7;  // saturate to max
-
-    // Thresholds are midpoints between consecutive representable values:
+    // Branchless: count of midpoint thresholds exceeded gives the E2M1 code.
+    // Thresholds between adjacent representable values:
     //   0    0.5    1.0    1.5    2.0    3.0    4.0    6.0
     //     0.25  0.75  1.25  1.75  2.5   3.5    5.0
-    if (abs_val < 0.25f)  return 0;   // -> 0.0
-    if (abs_val < 0.75f)  return 1;   // -> 0.5
-    if (abs_val < 1.25f)  return 2;   // -> 1.0
-    if (abs_val < 1.75f)  return 3;   // -> 1.5
-    if (abs_val < 2.5f)   return 4;   // -> 2.0
-    if (abs_val < 3.5f)   return 5;   // -> 3.0
-    if (abs_val < 5.0f)   return 6;   // -> 4.0
-    return 7;                          // -> 6.0
+    uint8_t code = (abs_val >= 0.25f) + (abs_val >= 0.75f) + (abs_val >= 1.25f)
+                 + (abs_val >= 1.75f) + (abs_val >= 2.5f)  + (abs_val >= 3.5f)
+                 + (abs_val >= 5.0f);
+    return code;  // 0..7
 }
 
 // float_to_fp8_e4m3() and fp8_e4m3_to_float() are provided by fp8_utils.cuh.
@@ -97,15 +90,17 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4(
     int64_t                  num_mb_per_row,
     int64_t                  K)
 {
-    // Step 1: Load 16 FP16 values and find local absmax.
+    // Step 1: Load 16 FP16 values via vectorized half2 loads and find local absmax.
     float vals[kMicroBlockSize];
     float local_absmax = 0.0f;
 
+    const half2* src_h2 = reinterpret_cast<const half2*>(input + base);
     #pragma unroll
-    for (int i = 0; i < kMicroBlockSize; i++) {
-        vals[i] = __half2float(input[base + i]);
-        float av = fabsf(vals[i]);
-        if (av > local_absmax) local_absmax = av;
+    for (int i = 0; i < kMicroBlockSize / 2; i++) {
+        half2 h2 = src_h2[i];
+        vals[i * 2]     = __half2float(h2.x);
+        vals[i * 2 + 1] = __half2float(h2.y);
+        local_absmax = fmaxf(local_absmax, fmaxf(fabsf(vals[i * 2]), fabsf(vals[i * 2 + 1])));
     }
 
     // Step 2: Compute micro-scale = local_absmax / (tensor_scale * 6.0).
@@ -320,10 +315,10 @@ float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream,
     float* d_global_max = d_reusable_max;
     bool own_alloc = false;
     if (!d_global_max) {
-        cudaMalloc(&d_global_max, sizeof(float));
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_global_max, sizeof(float)));
         own_alloc = true;
     }
-    cudaMemsetAsync(d_global_max, 0, sizeof(float), stream);
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_global_max, 0, sizeof(float), stream));
 
     int num_blocks = (int)((n_elements + kBlockSize - 1) / kBlockSize);
     if (num_blocks > 2048) num_blocks = 2048;  // cap grid size
@@ -336,11 +331,11 @@ float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream,
 
     // Read back the result.
     float h_absmax = 0.0f;
-    cudaMemcpyAsync(&h_absmax, d_global_max, sizeof(float),
-                    cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_absmax, d_global_max, sizeof(float),
+                    cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 
-    if (own_alloc) cudaFree(d_global_max);
+    if (own_alloc) IMP_CUDA_CHECK_LOG(cudaFree(d_global_max));
 
     if (h_absmax == 0.0f) {
         IMP_LOG_WARN("calibrate_nvfp4_scales: tensor is all zeros, using scale 1.0");
@@ -373,8 +368,8 @@ void quantize_fp16_to_nvfp4(const Tensor& input, NvFP4QuantResult& result,
 
     uint8_t* d_packed = nullptr;
     uint8_t* d_micro_scales = nullptr;
-    cudaMalloc(&d_packed, packed_bytes);
-    cudaMalloc(&d_micro_scales, micro_scale_bytes);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_packed, packed_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_micro_scales, micro_scale_bytes));
 
     // Step 3: Launch quantization kernel.
     int64_t total_micro_blocks = N * (K / kMicroBlockSize);
@@ -414,7 +409,7 @@ void quantize_fp16_to_nvfp4_async(const Tensor& input, NvFP4QuantResult& result,
     assert(K % kMicroBlockSize == 0 && "K must be multiple of 16");
 
     // Step 1: absmax reduction (async, no host sync)
-    cudaMemsetAsync(d_absmax_buf, 0, sizeof(float), stream);
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_absmax_buf, 0, sizeof(float), stream));
     int64_t n_elements = input.numel();
     int absmax_blocks = (int)((n_elements + kBlockSize - 1) / kBlockSize);
     if (absmax_blocks > 2048) absmax_blocks = 2048;
@@ -431,8 +426,8 @@ void quantize_fp16_to_nvfp4_async(const Tensor& input, NvFP4QuantResult& result,
 
     uint8_t* d_packed = nullptr;
     uint8_t* d_micro_scales = nullptr;
-    cudaMalloc(&d_packed, packed_bytes);
-    cudaMalloc(&d_micro_scales, micro_scale_bytes);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_packed, packed_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_micro_scales, micro_scale_bytes));
 
     // Step 3: Fused quantize that reads absmax from device (no host sync!)
     int64_t total_micro_blocks = N * (K / kMicroBlockSize);
@@ -551,11 +546,11 @@ void dequantize_nvfp4_moe_to_fp16(const NvFP4MoEQuantResult& result,
 void free_nvfp4_result(NvFP4QuantResult& result)
 {
     if (result.packed_data) {
-        cudaFree(result.packed_data);
+        IMP_CUDA_CHECK_LOG(cudaFree(result.packed_data));
         result.packed_data = nullptr;
     }
     if (result.micro_scales) {
-        cudaFree(result.micro_scales);
+        IMP_CUDA_CHECK_LOG(cudaFree(result.micro_scales));
         result.micro_scales = nullptr;
     }
     result.tensor_scale = 1.0f;
@@ -588,16 +583,16 @@ void quantize_packed_experts_to_nvfp4(
     uint8_t* d_packed = nullptr;
     uint8_t* d_micro_scales = nullptr;
     float* d_tensor_scales = nullptr;
-    cudaMalloc(&d_packed, total_packed);
-    cudaMalloc(&d_micro_scales, total_ms);
-    cudaMalloc(&d_tensor_scales, n_experts * sizeof(float));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_packed, total_packed));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_micro_scales, total_ms));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tensor_scales, n_experts * sizeof(float)));
 
     // Compute expert stride in source GGML data
     size_t src_expert_stride = static_cast<size_t>(eff) * ggml_quant_row_bytes(qtype, K);
 
     // Temporary device buffer for absmax reduction
     float* d_global_max = nullptr;
-    cudaMalloc(&d_global_max, sizeof(float));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_global_max, sizeof(float)));
 
     int64_t n_elements = static_cast<int64_t>(eff) * K;
     int64_t total_micro_blocks = static_cast<int64_t>(eff) * (K / kMicroBlockSize);
@@ -611,22 +606,22 @@ void quantize_packed_experts_to_nvfp4(
         dequant_gpu(src, scratch, qtype, eff, K, stream);
 
         // Step 2: Calibrate tensor_scale = absmax / 6.0
-        cudaMemsetAsync(d_global_max, 0, sizeof(float), stream);
+        IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_global_max, 0, sizeof(float), stream));
         int absmax_blocks = static_cast<int>((n_elements + kBlockSize - 1) / kBlockSize);
         if (absmax_blocks > 2048) absmax_blocks = 2048;
         absmax_kernel<<<absmax_blocks, kBlockSize, 0, stream>>>(
             scratch, n_elements, d_global_max);
 
         float h_absmax = 0.0f;
-        cudaMemcpyAsync(&h_absmax, d_global_max, sizeof(float),
-                        cudaMemcpyDeviceToHost, stream);
-        cudaStreamSynchronize(stream);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_absmax, d_global_max, sizeof(float),
+                        cudaMemcpyDeviceToHost, stream));
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 
         float ts = (h_absmax == 0.0f) ? 1.0f : (h_absmax / kFP4E2M1Max);
 
         // Copy tensor_scale to device array
-        cudaMemcpyAsync(d_tensor_scales + e, &ts, sizeof(float),
-                        cudaMemcpyHostToDevice, stream);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_tensor_scales + e, &ts, sizeof(float),
+                        cudaMemcpyHostToDevice, stream));
 
         // Step 3: Quantize FP16 scratch -> NVFP4 at expert offset
         quantize_nvfp4_kernel<<<quant_blocks, kBlockSize, 0, stream>>>(
@@ -637,10 +632,10 @@ void quantize_packed_experts_to_nvfp4(
             static_cast<int64_t>(eff), static_cast<int64_t>(K));
 
         // Must sync before scratch is reused by next expert
-        cudaStreamSynchronize(stream);
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
     }
 
-    cudaFree(d_global_max);
+    IMP_CUDA_CHECK_LOG(cudaFree(d_global_max));
 
     // Fill result
     result.packed_data = d_packed;
@@ -662,15 +657,15 @@ void quantize_packed_experts_to_nvfp4(
 void free_nvfp4_moe_result(NvFP4MoEQuantResult& result)
 {
     if (result.packed_data) {
-        cudaFree(result.packed_data);
+        IMP_CUDA_CHECK_LOG(cudaFree(result.packed_data));
         result.packed_data = nullptr;
     }
     if (result.micro_scales) {
-        cudaFree(result.micro_scales);
+        IMP_CUDA_CHECK_LOG(cudaFree(result.micro_scales));
         result.micro_scales = nullptr;
     }
     if (result.tensor_scales) {
-        cudaFree(result.tensor_scales);
+        IMP_CUDA_CHECK_LOG(cudaFree(result.tensor_scales));
         result.tensor_scales = nullptr;
     }
     result.n_experts = 0;

@@ -84,7 +84,7 @@ bool qjl_init(QJLProjection& proj, int head_dim, int sketch_dim, uint64_t seed,
     err = cudaGetLastError();
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("QJL: matrix generation kernel failed: %s", cudaGetErrorString(err));
-        cudaFree(proj.matrix);
+        IMP_CUDA_CHECK_LOG(cudaFree(proj.matrix));
         proj.matrix = nullptr;
         return false;
     }
@@ -97,7 +97,7 @@ bool qjl_init(QJLProjection& proj, int head_dim, int sketch_dim, uint64_t seed,
 
 void qjl_destroy(QJLProjection& proj) {
     if (proj.matrix) {
-        cudaFree(proj.matrix);
+        IMP_CUDA_CHECK_LOG(cudaFree(proj.matrix));
         proj.matrix = nullptr;
     }
     proj.sketch_dim = 0;

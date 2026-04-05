@@ -94,8 +94,8 @@ void* ExpertLRUCache::get_or_load(ExpertCacheKey key, const void* src_host,
 
     // Load expert from host to GPU slot
     Slot& slot = slots_[slot_idx];
-    cudaMemcpyAsync(slot.gpu_ptr, src_host, expert_bytes,
-                    cudaMemcpyHostToDevice, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(slot.gpu_ptr, src_host, expert_bytes,
+                    cudaMemcpyHostToDevice, stream));
 
     // Register in LRU
     slot.key = key;

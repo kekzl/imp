@@ -125,7 +125,7 @@ void BatchingEngine::worker_loop() {
         }
 
         // 3. Run one engine step (processes all scheduled requests)
-        engine->step();
+        (void)engine->step();
 
         // 4. Deliver new tokens and check for completion
         imp::Tokenizer* tok = engine->model()->tokenizer();

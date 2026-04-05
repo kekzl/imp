@@ -76,6 +76,11 @@ struct WeightCacheManager {
     size_t cutlass_mxfp4_bytes = 0;
     bool use_mxfp4 = false;
 
+    // --- Dual-path mode: FP8 attention + NVFP4 FFN ---
+    // When true, attention weights (WQ/WK/WV/WO) are excluded from NVFP4 cache
+    // and kept at FP8 for higher quality. Only FFN weights get NVFP4.
+    bool dual_path_quant = false;
+
     // Free all cached weights and bulk buffers.
     void free(VRAMAllocator* alloc);
 };

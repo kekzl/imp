@@ -16,7 +16,7 @@
 // Ban specific token IDs by setting their logits to -inf.
 // Used in the CUDA graph decode path where host-side logit manipulation
 // (cudaMemcpyAsync per token) is not possible during graph replay.
-__global__ void ban_logits_kernel(float* __restrict__ logits,
+__global__ __launch_bounds__(256) void ban_logits_kernel(float* __restrict__ logits,
                                    const int32_t* __restrict__ banned_ids,
                                    int n_banned, int vocab_size) {
     int i = threadIdx.x;
@@ -92,8 +92,8 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
         for (int bi = 0; bi < state.n_banned_tokens; bi++) {
             int32_t tid = state.banned_tokens[bi];
             if (tid >= 0 && tid < vocab_size) {
-                cudaMemcpyAsync(logits_ptr + tid, &neg_inf, sizeof(float),
-                                cudaMemcpyHostToDevice, stream);
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(logits_ptr + tid, &neg_inf, sizeof(float),
+                                cudaMemcpyHostToDevice, stream));
             }
         }
     }
@@ -105,10 +105,10 @@ int32_t GraphExecutor::forward(const InferenceState& state, cudaStream_t stream)
             float bias = state.logit_bias[i].second;
             if (tid >= 0 && tid < vocab_size) {
                 float logit;
-                cudaMemcpy(&logit, logits_ptr + tid, sizeof(float), cudaMemcpyDeviceToHost);
+                IMP_CUDA_CHECK_LOG(cudaMemcpy(&logit, logits_ptr + tid, sizeof(float), cudaMemcpyDeviceToHost));
                 logit += bias;
-                cudaMemcpyAsync(logits_ptr + tid, &logit, sizeof(float),
-                                cudaMemcpyHostToDevice, stream);
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(logits_ptr + tid, &logit, sizeof(float),
+                                cudaMemcpyHostToDevice, stream));
             }
         }
     }
@@ -230,10 +230,10 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits,
                 float bias = st.logit_bias[i].second;
                 if (tid >= 0 && tid < vocab) {
                     float logit;
-                    cudaMemcpy(&logit, lp + tid, sizeof(float), cudaMemcpyDeviceToHost);
+                    IMP_CUDA_CHECK_LOG(cudaMemcpy(&logit, lp + tid, sizeof(float), cudaMemcpyDeviceToHost));
                     logit += bias;
-                    cudaMemcpyAsync(lp + tid, &logit, sizeof(float),
-                                    cudaMemcpyHostToDevice, stream);
+                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(lp + tid, &logit, sizeof(float),
+                                    cudaMemcpyHostToDevice, stream));
                 }
             }
         }
@@ -344,8 +344,8 @@ int32_t GraphExecutor::sample_single_from_logits(const Tensor& logits,
         for (int bi = 0; bi < state.n_banned_tokens; bi++) {
             int32_t tid = state.banned_tokens[bi];
             if (tid >= 0 && tid < vocab)
-                cudaMemcpyAsync(lp + tid, &neg_inf, sizeof(float),
-                                cudaMemcpyHostToDevice, stream);
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(lp + tid, &neg_inf, sizeof(float),
+                                cudaMemcpyHostToDevice, stream));
         }
     }
     // Apply logit bias
@@ -355,10 +355,10 @@ int32_t GraphExecutor::sample_single_from_logits(const Tensor& logits,
             float bias = state.logit_bias[i].second;
             if (tid >= 0 && tid < vocab) {
                 float logit;
-                cudaMemcpy(&logit, lp + tid, sizeof(float), cudaMemcpyDeviceToHost);
+                IMP_CUDA_CHECK_LOG(cudaMemcpy(&logit, lp + tid, sizeof(float), cudaMemcpyDeviceToHost));
                 logit += bias;
-                cudaMemcpyAsync(lp + tid, &logit, sizeof(float),
-                                cudaMemcpyHostToDevice, stream);
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(lp + tid, &logit, sizeof(float),
+                                cudaMemcpyHostToDevice, stream));
             }
         }
     }
@@ -550,6 +550,20 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
         if (threads > 256) threads = 256;
         ban_logits_kernel<<<1, threads, 0, stream>>>(
             lp, state.d_banned_tokens, state.n_d_banned_tokens, vocab);
+    }
+
+    // ---- Step 4b: Apply penalties (repetition/frequency/presence) ----
+    // In the CUDA graph loop, d_n_penalty_tokens points to a device counter
+    // that grows each iteration as tokens are generated.
+    if (state.penalty_tokens != nullptr && state.d_n_penalty_tokens != nullptr) {
+        float* lp = static_cast<float*>(lg.data);
+        int vocab = static_cast<int>(lg.shape[lg.ndim - 1]);
+        apply_penalties_device_count(lp, vocab, state.penalty_tokens,
+                                     state.d_n_penalty_tokens,
+                                     state.repeat_last_n,
+                                     state.repetition_penalty,
+                                     state.frequency_penalty,
+                                     state.presence_penalty, stream);
     }
 
     // ---- Step 5: Async sampling → write to d_token_id + h_mapped ----

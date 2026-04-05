@@ -1,9 +1,7 @@
 #include "quant/dequant_gpu.h"
 #include "core/logging.h"
 #include <cuda_fp16.h>
-#ifdef __CUDA_FP8_TYPES_EXIST__
 #include <cuda_fp8.h>
-#endif
 #include <cstdio>
 
 namespace imp {
@@ -753,7 +751,6 @@ __global__ void dequant_q6k_to_fp8_kernel(
     int blk_id = blockIdx.x;
     if (blk_id >= total_blocks) return;
 
-#ifdef __CUDA_FP8_TYPES_EXIST__
     const uint8_t* bp = src + static_cast<int64_t>(blk_id) * 210;
     uint16_t* out = reinterpret_cast<uint16_t*>(dst + static_cast<int64_t>(blk_id) * 256);
     float d_w = __half2float(*reinterpret_cast<const half*>(bp + 208));
@@ -770,11 +767,6 @@ __global__ void dequant_q6k_to_fp8_kernel(
     memcpy(&b0, &f0, 1);
     memcpy(&b1, &f1, 1);
     out[threadIdx.x] = static_cast<uint16_t>(b0) | (static_cast<uint16_t>(b1) << 8);
-#else
-    // FP8 types unavailable — zero fill (should not be reached on sm_90+)
-    uint16_t* out = reinterpret_cast<uint16_t*>(dst + static_cast<int64_t>(blk_id) * 256);
-    out[threadIdx.x] = 0;
-#endif
 }
 
 // ---------------------------------------------------------------------------

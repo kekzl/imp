@@ -72,16 +72,11 @@ __device__ __forceinline__ float mxfp4_ue8m0_to_float(uint8_t bits) {
 }
 
 __device__ __forceinline__ uint8_t mxfp4_quantize_abs(float abs_val) {
-    if (abs_val <= 0.0f)  return 0;
-    if (abs_val >= 6.0f)  return 7;
-    if (abs_val < 0.25f)  return 0;
-    if (abs_val < 0.75f)  return 1;
-    if (abs_val < 1.25f)  return 2;
-    if (abs_val < 1.75f)  return 3;
-    if (abs_val < 2.5f)   return 4;
-    if (abs_val < 3.5f)   return 5;
-    if (abs_val < 5.0f)   return 6;
-    return 7;
+    // Branchless: count of midpoint thresholds exceeded gives the E2M1 code.
+    uint8_t code = (abs_val >= 0.25f) + (abs_val >= 0.75f) + (abs_val >= 1.25f)
+                 + (abs_val >= 1.75f) + (abs_val >= 2.5f)  + (abs_val >= 3.5f)
+                 + (abs_val >= 5.0f);
+    return code;  // 0..7
 }
 
 __device__ __forceinline__
@@ -121,14 +116,16 @@ __global__ void quantize_fp16_mxfp4_strided_kernel(
     int k_group = mb_idx % K_groups;
     int base    = row * input_row_stride + k_group * kMxGroupSize;
 
-    // Load 32 FP16 values, track absmax
+    // Load 32 FP16 values via vectorized half2 loads, track absmax
     float vals[32];
     float local_absmax = 0.0f;
+    const half2* src_h2 = reinterpret_cast<const half2*>(input + base);
     #pragma unroll
-    for (int i = 0; i < 32; i++) {
-        vals[i] = __half2float(input[base + i]);
-        float av = fabsf(vals[i]);
-        if (av > local_absmax) local_absmax = av;
+    for (int i = 0; i < 16; i++) {
+        half2 h2 = src_h2[i];
+        vals[i * 2]     = __half2float(h2.x);
+        vals[i * 2 + 1] = __half2float(h2.y);
+        local_absmax = fmaxf(local_absmax, fmaxf(fabsf(vals[i * 2]), fabsf(vals[i * 2 + 1])));
     }
 
     // UE8M0 scale = ceil_pow2(absmax / 6.0)
@@ -274,7 +271,7 @@ static void ensure_workspace(int seq_q, int seq_kv, int hd) {
         return;
 
     // Free existing
-    auto safe_free = [](void*& p) { if (p) { cudaFree(p); p = nullptr; } };
+    auto safe_free = [](void*& p) { if (p) { IMP_CUDA_CHECK_LOG(cudaFree(p)); p = nullptr; } };
     safe_free(s_ws.q_packed);
     safe_free(s_ws.q_sf);
     safe_free(s_ws.k_packed);
@@ -288,15 +285,15 @@ static void ensure_workspace(int seq_q, int seq_kv, int hd) {
     size_t k_sf_bytes = cutlass_mxfp4_sf_size(seq_kv, hd);
     size_t s_bytes = (size_t)seq_q * seq_kv * sizeof(half);
 
-    cudaMalloc(&s_ws.q_packed, q_packed_bytes);
-    cudaMalloc(&s_ws.q_sf,     q_sf_bytes);
-    cudaMalloc(&s_ws.k_packed, k_packed_bytes);
-    cudaMalloc(&s_ws.k_sf,     k_sf_bytes);
-    cudaMalloc(&s_ws.s_matrix, s_bytes);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.q_packed, q_packed_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.q_sf,     q_sf_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.k_packed, k_packed_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.k_sf,     k_sf_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.s_matrix, s_bytes));
 
     size_t gws = gemm_mxfp4_cutlass_sm120_workspace(seq_q, seq_kv, hd);
     if (gws > 0) {
-        cudaMalloc(&s_ws.gemm_ws, gws);
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&s_ws.gemm_ws, gws));
         s_ws.gemm_ws_size = gws;
     }
 
@@ -403,7 +400,7 @@ bool attention_mxfp4_prefill(
             // ---- Quantize K for this KV head ----
             const half* K_head = K_b + g * hd;
 
-            cudaMemsetAsync(s_ws.k_sf, 0, k_sf_bytes, stream);
+            IMP_CUDA_CHECK_LOG(cudaMemsetAsync(s_ws.k_sf, 0, k_sf_bytes, stream));
             quantize_fp16_mxfp4_strided_kernel<<<k_blocks, 256, 0, stream>>>(
                 K_head, kv_row_stride,
                 static_cast<uint8_t*>(s_ws.k_packed),
@@ -416,7 +413,7 @@ bool attention_mxfp4_prefill(
 
                 // Quantize Q for this head
                 const half* Q_head = Q_b + h * hd;
-                cudaMemsetAsync(s_ws.q_sf, 0, q_sf_bytes, stream);
+                IMP_CUDA_CHECK_LOG(cudaMemsetAsync(s_ws.q_sf, 0, q_sf_bytes, stream));
                 quantize_fp16_mxfp4_strided_kernel<<<q_blocks, 256, 0, stream>>>(
                     Q_head, q_row_stride,
                     static_cast<uint8_t*>(s_ws.q_packed),

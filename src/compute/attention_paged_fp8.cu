@@ -13,31 +13,9 @@ namespace imp {
 // FP8 E4M3 helper: convert a single FP8 byte to float
 // ---------------------------------------------------------------------------
 __device__ __forceinline__ float fp8_e4m3_to_float(uint8_t bits) {
-#ifdef __CUDA_FP8_TYPES_EXIST__
     __nv_fp8_e4m3 val;
     memcpy(&val, &bits, 1);
     return static_cast<float>(val);
-#else
-    // Software fallback: E4M3 (1 sign, 4 exponent, 3 mantissa, bias=7)
-    uint32_t sign = (bits >> 7) & 1u;
-    uint32_t exp  = (bits >> 3) & 0xFu;
-    uint32_t mant = bits & 0x7u;
-
-    if (exp == 0 && mant == 0) return sign ? -0.0f : 0.0f;
-
-    float result;
-    if (exp == 0) {
-        // Subnormal: value = (-1)^sign * 2^(1-bias) * (0.mantissa)
-        result = ldexpf((float)mant / 8.0f, 1 - 7);
-    } else if (exp == 0xFu && mant == 0x7u) {
-        // NaN in E4M3 (no inf; max exp with max mantissa = NaN)
-        result = __int_as_float(0x7FC00000);  // quiet NaN
-    } else {
-        // Normal: value = (-1)^sign * 2^(exp-bias) * (1 + mantissa/8)
-        result = ldexpf(1.0f + (float)mant / 8.0f, (int)exp - 7);
-    }
-    return sign ? -result : result;
-#endif
 }
 // ---------------------------------------------------------------------------
 // Pipelined Split-K: FP8 E4M3 variant
@@ -147,14 +125,17 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
         if (n_toks <= 0) continue;
 
         // Prime: async load K[first_tok] into k_buf0
-        // FP8: 4 bytes per cp.async (ELEMS bytes per thread = 4 for HD=128)
+        // FP8: ELEMS bytes per thread (4 for HD=128, 8 for HD=256)
         {
             const uint8_t* K_tok = K_block + first_tok * kv_slot_stride + kv_head * HEAD_DIM;
-            // Use cp.async.cg 4-byte for FP8 (ELEMS=4 for HD=128)
-            asm volatile(
-                "cp.async.ca.shared.global [%0], [%1], 4;\n"
-                :: "r"(static_cast<uint32_t>(__cvta_generic_to_shared(&k_buf0[lane_offset]))),
-                   "l"(&K_tok[lane_offset]));
+            if constexpr (ELEMS >= 8) {
+                cp_async_ca_8(&k_buf0[lane_offset], &K_tok[lane_offset]);
+            } else {
+                asm volatile(
+                    "cp.async.ca.shared.global [%0], [%1], 4;\n"
+                    :: "r"(static_cast<uint32_t>(__cvta_generic_to_shared(&k_buf0[lane_offset]))),
+                       "l"(&K_tok[lane_offset]));
+            }
             cp_async_commit();
         }
 
@@ -165,18 +146,25 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
             int t = first_tok + ti;
             const uint8_t* V_tok = V_block + t * kv_slot_stride + kv_head * HEAD_DIM;
 
-            // Start async V[t] load (4 bytes)
-            asm volatile(
-                "cp.async.ca.shared.global [%0], [%1], 4;\n"
-                :: "r"(static_cast<uint32_t>(__cvta_generic_to_shared(&v_buf[lane_offset]))),
-                   "l"(&V_tok[lane_offset]));
-
-            if (ti + 1 < n_toks) {
-                const uint8_t* K_next = K_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
+            // Start async V[t] + K[t+1] loads (ELEMS bytes per thread)
+            if constexpr (ELEMS >= 8) {
+                cp_async_ca_8(&v_buf[lane_offset], &V_tok[lane_offset]);
+                if (ti + 1 < n_toks) {
+                    const uint8_t* K_next = K_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
+                    cp_async_ca_8(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
+                }
+            } else {
                 asm volatile(
                     "cp.async.ca.shared.global [%0], [%1], 4;\n"
-                    :: "r"(static_cast<uint32_t>(__cvta_generic_to_shared(&k_bufs[1 - cur][lane_offset]))),
-                       "l"(&K_next[lane_offset]));
+                    :: "r"(static_cast<uint32_t>(__cvta_generic_to_shared(&v_buf[lane_offset]))),
+                       "l"(&V_tok[lane_offset]));
+                if (ti + 1 < n_toks) {
+                    const uint8_t* K_next = K_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
+                    asm volatile(
+                        "cp.async.ca.shared.global [%0], [%1], 4;\n"
+                        :: "r"(static_cast<uint32_t>(__cvta_generic_to_shared(&k_bufs[1 - cur][lane_offset]))),
+                           "l"(&K_next[lane_offset]));
+                }
             }
             cp_async_commit();
             cp_async_wait_group<1>();
@@ -240,44 +228,12 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
 
     // ---- Cross-warp reduction ----
     __syncthreads();
-    float* warp_max = reinterpret_cast<float*>(smem_pipe_fp8);
-    float* warp_l   = warp_max + NUM_WARPS;
-    float* warp_o   = warp_l   + NUM_WARPS;
-
-    if (lane_id == 0) {
-        warp_max[warp_id] = m_w;
-        warp_l[warp_id]   = l_w;
-    }
-    #pragma unroll
-    for (int i = 0; i < ELEMS; i++)
-        warp_o[warp_id * HEAD_DIM + lane_offset + i] = o_reg[i];
-    __syncthreads();
-
-    if (warp_id == 0) {
-        float global_max = -FLT_MAX;
-        for (int w = 0; w < NUM_WARPS; w++)
-            global_max = fmaxf(global_max, warp_max[w]);
-        float global_l = 0.0f;
-        for (int w = 0; w < NUM_WARPS; w++)
-            global_l += expf(warp_max[w] - global_max) * warp_l[w];
-
-        int partial_idx = ((batch_idx * n_heads + head_idx) * num_splits + split_idx);
-        constexpr int partial_stride = 2 + HEAD_DIM;
-        float* out = partial_out + (int64_t)partial_idx * partial_stride;
-
-        if (lane_id == 0) { out[0] = global_max; out[1] = global_l; }
-
-        #pragma unroll
-        for (int i = 0; i < ELEMS; i++) {
-            int d = lane_offset + i;
-            float o_val = 0.0f;
-            for (int w = 0; w < NUM_WARPS; w++) {
-                float weight = expf(warp_max[w] - global_max) * warp_l[w];
-                o_val += weight * warp_o[w * HEAD_DIM + d];
-            }
-            out[2 + d] = o_val;
-        }
-    }
+    crosswarp_reduce_splitk<HEAD_DIM>(
+        reinterpret_cast<float*>(smem_pipe_fp8),
+        m_w, l_w, o_reg,
+        warp_id, lane_id, lane_offset,
+        partial_out, batch_idx, n_heads, head_idx,
+        num_splits, split_idx);
 }
 
 // ---------------------------------------------------------------------------
@@ -469,51 +425,12 @@ __global__ void paged_attention_splitk_fp8_kernel(
 
     // ---- Cross-warp reduction within this block ----
     extern __shared__ char smem_sk_fp8[];
-    float* warp_max = reinterpret_cast<float*>(smem_sk_fp8);
-    float* warp_l   = warp_max + NUM_WARPS;
-    float* warp_o   = warp_l   + NUM_WARPS;
-
-    if (lane_id == 0) {
-        warp_max[warp_id] = m_w;
-        warp_l[warp_id]   = l_w;
-    }
-    #pragma unroll
-    for (int i = 0; i < ELEMS; i++) {
-        warp_o[warp_id * HEAD_DIM + lane_offset + i] = o_reg[i];
-    }
-    __syncthreads();
-
-    // First warp reduces and writes partial output
-    if (warp_id == 0) {
-        float global_max = -FLT_MAX;
-        for (int w = 0; w < NUM_WARPS; w++)
-            global_max = fmaxf(global_max, warp_max[w]);
-
-        float global_l = 0.0f;
-        for (int w = 0; w < NUM_WARPS; w++)
-            global_l += expf(warp_max[w] - global_max) * warp_l[w];
-
-        // Write partial result: [max, sum_exp, O_unnormalized[HEAD_DIM]]
-        int partial_idx = ((batch_idx * n_heads + head_idx) * num_splits + split_idx);
-        constexpr int partial_stride = 2 + HEAD_DIM;
-        float* out = partial_out + (int64_t)partial_idx * partial_stride;
-
-        if (lane_id == 0) {
-            out[0] = global_max;
-            out[1] = global_l;
-        }
-
-        #pragma unroll
-        for (int i = 0; i < ELEMS; i++) {
-            int d = lane_offset + i;
-            float o_val = 0.0f;
-            for (int w = 0; w < NUM_WARPS; w++) {
-                float weight = expf(warp_max[w] - global_max) * warp_l[w];
-                o_val += weight * warp_o[w * HEAD_DIM + d];
-            }
-            out[2 + d] = o_val;
-        }
-    }
+    crosswarp_reduce_splitk<HEAD_DIM>(
+        reinterpret_cast<float*>(smem_sk_fp8),
+        m_w, l_w, o_reg,
+        warp_id, lane_id, lane_offset,
+        partial_out, batch_idx, n_heads, head_idx,
+        num_splits, split_idx);
 }
 
 
@@ -655,44 +572,12 @@ __global__ void paged_attention_decode_fp8_kernel(
 
     // ---- Cross-warp reduction ----
     extern __shared__ char smem_fp8[];
-    float* warp_max = reinterpret_cast<float*>(smem_fp8);
-    float* warp_l   = warp_max + NUM_WARPS;
-    float* warp_o   = warp_l   + NUM_WARPS;
-
-    if (lane_id == 0) {
-        warp_max[warp_id] = m_w;
-        warp_l[warp_id]   = l_w;
-    }
-    #pragma unroll
-    for (int i = 0; i < ELEMS; i++) {
-        warp_o[warp_id * HEAD_DIM + lane_offset + i] = o_reg[i];
-    }
     __syncthreads();
-
-    if (warp_id == 0) {
-        float global_max = -FLT_MAX;
-        for (int w = 0; w < NUM_WARPS; w++)
-            global_max = fmaxf(global_max, warp_max[w]);
-
-        float global_l = 0.0f;
-        for (int w = 0; w < NUM_WARPS; w++)
-            global_l += expf(warp_max[w] - global_max) * warp_l[w];
-
-        #pragma unroll
-        for (int i = 0; i < ELEMS; i++) {
-            int d = lane_offset + i;
-            float o_val = 0.0f;
-            for (int w = 0; w < NUM_WARPS; w++) {
-                float weight = expf(warp_max[w] - global_max) * warp_l[w];
-                o_val += weight * warp_o[w * HEAD_DIM + d];
-            }
-            if (global_l > 0.0f) o_val /= global_l;
-
-            int out_idx = batch_idx * n_heads * HEAD_DIM
-                        + head_idx * HEAD_DIM + d;
-            stcs_half(&O[out_idx], __float2half(o_val));
-        }
-    }
+    crosswarp_reduce_and_write<HEAD_DIM>(
+        reinterpret_cast<float*>(smem_fp8),
+        m_w, l_w, o_reg,
+        warp_id, lane_id, lane_offset,
+        O, batch_idx, n_heads, head_idx);
 }
 
 

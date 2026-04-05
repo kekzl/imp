@@ -9,7 +9,10 @@ ARG CUDA_ARCHITECTURES="90a;100"
 ARG CMAKE_BUILD_TYPE=Release
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        cmake g++ git ninja-build ca-certificates python3 \
+        g++ git ninja-build ca-certificates python3 wget \
+    && wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v4.3.1/cmake-4.3.1-linux-x86_64.sh \
+    && sh /tmp/cmake.sh --skip-license --prefix=/usr/local \
+    && rm /tmp/cmake.sh \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -55,8 +58,7 @@ COPY --from=builder /tmp/imp-test[s] /usr/local/bin/
 COPY --from=builder /tmp/imp-benc[h] /usr/local/bin/
 COPY --from=builder /tmp/test-gd[n] /usr/local/bin/
 
-# Copy presets and entrypoint
-COPY presets.toml /usr/local/bin/presets.toml
+# Copy entrypoint
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 

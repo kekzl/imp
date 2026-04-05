@@ -8,7 +8,7 @@ namespace imp {
 SSMState::~SSMState() {
     if (pool_) {
         if (alloc_) alloc_->free(pool_);
-        else cudaFree(pool_);
+        else IMP_CUDA_CHECK_LOG(cudaFree(pool_));
         pool_ = nullptr;
     }
 }
@@ -58,7 +58,7 @@ bool SSMState::init(int n_ssm_layers, int max_sequences,
     }
 
     // Zero-initialize all state
-    cudaMemset(pool_, 0, total_bytes_);
+    IMP_CUDA_CHECK_LOG(cudaMemset(pool_, 0, total_bytes_));
 
     IMP_LOG_INFO("SSM state: %d layers x %d sequences = %.2f MiB "
                  "(conv=%.1f KB, h=%.1f KB [%s] per layer)",
@@ -82,7 +82,7 @@ void* SSMState::h_state(int seq_id, int ssm_layer_idx) {
 void SSMState::reset_sequence(int seq_id, cudaStream_t stream) {
     if (!pool_ || seq_id < 0 || seq_id >= max_sequences_) return;
     char* base = static_cast<char*>(pool_) + seq_id * per_seq_bytes_;
-    cudaMemsetAsync(base, 0, per_seq_bytes_, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(base, 0, per_seq_bytes_, stream));
 }
 
 } // namespace imp

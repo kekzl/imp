@@ -27,9 +27,6 @@
 #include <cstdint>
 #include <cassert>
 
-// CUTLASS headers — only included under IMP_USE_CUTLASS
-#ifdef IMP_USE_CUTLASS
-
 #include "cutlass/cutlass.h"
 #include "cute/tensor.hpp"
 #include "cutlass/tensor_ref.h"
@@ -42,8 +39,6 @@
 #include "cutlass/util/packed_stride.hpp"
 
 using namespace cute;
-
-#if defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED)
 
 // ---------------------------------------------------------------------------
 // CUTLASS GEMM type configuration: NVFP4 × NVFP4 → FP16
@@ -113,8 +108,6 @@ using Sm1xxBlkScaledConfig = typename Gemm::GemmKernel::CollectiveMainloop::Sm1x
 static_assert(Gemm::GemmKernel::CollectiveMainloop::TiledMma::Traits::SFVecSize == 16,
               "CUTLASS SFVecSize mismatch — expected 16 for nv_float4_t");
 
-#endif // CUTLASS_ARCH_MMA_SM120_SUPPORTED
-#endif // IMP_USE_CUTLASS
 
 namespace imp {
 
@@ -262,16 +255,11 @@ __global__ void convert_scales_sfatom_kernel(
 // ---------------------------------------------------------------------------
 
 __device__ __forceinline__ uint8_t quantize_abs_to_fp4(float abs_val) {
-    if (abs_val <= 0.0f)  return 0;
-    if (abs_val >= 6.0f)  return 7;
-    if (abs_val < 0.25f)  return 0;
-    if (abs_val < 0.75f)  return 1;
-    if (abs_val < 1.25f)  return 2;
-    if (abs_val < 1.75f)  return 3;
-    if (abs_val < 2.5f)   return 4;
-    if (abs_val < 3.5f)   return 5;
-    if (abs_val < 5.0f)   return 6;
-    return 7;
+    // Branchless: count of midpoint thresholds exceeded gives the E2M1 code.
+    uint8_t code = (abs_val >= 0.25f) + (abs_val >= 0.75f) + (abs_val >= 1.25f)
+                 + (abs_val >= 1.75f) + (abs_val >= 2.5f)  + (abs_val >= 3.5f)
+                 + (abs_val >= 5.0f);
+    return code;  // 0..7
 }
 
 // Each thread handles one micro-block of 16 elements.
@@ -291,14 +279,16 @@ __global__ void quantize_fp16_nvfp4_cutlass_kernel(
     int k_group = mb_idx % K_groups;
     int base   = row * K + k_group * kSFVecSize;
 
-    // Load 16 values and find absmax
+    // Load 16 values via vectorized half2 loads and find absmax
     float vals[kSFVecSize];
     float local_absmax = 0.0f;
+    const half2* src_h2 = reinterpret_cast<const half2*>(input + base);
     #pragma unroll
-    for (int i = 0; i < kSFVecSize; i++) {
-        vals[i] = __half2float(input[base + i]);
-        float av = fabsf(vals[i]);
-        if (av > local_absmax) local_absmax = av;
+    for (int i = 0; i < kSFVecSize / 2; i++) {
+        half2 h2 = src_h2[i];
+        vals[i * 2]     = __half2float(h2.x);
+        vals[i * 2 + 1] = __half2float(h2.y);
+        local_absmax = fmaxf(local_absmax, fmaxf(fabsf(vals[i * 2]), fabsf(vals[i * 2 + 1])));
     }
 
     // Compute UE4M3 scale factor = local_absmax / 6.0
@@ -400,8 +390,8 @@ void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src,
     // Allocate SfAtom scale buffer
     size_t sf_bytes = cutlass_nvfp4_sf_size(static_cast<int>(N), static_cast<int>(K));
     void* d_sf = nullptr;
-    cudaMalloc(&d_sf, sf_bytes);
-    cudaMemsetAsync(d_sf, 0, sf_bytes, stream);  // zero-init for padding
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_sf, sf_bytes));
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(d_sf, 0, sf_bytes, stream));  // zero-init for padding
 
     // Convert scales to SfAtom layout (micro_scale only, tensor_scale deferred to GEMM alpha)
     {
@@ -431,7 +421,7 @@ void convert_nvfp4_to_cutlass(const NvFP4QuantResult& src,
 void free_cutlass_nvfp4_weight(CutlassNvFP4Weight& w) {
     // data is borrowed from NvFP4QuantResult — do NOT free it
     w.data = nullptr;
-    if (w.scale_factors) { cudaFree(w.scale_factors); w.scale_factors = nullptr; }
+    if (w.scale_factors) { IMP_CUDA_CHECK_LOG(cudaFree(w.scale_factors)); w.scale_factors = nullptr; }
     w.N = w.K = 0;
     w.sf_bytes = 0;
 }
@@ -444,7 +434,7 @@ void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data,
 
     // Zero the SF buffer for padding safety
     size_t sf_bytes = cutlass_nvfp4_sf_size(M, K);
-    cudaMemsetAsync(dst_sf, 0, sf_bytes, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemsetAsync(dst_sf, 0, sf_bytes, stream));
 
     int K_groups = K / kSFVecSize;
     int total_mb = M * K_groups;
@@ -462,8 +452,6 @@ void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data,
 // ---------------------------------------------------------------------------
 // CUTLASS GEMM execution
 // ---------------------------------------------------------------------------
-
-#if defined(IMP_USE_CUTLASS) && defined(CUTLASS_ARCH_MMA_SM120_SUPPORTED)
 
 // Persistent workspace and GEMM instance
 static void* s_cutlass_workspace = nullptr;
@@ -552,8 +540,8 @@ bool gemm_nvfp4_cutlass_sm120(const void* a_data, const void* a_sf,
     void* ws = workspace;
     if (needed > workspace_size) {
         if (needed > s_cutlass_workspace_size) {
-            if (s_cutlass_workspace) cudaFree(s_cutlass_workspace);
-            cudaMalloc(&s_cutlass_workspace, needed);
+            if (s_cutlass_workspace) IMP_CUDA_CHECK_LOG(cudaFree(s_cutlass_workspace));
+            IMP_CUDA_CHECK_LOG(cudaMalloc(&s_cutlass_workspace, needed));
             s_cutlass_workspace_size = needed;
         }
         ws = s_cutlass_workspace;
@@ -579,21 +567,5 @@ bool cutlass_sm120_nvfp4_available() {
     return true;
 }
 
-#else // !CUTLASS_ARCH_MMA_SM120_SUPPORTED || !IMP_USE_CUTLASS
-
-// Stubs when CUTLASS sm_120 is not compiled
-size_t gemm_nvfp4_cutlass_sm120_workspace(int, int, int) { return 0; }
-
-bool gemm_nvfp4_cutlass_sm120(const void*, const void*,
-                               const CutlassNvFP4Weight&,
-                               void*, int, int, int,
-                               void*, size_t,
-                               cudaStream_t) {
-    return false;
-}
-
-bool cutlass_sm120_nvfp4_available() { return false; }
-
-#endif
 
 } // namespace imp

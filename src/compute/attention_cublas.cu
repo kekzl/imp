@@ -156,8 +156,8 @@ static int s_attn_d_ptrs_capacity = 0;  // in number of pointers
 static void ensure_attn_ptr_arrays(int n_heads) {
     int needed = 3 * n_heads;
     if (needed <= s_attn_d_ptrs_capacity) return;
-    if (s_attn_d_ptrs) cudaFree(s_attn_d_ptrs);
-    cudaMalloc(&s_attn_d_ptrs, needed * sizeof(void*));
+    if (s_attn_d_ptrs) IMP_CUDA_CHECK_LOG(cudaFree(s_attn_d_ptrs));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_attn_d_ptrs, needed * sizeof(void*)));
     s_attn_d_ptrs_capacity = needed;
 }
 
@@ -283,9 +283,9 @@ void attention_cublas_prefill(
             h_B[h] = Q_base + h * head_dim;           // Q head
             h_C[h] = S_base + h * strideS;            // S head
         }
-        cudaMemcpyAsync(s_attn_d_ptrs,               h_A, n_heads * sizeof(void*), cudaMemcpyHostToDevice, stream);
-        cudaMemcpyAsync(s_attn_d_ptrs + n_heads,     h_B, n_heads * sizeof(void*), cudaMemcpyHostToDevice, stream);
-        cudaMemcpyAsync(s_attn_d_ptrs + 2 * n_heads, h_C, n_heads * sizeof(void*), cudaMemcpyHostToDevice, stream);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_attn_d_ptrs,               h_A, n_heads * sizeof(void*), cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_attn_d_ptrs + n_heads,     h_B, n_heads * sizeof(void*), cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_attn_d_ptrs + 2 * n_heads, h_C, n_heads * sizeof(void*), cudaMemcpyHostToDevice, stream));
 
         cublasGemmBatchedEx(
             handle,
@@ -325,9 +325,9 @@ void attention_cublas_prefill(
             h_B[h] = S_base + h * strideS;            // P head
             h_C[h] = O_base + h * head_dim;           // O head
         }
-        cudaMemcpyAsync(s_attn_d_ptrs,               h_A, n_heads * sizeof(void*), cudaMemcpyHostToDevice, stream);
-        cudaMemcpyAsync(s_attn_d_ptrs + n_heads,     h_B, n_heads * sizeof(void*), cudaMemcpyHostToDevice, stream);
-        cudaMemcpyAsync(s_attn_d_ptrs + 2 * n_heads, h_C, n_heads * sizeof(void*), cudaMemcpyHostToDevice, stream);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_attn_d_ptrs,               h_A, n_heads * sizeof(void*), cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_attn_d_ptrs + n_heads,     h_B, n_heads * sizeof(void*), cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_attn_d_ptrs + 2 * n_heads, h_C, n_heads * sizeof(void*), cudaMemcpyHostToDevice, stream));
 
         cublasGemmBatchedEx(
             handle,

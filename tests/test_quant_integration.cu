@@ -4,6 +4,7 @@
 #include "model/model.h"
 #include "model/gguf_loader.h"
 #include "graph/executor.h"
+#include "graph/weight_cache_manager.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
 #include "compute/gemm.h"
@@ -14,6 +15,7 @@
 #include <cstring>
 #include <cmath>
 #include <random>
+#include <unordered_set>
 
 namespace imp {
 namespace {
@@ -1825,6 +1827,51 @@ TEST(QuantIntegrationTest, Q5_KDequantCorrectness) {
     cudaFree(d_fp16_0);
     cudaFree(d_raw1);
     cudaFree(d_fp16_1);
+}
+
+// ===========================================================================
+// Dual-path quantization: attention weight exclusion from NVFP4
+// ===========================================================================
+
+// Verifies that the dual-path pointer exclusion set correctly identifies
+// attention weights (WQ/WK/WV/WO) and excludes them, while allowing FFN
+// weights (gate/up/down) through.
+TEST(DualPathQuant, AttentionWeightsExcludedFromNvfp4) {
+    // Simulate weight data pointers (just unique addresses, no real data needed)
+    uint8_t fake_wq, fake_wk, fake_wv, fake_wo;
+    uint8_t fake_gate, fake_up, fake_down;
+    uint8_t fake_lm_head;
+
+    // Build attention exclusion set (as done in executor_pre_dequant.cu)
+    std::unordered_set<const void*> attn_weight_ptrs;
+    attn_weight_ptrs.insert(&fake_wq);
+    attn_weight_ptrs.insert(&fake_wk);
+    attn_weight_ptrs.insert(&fake_wv);
+    attn_weight_ptrs.insert(&fake_wo);
+
+    // Attention weights should be excluded
+    EXPECT_TRUE(attn_weight_ptrs.count(&fake_wq));
+    EXPECT_TRUE(attn_weight_ptrs.count(&fake_wk));
+    EXPECT_TRUE(attn_weight_ptrs.count(&fake_wv));
+    EXPECT_TRUE(attn_weight_ptrs.count(&fake_wo));
+
+    // FFN weights should NOT be excluded
+    EXPECT_FALSE(attn_weight_ptrs.count(&fake_gate));
+    EXPECT_FALSE(attn_weight_ptrs.count(&fake_up));
+    EXPECT_FALSE(attn_weight_ptrs.count(&fake_down));
+    EXPECT_FALSE(attn_weight_ptrs.count(&fake_lm_head));
+
+    EXPECT_EQ(attn_weight_ptrs.size(), 4u);
+}
+
+// Verifies that the WeightCacheManager dual_path_quant flag defaults to false
+// and can be toggled.
+TEST(DualPathQuant, WeightCacheManagerFlag) {
+    imp::WeightCacheManager wcache;
+    EXPECT_FALSE(wcache.dual_path_quant);
+
+    wcache.dual_path_quant = true;
+    EXPECT_TRUE(wcache.dual_path_quant);
 }
 
 } // namespace

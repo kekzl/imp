@@ -35,6 +35,7 @@ static bool model_exists() {
 static std::string generate(ImpModel model, ImpContext ctx,
                              const std::string& prompt, int max_tokens,
                              float temperature = 0.7f) {
+    (void)model;
     ImpGenerateParams params = imp_generate_params_default();
     params.max_tokens = max_tokens;
     params.temperature = temperature;

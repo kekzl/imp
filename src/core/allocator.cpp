@@ -1,4 +1,5 @@
 #include "core/allocator.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cstdlib>
 #include <stdexcept>
@@ -33,7 +34,7 @@ ArenaAllocator::ArenaAllocator(size_t capacity, bool on_device)
 ArenaAllocator::~ArenaAllocator() {
     if (!base_) return;
     if (on_device_) {
-        cudaFree(base_);
+        IMP_CUDA_CHECK_LOG(cudaFree(base_));
     } else {
         std::free(base_);
     }
@@ -76,7 +77,7 @@ PoolAllocator::PoolAllocator(size_t block_size, size_t num_blocks, bool on_devic
 PoolAllocator::~PoolAllocator() {
     if (!base_) return;
     if (on_device_) {
-        cudaFree(base_);
+        IMP_CUDA_CHECK_LOG(cudaFree(base_));
     } else {
         std::free(base_);
     }

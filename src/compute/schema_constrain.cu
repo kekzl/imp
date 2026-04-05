@@ -15,9 +15,9 @@ namespace imp {
 // ---------------------------------------------------------------------------
 
 SchemaConstrainer::~SchemaConstrainer() {
-    if (d_token_categories_) cudaFree(d_token_categories_);
-    if (d_token_allow_) cudaFree(d_token_allow_);
-    if (d_allowed_mask_) cudaFree(d_allowed_mask_);
+    if (d_token_categories_) IMP_CUDA_CHECK_LOG(cudaFree(d_token_categories_));
+    if (d_token_allow_) IMP_CUDA_CHECK_LOG(cudaFree(d_token_allow_));
+    if (d_allowed_mask_) IMP_CUDA_CHECK_LOG(cudaFree(d_allowed_mask_));
 }
 
 bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> schema) {
@@ -38,12 +38,12 @@ bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> s
     }
 
     // Upload to GPU
-    cudaMalloc(&d_token_categories_, vocab_size_ * sizeof(uint16_t));
-    cudaMemcpy(d_token_categories_, token_categories_.data(),
-               vocab_size_ * sizeof(uint16_t), cudaMemcpyHostToDevice);
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_token_categories_, vocab_size_ * sizeof(uint16_t)));
+    IMP_CUDA_CHECK_LOG(cudaMemcpy(d_token_categories_, token_categories_.data(),
+               vocab_size_ * sizeof(uint16_t), cudaMemcpyHostToDevice));
 
-    cudaMalloc(&d_token_allow_, vocab_size_ * sizeof(uint8_t));
-    cudaMalloc(&d_allowed_mask_, sizeof(uint16_t));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_token_allow_, vocab_size_ * sizeof(uint8_t)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_allowed_mask_, sizeof(uint16_t)));
 
     reset();
     initialized_ = true;
@@ -305,14 +305,14 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
                   stack_.size());
 
     // Upload category mask
-    cudaMemcpyAsync(d_allowed_mask_, &cat_mask, sizeof(uint16_t),
-                    cudaMemcpyHostToDevice, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_allowed_mask_, &cat_mask, sizeof(uint16_t),
+                    cudaMemcpyHostToDevice, stream));
 
     // Upload token allow mask if needed
     if (need_token_allow_) {
-        cudaMemcpyAsync(d_token_allow_, token_allow_.data(),
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_allow_, token_allow_.data(),
                         vocab_size_ * sizeof(uint8_t),
-                        cudaMemcpyHostToDevice, stream);
+                        cudaMemcpyHostToDevice, stream));
     }
 
     int threads = 256;

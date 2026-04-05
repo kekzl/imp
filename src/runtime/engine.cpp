@@ -30,10 +30,10 @@ namespace {
 void free_prefill_buffers(int32_t* d_token_ids, int* d_positions,
                            int* d_block_tables, int* d_context_lens,
                            cudaStream_t stream) {
-    cudaFreeAsync(d_token_ids, stream);
-    cudaFreeAsync(d_positions, stream);
-    cudaFreeAsync(d_block_tables, stream);
-    cudaFreeAsync(d_context_lens, stream);
+    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_token_ids, stream));
+    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_positions, stream));
+    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, stream));
+    IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_context_lens, stream));
 }
 
 // Compute a deterministic-but-varying seed for each decode step.
@@ -87,11 +87,11 @@ Engine::~Engine() {
         async_graph_runner_.cleanup();
     }
     if (async_d_block_tables_) {
-        cudaFree(async_d_block_tables_);
+        IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_));
         async_d_block_tables_ = nullptr;
     }
     if (async_d_banned_tokens_) {
-        cudaFree(async_d_banned_tokens_);
+        IMP_CUDA_CHECK_LOG(cudaFree(async_d_banned_tokens_));
         async_d_banned_tokens_ = nullptr;
     }
     if (d_penalty_tokens_) {
@@ -99,7 +99,7 @@ Engine::~Engine() {
         d_penalty_tokens_ = nullptr;
     }
     if (h_sample_pinned_) {
-        cudaFreeHost(h_sample_pinned_);
+        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_sample_pinned_));
         h_sample_pinned_ = nullptr;
     }
     if (prefill_pool_) {
@@ -107,11 +107,11 @@ Engine::~Engine() {
         prefill_pool_ = nullptr;
     }
     if (h_pf_positions_) {
-        cudaFreeHost(h_pf_positions_);
+        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_pf_positions_));
         h_pf_positions_ = nullptr;
     }
     if (h_pf_token_ids_) {
-        cudaFreeHost(h_pf_token_ids_);
+        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_pf_token_ids_));
         h_pf_token_ids_ = nullptr;
     }
     // stream_, prefill_done_, decode_done_ cleaned up by CudaStream/CudaEvent RAII
@@ -143,8 +143,16 @@ void Engine::reset_batch_pool_cache() {
 }
 
 void Engine::invalidate_graphs() {
-    for (int i = 0; i < kMaxGraphPoolSize; i++)
-        decode_graph_pool_[i].invalidate();
+    // Preserve decode_graph_pool_ across context resets — the decode step
+    // topology (forward_logits) doesn't change between requests. Inputs
+    // (token IDs, positions, block tables) are uploaded fresh each step via
+    // the batch pool. Per-entry invalidation already handles max_blocks_per_seq
+    // changes in step_decode_forward(). Re-capturing on every benchmark rep
+    // adds ~100ms overhead per reset.
+    //
+    // The conditional graph runner MUST be invalidated: it captures the full
+    // decode loop including token feedback, stop conditions, and request-specific
+    // KV block pointers.
     if (async_graph_runner_.is_setup()) {
         async_graph_runner_.cleanup();
     }
@@ -268,8 +276,8 @@ void Engine::upload_penalties(const Request& req, InferenceState& state,
             return;
         }
     }
-    cudaMemcpyAsync(d_penalty_tokens_, req.output_tokens.data(),
-                    n * sizeof(int32_t), cudaMemcpyHostToDevice, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_tokens_, req.output_tokens.data(),
+                    n * sizeof(int32_t), cudaMemcpyHostToDevice, stream));
     state.penalty_tokens = d_penalty_tokens_;
     state.n_penalty_tokens = static_cast<int>(n);
 }
@@ -325,6 +333,74 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     const auto& mcfg = model_->config();
 
+    // --- Auto-detect max_seq_len and max_batch_size if not set ---
+    if (config_.max_seq_len <= 0) {
+        int model_ctx = mcfg.max_seq_len;  // from GGUF metadata
+        // Cap based on available VRAM: reserve ~30% for KV cache
+        size_t free_vram = 0, total_vram = 0;
+        cudaMemGetInfo(&free_vram, &total_vram);
+        int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
+        int kv_bytes_per_token = mcfg.n_kv_heads * head_dim * 2 * mcfg.n_layers * 2;  // K+V, FP16
+        int max_by_vram = (kv_bytes_per_token > 0)
+            ? static_cast<int>(free_vram * 0.3 / kv_bytes_per_token)
+            : 131072;
+        config_.max_seq_len = std::min(model_ctx, std::max(max_by_vram, 4096));
+        IMP_LOG_INFO("max_seq_len: auto → %d (model=%d, vram_cap=%d)",
+                     config_.max_seq_len, model_ctx, max_by_vram);
+    }
+
+    if (config_.max_batch_size <= 0) {
+        // Estimate model weight size from config to determine batch capacity.
+        // Rough heuristic: 2 bytes/param for FP16. d_model * d_model * n_layers * ~12 gives
+        // approximate total weight bytes for a dense transformer.
+        size_t approx_weight_bytes = static_cast<size_t>(mcfg.d_model) * mcfg.d_model
+                                     * mcfg.n_layers * 12;  // ~12 matrices per layer
+        if (mcfg.n_experts > 0) {
+            // MoE: expert weights dominate
+            approx_weight_bytes += static_cast<size_t>(mcfg.n_experts) * mcfg.expert_d_ff
+                                   * mcfg.d_model * mcfg.n_layers * 2;
+        }
+        if (approx_weight_bytes > 20ULL * 1024 * 1024 * 1024)
+            config_.max_batch_size = 1;   // >20GB models
+        else if (approx_weight_bytes > 10ULL * 1024 * 1024 * 1024)
+            config_.max_batch_size = 4;   // 10-20GB
+        else if (approx_weight_bytes > 5ULL * 1024 * 1024 * 1024)
+            config_.max_batch_size = 8;   // 5-10GB
+        else
+            config_.max_batch_size = 16;  // <5GB
+        IMP_LOG_INFO("max_batch_size: auto → %d (approx_weights=%.1f GB)",
+                     config_.max_batch_size,
+                     approx_weight_bytes / (1024.0 * 1024.0 * 1024.0));
+    }
+
+    // --- Auto-detect SSM state dtype for hybrid models ---
+    // Nemotron-H and similar: use FP16 for SSM h_state (~50% VRAM savings)
+    if (config_.ssm_state_dtype == DType::FP32 && mcfg.ssm_state_size > 0) {
+        config_.ssm_state_dtype = DType::FP16;
+        IMP_LOG_INFO("SSM state dtype: auto → FP16 (hybrid SSM model, state_size=%d)",
+                     mcfg.ssm_state_size);
+    }
+
+    // --- Auto-detect KV cache dtype ---
+    // Default to FP8 E4M3 on sm_90+ for ~50% KV VRAM savings
+    if (config_.kv_cache_dtype == DType::FP16) {
+        int sm = get_device_sm_version();
+        if (sm >= 90) {
+            config_.kv_cache_dtype = DType::FP8_E4M3;
+            IMP_LOG_INFO("KV cache dtype: auto → FP8_E4M3 (sm_%d)", sm);
+        }
+    }
+
+    // --- Auto-detect FP8 prefill ---
+    // Enable by default on sm_90+ unless already set
+    if (!config_.use_fp8_prefill) {
+        int sm = get_device_sm_version();
+        if (sm >= 90) {
+            config_.use_fp8_prefill = true;
+            IMP_LOG_INFO("FP8 prefill: auto → enabled (sm_%d)", sm);
+        }
+    }
+
     // --- Resolve auto-detection flags ---
     // NVFP4 decode mode
     int n_gdn_auto = 0;
@@ -334,11 +410,27 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     if (config_.use_nvfp4_decode < 0) {
         int sm = get_device_sm_version();
         if (n_gdn_auto > 0) {
+            // GDN models with large d_model: enable NVFP4 for attention + FFN weights,
+            // but SSM/GDN projections (ssm_in/ssm_out) will be excluded in
+            // pre_dequant_weights to preserve recurrent state precision.
+            // Small GDN models (d_model<3072, e.g. Qwen3.5-4B d_model=2560) are
+            // ~2% slower with NVFP4 — only ~40% of weights benefit (attention+FFN)
+            // and the GEMV overhead doesn't pay off at small dimensions.
+            if (sm >= 120) {
+                config_.use_nvfp4_decode = 2;
+                IMP_LOG_INFO("NVFP4 decode: auto → mode 2 (GDN model, %d recurrent layers — "
+                             "ssm_in/ssm_out excluded for precision)", n_gdn_auto);
+            } else if (sm >= 90) {
+                config_.use_nvfp4_decode = 1;
+                IMP_LOG_INFO("NVFP4 decode: auto → mode 1 (GDN model, %d recurrent layers — "
+                             "ssm_in/ssm_out excluded for precision)", n_gdn_auto);
+            } else {
+                config_.use_nvfp4_decode = 0;
+            }
+        } else if (n_gdn_auto > 0) {
+            // Small GDN model (d_model < 3072): NVFP4 overhead exceeds savings
             config_.use_nvfp4_decode = 0;
-            IMP_LOG_INFO("NVFP4 decode: auto → disabled (GDN model, %d recurrent layers)", n_gdn_auto);
-        } else if (mcfg.d_model < 4096 && mcfg.n_experts == 0) {
-            config_.use_nvfp4_decode = 0;
-            IMP_LOG_INFO("NVFP4 decode: auto → disabled (d_model=%d < 4096)", mcfg.d_model);
+            IMP_LOG_INFO("NVFP4 decode: auto → disabled (GDN model, d_model=%d < 3072)", mcfg.d_model);
         } else if (sm >= 120) {
             config_.use_nvfp4_decode = 2;
             IMP_LOG_INFO("NVFP4 decode: auto → mode %d (sm_%d)", config_.use_nvfp4_decode, sm);
@@ -364,6 +456,19 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
     }
 
+    // Dual-path quant validation: requires NVFP4 decode + FP8 prefill.
+    // If either is missing, auto-enable or warn.
+    if (config_.dual_path_quant) {
+        if (config_.use_nvfp4_decode <= 0) {
+            IMP_LOG_WARN("Dual-path quant requires NVFP4 decode — enabling mode 2 (NVFP4 only)");
+            config_.use_nvfp4_decode = 2;
+        }
+        if (!config_.use_fp8_prefill) {
+            IMP_LOG_INFO("Dual-path quant: auto-enabling FP8 prefill for attention weight quality");
+            config_.use_fp8_prefill = true;
+        }
+    }
+
     // --- Core initialization ---
     // 5% headroom (was 10%) — MoE models (30B Q6_K) need every MiB on 32GB.
     // WSL2/WDDM has ~500 MiB driver overhead, 5% of 32GB = 1.6 GB covers it.
@@ -373,7 +478,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
     gemm_init();
     scheduler_ = std::make_unique<Scheduler>(config_.max_batch_size);
-    stream_.create(cudaStreamNonBlocking);
+    (void)stream_.create(cudaStreamNonBlocking);
 
     // --- Sub-phases ---
     if (!init_weights()) return false;
@@ -401,6 +506,11 @@ bool Engine::init_weights() {
                              config_.use_fp8_prefill, config_.use_nvfp4_decode,
                              config_.use_mxfp4_prefill))
             return false;
+
+        if (config_.dual_path_quant) {
+            executor_->set_dual_path_quant(true);
+            IMP_LOG_INFO("Dual-path quant: attention weights → FP8, FFN weights → NVFP4");
+        }
     }
 
     // Reserve L2 persisting cache for decode GEMV
@@ -463,23 +573,23 @@ bool Engine::init_weights() {
                  free_before / (1024 * 1024), total_before / (1024 * 1024));
 
     cudaStream_t upload_stream = nullptr;
-    cudaStreamCreateWithFlags(&upload_stream, cudaStreamNonBlocking);
+    IMP_CUDA_CHECK_LOG(cudaStreamCreateWithFlags(&upload_stream, cudaStreamNonBlocking));
 
     if (!model_->upload_weights_gpu(config_.compute_dtype,
                                      upload_stream ? upload_stream : stream_,
                                      expert_reserve)) {
         IMP_LOG_ERROR("Weight upload failed. Try a smaller quantization.");
-        if (upload_stream) cudaStreamDestroy(upload_stream);
+        if (upload_stream) IMP_CUDA_CHECK_LOG(cudaStreamDestroy(upload_stream));
         return false;
     }
 
     if (upload_stream) {
         cudaEvent_t upload_done;
-        cudaEventCreate(&upload_done);
-        cudaEventRecord(upload_done, upload_stream);
-        cudaStreamWaitEvent(stream_, upload_done);
-        cudaEventDestroy(upload_done);
-        cudaStreamDestroy(upload_stream);
+        IMP_CUDA_CHECK_LOG(cudaEventCreate(&upload_done));
+        IMP_CUDA_CHECK_LOG(cudaEventRecord(upload_done, upload_stream));
+        IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(stream_, upload_done));
+        IMP_CUDA_CHECK_LOG(cudaEventDestroy(upload_done));
+        IMP_CUDA_CHECK_LOG(cudaStreamDestroy(upload_stream));
     }
 
     size_t free_after = 0, total_after = 0;
@@ -503,7 +613,7 @@ bool Engine::init_weights() {
     }
 
     // Phase 2: allocate GPU workspace
-    executor_->allocate_workspaces(experts_on_host_);
+    (void)executor_->allocate_workspaces(experts_on_host_);
 
     // Layer offloading
     if (config_.gpu_layers >= 0) {
@@ -661,11 +771,27 @@ bool Engine::init_kv_cache() {
             // scan, causing degenerate output after ~50 special tokens in
             // multi-turn chat.  Force FP16 weights for GDN prefill.
             if (config_.use_fp8_prefill) {
-                IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)");
+                if (config_.dual_path_quant) {
+                    IMP_LOG_WARN("GDN + dual-path: attention weights forced to FP16 (not FP8) — "
+                                 "recurrent state needs FP16 precision. FFN weights still use NVFP4.");
+                } else {
+                    IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)");
+                }
                 config_.use_fp8_prefill = 0;
                 executor_->disable_fp8_prefill();
             }
         }
+    }
+
+    // Detect pure Mamba2 SSM layers (layers with ssm_in but without gdn_gate).
+    // GDN-only models (Qwen3.5) are graph-compatible; pure SSM (Nemotron-H) is not yet.
+    {
+        int n_pure_ssm = 0;
+        for (int i = 0; i < mcfg.n_layers; i++)
+            if (model_->layer(i).ssm_in.data != nullptr &&
+                model_->layer(i).gdn_gate.data == nullptr)
+                n_pure_ssm++;
+        has_pure_ssm_layers_ = (n_pure_ssm > 0);
     }
 
     // Dequant weights → FP16/FP8/NVFP4 caches
@@ -922,7 +1048,11 @@ bool Engine::init_features() {
         }
     }
     if (!decode_done_)
-        decode_done_.create(cudaEventDisableTiming);
+        (void)decode_done_.create(cudaEventDisableTiming);
+
+    // Pre-allocate DRY penalty buffers to avoid cudaStreamSynchronize on first
+    // use during inference (the lazy-alloc path blocks the decode stream).
+    sampling_preallocate_dry(config_.max_seq_len, decode_stream());
 
     return true;
 }
@@ -954,7 +1084,7 @@ void Engine::warmup() {
         scheduler_->add_request(req);
 
         for (int i = 0; i < 8 && req->status != RequestStatus::FINISHED; i++)
-            step();
+            (void)step();
 
         kv_manager_->free_sequence(req->id);
         reset_ssm_state(req->id);
@@ -965,8 +1095,8 @@ void Engine::warmup() {
     for (int i = 0; i < kMaxGraphPoolSize; i++) decode_graph_pool_[i].invalidate();
     decode_batch_pool_.reset_upload_cache();
     if (async_graph_runner_.is_setup()) async_graph_runner_.cleanup();
-    if (async_d_block_tables_) { cudaFree(async_d_block_tables_); async_d_block_tables_ = nullptr; }
-    if (async_d_banned_tokens_) { cudaFree(async_d_banned_tokens_); async_d_banned_tokens_ = nullptr; }
+    if (async_d_block_tables_) { IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_)); async_d_block_tables_ = nullptr; }
+    if (async_d_banned_tokens_) { IMP_CUDA_CHECK_LOG(cudaFree(async_d_banned_tokens_)); async_d_banned_tokens_ = nullptr; }
     async_graph_req_ = nullptr;
     async_pending_tokens_.clear();
     async_pending_cursor_ = 0;
@@ -980,84 +1110,45 @@ void Engine::warmup() {
     IMP_LOG_INFO("Warmup complete");
 }
 
-// =====================================================================
-// Speculative decoding init
-// =====================================================================
-
-bool Engine::init_speculative() {
-    if (config_.draft_model_path.empty()) {
-        IMP_LOG_ERROR("Speculative decoding enabled but no draft model path provided");
-        return false;
-    }
-
-    auto draft_unique = load_gguf(config_.draft_model_path);
-    if (!draft_unique) {
-        IMP_LOG_ERROR("Failed to load draft model: %s", config_.draft_model_path.c_str());
-        return false;
-    }
-    draft_model_ = std::move(draft_unique);
-
-    if (!draft_model_->upload_weights_gpu(config_.compute_dtype, stream_)) {
-        IMP_LOG_ERROR("Failed to upload draft model weights");
-        return false;
-    }
-
-    const auto& dcfg = draft_model_->config();
-    int hd = dcfg.head_dim > 0 ? dcfg.head_dim : (dcfg.d_model / dcfg.n_heads);
-    int draft_max_blocks = std::max(kv_cache_raw_->total_blocks() / 4, 64);
-    auto draft_kv = std::make_unique<KVCache>(
-        dcfg.n_layers, dcfg.n_kv_heads, hd,
-        config_.compute_dtype, draft_max_blocks);
-    draft_kv_manager_ = std::make_unique<KVCacheManager>(std::move(draft_kv));
-
-    auto draft_exec = std::make_unique<GraphExecutor>();
-    if (!draft_exec->init(*draft_model_, config_.compute_dtype, config_.use_pdl)) {
-        IMP_LOG_ERROR("Failed to init draft executor");
-        return false;
-    }
-
-    spec_decoder_ = std::make_unique<SpeculativeDecoder>();
-    SpeculativeConfig spec_cfg;
-    spec_cfg.spec_k = config_.spec_k;
-    if (!spec_decoder_->init(executor_.get(), draft_model_, std::move(draft_exec),
-                              kv_manager_.get(), draft_kv_manager_.get(), spec_cfg)) {
-        IMP_LOG_ERROR("Failed to init speculative decoder");
-        return false;
-    }
-
-    IMP_LOG_INFO("Speculative decoding enabled: draft=%s, k=%d",
-                 config_.draft_model_path.c_str(), config_.spec_k);
-    return true;
-}
-
-bool Engine::set_draft_model(const std::string& path, int spec_k) {
-    if (path.empty()) {
-        IMP_LOG_ERROR("set_draft_model: empty path");
-        return false;
-    }
-    if (spec_decoder_) {
-        IMP_LOG_ERROR("set_draft_model: draft model already set");
-        return false;
-    }
-    config_.draft_model_path = path;
-    config_.spec_k = spec_k;
-    config_.enable_speculative = true;
-    return init_speculative();
-}
+// init_speculative: moved to engine_speculative.cpp
+// set_draft_model: moved to engine_speculative.cpp
 
 // =====================================================================
 // step() — main inference loop
 // =====================================================================
 
 bool Engine::step() {
-    // Ensure all async weight dequant / upload operations are complete.
-    // Without this, MXFP4 CPU-side dequant H2D copies may race with
-    // prefill memcpy on the same device memory (first call only).
-    const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
-
-    // ====================================================================
     // Fast path: async conditional graph loop completed on GPU.
-    // ====================================================================
+    int async_result = step_async_graph_resume();
+    if (async_result == 1) return true;   // still running
+    if (async_result == -1) {
+        return scheduler_->has_pending() || scheduler_->active_count() > 0;
+    }
+
+    // Schedule prefill/decode batches and reconfigure green contexts.
+    if (!step_schedule()) return false;
+
+    // Process prefill requests.
+    if (!sched_prefill_batch_.empty()) {
+        step_prefill(prefill_stream());
+        ensure_prefill_workspace(executor_.get());
+    }
+
+    // Process decode requests (batched).
+    if (!sched_decode_batch_.empty()) {
+        step_decode(decode_stream());
+        ensure_prefill_workspace(executor_.get());
+    }
+
+    return scheduler_->has_pending() || scheduler_->active_count() > 0;
+}
+
+// =====================================================================
+// step_async_graph_resume — handle async conditional graph loop
+// Returns: 0 = no graph active, 1 = still running, -1 = generation done
+// =====================================================================
+
+int Engine::step_async_graph_resume() {
     if (async_graph_runner_.is_setup() && async_graph_req_) {
         auto& req = async_graph_req_;
 
@@ -1078,18 +1169,18 @@ bool Engine::step() {
             bool is_stop = should_stop(*req, token);
             generation_done = is_stop ||
                 static_cast<int>(req->output_tokens.size()) >= req->max_tokens;
-            if (!generation_done) return true;
+            if (!generation_done) return 1;
         }
 
         auto saved_req = async_graph_req_;
 
         async_graph_runner_.cleanup();
         if (async_d_block_tables_) {
-            cudaFree(async_d_block_tables_);
+            IMP_CUDA_CHECK_LOG(cudaFree(async_d_block_tables_));
             async_d_block_tables_ = nullptr;
         }
         if (async_d_banned_tokens_) {
-            cudaFree(async_d_banned_tokens_);
+            IMP_CUDA_CHECK_LOG(cudaFree(async_d_banned_tokens_));
             async_d_banned_tokens_ = nullptr;
         }
         async_graph_req_ = nullptr;
@@ -1098,7 +1189,7 @@ bool Engine::step() {
 
         if (generation_done) {
             finish_request(saved_req);
-            return scheduler_->has_pending() || scheduler_->active_count() > 0;
+            return -1;
         }
 
         IMP_LOG_DEBUG("AsyncGraphLoop: graph tokens exhausted, continuing with step decode");
@@ -1111,14 +1202,20 @@ bool Engine::step() {
         async_pending_cursor_ = 0;
     }
 
-    // 1. Call scheduler
+    return 0;
+}
+
+// =====================================================================
+// step_schedule — call scheduler, reconfigure green contexts
+// Returns true if there is work to do.
+// =====================================================================
+
+bool Engine::step_schedule() {
     sched_prefill_batch_.clear();
     sched_decode_batch_.clear();
     scheduler_->schedule(sched_prefill_batch_, sched_decode_batch_);
-    auto& prefill_batch = sched_prefill_batch_;
-    auto& decode_batch = sched_decode_batch_;
 
-    if (prefill_batch.empty() && decode_batch.empty()) {
+    if (sched_prefill_batch_.empty() && sched_decode_batch_.empty()) {
         return false;
     }
 
@@ -1126,9 +1223,9 @@ bool Engine::step() {
     if (config_.use_green_contexts && green_ctx_.is_available() &&
         green_ctx_.has_green_contexts()) {
         float target_ratio = config_.green_ctx_prefill_ratio;
-        if (prefill_batch.empty() && !decode_batch.empty()) {
+        if (sched_prefill_batch_.empty() && !sched_decode_batch_.empty()) {
             target_ratio = 0.0f;
-        } else if (!prefill_batch.empty() && decode_batch.empty()) {
+        } else if (!sched_prefill_batch_.empty() && sched_decode_batch_.empty()) {
             target_ratio = 1.0f;
         }
         if (std::abs(target_ratio - green_ctx_.prefill_ratio()) > 0.1f) {
@@ -1136,633 +1233,660 @@ bool Engine::step() {
         }
     }
 
-    // ====================================================================
-    // 2. Process prefill requests
-    // ====================================================================
-    cudaStream_t pf_stream = prefill_stream();
+    return true;
+}
 
-    for (auto& req : prefill_batch) {
-        int total_input = static_cast<int>(req->input_tokens.size());
-        int offset = req->prefill_offset;
+// =====================================================================
+// step_prefill — process all prefill requests
+// =====================================================================
 
-        // Determine chunk boundaries
-        int chunk_len = total_input - offset;
-        bool is_last_chunk = true;
-        int effective_chunk = config_.prefill_chunk_size > 0
-            ? config_.prefill_chunk_size : executor_->max_tokens();
-        if (kv_manager_) {
-            int bs = kv_manager_->kv_cache()->block_size();
-            if (effective_chunk > bs)
-                effective_chunk = (effective_chunk / bs) * bs;
-        }
-        if (chunk_len > effective_chunk) {
-            chunk_len = effective_chunk;
-            is_last_chunk = false;
-        }
+void Engine::step_prefill(cudaStream_t stream) {
+    int effective_chunk = config_.prefill_chunk_size > 0
+        ? config_.prefill_chunk_size : executor_->max_tokens();
+    if (kv_manager_) {
+        int bs = kv_manager_->kv_cache()->block_size();
+        if (effective_chunk > bs)
+            effective_chunk = (effective_chunk / bs) * bs;
+    }
 
-        int ctx_len = offset + chunk_len;
-        executor_->resize_workspace(chunk_len, pf_stream);
+    for (auto& req : sched_prefill_batch_) {
+        step_prefill_one(req, effective_chunk, stream);
+        kv_manager_->touch(req->id);
+    }
+}
 
-        int num_blocks = (ctx_len + kv_bs - 1) / kv_bs;
+// =====================================================================
+// step_prefill_one — process a single prefill request
+// =====================================================================
 
-        // Allocate KV cache blocks
-        int prefix_reused = 0;
-        int existing = static_cast<int>(kv_manager_->block_table(req->id).size());
+void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk,
+                              cudaStream_t pf_stream) {
+    const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+    int total_input = static_cast<int>(req->input_tokens.size());
+    int offset = req->prefill_offset;
 
-        if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0) {
-            int total_blocks_needed = (total_input + kv_bs - 1) / kv_bs;
+    // Determine chunk boundaries
+    int chunk_len = total_input - offset;
+    bool is_last_chunk = true;
+    if (chunk_len > effective_chunk) {
+        chunk_len = effective_chunk;
+        is_last_chunk = false;
+    }
+
+    int ctx_len = offset + chunk_len;
+    (void)executor_->resize_workspace(chunk_len, pf_stream);
+
+    int num_blocks = (ctx_len + kv_bs - 1) / kv_bs;
+
+    // Allocate KV cache blocks
+    int prefix_reused = 0;
+    int existing = static_cast<int>(kv_manager_->block_table(req->id).size());
+
+    if (kv_manager_->prefix_caching_enabled() && existing == 0 && offset == 0) {
+        int total_blocks_needed = (total_input + kv_bs - 1) / kv_bs;
+        prefix_reused = kv_manager_->allocate_blocks_with_prefix(
+            req->id, req->input_tokens);
+        if (prefix_reused < 0) {
+            while (kv_manager_->num_free_blocks() < total_blocks_needed) {
+                int evicted = kv_manager_->evict_lru();
+                if (evicted < 0) break;
+            }
             prefix_reused = kv_manager_->allocate_blocks_with_prefix(
                 req->id, req->input_tokens);
             if (prefix_reused < 0) {
-                while (kv_manager_->num_free_blocks() < total_blocks_needed) {
+                req->status = RequestStatus::CANCELLED;
+                return;
+            }
+        }
+
+        if (prefix_reused > 0) {
+            int effective_reused = (prefix_reused > 1) ? prefix_reused - 1 : 0;
+            int skip_tokens = effective_reused * kv_bs;
+            if (skip_tokens >= total_input) {
+                skip_tokens = (total_input / kv_bs) * kv_bs;
+                if (skip_tokens >= total_input) {
+                    skip_tokens = total_input - 1;
+                }
+            }
+            if (skip_tokens > offset) {
+                IMP_LOG_INFO("PrefixCache: seq %d skipping %d/%d prefill tokens (%d blocks reused)",
+                             req->id, skip_tokens, total_input, prefix_reused);
+                req->cached_tokens = skip_tokens;
+                offset = skip_tokens;
+                req->prefill_offset = offset;
+                chunk_len = total_input - offset;
+                is_last_chunk = true;
+                if (chunk_len > effective_chunk) {
+                    chunk_len = effective_chunk;
+                    is_last_chunk = false;
+                }
+                ctx_len = offset + chunk_len;
+                (void)executor_->resize_workspace(chunk_len, pf_stream);
+            }
+        }
+    } else {
+        int additional = num_blocks - existing;
+        if (additional > 0) {
+            if (!kv_manager_->allocate_blocks(req->id, additional)) {
+                while (kv_manager_->num_free_blocks() < additional) {
                     int evicted = kv_manager_->evict_lru();
                     if (evicted < 0) break;
                 }
-                prefix_reused = kv_manager_->allocate_blocks_with_prefix(
-                    req->id, req->input_tokens);
-                if (prefix_reused < 0) {
-                    req->status = RequestStatus::CANCELLED;
-                    continue;
-                }
-            }
-
-            if (prefix_reused > 0) {
-                int effective_reused = (prefix_reused > 1) ? prefix_reused - 1 : 0;
-                int skip_tokens = effective_reused * kv_bs;
-                if (skip_tokens >= total_input) {
-                    skip_tokens = (total_input / kv_bs) * kv_bs;
-                    if (skip_tokens >= total_input) {
-                        skip_tokens = total_input - 1;
-                    }
-                }
-                if (skip_tokens > offset) {
-                    IMP_LOG_INFO("PrefixCache: seq %d skipping %d/%d prefill tokens (%d blocks reused)",
-                                 req->id, skip_tokens, total_input, prefix_reused);
-                    req->cached_tokens = skip_tokens;
-                    offset = skip_tokens;
-                    req->prefill_offset = offset;
-                    chunk_len = total_input - offset;
-                    is_last_chunk = true;
-                    if (chunk_len > effective_chunk) {
-                        chunk_len = effective_chunk;
-                        is_last_chunk = false;
-                    }
-                    ctx_len = offset + chunk_len;
-                    executor_->resize_workspace(chunk_len, pf_stream);
-                }
-            }
-        } else {
-            int additional = num_blocks - existing;
-            if (additional > 0) {
                 if (!kv_manager_->allocate_blocks(req->id, additional)) {
-                    while (kv_manager_->num_free_blocks() < additional) {
-                        int evicted = kv_manager_->evict_lru();
-                        if (evicted < 0) break;
-                    }
-                    if (!kv_manager_->allocate_blocks(req->id, additional)) {
-                        kv_manager_->free_sequence(req->id);
-                        req->status = RequestStatus::CANCELLED;
-                        continue;
-                    }
+                    kv_manager_->free_sequence(req->id);
+                    req->status = RequestStatus::CANCELLED;
+                    return;
                 }
             }
         }
+    }
 
-        const auto& block_table = kv_manager_->block_table(req->id);
+    const auto& block_table = kv_manager_->block_table(req->id);
 
-        // Upload prefill metadata to device (pre-allocated pool or fallback malloc)
-        int32_t* d_token_ids = nullptr;
-        int* d_positions = nullptr;
-        int* d_block_tables = nullptr;
-        int* d_context_lens = nullptr;
-        bool pf_pool_used = false;
+    // Upload prefill metadata to device (pre-allocated pool or fallback malloc)
+    int32_t* d_token_ids = nullptr;
+    int* d_positions = nullptr;
+    int* d_block_tables = nullptr;
+    int* d_context_lens = nullptr;
+    bool pf_pool_used = false;
 
-        auto check = [&req](cudaError_t err, const char* op) {
-            if (err != cudaSuccess) {
-                IMP_LOG_ERROR("Engine::step prefill %s failed: %s", op, cudaGetErrorString(err));
-                req->status = RequestStatus::CANCELLED;
-            }
-            return err == cudaSuccess;
-        };
+    auto check = [&req](cudaError_t err, const char* op) {
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("Engine::step prefill %s failed: %s", op, cudaGetErrorString(err));
+            req->status = RequestStatus::CANCELLED;
+        }
+        return err == cudaSuccess;
+    };
 
-        if (prefill_pool_ && chunk_len <= config_.max_seq_len) {
-            d_token_ids   = d_pf_token_ids_;
-            d_positions   = d_pf_positions_;
-            d_block_tables = d_pf_block_tables_;
-            d_context_lens = d_pf_context_lens_;
-            pf_pool_used = true;
-        } else {
-            if (!check(cudaMallocAsync(&d_token_ids, chunk_len * sizeof(int32_t), pf_stream), "malloc token_ids") ||
-                !check(cudaMallocAsync(&d_positions, chunk_len * sizeof(int), pf_stream), "malloc positions") ||
-                !check(cudaMallocAsync(&d_block_tables, block_table.size() * sizeof(int), pf_stream), "malloc block_tables") ||
-                !check(cudaMallocAsync(&d_context_lens, sizeof(int), pf_stream), "malloc context_lens")) {
-                if (d_token_ids) cudaFreeAsync(d_token_ids, pf_stream);
-                if (d_positions) cudaFreeAsync(d_positions, pf_stream);
-                if (d_block_tables) cudaFreeAsync(d_block_tables, pf_stream);
-                if (d_context_lens) cudaFreeAsync(d_context_lens, pf_stream);
-                kv_manager_->free_sequence(req->id);
-                continue;
-            }
+    if (prefill_pool_ && chunk_len <= config_.max_seq_len) {
+        d_token_ids   = d_pf_token_ids_;
+        d_positions   = d_pf_positions_;
+        d_block_tables = d_pf_block_tables_;
+        d_context_lens = d_pf_context_lens_;
+        pf_pool_used = true;
+    } else {
+        if (!check(cudaMallocAsync(&d_token_ids, chunk_len * sizeof(int32_t), pf_stream), "malloc token_ids") ||
+            !check(cudaMallocAsync(&d_positions, chunk_len * sizeof(int), pf_stream), "malloc positions") ||
+            !check(cudaMallocAsync(&d_block_tables, block_table.size() * sizeof(int), pf_stream), "malloc block_tables") ||
+            !check(cudaMallocAsync(&d_context_lens, sizeof(int), pf_stream), "malloc context_lens")) {
+            if (d_token_ids) IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_token_ids, pf_stream));
+            if (d_positions) IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_positions, pf_stream));
+            if (d_block_tables) IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_block_tables, pf_stream));
+            if (d_context_lens) IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_context_lens, pf_stream));
+            kv_manager_->free_sequence(req->id);
+            return;
+        }
+    }
+
+    // Use pinned staging buffers when available (avoids internal pageable->pinned copy)
+    if (h_pf_token_ids_ && chunk_len <= config_.max_seq_len) {
+        memcpy(h_pf_token_ids_, req->input_tokens.data() + offset,
+               chunk_len * sizeof(int32_t));
+        check(cudaMemcpyAsync(d_token_ids, h_pf_token_ids_,
+                        chunk_len * sizeof(int32_t),
+                        cudaMemcpyHostToDevice, pf_stream), "memcpy token_ids");
+    } else {
+        check(cudaMemcpyAsync(d_token_ids, req->input_tokens.data() + offset,
+                        chunk_len * sizeof(int32_t),
+                        cudaMemcpyHostToDevice, pf_stream), "memcpy token_ids");
+    }
+
+    if (h_pf_positions_ && chunk_len <= config_.max_seq_len) {
+        for (int i = 0; i < chunk_len; i++)
+            h_pf_positions_[i] = offset + i;
+        check(cudaMemcpyAsync(d_positions, h_pf_positions_,
+                        chunk_len * sizeof(int),
+                        cudaMemcpyHostToDevice, pf_stream), "memcpy positions");
+    } else {
+        std::vector<int> positions(chunk_len);
+        for (int i = 0; i < chunk_len; i++)
+            positions[i] = offset + i;
+        check(cudaMemcpyAsync(d_positions, positions.data(),
+                        chunk_len * sizeof(int),
+                        cudaMemcpyHostToDevice, pf_stream), "memcpy positions");
+    }
+
+    check(cudaMemcpyAsync(d_block_tables, block_table.data(),
+                    block_table.size() * sizeof(int),
+                    cudaMemcpyHostToDevice, pf_stream), "memcpy block_tables");
+    check(cudaMemcpyAsync(d_context_lens, &ctx_len, sizeof(int),
+                    cudaMemcpyHostToDevice, pf_stream), "memcpy context_lens");
+
+    // Build InferenceState
+    InferenceState state;
+    state.token_ids = d_token_ids;
+    state.positions = d_positions;
+    state.n_tokens = chunk_len;
+    state.kv_cache = kv_cache_raw_;
+    state.block_tables = d_block_tables;
+    state.context_lens = d_context_lens;
+    state.max_context_len = ctx_len;
+    state.n_sequences = 1;
+    state.max_blocks_per_seq = 0;
+    state.is_prefill = true;
+    fill_sampling_params(*req, state);
+
+    // Constraints via ConstraintManager
+    constraints_.prepare(req->json_mode, req->json_schema, model_->tokenizer());
+    state.json_constrainer = constraints_.json_constrainer();
+    state.schema_constrainer = constraints_.schema_constrainer();
+
+    // Penalties
+    upload_penalties(*req, state, pf_stream);
+
+    // Recurrent state (SSM/GDN)
+    // Reset on the first chunk of a new request so previous-request state
+    // doesn't leak in.  Subsequent chunks must NOT reset — the recurrent
+    // state built during earlier chunks must carry forward.
+    fill_recurrent_state(*req, state, /*reset=*/(offset == 0), pf_stream);
+
+    // Vision embeddings on first chunk
+    if (vision_.has_input() && vision_.is_available() && offset == 0) {
+        state.vision_embeddings = vision_.embeddings();
+        state.vision_token_id = vision_.soft_token_id();
+        state.n_vision_tokens = vision_.num_image_tokens();
+    }
+
+    if (!is_last_chunk) {
+        if (executor_->has_decode_workspace()) {
+            executor_->use_workspace(0);
+        }
+        Tensor logits_out;
+        executor_->forward_logits(state, logits_out, pf_stream);
+
+        if (!pf_pool_used) {
+            free_prefill_buffers(d_token_ids, d_positions,
+                                 d_block_tables, d_context_lens, pf_stream);
         }
 
-        // Use pinned staging buffers when available (avoids internal pageable→pinned copy)
-        if (h_pf_token_ids_ && chunk_len <= config_.max_seq_len) {
-            memcpy(h_pf_token_ids_, req->input_tokens.data() + offset,
-                   chunk_len * sizeof(int32_t));
-            check(cudaMemcpyAsync(d_token_ids, h_pf_token_ids_,
-                            chunk_len * sizeof(int32_t),
-                            cudaMemcpyHostToDevice, pf_stream), "memcpy token_ids");
-        } else {
-            check(cudaMemcpyAsync(d_token_ids, req->input_tokens.data() + offset,
-                            chunk_len * sizeof(int32_t),
-                            cudaMemcpyHostToDevice, pf_stream), "memcpy token_ids");
-        }
+        req->prefill_offset = offset + chunk_len;
+        IMP_LOG_DEBUG("Chunked prefill: req %d chunk [%d, %d) of %d",
+                      req->id, offset, offset + chunk_len, total_input);
+    } else {
+        // Last chunk: forward + sample
+        int32_t next_token;
+        bool use_event_sync = (h_sample_pinned_ != nullptr &&
+                               executor_->d_sample_result() != nullptr &&
+                               (state.temperature <= 0.0f || state.top_k == 1) &&
+                               !req->logprobs &&
+                               !state.json_constrainer &&
+                               !state.schema_constrainer);
 
-        if (h_pf_positions_ && chunk_len <= config_.max_seq_len) {
-            for (int i = 0; i < chunk_len; i++)
-                h_pf_positions_[i] = offset + i;
-            check(cudaMemcpyAsync(d_positions, h_pf_positions_,
-                            chunk_len * sizeof(int),
-                            cudaMemcpyHostToDevice, pf_stream), "memcpy positions");
-        } else {
-            std::vector<int> positions(chunk_len);
-            for (int i = 0; i < chunk_len; i++)
-                positions[i] = offset + i;
-            check(cudaMemcpyAsync(d_positions, positions.data(),
-                            chunk_len * sizeof(int),
-                            cudaMemcpyHostToDevice, pf_stream), "memcpy positions");
-        }
+        Tensor prefill_logits_out;
 
-        check(cudaMemcpyAsync(d_block_tables, block_table.data(),
-                        block_table.size() * sizeof(int),
-                        cudaMemcpyHostToDevice, pf_stream), "memcpy block_tables");
-        check(cudaMemcpyAsync(d_context_lens, &ctx_len, sizeof(int),
-                        cudaMemcpyHostToDevice, pf_stream), "memcpy context_lens");
-
-        // Build InferenceState
-        InferenceState state;
-        state.token_ids = d_token_ids;
-        state.positions = d_positions;
-        state.n_tokens = chunk_len;
-        state.kv_cache = kv_cache_raw_;
-        state.block_tables = d_block_tables;
-        state.context_lens = d_context_lens;
-        state.max_context_len = ctx_len;
-        state.n_sequences = 1;
-        state.max_blocks_per_seq = 0;
-        state.is_prefill = true;
-        fill_sampling_params(*req, state);
-
-        // Constraints via ConstraintManager
-        constraints_.prepare(req->json_mode, req->json_schema, model_->tokenizer());
-        state.json_constrainer = constraints_.json_constrainer();
-        state.schema_constrainer = constraints_.schema_constrainer();
-
-        // Penalties
-        upload_penalties(*req, state, pf_stream);
-
-        // Recurrent state (SSM/GDN)
-        // Reset on the first chunk of a new request so previous-request state
-        // doesn't leak in.  Subsequent chunks must NOT reset — the recurrent
-        // state built during earlier chunks must carry forward.
-        fill_recurrent_state(*req, state, /*reset=*/(offset == 0), pf_stream);
-
-        // Vision embeddings on first chunk
-        if (vision_.has_input() && vision_.is_available() && offset == 0) {
-            state.vision_embeddings = vision_.embeddings();
-            state.vision_token_id = vision_.soft_token_id();
-            state.n_vision_tokens = vision_.num_image_tokens();
-        }
-
-        if (!is_last_chunk) {
-            if (executor_->has_decode_workspace()) {
-                executor_->use_workspace(0);
-            }
+        if (use_event_sync) {
             Tensor logits_out;
             executor_->forward_logits(state, logits_out, pf_stream);
+            Tensor last_logits = logits_out.slice(0, 1);
+            int64_t vocab_shape[1] = {last_logits.shape[1]};
+            last_logits = last_logits.reshape(1, vocab_shape);
+            sample_greedy_device(last_logits, executor_->d_sample_result(),
+                                  h_sample_pinned_, pf_stream);
+
+            if (!prefill_done_) (void)prefill_done_.create();
+            cudaEventRecord(prefill_done_, pf_stream);
 
             if (!pf_pool_used) {
                 free_prefill_buffers(d_token_ids, d_positions,
                                      d_block_tables, d_context_lens, pf_stream);
             }
 
-            req->prefill_offset = offset + chunk_len;
-            IMP_LOG_DEBUG("Chunked prefill: req %d chunk [%d, %d) of %d",
-                          req->id, offset, offset + chunk_len, total_input);
+            cudaEventSynchronize(prefill_done_);
+            next_token = *h_sample_pinned_;
+        } else if (req->logprobs) {
+            executor_->forward_logits(state, prefill_logits_out, pf_stream);
+            auto sampled = executor_->sample_from_logits(prefill_logits_out, state, pf_stream);
+            next_token = sampled[0];
+
+            if (!pf_pool_used) {
+                free_prefill_buffers(d_token_ids, d_positions,
+                                     d_block_tables, d_context_lens, pf_stream);
+            }
         } else {
-            // Last chunk: forward + sample
-            int32_t next_token;
-            bool use_event_sync = (h_sample_pinned_ != nullptr &&
-                                   executor_->d_sample_result() != nullptr &&
-                                   (state.temperature <= 0.0f || state.top_k == 1) &&
-                                   !req->logprobs &&
-                                   !state.json_constrainer &&
-                                   !state.schema_constrainer);
+            next_token = executor_->forward(state, pf_stream);
 
-            Tensor prefill_logits_out;
-
-            if (use_event_sync) {
-                Tensor logits_out;
-                executor_->forward_logits(state, logits_out, pf_stream);
-                Tensor last_logits = logits_out.slice(0, 1);
-                int64_t vocab_shape[1] = {last_logits.shape[1]};
-                last_logits = last_logits.reshape(1, vocab_shape);
-                sample_greedy_device(last_logits, executor_->d_sample_result(),
-                                      h_sample_pinned_, pf_stream);
-
-                if (!prefill_done_) prefill_done_.create();
-                cudaEventRecord(prefill_done_, pf_stream);
-
-                if (!pf_pool_used) {
-                    free_prefill_buffers(d_token_ids, d_positions,
-                                         d_block_tables, d_context_lens, pf_stream);
-                }
-
-                cudaEventSynchronize(prefill_done_);
-                next_token = *h_sample_pinned_;
-            } else if (req->logprobs) {
-                executor_->forward_logits(state, prefill_logits_out, pf_stream);
-                auto sampled = executor_->sample_from_logits(prefill_logits_out, state, pf_stream);
-                next_token = sampled[0];
-
-                if (!pf_pool_used) {
-                    free_prefill_buffers(d_token_ids, d_positions,
-                                         d_block_tables, d_context_lens, pf_stream);
-                }
-            } else {
-                next_token = executor_->forward(state, pf_stream);
-
-                if (!pf_pool_used) {
-                    free_prefill_buffers(d_token_ids, d_positions,
-                                         d_block_tables, d_context_lens, pf_stream);
-                }
-            }
-
-            if (req->mirostat == 2)
-                req->mirostat_mu = state.mirostat_mu;
-
-            // Extract logprobs
-            if (req->logprobs && prefill_logits_out.data != nullptr) {
-                int vocab_size = static_cast<int>(prefill_logits_out.shape[prefill_logits_out.ndim - 1]);
-                executor_->ensure_logits_pinned(vocab_size);
-
-                const float* d_logits = static_cast<const float*>(prefill_logits_out.data);
-                cudaMemcpyAsync(executor_->h_logits_pinned(), d_logits,
-                                vocab_size * sizeof(float),
-                                cudaMemcpyDeviceToHost, pf_stream);
-                cudaStreamSynchronize(pf_stream);
-
-                req->output_logprobs.push_back(
-                    build_logprob_info(executor_->h_logits_pinned(), vocab_size,
-                                       next_token, req->top_logprobs,
-                                       model_->tokenizer()));
-            }
-
-            req->output_tokens.push_back(next_token);
-            track_think_state(*req, next_token);
-
-            Tokenizer* tok = model_->tokenizer();
-            IMP_LOG_DEBUG("Prefill -> token %d (ctx=%d): id=%d [%s]",
-                          (int)req->output_tokens.size(), req->context_len(),
-                          next_token, tok->decode_token(next_token).c_str());
-
-            // Update constraint FSM
-            constraints_.update(next_token);
-
-            if (should_stop(*req, next_token) ||
-                static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
-                finish_request(req);
-            } else {
-                req->status = RequestStatus::DECODING;
-                if (kv_manager_->prefix_caching_enabled()) {
-                    kv_manager_->register_block_hashes(req->id, req->input_tokens);
-                }
+            if (!pf_pool_used) {
+                free_prefill_buffers(d_token_ids, d_positions,
+                                     d_block_tables, d_context_lens, pf_stream);
             }
         }
 
+        if (req->mirostat == 2)
+            req->mirostat_mu = state.mirostat_mu;
+
+        // Extract logprobs
+        if (req->logprobs && prefill_logits_out.data != nullptr) {
+            int vocab_size = static_cast<int>(prefill_logits_out.shape[prefill_logits_out.ndim - 1]);
+            executor_->ensure_logits_pinned(vocab_size);
+
+            const float* d_logits = static_cast<const float*>(prefill_logits_out.data);
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(executor_->h_logits_pinned(), d_logits,
+                            vocab_size * sizeof(float),
+                            cudaMemcpyDeviceToHost, pf_stream));
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(pf_stream));
+
+            req->output_logprobs.push_back(
+                build_logprob_info(executor_->h_logits_pinned(), vocab_size,
+                                   next_token, req->top_logprobs,
+                                   model_->tokenizer()));
+        }
+
+        req->output_tokens.push_back(next_token);
+        track_think_state(*req, next_token);
+
+        Tokenizer* tok = model_->tokenizer();
+        IMP_LOG_DEBUG("Prefill -> token %d (ctx=%d): id=%d [%s]",
+                      (int)req->output_tokens.size(), req->context_len(),
+                      next_token, tok->decode_token(next_token).c_str());
+
+        // Update constraint FSM
+        constraints_.update(next_token);
+
+        if (should_stop(*req, next_token) ||
+            static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
+            finish_request(req);
+        } else {
+            req->status = RequestStatus::DECODING;
+            if (kv_manager_->prefix_caching_enabled()) {
+                kv_manager_->register_block_hashes(req->id, req->input_tokens);
+            }
+        }
+    }
+}
+
+// =====================================================================
+// step_decode — process all decode requests (batched)
+// =====================================================================
+
+void Engine::step_decode(cudaStream_t dec_stream) {
+    auto& decode_batch = sched_decode_batch_;
+    const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
+
+    // SSM/GDN: limit decode batch to 1 sequence
+    if ((ssm_state_ || gdn_state_) && decode_batch.size() > 1) {
+        decode_batch.resize(1);
+    }
+
+    // Allocate new KV blocks where needed
+    valid_decode_.clear();
+    auto& valid_decode = valid_decode_;
+
+    for (auto& req : decode_batch) {
+        int ctx_len = req->context_len();
+        int blocks_needed = (ctx_len + kv_bs - 1) / kv_bs;
+        const auto& block_table = kv_manager_->block_table(req->id);
+        int blocks_have = static_cast<int>(block_table.size());
+
+        if (blocks_needed > blocks_have) {
+            int new_block = kv_manager_->append_block(req->id);
+            if (new_block < 0) {
+                int evicted = kv_manager_->evict_lru();
+                if (evicted >= 0) {
+                    new_block = kv_manager_->append_block(req->id);
+                }
+                if (new_block < 0) {
+                    kv_manager_->free_sequence(req->id);
+                    req->status = RequestStatus::CANCELLED;
+                    continue;
+                }
+            }
+        }
+        valid_decode.push_back(req);
+    }
+
+    if (!valid_decode.empty()) {
+        // Speculative decode shortcut (self-spec, n-gram)
+        if (try_speculative_decode(valid_decode, dec_stream))
+            return;
+
+        step_decode_forward(valid_decode, dec_stream);
+    }
+}
+
+// =====================================================================
+// step_decode_forward — build batch, run forward pass, sample, process
+// =====================================================================
+
+void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_decode,
+                                  cudaStream_t dec_stream) {
+    // Switch workspace for decode
+    if (executor_->has_decode_workspace() && valid_decode.size() == 1) {
+        executor_->use_workspace(1);
+    } else {
+        if (executor_->active_workspace() == 1) executor_->use_workspace(0);
+        (void)executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
+    }
+
+    // Build batched decode
+    decode_builder_.reset();
+
+    int max_ctx = 0;
+    for (auto& req : valid_decode) {
+        int ctx_len = req->context_len();
+        max_ctx = std::max(max_ctx, ctx_len);
+
+        int32_t last_token = req->output_tokens.empty()
+            ? req->input_tokens.back()
+            : req->output_tokens.back();
+        int position = ctx_len - 1;
+
+        const auto& bt = kv_manager_->block_table(req->id);
+        decode_builder_.add_decode_sequence(last_token, position,
+                                           bt.data(), static_cast<int>(bt.size()),
+                                           ctx_len);
+    }
+
+    Batch batch = decode_builder_.build();
+
+    // Upload to GPU using pre-allocated pool
+    GPUBatch gpu_batch;
+    if (decode_batch_pool_.is_allocated()) {
+        int pool_max = decode_batch_pool_.max_blocks_per_seq();
+        if (batch.max_blocks_per_seq < pool_max) {
+            int n_seq = batch.n_sequences;
+            int old_stride = batch.max_blocks_per_seq;
+            size_t needed = static_cast<size_t>(n_seq) * pool_max;
+            padded_block_table_.resize(needed);
+            std::memset(padded_block_table_.data(), 0, needed * sizeof(int));
+            for (int s = 0; s < n_seq; s++) {
+                for (int b = 0; b < old_stride; b++) {
+                    padded_block_table_[s * pool_max + b] = batch.block_tables[s * old_stride + b];
+                }
+            }
+            batch.block_tables.swap(padded_block_table_);
+            batch.max_blocks_per_seq = pool_max;
+        }
+        gpu_batch = decode_batch_pool_.upload_into_pool(batch, dec_stream);
+    } else {
+        gpu_batch.upload(batch, dec_stream);
+    }
+
+    // Build InferenceState
+    InferenceState state;
+    state.token_ids = gpu_batch.d_token_ids;
+    state.positions = gpu_batch.d_positions;
+    state.n_tokens = gpu_batch.total_tokens;
+    state.n_sequences = gpu_batch.n_sequences;
+    state.max_blocks_per_seq = gpu_batch.max_blocks_per_seq;
+    state.kv_cache = kv_cache_raw_;
+    state.block_tables = gpu_batch.d_block_tables;
+    state.context_lens = gpu_batch.d_context_lens;
+    state.max_context_len = max_ctx;
+    state.is_prefill = false;
+    fill_sampling_params(*valid_decode[0], state);
+
+    // Derive per-step seed: mix request seed with output count so each
+    // decode step gets a different random draw.  Without this, seed=-1
+    // falls back to a fixed 42 on every step, producing identical RNG
+    // values and causing repetition loops on long structured outputs.
+    state.seed = compute_step_seed(*valid_decode[0]);
+
+    // Penalties (single-sequence only)
+    if (gpu_batch.n_sequences == 1) {
+        upload_penalties(*valid_decode[0], state, dec_stream);
+    }
+
+    // Recurrent state
+    fill_recurrent_state(*valid_decode[0], state, false, dec_stream);
+
+    // Check if any request needs logprobs or constrained mode
+    bool needs_logprobs = false;
+    bool needs_json_mode = false;
+    bool needs_schema_mode = false;
+    for (const auto& r : valid_decode) {
+        if (r->logprobs) needs_logprobs = true;
+        if (r->json_mode && r->json_schema.empty()) needs_json_mode = true;
+        if (!r->json_schema.empty()) needs_schema_mode = true;
+    }
+
+    // Schema/JSON constraints for decode (reuse state from prefill)
+    if (needs_schema_mode && valid_decode.size() == 1 &&
+        !valid_decode[0]->json_schema.empty()) {
+        if (constraints_.has_schema()) {
+            state.schema_constrainer = constraints_.schema_constrainer();
+        }
+    }
+    if (needs_json_mode && valid_decode.size() == 1 && valid_decode[0]->json_mode) {
+        // Lazily init if needed (decode might be first step with json_mode)
+        if (!constraints_.has_json() && !constraints_.has_schema()) {
+            constraints_.prepare(true, "", model_->tokenizer());
+        }
+        state.json_constrainer = constraints_.json_constrainer();
+    }
+
+    // Per-request sampling lambda
+    auto sample_per_request = [&](const Tensor& logits) -> std::vector<int32_t> {
+        int n = static_cast<int>(valid_decode.size());
+
+        if (n == 1) {
+            auto& req = valid_decode[0];
+            int32_t tok = executor_->sample_single_from_logits(logits, state, dec_stream);
+            if (state.mirostat == 2)
+                req->mirostat_mu = state.mirostat_mu;
+            return {tok};
+        }
+
+        std::vector<int32_t> result(n);
+        for (int i = 0; i < n; i++) {
+            auto& req = valid_decode[i];
+            InferenceState per_state = state;
+            fill_sampling_params(*req, per_state);
+            // Per-step seed (same fix as single-sequence path)
+            per_state.seed = compute_step_seed(*req);
+            per_state.penalty_tokens = nullptr;
+            per_state.n_penalty_tokens = 0;
+            bool req_needs_pen = (req->repetition_penalty != 1.0f ||
+                                  req->frequency_penalty != 0.0f ||
+                                  req->presence_penalty != 0.0f);
+            if (req_needs_pen && !req->output_tokens.empty() && d_penalty_tokens_) {
+                size_t rn = req->output_tokens.size();
+                if (rn <= d_penalty_tokens_capacity_) {
+                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_tokens_, req->output_tokens.data(),
+                                    rn * sizeof(int32_t), cudaMemcpyHostToDevice, dec_stream));
+                    per_state.penalty_tokens = d_penalty_tokens_;
+                    per_state.n_penalty_tokens = static_cast<int>(rn);
+                }
+            }
+            per_state.n_sequences = 1;
+            Tensor seq_logits = logits.slice(i, i + 1);
+            result[i] = executor_->sample_single_from_logits(seq_logits, per_state, dec_stream);
+            if (per_state.mirostat == 2)
+                req->mirostat_mu = per_state.mirostat_mu;
+        }
+        return result;
+    };
+
+    // Execute forward pass (piecewise CUDA Graph: forward in graph,
+    // sampling always eager — per-batch-size graph pool avoids
+    // re-capture when continuous batching changes batch size)
+    std::vector<int32_t> tokens;
+    Tensor decode_logits_out;
+
+    static const bool profiling = (std::getenv("IMP_PROFILE") != nullptr);
+    int graph_idx = gpu_batch.n_sequences - 1;
+    if (config_.use_cuda_graphs && !profiling &&
+        gpu_batch.n_sequences > 0 &&
+        graph_idx < kMaxGraphPoolSize &&
+        decode_batch_pool_.is_allocated()) {
+        auto& graph_runner = decode_graph_pool_[graph_idx];
+
+        if (gpu_batch.max_blocks_per_seq != last_decode_max_blocks_per_graph_[graph_idx]) {
+            graph_runner.invalidate();
+            last_decode_max_blocks_per_graph_[graph_idx] = gpu_batch.max_blocks_per_seq;
+        }
+
+        // Graph captures ONLY forward_logits — sampling runs eager after
+        Tensor logits_out;
+        graph_runner.set_decode_fn(
+            [this, &state, &logits_out](cudaStream_t s) {
+                executor_->forward_logits(state, logits_out, s);
+            });
+        graph_runner.execute(dec_stream);
+
+        if (logits_out.data == nullptr) {
+            logits_out = executor_->get_logits_view(gpu_batch.n_sequences);
+        }
+        // Eager sampling (handles all modes: greedy, top-k/p, penalties,
+        // force_token, constraints, logprobs, mirostat)
+        tokens = sample_per_request(logits_out);
+        if (needs_logprobs) decode_logits_out = logits_out;
+    } else {
+        executor_->forward_logits(state, decode_logits_out, dec_stream);
+        tokens = sample_per_request(decode_logits_out);
+    }
+
+    if (!decode_batch_pool_.is_allocated()) {
+        gpu_batch.free();
+    }
+
+    // Process outputs: logprobs extraction + token distribution
+    step_decode_process_outputs(valid_decode, tokens, decode_logits_out,
+                                needs_logprobs, needs_json_mode, needs_schema_mode,
+                                dec_stream);
+}
+
+// =====================================================================
+// step_decode_process_outputs — extract logprobs, distribute tokens,
+//                                try async graph loop
+// =====================================================================
+
+void Engine::step_decode_process_outputs(
+        std::vector<std::shared_ptr<Request>>& valid_decode,
+        const std::vector<int32_t>& tokens,
+        const Tensor& decode_logits_out,
+        bool needs_logprobs, bool needs_json_mode, bool needs_schema_mode,
+        cudaStream_t dec_stream) {
+    Tokenizer* tok = model_->tokenizer();
+
+    // Extract logprobs
+    if (needs_logprobs && decode_logits_out.data != nullptr) {
+        int vocab_size = static_cast<int>(decode_logits_out.shape[decode_logits_out.ndim - 1]);
+        int n_lp = 0;
+        for (const auto& r : valid_decode) if (r->logprobs) n_lp++;
+        executor_->ensure_logits_pinned(vocab_size * n_lp);
+        float* h_base = executor_->h_logits_pinned();
+
+        int slot = 0;
+        for (int i = 0; i < static_cast<int>(valid_decode.size()); i++) {
+            if (!valid_decode[i]->logprobs) continue;
+            const float* d_logits = static_cast<const float*>(decode_logits_out.data)
+                + static_cast<size_t>(i) * vocab_size;
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_base + static_cast<size_t>(slot) * vocab_size,
+                            d_logits, vocab_size * sizeof(float),
+                            cudaMemcpyDeviceToHost, dec_stream));
+            slot++;
+        }
+        IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(dec_stream));
+
+        slot = 0;
+        for (int i = 0; i < static_cast<int>(valid_decode.size()); i++) {
+            auto& req = valid_decode[i];
+            if (!req->logprobs) continue;
+
+            float* h_logits = h_base + static_cast<size_t>(slot) * vocab_size;
+            req->output_logprobs.push_back(
+                build_logprob_info(h_logits, vocab_size, tokens[i],
+                                   req->top_logprobs, tok));
+            slot++;
+        }
+    }
+
+    // Distribute sampled tokens back to requests
+    for (int i = 0; i < static_cast<int>(valid_decode.size()); i++) {
+        auto& req = valid_decode[i];
+        int32_t next_token = tokens[i];
+
+        req->output_tokens.push_back(next_token);
+        track_think_state(*req, next_token);
+
+        IMP_LOG_DEBUG("Decode step %d (ctx=%d, pos=%d): id=%d [%s]",
+                      (int)req->output_tokens.size(), req->context_len(),
+                      req->context_len() - 1,
+                      next_token, tok->decode_token(next_token).c_str());
+
+        if (should_stop(*req, next_token) ||
+            static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
+            finish_request(req);
+        }
+
+        constraints_.update(next_token);
         kv_manager_->touch(req->id);
     }
 
-    // ====================================================================
-    // 2b. Restore workspace
-    // ====================================================================
-    ensure_prefill_workspace(executor_.get());
-
-    // ====================================================================
-    // 3. Process decode requests (BATCHED)
-    // ====================================================================
-    if (!decode_batch.empty()) {
-        cudaStream_t dec_stream = decode_stream();
-
-        // SSM/GDN: limit decode batch to 1 sequence
-        if ((ssm_state_ || gdn_state_) && decode_batch.size() > 1) {
-            decode_batch.resize(1);
-        }
-
-        // 3a. Pre-process: allocate new blocks where needed
-        valid_decode_.clear();
-        auto& valid_decode = valid_decode_;
-
-        for (auto& req : decode_batch) {
-            int ctx_len = req->context_len();
-            int blocks_needed = (ctx_len + kv_bs - 1) / kv_bs;
-            const auto& block_table = kv_manager_->block_table(req->id);
-            int blocks_have = static_cast<int>(block_table.size());
-
-            if (blocks_needed > blocks_have) {
-                int new_block = kv_manager_->append_block(req->id);
-                if (new_block < 0) {
-                    int evicted = kv_manager_->evict_lru();
-                    if (evicted >= 0) {
-                        new_block = kv_manager_->append_block(req->id);
-                    }
-                    if (new_block < 0) {
-                        kv_manager_->free_sequence(req->id);
-                        req->status = RequestStatus::CANCELLED;
-                        continue;
-                    }
-                }
-            }
-            valid_decode.push_back(req);
-        }
-        if (!valid_decode.empty()) {
-            // Speculative decode shortcut (self-spec, n-gram)
-            if (try_speculative_decode(valid_decode, dec_stream))
-                goto decode_done;
-
-            // Switch workspace for decode
-            if (executor_->has_decode_workspace() && valid_decode.size() == 1) {
-                executor_->use_workspace(1);
-            } else {
-                if (executor_->active_workspace() == 1) executor_->use_workspace(0);
-                executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
-            }
-
-            // 3b. Build batched decode
-            decode_builder_.reset();
-
-            int max_ctx = 0;
-            for (auto& req : valid_decode) {
-                int ctx_len = req->context_len();
-                max_ctx = std::max(max_ctx, ctx_len);
-
-                int32_t last_token = req->output_tokens.empty()
-                    ? req->input_tokens.back()
-                    : req->output_tokens.back();
-                int position = ctx_len - 1;
-
-                const auto& bt = kv_manager_->block_table(req->id);
-                decode_builder_.add_decode_sequence(last_token, position,
-                                                   bt.data(), static_cast<int>(bt.size()),
-                                                   ctx_len);
-            }
-
-            Batch batch = decode_builder_.build();
-
-            // 3c. Upload to GPU using pre-allocated pool
-            GPUBatch gpu_batch;
-            if (decode_batch_pool_.is_allocated()) {
-                int pool_max = decode_batch_pool_.max_blocks_per_seq();
-                if (batch.max_blocks_per_seq < pool_max) {
-                    int n_seq = batch.n_sequences;
-                    int old_stride = batch.max_blocks_per_seq;
-                    size_t needed = static_cast<size_t>(n_seq) * pool_max;
-                    padded_block_table_.resize(needed);
-                    std::memset(padded_block_table_.data(), 0, needed * sizeof(int));
-                    for (int s = 0; s < n_seq; s++) {
-                        for (int b = 0; b < old_stride; b++) {
-                            padded_block_table_[s * pool_max + b] = batch.block_tables[s * old_stride + b];
-                        }
-                    }
-                    batch.block_tables.swap(padded_block_table_);
-                    batch.max_blocks_per_seq = pool_max;
-                }
-                gpu_batch = decode_batch_pool_.upload_into_pool(batch, dec_stream);
-            } else {
-                gpu_batch.upload(batch, dec_stream);
-            }
-
-            // 3d. Build InferenceState
-            InferenceState state;
-            state.token_ids = gpu_batch.d_token_ids;
-            state.positions = gpu_batch.d_positions;
-            state.n_tokens = gpu_batch.total_tokens;
-            state.n_sequences = gpu_batch.n_sequences;
-            state.max_blocks_per_seq = gpu_batch.max_blocks_per_seq;
-            state.kv_cache = kv_cache_raw_;
-            state.block_tables = gpu_batch.d_block_tables;
-            state.context_lens = gpu_batch.d_context_lens;
-            state.max_context_len = max_ctx;
-            state.is_prefill = false;
-            fill_sampling_params(*valid_decode[0], state);
-
-            // Derive per-step seed: mix request seed with output count so each
-            // decode step gets a different random draw.  Without this, seed=-1
-            // falls back to a fixed 42 on every step, producing identical RNG
-            // values and causing repetition loops on long structured outputs.
-            state.seed = compute_step_seed(*valid_decode[0]);
-
-            // Penalties (single-sequence only)
-            if (gpu_batch.n_sequences == 1) {
-                upload_penalties(*valid_decode[0], state, dec_stream);
-            }
-
-            // Recurrent state
-            fill_recurrent_state(*valid_decode[0], state, false, dec_stream);
-
-            // Check if any request needs logprobs or constrained mode
-            bool needs_logprobs = false;
-            bool needs_json_mode = false;
-            bool needs_schema_mode = false;
-            for (const auto& r : valid_decode) {
-                if (r->logprobs) needs_logprobs = true;
-                if (r->json_mode && r->json_schema.empty()) needs_json_mode = true;
-                if (!r->json_schema.empty()) needs_schema_mode = true;
-            }
-
-            // Schema/JSON constraints for decode (reuse state from prefill)
-            if (needs_schema_mode && valid_decode.size() == 1 &&
-                !valid_decode[0]->json_schema.empty()) {
-                if (constraints_.has_schema()) {
-                    state.schema_constrainer = constraints_.schema_constrainer();
-                }
-            }
-            if (needs_json_mode && valid_decode.size() == 1 && valid_decode[0]->json_mode) {
-                // Lazily init if needed (decode might be first step with json_mode)
-                if (!constraints_.has_json() && !constraints_.has_schema()) {
-                    constraints_.prepare(true, "", model_->tokenizer());
-                }
-                state.json_constrainer = constraints_.json_constrainer();
-            }
-
-            // Per-request sampling
-            auto sample_per_request = [&](const Tensor& logits) -> std::vector<int32_t> {
-                int n = static_cast<int>(valid_decode.size());
-
-                if (n == 1) {
-                    auto& req = valid_decode[0];
-                    int32_t tok = executor_->sample_single_from_logits(logits, state, dec_stream);
-                    if (state.mirostat == 2)
-                        req->mirostat_mu = state.mirostat_mu;
-                    return {tok};
-                }
-
-                std::vector<int32_t> result(n);
-                for (int i = 0; i < n; i++) {
-                    auto& req = valid_decode[i];
-                    InferenceState per_state = state;
-                    fill_sampling_params(*req, per_state);
-                    // Per-step seed (same fix as single-sequence path)
-                    per_state.seed = compute_step_seed(*req);
-                    per_state.penalty_tokens = nullptr;
-                    per_state.n_penalty_tokens = 0;
-                    bool req_needs_pen = (req->repetition_penalty != 1.0f ||
-                                          req->frequency_penalty != 0.0f ||
-                                          req->presence_penalty != 0.0f);
-                    if (req_needs_pen && !req->output_tokens.empty() && d_penalty_tokens_) {
-                        size_t rn = req->output_tokens.size();
-                        if (rn <= d_penalty_tokens_capacity_) {
-                            cudaMemcpyAsync(d_penalty_tokens_, req->output_tokens.data(),
-                                            rn * sizeof(int32_t), cudaMemcpyHostToDevice, dec_stream);
-                            per_state.penalty_tokens = d_penalty_tokens_;
-                            per_state.n_penalty_tokens = static_cast<int>(rn);
-                        }
-                    }
-                    per_state.n_sequences = 1;
-                    Tensor seq_logits = logits.slice(i, i + 1);
-                    result[i] = executor_->sample_single_from_logits(seq_logits, per_state, dec_stream);
-                    if (per_state.mirostat == 2)
-                        req->mirostat_mu = per_state.mirostat_mu;
-                }
-                return result;
-            };
-
-            // 3e. Execute forward pass (with CUDA Graph when enabled)
-            std::vector<int32_t> tokens;
-            Tensor decode_logits_out;
-
-            // 3e. Execute forward pass (piecewise CUDA Graph: forward in graph,
-            //     sampling always eager — per-batch-size graph pool avoids
-            //     re-capture when continuous batching changes batch size)
-            static const bool profiling = (std::getenv("IMP_PROFILE") != nullptr);
-            int graph_idx = gpu_batch.n_sequences - 1;
-            if (config_.use_cuda_graphs && !profiling &&
-                gpu_batch.n_sequences > 0 &&
-                graph_idx < kMaxGraphPoolSize &&
-                decode_batch_pool_.is_allocated()) {
-                auto& graph_runner = decode_graph_pool_[graph_idx];
-
-                if (gpu_batch.max_blocks_per_seq != last_decode_max_blocks_per_graph_[graph_idx]) {
-                    graph_runner.invalidate();
-                    last_decode_max_blocks_per_graph_[graph_idx] = gpu_batch.max_blocks_per_seq;
-                }
-
-                // Graph captures ONLY forward_logits — sampling runs eager after
-                Tensor logits_out;
-                graph_runner.set_decode_fn(
-                    [this, &state, &logits_out](cudaStream_t s) {
-                        executor_->forward_logits(state, logits_out, s);
-                    });
-                graph_runner.execute(dec_stream);
-
-                if (logits_out.data == nullptr) {
-                    logits_out = executor_->get_logits_view(gpu_batch.n_sequences);
-                }
-                // Eager sampling (handles all modes: greedy, top-k/p, penalties,
-                // force_token, constraints, logprobs, mirostat)
-                tokens = sample_per_request(logits_out);
-                if (needs_logprobs) decode_logits_out = logits_out;
-            } else {
-                executor_->forward_logits(state, decode_logits_out, dec_stream);
-                tokens = sample_per_request(decode_logits_out);
-            }
-
-            if (!decode_batch_pool_.is_allocated()) {
-                gpu_batch.free();
-            }
-
-            Tokenizer* tok = model_->tokenizer();
-
-            // 3f. Extract logprobs
-            if (needs_logprobs && decode_logits_out.data != nullptr) {
-                int vocab_size = static_cast<int>(decode_logits_out.shape[decode_logits_out.ndim - 1]);
-                int n_lp = 0;
-                for (const auto& r : valid_decode) if (r->logprobs) n_lp++;
-                executor_->ensure_logits_pinned(vocab_size * n_lp);
-                float* h_base = executor_->h_logits_pinned();
-
-                int slot = 0;
-                for (int i = 0; i < static_cast<int>(valid_decode.size()); i++) {
-                    if (!valid_decode[i]->logprobs) continue;
-                    const float* d_logits = static_cast<const float*>(decode_logits_out.data)
-                        + static_cast<size_t>(i) * vocab_size;
-                    cudaMemcpyAsync(h_base + static_cast<size_t>(slot) * vocab_size,
-                                    d_logits, vocab_size * sizeof(float),
-                                    cudaMemcpyDeviceToHost, dec_stream);
-                    slot++;
-                }
-                cudaStreamSynchronize(dec_stream);
-
-                slot = 0;
-                for (int i = 0; i < static_cast<int>(valid_decode.size()); i++) {
-                    auto& req = valid_decode[i];
-                    if (!req->logprobs) continue;
-
-                    float* h_logits = h_base + static_cast<size_t>(slot) * vocab_size;
-                    req->output_logprobs.push_back(
-                        build_logprob_info(h_logits, vocab_size, tokens[i],
-                                           req->top_logprobs, tok));
-                    slot++;
-                }
-            }
-
-            // Distribute sampled tokens back to requests
-            for (int i = 0; i < static_cast<int>(valid_decode.size()); i++) {
-                auto& req = valid_decode[i];
-                int32_t next_token = tokens[i];
-
-                req->output_tokens.push_back(next_token);
-                track_think_state(*req, next_token);
-
-                IMP_LOG_DEBUG("Decode step %d (ctx=%d, pos=%d): id=%d [%s]",
-                              (int)req->output_tokens.size(), req->context_len(),
-                              req->context_len() - 1,
-                              next_token, tok->decode_token(next_token).c_str());
-
-                if (should_stop(*req, next_token) ||
-                    static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
-                    finish_request(req);
-                }
-
-                constraints_.update(next_token);
-                kv_manager_->touch(req->id);
-            }
-
-            // Try async graph loop after first decode step.
-            // Think budget is now handled device-side in post_decode_step_kernel.
-            if (decode_graph_pool_[0].is_ready() && valid_decode.size() == 1 &&
-                !offload_mgr_ && !ssm_state_ && !config_.enable_speculative &&
-                config_.use_cuda_graphs && !async_graph_runner_.is_setup() &&
-                !needs_logprobs && !needs_json_mode && !needs_schema_mode) {
-                auto& dreq = valid_decode[0];
-                bool dreq_has_penalties = (dreq->repetition_penalty != 1.0f ||
-                                           dreq->frequency_penalty != 0.0f ||
-                                           dreq->presence_penalty != 0.0f);
-                if (dreq->status == RequestStatus::DECODING &&
-                    !dreq->output_tokens.empty() && !dreq->ignore_eos &&
-                    !dreq_has_penalties) {
-                    int32_t last_token = dreq->output_tokens.back();
-                    try_launch_async_graph_loop(dreq, last_token, dec_stream);
-                }
-            }
+    // Try async graph loop after first decode step.
+    // Think budget is now handled device-side in post_decode_step_kernel.
+    if (decode_graph_pool_[0].is_ready() && valid_decode.size() == 1 &&
+        !offload_mgr_ && !ssm_state_ &&
+        !config_.enable_speculative &&
+        config_.use_cuda_graphs && !async_graph_runner_.is_setup() &&
+        !needs_logprobs && !needs_json_mode && !needs_schema_mode) {
+        auto& dreq = valid_decode[0];
+        if (dreq->status == RequestStatus::DECODING &&
+            !dreq->output_tokens.empty()) {
+            int32_t last_token = dreq->output_tokens.back();
+            try_launch_async_graph_loop(dreq, last_token, dec_stream);
         }
     }
-decode_done:
-
-    // Restore prefill workspace
-    ensure_prefill_workspace(executor_.get());
-
-    return scheduler_->has_pending() || scheduler_->active_count() > 0;
 }
 
 // =====================================================================
@@ -1777,7 +1901,6 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
                               float repetition_penalty,
                               float frequency_penalty,
                               float presence_penalty) {
-    const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     Tokenizer* tok = model_->tokenizer();
     if (!tok) {
         return "";
@@ -1841,15 +1964,13 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     }
 
     // Decode — try conditional graph loop, fall back to step()
-    bool req_has_penalties = (req->repetition_penalty != 1.0f ||
-                              req->frequency_penalty != 0.0f ||
-                              req->presence_penalty != 0.0f);
     // Think budget is now enforced device-side in post_decode_step_kernel.
+    // Penalties are applied device-side via apply_penalties_device_count in the graph loop.
     if (req->status == RequestStatus::DECODING && !req->output_tokens.empty() &&
-        config_.use_cuda_graphs && !offload_mgr_ && !ssm_state_ && !gdn_state_ &&
-        !config_.enable_speculative && !req->ignore_eos && !req_has_penalties) {
+        config_.use_cuda_graphs && !offload_mgr_ &&
+        !ssm_state_ &&
+        !config_.enable_speculative) {
         int32_t first_token = req->output_tokens.back();
-        Tokenizer* gtok = model_->tokenizer();
         auto graph_tokens = try_graph_loop_decode(req, first_token, decode_stream());
         if (!graph_tokens.empty()) {
             int32_t last = graph_tokens.back();
@@ -1891,235 +2012,11 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     return result;
 }
 
-// =====================================================================
-// Speculative decode shortcut
-// =====================================================================
-
-bool Engine::try_speculative_decode(
-        std::vector<std::shared_ptr<Request>>& valid_decode, cudaStream_t stream) {
-    if (valid_decode.size() != 1) return false;
-    auto& req = valid_decode[0];
-
-    auto accept_tokens = [&](const std::vector<int32_t>& tokens) {
-        for (int32_t t : tokens) {
-            req->output_tokens.push_back(t);
-            track_think_state(*req, t);
-            if (should_stop(*req, t) ||
-                static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
-                finish_request(req);
-                break;
-            }
-        }
-        kv_manager_->touch(req->id);
-    };
-
-    // Self-speculative
-    if (self_spec_decoder_ && config_.enable_self_speculative) {
-        int32_t last_token = req->output_tokens.empty()
-            ? req->input_tokens.back() : req->output_tokens.back();
-        auto tokens = self_spec_decoder_->step(
-            last_token, req->context_len() - 1, req->id,
-            req->temperature, req->top_p, req->top_k, req->seed, stream);
-        accept_tokens(tokens);
-        return true;
-    }
-
-    // N-gram speculative
-    if (ngram_spec_decoder_ &&
-        static_cast<int>(req->output_tokens.size()) >= config_.ngram_n) {
-        int32_t last_token = req->output_tokens.back();
-        auto sr = ngram_spec_decoder_->step(
-            req, last_token, req->context_len() - 1, req->id, stream);
-        if (!sr.tokens.empty()) {
-            accept_tokens(sr.tokens);
-            IMP_LOG_DEBUG("N-gram spec: drafted=%d accepted=%d (rate=%.0f%%)",
-                          sr.n_drafted, sr.n_accepted,
-                          ngram_spec_decoder_->acceptance_rate() * 100.0f);
-            return true;
-        }
-    }
-
-    return false;
-}
-
-// =====================================================================
-// CUDA Graph decode helpers
-// =====================================================================
-
-int Engine::prepare_graph_loop(std::shared_ptr<Request>& req) {
-    const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
-
-    int remaining = req->max_tokens - static_cast<int>(req->output_tokens.size());
-    if (remaining <= 0) return 0;
-
-    constexpr int kMaxLayersForConditionalGraph = 128;
-    if (model_->config().n_layers > kMaxLayersForConditionalGraph) return 0;
-
-    { size_t f = 0, t = 0; cudaMemGetInfo(&f, &t);
-      if (f < 256ULL * 1024 * 1024) return 0; }
-
-    // Pre-allocate KV blocks
-    int ctx_len = req->context_len();
-    int final_ctx = ctx_len + remaining;
-    int blocks_needed = (final_ctx + kv_bs - 1) / kv_bs;
-    int blocks_have = static_cast<int>(kv_manager_->block_table(req->id).size());
-
-    for (int b = blocks_have; b < blocks_needed; b++) {
-        if (kv_manager_->append_block(req->id) < 0) break;
-    }
-
-    int blocks_got = static_cast<int>(kv_manager_->block_table(req->id).size());
-    int capped = blocks_got * kv_bs - ctx_len;
-    if (capped <= 0) return 0;
-    return std::min(capped, remaining);
-}
-
-CudaGraphConditionalRunner::Config Engine::build_graph_config(
-        const Request& req, int remaining) const {
-    Tokenizer* tok = model_->tokenizer();
-    CudaGraphConditionalRunner::Config gcfg;
-    gcfg.max_steps = remaining;
-    gcfg.initial_context_len = req.context_len();
-    gcfg.initial_position = req.context_len() - 1;
-    gcfg.eos_id = tok ? tok->eos_id() : -1;
-    gcfg.stop_ids = chat_template_.stop_token_ids();
-    // Banned tokens (e.g. <pad>, <unk>) should also stop the graph loop.
-    // The ban_logits_kernel sets them to -1e30 before sampling, but if
-    // they still leak through (FP32 precision edge cases with 262K vocab),
-    // the stop check catches them as a safety net.
-    for (int32_t bid : banned_token_ids_) {
-        gcfg.stop_ids.push_back(bid);
-    }
-    gcfg.temperature = req.temperature;
-    gcfg.top_p = req.top_p;
-    gcfg.top_k = req.top_k;
-    gcfg.seed = req.seed;
-    // Think budget: device-side enforcement in post_decode_step_kernel
-    if (req.think_budget > 0.0f && think_end_id_ >= 0) {
-        gcfg.think_budget_limit = static_cast<int>(req.max_tokens * req.think_budget);
-        gcfg.think_start_id = think_start_id_;
-        gcfg.think_end_id = think_end_id_;
-        gcfg.initial_in_think = req.in_think_block;
-    }
-    return gcfg;
-}
-
-std::vector<int32_t> Engine::try_graph_loop_decode(
-        std::shared_ptr<Request> req, int32_t first_token, cudaStream_t stream) {
-    int remaining = prepare_graph_loop(req);
-    if (remaining <= 0) return {};
-
-    const auto& full_bt = kv_manager_->block_table(req->id);
-    int max_blocks_per_seq = static_cast<int>(full_bt.size());
-
-    int* d_block_tables = nullptr;
-    if (cudaMallocAsync(&d_block_tables, max_blocks_per_seq * sizeof(int), stream) != cudaSuccess)
-        return {};
-    cudaMemcpyAsync(d_block_tables, full_bt.data(),
-                     max_blocks_per_seq * sizeof(int), cudaMemcpyHostToDevice, stream);
-
-    executor_->resize_workspace(1, stream);
-
-    InferenceState state_template;
-    state_template.kv_cache = kv_cache_raw_;
-    state_template.block_tables = d_block_tables;
-    state_template.n_sequences = 1;
-    state_template.max_blocks_per_seq = max_blocks_per_seq;
-    state_template.is_prefill = false;
-
-    // Upload banned tokens for graph-captured logit masking
-    int32_t* d_banned = nullptr;
-    if (!banned_token_ids_.empty()) {
-        if (cudaMallocAsync(&d_banned, banned_token_ids_.size() * sizeof(int32_t), stream) == cudaSuccess) {
-            cudaMemcpyAsync(d_banned, banned_token_ids_.data(),
-                            banned_token_ids_.size() * sizeof(int32_t),
-                            cudaMemcpyHostToDevice, stream);
-            state_template.d_banned_tokens = d_banned;
-            state_template.n_d_banned_tokens = static_cast<int>(banned_token_ids_.size());
-        }
-    }
-
-    auto gcfg = build_graph_config(*req, remaining);
-
-    CudaGraphConditionalRunner runner;
-    if (!runner.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
-        if (d_banned) cudaFreeAsync(d_banned, stream);
-        cudaFreeAsync(d_block_tables, stream);
-        return {};
-    }
-    if (!runner.launch(stream)) {
-        if (d_banned) cudaFreeAsync(d_banned, stream);
-        cudaFreeAsync(d_block_tables, stream);
-        return {};
-    }
-
-    auto tokens = runner.wait_and_get_tokens(stream);
-    if (d_banned) cudaFreeAsync(d_banned, stream);
-    cudaFreeAsync(d_block_tables, stream);
-    IMP_LOG_INFO("ConditionalGraph: generated %zu tokens in graph loop", tokens.size());
-    runner.cleanup();
-    return tokens;
-}
-
-bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
-                                          int32_t first_token, cudaStream_t stream) {
-    int remaining = prepare_graph_loop(req);
-    if (remaining <= 0) return false;
-
-    const auto& full_bt = kv_manager_->block_table(req->id);
-    int max_blocks_per_seq = static_cast<int>(full_bt.size());
-
-    int* d_bt = nullptr;
-    if (cudaMalloc(&d_bt, max_blocks_per_seq * sizeof(int)) != cudaSuccess)
-        return false;
-    cudaMemcpyAsync(d_bt, full_bt.data(),
-                     max_blocks_per_seq * sizeof(int), cudaMemcpyHostToDevice, stream);
-
-    executor_->resize_workspace(1, stream);
-
-    InferenceState state_template;
-    state_template.kv_cache = kv_cache_raw_;
-    state_template.block_tables = d_bt;
-    state_template.n_sequences = 1;
-    state_template.max_blocks_per_seq = max_blocks_per_seq;
-    state_template.is_prefill = false;
-
-    // Upload banned tokens to device for graph-captured logit masking
-    int32_t* d_banned = nullptr;
-    if (!banned_token_ids_.empty()) {
-        if (cudaMalloc(&d_banned, banned_token_ids_.size() * sizeof(int32_t)) == cudaSuccess) {
-            cudaMemcpyAsync(d_banned, banned_token_ids_.data(),
-                            banned_token_ids_.size() * sizeof(int32_t),
-                            cudaMemcpyHostToDevice, stream);
-            state_template.d_banned_tokens = d_banned;
-            state_template.n_d_banned_tokens = static_cast<int>(banned_token_ids_.size());
-        }
-    }
-
-    auto gcfg = build_graph_config(*req, remaining);
-
-    if (!async_graph_runner_.setup(executor_.get(), state_template, first_token, gcfg, stream)) {
-        if (d_banned) cudaFree(d_banned);
-        cudaFree(d_bt);
-        return false;
-    }
-    if (!async_graph_runner_.launch(stream)) {
-        async_graph_runner_.cleanup();
-        if (d_banned) cudaFree(d_banned);
-        cudaFree(d_bt);
-        return false;
-    }
-
-    async_graph_req_ = req;
-    async_d_block_tables_ = d_bt;
-    async_d_banned_tokens_ = d_banned;
-    IMP_LOG_DEBUG("AsyncGraphLoop: launched with %d banned tokens",
-                  state_template.n_d_banned_tokens);
-    async_pending_tokens_.clear();
-    async_pending_cursor_ = 0;
-    IMP_LOG_INFO("AsyncGraphLoop: launched for %d remaining tokens", remaining);
-    return true;
-}
+// try_speculative_decode: moved to engine_speculative.cpp
+// prepare_graph_loop: moved to engine_speculative.cpp
+// build_graph_config: moved to engine_speculative.cpp
+// try_graph_loop_decode: moved to engine_speculative.cpp
+// try_launch_async_graph_loop: moved to engine_speculative.cpp
 
 void Engine::add_request(std::shared_ptr<Request> req) {
     if (scheduler_) {

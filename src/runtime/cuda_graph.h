@@ -117,6 +117,14 @@ public:
         int32_t think_start_id = -1;     // <think> token ID
         int32_t think_end_id = -1;       // </think> token ID
         bool initial_in_think = false;   // true if already inside <think> block
+        bool ignore_eos = false;         // don't stop on EOS/stop tokens (benchmark mode)
+        // Penalty parameters (applied to logits before sampling each iteration)
+        float repetition_penalty = 1.0f;
+        float frequency_penalty = 0.0f;
+        float presence_penalty = 0.0f;
+        int repeat_last_n = 0;           // 0 = all generated tokens
+        // Pre-existing output tokens to seed the penalty history (copied to ring buffer prefix)
+        std::vector<int32_t> penalty_history;
     };
 
     // Build the conditional graph and all device state.
@@ -160,6 +168,13 @@ private:
     // Think budget tracking (device-side)
     int* d_think_count_ = nullptr;          // [1] reasoning token counter
     int* d_in_think_ = nullptr;             // [1] currently inside <think> block
+
+    // Penalty token history: [prefix_len + max_steps] ring buffer for penalty computation.
+    // prefix_len tokens are pre-populated from prior output; subsequent slots filled by
+    // post_decode_step_kernel each iteration.
+    int32_t* d_penalty_ring_ = nullptr;     // device penalty ring buffer
+    int* d_penalty_count_ = nullptr;        // [1] device-side total penalty token count
+    int penalty_prefix_len_ = 0;            // number of pre-populated history tokens
 
     // Mapped pinned memory for zero-copy host readback
     int32_t* h_ring_buffer_ = nullptr;     // host pointer to ring buffer

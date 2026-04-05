@@ -669,7 +669,7 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
     float* d_expert_weights = nullptr;
     if (!check_alloc(cudaMalloc(&d_expert_weights,
             static_cast<size_t>(total_assignments) * sizeof(float)), "expert_weights")) {
-        cudaFree(d_expert_indices);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_expert_indices));
         return;
     }
 
@@ -678,8 +678,8 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
     int32_t* d_sorted_token_ids = nullptr;
     if (!check_alloc(cudaMalloc(&d_sorted_token_ids,
             static_cast<size_t>(total_assignments) * 2 * sizeof(int32_t)), "sorted_token_ids")) {
-        cudaFree(d_expert_indices);
-        cudaFree(d_expert_weights);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_expert_indices));
+        IMP_CUDA_CHECK_LOG(cudaFree(d_expert_weights));
         return;
     }
     int32_t* d_sorted_flat_idx = d_sorted_token_ids + total_assignments;
@@ -688,9 +688,9 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
     int32_t* d_expert_offsets = nullptr;
     if (!check_alloc(cudaMalloc(&d_expert_offsets,
             static_cast<size_t>(n_experts + 1) * sizeof(int32_t)), "expert_offsets")) {
-        cudaFree(d_expert_indices);
-        cudaFree(d_expert_weights);
-        cudaFree(d_sorted_token_ids);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_expert_indices));
+        IMP_CUDA_CHECK_LOG(cudaFree(d_expert_weights));
+        IMP_CUDA_CHECK_LOG(cudaFree(d_sorted_token_ids));
         return;
     }
 
@@ -831,7 +831,7 @@ void MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val) {
 
 void MoeRoutingBuffers::free() {
     if (pool) {
-        cudaFree(pool);
+        IMP_CUDA_CHECK_LOG(cudaFree(pool));
         pool = nullptr;
     }
     pool_size = 0;

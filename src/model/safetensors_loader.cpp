@@ -368,78 +368,6 @@ static void infer_config(ModelConfig& cfg,
     if (cfg.n_kv_heads == 0) cfg.n_kv_heads = cfg.n_heads;
 }
 
-// ---- Assign tensor to model fields by HuggingFace name ----
-
-static bool assign_tensor_hf(Model& model, const std::string& name,
-                              const Tensor& tensor) {
-    // Global tensors
-    if (name == "model.embed_tokens.weight" || name == "lm_head.weight" ||
-        name == "model.norm.weight") {
-        if (name == "model.embed_tokens.weight") { model.tok_emb_ = tensor; return true; }
-        if (name == "model.norm.weight")         { model.out_norm_ = tensor; return true; }
-        if (name == "lm_head.weight")            { model.out_proj_ = tensor; return true; }
-    }
-
-    int layer_idx = extract_layer_index(name);
-    if (layer_idx < 0 || layer_idx >= model.n_layers()) return false;
-
-    auto& layer = model.layers_[layer_idx];
-
-    // Strip "model.layers.{N}." prefix to get suffix
-    // Find third dot to get suffix
-    size_t dot_count = 0;
-    size_t suffix_start = 0;
-    for (size_t i = 0; i < name.size(); i++) {
-        if (name[i] == '.') {
-            dot_count++;
-            if (dot_count == 3) { suffix_start = i + 1; break; }
-        }
-    }
-    std::string suffix = name.substr(suffix_start);
-
-    // Standard (non-MoE) attention
-    if      (suffix == "self_attn.q_proj.weight") { layer.wq = tensor; return true; }
-    else if (suffix == "self_attn.k_proj.weight") { layer.wk = tensor; return true; }
-    else if (suffix == "self_attn.v_proj.weight") { layer.wv = tensor; return true; }
-    else if (suffix == "self_attn.o_proj.weight") { layer.wo = tensor; return true; }
-    else if (suffix == "input_layernorm.weight")  { layer.attn_norm = tensor; return true; }
-    else if (suffix == "post_attention_layernorm.weight") { layer.ffn_norm = tensor; return true; }
-
-    // Standard (non-MoE) FFN
-    else if (suffix == "mlp.gate_proj.weight") { layer.w_gate = tensor; return true; }
-    else if (suffix == "mlp.up_proj.weight")   { layer.w_up = tensor; return true; }
-    else if (suffix == "mlp.down_proj.weight") { layer.w_down = tensor; return true; }
-
-    // MoE router gate
-    else if (suffix == "block_sparse_moe.gate.weight") { layer.moe_gate = tensor; return true; }
-
-    // MoE expert weights: block_sparse_moe.experts.{E}.w1/w2/w3.weight
-    if (suffix.find("block_sparse_moe.experts.") == 0) {
-        // Parse expert index
-        const char* exp_prefix = "block_sparse_moe.experts.";
-        size_t ep_len = std::strlen(exp_prefix);
-        size_t dot_pos = suffix.find('.', ep_len);
-        if (dot_pos == std::string::npos) return false;
-
-        int expert_idx = 0;
-        for (size_t i = ep_len; i < dot_pos; i++) {
-            expert_idx = expert_idx * 10 + (suffix[i] - '0');
-        }
-
-        std::string field = suffix.substr(dot_pos + 1);
-
-        if (expert_idx < 0 || expert_idx >= static_cast<int>(layer.expert_w_gate.size()))
-            return false;
-
-        // w1 = gate, w2 = down, w3 = up (Mixtral convention)
-        if      (field == "w1.weight") { layer.expert_w_gate[expert_idx] = tensor; return true; }
-        else if (field == "w2.weight") { layer.expert_w_down[expert_idx] = tensor; return true; }
-        else if (field == "w3.weight") { layer.expert_w_up[expert_idx] = tensor; return true; }
-    }
-
-    return false;
-}
-
 // ---- Per-shard loading helper ----
 
 struct ShardInfo {
@@ -697,6 +625,36 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
         IMP_LOG_INFO("GPTQ model: %d-bit, group_size=%d, desc_act=%s",
                      gptq_cfg.bits, gptq_cfg.group_size,
                      gptq_cfg.desc_act ? "true" : "false");
+    }
+
+    // 6c. NVFP4 config: link weight tensors to NvFP4PreQuantWeight structs
+    HFConfigLoader::NvFP4Config nvfp4_cfg;
+    bool is_nvfp4 = HFConfigLoader::load_nvfp4_config(model_dir, nvfp4_cfg);
+    if (is_nvfp4) {
+        cfg.is_nvfp4_prequant = true;
+        cfg.nvfp4_group_size = nvfp4_cfg.group_size;
+        // Link the main weight tensors to nvfp4 structs (they share the same data pointer)
+        for (auto& layer : model->layers_) {
+            auto link = [](TransformerLayer::NvFP4PreQuantWeight& nw, const Tensor& w) {
+                if (nw.weight_scale.data != nullptr) nw.weight = w;
+            };
+            link(layer.nvfp4_q, layer.wq);
+            link(layer.nvfp4_k, layer.wk);
+            link(layer.nvfp4_v, layer.wv);
+            link(layer.nvfp4_o, layer.wo);
+            link(layer.nvfp4_gate, layer.w_gate);
+            link(layer.nvfp4_up, layer.w_up);
+            link(layer.nvfp4_down, layer.w_down);
+        }
+        int nvfp4_count = 0;
+        for (const auto& layer : model->layers_) {
+            for (const auto* nw : {&layer.nvfp4_q, &layer.nvfp4_k, &layer.nvfp4_v, &layer.nvfp4_o,
+                                   &layer.nvfp4_gate, &layer.nvfp4_up, &layer.nvfp4_down}) {
+                if (nw->valid()) nvfp4_count++;
+            }
+        }
+        IMP_LOG_INFO("NVFP4 pre-quantized: %d weight tensors (group_size=%d)",
+                     nvfp4_count, nvfp4_cfg.group_size);
     }
 
     // 7. Tie output projection if not found

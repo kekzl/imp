@@ -27,12 +27,12 @@
 namespace imp {
 
 struct EngineConfig {
-    int max_batch_size = 32;
-    int max_seq_len = 4096;
+    int max_batch_size = 0;   // 0 = auto (engine detects from model size vs VRAM)
+    int max_seq_len = 0;      // 0 = auto (engine detects from model metadata + VRAM)
     int kv_cache_max_blocks = 0;  // 0 = auto
     bool use_green_contexts = false;
     float green_ctx_prefill_ratio = 0.8f;
-    bool use_cuda_graphs = false;
+    bool use_cuda_graphs = true;
     bool use_pdl = true;
     DType compute_dtype = DType::FP16;
 
@@ -76,6 +76,10 @@ struct EngineConfig {
 
     // MXFP4 prefill: CUTLASS MXFP4 GEMM for prefill (converts NVFP4 → MXFP4 format, sm_120)
     bool use_mxfp4_prefill = false;
+
+    // Dual-path quantization: attention weights (WQ/WK/WV/WO) stay at FP8 for quality,
+    // FFN weights (gate/up/down) use NVFP4 for 2x bandwidth reduction during decode.
+    bool dual_path_quant = false;
 
     // Speculative decoding
     bool enable_speculative = false;
@@ -181,7 +185,7 @@ private:
     // ── CUDA Graphs ──────────────────────────────────────────────────
     // Per-batch-size graph pool: avoids re-capture when batch size changes
     // during continuous batching (key = n_sequences).
-    static constexpr int kMaxGraphPoolSize = 8;
+    static constexpr int kMaxGraphPoolSize = 32;
     CudaGraphRunner decode_graph_pool_[kMaxGraphPoolSize];  // index = n_sequences - 1
     int last_decode_max_blocks_per_graph_[kMaxGraphPoolSize] = {};
     int32_t* h_sample_pinned_ = nullptr;
@@ -196,6 +200,7 @@ private:
     // ── Model-specific state ─────────────────────────────────────────
     std::unique_ptr<SSMState> ssm_state_;
     std::unique_ptr<GDNState> gdn_state_;
+    bool has_pure_ssm_layers_ = false;  // true if model has Mamba2 SSM layers (not GDN)
     std::unique_ptr<LayerOffloadManager> offload_mgr_;
     bool experts_on_host_ = false;
     bool dequant_done_ = false;
@@ -262,6 +267,36 @@ private:
     // Speculative decode shortcuts (self-spec, n-gram). Returns true if handled.
     bool try_speculative_decode(std::vector<std::shared_ptr<Request>>& valid_decode,
                                  cudaStream_t stream);
+
+    // ── step() sub-phases ─────────────────────────────────────────────
+    // Returns: 0 = no async graph active, 1 = still running (step returns true),
+    //         -1 = graph exhausted/generation done (check scheduler for more work)
+    int step_async_graph_resume();
+
+    // Schedule prefill/decode batches and reconfigure green contexts.
+    // Returns true if there is work to do (batches non-empty).
+    bool step_schedule();
+
+    // Process all prefill requests in sched_prefill_batch_.
+    void step_prefill(cudaStream_t stream);
+
+    // Process one prefill request (called from step_prefill).
+    void step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk,
+                          cudaStream_t stream);
+
+    // Process all decode requests in sched_decode_batch_.
+    void step_decode(cudaStream_t stream);
+
+    // Build batched decode state, run forward pass, sample tokens.
+    void step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_decode,
+                             cudaStream_t stream);
+
+    // Extract logprobs from decode logits and distribute tokens to requests.
+    void step_decode_process_outputs(std::vector<std::shared_ptr<Request>>& valid_decode,
+                                     const std::vector<int32_t>& tokens,
+                                     const Tensor& decode_logits_out,
+                                     bool needs_logprobs, bool needs_json_mode,
+                                     bool needs_schema_mode, cudaStream_t stream);
 
     // ── CUDA graph helpers ───────────────────────────────────────────
     // Pre-allocate KV blocks and check preconditions for graph loop.

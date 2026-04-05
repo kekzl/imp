@@ -4,6 +4,7 @@
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cuda_fp8.h>
 #include <cstdint>
 #include <cstring>
 #include <cfloat>
@@ -128,7 +129,6 @@ __global__ void calibrate_quantize_fp8_kernel(
     const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
     if (base >= n) return;
 
-#if defined(__CUDA_FP8_TYPES_EXIST__)
     #pragma unroll
     for (int i = 0; i < kElemsPerThread; ++i) {
         int idx = base + i;
@@ -139,16 +139,6 @@ __global__ void calibrate_quantize_fp8_kernel(
             memcpy(&output[idx], &fp8_val, 1);
         }
     }
-#else
-    #pragma unroll
-    for (int i = 0; i < kElemsPerThread; ++i) {
-        int idx = base + i;
-        if (idx < n) {
-            float val = __half2float(input[idx]) * inv_scale;
-            output[idx] = float_to_fp8_e4m3(val);
-        }
-    }
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -164,8 +154,6 @@ __global__ void quantize_fp16_to_fp8_scaled_kernel(
     const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
     if (base >= n) return;
 
-#if defined(__CUDA_FP8_TYPES_EXIST__)
-    // ---- Native FP8 path (CUDA 12+ with __nv_fp8_e4m3) --------------------
     #pragma unroll
     for (int i = 0; i < kElemsPerThread; ++i) {
         int idx = base + i;
@@ -177,17 +165,6 @@ __global__ void quantize_fp16_to_fp8_scaled_kernel(
             memcpy(&output[idx], &fp8_val, 1);
         }
     }
-#else
-    // ---- Software fallback -------------------------------------------------
-    #pragma unroll
-    for (int i = 0; i < kElemsPerThread; ++i) {
-        int idx = base + i;
-        if (idx < n) {
-            float val = __half2float(input[idx]) * inv_scale;
-            output[idx] = float_to_fp8_e4m3(val);
-        }
-    }
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -203,8 +180,6 @@ __global__ void dequantize_fp8_to_fp16_scaled_kernel(
     const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
     if (base >= n) return;
 
-#if defined(__CUDA_FP8_TYPES_EXIST__)
-    // ---- Native FP8 path ---------------------------------------------------
     #pragma unroll
     for (int i = 0; i < kElemsPerThread; ++i) {
         int idx = base + i;
@@ -215,17 +190,6 @@ __global__ void dequantize_fp8_to_fp16_scaled_kernel(
             output[idx] = __float2half(fval);
         }
     }
-#else
-    // ---- Software fallback -------------------------------------------------
-    #pragma unroll
-    for (int i = 0; i < kElemsPerThread; ++i) {
-        int idx = base + i;
-        if (idx < n) {
-            float fval = fp8_e4m3_to_float(input[idx]) * scale;
-            output[idx] = __float2half(fval);
-        }
-    }
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -250,7 +214,6 @@ __global__ void quantize_fp16_to_fp8_with_scale_kernel(
     const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
     if (base >= n) return;
 
-#if defined(__CUDA_FP8_TYPES_EXIST__)
     #pragma unroll
     for (int i = 0; i < kElemsPerThread; ++i) {
         int idx = base + i;
@@ -261,16 +224,6 @@ __global__ void quantize_fp16_to_fp8_with_scale_kernel(
             memcpy(&output[idx], &fp8_val, 1);
         }
     }
-#else
-    #pragma unroll
-    for (int i = 0; i < kElemsPerThread; ++i) {
-        int idx = base + i;
-        if (idx < n) {
-            float val = __half2float(input[idx]) * inv_scale;
-            output[idx] = float_to_fp8_e4m3(val);
-        }
-    }
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -303,8 +256,8 @@ float calibrate_fp8_scale(const Tensor& input, cudaStream_t stream)
     // Allocate temporary buffer for per-block absmax values + final scalar.
     float* d_block_maxes = nullptr;
     float* d_result = nullptr;
-    cudaMalloc(&d_block_maxes, (size_t)grid * sizeof(float));
-    cudaMalloc(&d_result, sizeof(float));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_maxes, (size_t)grid * sizeof(float)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_result, sizeof(float)));
 
     // First-level reduction: per-block absmax.
     absmax_reduce_kernel<<<grid, kBlockSize, 0, stream>>>(
@@ -320,11 +273,11 @@ float calibrate_fp8_scale(const Tensor& input, cudaStream_t stream)
 
     // Copy result back to host.
     float absmax = 0.0f;
-    cudaMemcpyAsync(&absmax, d_result, sizeof(float), cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&absmax, d_result, sizeof(float), cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 
-    cudaFree(d_block_maxes);
-    cudaFree(d_result);
+    IMP_CUDA_CHECK_LOG(cudaFree(d_block_maxes));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_result));
 
     // Avoid division by zero.
     if (absmax == 0.0f) {
@@ -418,8 +371,8 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
 
     float* d_block_maxes = nullptr;
     float* d_scale_device = nullptr;
-    cudaMalloc(&d_block_maxes, (size_t)grid * sizeof(float));
-    cudaMalloc(&d_scale_device, sizeof(float));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_maxes, (size_t)grid * sizeof(float)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_scale_device, sizeof(float)));
 
     absmax_reduce_kernel<<<grid, kBlockSize, 0, stream>>>(
         static_cast<const half*>(input.data),
@@ -432,14 +385,14 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
         grid);
 
     float absmax = 0.0f;
-    cudaMemcpyAsync(&absmax, d_scale_device, sizeof(float), cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&absmax, d_scale_device, sizeof(float), cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 
     float scale = (absmax > 0.0f) ? (absmax / kFP8E4M3Max) : 1.0f;
     float inv_scale = 1.0f / scale;
 
     if (d_scale_out != nullptr) {
-        cudaMemcpyAsync(d_scale_out, &scale, sizeof(float), cudaMemcpyHostToDevice, stream);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_scale_out, &scale, sizeof(float), cudaMemcpyHostToDevice, stream));
     }
 
     quantize_fp16_to_fp8_scaled_kernel<<<grid, kBlockSize, 0, stream>>>(
@@ -454,8 +407,8 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
                       cudaGetErrorString(err));
     }
 
-    cudaFree(d_block_maxes);
-    cudaFree(d_scale_device);
+    IMP_CUDA_CHECK_LOG(cudaFree(d_block_maxes));
+    IMP_CUDA_CHECK_LOG(cudaFree(d_scale_device));
 
     IMP_LOG_DEBUG("quantize_fp16_to_fp8_e4m3: n=%d  scale=%.6f", n, scale);
 }
@@ -588,7 +541,6 @@ __global__ void quantize_fp16_to_fp8_per_expert_kernel(
     int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
     if (base >= n_elems) return;
 
-#if defined(__CUDA_FP8_TYPES_EXIST__)
     #pragma unroll
     for (int i = 0; i < kElemsPerThread; ++i) {
         int idx = base + i;
@@ -599,16 +551,6 @@ __global__ void quantize_fp16_to_fp8_per_expert_kernel(
             memcpy(&expert_out[idx], &fp8_val, 1);
         }
     }
-#else
-    #pragma unroll
-    for (int i = 0; i < kElemsPerThread; ++i) {
-        int idx = base + i;
-        if (idx < n_elems) {
-            float val = __half2float(expert_in[idx]) * inv_scale;
-            expert_out[idx] = float_to_fp8_e4m3(val);
-        }
-    }
-#endif
 }
 
 // ---------------------------------------------------------------------------

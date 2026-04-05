@@ -1,5 +1,6 @@
 #include "model/model.h"
 #include "model/model_arch.h"
+#include "core/logging.h"
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <cmath>
@@ -15,7 +16,7 @@ Model::~Model() {
     // Free all GPU-side weight buffers.
     for (void* ptr : gpu_allocations_) {
         if (ptr) {
-            cudaFree(ptr);
+            IMP_CUDA_CHECK_LOG(cudaFree(ptr));
         }
     }
     gpu_allocations_.clear();
@@ -23,7 +24,7 @@ Model::~Model() {
     // Unpin host-registered expert weight regions before munmap.
     for (void* ptr : host_pinned_) {
         if (ptr) {
-            cudaHostUnregister(ptr);
+            IMP_CUDA_CHECK_LOG(cudaHostUnregister(ptr));
         }
     }
     host_pinned_.clear();
@@ -31,7 +32,7 @@ Model::~Model() {
     // Free cudaHostAlloc'd expert buffers (WSL2 DMA path).
     for (void* ptr : host_pinned_allocs_) {
         if (ptr) {
-            cudaFreeHost(ptr);
+            IMP_CUDA_CHECK_LOG(cudaFreeHost(ptr));
         }
     }
     host_pinned_allocs_.clear();
@@ -61,22 +62,73 @@ void Model::release_gpu_allocation(void* ptr) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Architecture registry — single source of truth for all per-arch metadata.
+// Replaces scattered switch statements in model.cpp, chat_template.cpp,
+// presets.cpp, and imp_api.cpp (RF-003).
+// ---------------------------------------------------------------------------
+struct ArchEntry {
+    ModelArch arch;
+    const char* name;
+    int c_api_id;           // IMP_ARCH_* enum value
+
+    // Config defaults
+    int rope_neox;          // -1 = don't override, 0 = false, 1 = true
+    float embed_scale;      // 0 = don't override
+    int ffn_activation;     // -1 = don't override, else FFNActivation cast
+    int norm_placement;     // -1 = don't override, else NormPlacement cast
+    bool moe_sigmoid_gating;
+    bool expert_weights_norm;
+
+    // Sampling defaults
+    float temperature;
+    float top_p;
+    int top_k;
+};
+
+// IMP_ARCH_* values from include/imp/types.h (avoid header dependency)
+enum {
+    kApiLlama = 0, kApiMistral = 1, kApiMixtral = 2, kApiDeepseek = 3,
+    kApiNemotronHMoe = 4, kApiQwen3 = 5, kApiQwen3Moe = 6,
+    kApiGemma3 = 7, kApiLlama4 = 8, kApiGeneric = 9,
+    kApiQwen35 = 10, kApiQwen35Moe = 11,
+};
+
+static constexpr ArchEntry kArchRegistry[] = {
+    // arch                      name              c_api    rope  embed  ffn  norm  sigm  ewnorm  temp  top_p  top_k
+    {ModelArch::LLAMA,          "llama",           kApiLlama,          0, 0,    -1, -1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::MISTRAL,        "mistral",         kApiMistral,        0, 0,    -1, -1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::MIXTRAL,        "mixtral",         kApiMixtral,        0, 0,    -1, -1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::DEEPSEEK,       "deepseek",        kApiDeepseek,      -1, 0,    -1, -1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::NEMOTRON_H_MOE, "nemotron_h_moe",  kApiNemotronHMoe,  -1, 0,     2,  -1, true,  false, 0.6f, 0.95f, 0},
+    {ModelArch::QWEN3,          "qwen3",           kApiQwen3,         -1, 0,    -1, -1, false, false, 0.6f, 0.95f, 20},
+    {ModelArch::QWEN3_MOE,      "qwen3moe",        kApiQwen3Moe,      -1, 0,    -1, -1, false, true,  0.6f, 0.95f, 20},
+    {ModelArch::QWEN35,         "qwen35",          kApiQwen35,        -1, 0,    -1, -1, false, false, 0.6f, 0.95f, 20},
+    {ModelArch::QWEN35_MOE,     "qwen35moe",       kApiQwen35Moe,     -1, 0,    -1, -1, false, false, 0.6f, 0.95f, 20},
+    {ModelArch::GEMMA3,         "gemma3",          kApiGemma3,        -1, 0,     1,   1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::LLAMA4,         "llama4",          kApiLlama4,         0, 0,    -1, -1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::GENERIC,        "generic",         kApiGeneric,       -1, 0,    -1, -1, false, false, 0.6f, 0.95f, 0},
+};
+
+static const ArchEntry& lookup_arch(ModelArch arch) {
+    for (const auto& e : kArchRegistry)
+        if (e.arch == arch) return e;
+    return kArchRegistry[sizeof(kArchRegistry)/sizeof(kArchRegistry[0]) - 1];  // GENERIC
+}
+
 const char* model_arch_name(ModelArch arch) {
-    switch (arch) {
-        case ModelArch::LLAMA:    return "llama";
-        case ModelArch::MISTRAL:  return "mistral";
-        case ModelArch::MIXTRAL:  return "mixtral";
-        case ModelArch::DEEPSEEK:       return "deepseek";
-        case ModelArch::NEMOTRON_H_MOE: return "nemotron_h_moe";
-        case ModelArch::QWEN3:          return "qwen3";
-        case ModelArch::QWEN3_MOE:      return "qwen3moe";
-        case ModelArch::QWEN35:         return "qwen35";
-        case ModelArch::QWEN35_MOE:     return "qwen35moe";
-        case ModelArch::GEMMA3:         return "gemma3";
-        case ModelArch::LLAMA4:         return "llama4";
-        case ModelArch::GENERIC:        return "generic";
-    }
-    return "unknown";
+    return lookup_arch(arch).name;
+}
+
+int model_arch_c_api_id(ModelArch arch) {
+    return lookup_arch(arch).c_api_id;
+}
+
+void model_arch_sampling_defaults(ModelArch arch, float& temperature, float& top_p, int& top_k) {
+    const auto& e = lookup_arch(arch);
+    temperature = e.temperature;
+    top_p = e.top_p;
+    top_k = e.top_k;
 }
 
 ModelArch parse_model_arch(const std::string& s) {
@@ -121,33 +173,22 @@ ModelArch parse_model_arch(const std::string& s) {
 }
 
 void apply_arch_defaults(ModelConfig& cfg) {
-    switch (cfg.arch) {
-        case ModelArch::LLAMA:
-        case ModelArch::LLAMA4:
-        case ModelArch::MISTRAL:
-        case ModelArch::MIXTRAL:
-            // LLaMA/Mistral use interleaved RoPE (2i, 2i+1), not NeoX split (i, i+d/2)
-            cfg.rope_neox = false;
-            break;
-        case ModelArch::GEMMA3:
-            // Gemma-3 uses NeoX/split RoPE (default rope_neox=true is correct)
-            cfg.embed_scale = std::sqrt(static_cast<float>(cfg.d_model));
-            cfg.ffn_activation = FFNActivation::GEGLU;
-            // Gemma-3 uses sandwich norm: pre-norm (attn_norm/ffn_norm) AND
-            // post-norm (post_attention_norm/post_ffw_norm). The POST_NORM
-            // flag activates the FP32 residual accumulator for stability.
-            cfg.norm_placement = NormPlacement::POST_NORM;
-            break;
-        case ModelArch::NEMOTRON_H_MOE:
-            cfg.moe_sigmoid_gating = true;
-            cfg.ffn_activation = FFNActivation::RELU_SQR;
-            break;
-        case ModelArch::QWEN3_MOE:
-            cfg.expert_weights_norm = true;
-            break;
-        default:
-            break;
-    }
+    const auto& e = lookup_arch(cfg.arch);
+    if (e.rope_neox >= 0)
+        cfg.rope_neox = (e.rope_neox != 0);
+    if (e.embed_scale > 0)
+        cfg.embed_scale = e.embed_scale;
+    // Gemma-3 computes embed_scale from d_model
+    if (cfg.arch == ModelArch::GEMMA3)
+        cfg.embed_scale = std::sqrt(static_cast<float>(cfg.d_model));
+    if (e.ffn_activation >= 0)
+        cfg.ffn_activation = static_cast<FFNActivation>(e.ffn_activation);
+    if (e.norm_placement >= 0)
+        cfg.norm_placement = static_cast<NormPlacement>(e.norm_placement);
+    if (e.moe_sigmoid_gating)
+        cfg.moe_sigmoid_gating = true;
+    if (e.expert_weights_norm)
+        cfg.expert_weights_norm = true;
 }
 
 } // namespace imp

@@ -30,7 +30,7 @@ imp/
 │   ├── imp-server/       # OpenAI-compatible HTTP server (SSE streaming)
 │   └── imp-bench/        # Benchmark tool: GEMM, attention, end-to-end
 ├── third_party/stb/      # stb_image headers (image loading for vision)
-├── tests/                # Google Test suite (22 test files)
+├── tests/                # Google Test suite (45 test files, 544 tests)
 ├── cmake/                # Custom CMake modules (CompilerFlags, FindCUDAToolkit131)
 ├── CMakeLists.txt        # Build configuration
 └── .gitignore
@@ -170,9 +170,26 @@ Tests require an NVIDIA GPU with the appropriate compute capability. Test files 
 | `test_green_ctx.cu` | CUDA Green Context SM partitioning |
 | `test_chat_template.cpp` | Chat template rendering |
 | `test_e2e.cpp` | End-to-end generation pipeline |
+| `test_e2e_models.cpp` | Real model tests (Qwen3, Qwen3.5 GDN) |
 | `test_continuous_batching.cpp` | Continuous batching scheduler |
 | `test_speculative.cpp` | Speculative decoding (draft + verify) |
 | `test_gdn_kernel.cu` | GDN delta rule scan (single + multi-token) |
+| `test_forward_pass.cu` | Forward pass (multi-layer, GQA, decode, determinism) |
+| `test_engine_integration.cu` | Engine init/step/generate with synthetic models |
+| `test_executor_kernels.cu` | Executor utility kernels (elementwise, norms) |
+| `test_kv_cache_write.cu` | KV cache write correctness |
+| `test_attention_fmha_sm120.cu` | CUTLASS FMHA on Blackwell (FP16 + FP8) |
+| `test_fmha_fp8.cu` | FP8 FMHA correctness |
+| `test_attention_mxfp4.cu` | MXFP4 attention prefill |
+| `test_turboquant.cu` | TurboQuant KV cache quantization |
+| `test_hadamard.cu` | Hadamard transform kernel |
+| `test_softmax.cu` | Softmax kernels |
+| `test_ssm.cu` | SSM conv1d kernels |
+| `test_json_constrain.cu` | JSON constraint decoding |
+| `test_gemm_dp4a.cu` | DP4A INT8 GEMM/GEMV |
+| `test_jinja.cpp` | Jinja2 template engine |
+| `test_degeneration.cpp` | Output degeneration detection |
+| `test_tokenizer_compat.cpp` | Tokenizer HuggingFace compatibility |
 
 ## Tools
 

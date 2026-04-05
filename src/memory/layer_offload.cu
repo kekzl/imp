@@ -8,15 +8,15 @@ namespace imp {
 LayerOffloadManager::~LayerOffloadManager() {
     for (auto& slot : slots_) {
         if (slot.gpu_buf) {
-            cudaFree(slot.gpu_buf);
+            IMP_CUDA_CHECK_LOG(cudaFree(slot.gpu_buf));
             slot.gpu_buf = nullptr;
         }
         if (slot.ready_event) {
-            cudaEventDestroy(slot.ready_event);
+            IMP_CUDA_CHECK_LOG(cudaEventDestroy(slot.ready_event));
             slot.ready_event = nullptr;
         }
         if (slot.transfer_stream) {
-            cudaStreamDestroy(slot.transfer_stream);
+            IMP_CUDA_CHECK_LOG(cudaStreamDestroy(slot.transfer_stream));
             slot.transfer_stream = nullptr;
         }
     }
@@ -174,12 +174,12 @@ void LayerOffloadManager::upload_layer_to_slot(int layer, int slot_idx) {
     char* dst_base = static_cast<char*>(slot.gpu_buf);
 
     for (const auto& e : entries) {
-        cudaMemcpyAsync(dst_base + e.offset_in_slot, e.host_ptr, e.raw_bytes,
-                        cudaMemcpyHostToDevice, slot.transfer_stream);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(dst_base + e.offset_in_slot, e.host_ptr, e.raw_bytes,
+                        cudaMemcpyHostToDevice, slot.transfer_stream));
     }
 
     // Record event so compute stream can wait on it
-    cudaEventRecord(slot.ready_event, slot.transfer_stream);
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(slot.ready_event, slot.transfer_stream));
     slot.loaded_layer = layer;
 }
 
@@ -190,7 +190,7 @@ void LayerOffloadManager::ensure_layer(int layer, cudaStream_t compute_stream) {
     for (int s = 0; s < 2; s++) {
         if (slots_[s].loaded_layer == layer) {
             // Wait for transfer to complete before compute
-            cudaStreamWaitEvent(compute_stream, slots_[s].ready_event, 0);
+            IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(compute_stream, slots_[s].ready_event, 0));
 
             // Remap layer tensor pointers to staging buffer
             char* base = static_cast<char*>(slots_[s].gpu_buf);
@@ -210,7 +210,7 @@ void LayerOffloadManager::ensure_layer(int layer, cudaStream_t compute_stream) {
     upload_layer_to_slot(layer, target_slot);
 
     // Wait for transfer
-    cudaStreamWaitEvent(compute_stream, slots_[target_slot].ready_event, 0);
+    IMP_CUDA_CHECK_LOG(cudaStreamWaitEvent(compute_stream, slots_[target_slot].ready_event, 0));
 
     // Remap tensor pointers
     char* base = static_cast<char*>(slots_[target_slot].gpu_buf);

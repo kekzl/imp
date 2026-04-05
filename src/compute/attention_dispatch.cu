@@ -4,11 +4,9 @@
 #include <cuda_runtime.h>
 #include <cstdlib>
 
-#ifdef IMP_USE_CUTLASS
 #include "compute/attention_cutlass_fmha.h"
 #include "compute/attention_fmha_sm120.h"
 #include "compute/attention_mxfp4_prefill.h"
-#endif
 
 namespace imp {
 
@@ -30,7 +28,6 @@ void attention_prefill_dispatch(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
     float scale, bool causal, int sliding_window, float softcap, cudaStream_t stream) {
     int sm = get_device_sm_version();
-#ifdef IMP_USE_CUTLASS
     // sliding_window that covers entire seq_kv doesn't restrict attention
     int seq_kv = static_cast<int>(K.shape[1]);
     bool sw_active = (sliding_window > 0 && sliding_window < seq_kv);
@@ -44,9 +41,19 @@ void attention_prefill_dispatch(
         }
     }
 
-    // Native sm_120 FMHA: WGMMA for Blackwell with sliding window support.
-    // Preferred over CUTLASS Hopper FMHA on sm_120+ (native scheduling,
-    // supports sliding window which CUTLASS FMHA does not).
+    // Native sm_120 FP8 FMHA: QK^T in FP8 E4M3 (m16n8k32) for 2x score throughput.
+    // PV stays FP16. Set IMP_NO_FP8_FMHA=1 to force FP16 path.
+    static bool use_fp8_fmha = !getenv("IMP_NO_FP8_FMHA");
+    if (use_fp8_fmha && sm >= 120) {
+        bool fp8_ok = fmha_sm120_fp8_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream);
+        if (fp8_ok) {
+            IMP_LOG_DEBUG("FMHA dispatch: using FP8 sm120 kernel (hd=%d)", static_cast<int>(Q.shape[3]));
+            return;
+        }
+    }
+
+    // Native sm_120 FP16 FMHA: WMMA for Blackwell with sliding window support.
+    // Fallback when FP8 is disabled or unsupported config.
     // Set IMP_NO_FMHA_SM120=1 to skip and use CUTLASS/WMMA fallback.
     static bool use_fmha_sm120 = !getenv("IMP_NO_FMHA_SM120");
     if (use_fmha_sm120 && sm >= 120) {
@@ -67,7 +74,6 @@ void attention_prefill_dispatch(
         int hd = static_cast<int>(Q.shape[3]);
         IMP_LOG_DEBUG("CUTLASS FMHA unavailable (hd=%d, softcap=%.1f), using WMMA fallback", hd, softcap);
     }
-#endif
 
     if (sm >= 120) {
         // Optimized WMMA kernel with 128x64 tiles for Blackwell (sm_120+).
