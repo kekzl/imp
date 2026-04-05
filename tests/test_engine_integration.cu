@@ -124,7 +124,7 @@ TEST(EngineIntegrationTest, MultipleRequestsSequential) {
 
         int steps = 0;
         while (req->status != RequestStatus::FINISHED && steps < 20) {
-            engine.step();
+            (void)engine.step();
             steps++;
         }
 
@@ -171,7 +171,7 @@ TEST(EngineIntegrationTest, MoEInitSucceeds) {
 
     int steps = 0;
     while (req->status != RequestStatus::FINISHED && steps < 20) {
-        engine.step();
+        (void)engine.step();
         steps++;
     }
 
@@ -196,7 +196,7 @@ static void run_request(Engine& engine, std::vector<int32_t> input, int max_toke
 
     int steps = 0;
     while (req->status != RequestStatus::FINISHED && steps < 30) {
-        engine.step();
+        (void)engine.step();
         steps++;
     }
 

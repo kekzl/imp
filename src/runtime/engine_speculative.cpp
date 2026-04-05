@@ -219,7 +219,7 @@ std::vector<int32_t> Engine::try_graph_loop_decode(
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_tables, full_bt.data(),
                      max_blocks_per_seq * sizeof(int), cudaMemcpyHostToDevice, stream));
 
-    executor_->resize_workspace(1, stream);
+    (void)executor_->resize_workspace(1, stream);
 
     InferenceState state_template;
     state_template.kv_cache = kv_cache_raw_;
@@ -276,7 +276,7 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_bt, full_bt.data(),
                      max_blocks_per_seq * sizeof(int), cudaMemcpyHostToDevice, stream));
 
-    executor_->resize_workspace(1, stream);
+    (void)executor_->resize_workspace(1, stream);
 
     InferenceState state_template;
     state_template.kv_cache = kv_cache_raw_;

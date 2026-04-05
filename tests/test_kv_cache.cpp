@@ -463,7 +463,7 @@ TEST(KVCacheManagerTest, ManagerAppendBlock) {
 
     auto mgr = MakeManager(16);
 
-    mgr->allocate_blocks(0, 2);
+    (void)mgr->allocate_blocks(0, 2);
     EXPECT_EQ(static_cast<int>(mgr->block_table(0).size()), 2);
 
     int new_block = mgr->append_block(0);
@@ -480,7 +480,7 @@ TEST(KVCacheManagerTest, ManagerFreeSequence) {
 
     auto mgr = MakeManager(16);
 
-    mgr->allocate_blocks(0, 4);
+    (void)mgr->allocate_blocks(0, 4);
     EXPECT_EQ(mgr->num_active_sequences(), 1);
     EXPECT_EQ(mgr->num_free_blocks(), 12);
 
@@ -497,9 +497,9 @@ TEST(KVCacheManagerTest, ManagerLRUEviction) {
     auto mgr = MakeManager(8);
 
     // Fill the entire pool across three sequences.
-    mgr->allocate_blocks(0, 3); // seq 0: 3 blocks  (LRU order: 0)
-    mgr->allocate_blocks(1, 3); // seq 1: 3 blocks  (LRU order: 0, 1)
-    mgr->allocate_blocks(2, 2); // seq 2: 2 blocks  (LRU order: 0, 1, 2)
+    (void)mgr->allocate_blocks(0, 3); // seq 0: 3 blocks  (LRU order: 0)
+    (void)mgr->allocate_blocks(1, 3); // seq 1: 3 blocks  (LRU order: 0, 1)
+    (void)mgr->allocate_blocks(2, 2); // seq 2: 2 blocks  (LRU order: 0, 1, 2)
     EXPECT_EQ(mgr->num_free_blocks(), 0);
 
     // Touch seq 0, moving it to MRU. LRU order is now: 1, 2, 0.
@@ -525,8 +525,8 @@ TEST(KVCacheManagerTest, ManagerCanAllocate) {
 
     auto mgr = MakeManager(8);
 
-    mgr->allocate_blocks(0, 4);
-    mgr->allocate_blocks(1, 4);
+    (void)mgr->allocate_blocks(0, 4);
+    (void)mgr->allocate_blocks(1, 4);
     EXPECT_EQ(mgr->num_free_blocks(), 0);
 
     // We have 0 free blocks, but can evict 4+4 = 8 blocks total.
@@ -743,9 +743,9 @@ TEST(KVCacheManagerTest, PinnedBlocksSurviveEviction) {
     auto mgr = MakeManager(8);
 
     // Seq 0: 3 blocks, seq 1: 3 blocks, seq 2: 2 blocks.
-    mgr->allocate_blocks(0, 3);
-    mgr->allocate_blocks(1, 3);
-    mgr->allocate_blocks(2, 2);
+    (void)mgr->allocate_blocks(0, 3);
+    (void)mgr->allocate_blocks(1, 3);
+    (void)mgr->allocate_blocks(2, 2);
     EXPECT_EQ(mgr->num_free_blocks(), 0);
 
     // Pin seq 0's first 2 blocks.
@@ -780,7 +780,7 @@ TEST(KVCacheManagerTest, PinnedBlocksSurviveFreeSequence) {
 
     auto mgr = MakeManager(16);
 
-    mgr->allocate_blocks(0, 4);
+    (void)mgr->allocate_blocks(0, 4);
     const auto& table0 = mgr->block_table(0);
     ASSERT_EQ(static_cast<int>(table0.size()), 4);
 
@@ -849,8 +849,8 @@ TEST(KVCacheManagerTest, PinPrefixCanAllocateAccuracy) {
 
     auto mgr = MakeManager(8);
 
-    mgr->allocate_blocks(0, 4);
-    mgr->allocate_blocks(1, 4);
+    (void)mgr->allocate_blocks(0, 4);
+    (void)mgr->allocate_blocks(1, 4);
     EXPECT_EQ(mgr->num_free_blocks(), 0);
 
     // Pin seq 0. Now only seq 1's 4 blocks are reclaimable via eviction.
@@ -908,13 +908,13 @@ TEST(KVCacheManagerTest, CachedBlockLRUEvictionOrder) {
     // Seq 0: 2 blocks (tokens 0..31)
     std::vector<int32_t> tokens_a(32);
     std::iota(tokens_a.begin(), tokens_a.end(), 0);
-    mgr->allocate_blocks_with_prefix(0, tokens_a);
+    (void)mgr->allocate_blocks_with_prefix(0, tokens_a);
     mgr->register_block_hashes(0, tokens_a);
 
     // Seq 1: 2 blocks (tokens 100..131)
     std::vector<int32_t> tokens_b(32);
     std::iota(tokens_b.begin(), tokens_b.end(), 100);
-    mgr->allocate_blocks_with_prefix(1, tokens_b);
+    (void)mgr->allocate_blocks_with_prefix(1, tokens_b);
     mgr->register_block_hashes(1, tokens_b);
 
     // Free seq 0 first, then seq 1 — seq 0's blocks are older in LRU
@@ -955,7 +955,7 @@ TEST(KVCacheManagerTest, ThreeSequencesOverlappingPrefixes) {
     std::copy(shared.begin(), shared.end(), tokens_0.begin());
     std::iota(tokens_0.begin() + 32, tokens_0.end(), 900);
 
-    mgr->allocate_blocks_with_prefix(0, tokens_0);
+    (void)mgr->allocate_blocks_with_prefix(0, tokens_0);
     mgr->register_block_hashes(0, tokens_0);
     mgr->free_sequence(0);
     EXPECT_EQ(mgr->num_cached_blocks(), 3);
@@ -1009,7 +1009,7 @@ TEST(KVCacheManagerTest, RollbackThenReusePrefix) {
     std::vector<int32_t> tokens(48);
     std::iota(tokens.begin(), tokens.end(), 0);
 
-    mgr->allocate_blocks_with_prefix(0, tokens);
+    (void)mgr->allocate_blocks_with_prefix(0, tokens);
     mgr->register_block_hashes(0, tokens);
 
     // Rollback to 20 tokens — keeps 2 blocks (block 0: tokens 0-15, block 1: tokens 16-31)
@@ -1039,7 +1039,7 @@ TEST(KVCacheManagerTest, DoubleRegisterBlockHashes) {
     std::vector<int32_t> tokens(32);
     std::iota(tokens.begin(), tokens.end(), 0);
 
-    mgr->allocate_blocks_with_prefix(0, tokens);
+    (void)mgr->allocate_blocks_with_prefix(0, tokens);
 
     // Register twice — should not crash or corrupt state
     mgr->register_block_hashes(0, tokens);
@@ -1065,12 +1065,12 @@ TEST(KVCacheManagerTest, EvictAllCachedBlocksPoolIntegrity) {
     // Fill entire pool with cached blocks from 2 sequences
     std::vector<int32_t> tokens_a(64);
     std::iota(tokens_a.begin(), tokens_a.end(), 0);
-    mgr->allocate_blocks_with_prefix(0, tokens_a);
+    (void)mgr->allocate_blocks_with_prefix(0, tokens_a);
     mgr->register_block_hashes(0, tokens_a);
 
     std::vector<int32_t> tokens_b(64);
     std::iota(tokens_b.begin(), tokens_b.end(), 200);
-    mgr->allocate_blocks_with_prefix(1, tokens_b);
+    (void)mgr->allocate_blocks_with_prefix(1, tokens_b);
     mgr->register_block_hashes(1, tokens_b);
 
     // Free both — all 8 blocks now cached
@@ -1144,8 +1144,8 @@ TEST(KVCacheManagerTest, EvictionUnderPressure) {
     // Pool fits only 2 sequences worth of blocks (4 + 4 = 8).
     auto mgr = MakeManager(8);
 
-    mgr->allocate_blocks(0, 4);
-    mgr->allocate_blocks(1, 4);
+    (void)mgr->allocate_blocks(0, 4);
+    (void)mgr->allocate_blocks(1, 4);
     EXPECT_EQ(mgr->num_free_blocks(), 0);
 
     // Touch seq 1 so seq 0 remains LRU.

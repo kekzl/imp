@@ -203,6 +203,8 @@ bool ensure_model_loaded(ServerState& state, const std::string& requested_model,
 // Engine auto-detects max_seq_len, max_batch_size, KV dtype, FP8 prefill, NVFP4 decode.
 ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
                        const json& overrides, ImpModel model = nullptr) {
+    (void)model_path;
+    (void)model;
     ImpConfig config = imp_config_default();
 
     config.device_id = args.device;
@@ -666,13 +668,11 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     int32_t snap_think_start_id;
     int32_t snap_think_end_id;
     int snap_max_seq_len;
-    bool snap_model_loaded;
     bool snap_has_vision = false;
     std::vector<int32_t> snap_stop_token_ids;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
         if (!ensure_model_loaded(state, requested_model, res)) return;
-        snap_model_loaded = true;
         snap_tok = state.tok;
         snap_chat_tpl = state.chat_tpl;
         snap_have_template = state.have_template;

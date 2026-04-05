@@ -668,7 +668,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                 auto* sdata = reinterpret_cast<const uint8_t*>(shard_mmap);
                 BinaryReader sreader(sdata, shard_size);
                 uint32_t smagic = sreader.read_u32();
-                uint32_t sversion = sreader.read_u32();
+                sreader.read_u32(); // sversion (unused)
                 uint64_t stensor_count = sreader.read_u64();
                 uint64_t skv_count = sreader.read_u64();
 

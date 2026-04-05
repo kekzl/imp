@@ -478,7 +478,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
     gemm_init();
     scheduler_ = std::make_unique<Scheduler>(config_.max_batch_size);
-    stream_.create(cudaStreamNonBlocking);
+    (void)stream_.create(cudaStreamNonBlocking);
 
     // --- Sub-phases ---
     if (!init_weights()) return false;
@@ -613,7 +613,7 @@ bool Engine::init_weights() {
     }
 
     // Phase 2: allocate GPU workspace
-    executor_->allocate_workspaces(experts_on_host_);
+    (void)executor_->allocate_workspaces(experts_on_host_);
 
     // Layer offloading
     if (config_.gpu_layers >= 0) {
@@ -1048,7 +1048,7 @@ bool Engine::init_features() {
         }
     }
     if (!decode_done_)
-        decode_done_.create(cudaEventDisableTiming);
+        (void)decode_done_.create(cudaEventDisableTiming);
 
     // Pre-allocate DRY penalty buffers to avoid cudaStreamSynchronize on first
     // use during inference (the lazy-alloc path blocks the decode stream).
@@ -1084,7 +1084,7 @@ void Engine::warmup() {
         scheduler_->add_request(req);
 
         for (int i = 0; i < 8 && req->status != RequestStatus::FINISHED; i++)
-            step();
+            (void)step();
 
         kv_manager_->free_sequence(req->id);
         reset_ssm_state(req->id);
@@ -1274,7 +1274,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
     }
 
     int ctx_len = offset + chunk_len;
-    executor_->resize_workspace(chunk_len, pf_stream);
+    (void)executor_->resize_workspace(chunk_len, pf_stream);
 
     int num_blocks = (ctx_len + kv_bs - 1) / kv_bs;
 
@@ -1321,7 +1321,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
                     is_last_chunk = false;
                 }
                 ctx_len = offset + chunk_len;
-                executor_->resize_workspace(chunk_len, pf_stream);
+                (void)executor_->resize_workspace(chunk_len, pf_stream);
             }
         }
     } else {
@@ -1483,7 +1483,7 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             sample_greedy_device(last_logits, executor_->d_sample_result(),
                                   h_sample_pinned_, pf_stream);
 
-            if (!prefill_done_) prefill_done_.create();
+            if (!prefill_done_) (void)prefill_done_.create();
             cudaEventRecord(prefill_done_, pf_stream);
 
             if (!pf_pool_used) {
@@ -1614,7 +1614,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         executor_->use_workspace(1);
     } else {
         if (executor_->active_workspace() == 1) executor_->use_workspace(0);
-        executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
+        (void)executor_->resize_workspace(static_cast<int>(valid_decode.size()), dec_stream);
     }
 
     // Build batched decode
@@ -1901,7 +1901,6 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
                               float repetition_penalty,
                               float frequency_penalty,
                               float presence_penalty) {
-    const int kv_bs = kv_cache_raw_ ? kv_cache_raw_->block_size() : kKVBlockSize;
     Tokenizer* tok = model_->tokenizer();
     if (!tok) {
         return "";
@@ -1967,15 +1966,11 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     // Decode — try conditional graph loop, fall back to step()
     // Think budget is now enforced device-side in post_decode_step_kernel.
     // Penalties are applied device-side via apply_penalties_device_count in the graph loop.
-    bool req_has_penalties = (req->repetition_penalty != 1.0f ||
-                              req->frequency_penalty != 0.0f ||
-                              req->presence_penalty != 0.0f);
     if (req->status == RequestStatus::DECODING && !req->output_tokens.empty() &&
         config_.use_cuda_graphs && !offload_mgr_ &&
         !ssm_state_ &&
         !config_.enable_speculative) {
         int32_t first_token = req->output_tokens.back();
-        Tokenizer* gtok = model_->tokenizer();
         auto graph_tokens = try_graph_loop_decode(req, first_token, decode_stream());
         if (!graph_tokens.empty()) {
             int32_t last = graph_tokens.back();

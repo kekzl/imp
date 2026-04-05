@@ -820,7 +820,7 @@ static std::vector<std::string> llama3_pre_tokenize(const std::string& text) {
     static const char* contractions[] = {
         "'s", "'t", "'re", "'ve", "'m", "'ll", "'d",
         "\xe2\x80\x99s", "\xe2\x80\x99t", "\xe2\x80\x99re",
-        "\xe2\x80\x99ve", "\xe2\x80\x99m", "\xe2\x80\x99ll", "\xe2\x80\x99d",
+        "\xe2\x80\x99" "ve", "\xe2\x80\x99" "m", "\xe2\x80\x99" "ll", "\xe2\x80\x99" "d",
     };
 
     size_t i = 0;

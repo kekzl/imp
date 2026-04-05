@@ -593,7 +593,7 @@ ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
 
         // Run steps until prefill completes (may take multiple steps with chunked prefill)
         do {
-            ctx->engine->step();
+            (void)ctx->engine->step();
         } while (req->status == imp::RequestStatus::PREFILLING);
 
         // Verify the request was prefilled
@@ -664,7 +664,7 @@ ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params,
         } else {
             // Need a new engine step
             size_t prev_output_size = req->output_tokens.size();
-            ctx->engine->step();
+            (void)ctx->engine->step();
 
             if (req->output_tokens.size() > prev_output_size) {
                 ctx->consumed_output = prev_output_size;

@@ -256,7 +256,6 @@ public:
             if (pos + 1 < src_.size() && src_[pos] == '{' &&
                 (src_[pos + 1] == '{' || src_[pos + 1] == '%')) {
                 bool is_expr = (src_[pos + 1] == '{');
-                size_t tag_start = pos;
                 pos += 2;
 
                 // Check trim marker
