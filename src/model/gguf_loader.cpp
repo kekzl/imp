@@ -145,6 +145,7 @@ const char* ggml_type_name(GGMLType type) {
         case GGMLType::IQ1_M:   return "IQ1_M";
         case GGMLType::IQ4_NL:  return "IQ4_NL";
         case GGMLType::IQ4_XS:  return "IQ4_XS";
+        case GGMLType::MXFP4:   return "MXFP4";
         default:                return "UNKNOWN";
     }
 }
