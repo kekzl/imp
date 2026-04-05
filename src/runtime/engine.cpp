@@ -409,7 +409,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     if (config_.use_nvfp4_decode < 0) {
         int sm = get_device_sm_version();
-        if (n_gdn_auto > 0 && mcfg.d_model >= 4096) {
+        if (n_gdn_auto > 0) {
             // GDN models with large d_model: enable NVFP4 for attention + FFN weights,
             // but SSM/GDN projections (ssm_in/ssm_out) will be excluded in
             // pre_dequant_weights to preserve recurrent state precision.
@@ -424,9 +424,6 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             } else {
                 config_.use_nvfp4_decode = 0;
             }
-        } else if (mcfg.d_model < 4096 && mcfg.n_experts == 0) {
-            config_.use_nvfp4_decode = 0;
-            IMP_LOG_INFO("NVFP4 decode: auto → disabled (d_model=%d < 4096)", mcfg.d_model);
         } else if (sm >= 120) {
             config_.use_nvfp4_decode = 2;
             IMP_LOG_INFO("NVFP4 decode: auto → mode %d (sm_%d)", config_.use_nvfp4_decode, sm);
