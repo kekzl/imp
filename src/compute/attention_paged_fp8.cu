@@ -146,25 +146,21 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
             int t = first_tok + ti;
             const uint8_t* V_tok = V_block + t * kv_slot_stride + kv_head * HEAD_DIM;
 
-            // Start async V[t] + K[t+1] loads (ELEMS bytes per thread)
+            // Start async V[t] + K[t+1] loads (branchless: clamp to last valid token)
+            int t_next = min(t + 1, first_tok + n_toks - 1);
+            const uint8_t* K_next = K_block + t_next * kv_slot_stride + kv_head * HEAD_DIM;
             if constexpr (ELEMS >= 8) {
                 cp_async_ca_8(&v_buf[lane_offset], &V_tok[lane_offset]);
-                if (ti + 1 < n_toks) {
-                    const uint8_t* K_next = K_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
-                    cp_async_ca_8(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
-                }
+                cp_async_ca_8(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
             } else {
                 asm volatile(
                     "cp.async.ca.shared.global [%0], [%1], 4;\n"
                     :: "r"(static_cast<uint32_t>(__cvta_generic_to_shared(&v_buf[lane_offset]))),
                        "l"(&V_tok[lane_offset]));
-                if (ti + 1 < n_toks) {
-                    const uint8_t* K_next = K_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
-                    asm volatile(
-                        "cp.async.ca.shared.global [%0], [%1], 4;\n"
-                        :: "r"(static_cast<uint32_t>(__cvta_generic_to_shared(&k_bufs[1 - cur][lane_offset]))),
-                           "l"(&K_next[lane_offset]));
-                }
+                asm volatile(
+                    "cp.async.ca.shared.global [%0], [%1], 4;\n"
+                    :: "r"(static_cast<uint32_t>(__cvta_generic_to_shared(&k_bufs[1 - cur][lane_offset]))),
+                       "l"(&K_next[lane_offset]));
             }
             cp_async_commit();
             cp_async_wait_group<1>();

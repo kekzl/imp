@@ -973,19 +973,15 @@ __global__ void paged_attention_splitk_pipeline_kernel(
             int t = first_tok + ti;
             const half* V_tok = V_block + t * kv_slot_stride + kv_head * HEAD_DIM;
 
-            // Start async V[t] + K[t+1] loads
+            // Start async V[t] + K[t+1] loads (branchless: clamp to last valid token)
+            int t_next = min(t + 1, first_tok + n_toks - 1);
+            const half* K_next = K_block + t_next * kv_slot_stride + kv_head * HEAD_DIM;
             if constexpr (ELEMS >= 8) {
                 cp_async_ca_16(&v_buf[lane_offset], &V_tok[lane_offset]);
-                if (ti + 1 < n_toks) {
-                    const half* K_next = K_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
-                    cp_async_ca_16(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
-                }
+                cp_async_ca_16(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
             } else {
                 cp_async_ca_8(&v_buf[lane_offset], &V_tok[lane_offset]);
-                if (ti + 1 < n_toks) {
-                    const half* K_next = K_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
-                    cp_async_ca_8(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
-                }
+                cp_async_ca_8(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
             }
             cp_async_commit();
 
