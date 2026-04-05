@@ -6,7 +6,7 @@
 
 namespace imp {
 
-// Free static cuBLASLt grouped GEMM workspace. Call at shutdown.
+// No-op retained for API compatibility. Call at shutdown.
 void gemm_grouped_cleanup();
 
 // cuBLASLt Grouped GEMM for MoE expert parallelism
@@ -44,21 +44,5 @@ void gemm_moe_batched(const void* a_base, void* c_base,
                       DType output_dtype = DType(255),
                       const float* a_scales = nullptr,
                       const float* b_scales = nullptr);
-
-// Device-side grouped GEMM for MoE: eliminates cudaStreamSynchronize.
-// Uses cublasLtGroupedMatrixLayoutCreate (CUDA 13.1) with device-side shape arrays.
-// d_offsets is a DEVICE pointer to [n_experts+1] offsets.
-// d_b_ptrs is a DEVICE pointer to [n_experts] weight pointers.
-#if IMP_CUDA_13_1
-void gemm_moe_device_grouped(
-    const void* d_a_base, void* d_c_base,
-    const int32_t* d_offsets,
-    const void* const* d_b_ptrs,
-    int K, int N, DType dtype,
-    int n_experts, int max_tokens_per_expert,
-    cudaStream_t stream,
-    const float* a_scales = nullptr,
-    const float* b_scales = nullptr);
-#endif
 
 } // namespace imp

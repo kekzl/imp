@@ -165,8 +165,6 @@ private:
 
         auto node = std::make_unique<SchemaNode>();
         bool has_type = false;
-        bool has_enum = false;
-        bool has_any_of = false;
 
         skip_ws();
         if (peek() == '}') { pos_++; return node; }
@@ -220,7 +218,6 @@ private:
                     }
                     expect(']');
                 }
-                has_enum = true;
                 node->type = SchemaType::ENUM;
             } else if (key == "anyOf" || key == "oneOf") {
                 skip_ws();
@@ -235,7 +232,6 @@ private:
                     }
                     expect(']');
                 }
-                has_any_of = true;
                 node->type = SchemaType::ANY_OF;
             } else {
                 // Skip unknown fields ($schema, title, description, etc.)

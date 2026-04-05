@@ -164,6 +164,10 @@ struct InferenceState {
     // Token history for penalty computation (device pointer, owned by engine)
     const int32_t* penalty_tokens = nullptr;
     int n_penalty_tokens = 0;
+    // Device-side penalty token count (for CUDA graph loop where count grows
+    // each iteration). When non-null, forward_decode_async reads the count
+    // from *d_n_penalty_tokens instead of n_penalty_tokens.
+    const int* d_n_penalty_tokens = nullptr;
 
     // Logprobs: when true, forward() copies logits to h_logits_pinned_ for CPU extraction
     bool logprobs = false;
@@ -234,6 +238,10 @@ public:
 
     // Disable FP8 weight cache (must be called before pre_dequant_weights).
     void disable_fp8_prefill() { wcache_.use_fp8 = false; }
+
+    // Enable dual-path quantization: attention weights stay FP8, FFN weights get NVFP4.
+    // Must be called before pre_dequant_weights().
+    void set_dual_path_quant(bool enable) { wcache_.dual_path_quant = enable; }
 
     // Phase 2: Allocate all GPU workspace buffers.
     // Call AFTER weight upload to maximize VRAM available for expert layers.

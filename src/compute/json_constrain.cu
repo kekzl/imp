@@ -14,11 +14,11 @@ namespace imp {
 
 JsonConstrainer::~JsonConstrainer() {
     if (d_token_categories_) {
-        cudaFree(d_token_categories_);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_token_categories_));
         d_token_categories_ = nullptr;
     }
     if (d_allowed_mask_) {
-        cudaFree(d_allowed_mask_);
+        IMP_CUDA_CHECK_LOG(cudaFree(d_allowed_mask_));
         d_allowed_mask_ = nullptr;
     }
 }
@@ -328,8 +328,8 @@ void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t s
     uint16_t mask = compute_allowed_mask();
 
     // Upload mask to device
-    cudaMemcpyAsync(d_allowed_mask_, &mask, sizeof(uint16_t),
-                     cudaMemcpyHostToDevice, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_allowed_mask_, &mask, sizeof(uint16_t),
+                     cudaMemcpyHostToDevice, stream));
 
     // Launch masking kernel
     int threads = 256;

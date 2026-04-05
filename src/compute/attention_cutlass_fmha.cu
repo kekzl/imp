@@ -8,8 +8,6 @@
 #include "compute/attention_cutlass_fmha.h"
 #include "core/logging.h"
 
-#if defined(CUTLASS_ARCH_MMA_SM90_SUPPORTED) || defined(__CUDA_ARCH__) || defined(IMP_USE_CUTLASS)
-
 #include "cute/tensor.hpp"
 #include "cutlass/cutlass.h"
 #include "cutlass/kernel_hardware_info.h"
@@ -109,15 +107,15 @@ static size_t s_workspace_sz = 0;
 
 static void ensure_lse_buf(size_t needed) {
     if (needed <= s_lse_sz) return;
-    if (s_lse_buf) cudaFree(s_lse_buf);
-    cudaMalloc(&s_lse_buf, needed);
+    if (s_lse_buf) IMP_CUDA_CHECK_LOG(cudaFree(s_lse_buf));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_lse_buf, needed));
     s_lse_sz = needed;
 }
 
 static void ensure_workspace(size_t needed) {
     if (needed <= s_workspace_sz) return;
-    if (s_workspace) cudaFree(s_workspace);
-    cudaMalloc(&s_workspace, needed);
+    if (s_workspace) IMP_CUDA_CHECK_LOG(cudaFree(s_workspace));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&s_workspace, needed));
     s_workspace_sz = needed;
 }
 
@@ -149,8 +147,8 @@ size_t cutlass_fmha_init_workspace(int max_batch, int max_seq, int n_heads, int 
 }
 
 void cutlass_fmha_free_workspace() {
-    if (s_lse_buf) { cudaFree(s_lse_buf); s_lse_buf = nullptr; s_lse_sz = 0; }
-    if (s_workspace) { cudaFree(s_workspace); s_workspace = nullptr; s_workspace_sz = 0; }
+    if (s_lse_buf) { IMP_CUDA_CHECK_LOG(cudaFree(s_lse_buf)); s_lse_buf = nullptr; s_lse_sz = 0; }
+    if (s_workspace) { IMP_CUDA_CHECK_LOG(cudaFree(s_workspace)); s_workspace = nullptr; s_workspace_sz = 0; }
 }
 
 // ============================================================================
@@ -302,7 +300,7 @@ bool cutlass_fmha_prefill(
         sp.inv_softcap = 1.0f / softcap;
         sp.scale       = scale;
         sp.inv_scale   = 1.0f / scale;
-        cudaMemcpyToSymbol(d_softcap_params, &sp, sizeof(SoftcapParams));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyToSymbol(d_softcap_params, &sp, sizeof(SoftcapParams)));
     }
 
     IMP_LOG_DEBUG("CUTLASS FMHA: B=%d Q=%d KV=%d nh=%d nkv=%d hd=%d causal=%d softcap=%.1f",
@@ -345,22 +343,3 @@ bool cutlass_fmha_prefill(
 }
 
 } // namespace imp
-
-#else  // !CUTLASS_ARCH_MMA_SM90_SUPPORTED && !IMP_USE_CUTLASS
-
-namespace imp {
-
-bool cutlass_fmha_prefill(
-    const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, float softcap, cudaStream_t stream)
-{
-    return false;  // CUTLASS FMHA not available
-}
-
-size_t cutlass_fmha_workspace_estimate(int, int, int, int) { return 0; }
-size_t cutlass_fmha_init_workspace(int, int, int, int) { return 0; }
-void cutlass_fmha_free_workspace() {}
-
-} // namespace imp
-
-#endif

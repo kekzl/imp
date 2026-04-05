@@ -153,19 +153,7 @@ uint64_t val_uint(const VGGUFValue& v) {
     }
 }
 
-double val_float(const VGGUFValue& v) {
-    switch (v.type) {
-        case VGGUFValueType::FLOAT32: case VGGUFValueType::FLOAT64:
-            return v.float_val;
-        case VGGUFValueType::UINT8: case VGGUFValueType::UINT16:
-        case VGGUFValueType::UINT32: case VGGUFValueType::UINT64:
-            return static_cast<double>(v.uint_val);
-        case VGGUFValueType::INT8: case VGGUFValueType::INT16:
-        case VGGUFValueType::INT32: case VGGUFValueType::INT64:
-            return static_cast<double>(v.int_val);
-        default: return 0.0;
-    }
-}
+
 
 // Upload raw tensor data to GPU as FP16.
 // Handles F32 -> FP16 conversion and F16 passthrough.
@@ -181,7 +169,7 @@ bool upload_tensor_fp16(const void* src, GGMLType type,
     gpu_allocs.push_back(d_ptr);
 
     if (type == GGMLType::F16) {
-        cudaMemcpy(d_ptr, src, fp16_bytes, cudaMemcpyHostToDevice);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_ptr, src, fp16_bytes, cudaMemcpyHostToDevice));
     } else if (type == GGMLType::F32) {
         // Convert F32 -> F16 on host, then upload
         const float* f32 = static_cast<const float*>(src);
@@ -189,7 +177,7 @@ bool upload_tensor_fp16(const void* src, GGMLType type,
         for (int64_t i = 0; i < n_elements; i++) {
             h_fp16[i] = __float2half(f32[i]);
         }
-        cudaMemcpy(d_ptr, h_fp16.data(), fp16_bytes, cudaMemcpyHostToDevice);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_ptr, h_fp16.data(), fp16_bytes, cudaMemcpyHostToDevice));
     } else if (type == GGMLType::BF16) {
         // Convert BF16 -> FP16 on host
         const uint16_t* bf16 = static_cast<const uint16_t*>(src);
@@ -201,7 +189,7 @@ bool upload_tensor_fp16(const void* src, GGMLType type,
             std::memcpy(&f, &bits, sizeof(float));
             h_fp16[i] = __float2half(f);
         }
-        cudaMemcpy(d_ptr, h_fp16.data(), fp16_bytes, cudaMemcpyHostToDevice);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_ptr, h_fp16.data(), fp16_bytes, cudaMemcpyHostToDevice));
     } else {
         IMP_LOG_ERROR("Vision: unsupported GGML type %u for tensor upload",
                       static_cast<uint32_t>(type));
@@ -328,11 +316,6 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
         auto it = metadata.find(key);
         return (it != metadata.end()) ? val_uint(it->second) : def;
     };
-    auto get_float = [&](const std::string& key, double def = 0.0) -> double {
-        auto it = metadata.find(key);
-        return (it != metadata.end()) ? val_float(it->second) : def;
-    };
-
     cfg.image_size  = static_cast<int>(get_uint("clip.vision.image_size", 896));
     cfg.patch_size  = static_cast<int>(get_uint("clip.vision.patch_size", 14));
     cfg.hidden_size = static_cast<int>(get_uint("clip.vision.embedding_length", 1152));

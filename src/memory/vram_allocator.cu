@@ -84,7 +84,7 @@ void VRAMAllocator::free(void* ptr) {
         }
     }
 
-    cudaFree(ptr);
+    IMP_CUDA_CHECK_LOG(cudaFree(ptr));
 
     if (bytes > 0) {
         allocated_.fetch_sub(bytes, std::memory_order_relaxed);

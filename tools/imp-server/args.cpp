@@ -26,6 +26,7 @@ void print_server_usage(const char* prog) {
         "  --decode-nvfp4        NVFP4 decode cache (additive: FP16 prefill + NVFP4 decode)\n"
         "  --decode-nvfp4-only   NVFP4 decode cache (replacement: saves VRAM, slower prefill)\n"
         "  --mxfp4-prefill       Use CUTLASS MXFP4 GEMM for prefill (sm_120, requires NVFP4)\n"
+        "  --dual-path-quant     FP8 attention + NVFP4 FFN (higher quality attention, faster FFN)\n"
         "  --no-nvfp4            Disable NVFP4 decode cache (override auto-detection)\n"
         "  --mmproj <path>       Path to vision encoder GGUF (mmproj) for multimodal\n"
         "  --models-dir <path>   Directory to scan for .gguf models (auto-load on select)\n"
@@ -37,9 +38,6 @@ void print_server_usage(const char* prog) {
         "  --self-spec-exit-layer <n>  Early-exit layer (-1 = n_layers/2)\n"
         "  --ngram-spec          N-gram speculative decoding (draft from token history)\n"
         "  --ngram-spec-k <n>    N-gram max draft tokens per step (default: 5)\n"
-        "  --preset <name|none>  Override auto-detected preset, or 'none' to disable\n"
-        "                        Use --preset list to show all available presets\n"
-        "  --presets-file <path> Custom presets.toml path\n"
         "  --max-concurrent <n>  Max simultaneous requests (default: 64, 0=unlimited)\n"
         "  --request-timeout <s> Per-request timeout in seconds (default: 300, 0=unlimited)\n"
         "  --rate-limit <n>      Max requests/minute per IP (default: 0=unlimited)\n"
@@ -96,6 +94,8 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.decode_nvfp4 = 2;
         } else if (std::strcmp(arg, "--mxfp4-prefill") == 0) {
             args.mxfp4_prefill = true;
+        } else if (std::strcmp(arg, "--dual-path-quant") == 0) {
+            args.dual_path_quant = true;
         } else if (std::strcmp(arg, "--no-nvfp4") == 0) {
             args.decode_nvfp4 = 0;
         } else if (std::strcmp(arg, "--min-kv-tokens") == 0 && i + 1 < argc) {
@@ -122,10 +122,6 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.ngram_spec = true;
         } else if (std::strcmp(arg, "--ngram-spec-k") == 0 && i + 1 < argc) {
             args.ngram_spec_k = std::atoi(argv[++i]);
-        } else if (std::strcmp(arg, "--preset") == 0 && i + 1 < argc) {
-            args.preset = argv[++i];
-        } else if (std::strcmp(arg, "--presets-file") == 0 && i + 1 < argc) {
-            args.presets_file = argv[++i];
         } else if (std::strcmp(arg, "--max-concurrent") == 0 && i + 1 < argc) {
             args.max_concurrent = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--request-timeout") == 0 && i + 1 < argc) {

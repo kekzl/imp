@@ -109,9 +109,7 @@ paged_attention_decode_turboquant_kernel(
     // Layout: [sketch_dim/8 bytes for Q sketch] [warp_max + warp_l + warp_o]
     const int sketch_bytes = sketch_dim / 8;
     uint8_t* q_sketch = reinterpret_cast<uint8_t*>(smem_tq);
-    float* warp_max_ptr = reinterpret_cast<float*>(q_sketch + ((sketch_bytes + 3) & ~3));  // align to 4
-    float* warp_l_ptr   = warp_max_ptr + NUM_WARPS;
-    float* warp_o_ptr   = warp_l_ptr + NUM_WARPS;
+    float* smem_red_base = reinterpret_cast<float*>(q_sketch + ((sketch_bytes + 3) & ~3));  // align to 4
 
     // Initialize Q sketch to zero
     for (int i = threadIdx.x; i < sketch_bytes; i += blockDim.x)
@@ -284,39 +282,11 @@ paged_attention_decode_turboquant_kernel(
     }
 
     // Cross-warp reduction
-    if (lane_id == 0) {
-        warp_max_ptr[warp_id] = m_w;
-        warp_l_ptr[warp_id]   = l_w;
-    }
-    #pragma unroll
-    for (int i = 0; i < ELEMS; i++)
-        warp_o_ptr[warp_id * HEAD_DIM + lane_offset + i] = o_reg[i];
-    __syncthreads();
-
-    if (warp_id == 0) {
-        float global_max = -FLT_MAX;
-        for (int w = 0; w < NUM_WARPS; w++)
-            global_max = fmaxf(global_max, warp_max_ptr[w]);
-
-        float global_l = 0.0f;
-        for (int w = 0; w < NUM_WARPS; w++)
-            global_l += expf(warp_max_ptr[w] - global_max) * warp_l_ptr[w];
-
-        #pragma unroll
-        for (int i = 0; i < ELEMS; i++) {
-            int d = lane_offset + i;
-            float o_val = 0.0f;
-            for (int w = 0; w < NUM_WARPS; w++) {
-                float weight = expf(warp_max_ptr[w] - global_max) * warp_l_ptr[w];
-                o_val += weight * warp_o_ptr[w * HEAD_DIM + d];
-            }
-            if (global_l > 0.0f) o_val /= global_l;
-
-            int out_idx = batch_idx * n_heads * HEAD_DIM
-                        + head_idx * HEAD_DIM + d;
-            O[out_idx] = __float2half(o_val);
-        }
-    }
+    crosswarp_reduce_and_write<HEAD_DIM>(
+        smem_red_base,
+        m_w, l_w, o_reg,
+        warp_id, lane_id, lane_offset,
+        O, batch_idx, n_heads, head_idx);
 }
 
 // ---------------------------------------------------------------------------
@@ -389,9 +359,7 @@ paged_attention_splitk_turboquant_kernel(
     extern __shared__ char smem_tq_sk[];
     const int sketch_bytes = sketch_dim / 8;
     uint8_t* q_sketch = reinterpret_cast<uint8_t*>(smem_tq_sk);
-    float* warp_max_ptr = reinterpret_cast<float*>(q_sketch + ((sketch_bytes + 3) & ~3));
-    float* warp_l_ptr   = warp_max_ptr + NUM_WARPS;
-    float* warp_o_ptr   = warp_l_ptr + NUM_WARPS;
+    float* smem_red_base = reinterpret_cast<float*>(q_sketch + ((sketch_bytes + 3) & ~3));
 
     for (int i = threadIdx.x; i < sketch_bytes; i += blockDim.x)
         q_sketch[i] = 0;
@@ -564,41 +532,13 @@ paged_attention_splitk_turboquant_kernel(
     }
 
     // Cross-warp reduction → write partial for split-K reduce
-    __syncthreads();
-    if (lane_id == 0) {
-        warp_max_ptr[warp_id] = m_w;
-        warp_l_ptr[warp_id]   = l_w;
-    }
-    #pragma unroll
-    for (int i = 0; i < ELEMS; i++)
-        warp_o_ptr[warp_id * HEAD_DIM + lane_offset + i] = o_reg[i];
-    __syncthreads();
-
-    if (warp_id == 0) {
-        float global_max = -FLT_MAX;
-        for (int w = 0; w < NUM_WARPS; w++)
-            global_max = fmaxf(global_max, warp_max_ptr[w]);
-        float global_l = 0.0f;
-        for (int w = 0; w < NUM_WARPS; w++)
-            global_l += expf(warp_max_ptr[w] - global_max) * warp_l_ptr[w];
-
-        int partial_idx = ((batch_idx * n_heads + head_idx) * num_splits + split_idx);
-        constexpr int partial_stride = 2 + HEAD_DIM;
-        float* out = partial_out + (int64_t)partial_idx * partial_stride;
-
-        if (lane_id == 0) { out[0] = global_max; out[1] = global_l; }
-
-        #pragma unroll
-        for (int i = 0; i < ELEMS; i++) {
-            int d = lane_offset + i;
-            float o_val = 0.0f;
-            for (int w = 0; w < NUM_WARPS; w++) {
-                float weight = expf(warp_max_ptr[w] - global_max) * warp_l_ptr[w];
-                o_val += weight * warp_o_ptr[w * HEAD_DIM + d];
-            }
-            out[2 + d] = o_val;
-        }
-    }
+    __syncthreads();  // guard smem reuse from Q sketch computation
+    crosswarp_reduce_splitk<HEAD_DIM>(
+        smem_red_base,
+        m_w, l_w, o_reg,
+        warp_id, lane_id, lane_offset,
+        partial_out, batch_idx, n_heads, head_idx,
+        num_splits, split_idx);
 }
 
 // ---------------------------------------------------------------------------
@@ -782,9 +722,7 @@ paged_attention_decode_turboquant_lite_kernel(
     extern __shared__ char smem_tql[];
     const int sketch_bytes = sketch_dim / 8;
     uint8_t* q_sketch = reinterpret_cast<uint8_t*>(smem_tql);
-    float* warp_max_ptr = reinterpret_cast<float*>(q_sketch + ((sketch_bytes + 3) & ~3));
-    float* warp_l_ptr   = warp_max_ptr + NUM_WARPS;
-    float* warp_o_ptr   = warp_l_ptr + NUM_WARPS;
+    float* smem_red_base = reinterpret_cast<float*>(q_sketch + ((sketch_bytes + 3) & ~3));
 
     for (int i = threadIdx.x; i < sketch_bytes; i += blockDim.x)
         q_sketch[i] = 0;
@@ -906,39 +844,11 @@ paged_attention_decode_turboquant_lite_kernel(
     }
 
     // Cross-warp reduction
-    if (lane_id == 0) {
-        warp_max_ptr[warp_id] = m_w;
-        warp_l_ptr[warp_id]   = l_w;
-    }
-    #pragma unroll
-    for (int i = 0; i < ELEMS; i++)
-        warp_o_ptr[warp_id * HEAD_DIM + lane_offset + i] = o_reg[i];
-    __syncthreads();
-
-    if (warp_id == 0) {
-        float global_max = -FLT_MAX;
-        for (int w = 0; w < NUM_WARPS; w++)
-            global_max = fmaxf(global_max, warp_max_ptr[w]);
-
-        float global_l = 0.0f;
-        for (int w = 0; w < NUM_WARPS; w++)
-            global_l += expf(warp_max_ptr[w] - global_max) * warp_l_ptr[w];
-
-        #pragma unroll
-        for (int i = 0; i < ELEMS; i++) {
-            int d = lane_offset + i;
-            float o_val = 0.0f;
-            for (int w = 0; w < NUM_WARPS; w++) {
-                float weight = expf(warp_max_ptr[w] - global_max) * warp_l_ptr[w];
-                o_val += weight * warp_o_ptr[w * HEAD_DIM + d];
-            }
-            if (global_l > 0.0f) o_val /= global_l;
-
-            int out_idx = batch_idx * n_heads * HEAD_DIM
-                        + head_idx * HEAD_DIM + d;
-            O[out_idx] = __float2half(o_val);
-        }
-    }
+    crosswarp_reduce_and_write<HEAD_DIM>(
+        smem_red_base,
+        m_w, l_w, o_reg,
+        warp_id, lane_id, lane_offset,
+        O, batch_idx, n_heads, head_idx);
 }
 
 // ---------------------------------------------------------------------------
@@ -1009,9 +919,7 @@ paged_attention_splitk_turboquant_lite_kernel(
     extern __shared__ char smem_tql_sk[];
     const int sketch_bytes = sketch_dim / 8;
     uint8_t* q_sketch = reinterpret_cast<uint8_t*>(smem_tql_sk);
-    float* warp_max_ptr = reinterpret_cast<float*>(q_sketch + ((sketch_bytes + 3) & ~3));
-    float* warp_l_ptr   = warp_max_ptr + NUM_WARPS;
-    float* warp_o_ptr   = warp_l_ptr + NUM_WARPS;
+    float* smem_red_base = reinterpret_cast<float*>(q_sketch + ((sketch_bytes + 3) & ~3));
 
     for (int i = threadIdx.x; i < sketch_bytes; i += blockDim.x)
         q_sketch[i] = 0;
@@ -1143,41 +1051,13 @@ paged_attention_splitk_turboquant_lite_kernel(
     }
 
     // Cross-warp reduction → write partial
-    __syncthreads();
-    if (lane_id == 0) {
-        warp_max_ptr[warp_id] = m_w;
-        warp_l_ptr[warp_id]   = l_w;
-    }
-    #pragma unroll
-    for (int i = 0; i < ELEMS; i++)
-        warp_o_ptr[warp_id * HEAD_DIM + lane_offset + i] = o_reg[i];
-    __syncthreads();
-
-    if (warp_id == 0) {
-        float global_max = -FLT_MAX;
-        for (int w = 0; w < NUM_WARPS; w++)
-            global_max = fmaxf(global_max, warp_max_ptr[w]);
-        float global_l = 0.0f;
-        for (int w = 0; w < NUM_WARPS; w++)
-            global_l += expf(warp_max_ptr[w] - global_max) * warp_l_ptr[w];
-
-        int partial_idx = ((batch_idx * n_heads + head_idx) * num_splits + split_idx);
-        constexpr int partial_stride = 2 + HEAD_DIM;
-        float* out = partial_out + (int64_t)partial_idx * partial_stride;
-
-        if (lane_id == 0) { out[0] = global_max; out[1] = global_l; }
-
-        #pragma unroll
-        for (int i = 0; i < ELEMS; i++) {
-            int d = lane_offset + i;
-            float o_val = 0.0f;
-            for (int w = 0; w < NUM_WARPS; w++) {
-                float weight = expf(warp_max_ptr[w] - global_max) * warp_l_ptr[w];
-                o_val += weight * warp_o_ptr[w * HEAD_DIM + d];
-            }
-            out[2 + d] = o_val;
-        }
-    }
+    __syncthreads();  // guard smem reuse from Q sketch computation
+    crosswarp_reduce_splitk<HEAD_DIM>(
+        smem_red_base,
+        m_w, l_w, o_reg,
+        warp_id, lane_id, lane_offset,
+        partial_out, batch_idx, n_heads, head_idx,
+        num_splits, split_idx);
 }
 
 // ---------------------------------------------------------------------------

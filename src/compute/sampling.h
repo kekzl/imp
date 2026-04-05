@@ -58,6 +58,17 @@ void apply_penalties(float* logits, int vocab_size,
                      float presence_penalty,
                      cudaStream_t stream = nullptr);
 
+// Variant for CUDA graph loop: reads token count from device pointer.
+// d_n_tokens points to a device int that changes each graph iteration.
+void apply_penalties_device_count(float* logits, int vocab_size,
+                                  const int32_t* token_ids,
+                                  const int* d_n_tokens,
+                                  int repeat_last_n,
+                                  float repetition_penalty,
+                                  float frequency_penalty,
+                                  float presence_penalty,
+                                  cudaStream_t stream = nullptr);
+
 // Apply min_p filtering to logits in-place: set logits below
 // (min_p * max_logit_prob) to -inf after softmax. Works on raw logits
 // by finding max and setting tokens whose exp(logit - max) < min_p to -inf.
@@ -110,6 +121,11 @@ struct LogprobResult {
 void compute_logprobs_cpu(const float* logits, int vocab_size,
                           int32_t sampled_token, int top_n,
                           LogprobResult* out);
+
+// Pre-allocate DRY penalty GPU buffers at engine init time to avoid
+// cudaStreamSynchronize on first use during inference.
+// max_seq_len: maximum sequence length (context + generation tokens).
+void sampling_preallocate_dry(int max_seq_len, cudaStream_t stream = nullptr);
 
 // Free persistent CUB sort scratch (call at engine shutdown).
 void sampling_cleanup();

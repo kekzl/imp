@@ -22,6 +22,7 @@ struct ServerArgs {
     int prefill_chunk_size = 0;
     int decode_nvfp4 = -1;     // -1=auto, 0=off, 1=additive, 2=NVFP4-only
     bool mxfp4_prefill = false;  // --mxfp4-prefill: CUTLASS MXFP4 GEMM for prefill
+    bool dual_path_quant = false; // --dual-path-quant: FP8 attention + NVFP4 FFN
     std::string mmproj_path;   // --mmproj: vision encoder GGUF
     std::string models_dir;    // --models-dir: scan for .gguf files
     std::string api_key;       // --api-key: require Bearer token auth
@@ -34,9 +35,6 @@ struct ServerArgs {
     bool ngram_spec = false;        // --ngram-spec
     int ngram_spec_k = 5;           // --ngram-spec-k
     int min_kv_tokens = 0;     // --min-kv-tokens: minimum KV cache capacity (0=auto)
-    std::string preset;        // --preset: named model preset (e.g. qwen3-32b)
-    std::string presets_file;  // --presets-file: custom presets.toml path
-
     // Server limits
     int max_concurrent = 64;   // --max-concurrent: max simultaneous requests (0=unlimited)
     int request_timeout = 300; // --request-timeout: per-request timeout in seconds (0=unlimited)

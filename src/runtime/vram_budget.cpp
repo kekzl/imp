@@ -155,7 +155,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
             break;
         }
         case VRAMBudget::FP8_PREFILL_NVFP4_DECODE: {
-            budget.fp8_cache_bytes = nvfp4_elems;
+            // NVFP4 decode cache is critical for performance — ensure it fits first.
+            // FP8 prefill cache is nice-to-have but not essential (fallback: dequant on-the-fly).
             budget.nvfp4_cache_bytes = nvfp4_estimate;
             double kv_fraction = (config.use_nvfp4_decode == 2) ? 0.1 : 0.8;
             budget.kv_cache_bytes = static_cast<size_t>(available * kv_fraction);
@@ -163,6 +164,14 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
                 ? static_cast<int>(budget.kv_cache_bytes / per_block_total) : needed_blocks;
             if (config.use_nvfp4_decode != 2)
                 budget.kv_max_blocks = std::max(budget.kv_max_blocks, needed_blocks);
+
+            // FP8 prefill: use remaining VRAM after NVFP4 decode + KV cache.
+            // Cap FP8 to what we actually need (nvfp4_elems = raw weight bytes).
+            size_t kv_actual = static_cast<size_t>(budget.kv_max_blocks) * per_block_total;
+            size_t nvfp4_actual = nvfp4_estimate + cutlass_sf_estimate;
+            size_t remaining_for_fp8 = (available > kv_actual + nvfp4_actual)
+                ? (available - kv_actual - nvfp4_actual) : 0;
+            budget.fp8_cache_bytes = std::min(nvfp4_elems, remaining_for_fp8);
             budget.nvfp4_second_pass = (config.use_nvfp4_decode == 2);
             break;
         }

@@ -27,8 +27,8 @@ TEST(EndToEndTest, VersionString) {
 
 TEST(EndToEndTest, ConfigDefault) {
     ImpConfig config = imp_config_default();
-    EXPECT_GE(config.max_batch_size, 1);
-    EXPECT_GE(config.max_seq_len, 1);
+    EXPECT_GE(config.max_batch_size, 0);  // 0 = auto-detect
+    EXPECT_GE(config.max_seq_len, 0);     // 0 = auto-detect
     EXPECT_EQ(config.compute_dtype, IMP_DTYPE_FP16);
     EXPECT_EQ(config.enable_pdl, 1);
     EXPECT_EQ(config.enable_cuda_graphs, 1);

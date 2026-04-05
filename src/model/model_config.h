@@ -70,6 +70,14 @@ struct ModelConfig {
     bool moe_sigmoid_gating = false;   // Nemotron-H uses sigmoid instead of softmax
     float attn_logit_softcap = 0.0f;   // Gemma-2/3: tanh(score/cap)*cap before softmax (0=disabled)
     float final_logit_softcap = 0.0f;  // Gemma-2/3: tanh(logit/cap)*cap on output logits (0=disabled)
+
+    // MXFP4 Hadamard rotation (set by converter via GGUF metadata)
+    int mxfp4_hadamard_attn = 0;  // block size for attention weights (0=disabled)
+    int mxfp4_hadamard_ffn = 0;   // block size for FFN weights (0=disabled)
+
+    // NVFP4 pre-quantized model (from Model Optimizer SafeTensors)
+    bool is_nvfp4_prequant = false;
+    int nvfp4_group_size = 16;
 };
 
 struct TransformerLayer {
@@ -126,6 +134,20 @@ struct TransformerLayer {
 
     // Router bias (Nemotron MoE)
     Tensor moe_router_bias;
+
+    // Pre-quantized NVFP4 weights (from Model Optimizer via SafeTensors).
+    // weight_scale: FP8 E4M3 micro-scales per group_size elements
+    // weight_scale_2: FP32 tensor-scale (single value per tensor)
+    // input_scale: FP32 activation scale (optional, for FP8 activations)
+    struct NvFP4PreQuantWeight {
+        Tensor weight;          // [N, K/2] packed FP4 E2M1 nibbles
+        Tensor weight_scale;    // [N, K/group_size] FP8 E4M3 micro-scales
+        Tensor weight_scale_2;  // [1] or scalar FP32 tensor-scale
+        Tensor input_scale;     // [1] optional FP32 activation scale
+        bool valid() const { return weight.data != nullptr && weight_scale.data != nullptr; }
+    };
+    NvFP4PreQuantWeight nvfp4_q, nvfp4_k, nvfp4_v, nvfp4_o;
+    NvFP4PreQuantWeight nvfp4_gate, nvfp4_up, nvfp4_down;
 
     // GPTQ quantized weights (temporary — dequantized to FP16 during upload)
     struct GPTQWeight {

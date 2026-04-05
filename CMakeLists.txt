@@ -25,8 +25,9 @@ add_compile_definitions(IMP_CUDA_13_1=1)
 #
 # Blackwell gencode flags:
 #   -gencode arch=compute_120f,code=sm_120    (SASS cubin with family features)
-#   -gencode arch=compute_120,code=compute_120 (PTX for forward compatibility)
-set(IMP_SM120_FLAGS "--generate-code=arch=compute_120f,code=sm_120 --generate-code=arch=compute_120,code=compute_120")
+# Note: generic compute_120 PTX removed — it lacks FP8 MMA (.kind::f8f6f4)
+# and all target GPUs (RTX 5090) run sm_120f SASS directly.
+set(IMP_SM120_FLAGS "--generate-code=arch=compute_120f,code=sm_120")
 
 option(IMP_NATIVE_SM120 "Build exclusively for sm_120f (RTX 5090)" OFF)
 if(IMP_NATIVE_SM120)
@@ -101,7 +102,6 @@ set(IMP_CORE_SOURCES
     src/core/allocator.cpp
     src/core/logging.cpp
     src/core/threading.cpp
-    src/core/toml_parser.cpp
 )
 
 set(IMP_MEMORY_SOURCES
@@ -137,6 +137,7 @@ set(IMP_QUANT_SOURCES
     src/quant/fp8_quant.cu
     src/quant/nvfp4_quant.cu
     src/quant/nvfp4_gemm.cu
+    src/quant/mxfp4_gemm.cu
     src/quant/turboquant.cu
     src/quant/dequant_gptq.cu
 )
@@ -194,6 +195,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/request.cpp
     src/runtime/batch.cpp
     src/runtime/engine.cpp
+    src/runtime/engine_speculative.cpp
     src/runtime/vision_pipeline.cpp
     src/runtime/constraint_manager.cpp
     src/runtime/vram_budget.cpp
@@ -211,7 +213,12 @@ set(IMP_GRAPH_SOURCES
     src/graph/executor.cu
     src/graph/executor_kernels.cu
     src/graph/executor_workspace.cu
+    src/graph/executor_pre_dequant.cu
+    src/graph/executor_workspace_config.cu
+    src/graph/executor_attention.cu
     src/graph/executor_forward.cu
+    src/graph/executor_ffn.cu
+    src/graph/executor_ssm_gdn.cu
     src/graph/executor_forward_moe.cu
     src/graph/expert_cache.cu
     src/graph/weight_cache_manager.cu
@@ -367,14 +374,20 @@ if(IMP_BUILD_TESTS)
         tests/test_tokenizer.cpp
         tests/test_chat_template.cpp
         tests/test_jinja.cpp
+        tests/test_executor_kernels.cu
+        tests/test_kv_cache_write.cu
+        tests/test_forward_pass.cu
+        tests/test_engine_integration.cu
         tests/test_hadamard.cu
         tests/test_attention_fmha_sm120.cu
+        tests/test_fmha_fp8.cu
         tests/test_attention_mxfp4.cu
         tests/test_softmax.cu
         tests/test_ssm.cu
         tests/test_json_constrain.cu
         tests/test_gdn.cu
         tests/test_gemm_dp4a.cu
+        tests/test_e2e_models.cpp
         tests/test_degeneration.cpp
         tests/test_tokenizer_compat.cpp
         tests/gguf_stub.cpp

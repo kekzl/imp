@@ -1,23 +1,20 @@
 #include "runtime/self_speculative.h"
 #include "runtime/speculative_common.h"
 #include "compute/sampling.h"
+#include "core/logging.h"
 #include <cstring>
 
 namespace imp {
 
-static void check_cuda(cudaError_t err, const char* msg) {
-    spec_check_cuda(err, msg);
-}
-
 SelfSpeculativeDecoder::~SelfSpeculativeDecoder() {
-    if (d_tokens_) cudaFree(d_tokens_);
-    if (d_positions_) cudaFree(d_positions_);
-    if (d_block_table_) cudaFree(d_block_table_);
-    if (d_ctx_len_) cudaFree(d_ctx_len_);
-    if (d_draft_scratch_) cudaFree(d_draft_scratch_);
-    if (h_draft_results_) cudaFreeHost(h_draft_results_);
-    if (d_position_array_) cudaFree(d_position_array_);
-    if (d_ctx_len_array_) cudaFree(d_ctx_len_array_);
+    if (d_tokens_) IMP_CUDA_CHECK_LOG(cudaFree(d_tokens_));
+    if (d_positions_) IMP_CUDA_CHECK_LOG(cudaFree(d_positions_));
+    if (d_block_table_) IMP_CUDA_CHECK_LOG(cudaFree(d_block_table_));
+    if (d_ctx_len_) IMP_CUDA_CHECK_LOG(cudaFree(d_ctx_len_));
+    if (d_draft_scratch_) IMP_CUDA_CHECK_LOG(cudaFree(d_draft_scratch_));
+    if (h_draft_results_) IMP_CUDA_CHECK_LOG(cudaFreeHost(h_draft_results_));
+    if (d_position_array_) IMP_CUDA_CHECK_LOG(cudaFree(d_position_array_));
+    if (d_ctx_len_array_) IMP_CUDA_CHECK_LOG(cudaFree(d_ctx_len_array_));
 }
 
 bool SelfSpeculativeDecoder::init(GraphExecutor* executor,
@@ -57,22 +54,21 @@ bool SelfSpeculativeDecoder::init(GraphExecutor* executor,
     // Pre-allocate device buffers for max K+1 tokens
     int max_n = config_.spec_k + 1;
     int K = config_.spec_k;
-    check_cuda(cudaMalloc(&d_tokens_, max_n * sizeof(int32_t)), "malloc d_tokens");
-    check_cuda(cudaMalloc(&d_positions_, max_n * sizeof(int)), "malloc d_positions");
-    check_cuda(cudaMalloc(&d_ctx_len_, max_n * sizeof(int)), "malloc d_ctx_len");
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tokens_, max_n * sizeof(int32_t)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_positions_, max_n * sizeof(int)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_ctx_len_, max_n * sizeof(int)));
 
     // Argmax scratch buffer (needs ARGMAX_SCRATCH_BYTES for multi-block reduction)
-    check_cuda(cudaMalloc(&d_draft_scratch_, ARGMAX_SCRATCH_BYTES), "malloc d_draft_scratch");
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_draft_scratch_, ARGMAX_SCRATCH_BYTES));
 
     // Mapped pinned memory for K draft tokens (zero-copy readback after graph)
-    check_cuda(cudaHostAlloc(&h_draft_results_, K * sizeof(int32_t),
-               cudaHostAllocMapped), "hostalloc draft_results");
-    check_cuda(cudaHostGetDevicePointer(&d_draft_results_, h_draft_results_, 0),
-               "getdevptr draft_results");
+    IMP_CUDA_CHECK_LOG(cudaHostAlloc(&h_draft_results_, K * sizeof(int32_t),
+               cudaHostAllocMapped));
+    IMP_CUDA_CHECK_LOG(cudaHostGetDevicePointer(&d_draft_results_, h_draft_results_, 0));
 
     // Pre-computed position/ctx_len arrays for K iterations (uploaded before graph)
-    check_cuda(cudaMalloc(&d_position_array_, K * sizeof(int)), "malloc d_position_array");
-    check_cuda(cudaMalloc(&d_ctx_len_array_, K * sizeof(int)), "malloc d_ctx_len_array");
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_position_array_, K * sizeof(int)));
+    IMP_CUDA_CHECK_LOG(cudaMalloc(&d_ctx_len_array_, K * sizeof(int)));
 
     initialized_ = true;
     if (config.layer_skip) {
@@ -92,15 +88,13 @@ void SelfSpeculativeDecoder::upload_block_table(int seq_id, cudaStream_t stream)
     const auto& bt = kv_manager_->block_table(seq_id);
     int n_blocks = static_cast<int>(bt.size());
     if (n_blocks > d_block_table_cap_) {
-        if (d_block_table_) cudaFree(d_block_table_);
+        if (d_block_table_) IMP_CUDA_CHECK_LOG(cudaFree(d_block_table_));
         d_block_table_cap_ = n_blocks + 16;
-        check_cuda(cudaMalloc(&d_block_table_, d_block_table_cap_ * sizeof(int)),
-                   "malloc d_block_table");
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_table_, d_block_table_cap_ * sizeof(int)));
         draft_graph_.invalidate();  // device pointer changed
     }
-    check_cuda(cudaMemcpyAsync(d_block_table_, bt.data(),
-               n_blocks * sizeof(int), cudaMemcpyHostToDevice, stream),
-               "memcpy block_table");
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_table_, bt.data(),
+               n_blocks * sizeof(int), cudaMemcpyHostToDevice, stream));
 }
 
 // ─── Helper: upload replicated block table for batched verify ────────────────
@@ -112,10 +106,9 @@ void SelfSpeculativeDecoder::upload_block_table_replicated(
 
     int total_entries = n_copies * max_blocks_per_seq;
     if (total_entries > d_block_table_cap_) {
-        if (d_block_table_) cudaFree(d_block_table_);
+        if (d_block_table_) IMP_CUDA_CHECK_LOG(cudaFree(d_block_table_));
         d_block_table_cap_ = total_entries + 16;
-        check_cuda(cudaMalloc(&d_block_table_, d_block_table_cap_ * sizeof(int)),
-                   "malloc d_block_table replicated");
+        IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_table_, d_block_table_cap_ * sizeof(int)));
         draft_graph_.invalidate();  // device pointer changed
     }
 
@@ -126,9 +119,8 @@ void SelfSpeculativeDecoder::upload_block_table_replicated(
             replicated[c * max_blocks_per_seq + b] = bt[b];
         }
     }
-    check_cuda(cudaMemcpyAsync(d_block_table_, replicated.data(),
-               total_entries * sizeof(int), cudaMemcpyHostToDevice, stream),
-               "memcpy block_table replicated");
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_table_, replicated.data(),
+               total_entries * sizeof(int), cudaMemcpyHostToDevice, stream));
 }
 
 // ─── Helper: ensure KV blocks ────────────────────────────────────────────────
@@ -172,8 +164,8 @@ std::vector<int32_t> SelfSpeculativeDecoder::draft_tokens(
     }
 
     // Upload initial token BEFORE the graph
-    check_cuda(cudaMemcpyAsync(d_tokens_, &last_token, sizeof(int32_t),
-               cudaMemcpyHostToDevice, stream), "memcpy token");
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_tokens_, &last_token, sizeof(int32_t),
+               cudaMemcpyHostToDevice, stream));
 
     // Upload pre-computed position and ctx_len arrays for K iterations
     {
@@ -182,12 +174,10 @@ std::vector<int32_t> SelfSpeculativeDecoder::draft_tokens(
             positions[k] = position + k;
             ctx_lens[k] = position + k + 1;
         }
-        check_cuda(cudaMemcpyAsync(d_position_array_, positions.data(),
-                   K * sizeof(int), cudaMemcpyHostToDevice, stream),
-                   "memcpy position_array");
-        check_cuda(cudaMemcpyAsync(d_ctx_len_array_, ctx_lens.data(),
-                   K * sizeof(int), cudaMemcpyHostToDevice, stream),
-                   "memcpy ctx_len_array");
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_position_array_, positions.data(),
+                   K * sizeof(int), cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_ctx_len_array_, ctx_lens.data(),
+                   K * sizeof(int), cudaMemcpyHostToDevice, stream));
     }
 
     // Build a fixed InferenceState for graph capture/replay.
@@ -248,10 +238,10 @@ std::vector<int32_t> SelfSpeculativeDecoder::draft_tokens(
 
     // Single sync after all K iterations — read all draft tokens
     cudaEvent_t draft_done;
-    cudaEventCreateWithFlags(&draft_done, cudaEventDisableTiming);
-    cudaEventRecord(draft_done, stream);
+    IMP_CUDA_CHECK_LOG(cudaEventCreateWithFlags(&draft_done, cudaEventDisableTiming));
+    IMP_CUDA_CHECK_LOG(cudaEventRecord(draft_done, stream));
     while (cudaEventQuery(draft_done) == cudaErrorNotReady) {}
-    cudaEventDestroy(draft_done);
+    IMP_CUDA_CHECK_LOG(cudaEventDestroy(draft_done));
 
     std::vector<int32_t> drafts(K);
     for (int k = 0; k < K; ++k)
@@ -267,6 +257,11 @@ SelfSpeculativeDecoder::verify(const std::vector<int32_t>& draft,
                                 int32_t last_token, int position, int seq_id,
                                 float temperature, float top_p_val, int top_k_val,
                                 int seed, cudaStream_t stream) {
+    (void)temperature;
+    (void)top_p_val;
+    (void)top_k_val;
+    (void)seed;
+
     VerifyResult result;
     const int K = static_cast<int>(draft.size());
     if (K == 0) return result;
@@ -301,18 +296,15 @@ SelfSpeculativeDecoder::verify(const std::vector<int32_t>& draft,
         ctx_lens[i] = position + i + 1;
 
     // Upload to device
-    check_cuda(cudaMemcpyAsync(d_tokens_, verify_tokens.data(),
-               n_verify * sizeof(int32_t), cudaMemcpyHostToDevice, stream),
-               "verify memcpy tokens");
-    check_cuda(cudaMemcpyAsync(d_positions_, positions.data(),
-               n_verify * sizeof(int), cudaMemcpyHostToDevice, stream),
-               "verify memcpy positions");
-    check_cuda(cudaMemcpyAsync(d_ctx_len_, ctx_lens.data(),
-               n_verify * sizeof(int), cudaMemcpyHostToDevice, stream),
-               "verify memcpy ctx_lens");
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_tokens_, verify_tokens.data(),
+               n_verify * sizeof(int32_t), cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_positions_, positions.data(),
+               n_verify * sizeof(int), cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_ctx_len_, ctx_lens.data(),
+               n_verify * sizeof(int), cudaMemcpyHostToDevice, stream));
 
     // Resize workspace for K+1 tokens BEFORE the batched forward
-    executor_->resize_workspace(n_verify, stream);
+    (void)executor_->resize_workspace(n_verify, stream);
 
     // Build inference state for batched decode
     InferenceState state;
@@ -335,7 +327,7 @@ SelfSpeculativeDecoder::verify(const std::vector<int32_t>& draft,
     std::vector<int32_t> targets = executor_->forward_batch(state, stream);
 
     // Resize workspace back to 1 for subsequent draft passes
-    executor_->resize_workspace(1, stream);
+    (void)executor_->resize_workspace(1, stream);
 
     // Acceptance: compare target[i] with draft[i]
     int n_accepted = 0;
@@ -368,7 +360,7 @@ std::vector<int32_t> SelfSpeculativeDecoder::step(
     }
 
     // Resize workspace for single-token draft passes
-    executor_->resize_workspace(1, stream);
+    (void)executor_->resize_workspace(1, stream);
 
     // 1. Draft K tokens with layer skip/early exit
     std::vector<int32_t> draft = draft_tokens(last_token, position, seq_id, stream);

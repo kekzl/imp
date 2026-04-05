@@ -778,5 +778,155 @@ TEST(FP8KVCache, PagedAttentionDecodeFP8vsFP16) {
     cudaFree(d_o_fp8);
 }
 
+// ============================================================================
+// Test: FP8 Split-K decode HD=256 (Gemma-3 config: GQA, head_dim=256)
+// ============================================================================
+//
+// Exercises the FP8 pipelined Split-K kernel with ELEMS=8 (HD=256).
+// Prior to fix, cp.async only copied 4 bytes per thread instead of 8,
+// corrupting half the K/V data in shared memory.
+// ============================================================================
+
+TEST(FP8KVCache, SplitKHD256) {
+    SKIP_IF_NO_CUDA();
+
+    // Gemma-3-like config: GQA with HD=256
+    const int batch_size = 1;
+    const int n_heads = 16;
+    const int n_kv_heads = 8;
+    const int head_dim = 256;
+    const int ctx_len = 128;  // enough for split-K
+    const int block_size = kKVBlockSize;  // 16
+    const int num_blocks = (ctx_len + block_size - 1) / block_size;
+    const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
+
+    const int q_elems = batch_size * 1 * n_heads * head_dim;
+    std::vector<half> h_q(q_elems);
+    srand(123);
+    for (int i = 0; i < q_elems; i++)
+        h_q[i] = __float2half(((rand() % 200) - 100) / 100.0f);
+    void* d_q = nullptr;
+    cudaMalloc(&d_q, q_elems * sizeof(half));
+    cudaMemcpy(d_q, h_q.data(), q_elems * sizeof(half), cudaMemcpyHostToDevice);
+
+    // KV cache [num_blocks, block_size, n_kv_heads, head_dim]
+    const int kv_elems_per_block = block_size * n_kv_heads * head_dim;
+    const int total_kv_elems = num_blocks * kv_elems_per_block;
+    std::vector<half> h_kv(total_kv_elems);
+    for (int i = 0; i < total_kv_elems; i++)
+        h_kv[i] = __float2half(0.5f * ((rand() % 200) - 100) / 100.0f);
+
+    void* d_k_fp16 = nullptr;
+    void* d_v_fp16 = nullptr;
+    cudaMalloc(&d_k_fp16, total_kv_elems * sizeof(half));
+    cudaMalloc(&d_v_fp16, total_kv_elems * sizeof(half));
+    cudaMemcpy(d_k_fp16, h_kv.data(), total_kv_elems * sizeof(half), cudaMemcpyHostToDevice);
+    for (int i = 0; i < total_kv_elems; i++)
+        h_kv[i] = __float2half(0.5f * ((rand() % 200) - 100) / 100.0f);
+    cudaMemcpy(d_v_fp16, h_kv.data(), total_kv_elems * sizeof(half), cudaMemcpyHostToDevice);
+
+    // Block tables: identity mapping
+    std::vector<int> h_bt(num_blocks);
+    std::iota(h_bt.begin(), h_bt.end(), 0);
+    int* d_bt = nullptr;
+    cudaMalloc(&d_bt, num_blocks * sizeof(int));
+    cudaMemcpy(d_bt, h_bt.data(), num_blocks * sizeof(int), cudaMemcpyHostToDevice);
+
+    int* d_ctx = nullptr;
+    cudaMalloc(&d_ctx, sizeof(int));
+    cudaMemcpy(d_ctx, &ctx_len, sizeof(int), cudaMemcpyHostToDevice);
+
+    // Quantize KV to FP8
+    int64_t q_shape[4] = {batch_size, 1, n_heads, head_dim};
+    int64_t kv_shape[4] = {num_blocks, block_size, n_kv_heads, head_dim};
+    Tensor t_k16(d_k_fp16, DType::FP16, 4, kv_shape, true);
+    Tensor t_v16(d_v_fp16, DType::FP16, 4, kv_shape, true);
+
+    float k_scale = calibrate_fp8_scale(t_k16, nullptr);
+    cudaDeviceSynchronize();
+    float v_scale = calibrate_fp8_scale(t_v16, nullptr);
+    cudaDeviceSynchronize();
+    float kv_scale = fmaxf(k_scale, v_scale);
+    if (kv_scale <= 0.0f) kv_scale = 1.0f;
+
+    void* d_k_fp8 = nullptr;
+    void* d_v_fp8 = nullptr;
+    cudaMalloc(&d_k_fp8, total_kv_elems);
+    cudaMalloc(&d_v_fp8, total_kv_elems);
+    quantize_fp16_to_fp8_e4m3_scaled(d_k_fp16, d_k_fp8, total_kv_elems, kv_scale, nullptr);
+    quantize_fp16_to_fp8_e4m3_scaled(d_v_fp16, d_v_fp8, total_kv_elems, kv_scale, nullptr);
+    cudaDeviceSynchronize();
+
+    Tensor t_q(d_q, DType::FP16, 4, q_shape, true);
+    Tensor t_k8(d_k_fp8, DType::FP8_E4M3, 4, kv_shape, true);
+    Tensor t_v8(d_v_fp8, DType::FP8_E4M3, 4, kv_shape, true);
+
+    // Output buffers
+    void* d_o_nosplit = nullptr;
+    void* d_o_splitk = nullptr;
+    cudaMalloc(&d_o_nosplit, q_elems * sizeof(half));
+    cudaMalloc(&d_o_splitk, q_elems * sizeof(half));
+    cudaMemset(d_o_nosplit, 0, q_elems * sizeof(half));
+    cudaMemset(d_o_splitk, 0, q_elems * sizeof(half));
+
+    // Run FP8 decode WITHOUT Split-K (reference — uses non-pipelined kernel)
+    Tensor t_o_nosplit(d_o_nosplit, DType::FP16, 4, q_shape, true);
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_nosplit,
+                               d_bt, d_ctx, block_size, scale, kv_scale,
+                               ctx_len, 0, 0.0f, nullptr);
+    cudaDeviceSynchronize();
+
+    // Run FP8 decode WITH Split-K (exercises pipelined kernel on sm_90+)
+    const int max_splits = 64;
+    size_t scratch_size = (size_t)batch_size * n_heads * max_splits
+                          * (2 + head_dim) * sizeof(float);
+    void* d_scratch = nullptr;
+    cudaMalloc(&d_scratch, scratch_size);
+
+    Tensor t_o_splitk(d_o_splitk, DType::FP16, 4, q_shape, true);
+    paged_attention_set_splitk_scratch(d_scratch, scratch_size);
+    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_splitk,
+                               d_bt, d_ctx, block_size, scale, kv_scale,
+                               ctx_len, 0, 0.0f, nullptr);
+    cudaDeviceSynchronize();
+
+    // Check for CUDA errors (would catch invalid argument from bad kernel launch)
+    cudaError_t err = cudaGetLastError();
+    ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err);
+
+    // Compare Split-K vs non-Split-K
+    std::vector<half> h_o_nosplit(q_elems);
+    std::vector<half> h_o_splitk(q_elems);
+    cudaMemcpy(h_o_nosplit.data(), d_o_nosplit, q_elems * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_o_splitk.data(), d_o_splitk, q_elems * sizeof(half), cudaMemcpyDeviceToHost);
+
+    float max_rel_err = 0.0f;
+    int mismatches = 0;
+    for (int i = 0; i < q_elems; i++) {
+        float ref = __half2float(h_o_nosplit[i]);
+        float test = __half2float(h_o_splitk[i]);
+        float denom = std::max(std::abs(ref), 1e-6f);
+        float rel_err = std::abs(test - ref) / denom;
+        max_rel_err = std::max(max_rel_err, rel_err);
+        if (rel_err > 0.05f) mismatches++;
+    }
+    EXPECT_EQ(mismatches, 0) << "HD=256 FP8 Split-K vs non-Split-K: "
+        << mismatches << "/" << q_elems << " mismatches, max_rel_err=" << max_rel_err;
+
+    // Cleanup
+    paged_attention_set_splitk_scratch(nullptr, 0);
+    cudaFree(d_scratch);
+    cudaFree(d_q);
+    cudaFree(d_k_fp16);
+    cudaFree(d_v_fp16);
+    cudaFree(d_k_fp8);
+    cudaFree(d_v_fp8);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
+    cudaFree(d_o_nosplit);
+    cudaFree(d_o_splitk);
+}
+
 } // namespace
 } // namespace imp

@@ -41,6 +41,14 @@ struct HFConfigLoader {
     };
     static bool load_gptq_config(const std::string& model_dir, GPTQConfig& cfg);
 
+    // NVFP4 quantization config from hf_quant_config.json (Model Optimizer)
+    struct NvFP4Config {
+        int group_size = 16;                       // micro-scale group (default: 16 for NVFP4)
+        std::string kv_cache_quant_algo;           // "FP8" or empty
+        std::vector<std::string> exclude_modules;  // e.g. ["lm_head"]
+    };
+    static bool load_nvfp4_config(const std::string& model_dir, NvFP4Config& cfg);
+
     // Map HF architecture class name to imp ModelArch.
     static ModelArch map_architecture(const std::string& hf_arch);
 };

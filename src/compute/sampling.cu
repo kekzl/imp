@@ -196,11 +196,11 @@ int32_t sample_greedy(const Tensor& logits, cudaStream_t stream) {
     argmax_kernel<<<1, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, d_result);
 
     int32_t h_result = 0;
-    cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
-    cudaFree(d_result);
+    IMP_CUDA_CHECK_LOG(cudaFree(d_result));
     return h_result;
 }
 
@@ -222,8 +222,8 @@ int32_t sample_greedy(const Tensor& logits, int32_t* d_result,
         partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
 
     int32_t h_result = 0;
-    cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
     return h_result;
@@ -587,6 +587,21 @@ __global__ void softmax_to_pairs_kernel(
     d_values[idx] = idx;
 }
 
+// Kernel: compute softmax probabilities reading max/sum from device memory.
+// d_max_sum[0] = global_max, d_max_sum[1] = sum. Avoids 2 D2H syncs.
+__global__ void softmax_to_pairs_device_kernel(
+        const float* __restrict__ logits, int vocab_size,
+        float inv_temperature, const float* __restrict__ d_max_sum,
+        float* __restrict__ d_keys, int32_t* __restrict__ d_values) {
+    float global_max = d_max_sum[0];
+    float inv_sum = 1.0f / d_max_sum[1];
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= vocab_size) return;
+    float prob = expf((logits[idx] - global_max) * inv_temperature) * inv_sum;
+    d_keys[idx] = prob;
+    d_values[idx] = idx;
+}
+
 // Kernel: find global max of logits (Phase 1)
 __global__ void softmax_max_kernel(
         const float* __restrict__ logits, int vocab_size,
@@ -619,6 +634,32 @@ __global__ void softmax_sum_kernel(
         float* __restrict__ d_sum) {
     __shared__ float s_sum[BLOCK_SIZE / WARP_SIZE];
 
+    float local_sum = 0.0f;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < vocab_size;
+         i += blockDim.x * gridDim.x) {
+        local_sum += expf((logits[i] - global_max) * inv_temperature);
+    }
+    local_sum = warp_reduce_sum(local_sum);
+    int warp_id = threadIdx.x / WARP_SIZE;
+    int lane_id = threadIdx.x % WARP_SIZE;
+    if (lane_id == 0) s_sum[warp_id] = local_sum;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float sm = 0.0f;
+        for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; w++) sm += s_sum[w];
+        atomicAdd(d_sum, sm);
+    }
+}
+
+// Kernel: compute sum of exp(logits - max) reading max from device memory.
+// Avoids D2H sync between max and sum phases.
+__global__ void softmax_sum_device_max_kernel(
+        const float* __restrict__ logits, int vocab_size,
+        float inv_temperature, const float* __restrict__ d_max,
+        float* __restrict__ d_sum) {
+    __shared__ float s_sum[BLOCK_SIZE / WARP_SIZE];
+
+    float global_max = *d_max;
     float local_sum = 0.0f;
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < vocab_size;
          i += blockDim.x * gridDim.x) {
@@ -706,12 +747,12 @@ struct CubSortScratch {
     }
 
     void free() {
-        if (d_keys_in)  { cudaFree(d_keys_in);  d_keys_in  = nullptr; }
-        if (d_keys_out) { cudaFree(d_keys_out); d_keys_out = nullptr; }
-        if (d_vals_in)  { cudaFree(d_vals_in);  d_vals_in  = nullptr; }
-        if (d_vals_out) { cudaFree(d_vals_out); d_vals_out = nullptr; }
-        if (d_max_sum)  { cudaFree(d_max_sum);  d_max_sum  = nullptr; }
-        if (d_temp)     { cudaFree(d_temp);     d_temp     = nullptr; }
+        if (d_keys_in)  { IMP_CUDA_CHECK_LOG(cudaFree(d_keys_in));  d_keys_in  = nullptr; }
+        if (d_keys_out) { IMP_CUDA_CHECK_LOG(cudaFree(d_keys_out)); d_keys_out = nullptr; }
+        if (d_vals_in)  { IMP_CUDA_CHECK_LOG(cudaFree(d_vals_in));  d_vals_in  = nullptr; }
+        if (d_vals_out) { IMP_CUDA_CHECK_LOG(cudaFree(d_vals_out)); d_vals_out = nullptr; }
+        if (d_max_sum)  { IMP_CUDA_CHECK_LOG(cudaFree(d_max_sum));  d_max_sum  = nullptr; }
+        if (d_temp)     { IMP_CUDA_CHECK_LOG(cudaFree(d_temp));     d_temp     = nullptr; }
         temp_bytes = 0;
         capacity = 0;
     }
@@ -731,44 +772,32 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size,
 
     auto& sc = s_cub_scratch;
 
-    // Step 1: Compute softmax stats (max, then sum) using two separate kernels
-    // to avoid a race between the max reduction and the sum computation.
+    // Step 1: Compute softmax stats (max, then sum) entirely on device.
+    // All intermediate values stay in d_max_sum — no D2H syncs needed.
+    // d_max_sum[0] = global max, d_max_sum[1] = sum of exp.
     float neg_inf_val = -FLT_MAX;
     int neg_inf_bits;
     std::memcpy(&neg_inf_bits, &neg_inf_val, sizeof(int));
-    cudaMemcpyAsync(sc.d_max_sum, &neg_inf_bits, sizeof(int),
-                    cudaMemcpyHostToDevice, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(sc.d_max_sum, &neg_inf_bits, sizeof(int),
+                    cudaMemcpyHostToDevice, stream));
     float zero = 0.0f;
-    cudaMemcpyAsync(sc.d_max_sum + 1, &zero, sizeof(float),
-                    cudaMemcpyHostToDevice, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(sc.d_max_sum + 1, &zero, sizeof(float),
+                    cudaMemcpyHostToDevice, stream));
 
     int stats_blocks = std::min((vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE, 128);
 
-    // Phase 1: global max
+    // Phase 1: global max (result in d_max_sum[0])
     softmax_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(
         d_logits, vocab_size, sc.d_max_sum);
 
-    // Read back max (need sync before phase 2)
-    float gmax;
-    cudaMemcpyAsync(&gmax, sc.d_max_sum, sizeof(float),
-                    cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
+    // Phase 2: sum of exp — reads max from device memory (no D2H sync)
+    softmax_sum_device_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(
+        d_logits, vocab_size, inv_temperature, sc.d_max_sum, sc.d_max_sum + 1);
 
-    // Phase 2: sum of exp (uses host-side gmax as kernel arg — no race)
-    softmax_sum_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, inv_temperature, gmax, sc.d_max_sum + 1);
-
-    float h_sum;
-    cudaMemcpyAsync(&h_sum, sc.d_max_sum + 1, sizeof(float),
-                    cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
-
-    float inv_sum = 1.0f / h_sum;
-
-    // Step 2: Compute probabilities into key/value arrays
+    // Step 2: Compute probabilities reading max/sum from device memory (no D2H sync)
     int pair_blocks = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    softmax_to_pairs_kernel<<<pair_blocks, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, inv_temperature, gmax, inv_sum,
+    softmax_to_pairs_device_kernel<<<pair_blocks, BLOCK_SIZE, 0, stream>>>(
+        d_logits, vocab_size, inv_temperature, sc.d_max_sum,
         sc.d_keys_in, sc.d_vals_in);
 
     // Step 3: CUB radix sort descending
@@ -784,8 +813,8 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size,
         top_k, top_p, seed, d_result);
 
     int32_t h_result = 0;
-    cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
     return h_result;
@@ -803,7 +832,7 @@ static int32_t sample_topk_topp_impl(
         int32_t result = sample_topk_topp_cub(
             d_logits, vocab_size, top_k, top_p, inv_temperature, seed,
             d_result, stream);
-        if (owns_result) cudaFree(d_result);
+        if (owns_result) IMP_CUDA_CHECK_LOG(cudaFree(d_result));
         return result;
     }
 
@@ -813,11 +842,11 @@ static int32_t sample_topk_topp_impl(
         d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result);
 
     int32_t h_result = 0;
-    cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
-    if (owns_result) cudaFree(d_result);
+    if (owns_result) IMP_CUDA_CHECK_LOG(cudaFree(d_result));
     return h_result;
 }
 
@@ -877,8 +906,8 @@ void sample_greedy_device(const Tensor& logits, int32_t* d_result,
         partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
 
     // Async copy to mapped pinned memory — no sync needed.
-    cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream));
 }
 
 void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p,
@@ -902,8 +931,8 @@ void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p,
         d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result);
 
     // Async copy to mapped pinned memory — no sync needed.
-    cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream));
 }
 
 // ===========================================================================
@@ -952,6 +981,50 @@ __global__ void apply_penalties_kernel(
     logits[idx] = logit;
 }
 
+// Variant: reads n_tokens from a device pointer (for CUDA graph loop where count changes).
+// repeat_last_n: when > 0, only scan the last N tokens in the history.
+__global__ void apply_penalties_device_count_kernel(
+        float* __restrict__ logits,
+        const int32_t* __restrict__ token_ids,
+        const int* __restrict__ d_n_tokens,       // [1] device-side token count
+        int vocab_size,
+        int repeat_last_n,
+        float repetition_penalty,
+        float frequency_penalty,
+        float presence_penalty) {
+    int n_tokens = *d_n_tokens;
+    if (n_tokens <= 0) return;
+
+    // Apply repeat_last_n window
+    int start = 0;
+    if (repeat_last_n > 0 && n_tokens > repeat_last_n) {
+        start = n_tokens - repeat_last_n;
+    }
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= vocab_size) return;
+
+    int count = 0;
+    for (int i = start; i < n_tokens; i++) {
+        if (token_ids[i] == idx) count++;
+    }
+    if (count == 0) return;
+
+    float logit = logits[idx];
+
+    if (repetition_penalty != 1.0f) {
+        if (logit > 0.0f)
+            logit /= repetition_penalty;
+        else
+            logit *= repetition_penalty;
+    }
+
+    logit -= frequency_penalty * static_cast<float>(count);
+    logit -= presence_penalty;
+
+    logits[idx] = logit;
+}
+
 // Force a single token: set all logits to -inf except the given token.
 // Used by think-budget to force </think> generation via logit manipulation.
 __global__ void force_single_token_kernel(float* logits, int vocab_size, int32_t keep_token) {
@@ -978,6 +1051,23 @@ void apply_penalties(float* logits, int vocab_size,
     int blocks = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
     apply_penalties_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
         logits, token_ids, n_tokens, vocab_size,
+        repetition_penalty, frequency_penalty, presence_penalty);
+}
+
+void apply_penalties_device_count(float* logits, int vocab_size,
+                                  const int32_t* token_ids,
+                                  const int* d_n_tokens,
+                                  int repeat_last_n,
+                                  float repetition_penalty,
+                                  float frequency_penalty,
+                                  float presence_penalty,
+                                  cudaStream_t stream) {
+    if (repetition_penalty == 1.0f && frequency_penalty == 0.0f && presence_penalty == 0.0f)
+        return;
+
+    int blocks = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    apply_penalties_device_count_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
+        logits, token_ids, d_n_tokens, vocab_size, repeat_last_n,
         repetition_penalty, frequency_penalty, presence_penalty);
 }
 
@@ -1037,6 +1127,14 @@ void apply_min_p(float* logits, int vocab_size, float min_p,
 // ===========================================================================
 // DRY (Don't Repeat Yourself) repetition penalty
 // ===========================================================================
+
+// File-scope persistent GPU buffers for DRY penalty application.
+// Promoted from function-local statics so sampling_preallocate_dry() can
+// pre-allocate them at engine init time and avoid cudaStreamSynchronize on
+// first use during inference.
+static int32_t* s_dry_tokens_buf = nullptr;
+static float*   s_dry_values_buf = nullptr;
+static size_t   s_dry_buf_cap    = 0;
 
 // Sparse penalty application kernel: subtracts penalty from each listed token.
 __global__ void apply_dry_sparse_kernel(
@@ -1106,34 +1204,31 @@ void apply_dry_penalty(float* d_logits, int vocab_size,
     }
 
     // Upload to GPU and apply — reuse persistent buffers to avoid per-call cudaMalloc
-    static int32_t* s_dry_tokens_buf = nullptr;
-    static float* s_dry_values_buf = nullptr;
-    static size_t s_dry_buf_cap = 0;
-
+    // (buffers are file-scope; pre-allocated by sampling_preallocate_dry at engine init)
     size_t needed = static_cast<size_t>(n);
     if (needed > s_dry_buf_cap) {
         // Grow buffers (sync stream first to ensure previous work is done)
         cudaStreamSynchronize(stream);
-        if (s_dry_tokens_buf) cudaFree(s_dry_tokens_buf);
-        if (s_dry_values_buf) cudaFree(s_dry_values_buf);
+        if (s_dry_tokens_buf) IMP_CUDA_CHECK_LOG(cudaFree(s_dry_tokens_buf));
+        if (s_dry_values_buf) IMP_CUDA_CHECK_LOG(cudaFree(s_dry_values_buf));
         // Over-allocate to reduce future reallocations
         size_t new_cap = std::max(needed, s_dry_buf_cap * 2);
         new_cap = std::max(new_cap, static_cast<size_t>(256));
         if (cudaMalloc(&s_dry_tokens_buf, new_cap * sizeof(int32_t)) != cudaSuccess ||
             cudaMalloc(&s_dry_values_buf, new_cap * sizeof(float)) != cudaSuccess) {
             IMP_LOG_ERROR("apply_dry_penalty: cudaMalloc failed");
-            if (s_dry_tokens_buf) { cudaFree(s_dry_tokens_buf); s_dry_tokens_buf = nullptr; }
-            if (s_dry_values_buf) { cudaFree(s_dry_values_buf); s_dry_values_buf = nullptr; }
+            if (s_dry_tokens_buf) { IMP_CUDA_CHECK_LOG(cudaFree(s_dry_tokens_buf)); s_dry_tokens_buf = nullptr; }
+            if (s_dry_values_buf) { IMP_CUDA_CHECK_LOG(cudaFree(s_dry_values_buf)); s_dry_values_buf = nullptr; }
             s_dry_buf_cap = 0;
             return;
         }
         s_dry_buf_cap = new_cap;
     }
 
-    cudaMemcpyAsync(s_dry_tokens_buf, h_tokens.data(), n * sizeof(int32_t),
-                    cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(s_dry_values_buf, h_values.data(), n * sizeof(float),
-                    cudaMemcpyHostToDevice, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_dry_tokens_buf, h_tokens.data(), n * sizeof(int32_t),
+                    cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_dry_values_buf, h_values.data(), n * sizeof(float),
+                    cudaMemcpyHostToDevice, stream));
 
     int grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
     apply_dry_sparse_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
@@ -1428,13 +1523,13 @@ static int32_t sample_mirostat_v2_impl(
     // Read results
     int32_t h_result = 0;
     float h_surprise = 0.0f;
-    cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream);
-    cudaMemcpyAsync(&h_surprise, d_surprise, sizeof(float),
-                    cudaMemcpyDeviceToHost, stream);
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
+                    cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_surprise, d_surprise, sizeof(float),
+                    cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
-    if (owns_result) cudaFree(d_result);
+    if (owns_result) IMP_CUDA_CHECK_LOG(cudaFree(d_result));
 
     // Update mu: mu = mu - eta * (surprise - tau)
     *mu = *mu - eta * (h_surprise - tau);
@@ -1531,8 +1626,32 @@ void compute_logprobs_cpu(const float* logits, int vocab_size,
     }
 }
 
+void sampling_preallocate_dry(int max_seq_len, cudaStream_t /*stream*/) {
+    if (max_seq_len <= 0) return;
+    size_t cap = static_cast<size_t>(max_seq_len);
+    if (cap <= s_dry_buf_cap) return;  // already large enough
+
+    // Free existing (if any) before re-allocating
+    if (s_dry_tokens_buf) { cudaFree(s_dry_tokens_buf); s_dry_tokens_buf = nullptr; }
+    if (s_dry_values_buf) { cudaFree(s_dry_values_buf); s_dry_values_buf = nullptr; }
+    s_dry_buf_cap = 0;
+
+    if (cudaMalloc(&s_dry_tokens_buf, cap * sizeof(int32_t)) != cudaSuccess ||
+        cudaMalloc(&s_dry_values_buf, cap * sizeof(float)) != cudaSuccess) {
+        IMP_LOG_ERROR("sampling_preallocate_dry: cudaMalloc failed for %zu elements", cap);
+        if (s_dry_tokens_buf) { cudaFree(s_dry_tokens_buf); s_dry_tokens_buf = nullptr; }
+        if (s_dry_values_buf) { cudaFree(s_dry_values_buf); s_dry_values_buf = nullptr; }
+        return;
+    }
+    s_dry_buf_cap = cap;
+    IMP_LOG_DEBUG("sampling_preallocate_dry: pre-allocated %zu DRY penalty slots", cap);
+}
+
 void sampling_cleanup() {
     s_cub_scratch.free();
+    if (s_dry_tokens_buf) { cudaFree(s_dry_tokens_buf); s_dry_tokens_buf = nullptr; }
+    if (s_dry_values_buf) { cudaFree(s_dry_values_buf); s_dry_values_buf = nullptr; }
+    s_dry_buf_cap = 0;
 }
 
 } // namespace imp
