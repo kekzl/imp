@@ -51,6 +51,12 @@ static void ensure_expert(TransformerLayer& layer, int idx) {
         layer.expert_w_up.resize(needed);
     if (static_cast<int>(layer.expert_w_down.size()) < needed)
         layer.expert_w_down.resize(needed);
+    if (static_cast<int>(layer.expert_nvfp4_gate.size()) < needed)
+        layer.expert_nvfp4_gate.resize(needed);
+    if (static_cast<int>(layer.expert_nvfp4_up.size()) < needed)
+        layer.expert_nvfp4_up.resize(needed);
+    if (static_cast<int>(layer.expert_nvfp4_down.size()) < needed)
+        layer.expert_nvfp4_down.resize(needed);
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +313,37 @@ bool WeightMap::apply_weights(
             else if (proj == "down_proj") { layer.w_down = tensor; matched = true; }
         }
 
+        // -- NVFP4 scale tensors (ModelOpt pre-quantized) --
+        // self_attn.{q,k,v,o}_proj.{weight_scale,weight_scale_2,input_scale}
+        if (!matched && parts.size() >= 6 && parts[3] == "self_attn" &&
+            (parts[5] == "weight_scale" || parts[5] == "weight_scale_2" || parts[5] == "input_scale")) {
+            const std::string& proj = parts[4];
+            const std::string& kind = parts[5];
+            auto assign = [&](TransformerLayer::NvFP4PreQuantWeight& nw) {
+                if (kind == "weight_scale")   nw.weight_scale = tensor;
+                else if (kind == "weight_scale_2") nw.weight_scale_2 = tensor;
+                else if (kind == "input_scale")    nw.input_scale = tensor;
+            };
+            if (proj == "q_proj") { assign(layer.nvfp4_q); matched = true; }
+            else if (proj == "k_proj") { assign(layer.nvfp4_k); matched = true; }
+            else if (proj == "v_proj") { assign(layer.nvfp4_v); matched = true; }
+            else if (proj == "o_proj") { assign(layer.nvfp4_o); matched = true; }
+        }
+        // mlp.{gate,up,down}_proj.{weight_scale,weight_scale_2,input_scale}
+        if (!matched && parts.size() >= 6 && parts[3] == "mlp" &&
+            (parts[5] == "weight_scale" || parts[5] == "weight_scale_2" || parts[5] == "input_scale")) {
+            const std::string& proj = parts[4];
+            const std::string& kind = parts[5];
+            auto assign = [&](TransformerLayer::NvFP4PreQuantWeight& nw) {
+                if (kind == "weight_scale")   nw.weight_scale = tensor;
+                else if (kind == "weight_scale_2") nw.weight_scale_2 = tensor;
+                else if (kind == "input_scale")    nw.input_scale = tensor;
+            };
+            if (proj == "gate_proj") { assign(layer.nvfp4_gate); matched = true; }
+            else if (proj == "up_proj") { assign(layer.nvfp4_up); matched = true; }
+            else if (proj == "down_proj") { assign(layer.nvfp4_down); matched = true; }
+        }
+
         // -----------------------------------------------------------------
         // MoE weights -- Mixtral style
         //   block_sparse_moe.gate.weight               -> moe_gate
@@ -362,6 +399,24 @@ bool WeightMap::apply_weights(
                     if (proj == "gate_proj") { layer.expert_w_gate[expert_idx] = tensor; matched = true; }
                     else if (proj == "up_proj") { layer.expert_w_up[expert_idx] = tensor; matched = true; }
                     else if (proj == "down_proj") { layer.expert_w_down[expert_idx] = tensor; matched = true; }
+                }
+            }
+            // MoE expert NVFP4 scales: mlp.experts.{e}.{proj}.{weight_scale,weight_scale_2,input_scale}
+            else if (parts.size() >= 8 && parts[4] == "experts" &&
+                     (parts[7] == "weight_scale" || parts[7] == "weight_scale_2" || parts[7] == "input_scale")) {
+                int expert_idx = parse_int(parts[5]);
+                if (expert_idx >= 0) {
+                    ensure_expert(layer, expert_idx);
+                    const std::string& proj = parts[6];
+                    const std::string& kind = parts[7];
+                    auto assign = [&](TransformerLayer::NvFP4PreQuantWeight& nw) {
+                        if (kind == "weight_scale")   nw.weight_scale = tensor;
+                        else if (kind == "weight_scale_2") nw.weight_scale_2 = tensor;
+                        else if (kind == "input_scale")    nw.input_scale = tensor;
+                    };
+                    if (proj == "gate_proj") { assign(layer.expert_nvfp4_gate[expert_idx]); matched = true; }
+                    else if (proj == "up_proj") { assign(layer.expert_nvfp4_up[expert_idx]); matched = true; }
+                    else if (proj == "down_proj") { assign(layer.expert_nvfp4_down[expert_idx]); matched = true; }
                 }
             }
             // Shared expert: mlp.shared_expert.{gate,up,down}_proj.weight

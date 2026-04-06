@@ -640,6 +640,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
             auto link = [](TransformerLayer::NvFP4PreQuantWeight& nw, const Tensor& w) {
                 if (nw.weight_scale.data != nullptr) nw.weight = w;
             };
+            // Dense weights
             link(layer.nvfp4_q, layer.wq);
             link(layer.nvfp4_k, layer.wk);
             link(layer.nvfp4_v, layer.wv);
@@ -647,16 +648,28 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
             link(layer.nvfp4_gate, layer.w_gate);
             link(layer.nvfp4_up, layer.w_up);
             link(layer.nvfp4_down, layer.w_down);
+            // Expert weights
+            for (size_t e = 0; e < layer.expert_nvfp4_gate.size(); e++) {
+                if (e < layer.expert_w_gate.size()) link(layer.expert_nvfp4_gate[e], layer.expert_w_gate[e]);
+                if (e < layer.expert_w_up.size())   link(layer.expert_nvfp4_up[e],   layer.expert_w_up[e]);
+                if (e < layer.expert_w_down.size()) link(layer.expert_nvfp4_down[e], layer.expert_w_down[e]);
+            }
         }
         int nvfp4_count = 0;
+        int nvfp4_expert_count = 0;
         for (const auto& layer : model->layers_) {
             for (const auto* nw : {&layer.nvfp4_q, &layer.nvfp4_k, &layer.nvfp4_v, &layer.nvfp4_o,
                                    &layer.nvfp4_gate, &layer.nvfp4_up, &layer.nvfp4_down}) {
                 if (nw->valid()) nvfp4_count++;
             }
+            for (const auto* vec : {&layer.expert_nvfp4_gate, &layer.expert_nvfp4_up, &layer.expert_nvfp4_down}) {
+                for (const auto& nw : *vec) {
+                    if (nw.valid()) nvfp4_expert_count++;
+                }
+            }
         }
-        IMP_LOG_INFO("NVFP4 pre-quantized: %d weight tensors (group_size=%d)",
-                     nvfp4_count, nvfp4_cfg.group_size);
+        IMP_LOG_INFO("NVFP4 pre-quantized: %d dense + %d expert weight tensors (group_size=%d)",
+                     nvfp4_count, nvfp4_expert_count, nvfp4_cfg.group_size);
     }
 
     // 7. Tie output projection if not found
