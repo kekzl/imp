@@ -1354,6 +1354,40 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
         return false;
     }
 
+    // Upload NVFP4 pre-quantized scale tensors (weight_scale, weight_scale_2, input_scale)
+    if (config_.is_nvfp4_prequant) {
+        int scale_count = 0;
+        auto upload_scale = [&](Tensor& t) {
+            if (!t.data || t.on_device || t.numel() == 0) return;
+            size_t bytes = t.nbytes();
+            void* d_ptr = nullptr;
+            if (cudaMalloc(&d_ptr, bytes) != cudaSuccess) return;
+            cudaMemcpyAsync(d_ptr, t.data, bytes, cudaMemcpyHostToDevice, stream);
+            gpu_allocations_.push_back(d_ptr);
+            t.data = d_ptr;
+            t.on_device = true;
+            scale_count++;
+        };
+
+        for (auto& L : layers_) {
+            for (auto* nw : {&L.nvfp4_q, &L.nvfp4_k, &L.nvfp4_v, &L.nvfp4_o,
+                             &L.nvfp4_gate, &L.nvfp4_up, &L.nvfp4_down}) {
+                upload_scale(nw->weight_scale);
+                upload_scale(nw->weight_scale_2);
+                upload_scale(nw->input_scale);
+            }
+            for (auto* vec : {&L.expert_nvfp4_gate, &L.expert_nvfp4_up, &L.expert_nvfp4_down}) {
+                for (auto& nw : *vec) {
+                    upload_scale(nw.weight_scale);
+                    upload_scale(nw.weight_scale_2);
+                    upload_scale(nw.input_scale);
+                }
+            }
+        }
+        if (scale_count > 0)
+            IMP_LOG_INFO("NVFP4 prequant: uploaded %d scale tensors to GPU", scale_count);
+    }
+
     // Final sync
     if (stream) {
         cudaStreamSynchronize(stream);
