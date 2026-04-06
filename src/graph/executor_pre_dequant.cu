@@ -115,6 +115,60 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     size_t remaining_budget = (free_vram > min_reserve)
                               ? (free_vram - min_reserve) : 0;
 
+    // --- Phase 0: Register NVFP4 pre-quantized weights directly (no quantization needed) ---
+    if (cfg.is_nvfp4_prequant) {
+        int prequant_count = 0;
+        auto register_prequant = [&](const TransformerLayer::NvFP4PreQuantWeight& nw,
+                                      const Tensor& weight) {
+            if (!nw.valid() || !weight.data) return;
+            NvFP4QuantResult result;
+            result.packed_data = weight.data;       // FP4 packed [N, K/2]
+            result.micro_scales = nw.weight_scale.data;  // FP8 E4M3 [N, K/group_size]
+            result.N = weight.shape[0];
+            // K is packed: shape[1] stores K/2 for FP4
+            result.K = weight.shape[1] * 2;
+            // tensor_scale from weight_scale_2 (scalar FP32, may be on host or device)
+            if (nw.weight_scale_2.data) {
+                float h_scale = 1.0f;
+                if (nw.weight_scale_2.on_device) {
+                    cudaMemcpy(&h_scale, nw.weight_scale_2.data, sizeof(float), cudaMemcpyDeviceToHost);
+                } else {
+                    memcpy(&h_scale, nw.weight_scale_2.data, sizeof(float));
+                }
+                result.tensor_scale = h_scale;
+            }
+            // Only register if both data and scales are on device
+            if (weight.on_device && nw.weight_scale.on_device) {
+                wcache_.nvfp4[weight.data] = result;
+                prequant_count++;
+            } else {
+                IMP_LOG_DEBUG("NVFP4 prequant: skipping %p (data_dev=%d, scale_dev=%d)",
+                              weight.data, weight.on_device, nw.weight_scale.on_device);
+            }
+        };
+
+        for (int i = 0; i < cfg.n_layers; i++) {
+            const auto& L = model_->layer(i);
+            // Dense weights
+            register_prequant(L.nvfp4_q, L.wq);
+            register_prequant(L.nvfp4_k, L.wk);
+            register_prequant(L.nvfp4_v, L.wv);
+            register_prequant(L.nvfp4_o, L.wo);
+            register_prequant(L.nvfp4_gate, L.w_gate);
+            register_prequant(L.nvfp4_up, L.w_up);
+            register_prequant(L.nvfp4_down, L.w_down);
+            // Expert weights
+            for (size_t e = 0; e < L.expert_nvfp4_gate.size(); e++) {
+                if (e < L.expert_w_gate.size()) register_prequant(L.expert_nvfp4_gate[e], L.expert_w_gate[e]);
+                if (e < L.expert_w_up.size())   register_prequant(L.expert_nvfp4_up[e],   L.expert_w_up[e]);
+                if (e < L.expert_w_down.size()) register_prequant(L.expert_nvfp4_down[e], L.expert_w_down[e]);
+            }
+        }
+        if (prequant_count > 0) {
+            IMP_LOG_INFO("NVFP4 pre-quantized: registered %d weights directly (no quantization)", prequant_count);
+        }
+    }
+
     // Helper: does this qtype benefit from NVFP4 conversion? (> 4.5 bits/elem)
     auto nvfp4_beneficial = [](GGMLQuantType qt) -> bool {
         switch (qt) {
