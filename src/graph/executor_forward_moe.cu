@@ -32,6 +32,7 @@
 #include "compute/gdn.h"
 #include "memory/gdn_state.h"
 #include "quant/quant_gemm.h"
+#include "quant/nvfp4_gemm.h"
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
@@ -995,6 +996,28 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     auto expert_gemm = [&](const Tensor& a, Tensor& c,
                             const Tensor& packed, GGMLQuantType qtype,
                             const std::vector<Tensor>& fallback, int eidx) {
+        // NVFP4 prequant path: native NVFP4 GEMV (any batch size)
+        if (!fallback.empty() &&
+            static_cast<size_t>(eidx) < fallback.size() &&
+            wcache_.nvfp4.count(fallback[eidx].data)) {
+            const auto& nw = wcache_.nvfp4.at(fallback[eidx].data);
+            int N_dim = static_cast<int>(nw.N);
+            int K_dim = static_cast<int>(nw.K);
+            int M = static_cast<int>(a.shape[0]);
+            if (M == 1) {
+                // Single-token decode: direct NVFP4 GEMV
+                gemv_nvfp4_kpar(nw, static_cast<const half*>(a.data),
+                               static_cast<half*>(c.data), N_dim, K_dim, stream);
+            } else {
+                // Multi-token: per-row GEMV (each row is one token)
+                for (int r = 0; r < M; r++) {
+                    const half* a_row = static_cast<const half*>(a.data) + r * K_dim;
+                    half* c_row = static_cast<half*>(c.data) + r * N_dim;
+                    gemv_nvfp4_kpar(nw, a_row, c_row, N_dim, K_dim, stream);
+                }
+            }
+            return;
+        }
         if (a.shape[0] == 1 && use_packed_dequant &&
             compute_dtype_ == DType::FP16 &&
             (qtype == GGMLQuantType::Q6_K || qtype == GGMLQuantType::Q8_0)) {
