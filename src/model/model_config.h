@@ -149,6 +149,9 @@ struct TransformerLayer {
     NvFP4PreQuantWeight nvfp4_q, nvfp4_k, nvfp4_v, nvfp4_o;
     NvFP4PreQuantWeight nvfp4_gate, nvfp4_up, nvfp4_down;
 
+    // Per-expert NVFP4 weights (MoE models with pre-quantized expert weights)
+    std::vector<NvFP4PreQuantWeight> expert_nvfp4_gate, expert_nvfp4_up, expert_nvfp4_down;
+
     // GPTQ quantized weights (temporary — dequantized to FP16 during upload)
     struct GPTQWeight {
         Tensor qweight;   // packed INT32
