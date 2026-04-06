@@ -3,6 +3,7 @@
 #include "model/chat_template.h"
 #include "model/hf_hub.h"
 #include "model/tokenizer.h"
+#include <sys/stat.h>
 #include "runtime/presets.h"
 
 #include <chrono>
@@ -22,22 +23,42 @@ int main(int argc, char** argv) {
 
     printf("IMP Inference Engine %s\n", imp_version());
 
-    // Resolve model path: supports local files, directories, and HuggingFace repo IDs
-    std::string resolved_model = imp::resolve_model_gguf(args.model_path, args.revision);
-    if (resolved_model.empty()) {
-        fprintf(stderr, "Failed to resolve model: %s\n", args.model_path.c_str());
-        return 1;
-    }
-    if (resolved_model != args.model_path) {
-        printf("Resolved model: %s -> %s\n", args.model_path.c_str(), resolved_model.c_str());
+    // Resolve model path: supports local files, directories, and HuggingFace repo IDs.
+    // Auto-detect format: directories with .safetensors → SafeTensors, else GGUF.
+    std::string resolved_model = args.model_path;
+    ImpModelFormat format = IMP_FORMAT_GGUF;
+
+    // Check if path is a directory with SafeTensors files
+    {
+        struct stat st;
+        if (stat(args.model_path.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            std::string index = args.model_path + "/model.safetensors.index.json";
+            std::string single = args.model_path + "/model.safetensors";
+            struct stat idx_st;
+            if (stat(index.c_str(), &idx_st) == 0 || stat(single.c_str(), &idx_st) == 0) {
+                format = IMP_FORMAT_SAFETENSORS;
+            }
+        }
     }
 
-    printf("Loading model: %s\n", resolved_model.c_str());
+    if (format == IMP_FORMAT_GGUF) {
+        resolved_model = imp::resolve_model_gguf(args.model_path, args.revision);
+        if (resolved_model.empty()) {
+            fprintf(stderr, "Failed to resolve model: %s\n", args.model_path.c_str());
+            return 1;
+        }
+        if (resolved_model != args.model_path) {
+            printf("Resolved model: %s -> %s\n", args.model_path.c_str(), resolved_model.c_str());
+        }
+    }
+
+    printf("Loading model: %s (%s)\n", resolved_model.c_str(),
+           format == IMP_FORMAT_SAFETENSORS ? "SafeTensors" : "GGUF");
 
     auto t_init_start = std::chrono::high_resolution_clock::now();
 
     ImpModel model = nullptr;
-    ImpError err = imp_model_load(resolved_model.c_str(), IMP_FORMAT_GGUF, &model);
+    ImpError err = imp_model_load(resolved_model.c_str(), format, &model);
     if (err != IMP_SUCCESS) {
         fprintf(stderr, "Error loading model: %s\n", imp_error_string(err));
         return 1;

@@ -233,6 +233,8 @@ static DType safetensors_dtype(const std::string& s) {
     if (s == "I32")  return DType::INT32;
     if (s == "I64")  return DType::INT32;  // closest proxy
     if (s == "BOOL") return DType::INT8;
+    if (s == "F8_E4M3") return DType::FP8_E4M3;
+    if (s == "F8_E5M2") return DType::FP8_E4M3;  // closest proxy
     IMP_LOG_WARN("Unknown SafeTensors dtype '%s', defaulting to FP32", s.c_str());
     return DType::FP32;
 }
