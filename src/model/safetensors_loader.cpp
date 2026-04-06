@@ -359,9 +359,15 @@ static void infer_config(ModelConfig& cfg,
     }
 
     if (cfg.expert_d_ff == 0 && cfg.n_experts > 0) {
-        auto it_expert = tensors.find("model.layers.0.block_sparse_moe.experts.0.w1.weight");
-        if (it_expert != tensors.end() && it_expert->second.ndim == 2) {
-            cfg.expert_d_ff = static_cast<int>(it_expert->second.shape[0]);
+        // Try Mixtral-style (w1) then DeepSeek/Qwen-style (gate_proj)
+        for (const char* name : {
+            "model.layers.0.block_sparse_moe.experts.0.w1.weight",
+            "model.layers.0.mlp.experts.0.gate_proj.weight"}) {
+            auto it_expert = tensors.find(name);
+            if (it_expert != tensors.end() && it_expert->second.ndim == 2) {
+                cfg.expert_d_ff = static_cast<int>(it_expert->second.shape[0]);
+                break;
+            }
         }
     }
 
