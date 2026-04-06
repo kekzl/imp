@@ -502,12 +502,18 @@ bool Tokenizer::load(const std::string& path) {
     }
 
     // Extract merges (BPE only)
+    // Supports both string format ("a b") and array format (["a", "b"])
     const JValue* merges = jobj_find(*model, "merges");
     if (merges && merges->type == JType::ARRAY) {
         std::vector<std::string> merge_strs;
         merge_strs.reserve(merges->arr.size());
         for (const auto& m : merges->arr) {
-            if (m.type == JType::STRING) merge_strs.push_back(m.str_val);
+            if (m.type == JType::STRING) {
+                merge_strs.push_back(m.str_val);
+            } else if (m.type == JType::ARRAY && m.arr.size() == 2 &&
+                       m.arr[0].type == JType::STRING && m.arr[1].type == JType::STRING) {
+                merge_strs.push_back(m.arr[0].str_val + " " + m.arr[1].str_val);
+            }
         }
         load_merges(merge_strs);
         IMP_LOG_INFO("tokenizer.json: loaded %zu merges", merge_strs.size());
