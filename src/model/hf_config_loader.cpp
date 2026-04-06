@@ -436,6 +436,9 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         jobj_get_int(root, "num_experts", cfg.n_experts);
     }
     jobj_get_int(root, "num_experts_per_tok", cfg.n_experts_active);
+    if (!jobj_get_int(root, "moe_intermediate_size", cfg.expert_d_ff)) {
+        jobj_get_int(root, "expert_intermediate_size", cfg.expert_d_ff);
+    }
 
     // tie_word_embeddings is informational (logged but not stored in ModelConfig)
     const JValue* tie = jobj_find(root, "tie_word_embeddings");
