@@ -164,6 +164,9 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 if (e < L.expert_w_down.size()) register_prequant(L.expert_nvfp4_down[e], L.expert_w_down[e]);
             }
         }
+        // LM head (output projection)
+        register_prequant(model_->nvfp4_out_proj(), model_->output_proj());
+
         if (prequant_count > 0) {
             IMP_LOG_INFO("NVFP4 pre-quantized: registered %d weights directly (no quantization)", prequant_count);
         }

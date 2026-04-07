@@ -12,43 +12,18 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerFlags)
 
 # --- CUDA Toolkit ---
-find_package(CUDAToolkit 13.1 REQUIRED)
+find_package(CUDAToolkit 13.2 REQUIRED)
 message(STATUS "CUDA ${CUDAToolkit_VERSION} detected")
-add_compile_definitions(IMP_CUDA_13_1=1)
-# When upgrading to CUDA 13.2: uncomment for MXFP8 Grouped GEMM + cub::DeviceTopK
-# add_compile_definitions(IMP_CUDA_13_2=1)
 
 # --- CUDA Architecture ---
-# sm_120f (family feature set) enables TMA warp-specialized grouped GEMM tactics.
-# CMake < 3.31 doesn't understand the 'f' suffix, so we pass Blackwell gencode
-# flags directly to nvcc and let CMake handle only Hopper (90a) and sm_100.
-#
-# Blackwell gencode flags:
-#   -gencode arch=compute_120f,code=sm_120    (SASS cubin with family features)
-# Note: generic compute_120 PTX removed — it lacks FP8 MMA (.kind::f8f6f4)
-# and all target GPUs (RTX 5090) run sm_120f SASS directly.
+# SM120-only: RTX 5090 (GB202, Blackwell).
+# sm_120f (family feature set) enables FP8 MMA (.kind::f8f6f4) and
+# TMA warp-specialized grouped GEMM tactics.
+# CMake < 3.31 doesn't understand the 'f' suffix, so we pass gencode directly.
 set(IMP_SM120_FLAGS "--generate-code=arch=compute_120f,code=sm_120")
-
-option(IMP_NATIVE_SM120 "Build exclusively for sm_120f (RTX 5090)" OFF)
-if(IMP_NATIVE_SM120)
-    set(CMAKE_CUDA_ARCHITECTURES OFF)
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${IMP_SM120_FLAGS}")
-    message(STATUS "CUDA architectures: sm_120f (native RTX 5090)")
-elseif(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES "90a;100")
-    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${IMP_SM120_FLAGS}")
-    message(STATUS "CUDA architectures: 90a + 100 + 120f (default)")
-else()
-    # User-provided archs — add 120f unless 120 is already in the list
-    # (having both 120 and 120f causes nvcc "same GPU code" fatal error)
-    string(FIND "${CMAKE_CUDA_ARCHITECTURES}" "120" _has_120)
-    if(_has_120 EQUAL -1)
-        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${IMP_SM120_FLAGS}")
-        message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES} + 120f")
-    else()
-        message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES} (120 present, skipping 120f)")
-    endif()
-endif()
+set(CMAKE_CUDA_ARCHITECTURES OFF)
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} ${IMP_SM120_FLAGS}")
+message(STATUS "CUDA architectures: sm_120f (RTX 5090)")
 
 # --- Options ---
 option(IMP_BUILD_TESTS "Build tests" ON)
@@ -149,7 +124,6 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm_moe_fused.cu
     src/compute/gemm_moe_fused_tc.cu
     src/compute/gemm_q6k.cu
-    src/compute/attention.cu
     src/compute/attention_paged.cu
     src/compute/attention_paged_fp8.cu
     src/compute/attention_paged_int8.cu
@@ -182,8 +156,8 @@ if(IMP_USE_CUTLASS)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_mxfp4_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_grouped_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_grouped_3x.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_cutlass_fmha.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_sm120.cu)
+    list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_mxfp4_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxfp4_prefill.cu)
 endif()
 
@@ -352,7 +326,6 @@ if(IMP_BUILD_TESTS)
         tests/test_tensor.cpp
         tests/test_gguf_loader.cpp
         tests/test_kv_cache.cpp
-        tests/test_attention.cu
         tests/test_rope.cu
         tests/test_layernorm.cu
         tests/test_moe.cu
@@ -385,6 +358,7 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_fmha_sm120.cu
         tests/test_fmha_fp8.cu
         tests/test_attention_mxfp4.cu
+        tests/test_attention_fmha_mxfp4.cu
         tests/test_softmax.cu
         tests/test_ssm.cu
         tests/test_json_constrain.cu

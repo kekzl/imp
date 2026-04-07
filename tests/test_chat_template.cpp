@@ -1,6 +1,9 @@
 #include "model/chat_template.h"
+#include "model/hf_config_loader.h"
 #include "model/model_arch.h"
 #include <gtest/gtest.h>
+#include <filesystem>
+#include <fstream>
 
 namespace imp {
 namespace {
@@ -695,6 +698,69 @@ TEST(ChatTemplateApplyTest, MultipleSystemMessages) {
     // 2 system + 1 user + 1 assistant prefix = 4 im_start tokens
     int im_starts = std::count(ids.begin(), ids.end(), IM_START);
     EXPECT_EQ(im_starts, 4);
+}
+
+// ---------------------------------------------------------------------------
+// HFConfigLoader::load_chat_template — array-format support
+// ---------------------------------------------------------------------------
+
+class HFChatTemplateTest : public ::testing::Test {
+protected:
+    std::filesystem::path tmp_dir_;
+
+    void SetUp() override {
+        tmp_dir_ = std::filesystem::temp_directory_path() /
+                   ("imp_test_ct_" + std::to_string(::getpid()));
+        std::filesystem::create_directories(tmp_dir_);
+    }
+
+    void TearDown() override {
+        std::filesystem::remove_all(tmp_dir_);
+    }
+
+    void write_tokenizer_config(const std::string& json) {
+        std::ofstream f(tmp_dir_ / "tokenizer_config.json");
+        f << json;
+    }
+};
+
+TEST_F(HFChatTemplateTest, StringFormat) {
+    write_tokenizer_config(R"({"chat_template": "{% for m in messages %}test{% endfor %}"})");
+    auto result = HFConfigLoader::load_chat_template(tmp_dir_.string());
+    EXPECT_EQ(result, "{% for m in messages %}test{% endfor %}");
+}
+
+TEST_F(HFChatTemplateTest, ArrayDefaultSelected) {
+    write_tokenizer_config(R"({
+        "chat_template": [
+            {"name": "tool_use", "template": "tool template"},
+            {"name": "default", "template": "default template"}
+        ]
+    })");
+    auto result = HFConfigLoader::load_chat_template(tmp_dir_.string());
+    EXPECT_EQ(result, "default template");
+}
+
+TEST_F(HFChatTemplateTest, ArrayFallbackToFirst) {
+    write_tokenizer_config(R"({
+        "chat_template": [
+            {"name": "tool_use", "template": "tool template"}
+        ]
+    })");
+    auto result = HFConfigLoader::load_chat_template(tmp_dir_.string());
+    EXPECT_EQ(result, "tool template");
+}
+
+TEST_F(HFChatTemplateTest, ArrayEmpty) {
+    write_tokenizer_config(R"({"chat_template": []})");
+    auto result = HFConfigLoader::load_chat_template(tmp_dir_.string());
+    EXPECT_TRUE(result.empty());
+}
+
+TEST_F(HFChatTemplateTest, MissingField) {
+    write_tokenizer_config(R"({"model_type": "llama"})");
+    auto result = HFConfigLoader::load_chat_template(tmp_dir_.string());
+    EXPECT_TRUE(result.empty());
 }
 
 } // namespace

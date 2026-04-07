@@ -43,6 +43,30 @@ Current gap vs FP8 baseline: -23% decode (191 vs 248 tok/s). This is algorithm-i
 
 ---
 
+## Completed (v0.6)
+
+### NVFP4 Prequant SafeTensors Support
+- [x] NVIDIA Model Optimizer NVFP4 models load from SafeTensors (tested: Qwen3-Coder-30B-A3B-FP4)
+- [x] Phase 0 direct weight registration in `wcache_.nvfp4` (no re-quantization)
+- [x] CUTLASS NVFP4 conversion for prefill GEMM (Phase 3b)
+- [x] Per-expert NVFP4 GEMV in MoE legacy dispatch path
+- [x] LM head prequant scale support (weight_scale, weight_scale_2, input_scale)
+- [x] Shape bug fix: use `NvFP4QuantResult.N/.K` instead of packed tensor shape in GEMV dispatch
+- [x] BF16→FP16 host-side conversion for non-quantized weights (norms, router, embeddings, lm_head)
+- [x] CUDA graphs disabled for MoE models (D2H routing memcpy incompatible with graph capture)
+
+### Server & Format Support
+- [x] SafeTensors model loading in imp-server (was GGUF-only)
+- [x] `resolve_model_auto()` with format auto-detection (SafeTensors directory vs GGUF file)
+- [x] Server model list includes both GGUF files and SafeTensors directories
+- [x] Server hot-swap between GGUF and SafeTensors models
+- [x] Chat template array-format support in `tokenizer_config.json` (HuggingFace convention)
+
+### Verified
+- [x] Qwen3-Coder-30B-A3B-FP4: single-turn, multi-turn, code gen, math — all correct
+- [x] Benchmark: 38 tok/s decode (tg256), 90 tok/s prefill (pp512) on RTX 5090
+- [x] 536/536 unit tests pass
+
 ## Completed (v0.4)
 
 ### Performance

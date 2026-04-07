@@ -7,7 +7,6 @@
 #include "graph/executor_helpers.h"
 #include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/attention_cutlass_fmha.h"
 #include "compute/sampling.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
@@ -187,19 +186,6 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         }
     } else {
         IMP_LOG_INFO("cuBLAS attention S-matrix: skipped (VRAM-constrained, using WMMA/TCGEN05 fallback)");
-    }
-
-    // CUTLASS FMHA workspace: pre-allocate LSE + kernel workspace at max dimensions.
-    // This ensures the allocations are tracked in the VRAM budget instead of happening
-    // lazily (which would cause untracked VRAM growth and potential shared memory swapping).
-    {
-        int fmha_nh = cfg.n_heads;
-        int fmha_hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / fmha_nh);
-        size_t fmha_bytes = cutlass_fmha_init_workspace(1, max_tokens_, fmha_nh, fmha_hd);
-        if (fmha_bytes > 0) {
-            IMP_LOG_INFO("CUTLASS FMHA workspace: %.2f MiB (LSE + kernel)",
-                         fmha_bytes / (1024.0 * 1024.0));
-        }
     }
 
     // MoE dequant and staging buffers
@@ -516,7 +502,6 @@ void GraphExecutor::free_buffers() {
     }
     vfree(attn_scores_buf_);
     attn_scores_buf_size_ = 0;
-    cutlass_fmha_free_workspace();
     vfree(shared_workspace_);
     shared_workspace_size_ = 0;
     vfree(persistent_workspace_);

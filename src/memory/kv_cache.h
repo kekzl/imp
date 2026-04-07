@@ -25,6 +25,16 @@ public:
             int max_blocks, int block_size = kKVBlockSize,
             VRAMAllocator* alloc = nullptr, int sketch_dim = 0,
             bool use_mxfp4 = false);
+
+    // Per-layer-shape constructor (Gemma 4 dual attention geometry).
+    // n_kv_heads_per_layer[l] and head_dim_per_layer[l] define layer l's
+    // KV shape. The scale/sketch pools are sized using max across layers.
+    KVCache(int n_layers,
+            const std::vector<int>& n_kv_heads_per_layer,
+            const std::vector<int>& head_dim_per_layer,
+            DType dtype,
+            int max_blocks, int block_size,
+            VRAMAllocator* alloc);
     ~KVCache();
 
     // Block allocation / deallocation
@@ -87,6 +97,12 @@ private:
     std::vector<int> free_list_;
     void* pool_ = nullptr;          // single contiguous GPU allocation
                                     // For TURBOQUANT_LITE: V-only (no K directions in pool)
+
+    // Per-layer KV shapes and offsets (for Gemma 4 dual attention geometry).
+    // If empty, all layers use the scalar n_kv_heads_/head_dim_/block_bytes_.
+    std::vector<size_t> layer_block_bytes_;  // block_size * nkv[l] * hd[l] * dtype_size
+    std::vector<size_t> layer_k_offset_;     // byte offset of layer l's K region in pool
+    std::vector<size_t> layer_v_offset_;     // byte offset of layer l's V region in pool
 
     // INT8/INT4/TURBOQUANT/TURBOQUANT_LITE per-head scales: one half per head per token slot.
     // Layout: 2x blocks per layer (K scales region + V scales region).

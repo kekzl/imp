@@ -573,4 +573,20 @@ void gemv_mxfp4_geglu_residual(const CutlassMxFP4Weight& W,
         gate, up, y, residual, N, K);
 }
 
+// One-time L1 cache carveout for MXFP4 GEMV kernels (bandwidth-bound, no SMEM).
+void mxfp4_gemv_set_l1_carveout() {
+    #define MX_L1(kern) cudaFuncSetAttribute(kern, \
+        cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxL1)
+    MX_L1(gemv_mxfp4_kpar_kernel);
+    MX_L1(gemv_mxfp4_kpar_fp32_kernel);
+    MX_L1(gemv_mxfp4_multirow_kernel<kMRWarps>);
+    MX_L1(gemv_mxfp4_multirow_fp32_kernel<kMRWarps>);
+    MX_L1(gemv_mxfp4_qkv_kernel);
+    MX_L1(gemv_mxfp4_gate_up_kernel);
+    MX_L1(gemv_mxfp4_residual_kernel);
+    MX_L1(gemv_mxfp4_swiglu_residual_kernel);
+    MX_L1(gemv_mxfp4_geglu_residual_kernel);
+    #undef MX_L1
+}
+
 } // namespace imp

@@ -12,7 +12,6 @@ namespace imp {
 // ---------------------------------------------------------------------------
 // apply_pdl_edges — convert kernel→kernel edges to PDL edges in a graph
 // ---------------------------------------------------------------------------
-#if IMP_CUDA_13_1
 static int apply_pdl_edges(cudaGraph_t graph) {
     if (!graph) return 0;
 
@@ -98,7 +97,6 @@ static int apply_pdl_edges(cudaGraph_t graph) {
 
     return converted;
 }
-#endif // IMP_CUDA_13_1
 
 // ---------------------------------------------------------------------------
 // CudaGraphCapture
@@ -138,13 +136,11 @@ bool CudaGraphCapture::end_capture() {
     }
 
     // Convert kernel→kernel edges to PDL edges for tail/head overlap
-#if IMP_CUDA_13_1
     if (pdl::is_available()) {
         int converted = apply_pdl_edges(graph_);
         if (converted > 0)
             IMP_LOG_DEBUG("CudaGraphCapture: %d edges converted to PDL", converted);
     }
-#endif
 
     err = cudaGraphInstantiate(&graph_exec_, graph_, 0);
     if (err != cudaSuccess) {
@@ -595,13 +591,11 @@ bool CudaGraphConditionalRunner::setup(
         }
 
         // 5d. Convert kernel→kernel edges to PDL in the body graph
-#if IMP_CUDA_13_1
         if (pdl::is_available()) {
             int converted = apply_pdl_edges(body_graph);
             if (converted > 0)
                 IMP_LOG_INFO("ConditionalRunner: %d body graph edges converted to PDL", converted);
         }
-#endif
 
         // 6. Instantiate the top-level graph
         err = cudaGraphInstantiate(&exec_, graph_, 0);

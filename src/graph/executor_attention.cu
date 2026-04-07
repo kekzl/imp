@@ -14,7 +14,6 @@
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/attention_cutlass_fmha.h"
 #include "compute/activation.h"
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"
@@ -85,22 +84,22 @@ static void set_l2_persist_kv(cudaStream_t stream, const void* kv_ptr, size_t kv
         max_persist = prop.persistingL2CacheMaxSize;
         if (max_persist == 0) return;  // L2 persistence not supported
     }
-    if (kv_bytes > max_persist) kv_bytes = max_persist;
+    // Use proportional hitRatio when KV exceeds L2 capacity, so the hardware
+    // probabilistically persists a representative subset across the full range
+    // (not just the first max_persist bytes).
+    float ratio = (kv_bytes <= max_persist) ? 1.0f
+                : static_cast<float>(max_persist) / static_cast<float>(kv_bytes);
     cudaStreamAttrValue attr = {};
     attr.accessPolicyWindow.base_ptr = const_cast<void*>(kv_ptr);
     attr.accessPolicyWindow.num_bytes = kv_bytes;
-    attr.accessPolicyWindow.hitRatio = 1.0f;
+    attr.accessPolicyWindow.hitRatio = ratio;
     attr.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
     attr.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
     cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr);
 }
 
-static void clear_l2_persist(cudaStream_t stream) {
-    if (!stream) return;
-    cudaStreamAttrValue attr = {};
-    attr.accessPolicyWindow.num_bytes = 0;
-    cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr);
-}
+// Alias for the shared clear_l2_policy helper (back-compat name for call sites).
+static void clear_l2_persist(cudaStream_t stream) { clear_l2_policy(stream); }
 
 // ---------------------------------------------------------------------------
 // Attention sub-pass for one layer
@@ -115,8 +114,14 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     const auto& ly  = model_->layer(layer);
     int n   = state.n_tokens;
     int nh  = cfg.n_heads;
-    int nkv = cfg.n_kv_heads;
-    int hd  = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / nh);
+    // Per-layer head_dim / n_kv_heads (Gemma 4 dual geometry + Nemotron-H hybrid)
+    int nkv = (!cfg.n_kv_heads_per_layer.empty() && layer < (int)cfg.n_kv_heads_per_layer.size() &&
+               cfg.n_kv_heads_per_layer[layer] > 0)
+              ? cfg.n_kv_heads_per_layer[layer] : cfg.n_kv_heads;
+    int hd  = (!cfg.head_dim_per_layer.empty() && layer < (int)cfg.head_dim_per_layer.size() &&
+               cfg.head_dim_per_layer[layer] > 0)
+              ? cfg.head_dim_per_layer[layer]
+              : (cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / nh));
     float eps = cfg.rms_norm_eps;
 
 
@@ -136,6 +141,25 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     Tensor vv = view_tokens(v_,        n);
     Tensor ao = view_tokens(attn_out_, n);
     Tensor po = view_tokens(proj_out_, n);
+
+    const bool per_layer_shapes =
+        (!cfg.head_dim_per_layer.empty() || !cfg.n_kv_heads_per_layer.empty());
+
+    // Per-layer shape narrowing: Q/K/V/ao workspace tensors are allocated with
+    // max shapes (for worst-case layer). For layers with smaller head_dim (Gemma 4
+    // SWA), narrow the view so cuBLAS gemm writes with the correct leading dim.
+    if (per_layer_shapes) {
+        auto narrow_cols = [](Tensor& t, int64_t new_cols) {
+            if (t.shape[1] != new_cols) {
+                t.shape[1] = new_cols;
+                t.compute_strides();
+            }
+        };
+        narrow_cols(qv, static_cast<int64_t>(nh)  * hd);
+        narrow_cols(kk, static_cast<int64_t>(nkv) * hd);
+        narrow_cols(vv, static_cast<int64_t>(nkv) * hd);
+        narrow_cols(ao, static_cast<int64_t>(nh)  * hd);
+    }
 
     // For Qwen3.5 attention output gate: allocate larger Q buffer AFTER all
     // standard attention buffers to avoid overlap (q_/k_/v_/attn_out_/proj_out_
@@ -237,10 +261,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         } else if (nvfp4_qkv) {
             // NVFP4 fused QKV: RMSNorm to FP16, then NVFP4 GEMV (no Q8_1 needed)
             rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
-            int q_rows = static_cast<int>(ly.wq.shape[0]);
-            int k_rows = static_cast<int>(ly.wk.shape[0]);
-            int v_rows = static_cast<int>(ly.wv.shape[0]);
-            int K = static_cast<int>(ly.wq.shape[1]);
+            int q_rows = static_cast<int>(nvfp4_wq->second.N);
+            int k_rows = static_cast<int>(nvfp4_wk->second.N);
+            int v_rows = static_cast<int>(nvfp4_wv->second.N);
+            int K = static_cast<int>(nvfp4_wq->second.K);
             gemv_nvfp4_qkv_fused(nvfp4_wq->second, nvfp4_wk->second, nvfp4_wv->second,
                                   static_cast<const half*>(no.data),
                                   static_cast<half*>(qv.data),
@@ -272,7 +296,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             auto fp8_wq = wcache_.fp8.find(ly.wq.data);
             auto fp8_wk = wcache_.fp8.find(ly.wk.data);
             auto fp8_wv = wcache_.fp8.find(ly.wv.data);
-            if (n > 1 && !state.force_fp16_gemm &&
+            if (wcache_.use_fp8 && n > 1 && !state.force_fp16_gemm &&
                 fp8_wq != wcache_.fp8.end() &&
                 fp8_wk != wcache_.fp8.end() && fp8_wv != wcache_.fp8.end() &&
                 qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
@@ -288,7 +312,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             } else {
                 // Try fused K+V path: single strided batched GEMM for both projections
                 auto fused_kv_it = wcache_.fused_kv.find(layer);
-                if (n > 1 && fused_kv_it != wcache_.fused_kv.end()) {
+                // Gemma 4 per-layer shapes break strided-batched K+V layout assumptions.
+                if (n > 1 && fused_kv_it != wcache_.fused_kv.end() && !per_layer_shapes) {
                     // Q: still separate (different output dim with GQA)
                     gemm_dispatch(no, ly.wq, ly.wq_qtype, q_target, ctx);
                     // K+V: one batched cuBLAS call
@@ -304,6 +329,30 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // Apply Q/K/V biases if present (Qwen2) — fused 3-way for 1 launch
         add_bias_3way(qv, ly.q_bias, kk, ly.k_bias, vv, ly.v_bias, stream);
     }
+
+    // Gemma 4: K=V sharing for global attention layers (wv == null).
+    // These layers have no V projection — V is aliased from K. Copy K→V here
+    // so all downstream code (QK-norm, V-norm, KV-write, attention) sees a
+    // valid V tensor.
+    if (cfg.arch == ModelArch::GEMMA4 && ly.wv.data == nullptr &&
+        kk.data != nullptr && vv.data != nullptr) {
+        size_t kv_bytes = static_cast<size_t>(n) * nkv * hd * dtype_size(kk.dtype);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(vv.data, kk.data, kv_bytes,
+                        cudaMemcpyDeviceToDevice, stream));
+    }
+
+    // Gemma 4: V-normalization (RMSNorm with no learned weight).
+    // V is flattened to [n * nkv, hd] and each per-head row is normalized.
+    // This keeps V at unit RMS, preventing attention output blowup.
+    if (cfg.arch == ModelArch::GEMMA4 && v_norm_ones_buf_ != nullptr &&
+        getenv("IMP_G4_NO_VNORM") == nullptr) {
+        int64_t vflat_shape[4] = {static_cast<int64_t>(n) * nkv, hd, 0, 0};
+        Tensor v_flat(vv.data, vv.dtype, 2, vflat_shape, true);
+        int64_t ones_shape[4] = {hd, 0, 0, 0};
+        Tensor ones_w(v_norm_ones_buf_, DType::FP16, 1, ones_shape, true);
+        rmsnorm(v_flat, ones_w, v_flat, eps, stream, 0.0f);
+    }
+
     if (debug_attn_steps) {
         debug_tensor_stats("L0_step1_after_qkv_q", qv, stream);
         debug_tensor_stats("L0_step1_after_qkv_k", kk, stream);
@@ -379,6 +428,14 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                   qv.dtype == DType::FP16 &&
                                   state.kv_cache &&
                                   state.kv_cache->dtype() == DType::FP16);
+        // Per-layer rope_dim (Gemma 4: SWA full, global 25% partial)
+        int fused_rope_dim = cfg.rope_dim;
+        if (cfg.arch == ModelArch::GEMMA4) {
+            bool is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
+            fused_rope_dim = is_swa ? hd : (hd / 4);
+        } else if (fused_rope_dim > hd || fused_rope_dim <= 0) {
+            fused_rope_dim = hd;
+        }
         if (has_qk_norm && n == 1 && qv.dtype == DType::FP16) {
             // Fused: QK-norm + RoPE in one kernel launch (saves 2 launches)
             qknorm_rope_fused(static_cast<half*>(qv.data),
@@ -388,13 +445,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                nh, nkv, hd, eps,
                                state.positions,  // device pointer
                                layer_rope_theta, layer_rope_freq_scale,
-                               cfg.rope_dim, cfg.rope_neox, stream, norm_w_off_,
+                               fused_rope_dim, cfg.rope_neox, stream, norm_w_off_,
                                cfg.yarn_ext_factor, cfg.yarn_attn_factor,
                                cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr,
                                longrope_freqs);
         } else if (can_fuse_rope_kv && !has_qk_norm) {
             // Fused path: Q-only RoPE here, K-RoPE deferred to KV write
-            const int effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
+            const int effective_rope_dim = fused_rope_dim;
             const int pairs = effective_rope_dim / 2;
             const float inv_scaling = 1.0f / layer_rope_freq_scale;
             rope_q_only_fp16_kernel<<<dim3(1, nh), pairs, 0, stream>>>(
@@ -418,8 +475,18 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             int64_t k4r[4] = {1, n, nkv, hd};
             Tensor q4r_t = qv.reshape(4, q4r);
             Tensor k4r_t = kk.reshape(4, k4r);
+            // Per-layer rope_dim: for Gemma 4, SWA layers use full rotation
+            // (rope_dim = hd_layer), global layers use 25% partial rotation
+            // (rope_dim = hd_layer / 4). Otherwise use cfg.rope_dim.
+            int layer_rope_dim = cfg.rope_dim;
+            if (cfg.arch == ModelArch::GEMMA4) {
+                bool is_swa_layer = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
+                layer_rope_dim = is_swa_layer ? hd : (hd / 4);
+            } else if (layer_rope_dim > hd || layer_rope_dim <= 0) {
+                layer_rope_dim = hd;  // safety clamp
+            }
             rope_forward(q4r_t, k4r_t, state.positions, hd, layer_rope_theta, layer_rope_freq_scale,
-                         cfg.rope_dim, cfg.rope_neox,
+                         layer_rope_dim, cfg.rope_neox,
                          cfg.yarn_ext_factor, cfg.yarn_attn_factor,
                          cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr, stream,
                          longrope_freqs);
@@ -433,7 +500,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     }
 
     // 7. Attention
-    float scale = 1.0f / std::sqrt(static_cast<float>(hd));
+    // Gemma 4: attention_scale = 1.0 (absorbed into Q/K norms).
+    // Other archs: standard 1/sqrt(head_dim).
+    float scale = (cfg.arch == ModelArch::GEMMA4)
+                  ? 1.0f
+                  : (1.0f / std::sqrt(static_cast<float>(hd)));
 
     if (state.is_prefill) {
         bool sliding_active = (layer_sliding_window > 0 && n > layer_sliding_window);
@@ -443,8 +514,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // Falls back to flash attention for long sequences, sliding window, or when
         // the S-matrix buffer wasn't allocated (VRAM-constrained).
         // Set IMP_NO_CUBLAS_ATTN=1 to force flash attention (for benchmarking).
+        // Gemma 4: flash attention kernels don't support head_dim=512, so we MUST
+        // use cuBLAS attention for all layers (it handles arbitrary head_dim).
         static bool no_cublas_attn = getenv("IMP_NO_CUBLAS_ATTN");
-        if (!no_cublas_attn && attn_scores_buf_ && n <= static_cast<int>(attn_scores_.shape[1]) &&
+        bool force_cublas_attn = per_layer_shapes;  // Gemma 4 dual head_dim
+        if ((force_cublas_attn || !no_cublas_attn) && attn_scores_buf_ && n <= static_cast<int>(attn_scores_.shape[1]) &&
             n <= 1024 && !sliding_active) {
             int64_t s_shape[3] = {static_cast<int64_t>(nh),
                                   static_cast<int64_t>(n),
@@ -482,7 +556,15 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             int row_elems    = nkv * hd;
             int block_stride = kv_block_size_d * row_elems;
             int threads = std::min(row_elems, 256);
-            const int effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
+            // Per-layer rope_dim (same as prefill rope path above)
+            int effective_rope_dim;
+            if (cfg.arch == ModelArch::GEMMA4) {
+                bool is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
+                effective_rope_dim = is_swa ? hd : (hd / 4);
+            } else {
+                effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
+                if (effective_rope_dim > hd) effective_rope_dim = hd;
+            }
             const int pairs = effective_rope_dim / 2;
             const float inv_scaling = 1.0f / layer_rope_freq_scale;
             Tensor kv_view = view_tokens(k_, n);
@@ -624,8 +706,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     if (will_fuse_o_nvfp4) {
         // NVFP4 Wo + residual: attn_out (FP16) @ wo_nvfp4^T + residual → hidden
         auto& wo_nvfp4 = wcache_.nvfp4.at(ly.wo.data);
-        int M_o = static_cast<int>(ly.wo.shape[0]);
-        int K_o = static_cast<int>(ly.wo.shape[1]);
+        int M_o = static_cast<int>(wo_nvfp4.N);
+        int K_o = static_cast<int>(wo_nvfp4.K);
         gemv_nvfp4_residual(wo_nvfp4,
                              static_cast<const half*>(ao.data),
                              static_cast<half*>(h.data),
@@ -661,7 +743,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // TODO: migrate to gemm_dispatch with beta=1.0
         gemm(ao, wo_fp16, h, 1.0f, 1.0f, stream);
     } else if ((will_fuse_o_beta1 || will_fuse_o_dequant_beta1) &&
-               qscratch_.dequant != nullptr && dequant_gpu_supported(ly.wo_qtype)) {
+               qscratch_.dequant != nullptr && dequant_gpu_supported(ly.wo_qtype) &&
+               !per_layer_shapes) {  // Gemma 4: workspace stride mismatch with narrow ao
         // Dequant beta=1: dequant weights on-the-fly, then FP16 GEMM + residual
         int rows = static_cast<int>(ly.wo.shape[0]);
         int cols = static_cast<int>(ly.wo.shape[1]);

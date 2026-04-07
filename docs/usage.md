@@ -29,8 +29,11 @@ cmake --build build -j$(nproc)
 ## CLI
 
 ```bash
-# Single prompt
+# Single prompt (GGUF)
 ./build/imp-cli --model model.gguf --prompt "Hello, world!"
+
+# SafeTensors model (NVFP4 prequant from Model Optimizer)
+./build/imp-cli --model ./Qwen3-Coder-30B-A3B-FP4/ --prompt "Hello"
 
 # Interactive chat
 ./build/imp-cli --model model.gguf --interactive
@@ -48,6 +51,8 @@ cmake --build build -j$(nproc)
 # Benchmark (matches llama-bench methodology)
 ./build/imp-cli --model model.gguf --bench --bench-pp 512 --max-tokens 128 --bench-reps 5
 ```
+
+Format auto-detection: directories with `model.safetensors` or `model.safetensors.index.json` load as SafeTensors. Everything else loads as GGUF.
 
 <details>
 <summary>Full CLI options</summary>
@@ -107,9 +112,14 @@ Benchmark:
 
 ## Server (OpenAI-compatible)
 
+Supports both GGUF and SafeTensors models with hot-swap between formats.
+
 ```bash
-# Start
+# Start with GGUF
 ./build/imp-server --model model.gguf --port 8080
+
+# Start with SafeTensors (NVFP4 prequant)
+./build/imp-server --model ./Qwen3-Coder-30B-A3B-FP4/ --port 8080
 
 # With vision
 ./build/imp-server --model gemma-3-12b-it.gguf --mmproj mmproj.gguf
@@ -137,7 +147,7 @@ for chunk in client.chat.completions.create(
     print(chunk.choices[0].delta.content or "", end="", flush=True)
 ```
 
-Supports `/v1/chat/completions`, `/v1/completions`, `/tokenize`, `/detokenize`, `/health`, tool/function calling, streaming usage stats, logprobs, and API key auth (`--api-key`).
+Supports `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/tokenize`, `/detokenize`, `/health`, tool/function calling, streaming usage stats, logprobs, and API key auth (`--api-key`). The `/v1/models` endpoint lists all available GGUF and SafeTensors models in the models directory. Requesting a different model via the `model` field triggers automatic hot-swap.
 
 ## C API
 
@@ -185,7 +195,7 @@ imp/
 │   ├── imp-cli/          CLI (interactive + single-prompt + benchmark)
 │   ├── imp-server/       OpenAI-compatible HTTP server
 │   └── imp-bench/        Standalone benchmarks
-├── tests/                Google Test suite (26 files, 289 tests)
+├── tests/                Google Test suite (45+ files, 549 tests)
 └── third_party/stb/      stb_image (image loading for vision)
 ```
 
@@ -204,7 +214,7 @@ Covers: tensor ops, GGUF parsing, KV cache, attention (scalar + WMMA), RoPE, Lay
 ### Inference Pipeline
 
 1. **Load** — GGUF/SafeTensors parsed, weights mmap'd
-2. **Upload** — dequantize to FP16, upload to GPU, fuse KV weights for batched GEMM
+2. **Upload** — dequantize/convert to FP16 (BF16→FP16 for SafeTensors), upload to GPU, fuse KV weights for batched GEMM. NVFP4 prequant weights uploaded as-is with scale tensors.
 3. **Forward** — `GraphExecutor` runs hardcoded transformer forward (no graph walking)
 4. **Schedule** — continuous batching with prefill/decode separation
 5. **KV cache** — paged blocks, LRU eviction, prefix caching

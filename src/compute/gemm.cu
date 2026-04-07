@@ -42,11 +42,7 @@ static inline int gemv_blocks(int M) {
     return (M + kGemvWarps - 1) / kGemvWarps;
 }
 
-#if IMP_CUDA_13_1
 static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
-#else
-static constexpr auto kGemmAlgo = CUBLAS_GEMM_DEFAULT;
-#endif
 
 // ---------------------------------------------------------------------------
 // cuBLAS / cuBLASLt handles (lazily initialized, process-lifetime)

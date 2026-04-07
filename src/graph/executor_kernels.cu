@@ -1918,7 +1918,11 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
             return;
         }
     }
-    if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
+    // Gemma 4: if FP16 cache has the weight, use it (dp4a dispatch has issues
+    // with non-standard strides from per-layer narrow tensors).
+    bool prefer_fp16_cache = (fp16_cache != nullptr && fp16_cache->count(weight.data) > 0 &&
+                               input.stride[0] != weight.shape[1]);  // non-contiguous input
+    if (!prefer_fp16_cache && input.shape[0] == 1 && input.dtype == DType::FP16 &&
                q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype)) {
         // dp4a MMVQ: quantize input to Q8_1, then dp4a dot product
         int K = static_cast<int>(weight.shape[1]);

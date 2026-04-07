@@ -91,7 +91,7 @@ enum {
     kApiLlama = 0, kApiMistral = 1, kApiMixtral = 2, kApiDeepseek = 3,
     kApiNemotronHMoe = 4, kApiQwen3 = 5, kApiQwen3Moe = 6,
     kApiGemma3 = 7, kApiLlama4 = 8, kApiGeneric = 9,
-    kApiQwen35 = 10, kApiQwen35Moe = 11,
+    kApiQwen35 = 10, kApiQwen35Moe = 11, kApiGemma4 = 12,
 };
 
 static constexpr ArchEntry kArchRegistry[] = {
@@ -106,6 +106,7 @@ static constexpr ArchEntry kArchRegistry[] = {
     {ModelArch::QWEN35,         "qwen35",          kApiQwen35,        -1, 0,    -1, -1, false, false, 0.6f, 0.95f, 20},
     {ModelArch::QWEN35_MOE,     "qwen35moe",       kApiQwen35Moe,     -1, 0,    -1, -1, false, false, 0.6f, 0.95f, 20},
     {ModelArch::GEMMA3,         "gemma3",          kApiGemma3,        -1, 0,     1,   1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::GEMMA4,         "gemma4",          kApiGemma4,        -1, 0,     1,   1, false, true,  0.6f, 0.95f, 0},
     {ModelArch::LLAMA4,         "llama4",          kApiLlama4,         0, 0,    -1, -1, false, false, 0.6f, 0.95f, 0},
     {ModelArch::GENERIC,        "generic",         kApiGeneric,       -1, 0,    -1, -1, false, false, 0.6f, 0.95f, 0},
 };
@@ -147,6 +148,7 @@ ModelArch parse_model_arch(const std::string& s) {
         {"gemma3", ModelArch::GEMMA3},
         {"gemma", ModelArch::GEMMA3},
         {"gemma2", ModelArch::GEMMA3},
+        {"gemma4", ModelArch::GEMMA4},
         {"llama4", ModelArch::LLAMA4},
         {"qwen2", ModelArch::LLAMA},
         {"phi3", ModelArch::LLAMA},
@@ -159,6 +161,8 @@ ModelArch parse_model_arch(const std::string& s) {
         {"Gemma2ForCausalLM", ModelArch::GEMMA3},
         {"GemmaForCausalLM", ModelArch::GEMMA3},
         {"Gemma3ForCausalLM", ModelArch::GEMMA3},
+        {"Gemma4ForCausalLM", ModelArch::GEMMA4},
+        {"Gemma4ForConditionalGeneration", ModelArch::GEMMA4},
         {"DeepseekV2ForCausalLM", ModelArch::DEEPSEEK},
         {"DeepseekV3ForCausalLM", ModelArch::DEEPSEEK},
         {"PhiForCausalLM", ModelArch::LLAMA},
@@ -178,9 +182,12 @@ void apply_arch_defaults(ModelConfig& cfg) {
         cfg.rope_neox = (e.rope_neox != 0);
     if (e.embed_scale > 0)
         cfg.embed_scale = e.embed_scale;
-    // Gemma-3 computes embed_scale from d_model
-    if (cfg.arch == ModelArch::GEMMA3)
+    // Gemma-3/4 computes embed_scale from d_model
+    if (cfg.arch == ModelArch::GEMMA3 || cfg.arch == ModelArch::GEMMA4)
         cfg.embed_scale = std::sqrt(static_cast<float>(cfg.d_model));
+    // Gemma-3/4 store norm weights as (w - 1) so add 1.0 back at runtime.
+    if (cfg.arch == ModelArch::GEMMA3 || cfg.arch == ModelArch::GEMMA4)
+        cfg.norm_weight_offset = 1.0f;
     if (e.ffn_activation >= 0)
         cfg.ffn_activation = static_cast<FFNActivation>(e.ffn_activation);
     if (e.norm_placement >= 0)

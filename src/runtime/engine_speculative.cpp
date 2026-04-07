@@ -228,6 +228,10 @@ std::vector<int32_t> Engine::try_graph_loop_decode(
     state_template.max_blocks_per_seq = max_blocks_per_seq;
     state_template.is_prefill = false;
 
+    // Recurrent state for SSM/GDN layers — pointers are constant for
+    // single-sequence decode, so they're safe to bake into the graph.
+    fill_recurrent_state(*req, state_template, /*reset=*/false, stream);
+
     // Upload banned tokens for graph-captured logit masking
     int32_t* d_banned = nullptr;
     if (!banned_token_ids_.empty()) {
@@ -284,6 +288,10 @@ bool Engine::try_launch_async_graph_loop(std::shared_ptr<Request> req,
     state_template.n_sequences = 1;
     state_template.max_blocks_per_seq = max_blocks_per_seq;
     state_template.is_prefill = false;
+
+    // Recurrent state for SSM/GDN layers — pointers are constant for
+    // single-sequence decode, so they're safe to bake into the graph.
+    fill_recurrent_state(*req, state_template, /*reset=*/false, stream);
 
     // Upload banned tokens to device for graph-captured logit masking
     int32_t* d_banned = nullptr;
