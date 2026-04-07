@@ -7,7 +7,6 @@ namespace imp {
 namespace pdl {
 
 // Enable PDL on a kernel function. Must be called before the kernel is launched.
-// On CUDA < 13.1, this is a no-op.
 void enable(const void* kernel_func);
 
 // Disable PDL on a kernel function (restore default behavior).
@@ -40,7 +39,6 @@ void disable_kernel(KernelFunc func) {
 // Usage:
 //   pdl::launch(my_kernel, grid, block, smem, stream, arg1, arg2, ...);
 // ---------------------------------------------------------------------------
-#if IMP_CUDA_13_1
 template<typename KernelFunc, typename... Args>
 void launch(KernelFunc func, dim3 grid, dim3 block, size_t smem,
             cudaStream_t stream, Args... args)
@@ -65,15 +63,6 @@ void launch(KernelFunc func, dim3 grid, dim3 block, size_t smem,
         func<<<grid, block, smem, stream>>>(args...);
     }
 }
-#else
-// Without CUDA 13.1, fall back to standard launch.
-template<typename KernelFunc, typename... Args>
-void launch(KernelFunc func, dim3 grid, dim3 block, size_t smem,
-            cudaStream_t stream, Args... args)
-{
-    func<<<grid, block, smem, stream>>>(args...);
-}
-#endif
 
 // RAII guard: enables PDL on construction, can disable on destruction.
 class ScopedPDL {

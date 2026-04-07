@@ -634,6 +634,7 @@ void paged_attention_decode_fp8(
                 case 96:  LAUNCH_SPLITK_FP8_PIPE(96);  break;
                 case 128: LAUNCH_SPLITK_FP8_PIPE(128); break;
                 case 256: LAUNCH_SPLITK_FP8_PIPE(256); break;
+                case 512: LAUNCH_SPLITK_FP8_PIPE(512); break;  // Gemma 4 global
                 default:
                     IMP_LOG_ERROR("paged_attention_splitk_fp8_pipeline: unsupported head_dim %d", head_dim);
                     return;
@@ -657,6 +658,7 @@ void paged_attention_decode_fp8(
                 case 96:  LAUNCH_SPLITK_FP8(96);  break;
                 case 128: LAUNCH_SPLITK_FP8(128); break;
                 case 256: LAUNCH_SPLITK_FP8(256); break;
+                case 512: LAUNCH_SPLITK_FP8(512); break;  // Gemma 4 global
                 default:
                     IMP_LOG_ERROR("paged_attention_splitk_fp8: unsupported head_dim %d", head_dim);
                     return;
@@ -688,6 +690,7 @@ void paged_attention_decode_fp8(
             case 96:  LAUNCH_FP8_FALLBACK(96);  break;
             case 128: LAUNCH_FP8_FALLBACK(128); break;
             case 256: LAUNCH_FP8_FALLBACK(256); break;
+            case 512: LAUNCH_FP8_FALLBACK(512); break;  // Gemma 4 global attention
             default:
                 IMP_LOG_ERROR("paged_attention_decode_fp8: unsupported head_dim %d", head_dim);
                 return;

@@ -11,6 +11,7 @@
 
 #include "graph/executor.h"
 #include "graph/executor_kernels.h"
+#include "graph/executor_debug.h"
 #include "compute/embedding.h"
 #include "compute/layernorm.h"
 #include "compute/rope.h"
@@ -21,7 +22,6 @@
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/attention_cutlass_fmha.h"
 #include "compute/activation.h"
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"
@@ -51,6 +51,26 @@
 
 
 namespace imp {
+
+// Replace +/-Inf with 0 in an FP16 tensor (in-place).
+// Used to sanitize FP16 GEMM outputs that overflow (e.g. Gemma 4 shared MLP at deep layers).
+__global__ void sanitize_fp16_kernel(__half* __restrict__ data, int64_t n) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    __half v = data[idx];
+    // __hisinf returns ±1 for ±inf, 0 otherwise. __hisnan returns non-zero for NaN.
+    if (__hisinf(v) != 0 || __hisnan(v)) {
+        data[idx] = __float2half(0.0f);
+    }
+}
+
+static void sanitize_fp16(__half* data, int64_t n, cudaStream_t stream) {
+    if (n <= 0) return;
+    int threads = 256;
+    int blocks = static_cast<int>((n + threads - 1) / threads);
+    sanitize_fp16_kernel<<<blocks, threads, 0, stream>>>(data, n);
+}
+
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -77,7 +97,8 @@ static bool can_decode_fast(int n, const Tensor& expert_up_packed,
 // ---------------------------------------------------------------------------
 static void apply_expert_activation(void* gate_data, void* up_data, void* swiglu_data,
                                     bool non_gated, int64_t rows, int64_t eff,
-                                    DType compute_dtype, cudaStream_t stream) {
+                                    DType compute_dtype, FFNActivation act_type,
+                                    cudaStream_t stream) {
     int64_t act_shape[2] = {rows, eff};
     if (non_gated) {
         Tensor up_t(up_data, compute_dtype, 2, act_shape, true);
@@ -86,7 +107,8 @@ static void apply_expert_activation(void* gate_data, void* up_data, void* swiglu
         Tensor g(gate_data, compute_dtype, 2, act_shape, true);
         Tensor u(up_data, compute_dtype, 2, act_shape, true);
         Tensor a(swiglu_data, compute_dtype, 2, act_shape, true);
-        swiglu(g, u, a, stream);
+        if (act_type == FFNActivation::GEGLU) geglu(g, u, a, stream);
+        else swiglu(g, u, a, stream);
     }
 }
 
@@ -124,7 +146,13 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
     // 1. Save residual (skip if decode fast path will handle it —
     //    h.data is never written before the final weighted_sum_residual).
-    const Tensor& norm_w = (ly.ffn_norm.data != nullptr) ? ly.ffn_norm : ly.attn_norm;
+    // Gemma 4: parallel branches — MoE experts use rmsnorm(h, pre_ffw_norm_2),
+    // shared MLP uses rmsnorm(h, ffn_norm). Pick MoE-side norm here; the shared
+    // branch recomputes its own norm later (reading from the saved residual).
+    const Tensor& norm_w =
+        (cfg.arch == ModelArch::GEMMA4 && ly.ffn_pre_norm_2.data != nullptr)
+            ? ly.ffn_pre_norm_2
+        : (ly.ffn_norm.data != nullptr) ? ly.ffn_norm : ly.attn_norm;
 
     // Pre-check: does NVFP4 MoE cache cover all expert tensors for this layer?
     // If so, the NVFP4 path doesn't need Q8_1 quantization (takes FP16 directly).
@@ -162,9 +190,29 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     }
 
     // 3. Gate logits + top-k routing
-    //    For n=1 decode with FP16 weights and pre-allocated buffers: use fused
-    //    kernel that computes gate GEMV + softmax/sigmoid + top-k in one launch.
-    //    Otherwise: separate gate GEMV + topk gating kernels.
+    //    Gemma 4: router input = rms_norm(h) * ffn_gate_inp_scale / sqrt(d_model).
+    //    Other archs: router input = no (ffn-normalized h).
+    Tensor router_in = no;
+    if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_gate_inp_scale.data != nullptr &&
+        getenv("IMP_G4_NO_CUSTOM_ROUTER") == nullptr) {
+        // Reuse moe_.scatter_out (FP32, max_tokens*d) as FP16 scratch:
+        // FP16 needs half the bytes so we only use half of it.
+        int64_t ri_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
+        router_in = Tensor(moe_.scatter_out.data, compute_dtype_, 2, ri_shape, true);
+        // Step 1: rmsnorm(h, ffn_gate_inp_scale, router_in) with offset=0
+        //         (the scale tensor holds raw per-channel scales, no -1 trick)
+        rmsnorm(h, ly.ffn_gate_inp_scale, router_in, eps, stream, 0.0f);
+        // Step 2: multiply by 1/sqrt(d_model) scalar
+        int64_t total_elems = static_cast<int64_t>(n) * d;
+        int threads = 256;
+        int blocks = static_cast<int>((total_elems / 2 + threads - 1) / threads);
+        float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
+        scale_fp16_kernel<<<blocks, threads, 0, stream>>>(
+            static_cast<half*>(router_in.data),
+            __float2half(inv_sqrt_d),
+            total_elems);
+    }
+
     const void* router_bias_ptr = ly.moe_router_bias.data;
     bool use_sigmoid = cfg.moe_sigmoid_gating;
     bool norm_weights = cfg.expert_weights_norm;
@@ -172,6 +220,11 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     GGMLQuantType up_qtype = ly.expert_up_qtype;
     bool will_decode_fast = can_decode_fast(n, ly.expert_up_packed, up_qtype,
                                             moe_.dequant_buf, compute_dtype_);
+    // Gemma 4: decode fast path uses gemv_*_moe_gate_up_fused kernels that have
+    // stride/layout issues with the split gate_up_exps tensor. Force slow path.
+    if (cfg.arch == ModelArch::GEMMA4) {
+        will_decode_fast = false;
+    }
 
     MoeRoutingResult routing;
 
@@ -185,7 +238,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         moe_.routing_buffers.pool && will_decode_fast) {
         // Fused: gate GEMV + softmax/sigmoid + top-k in one kernel (1 launch)
         moe_gate_topk_fused(static_cast<const half*>(ly.moe_gate.data),
-                            static_cast<const half*>(no.data),
+                            static_cast<const half*>(router_in.data),
                             ne, d, top_k,
                             moe_.routing_buffers, routing, stream,
                             use_sigmoid, norm_weights, router_bias_ptr);
@@ -195,13 +248,13 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
         if (n == 1 && compute_dtype_ == DType::FP16 && ly.moe_gate.dtype == DType::FP16) {
             gemv_gate_fp32(static_cast<const half*>(ly.moe_gate.data),
-                           static_cast<const half*>(no.data),
+                           static_cast<const half*>(router_in.data),
                            static_cast<float*>(gate_logits_f32.data),
                            ne, d, stream);
         } else {
             int64_t gl_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(ne)};
             Tensor gate_logits_tmp(moe_.gathered.data, compute_dtype_, 2, gl_shape, true);
-            gemm(no, ly.moe_gate, gate_logits_tmp, 1.0f, 0.0f, stream);
+            gemm(router_in, ly.moe_gate, gate_logits_tmp, 1.0f, 0.0f, stream);
 
             int64_t numel = static_cast<int64_t>(n) * ne;
             int threads = 256;
@@ -493,7 +546,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             // Non-dp4a: separate activation + FP16 down GEMV
             apply_expert_activation(gate_buf, up_buf, act_buf,
                                     non_gated_experts, top_k, eff,
-                                    compute_dtype_, stream);
+                                    compute_dtype_, cfg.ffn_activation, stream);
             size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_qtype);
             half* down_input = non_gated_experts ? up_buf : act_buf;
             if (up_qtype == GGMLQuantType::Q6_K) {
@@ -609,7 +662,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         // Activation (FP16)
         apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                 moe_.expert_swiglu.data, non_gated_experts,
-                                expanded, eff, compute_dtype_, stream);
+                                expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
 
         // Down projection (reads from expanded-layout SwiGLU output, no indirection)
         char* fused_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -743,7 +796,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         // Activation
         apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                 moe_.expert_swiglu.data, non_gated_experts,
-                                expanded, eff, compute_dtype_, stream);
+                                expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
 
         // Down projection
         char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -839,7 +892,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         // Activation (FP16 — reuse existing kernels)
         apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                 moe_.expert_swiglu.data, non_gated_experts,
-                                expanded, eff, compute_dtype_, stream);
+                                expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
 
         // Down projection: up buffer for non-gated (relu² in-place), swiglu for gated
         char* fp8_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -907,7 +960,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         // Activation
         apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                 moe_.expert_swiglu.data, non_gated_experts,
-                                expanded, eff, compute_dtype_, stream);
+                                expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
 
         // Down projection
         char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -1181,7 +1234,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
             apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                     moe_.expert_swiglu.data, non_gated_experts,
-                                    expanded, eff, compute_dtype_, stream);
+                                    expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
 
             {
                 char* batch_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -1202,7 +1255,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
             apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                     moe_.expert_swiglu.data, non_gated_experts,
-                                    expanded, eff, compute_dtype_, stream);
+                                    expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
 
             {
                 char* dequant_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -1242,7 +1295,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
             apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                     moe_.expert_swiglu.data, non_gated_experts,
-                                    expanded, eff, compute_dtype_, stream);
+                                    expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
 
             // Down projection activation source: up buffer for non-gated (relu² in-place),
             // swiglu buffer for gated.
@@ -1317,6 +1370,28 @@ moe_after_experts:
     //     dense FFN whose output is added to the routed expert output.
     //     Reuses MoE workspace buffers (routed computation is complete).
     //     Supports both gated (Qwen3: gate+up+SwiGLU) and non-gated (Nemotron: up+SiLU).
+    // Gemma 4: sanitize inf/NaN in MoE scatter output before post-norm.
+    if (cfg.arch == ModelArch::GEMMA4) {
+        sanitize_fp16(static_cast<__half*>(h.data),
+                      static_cast<int64_t>(n) * d, stream);
+    }
+
+    // Gemma 4: apply post_ffw_norm_2 on the MoE branch output (h) BEFORE shared adds.
+    // This matches the parallel-branch structure: rms_norm(moe_out, post_ffw_norm_2).
+    if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_post_norm_2.data != nullptr &&
+        getenv("IMP_G4_NO_POST_FFW_2") == nullptr) {
+        rmsnorm(h, ly.ffn_post_norm_2, h, eps, stream, norm_w_off_);
+    }
+
+    // Gemma 4: re-derive `no` for the shared MLP from the saved residual
+    // (which still holds the original hidden state) using ffn_norm — the MoE
+    // branch consumed `no` produced from pre_ffw_norm_2 above.
+    if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_pre_norm_2.data != nullptr &&
+        ly.w_up_shared.data != nullptr && ly.ffn_norm.data != nullptr) {
+        rmsnorm(r, ly.ffn_norm, no, eps, stream, norm_w_off_);
+    }
+
+    // Shared expert: enabled by default. Gemma 4: requires post_ffw_norm_1 to be uploaded.
     if (ly.w_up_shared.data != nullptr) {
         int eff_shared = static_cast<int>(ly.w_up_shared.shape[0]);
         bool shared_gated = (ly.w_gate_shared.data != nullptr);
@@ -1352,7 +1427,10 @@ moe_after_experts:
                               qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
                               nvfp4_ptr, ct4_ptr, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
                                   mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
-                swiglu(sh_gate, sh_up, sh_swiglu, stream);
+                if (cfg.ffn_activation == FFNActivation::GEGLU)
+                    geglu(sh_gate, sh_up, sh_swiglu, stream);
+                else
+                    swiglu(sh_gate, sh_up, sh_swiglu, stream);
             } else {
                 // Non-gated: relu^2(up) in-place [Nemotron-H uses squared ReLU]
                 relu_sqr_inplace(sh_up, stream);
@@ -1368,8 +1446,25 @@ moe_after_experts:
                                   mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
         }
 
+        // Gemma 4: shared MLP can overflow FP16 at deep layers. Sanitize inf/NaN
+        // to zero before the post-norm so rmsnorm doesn't produce all-zero output.
+        if (cfg.arch == ModelArch::GEMMA4) {
+            sanitize_fp16(static_cast<__half*>(sh_down.data),
+                          static_cast<int64_t>(n) * d, stream);
+        }
+        // Gemma 4: apply post_ffw_norm_1 on shared MLP output (sh_down).
+        if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_post_norm_1.data != nullptr &&
+            getenv("IMP_G4_NO_POST_FFW_1") == nullptr) {
+            rmsnorm(sh_down, ly.ffn_post_norm_1, sh_down, eps, stream, norm_w_off_);
+        }
+
         // Add shared expert output to hidden (which already has routed expert output)
         elementwise_add(h, sh_down, stream);
+    }
+
+    // Gemma 4: apply post_ffn_norm (combined post-norm) BEFORE residual add.
+    if (cfg.arch == ModelArch::GEMMA4 && ly.post_ffn_norm.data != nullptr) {
+        rmsnorm(h, ly.post_ffn_norm, h, eps, stream, norm_w_off_);
     }
 
     // 9. Residual connection: hidden += residual

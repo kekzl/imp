@@ -7,13 +7,13 @@
 #include "compute/gemm.h"
 #include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/attention_cutlass_fmha.h"
 #include "compute/activation.h"
 #include "compute/moe_routing.h"
 #include "compute/sampling.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
 #include "quant/nvfp4_gemm.h"
+#include "quant/mxfp4_gemm.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "memory/vram_allocator.h"
@@ -50,6 +50,22 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
     model_ = &model;
     compute_dtype_ = compute_dtype;
     norm_w_off_ = model.config().norm_weight_offset;
+
+    // Gemma 4: allocate a ones buffer for V-normalization (no learned weight).
+    // Size = max head_dim (512 for 26B model). Used as rmsnorm weight.
+    if (model.config().arch == ModelArch::GEMMA4) {
+        int hd_max = 0;
+        for (int v : model.config().head_dim_per_layer) hd_max = std::max(hd_max, v);
+        if (hd_max == 0) hd_max = model.config().head_dim;
+        size_t buf_bytes = static_cast<size_t>(hd_max) * sizeof(half);
+        if (cudaMalloc(&v_norm_ones_buf_, buf_bytes) == cudaSuccess) {
+            // Fill with FP16 1.0 via memset is not possible (FP16 1.0 is 0x3C00).
+            // Use a small host buffer + memcpy.
+            std::vector<uint16_t> ones(hd_max, 0x3C00);  // FP16 1.0
+            cudaMemcpy(v_norm_ones_buf_, ones.data(), buf_bytes, cudaMemcpyHostToDevice);
+            IMP_LOG_INFO("Gemma 4: allocated V-norm ones buffer (%d halfs)", hd_max);
+        }
+    }
     use_pdl_ = use_pdl;
     wcache_.use_fp8 = use_fp8_prefill;
     wcache_.nvfp4_decode_mode = use_nvfp4_decode;
@@ -66,8 +82,10 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
 
     // Compute max expert FFN hidden dim from actual packed tensor shapes.
     // cfg.expert_d_ff may not match the actual tensor dimensions (e.g. Nemotron-H).
+    // Gemma 4: ffn_gate_up_exps is fused (shape[1] = 2*expert_d_ff), but it gets
+    // split at weight_upload time. Trust cfg.expert_d_ff over the pre-split shape.
     max_expert_eff_ = cfg.expert_d_ff;
-    if (has_moe_) {
+    if (has_moe_ && cfg.arch != ModelArch::GEMMA4) {
         for (int li = 0; li < cfg.n_layers; li++) {
             const auto& L = model.layer(li);
             // gate/up packed: shape [n_experts, expert_d_ff, d_model]
@@ -159,6 +177,9 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
         IMP_LOG_WARN("PDL requested but not available on this device/CUDA version");
         use_pdl_ = false;
     }
+
+    // SMEM carveout: maximize L1 for bandwidth-bound GEMV kernels (independent of PDL).
+    mxfp4_gemv_set_l1_carveout();
 
     // Precompute YaRN correction dimensions if enabled
     if (cfg.yarn_ext_factor > 0.0f) {
@@ -292,13 +313,6 @@ size_t GraphExecutor::workspace_estimate() const {
 
     // Safety margin for FP8 act buffers, misc (reduced for MoE to save VRAM)
     auxiliary += is_moe ? (8ULL << 20) : (32ULL << 20);
-
-    // CUTLASS FMHA workspace (LSE buffer + kernel cooperative workspace)
-    // Skip for MoE models where prefill uses cuBLAS (compute-light attention)
-    if (!is_moe) {
-        int hd = cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads);
-        auxiliary += cutlass_fmha_workspace_estimate(1, max_tokens_, cfg.n_heads, hd);
-    }
 
     return persistent + shared + fp32_accum + auxiliary;
 }

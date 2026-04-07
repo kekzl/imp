@@ -490,11 +490,43 @@ std::string HFConfigLoader::load_chat_template(const std::string& model_dir) {
     JValue root;
     if (!parse_json_file(path, root)) return "";
 
+    // Case 1: chat_template is a plain string
     std::string chat_template;
     if (jobj_get_string(root, "chat_template", chat_template)) {
         IMP_LOG_INFO("loaded chat_template from tokenizer_config.json (%zu chars)",
                      chat_template.size());
         return chat_template;
+    }
+
+    // Case 2: chat_template is an array of {name, template} objects
+    // HuggingFace format: [{"name": "default", "template": "..."}, ...]
+    const JValue* ct = jobj_find(root, "chat_template");
+    if (ct && ct->type == JType::ARRAY) {
+        // Prefer "default" entry
+        for (const auto& entry : ct->arr) {
+            if (entry.type != JType::OBJECT) continue;
+            std::string name;
+            if (!jobj_get_string(entry, "name", name)) continue;
+            if (name == "default") {
+                if (jobj_get_string(entry, "template", chat_template)) {
+                    IMP_LOG_INFO("loaded chat_template (default) from tokenizer_config.json (%zu chars)",
+                                 chat_template.size());
+                    return chat_template;
+                }
+            }
+        }
+        // Fallback: first entry with a valid template string
+        for (const auto& entry : ct->arr) {
+            if (entry.type != JType::OBJECT) continue;
+            if (jobj_get_string(entry, "template", chat_template)) {
+                std::string name;
+                jobj_get_string(entry, "name", name);
+                IMP_LOG_INFO("loaded chat_template (%s) from tokenizer_config.json (%zu chars)",
+                             name.empty() ? "unnamed" : name.c_str(), chat_template.size());
+                return chat_template;
+            }
+        }
+        IMP_LOG_WARN("chat_template array found but no usable entry in %s", path.c_str());
     }
 
     return "";

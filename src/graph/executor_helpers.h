@@ -38,4 +38,24 @@ static inline int get_kv_layer(const std::vector<int>& kv_layer_map, int layer) 
     return kv_layer_map.empty() ? layer : kv_layer_map[layer];
 }
 
+// Set L2 streaming hint for weight data: deprioritize in L2 eviction so weights
+// don't pollute cache for KV data or activations reused across layers.
+static inline void set_l2_streaming(cudaStream_t stream, const void* ptr, size_t bytes) {
+    if (!ptr || bytes == 0 || !stream) return;
+    cudaStreamAttrValue attr = {};
+    attr.accessPolicyWindow.base_ptr = const_cast<void*>(ptr);
+    attr.accessPolicyWindow.num_bytes = bytes;
+    attr.accessPolicyWindow.hitRatio = 0.0f;
+    attr.accessPolicyWindow.hitProp = cudaAccessPropertyStreaming;
+    attr.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
+    cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr);
+}
+
+static inline void clear_l2_policy(cudaStream_t stream) {
+    if (!stream) return;
+    cudaStreamAttrValue attr = {};
+    attr.accessPolicyWindow.num_bytes = 0;
+    cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr);
+}
+
 } // namespace imp

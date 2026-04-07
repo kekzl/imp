@@ -19,6 +19,7 @@ public:
     const Tensor& token_embedding() const { return tok_emb_; }
     const Tensor& output_norm() const { return out_norm_; }
     const Tensor& output_proj() const { return out_proj_; }
+    const TransformerLayer::NvFP4PreQuantWeight& nvfp4_out_proj() const { return nvfp4_out_proj_; }
     int n_layers() const { return static_cast<int>(layers_.size()); }
 
     Tokenizer* tokenizer() const { return tokenizer_.get(); }
@@ -46,6 +47,7 @@ public:
     GGMLQuantType tok_emb_qtype_ = GGMLQuantType::NONE;
     GGMLQuantType out_norm_qtype_ = GGMLQuantType::NONE;
     GGMLQuantType out_proj_qtype_ = GGMLQuantType::NONE;
+    TransformerLayer::NvFP4PreQuantWeight nvfp4_out_proj_;  // prequant LM head scales
     std::vector<TransformerLayer> layers_;
     std::unique_ptr<Tokenizer> tokenizer_;
 

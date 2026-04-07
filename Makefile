@@ -27,7 +27,7 @@ build:
 
 # Unit tests: CPU-only, no GPU, no model, < 5s
 test-unit: build
-	$(DOCKER_RUN) imp-tests --gtest_filter="TensorTest.*:GgufLoaderTest.*:Tokenizer*:ChatTemplate*:BatchBuilder*:Scheduler*:Request*:EndToEndTest.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub"
+	$(DOCKER_RUN) imp-tests --gtest_filter="TensorTest.*:GgufLoaderTest.*:Tokenizer*:ChatTemplate*:HFChatTemplate*:BatchBuilder*:Scheduler*:Request*:EndToEndTest.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub"
 
 # GPU tests: everything including CUDA kernels, < 30s
 test-gpu: build

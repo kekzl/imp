@@ -44,11 +44,7 @@ static constexpr int kAtomSize     = kAtomRows * kAtomKGroups;     // 512
 // Maximum S matrix size per head. Beyond this, fall back to flash attention.
 static constexpr size_t kMaxSBytesPerHead = 256ULL * 1024 * 1024;  // 256 MiB
 
-#if IMP_CUDA_13_1
 static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
-#else
-static constexpr auto kGemmAlgo = CUBLAS_GEMM_DEFAULT;
-#endif
 
 // =============================================================================
 // Device helpers (self-contained — no cross-TU __device__ linkage)

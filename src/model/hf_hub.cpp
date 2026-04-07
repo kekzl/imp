@@ -138,6 +138,58 @@ std::string find_gguf_in_dir(const std::string& dir) {
     return best;
 }
 
+bool is_safetensors_dir(const std::string& dir) {
+    if (!fs::is_directory(dir)) return false;
+    return fs::exists(dir + "/model.safetensors.index.json") ||
+           fs::exists(dir + "/model.safetensors");
+}
+
+std::string resolve_model_auto(const std::string& model_id,
+                                ImpModelFormat& out_format,
+                                const std::string& revision) {
+    out_format = IMP_FORMAT_GGUF;
+
+    // Direct .gguf file
+    if (model_id.size() > 5 &&
+        model_id.substr(model_id.size() - 5) == ".gguf" &&
+        fs::exists(model_id)) {
+        return model_id;
+    }
+
+    // Check if it's a directory
+    if (fs::is_directory(model_id)) {
+        // SafeTensors directory?
+        if (is_safetensors_dir(model_id)) {
+            out_format = IMP_FORMAT_SAFETENSORS;
+            return model_id;
+        }
+        // GGUF in directory?
+        std::string gguf = find_gguf_in_dir(model_id);
+        if (!gguf.empty()) return gguf;
+        IMP_LOG_ERROR("No model files found in: %s", model_id.c_str());
+        return "";
+    }
+
+    // Try HuggingFace resolution
+    std::string resolved = resolve_model_path(model_id, revision);
+    if (resolved.empty()) return "";
+
+    if (fs::is_regular_file(resolved)) return resolved;
+
+    if (fs::is_directory(resolved)) {
+        if (is_safetensors_dir(resolved)) {
+            out_format = IMP_FORMAT_SAFETENSORS;
+            return resolved;
+        }
+        std::string gguf = find_gguf_in_dir(resolved);
+        if (!gguf.empty()) return gguf;
+        IMP_LOG_ERROR("No model files found in: %s", resolved.c_str());
+        return "";
+    }
+
+    return resolved;
+}
+
 std::string resolve_model_gguf(const std::string& model_id,
                                 const std::string& revision) {
     // If it already ends with .gguf and exists, use directly

@@ -881,6 +881,7 @@ std::vector<int32_t> ChatTemplate::apply_jinja(
     jinja::Context ctx;
     ctx["messages"] = jinja::Value(build_jinja_messages(msgs, suppress_thinking));
     ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt);
+    ctx["enable_thinking"] = jinja::Value(!suppress_thinking);
     ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
     ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
 
@@ -939,6 +940,7 @@ std::vector<int32_t> ChatTemplate::apply_jinja_with_tools(
     ctx["tools"] = jinja::Value(std::move(tools_arr));
     ctx["tool_choice"] = jinja::Value(tool_choice);
     ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt);
+    ctx["enable_thinking"] = jinja::Value(!suppress_thinking);
     ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
     ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
 

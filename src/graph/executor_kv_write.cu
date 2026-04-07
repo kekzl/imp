@@ -25,8 +25,21 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
 
     KVCache* cache = state.kv_cache;
     int n        = state.n_tokens;
-    int nkv      = cache->n_kv_heads();
-    int hd       = cache->head_dim();
+    const auto& cfg = model_->config();
+    // Per-layer shape support (Gemma 4 dual attention geometry)
+    int nkv, hd;
+    if (!cfg.n_kv_heads_per_layer.empty() && layer < (int)cfg.n_kv_heads_per_layer.size() &&
+        cfg.n_kv_heads_per_layer[layer] > 0) {
+        nkv = cfg.n_kv_heads_per_layer[layer];
+    } else {
+        nkv = cache->n_kv_heads();
+    }
+    if (!cfg.head_dim_per_layer.empty() && layer < (int)cfg.head_dim_per_layer.size() &&
+        cfg.head_dim_per_layer[layer] > 0) {
+        hd = cfg.head_dim_per_layer[layer];
+    } else {
+        hd = cache->head_dim();
+    }
     const int kv_block_size = cache->block_size();
     int row_elems    = nkv * hd;
     int block_stride = kv_block_size * row_elems;

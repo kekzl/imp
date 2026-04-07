@@ -5,7 +5,6 @@
 # =============================================================================
 FROM nvidia/cuda:13.2.0-devel-ubuntu24.04 AS builder
 
-ARG CUDA_ARCHITECTURES="90a;100"
 ARG CMAKE_BUILD_TYPE=Release
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -30,7 +29,6 @@ ARG IMP_BUILD_BENCH=OFF
 RUN --mount=type=cache,target=/src/build \
     cmake -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
-        -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" \
         -DIMP_BUILD_TESTS=${IMP_BUILD_TESTS} \
         -DIMP_BUILD_BENCH=${IMP_BUILD_BENCH} \
         -DIMP_BUILD_TOOLS=ON \

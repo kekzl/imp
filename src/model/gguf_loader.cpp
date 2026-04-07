@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -274,6 +275,11 @@ static GGUFValue read_gguf_value(BinaryReader& r, GGUFValueType type) {
             } else if (arr_type == GGUFValueType::UINT32) {
                 read_array_elements(r, count, v.int_array,
                     [](BinaryReader& br) { return static_cast<int32_t>(br.read_u32()); }, 4);
+            } else if (arr_type == GGUFValueType::BOOL ||
+                       arr_type == GGUFValueType::UINT8 ||
+                       arr_type == GGUFValueType::INT8) {
+                read_array_elements(r, count, v.int_array,
+                    [](BinaryReader& br) { return static_cast<int32_t>(br.read_u8()); }, 1);
             } else {
                 // Skip unknown array element types
                 for (uint64_t i = 0; i < count && !r.failed(); i++)
@@ -432,6 +438,19 @@ static bool assign_tensor(Model& model, const std::string& name,
         // Post-layer norms (Gemma-3)
         else if (field == "post_attention_norm") layer.post_attn_norm = tensor;
         else if (field == "post_ffw_norm")       layer.post_ffn_norm = tensor;
+        // Gemma 4: parallel shared MLP + MoE expert branch norms
+        else if (field == "pre_ffw_norm_2")      layer.ffn_pre_norm_2 = tensor;
+        else if (field == "post_ffw_norm_1")     layer.ffn_post_norm_1 = tensor;
+        else if (field == "post_ffw_norm_2")     layer.ffn_post_norm_2 = tensor;
+        else if (field == "layer_output_scale")  layer.layer_out_scale = tensor;
+        else if (field == "rope_freqs")          layer.rope_freqs = tensor;
+        // Gemma 4: fused gate+up experts: [n_experts, n_ff_exp*2, d_model]
+        // We keep it packed; the MoE executor handles de-interleaving at dispatch.
+        else if (field == "ffn_gate_up_exps") {
+            layer.expert_gate_packed = tensor;  // reuse gate packed slot with full fused tensor
+            layer.expert_gate_qtype = qtype;
+            // Mark fused by leaving expert_up_packed null — executor detects this.
+        }
         // FFN
         else if (field == "ffn_gate")    { layer.w_gate = tensor; layer.w_gate_qtype = qtype; }
         else if (field == "ffn_up")      { layer.w_up = tensor; layer.w_up_qtype = qtype; }
@@ -468,8 +487,25 @@ static bool assign_tensor(Model& model, const std::string& name,
     }
 
     // 5-part: "blk.{i}.ffn_*.{expert_idx}.weight" — MoE per-expert weights
+    //    or: "blk.{i}.ffn_gate_inp.scale.weight" / "blk.{i}.ffn_down_exps.scale.weight" (Gemma 4)
     if (parts.size() == 5) {
         const auto& field = parts[2];
+        const auto& subfield = parts[3];
+
+        // Gemma 4 scale tensors
+        if (subfield == "scale") {
+            if (field == "ffn_gate_inp") {
+                layer.ffn_gate_inp_scale = tensor;
+                return true;
+            }
+            if (field == "ffn_down_exps") {
+                // Per-expert output scale. Not yet consumed by the executor — store as
+                // router bias slot so weight_upload at least preserves it.
+                layer.moe_router_bias = tensor;
+                return true;
+            }
+            return false;
+        }
 
         // MoE expert weights: "blk.{i}.ffn_*.{expert_idx}.weight"
         int expert_idx = 0;
@@ -828,6 +864,61 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         if (cfg.rope_local_theta == 0.0f && cfg.sliding_window_pattern > 0) {
             cfg.rope_local_theta = 10000.0f;  // Gemma-3 default local theta
         }
+    }
+
+    // Gemma 4: per-layer SWA pattern (array), SWA-specific head dims, RoPE base.
+    if (arch_str == "gemma4") {
+        // Per-layer SWA bool array: 1 = sliding-window attention, 0 = full/global attention.
+        {
+            auto it = metadata.find("gemma4.attention.sliding_window_pattern");
+            if (it == metadata.end())
+                it = metadata.find("attention.sliding_window_pattern");
+            if (it != metadata.end() && !it->second.int_array.empty()) {
+                cfg.swa_layers.reserve(it->second.int_array.size());
+                for (auto v : it->second.int_array)
+                    cfg.swa_layers.push_back(v ? 1 : 0);
+            }
+        }
+        // Default: 5:1 SWA:full pattern (matches google/gemma-4-26B-A4B-it)
+        if (cfg.swa_layers.empty()) {
+            cfg.swa_layers.resize(cfg.n_layers, 0);
+            for (int i = 0; i < cfg.n_layers; i++)
+                cfg.swa_layers[i] = ((i % 6) == 5) ? 0 : 1;  // every 6th is full
+        }
+
+        // SWA-specific attention dims (full attention uses key_length/value_length)
+        int key_len      = static_cast<int>(get_uint("attention.key_length", 0));
+        int val_len      = static_cast<int>(get_uint("attention.value_length", 0));
+        int key_len_swa  = static_cast<int>(get_uint("attention.key_length_swa", key_len));
+        int val_len_swa  = static_cast<int>(get_uint("attention.value_length_swa", val_len));
+        (void)val_len; (void)val_len_swa;  // V head_dim assumed == K head_dim
+
+        cfg.sliding_window = static_cast<int>(get_uint("attention.sliding_window", 0));
+        cfg.rope_local_theta = static_cast<float>(get_float("rope.freq_base_swa", 0.0));
+        if (cfg.rope_local_theta == 0.0f) cfg.rope_local_theta = 10000.0f;
+        cfg.rope_theta_swa = cfg.rope_local_theta;
+
+        // Build per-layer head_dim and n_kv_heads from swa_layers.
+        // The GGUF may already supply per-layer arrays for head_count_kv; if not,
+        // we derive from swa_layers using key_length / key_length_swa.
+        if (cfg.head_dim_per_layer.empty() && key_len > 0 && key_len_swa > 0) {
+            cfg.head_dim_per_layer.resize(cfg.n_layers);
+            for (int i = 0; i < cfg.n_layers; i++)
+                cfg.head_dim_per_layer[i] = cfg.swa_layers[i] ? key_len_swa : key_len;
+        }
+        // scalar head_dim = max for buffer sizing
+        if (!cfg.head_dim_per_layer.empty()) {
+            int max_hd = 0;
+            for (int v : cfg.head_dim_per_layer) max_hd = std::max(max_hd, v);
+            cfg.head_dim = max_hd;
+            IMP_LOG_INFO("Gemma 4 per-layer head_dim: max=%d", max_hd);
+        }
+
+        // Gemma 4 has no attn logit softcap (only final logit softcap)
+        // MoE is per-layer; detected later via presence of ffn_gate_inp tensor.
+        IMP_LOG_INFO("Gemma 4: SWA layers=%zu (of %d), rope_theta_swa=%.0f",
+                     std::count(cfg.swa_layers.begin(), cfg.swa_layers.end(), uint8_t(1)),
+                     cfg.n_layers, cfg.rope_theta_swa);
     }
 
     // Attention logit softcapping (Gemma-2/3: tanh(score/cap)*cap)

@@ -10,11 +10,7 @@
 
 namespace imp {
 
-#if IMP_CUDA_13_1
 static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
-#else
-static constexpr auto kGemmAlgo = CUBLAS_GEMM_DEFAULT;
-#endif
 
 // ---------------------------------------------------------------------------
 // cuBLAS handle (reuse global — same as gemm.cu)

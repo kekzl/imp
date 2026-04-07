@@ -13,7 +13,6 @@
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/attention_cutlass_fmha.h"
 #include "compute/activation.h"
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"
@@ -283,7 +282,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         } else if (layer_has_dense_ffn(i)) {
             run_ffn(i, stream);
         }
-        if (i <= 1) {
+        {
             char buf[64];
             snprintf(buf, sizeof(buf), "after_layer%d_%s", i,
                      layer_has_moe(i) ? "moe" : (layer_has_dense_ffn(i) ? "ffn" : "no_ffn"));
@@ -471,7 +470,9 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     }
 
     // ---- Final logit soft-capping (Gemma-2/3) ----
-    if (cfg.final_logit_softcap > 0.0f) {
+    // Gemma 4: disable softcap for now (logits go well beyond cap=30, making argmax ambiguous).
+    bool skip_softcap = (cfg.arch == ModelArch::GEMMA4) || (getenv("IMP_NO_LOGIT_SOFTCAP") != nullptr);
+    if (cfg.final_logit_softcap > 0.0f && !skip_softcap) {
         int64_t n_logits = static_cast<int64_t>(logits_out.shape[0]) * cfg.vocab_size;
         int threads = 256;
         int blocks = static_cast<int>((n_logits + threads - 1) / threads);

@@ -261,6 +261,25 @@ bool WeightMap::apply_weights(
             ++assigned;
             continue;
         }
+        // NVFP4 prequant LM head scales (Model Optimizer)
+        if (name == "lm_head.weight_scale") {
+            model.nvfp4_out_proj_.weight_scale = tensor;
+            IMP_LOG_DEBUG("  assigned: %s -> nvfp4_out_proj.weight_scale", name.c_str());
+            ++assigned;
+            continue;
+        }
+        if (name == "lm_head.weight_scale_2") {
+            model.nvfp4_out_proj_.weight_scale_2 = tensor;
+            IMP_LOG_DEBUG("  assigned: %s -> nvfp4_out_proj.weight_scale_2", name.c_str());
+            ++assigned;
+            continue;
+        }
+        if (name == "lm_head.input_scale") {
+            model.nvfp4_out_proj_.input_scale = tensor;
+            IMP_LOG_DEBUG("  assigned: %s -> nvfp4_out_proj.input_scale", name.c_str());
+            ++assigned;
+            continue;
+        }
 
         // -----------------------------------------------------------------
         // Layer weights: model.layers.{i}.<rest>
