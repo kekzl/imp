@@ -122,6 +122,17 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                cfg.head_dim_per_layer[layer] > 0)
               ? cfg.head_dim_per_layer[layer]
               : (cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / nh));
+    // Gemma 4: derive per-layer n_heads from the actual wq output dim and the
+    // per-layer head_dim. Global layers can have fewer heads with a larger head_dim
+    // (e.g. 8×512) while SWA layers have more heads with a smaller head_dim
+    // (e.g. 16×256). Q output dim is constant across layers (= n_heads * head_dim).
+    if (cfg.arch == ModelArch::GEMMA4 && hd > 0 && ly.wq.data != nullptr) {
+        int wq_out = static_cast<int>(ly.wq.shape[0]);
+        if (wq_out > 0 && (wq_out % hd) == 0) {
+            int nh_layer = wq_out / hd;
+            if (nh_layer > 0 && nh_layer != nh) nh = nh_layer;
+        }
+    }
     float eps = cfg.rms_norm_eps;
 
 
@@ -321,7 +332,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                 } else {
                     gemm_dispatch(no, ly.wq, ly.wq_qtype, q_target, ctx);
                     gemm_dispatch(no, ly.wk, ly.wk_qtype, kk, ctx);
-                    gemm_dispatch(no, ly.wv, ly.wv_qtype, vv, ctx);
+                    if (ly.wv.data != nullptr) {
+                        gemm_dispatch(no, ly.wv, ly.wv_qtype, vv, ctx);
+                    }
+                    // else: K=V sharing path — vv populated below from kk.
                 }
             }
         }

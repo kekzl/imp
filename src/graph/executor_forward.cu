@@ -471,7 +471,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
 
     // ---- Final logit soft-capping (Gemma-2/3) ----
     // Gemma 4: disable softcap for now (logits go well beyond cap=30, making argmax ambiguous).
-    bool skip_softcap = (cfg.arch == ModelArch::GEMMA4) || (getenv("IMP_NO_LOGIT_SOFTCAP") != nullptr);
+    bool skip_softcap = (getenv("IMP_NO_LOGIT_SOFTCAP") != nullptr);
     if (cfg.final_logit_softcap > 0.0f && !skip_softcap) {
         int64_t n_logits = static_cast<int64_t>(logits_out.shape[0]) * cfg.vocab_size;
         int threads = 256;
