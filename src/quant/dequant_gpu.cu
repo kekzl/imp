@@ -332,9 +332,11 @@ __global__ void dequant_q4_0_kernel(
     half d_val = *reinterpret_cast<const half*>(block_ptr);
     const uint8_t* qs = block_ptr + 2;
 
-    int byte_idx = i / 2;
+    // ggml layout: element e (0..15) is low nibble of qs[e]; element e+16 is
+    // high nibble of qs[e]. NOT a linear (i/2, i%2) interleave.
+    int byte_idx = i & 15;
     uint8_t packed = qs[byte_idx];
-    int nibble = (i % 2 == 0) ? (packed & 0xF) : ((packed >> 4) & 0xF);
+    int nibble = (i < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
 
     float val = __half2float(d_val) * static_cast<float>(nibble - 8);
     dst[idx] = __float2half(val);
@@ -371,9 +373,9 @@ __global__ void dequant_q4_1_kernel(
     half m_val = *reinterpret_cast<const half*>(block_ptr + 2);
     const uint8_t* qs = block_ptr + 4;
 
-    int byte_idx = i / 2;
+    int byte_idx = i & 15;
     uint8_t packed = qs[byte_idx];
-    int nibble = (i % 2 == 0) ? (packed & 0xF) : ((packed >> 4) & 0xF);
+    int nibble = (i < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
 
     float val = __half2float(d_val) * static_cast<float>(nibble) + __half2float(m_val);
     dst[idx] = __float2half(val);
@@ -408,9 +410,9 @@ __global__ void dequant_q5_0_kernel(
     const uint8_t* qh = block_ptr + 2;   // 4 bytes high bits
     const uint8_t* qs = block_ptr + 6;   // 16 bytes low nibbles
 
-    int byte_idx = i / 2;
+    int byte_idx = i & 15;
     uint8_t packed = qs[byte_idx];
-    int low4 = (i % 2 == 0) ? (packed & 0xF) : ((packed >> 4) & 0xF);
+    int low4 = (i < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
     int high1 = (qh[i / 8] >> (i % 8)) & 1;
     int q5 = (high1 << 4) | low4;
 
@@ -449,9 +451,9 @@ __global__ void dequant_q5_1_kernel(
     const uint8_t* qh = block_ptr + 4;   // 4 bytes high bits
     const uint8_t* qs = block_ptr + 8;   // 16 bytes low nibbles
 
-    int byte_idx = i / 2;
+    int byte_idx = i & 15;
     uint8_t packed = qs[byte_idx];
-    int low4 = (i % 2 == 0) ? (packed & 0xF) : ((packed >> 4) & 0xF);
+    int low4 = (i < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
     int high1 = (qh[i / 8] >> (i % 8)) & 1;
     int q5 = (high1 << 4) | low4;
 
