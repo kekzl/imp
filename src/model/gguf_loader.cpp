@@ -460,7 +460,13 @@ static bool assign_tensor(Model& model, const std::string& name,
         else if (field == "ffn_up")      { layer.w_up = tensor; layer.w_up_qtype = qtype; }
         else if (field == "ffn_down")    { layer.w_down = tensor; layer.w_down_qtype = qtype; }
         else if (field == "ffn_norm")      layer.ffn_norm = tensor;
-        else if (field == "ffn_gate_inp")  layer.moe_gate = tensor;
+        else if (field == "ffn_gate_inp") {
+            // Distinguish .weight (the gate matrix) from .scale (per-channel multiplier).
+            // Gemma 4 stores `blk.X.ffn_gate_inp.scale` as a 4-part tensor name; without
+            // this branch the scale would be silently misassigned to layer.moe_gate.
+            if (suffix == "scale") layer.ffn_gate_inp_scale = tensor;
+            else                   layer.moe_gate = tensor;
+        }
         // Packed expert tensors: 3D [n_experts, rows, cols]
         else if (field == "ffn_gate_exps") { layer.expert_gate_packed = tensor; layer.expert_gate_qtype = qtype; }
         else if (field == "ffn_up_exps")   { layer.expert_up_packed = tensor; layer.expert_up_qtype = qtype; }
