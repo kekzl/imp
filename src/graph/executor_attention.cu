@@ -202,7 +202,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     // post_attn_norm serves as FFN input norm in run_ffn — NOT a sandwich norm.
     // Without this check, post_attn_norm is applied TWICE (here + run_ffn fallback).
     const bool has_post_attn_norm = (ly.post_attn_norm.data != nullptr && ly.ffn_norm.data != nullptr);
-    const bool using_fp32_accum = (fp32_accum_buf_ != nullptr && has_post_attn_norm);
+    // Gemma 4: use the corrected r + norm(po) path; skip fp32 accum (which fuses
+    // add-before-norm and would yield the wrong order).
+    const bool using_fp32_accum = (fp32_accum_buf_ != nullptr && has_post_attn_norm &&
+                                   model_->config().arch != ModelArch::GEMMA4);
     bool will_fuse_o_nvfp4 = (!has_post_attn_norm && n == 1 && h.dtype == DType::FP16 &&
                                wcache_.nvfp4.count(ly.wo.data));
     bool will_fuse_o_residual = (!has_post_attn_norm && !will_fuse_o_nvfp4 &&
@@ -355,11 +358,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                         cudaMemcpyDeviceToDevice, stream));
     }
 
-    // Gemma 4: V-normalization (RMSNorm with no learned weight).
-    // V is flattened to [n * nkv, hd] and each per-head row is normalized.
-    // This keeps V at unit RMS, preventing attention output blowup.
+    // (V-norm removed: Gemma 4 GGUF only ships Q-norm and K-norm; the all-ones
+    // V-norm bandaid was masking other bugs. Re-enable via IMP_G4_VNORM=1.)
     if (cfg.arch == ModelArch::GEMMA4 && v_norm_ones_buf_ != nullptr &&
-        getenv("IMP_G4_NO_VNORM") == nullptr) {
+        getenv("IMP_G4_VNORM") != nullptr) {
         int64_t vflat_shape[4] = {static_cast<int64_t>(n) * nkv, hd, 0, 0};
         Tensor v_flat(vv.data, vv.dtype, 2, vflat_shape, true);
         int64_t ones_shape[4] = {hd, 0, 0, 0};
@@ -376,7 +378,18 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     float layer_rope_theta = cfg.rope_theta;
     float layer_rope_freq_scale = cfg.rope_freq_scale;
     int layer_sliding_window = cfg.sliding_window;
-    if (cfg.sliding_window_pattern > 0) {
+    if (cfg.arch == ModelArch::GEMMA4 && !cfg.swa_layers.empty()) {
+        // Gemma 4: per-layer SWA pattern stored in cfg.swa_layers (1=SWA, 0=global).
+        bool is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
+        if (is_swa) {
+            layer_rope_theta = (cfg.rope_theta_swa > 0.0f) ? cfg.rope_theta_swa : cfg.rope_local_theta;
+            layer_rope_freq_scale = 1.0f;
+            // layer_sliding_window stays at cfg.sliding_window (1024)
+        } else {
+            // Global layer: full attention, model rope_theta, with freq scaling
+            layer_sliding_window = 0;
+        }
+    } else if (cfg.sliding_window_pattern > 0) {
         bool is_global = (layer % cfg.sliding_window_pattern) == (cfg.sliding_window_pattern - 1);
         if (is_global) {
             // Global layer: full attention, model-level rope_theta, with freq scaling
@@ -442,11 +455,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                   qv.dtype == DType::FP16 &&
                                   state.kv_cache &&
                                   state.kv_cache->dtype() == DType::FP16);
-        // Per-layer rope_dim (Gemma 4: SWA full, global 25% partial)
+        // Per-layer rope_dim. Gemma 4: full rotation on this layer's head_dim
+        // (SWA hd=256 → rope=256, Global hd=512 → rope=512). Other archs: cfg.rope_dim.
         int fused_rope_dim = cfg.rope_dim;
         if (cfg.arch == ModelArch::GEMMA4) {
-            bool is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
-            fused_rope_dim = is_swa ? hd : (hd / 4);
+            fused_rope_dim = hd;
         } else if (fused_rope_dim > hd || fused_rope_dim <= 0) {
             fused_rope_dim = hd;
         }
@@ -489,13 +502,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             int64_t k4r[4] = {1, n, nkv, hd};
             Tensor q4r_t = qv.reshape(4, q4r);
             Tensor k4r_t = kk.reshape(4, k4r);
-            // Per-layer rope_dim: for Gemma 4, SWA layers use full rotation
-            // (rope_dim = hd_layer), global layers use 25% partial rotation
-            // (rope_dim = hd_layer / 4). Otherwise use cfg.rope_dim.
+            // Per-layer rope_dim. Gemma 4: full rotation on this layer's head_dim.
             int layer_rope_dim = cfg.rope_dim;
             if (cfg.arch == ModelArch::GEMMA4) {
-                bool is_swa_layer = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
-                layer_rope_dim = is_swa_layer ? hd : (hd / 4);
+                layer_rope_dim = hd;
             } else if (layer_rope_dim > hd || layer_rope_dim <= 0) {
                 layer_rope_dim = hd;  // safety clamp
             }
@@ -513,12 +523,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         debug_tensor_stats("L0_step2_after_rope_k", kk, stream);
     }
 
-    // 7. Attention
-    // Gemma 4: attention_scale = 1.0 (absorbed into Q/K norms).
-    // Other archs: standard 1/sqrt(head_dim).
-    float scale = (cfg.arch == ModelArch::GEMMA4)
-                  ? 1.0f
-                  : (1.0f / std::sqrt(static_cast<float>(hd)));
+    // 7. Attention — standard 1/sqrt(head_dim) for all archs.
+    float scale = 1.0f / std::sqrt(static_cast<float>(hd));
 
     if (state.is_prefill) {
         bool sliding_active = (layer_sliding_window > 0 && n > layer_sliding_window);
@@ -573,8 +579,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             // Per-layer rope_dim (same as prefill rope path above)
             int effective_rope_dim;
             if (cfg.arch == ModelArch::GEMMA4) {
-                bool is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
-                effective_rope_dim = is_swa ? hd : (hd / 4);
+                effective_rope_dim = hd;
             } else {
                 effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
                 if (effective_rope_dim > hd) effective_rope_dim = hd;
@@ -783,6 +788,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                 static_cast<float*>(fp32_h.data),
                 static_cast<half*>(h.data),
                 model_->config().d_model, eps, norm_w_off_);
+        } else if (has_post_attn_norm && model_->config().arch == ModelArch::GEMMA4) {
+            // Gemma 4 sandwich norm: h = r + post_attn_norm(po).
+            // Normalize attention output first, THEN add residual (HF reference order).
+            rmsnorm(po, ly.post_attn_norm, po,
+                    model_->config().rms_norm_eps, stream, norm_w_off_);
+            elementwise_add_store(po, r, h, stream);
         } else if (has_post_attn_norm) {
             // Sandwich norm without FP32 accumulator: h = rmsnorm(po + r)
             // Fused: 3 ops (add_store + rmsnorm + memcpy) → 1 kernel
