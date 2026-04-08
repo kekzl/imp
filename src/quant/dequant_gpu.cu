@@ -413,7 +413,10 @@ __global__ void dequant_q5_0_kernel(
     int byte_idx = i & 15;
     uint8_t packed = qs[byte_idx];
     int low4 = (i < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
-    int high1 = (qh[i / 8] >> (i % 8)) & 1;
+    // ggml packs high bits into a u32 where element l (0..15) has its high bit at
+    // bit l, and element l+16 has its high bit at bit l+12 (NOT l+16).
+    int h_bit_idx = (i < 16) ? i : (i + 12 - 16);
+    int high1 = (qh[h_bit_idx / 8] >> (h_bit_idx % 8)) & 1;
     int q5 = (high1 << 4) | low4;
 
     float val = __half2float(d_val) * static_cast<float>(q5 - 16);
@@ -454,7 +457,10 @@ __global__ void dequant_q5_1_kernel(
     int byte_idx = i & 15;
     uint8_t packed = qs[byte_idx];
     int low4 = (i < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
-    int high1 = (qh[i / 8] >> (i % 8)) & 1;
+    // ggml packs high bits into a u32 where element l (0..15) has its high bit at
+    // bit l, and element l+16 has its high bit at bit l+12 (NOT l+16).
+    int h_bit_idx = (i < 16) ? i : (i + 12 - 16);
+    int high1 = (qh[h_bit_idx / 8] >> (h_bit_idx % 8)) & 1;
     int q5 = (high1 << 4) | low4;
 
     float val = __half2float(d_val) * static_cast<float>(q5) + __half2float(m_val);
