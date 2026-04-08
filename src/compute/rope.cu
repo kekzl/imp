@@ -122,8 +122,13 @@ __global__ void rope_forward_kernel(
         sin_val = __sinf(angle);
     }
 
+    // neox pair layout: (i, i + head_dim/2). For partial RoPE with rope_pairs
+    // < head_dim/2, the pair stride stays at head_dim/2 and only the first
+    // rope_pairs indices in the lower half get rotated. The upper-half slots
+    // [head_dim/2 + rope_pairs, head_dim) stay unchanged (no copy needed — the
+    // kernel only writes idx0/idx1, untouched indices keep their input value).
     const int idx0 = neox ? pair_idx : (2 * pair_idx);
-    const int idx1 = neox ? (pair_idx + rope_pairs) : (2 * pair_idx + 1);
+    const int idx1 = neox ? (pair_idx + head_dim / 2) : (2 * pair_idx + 1);
 
     if (head_idx < n_heads) {
         int64_t base = static_cast<int64_t>(token_idx) * n_heads * head_dim
@@ -305,16 +310,28 @@ __global__ void qknorm_rope_fused_fp16_kernel(
             }
 
             int idx0 = neox ? pair : (2 * pair);
-            int idx1 = neox ? (pair + rope_pairs) : (2 * pair + 1);
+            int idx1 = neox ? (pair + head_dim / 2) : (2 * pair + 1);
 
             float q0 = normed_vals[idx0];
             float q1 = normed_vals[idx1];
             q_head[idx0] = __float2half(q0 * cos_val - q1 * sin_val);
             q_head[idx1] = __float2half(q0 * sin_val + q1 * cos_val);
         }
-        int rotated_end = neox ? (2 * rope_pairs) : (2 * rope_pairs);
-        for (int i = rotated_end + threadIdx.x; i < head_dim; i += blockDim.x) {
-            q_head[i] = __float2half(normed_vals[i]);
+        // Copy back non-rotated dims. With neox partial RoPE, unrotated ranges
+        // are [rope_pairs, head_dim/2) and [head_dim/2 + rope_pairs, head_dim).
+        // For interleaved (non-neox), unrotated range is [2*rope_pairs, head_dim).
+        if (neox) {
+            const int hd_half = head_dim / 2;
+            for (int i = rope_pairs + threadIdx.x; i < hd_half; i += blockDim.x) {
+                q_head[i] = __float2half(normed_vals[i]);
+            }
+            for (int i = hd_half + rope_pairs + threadIdx.x; i < head_dim; i += blockDim.x) {
+                q_head[i] = __float2half(normed_vals[i]);
+            }
+        } else {
+            for (int i = 2 * rope_pairs + threadIdx.x; i < head_dim; i += blockDim.x) {
+                q_head[i] = __float2half(normed_vals[i]);
+            }
         }
     }
 
@@ -364,16 +381,25 @@ __global__ void qknorm_rope_fused_fp16_kernel(
             }
 
             int idx0 = neox ? pair : (2 * pair);
-            int idx1 = neox ? (pair + rope_pairs) : (2 * pair + 1);
+            int idx1 = neox ? (pair + head_dim / 2) : (2 * pair + 1);
 
             float k0 = normed_vals[idx0];
             float k1 = normed_vals[idx1];
             k_head[idx0] = __float2half(k0 * cos_val - k1 * sin_val);
             k_head[idx1] = __float2half(k0 * sin_val + k1 * cos_val);
         }
-        int rotated_end = neox ? (2 * rope_pairs) : (2 * rope_pairs);
-        for (int i = rotated_end + threadIdx.x; i < head_dim; i += blockDim.x) {
-            k_head[i] = __float2half(normed_vals[i]);
+        if (neox) {
+            const int hd_half = head_dim / 2;
+            for (int i = rope_pairs + threadIdx.x; i < hd_half; i += blockDim.x) {
+                k_head[i] = __float2half(normed_vals[i]);
+            }
+            for (int i = hd_half + rope_pairs + threadIdx.x; i < head_dim; i += blockDim.x) {
+                k_head[i] = __float2half(normed_vals[i]);
+            }
+        } else {
+            for (int i = 2 * rope_pairs + threadIdx.x; i < head_dim; i += blockDim.x) {
+                k_head[i] = __float2half(normed_vals[i]);
+            }
         }
     }
 }
