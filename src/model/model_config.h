@@ -147,6 +147,11 @@ struct TransformerLayer {
     // Router bias (Nemotron MoE)
     Tensor moe_router_bias;
 
+    // Per-expert output scale (Gemma 4): one scalar per expert, applied to each
+    // expert's down-projection output BEFORE the routing weighted sum. Loaded
+    // from `blk.X.ffn_down_exps.scale` (shape [n_expert]).
+    Tensor expert_down_scale;
+
     // Pre-quantized NVFP4 weights (from Model Optimizer via SafeTensors).
     // weight_scale: FP8 E4M3 micro-scales per group_size elements
     // weight_scale_2: FP32 tensor-scale (single value per tensor)

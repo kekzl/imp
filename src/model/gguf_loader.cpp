@@ -470,7 +470,14 @@ static bool assign_tensor(Model& model, const std::string& name,
         // Packed expert tensors: 3D [n_experts, rows, cols]
         else if (field == "ffn_gate_exps") { layer.expert_gate_packed = tensor; layer.expert_gate_qtype = qtype; }
         else if (field == "ffn_up_exps")   { layer.expert_up_packed = tensor; layer.expert_up_qtype = qtype; }
-        else if (field == "ffn_down_exps") { layer.expert_down_packed = tensor; layer.expert_down_qtype = qtype; }
+        else if (field == "ffn_down_exps") {
+            // Distinguish .weight (the per-expert FFN down weights) from .scale
+            // (per-expert output multiplier, shape [n_expert]). Same 4-part-name
+            // bug as ffn_gate_inp.scale: the scale tensor would otherwise overwrite
+            // expert_down_packed.
+            if (suffix == "scale") layer.expert_down_scale = tensor;
+            else                   { layer.expert_down_packed = tensor; layer.expert_down_qtype = qtype; }
+        }
         // Shared expert (always-active, e.g. Nemotron/DeepSeek)
         else if (field == "ffn_gate_shexp") { layer.w_gate_shared = tensor; layer.w_gate_shared_qtype = qtype; }
         else if (field == "ffn_up_shexp")   { layer.w_up_shared = tensor; layer.w_up_shared_qtype = qtype; }

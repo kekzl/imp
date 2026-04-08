@@ -929,7 +929,8 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i,
     // Post-layer norms (Gemma-3/4)
     for (auto* norm : {&L.post_attn_norm, &L.post_ffn_norm,
                        &L.ffn_pre_norm_2, &L.ffn_post_norm_1, &L.ffn_post_norm_2,
-                       &L.ffn_gate_inp_scale, &L.layer_out_scale, &L.rope_freqs}) {
+                       &L.ffn_gate_inp_scale, &L.layer_out_scale, &L.rope_freqs,
+                       &L.expert_down_scale}) {
         if (norm->data && !norm->on_device) {
             if (!upload_unquantized_weight(*norm, GGMLQuantType::NONE,
                                            ctx.compute_dtype, ctx.stream,
