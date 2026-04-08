@@ -914,11 +914,12 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             IMP_LOG_INFO("Gemma 4 per-layer head_dim: max=%d", max_hd);
         }
 
-        // Gemma 4 has no attn logit softcap (only final logit softcap)
-        // MoE is per-layer; detected later via presence of ffn_gate_inp tensor.
-        IMP_LOG_INFO("Gemma 4: SWA layers=%zu (of %d), rope_theta_swa=%.0f",
+        IMP_LOG_INFO("Gemma 4: SWA layers=%zu (of %d), rope_theta_swa=%.0f, key_len=%d, key_len_swa=%d",
                      std::count(cfg.swa_layers.begin(), cfg.swa_layers.end(), uint8_t(1)),
-                     cfg.n_layers, cfg.rope_theta_swa);
+                     cfg.n_layers, cfg.rope_theta_swa, key_len, key_len_swa);
+        // Per-layer head_dim/n_kv_heads detection happens at runtime in run_attention
+        // by reading wq.shape[0] / hd and wk.shape[0] / hd. Authoritative source =
+        // the loaded tensor shapes, not GGUF metadata.
     }
 
     // Attention logit softcapping (Gemma-2/3: tanh(score/cap)*cap)

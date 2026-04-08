@@ -122,15 +122,22 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                cfg.head_dim_per_layer[layer] > 0)
               ? cfg.head_dim_per_layer[layer]
               : (cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / nh));
-    // Gemma 4: derive per-layer n_heads from the actual wq output dim and the
-    // per-layer head_dim. Global layers can have fewer heads with a larger head_dim
-    // (e.g. 8×512) while SWA layers have more heads with a smaller head_dim
-    // (e.g. 16×256). Q output dim is constant across layers (= n_heads * head_dim).
+    // Gemma 4: derive per-layer n_heads and n_kv_heads from actual tensor shapes.
+    // Layer 0 (SWA) wq=[4096,2816] wk=[2048,2816] → 16 Q × hd=256, 8 KV × hd=256
+    // Layer 5 (Global) wq=[8192,2816] wk=[1024,2816] → 16 Q × hd=512, 2 KV × hd=512
+    // Authoritative source = the loaded tensor shapes; per-layer config can lag.
     if (cfg.arch == ModelArch::GEMMA4 && hd > 0 && ly.wq.data != nullptr) {
         int wq_out = static_cast<int>(ly.wq.shape[0]);
         if (wq_out > 0 && (wq_out % hd) == 0) {
             int nh_layer = wq_out / hd;
             if (nh_layer > 0 && nh_layer != nh) nh = nh_layer;
+        }
+        if (ly.wk.data != nullptr) {
+            int wk_out = static_cast<int>(ly.wk.shape[0]);
+            if (wk_out > 0 && (wk_out % hd) == 0) {
+                int nkv_layer = wk_out / hd;
+                if (nkv_layer > 0 && nkv_layer != nkv) nkv = nkv_layer;
+            }
         }
     }
     float eps = cfg.rms_norm_eps;
