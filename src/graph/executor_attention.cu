@@ -415,6 +415,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         longrope_freqs = (state.max_context_len <= longrope_orig_max_pos_)
                          ? longrope_short_freqs_ : longrope_long_freqs_;
     }
+    // Gemma 4: global attention layers use a separate `rope_freqs` tensor
+    // (loaded as a top-level tensor, fanned out to every global layer's slot).
+    if (cfg.arch == ModelArch::GEMMA4 && ly.rope_freqs.data != nullptr &&
+        ly.rope_freqs.on_device) {
+        longrope_freqs = static_cast<const float*>(ly.rope_freqs.data);
+    }
 
     // Qwen3.5 attention output gate: Q projection is INTERLEAVED per head:
     //   [Q_h0(hd), Gate_h0(hd), Q_h1(hd), Gate_h1(hd), ...]
