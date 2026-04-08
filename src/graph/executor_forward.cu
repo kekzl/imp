@@ -64,6 +64,20 @@ static void dispatch_gemv_fp32(GGMLQuantType qtype,
     }
 }
 
+// Gemma 4: per-layer output scale. Multiplies all elements of `data` by the
+// scalar half stored at `scale_ptr` (device memory). Used at end of each layer
+// to keep the residual stream bounded.
+__global__ __launch_bounds__(256) void scale_fp16_by_fp16ptr_kernel(
+    half* __restrict__ data, const half* __restrict__ scale_ptr, int64_t n) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t n2 = n / 2;
+    if (idx < n2) {
+        half2 s2 = __half2half2(*scale_ptr);
+        half2* d2 = reinterpret_cast<half2*>(data);
+        d2[idx] = __hmul2(d2[idx], s2);
+    }
+}
+
 // write_kv_cache: moved to executor_kv_write.cu
 
 // ---------------------------------------------------------------------------
@@ -288,6 +302,24 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                      layer_has_moe(i) ? "moe" : (layer_has_dense_ffn(i) ? "ffn" : "no_ffn"));
             debug_tensor_stats(buf, h, stream);
         }
+
+        // Gemma 4: per-layer output scale (a scalar weight). llama.cpp's
+        // gemma4-iswa.cpp:215-218 multiplies the layer output by this BEFORE the
+        // next layer reads it. Without it, the residual stream grows unbounded.
+        {
+            const auto& ly = model_->layer(i);
+            if (ly.layer_out_scale.data != nullptr && ly.layer_out_scale.on_device &&
+                h.dtype == DType::FP16) {
+                int64_t total = static_cast<int64_t>(n) * cfg.d_model;
+                int threads = 256;
+                int blocks = static_cast<int>((total / 2 + threads - 1) / threads);
+                scale_fp16_by_fp16ptr_kernel<<<blocks, threads, 0, stream>>>(
+                    static_cast<half*>(h.data),
+                    static_cast<const half*>(ly.layer_out_scale.data),
+                    total);
+            }
+        }
+
         if (i == max_layer - 1) {
             debug_tensor_stats("after_last_layer", h, stream);
         }
