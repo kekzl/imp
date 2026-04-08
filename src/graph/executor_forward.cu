@@ -280,7 +280,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         } else if (layer_has_ssm(i)) {
             run_ssm(i, state, stream);
         }
-        if (i <= 1) {
+        if (i <= 2) {
             char buf[64];
             snprintf(buf, sizeof(buf), "after_layer%d_%s", i,
                      layer_has_gdn(i) ? "gdn" :
@@ -296,7 +296,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         } else if (layer_has_dense_ffn(i)) {
             run_ffn(i, stream);
         }
-        {
+        if (i <= 2) {
             char buf[64];
             snprintf(buf, sizeof(buf), "after_layer%d_%s", i,
                      layer_has_moe(i) ? "moe" : (layer_has_dense_ffn(i) ? "ffn" : "no_ffn"));
@@ -317,6 +317,21 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                     static_cast<half*>(h.data),
                     static_cast<const half*>(ly.layer_out_scale.data),
                     total);
+                if (debug_forward_enabled() && i <= 2) {
+                    // Read the scalar back to stderr once per layer for verification.
+                    float sval = 0.0f;
+                    half h_scale;
+                    cudaMemcpyAsync(&h_scale, ly.layer_out_scale.data, sizeof(half),
+                                    cudaMemcpyDeviceToHost, stream);
+                    cudaStreamSynchronize(stream);
+                    sval = __half2float(h_scale);
+                    fprintf(stderr, "[DEBUG_FWD] L%d_out_scale = %.6f\n", i, sval);
+                }
+            }
+            if (debug_forward_enabled() && i <= 2) {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "L%d_after_out_scale", i);
+                debug_tensor_stats(buf, h, stream);
             }
         }
 
