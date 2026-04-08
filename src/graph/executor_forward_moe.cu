@@ -47,6 +47,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
+#include <vector>
 #include <algorithm>
 
 
@@ -771,6 +772,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                          ly.expert_gate_packed.on_device &&
                          ly.expert_gate_qtype == GGMLQuantType::Q6_K);
 
+    if (debug_forward_enabled() && layer == 0) {
+        int64_t gs[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(d)};
+        Tensor gv(moe_.gathered.data, compute_dtype_, 2, gs, true);
+        debug_tensor_stats("L0_moe_gathered", gv, stream);
+        debug_tensor_stats("L0_moe_norm_out_no", no, stream);
+    }
     if (can_fp16_batch_nosync) {
         // =================================================================
         // FP16 BATCH DEQUANT + cublasGemmGroupedBatchedEx
@@ -819,20 +826,40 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         if (!non_gated_experts)
             batch_dequant_gemm(ly.expert_gate_packed, ly.expert_gate_qtype,
                                 gathered_base, expert_gate_base, d, eff);
+        if (debug_forward_enabled() && layer == 0) {
+            int64_t sh[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
+            Tensor gv(moe_.expert_gate.data, compute_dtype_, 2, sh, true);
+            debug_tensor_stats("L0_moe_gate_out", gv, stream);
+        }
 
         // Up projection
         batch_dequant_gemm(ly.expert_up_packed, up_qtype,
                             gathered_base, expert_up_base, d, eff);
+        if (debug_forward_enabled() && layer == 0) {
+            int64_t sh[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
+            Tensor uv(moe_.expert_up.data, compute_dtype_, 2, sh, true);
+            debug_tensor_stats("L0_moe_up_out", uv, stream);
+        }
 
         // Activation
         apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                 moe_.expert_swiglu.data, non_gated_experts,
                                 expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
+        if (debug_forward_enabled() && layer == 0) {
+            int64_t sh[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
+            Tensor sv(moe_.expert_swiglu.data, compute_dtype_, 2, sh, true);
+            debug_tensor_stats("L0_moe_swiglu_out", sv, stream);
+        }
 
         // Down projection
         char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
         batch_dequant_gemm(ly.expert_down_packed, ly.expert_down_qtype,
                             down_act, expert_down_base, eff, d);
+        if (debug_forward_enabled() && layer == 0) {
+            int64_t sh[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(d)};
+            Tensor dv(moe_.expert_down.data, compute_dtype_, 2, sh, true);
+            debug_tensor_stats("L0_moe_down_out", dv, stream);
+        }
 
         // Falls through to scatter (step 7)
 
@@ -1407,11 +1434,43 @@ moe_after_experts:
                       static_cast<int64_t>(n) * d, stream);
     }
 
+    if (layer <= 2) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "L%d_moe_pre_post_norm2", layer);
+        debug_tensor_stats(buf, h, stream);
+        auto dump_norm = [&](const char* nm, const Tensor& t){
+            if (!t.data) return;
+            // Explicitly read 2816 halves from device memory
+            std::vector<half> tmp(2816);
+            cudaMemcpy(tmp.data(), t.data, 2816*sizeof(half), cudaMemcpyDeviceToHost);
+            double s=0, ss=0; float mn=1e30f, mx=-1e30f;
+            for (int i=0;i<2816;i++){
+                float v=__half2float(tmp[i]); s+=v; ss+=v*v;
+                if(v<mn)mn=v; if(v>mx)mx=v;
+            }
+            fprintf(stderr,"[DEBUG_FWD] L%d %-22s n=2816 sum=%+.4f mean=%+.4f L2=%.4f min=%+.4f max=%+.4f  [0..4]=%.4f %.4f %.4f %.4f %.4f\n",
+                layer, nm, s, s/2816.0, std::sqrt(ss), mn, mx,
+                __half2float(tmp[0]), __half2float(tmp[1]), __half2float(tmp[2]),
+                __half2float(tmp[3]), __half2float(tmp[4]));
+        };
+        dump_norm("W_post_ffw_norm_2", ly.ffn_post_norm_2);
+        dump_norm("W_post_ffw_norm_1", ly.ffn_post_norm_1);
+        dump_norm("W_post_ffw_norm",   ly.post_ffn_norm);
+        dump_norm("W_pre_ffw_norm_2",  ly.ffn_pre_norm_2);
+        dump_norm("W_ffn_norm",        ly.ffn_norm);
+        dump_norm("W_attn_norm",       ly.attn_norm);
+        dump_norm("W_post_attn_norm",  ly.post_attn_norm);
+    }
     // Gemma 4: apply post_ffw_norm_2 on the MoE branch output (h) BEFORE shared adds.
     // This matches the parallel-branch structure: rms_norm(moe_out, post_ffw_norm_2).
     if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_post_norm_2.data != nullptr &&
         getenv("IMP_G4_NO_POST_FFW_2") == nullptr) {
         rmsnorm(h, ly.ffn_post_norm_2, h, eps, stream, norm_w_off_);
+    }
+    if (layer <= 2) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "L%d_moe_post_post_norm2", layer);
+        debug_tensor_stats(buf, h, stream);
     }
 
     // Gemma 4: re-derive `no` for the shared MLP from the saved residual
@@ -1489,19 +1548,39 @@ moe_after_experts:
             rmsnorm(sh_down, ly.ffn_post_norm_1, sh_down, eps, stream, norm_w_off_);
         }
 
+        if (layer <= 2) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "L%d_shared_post_post_norm1", layer);
+            debug_tensor_stats(buf, sh_down, stream);
+        }
         // Add shared expert output to hidden (which already has routed expert output)
         elementwise_add(h, sh_down, stream);
+    }
+    if (layer <= 2) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "L%d_combined_pre_post_ffn_norm", layer);
+        debug_tensor_stats(buf, h, stream);
     }
 
     // Gemma 4: apply post_ffn_norm (combined post-norm) BEFORE residual add.
     if (cfg.arch == ModelArch::GEMMA4 && ly.post_ffn_norm.data != nullptr) {
         rmsnorm(h, ly.post_ffn_norm, h, eps, stream, norm_w_off_);
     }
+    if (layer <= 2) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "L%d_combined_post_post_ffn_norm", layer);
+        debug_tensor_stats(buf, h, stream);
+    }
 
     // 9. Residual connection: hidden += residual
     //    Skipped when decode fast path already fused residual into weighted_sum.
     if (!residual_fused) {
         elementwise_add(h, r, stream);
+    }
+    if (layer <= 2) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "L%d_after_residual_pre_scale", layer);
+        debug_tensor_stats(buf, h, stream);
     }
 
     // 10. Free routing result tensors only if allocated by moe_topk_gating.
