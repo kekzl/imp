@@ -52,6 +52,21 @@
 
 namespace imp {
 
+// Multiply each routing weight by the scale of its selected expert.
+// Used by Gemma 4 to apply per-expert output scale before the routing sum.
+__global__ void moe_apply_per_expert_scale_kernel(
+    float* __restrict__ weights,            // [n_weights = n_tokens * top_k]
+    const int32_t* __restrict__ indices,    // [n_weights]
+    const __half* __restrict__ scales,      // [n_experts]
+    int n_weights)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n_weights) return;
+    int eid = indices[idx];
+    float s = __half2float(scales[eid]);
+    weights[idx] *= s;
+}
+
 // Replace +/-Inf with 0 in an FP16 tensor (in-place).
 // Used to sanitize FP16 GEMM outputs that overflow (e.g. Gemma 4 shared MLP at deep layers).
 __global__ void sanitize_fp16_kernel(__half* __restrict__ data, int64_t n) {
@@ -286,6 +301,22 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         scale_fp32_kernel<<<blocks_s, threads_s, 0, stream>>>(
             static_cast<float*>(routing.expert_weights.data),
             cfg.expert_weights_scale, n_weights);
+    }
+
+    // 4c. Gemma 4: per-expert output scale. Multiply each token's routing weight
+    // by the scale of its selected expert. Mathematically equivalent to scaling
+    // each expert's down output then summing — saves a separate scatter pass.
+    // (Matches llama.cpp ffn_moe_down_scaled = MUL(ffn_moe_down, repeat(scale)).)
+    if (cfg.arch == ModelArch::GEMMA4 && ly.expert_down_scale.data != nullptr &&
+        ly.expert_down_scale.on_device) {
+        int64_t n_weights = static_cast<int64_t>(n) * top_k;
+        int threads_s = 256;
+        int blocks_s = static_cast<int>((n_weights + threads_s - 1) / threads_s);
+        moe_apply_per_expert_scale_kernel<<<blocks_s, threads_s, 0, stream>>>(
+            static_cast<float*>(routing.expert_weights.data),
+            static_cast<const int32_t*>(routing.expert_indices.data),
+            static_cast<const half*>(ly.expert_down_scale.data),
+            static_cast<int>(n_weights));
     }
 
     // Build per-expert tensor views for grouped GEMM.
