@@ -494,6 +494,12 @@ int main(int argc, char** argv) {
                 }
             }
             int n_prompt_tokens = static_cast<int>(tokens.size());
+            if (getenv("IMP_DUMP_TOKENS")) {
+                fprintf(stderr, "[DUMP_TOKENS] n=%d:", n_prompt_tokens);
+                for (int ti = 0; ti < n_prompt_tokens && ti < 20; ti++)
+                    fprintf(stderr, " %d", tokens[ti]);
+                fprintf(stderr, "\n");
+            }
 
             // Prefill with timing
             auto t_prefill_start = std::chrono::high_resolution_clock::now();
