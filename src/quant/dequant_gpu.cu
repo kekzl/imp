@@ -413,10 +413,12 @@ __global__ void dequant_q5_0_kernel(
     int byte_idx = i & 15;
     uint8_t packed = qs[byte_idx];
     int low4 = (i < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
-    // ggml packs high bits into a u32 where element l (0..15) has its high bit at
-    // bit l, and element l+16 has its high bit at bit l+12 (NOT l+16).
-    int h_bit_idx = (i < 16) ? i : (i + 12 - 16);
-    int high1 = (qh[h_bit_idx / 8] >> (h_bit_idx % 8)) & 1;
+    // ggml packs high bits into a u32 where element i (0..31) has its high bit
+    // at bit i. Ref dequantize_row_q5_0:
+    //   xh_0 = ((qh >> j) << 4) & 0x10        // bit j   → element j
+    //   xh_1 = ((qh >> (j+12))) & 0x10        // bit j+16→ element j+16
+    // (the j+12 shift picks up bit (4+j+12)=bit j+16 at output position 4).
+    int high1 = (qh[i / 8] >> (i % 8)) & 1;
     int q5 = (high1 << 4) | low4;
 
     float val = __half2float(d_val) * static_cast<float>(q5 - 16);
@@ -457,10 +459,8 @@ __global__ void dequant_q5_1_kernel(
     int byte_idx = i & 15;
     uint8_t packed = qs[byte_idx];
     int low4 = (i < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
-    // ggml packs high bits into a u32 where element l (0..15) has its high bit at
-    // bit l, and element l+16 has its high bit at bit l+12 (NOT l+16).
-    int h_bit_idx = (i < 16) ? i : (i + 12 - 16);
-    int high1 = (qh[h_bit_idx / 8] >> (h_bit_idx % 8)) & 1;
+    // Element i (0..31) uses bit i of the 32-bit qh (ref Q5_1 dequant).
+    int high1 = (qh[i / 8] >> (i % 8)) & 1;
     int q5 = (high1 << 4) | low4;
 
     float val = __half2float(d_val) * static_cast<float>(q5) + __half2float(m_val);
@@ -584,9 +584,19 @@ __global__ void dequant_q5k_kernel(
     uint8_t packed = qs[qs_byte];
     int q4 = use_high ? ((packed >> 4) & 0xF) : (packed & 0xF);
 
-    // Extract 5th bit from qh array
-    // qh has 256 bits = 32 bytes, bit i corresponds to element i
-    int qh_bit = (qh[i / 8] >> (i % 8)) & 1;
+    // Extract 5th bit from qh array. Ref ggml layout (dequantize_row_q5_K):
+    //   32 bytes. Each byte[l] holds the high bits for element l across
+    //   all 4 chunks (j=0,64,128,192) at bit positions 0..7.
+    //   For chunk c (0..3) and half h (0..1):
+    //     - l = index within the chunk-half (0..31)
+    //     - byte_idx = l   (0..31)
+    //     - bit_pos  = c*2 + h
+    //     - element index in block: i = c*64 + h*32 + l
+    int c = i >> 6;          // chunk 0..3
+    int h2 = (i >> 5) & 1;   // half 0/1
+    int l = i & 31;
+    int bit_pos = (c << 1) | h2;
+    int qh_bit = (qh[l] >> bit_pos) & 1;
     int q5 = q4 | (qh_bit << 4);
 
     float val = d * static_cast<float>(sc_val) * static_cast<float>(q5)
