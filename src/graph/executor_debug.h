@@ -62,9 +62,11 @@ inline void debug_tensor_stats(const char* name, const Tensor& t, cudaStream_t s
 }
 
 // Multi-row variant: dump stats over ALL rows of a tensor for cross-impl
-// comparison (matching llama.cpp's eval-callback sum dump).
+// comparison (matching llama.cpp's eval-callback sum dump). Sync first to
+// avoid races against pending stream work.
 inline void debug_tensor_stats_all(const char* name, const Tensor& t, cudaStream_t stream) {
     if (!debug_forward_enabled()) return;
+    cudaStreamSynchronize(stream);  // wait for pending work on this stream
     int cols = static_cast<int>(t.shape[t.ndim - 1]);
     int nrows = static_cast<int>(t.shape[0]);
     int64_t n = static_cast<int64_t>(cols) * nrows;
@@ -75,18 +77,15 @@ inline void debug_tensor_stats_all(const char* name, const Tensor& t, cudaStream
     std::vector<float> host(n);
     if (t.dtype == DType::FP16) {
         std::vector<half> tmp(n);
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(tmp.data(), t.data, n * sizeof(half),
-                                            cudaMemcpyDeviceToHost, stream));
-        cudaStreamSynchronize(stream);
+        cudaMemcpy(tmp.data(), t.data, n * sizeof(half), cudaMemcpyDeviceToHost);
         for (int64_t i = 0; i < n; i++) host[i] = __half2float(tmp[i]);
     } else {
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(host.data(), t.data, n * sizeof(float),
-                                            cudaMemcpyDeviceToHost, stream));
-        cudaStreamSynchronize(stream);
+        cudaMemcpy(host.data(), t.data, n * sizeof(float), cudaMemcpyDeviceToHost);
     }
-    double vsum = 0.0;
-    for (int64_t i = 0; i < n; i++) vsum += host[i];
-    fprintf(stderr, "[DEBUG_FWD_ALL] %-30s  rows=%d cols=%d  sum=%+.4f\n", name, nrows, cols, vsum);
+    double vsum = 0.0, vss = 0.0;
+    for (int64_t i = 0; i < n; i++) { vsum += host[i]; vss += host[i] * host[i]; }
+    fprintf(stderr, "[DEBUG_FWD_ALL] %-30s  rows=%d cols=%d  sum=%+.4f  L2=%.4f\n",
+            name, nrows, cols, vsum, std::sqrt(vss));
 }
 
 } // namespace imp

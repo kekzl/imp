@@ -536,8 +536,14 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         debug_tensor_stats("L0_step2_after_rope_k", kk, stream);
     }
 
-    // 7. Attention — standard 1/sqrt(head_dim) for all archs.
-    float scale = 1.0f / std::sqrt(static_cast<float>(hd));
+    // 7. Attention scale.
+    //   Standard archs: 1/sqrt(head_dim).
+    //   Gemma 4: 1.0 (matches llama.cpp's f_attention_scale=1.0 per
+    //                 llama-model.cpp:1273. The K-norm and Q-norm constants
+    //                 already absorb the per-element scaling).
+    float scale = (cfg.arch == ModelArch::GEMMA4)
+                  ? 1.0f
+                  : (1.0f / std::sqrt(static_cast<float>(hd)));
 
     if (state.is_prefill) {
         bool sliding_active = (layer_sliding_window > 0 && n > layer_sliding_window);

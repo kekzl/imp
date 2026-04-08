@@ -320,7 +320,6 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             }
         }
 
-
         if (i == max_layer - 1) {
             debug_tensor_stats("after_last_layer", h, stream);
         }
