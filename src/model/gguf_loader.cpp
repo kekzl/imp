@@ -349,6 +349,12 @@ static bool assign_tensor(Model& model, const std::string& name,
         model.out_norm_qtype_ = qtype;
         return true;
     }
+    if (name == "rope_freqs.weight") {
+        // Top-level Gemma 4 freq-divisor table (shape [hd_global/2]); fanned out
+        // to every global layer in the post-load fixup below.
+        model.layers_[0].rope_freqs = tensor;
+        return true;
+    }
     if (name == "output.weight") {
         model.out_proj_ = tensor;
         model.out_proj_qtype_ = qtype;
@@ -1185,6 +1191,46 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             }
             IMP_LOG_INFO("Inferred shared expert config: n_shared=%d, shared_d_ff=%d",
                          cfg.n_experts_shared, cfg.expert_shared_d_ff);
+        }
+
+        // Gemma 4: convert top-level rope_freqs (a freq DIVISOR table for global
+        // layers) into pre-computed effective per-pair frequencies, then fan out
+        // to every global layer. The kernel's `longrope_inv_freqs` parameter
+        // expects ready-to-use freq values, so do the math on the host.
+        if (cfg.arch == ModelArch::GEMMA4 && !cfg.swa_layers.empty() &&
+            model->layers_[0].rope_freqs.data != nullptr &&
+            model->layers_[0].rope_freqs.dtype == DType::FP32) {
+            const Tensor& src = model->layers_[0].rope_freqs;
+            int n_pairs = static_cast<int>(src.shape[0]);  // hd/2 for global layer
+            int hd_global = n_pairs * 2;
+            const float* divisors = static_cast<const float*>(src.data);
+            float theta_global = cfg.rope_theta;  // 1e6 for Gemma 4
+
+            // Pre-compute effective per-pair frequencies = theta^(-2*pair/hd)/divisor[pair]
+            // and present them via the layer's rope_freqs slot. The kernel reads
+            // these directly as the freq value (longrope_inv_freqs path), no further
+            // theta math. Memory is leaked deliberately (4 KB total, model-lifetime).
+            float* effective = new float[n_pairs];
+            for (int p = 0; p < n_pairs; ++p) {
+                float exp_p   = -2.0f * static_cast<float>(p) / static_cast<float>(hd_global);
+                float base_freq = std::pow(theta_global, exp_p);
+                effective[p] = base_freq / divisors[p];
+            }
+            int64_t shape[4] = {n_pairs, 0, 0, 0};
+            Tensor eff_tensor(effective, DType::FP32, 1, shape, /*on_device=*/false);
+            int n_global = 0;
+            for (int i = 0; i < cfg.n_layers; ++i) {
+                bool is_swa = (i < (int)cfg.swa_layers.size() && cfg.swa_layers[i]);
+                if (!is_swa) {
+                    model->layers_[i].rope_freqs = eff_tensor;
+                    n_global++;
+                }
+            }
+            if (cfg.swa_layers[0]) {
+                model->layers_[0].rope_freqs = Tensor();
+            }
+            IMP_LOG_INFO("Gemma 4: rope_freqs → %d effective freqs, %d global layers",
+                         n_pairs, n_global);
         }
 
         // Warn about config/tensor mismatches
