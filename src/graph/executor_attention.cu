@@ -365,10 +365,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                         cudaMemcpyDeviceToDevice, stream));
     }
 
-    // (V-norm removed: Gemma 4 GGUF only ships Q-norm and K-norm; the all-ones
-    // V-norm bandaid was masking other bugs. Re-enable via IMP_G4_VNORM=1.)
-    if (cfg.arch == ModelArch::GEMMA4 && v_norm_ones_buf_ != nullptr &&
-        getenv("IMP_G4_VNORM") != nullptr) {
+    // V-normalization (Gemma 4): per-head RMSNorm with NO learned weight.
+    // Matches llama.cpp's `Vcur = ggml_rms_norm(Vcur, eps)` (gemma4-iswa.cpp:82).
+    // Required for both K=V-shared global layers and standard SWA layers.
+    if (cfg.arch == ModelArch::GEMMA4 && v_norm_ones_buf_ != nullptr) {
         int64_t vflat_shape[4] = {static_cast<int64_t>(n) * nkv, hd, 0, 0};
         Tensor v_flat(vv.data, vv.dtype, 2, vflat_shape, true);
         int64_t ones_shape[4] = {hd, 0, 0, 0};

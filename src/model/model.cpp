@@ -185,8 +185,10 @@ void apply_arch_defaults(ModelConfig& cfg) {
     // Gemma-3/4 computes embed_scale from d_model
     if (cfg.arch == ModelArch::GEMMA3 || cfg.arch == ModelArch::GEMMA4)
         cfg.embed_scale = std::sqrt(static_cast<float>(cfg.d_model));
-    // Gemma-3/4 store norm weights as (w - 1) so add 1.0 back at runtime.
-    if (cfg.arch == ModelArch::GEMMA3 || cfg.arch == ModelArch::GEMMA4)
+    // Gemma-3 stores norm weights as (w - 1) so add 1.0 back at runtime.
+    // Gemma 4 stores them as actual values (verified against llama.cpp build_norm,
+    // which never adds an offset). q_norm values around 1.0234 ARE the actual scale.
+    if (cfg.arch == ModelArch::GEMMA3)
         cfg.norm_weight_offset = 1.0f;
     if (e.ffn_activation >= 0)
         cfg.ffn_activation = static_cast<FFNActivation>(e.ffn_activation);
