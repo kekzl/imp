@@ -350,8 +350,6 @@ static bool assign_tensor(Model& model, const std::string& name,
         return true;
     }
     if (name == "rope_freqs.weight") {
-        // Top-level Gemma 4 freq-divisor table (shape [hd_global/2]); fanned out
-        // to every global layer in the post-load fixup below.
         model.layers_[0].rope_freqs = tensor;
         return true;
     }

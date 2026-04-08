@@ -54,11 +54,39 @@ inline void debug_tensor_stats(const char* name, const Tensor& t, cudaStream_t s
     }
     float mean = vsum / std::max(n - nan_count - inf_count, 1);
     float l2 = std::sqrt(vl2);
-    fprintf(stderr, "[DEBUG_FWD] %-30s  min=%+.6e  max=%+.6e  mean=%+.6e  L2=%.6e",
-            name, vmin, vmax, mean, l2);
+    fprintf(stderr, "[DEBUG_FWD] %-30s  min=%+.6e  max=%+.6e  mean=%+.6e  sum=%+.4f  L2=%.6e",
+            name, vmin, vmax, mean, vsum, l2);
     if (nan_count > 0) fprintf(stderr, "  NaN=%d", nan_count);
     if (inf_count > 0) fprintf(stderr, "  Inf=%d", inf_count);
     fprintf(stderr, "\n");
+}
+
+// Multi-row variant: dump stats over ALL rows of a tensor for cross-impl
+// comparison (matching llama.cpp's eval-callback sum dump).
+inline void debug_tensor_stats_all(const char* name, const Tensor& t, cudaStream_t stream) {
+    if (!debug_forward_enabled()) return;
+    int cols = static_cast<int>(t.shape[t.ndim - 1]);
+    int nrows = static_cast<int>(t.shape[0]);
+    int64_t n = static_cast<int64_t>(cols) * nrows;
+    if (t.dtype != DType::FP16 && t.dtype != DType::FP32) {
+        fprintf(stderr, "[DEBUG_FWD_ALL] %s: unsupported dtype %d\n", name, (int)t.dtype);
+        return;
+    }
+    std::vector<float> host(n);
+    if (t.dtype == DType::FP16) {
+        std::vector<half> tmp(n);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(tmp.data(), t.data, n * sizeof(half),
+                                            cudaMemcpyDeviceToHost, stream));
+        cudaStreamSynchronize(stream);
+        for (int64_t i = 0; i < n; i++) host[i] = __half2float(tmp[i]);
+    } else {
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(host.data(), t.data, n * sizeof(float),
+                                            cudaMemcpyDeviceToHost, stream));
+        cudaStreamSynchronize(stream);
+    }
+    double vsum = 0.0;
+    for (int64_t i = 0; i < n; i++) vsum += host[i];
+    fprintf(stderr, "[DEBUG_FWD_ALL] %-30s  rows=%d cols=%d  sum=%+.4f\n", name, nrows, cols, vsum);
 }
 
 } // namespace imp
