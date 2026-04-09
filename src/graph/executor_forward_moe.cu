@@ -215,16 +215,19 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     //    Gemma 4: router input = rms_norm(h) * ffn_gate_inp_scale / sqrt(d_model).
     //    Other archs: router input = no (ffn-normalized h).
     Tensor router_in = no;
-    // Gemma-4 custom router: disabled by default. The implementation
-    // (rmsnorm(h, ffn_gate_inp_scale) * 1/sqrt(d_model)) does not match
-    // llama.cpp's reference (rmsnorm(h) * 1/sqrt(d_model) * ffn_gate_inp_scale)
-    // and caused ~1.5% drift per layer that cumulatively flipped the argmax
-    // at the final logit. Standard path (router_in = rmsnorm(h, ffn_norm))
-    // matches llama and produces coherent output (' Paris' for
-    // "The capital of France is"). Set IMP_G4_CUSTOM_ROUTER=1 to re-enable
-    // the legacy broken path for debugging.
+    // Gemma-4 custom router (2026-04-10): ENABLED by default. Direct
+    // comparison against llama-eval-callback L0 dump shows llama computes
+    // router input as:
+    //    rmsnorm_noweight(attn_out) * (1/sqrt(d_model)) * ffn_gate_inp.scale
+    // whereas the "standard" path (router_in = rmsnorm(h, ffn_pre_norm_2))
+    // uses the wrong weight and is missing the 1/sqrt(d_model) scale,
+    // producing router inputs ~50x too large and a completely different
+    // expert selection at L0 row 5. The earlier conclusion that the
+    // standard path "matched llama and produced coherent Paris" was wrong
+    // — llama actually picks token 45518 with these inputs, not " Paris".
+    // Set IMP_G4_NO_CUSTOM_ROUTER=1 to fall back to the broken path.
     if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_gate_inp_scale.data != nullptr &&
-        getenv("IMP_G4_CUSTOM_ROUTER") != nullptr) {
+        getenv("IMP_G4_NO_CUSTOM_ROUTER") == nullptr) {
         // Reuse moe_.scatter_out (FP32, max_tokens*d) as FP16 scratch:
         // FP16 needs half the bytes so we only use half of it.
         int64_t ri_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
