@@ -127,11 +127,14 @@ __device__ __forceinline__ float q5k_dp4a_sub(
         uint8_t min_val,                   // 6-bit sub-block min
         const int* __restrict__ xi,        // [8] packed Q8_1 int32 values
         float dq) {                        // Q8_1 block scale
+    // Ref layout (ggml dequantize_row_q5_K): qh is 32 bytes shared across
+    // all 8 subs. Element at position `i` within a sub uses bit `sub` of
+    // qh[i]. i.e. qh[l] byte holds the 5th bit for element l of EVERY sub,
+    // at bit position `sub`. Our prior code treated qh as `sub*4` private
+    // bytes with bits 0..7 encoding 4 elements — completely wrong layout.
     const int qs_byte_offset = (sub / 2) * 32;
     const bool use_high = (sub & 1);
     const uint8_t* qs_base = qs + qs_byte_offset;
-
-    const uint8_t* qh_sub = qh + sub * 4;
 
     int32_t sumi = 0;
     int32_t sumi_h = 0;   // 5th-bit correction
@@ -149,13 +152,18 @@ __device__ __forceinline__ float q5k_dp4a_sub(
         sumi = __dp4a(ni, xi[j], sumi);
         q8_sum_int = __dp4a(xi[j], ones, q8_sum_int);
 
-        uint8_t qh_byte = qh_sub[j / 2];
-        int bit_base = (j & 1) * 4;
-        uint32_t hbits = ((qh_byte >> (bit_base + 0)) & 1) |
-                         (((qh_byte >> (bit_base + 1)) & 1) << 8) |
-                         (((qh_byte >> (bit_base + 2)) & 1) << 16) |
-                         (((qh_byte >> (bit_base + 3)) & 1) << 24);
-        hbits *= 0x10;
+        // Four consecutive elements l = j*4, j*4+1, j*4+2, j*4+3.
+        // Each reads qh[l] and extracts bit `sub`. Place the resulting
+        // 0/1 into bit 4 (→ value 16) of each byte of the 4-byte packed
+        // int, matching how ni was built from nibbles 0..15.
+        uint8_t b0 = qh[j * 4 + 0];
+        uint8_t b1 = qh[j * 4 + 1];
+        uint8_t b2 = qh[j * 4 + 2];
+        uint8_t b3 = qh[j * 4 + 3];
+        uint32_t hbits = (((b0 >> sub) & 1u) << 4)  |
+                         (((b1 >> sub) & 1u) << 12) |
+                         (((b2 >> sub) & 1u) << 20) |
+                         (((b3 >> sub) & 1u) << 28);
         int hi;
         memcpy(&hi, &hbits, 4);
         sumi_h = __dp4a(hi, xi[j], sumi_h);
