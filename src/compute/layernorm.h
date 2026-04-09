@@ -18,6 +18,14 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out,
              float eps = 1e-5f, cudaStream_t stream = nullptr,
              float weight_offset = 0.0f);
 
+// RMSNorm with FP32 input and FP16 output. Used when the residual stream is
+// kept in FP32 (Gemma-4 post-norm arch) but the downstream GEMM wants FP16.
+// Avoids the FP32 → FP16 → RMSNorm rounding that would lose ~1-2% per layer.
+void rmsnorm_fp32_to_fp16(const Tensor& x_fp32, const Tensor& weight,
+                          Tensor& out_fp16,
+                          float eps = 1e-5f, cudaStream_t stream = nullptr,
+                          float weight_offset = 0.0f);
+
 // Register layernorm kernels for PDL tail/head overlap.
 void layernorm_pdl_register();
 

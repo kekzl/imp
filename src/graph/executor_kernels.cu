@@ -1922,8 +1922,20 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
     // with non-standard strides from per-layer narrow tensors).
     bool prefer_fp16_cache = (fp16_cache != nullptr && fp16_cache->count(weight.data) > 0 &&
                                input.stride[0] != weight.shape[1]);  // non-contiguous input
+    if (getenv("IMP_DEBUG_GEMM_DISPATCH") != nullptr) {
+        fprintf(stderr, "[GEMM_DISP] w=%p qtype=%d M=%lld N=%lld K=%lld prefer_fp16=%d "
+                "in_fp16_cache=%d in_fp8_cache=%d dp4a_ok=%d has_dequant=%d\n",
+                weight.data, (int)qtype,
+                (long long)input.shape[0], (long long)weight.shape[0], (long long)weight.shape[1],
+                (int)prefer_fp16_cache,
+                (fp16_cache && fp16_cache->count(weight.data) > 0),
+                (fp8_cache && fp8_cache->count(weight.data) > 0),
+                (int)(is_dp4a_qtype(qtype) && q8_1_buf && d8_buf),
+                (int)(dequant_scratch != nullptr));
+    }
     if (!prefer_fp16_cache && input.shape[0] == 1 && input.dtype == DType::FP16 &&
                q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype)) {
+        if (getenv("IMP_DEBUG_GEMM_DISPATCH") != nullptr) fprintf(stderr, "[GEMM_DISP]   -> dp4a MMVQ\n");
         // dp4a MMVQ: quantize input to Q8_1, then dp4a dot product
         int K = static_cast<int>(weight.shape[1]);
         quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
@@ -1975,6 +1987,7 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
     } else if (fp16_cache != nullptr && (dequant_gpu_supported(qtype) || qtype == GGMLQuantType::MXFP4)) {
         // Pre-dequantized FP16 cache: zero per-GEMM dequant overhead
         auto it = fp16_cache->find(weight.data);
+        if (getenv("IMP_DEBUG_GEMM_DISPATCH") != nullptr) fprintf(stderr, "[GEMM_DISP]   -> fp16_cache hit=%d\n", (int)(it != fp16_cache->end()));
         if (it != fp16_cache->end()) {
             gemm(input, it->second, output, 1.0f, 0.0f, stream);
         } else if (dequant_scratch != nullptr && qtype != GGMLQuantType::MXFP4) {
