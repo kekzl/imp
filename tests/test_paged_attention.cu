@@ -752,6 +752,191 @@ TEST(PagedAttentionTest, GQA_HD256) {
 }
 
 // =========================================================================
+// Gemma-4 Global layer geometry: GQA with hd=512, nkv=2, nh=16, short ctx
+// (reproduces decode config at the 7th token of "The capital of France is").
+// =========================================================================
+TEST(PagedAttentionTest, GQA_HD512_Gemma4Global) {
+    constexpr int batch = 1, n_heads = 16, n_kv_heads = 2, head_dim = 512;
+    constexpr int seq_len = 7;  // context after prefill(6) + decode token
+    constexpr int num_blocks = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    constexpr int max_blocks = num_blocks;
+    const float scale = 1.0f;  // Gemma-4 uses f_attention_scale=1.0
+
+    std::vector<float> h_Q(n_heads * head_dim);
+    for (int i = 0; i < n_heads * head_dim; i++)
+        h_Q[i] = 0.1f * sinf(static_cast<float>(i) * 0.013f);
+
+    std::vector<float> h_K(seq_len * n_kv_heads * head_dim);
+    std::vector<float> h_V(seq_len * n_kv_heads * head_dim);
+    for (int i = 0; i < seq_len * n_kv_heads * head_dim; i++) {
+        h_K[i] = 0.1f * cosf(static_cast<float>(i) * 0.005f);
+        h_V[i] = 0.1f * sinf(static_cast<float>(i) * 0.007f + 0.3f);
+    }
+
+    // CPU reference
+    std::vector<float> h_O(n_heads * head_dim, 0.0f);
+    for (int qh = 0; qh < n_heads; qh++) {
+        int kvh = qh / (n_heads / n_kv_heads);
+        std::vector<float> K_head(seq_len * head_dim), V_head(seq_len * head_dim);
+        for (int s = 0; s < seq_len; s++) {
+            for (int d = 0; d < head_dim; d++) {
+                K_head[s * head_dim + d] = h_K[s * n_kv_heads * head_dim + kvh * head_dim + d];
+                V_head[s * head_dim + d] = h_V[s * n_kv_heads * head_dim + kvh * head_dim + d];
+            }
+        }
+        cpu_attention(h_Q.data() + qh * head_dim, K_head.data(), V_head.data(),
+                      h_O.data() + qh * head_dim, seq_len, head_dim, scale);
+    }
+
+    std::vector<int> bt(num_blocks);
+    for (int i = 0; i < num_blocks; i++) bt[i] = i;
+
+    int total_cache_elems = num_blocks * BLOCK_SIZE * n_kv_heads * head_dim;
+    std::vector<float> h_K_cache(total_cache_elems, 0.0f);
+    std::vector<float> h_V_cache(total_cache_elems, 0.0f);
+    for (int h = 0; h < n_kv_heads; h++) {
+        std::vector<float> K_head(seq_len * head_dim), V_head(seq_len * head_dim);
+        for (int s = 0; s < seq_len; s++) {
+            for (int d = 0; d < head_dim; d++) {
+                K_head[s * head_dim + d] = h_K[s * n_kv_heads * head_dim + h * head_dim + d];
+                V_head[s * head_dim + d] = h_V[s * n_kv_heads * head_dim + h * head_dim + d];
+            }
+        }
+        fill_kv_cache(h_K_cache, K_head.data(), h, n_kv_heads, head_dim, seq_len, num_blocks, bt);
+        fill_kv_cache(h_V_cache, V_head.data(), h, n_kv_heads, head_dim, seq_len, num_blocks, bt);
+    }
+
+    Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
+    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(),
+                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(),
+                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_O = alloc_gpu_tensor_fp16({batch, 1, n_heads, head_dim});
+
+    int* d_bt = nullptr; int* d_ctx = nullptr;
+    cudaMalloc(&d_bt, max_blocks * sizeof(int));
+    cudaMalloc(&d_ctx, sizeof(int));
+    cudaMemcpy(d_bt, bt.data(), max_blocks * sizeof(int), cudaMemcpyHostToDevice);
+    int ctx = seq_len;
+    cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
+
+    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx,
+                           BLOCK_SIZE, scale, seq_len);
+    cudaDeviceSynchronize();
+
+    cudaError_t err = cudaGetLastError();
+    ASSERT_EQ(err, cudaSuccess) << "CUDA error: " << cudaGetErrorString(err);
+
+    auto result = read_gpu_fp16(d_O);
+    int mismatches = 0;
+    float max_err = 0.0f;
+    for (int qh = 0; qh < n_heads; qh++) {
+        for (int d = 0; d < head_dim; d++) {
+            int idx = qh * head_dim + d;
+            float err_val = std::abs(result[idx] - h_O[idx]);
+            max_err = std::max(max_err, err_val);
+            if (err_val > 0.01f) mismatches++;
+        }
+    }
+    EXPECT_EQ(mismatches, 0) << "HD=512 GQA Gemma-4 Global: " << mismatches
+        << " mismatches out of " << n_heads * head_dim
+        << " (max_err=" << max_err << ")";
+
+    free_gpu(d_Q); free_gpu(d_K); free_gpu(d_V); free_gpu(d_O);
+    cudaFree(d_bt); cudaFree(d_ctx);
+}
+
+// =========================================================================
+// Gemma-4 SWA layer geometry: GQA with hd=256, nkv=8, nh=16, short ctx
+// =========================================================================
+TEST(PagedAttentionTest, GQA_HD256_Gemma4SWA) {
+    constexpr int batch = 1, n_heads = 16, n_kv_heads = 8, head_dim = 256;
+    constexpr int seq_len = 7;
+    constexpr int num_blocks = (seq_len + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    constexpr int max_blocks = num_blocks;
+    const float scale = 1.0f;
+
+    std::vector<float> h_Q(n_heads * head_dim);
+    for (int i = 0; i < n_heads * head_dim; i++)
+        h_Q[i] = 0.1f * sinf(static_cast<float>(i) * 0.013f);
+
+    std::vector<float> h_K(seq_len * n_kv_heads * head_dim);
+    std::vector<float> h_V(seq_len * n_kv_heads * head_dim);
+    for (int i = 0; i < seq_len * n_kv_heads * head_dim; i++) {
+        h_K[i] = 0.1f * cosf(static_cast<float>(i) * 0.005f);
+        h_V[i] = 0.1f * sinf(static_cast<float>(i) * 0.007f + 0.3f);
+    }
+
+    std::vector<float> h_O(n_heads * head_dim, 0.0f);
+    for (int qh = 0; qh < n_heads; qh++) {
+        int kvh = qh / (n_heads / n_kv_heads);
+        std::vector<float> K_head(seq_len * head_dim), V_head(seq_len * head_dim);
+        for (int s = 0; s < seq_len; s++) {
+            for (int d = 0; d < head_dim; d++) {
+                K_head[s * head_dim + d] = h_K[s * n_kv_heads * head_dim + kvh * head_dim + d];
+                V_head[s * head_dim + d] = h_V[s * n_kv_heads * head_dim + kvh * head_dim + d];
+            }
+        }
+        cpu_attention(h_Q.data() + qh * head_dim, K_head.data(), V_head.data(),
+                      h_O.data() + qh * head_dim, seq_len, head_dim, scale);
+    }
+
+    std::vector<int> bt(num_blocks);
+    for (int i = 0; i < num_blocks; i++) bt[i] = i;
+
+    int total_cache_elems = num_blocks * BLOCK_SIZE * n_kv_heads * head_dim;
+    std::vector<float> h_K_cache(total_cache_elems, 0.0f);
+    std::vector<float> h_V_cache(total_cache_elems, 0.0f);
+    for (int h = 0; h < n_kv_heads; h++) {
+        std::vector<float> K_head(seq_len * head_dim), V_head(seq_len * head_dim);
+        for (int s = 0; s < seq_len; s++) {
+            for (int d = 0; d < head_dim; d++) {
+                K_head[s * head_dim + d] = h_K[s * n_kv_heads * head_dim + h * head_dim + d];
+                V_head[s * head_dim + d] = h_V[s * n_kv_heads * head_dim + h * head_dim + d];
+            }
+        }
+        fill_kv_cache(h_K_cache, K_head.data(), h, n_kv_heads, head_dim, seq_len, num_blocks, bt);
+        fill_kv_cache(h_V_cache, V_head.data(), h, n_kv_heads, head_dim, seq_len, num_blocks, bt);
+    }
+
+    Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
+    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(),
+                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(),
+                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_O = alloc_gpu_tensor_fp16({batch, 1, n_heads, head_dim});
+
+    int* d_bt = nullptr; int* d_ctx = nullptr;
+    cudaMalloc(&d_bt, max_blocks * sizeof(int));
+    cudaMalloc(&d_ctx, sizeof(int));
+    cudaMemcpy(d_bt, bt.data(), max_blocks * sizeof(int), cudaMemcpyHostToDevice);
+    int ctx = seq_len;
+    cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
+
+    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx,
+                           BLOCK_SIZE, scale, seq_len);
+    cudaDeviceSynchronize();
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+
+    auto result = read_gpu_fp16(d_O);
+    int mismatches = 0;
+    float max_err = 0.0f;
+    for (int qh = 0; qh < n_heads; qh++) {
+        for (int d = 0; d < head_dim; d++) {
+            int idx = qh * head_dim + d;
+            float err_val = std::abs(result[idx] - h_O[idx]);
+            max_err = std::max(max_err, err_val);
+            if (err_val > 0.01f) mismatches++;
+        }
+    }
+    EXPECT_EQ(mismatches, 0) << "HD=256 GQA Gemma-4 SWA: " << mismatches
+        << " mismatches / " << n_heads * head_dim << " (max_err=" << max_err << ")";
+
+    free_gpu(d_Q); free_gpu(d_K); free_gpu(d_V); free_gpu(d_O);
+    cudaFree(d_bt); cudaFree(d_ctx);
+}
+
+// =========================================================================
 // INT4 pack/unpack roundtrip
 // =========================================================================
 
