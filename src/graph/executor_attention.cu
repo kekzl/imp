@@ -209,10 +209,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     // post_attn_norm serves as FFN input norm in run_ffn — NOT a sandwich norm.
     // Without this check, post_attn_norm is applied TWICE (here + run_ffn fallback).
     const bool has_post_attn_norm = (ly.post_attn_norm.data != nullptr && ly.ffn_norm.data != nullptr);
-    // Gemma 4: use the corrected r + norm(po) path; skip fp32 accum (which fuses
-    // add-before-norm and would yield the wrong order).
-    const bool using_fp32_accum = (fp32_accum_buf_ != nullptr && has_post_attn_norm &&
-                                   model_->config().arch != ModelArch::GEMMA4);
+    // FP32 residual accumulator (Gemma-3 dense + Gemma-4 MoE post-norm architecture).
+    // Kernel semantics: fp32_h += rmsnorm(po) * w. llama's build_norm(attn) + residual
+    // is mathematically identical for both Gemma-3 and Gemma-4 (normalize-then-add).
+    const bool using_fp32_accum = (fp32_accum_buf_ != nullptr && has_post_attn_norm);
     bool will_fuse_o_nvfp4 = (!has_post_attn_norm && n == 1 && h.dtype == DType::FP16 &&
                                wcache_.nvfp4.count(ly.wo.data));
     bool will_fuse_o_residual = (!has_post_attn_norm && !will_fuse_o_nvfp4 &&
@@ -468,11 +468,15 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                   qv.dtype == DType::FP16 &&
                                   state.kv_cache &&
                                   state.kv_cache->dtype() == DType::FP16);
-        // Per-layer rope_dim. Gemma 4: full rotation on this layer's head_dim
-        // (SWA hd=256 → rope=256, Global hd=512 → rope=512). Other archs: cfg.rope_dim.
+        // Per-layer rope_dim. Gemma 4: SWA layers (hd=256) rotate full head_dim,
+        // but Global layers (hd=512) use partial_rotary_factor=0.25 per HF config
+        // → only first 128 of 512 dims are rotated. Matches llama.cpp rope_freqs
+        // tensor length (loaded as ly.rope_freqs for global layers).
         int fused_rope_dim = cfg.rope_dim;
         if (cfg.arch == ModelArch::GEMMA4) {
-            fused_rope_dim = hd;
+            bool is_swa_l = (!cfg.swa_layers.empty() && layer < (int)cfg.swa_layers.size() &&
+                             cfg.swa_layers[layer]);
+            fused_rope_dim = is_swa_l ? hd : (hd / 4);
         } else if (fused_rope_dim > hd || fused_rope_dim <= 0) {
             fused_rope_dim = hd;
         }
@@ -515,10 +519,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             int64_t k4r[4] = {1, n, nkv, hd};
             Tensor q4r_t = qv.reshape(4, q4r);
             Tensor k4r_t = kk.reshape(4, k4r);
-            // Per-layer rope_dim. Gemma 4: full rotation on this layer's head_dim.
+            // Per-layer rope_dim. Gemma 4: SWA full rotation, Global partial 1/4.
             int layer_rope_dim = cfg.rope_dim;
             if (cfg.arch == ModelArch::GEMMA4) {
-                layer_rope_dim = hd;
+                bool is_swa_l = (!cfg.swa_layers.empty() && layer < (int)cfg.swa_layers.size() &&
+                                 cfg.swa_layers[layer]);
+                layer_rope_dim = is_swa_l ? hd : (hd / 4);
             } else if (layer_rope_dim > hd || layer_rope_dim <= 0) {
                 layer_rope_dim = hd;  // safety clamp
             }
@@ -598,7 +604,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             // Per-layer rope_dim (same as prefill rope path above)
             int effective_rope_dim;
             if (cfg.arch == ModelArch::GEMMA4) {
-                effective_rope_dim = hd;
+                bool is_swa_l = (!cfg.swa_layers.empty() && layer < (int)cfg.swa_layers.size() &&
+                                 cfg.swa_layers[layer]);
+                effective_rope_dim = is_swa_l ? hd : (hd / 4);
             } else {
                 effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
                 if (effective_rope_dim > hd) effective_rope_dim = hd;
@@ -793,6 +801,15 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     } else {
         // Fallback: separate O-projection + optional post-norm + residual add
         gemm_dispatch(ao, ly.wo, ly.wo_qtype, po, ctx);
+        if (debug_attn_steps) {
+            debug_tensor_stats_all("L0_ao_pre_wo",  view_tokens(ao, n), stream);
+            debug_tensor_stats_all("L0_po_after_wo", view_tokens(po, n), stream);
+            debug_tensor_rows    ("po_wo-0",        view_tokens(po, n), stream);
+            debug_tensor_rows    ("ao_pre_wo-0",    view_tokens(ao, n), stream);
+            // dump wo weight shape info
+            fprintf(stderr, "[DEBUG_FWD] wo_shape: ndim=%d shape=[%ld,%ld] qtype=%d\n",
+                    ly.wo.ndim, (long)ly.wo.shape[0], (long)ly.wo.shape[1], (int)ly.wo_qtype);
+        }
         if (has_post_attn_norm && using_fp32_accum) {
             // Sandwich norm with FP32 accumulator (Gemma-3):
             // FP32 residual += attn_out, then post_attn_norm → FP16 hidden.
@@ -825,6 +842,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     }
     if (debug_attn_steps) {
         debug_tensor_stats("L0_step4_after_oproj_residual", h, stream);
+        debug_tensor_rows("step4_h-0", view_tokens(h, n), stream);
+        debug_tensor_stats_all("L0_step4_post_attn_all", view_tokens(h, n), stream);
     }
 
 }
