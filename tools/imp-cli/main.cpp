@@ -489,7 +489,9 @@ int main(int argc, char** argv) {
             } else {
                 tokens = tok->encode(args.prompt);
                 // Prepend BOS when the tokenizer requires it (e.g. Gemma)
-                if (tok->add_bos()) {
+                bool add_bos = tok->add_bos();
+                if (getenv("IMP_FORCE_BOS")) add_bos = true;
+                if (add_bos) {
                     tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
                 }
             }
