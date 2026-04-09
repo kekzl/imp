@@ -213,6 +213,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     // Kernel semantics: fp32_h += rmsnorm(po) * w. llama's build_norm(attn) + residual
     // is mathematically identical for both Gemma-3 and Gemma-4 (normalize-then-add).
     const bool using_fp32_accum = (fp32_accum_buf_ != nullptr && has_post_attn_norm);
+    if (debug_forward_enabled() && layer <= 1) {
+        fprintf(stderr, "[DEBUG_FWD] L%d attn: has_post_attn_norm=%d using_fp32_accum=%d "
+                "post_attn_norm=%p ffn_norm=%p\n",
+                layer, (int)has_post_attn_norm, (int)using_fp32_accum,
+                ly.post_attn_norm.data, ly.ffn_norm.data);
+    }
     bool will_fuse_o_nvfp4 = (!has_post_attn_norm && n == 1 && h.dtype == DType::FP16 &&
                                wcache_.nvfp4.count(ly.wo.data));
     bool will_fuse_o_residual = (!has_post_attn_norm && !will_fuse_o_nvfp4 &&
@@ -310,8 +316,16 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                      static_cast<half*>(vv.data),
                                      q_rows, k_rows, v_rows, K, stream);
         } else {
-            // Separate RMSNorm + dispatch
-            rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
+            // Separate RMSNorm + dispatch.
+            // Gemma-4 FP32 accum path: read FP32 residual directly to avoid the
+            // FP16 round-trip that drops ~1-2% precision per layer and causes
+            // the last-token hidden state to drift by sign-flip at L29.
+            if (using_fp32_accum && cfg.arch == ModelArch::GEMMA4) {
+                Tensor fp32_h = view_tokens(fp32_hidden_, n);
+                rmsnorm_fp32_to_fp16(fp32_h, ly.attn_norm, no, eps, stream, norm_w_off_);
+            } else {
+                rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
+            }
 
             // FP8 prefill path: quantize norm_out→FP8 once, 3 separate FP8 GEMMs
             auto fp8_wq = wcache_.fp8.find(ly.wq.data);
@@ -480,7 +494,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         } else if (fused_rope_dim > hd || fused_rope_dim <= 0) {
             fused_rope_dim = hd;
         }
-        if (has_qk_norm && n == 1 && qv.dtype == DType::FP16) {
+        static bool no_qknorm_fused = getenv("IMP_NO_QKNORM_FUSED") != nullptr;
+        if (has_qk_norm && n == 1 && qv.dtype == DType::FP16 && !no_qknorm_fused) {
             // Fused: QK-norm + RoPE in one kernel launch (saves 2 launches)
             qknorm_rope_fused(static_cast<half*>(qv.data),
                                static_cast<half*>(kk.data),

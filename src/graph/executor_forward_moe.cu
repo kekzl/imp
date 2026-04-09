@@ -202,22 +202,41 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                 static_cast<half*>(no.data),
                                 d, eps, stream, norm_w_off_);
     } else {
-        rmsnorm(h, norm_w, no, eps, stream, norm_w_off_);
+        // Gemma-4 FP32 accum: read FP32 residual directly to avoid FP16 round-trip.
+        if (cfg.arch == ModelArch::GEMMA4 && fp32_accum_buf_ != nullptr) {
+            Tensor fp32_h = view_tokens(fp32_hidden_, n);
+            rmsnorm_fp32_to_fp16(fp32_h, norm_w, no, eps, stream, norm_w_off_);
+        } else {
+            rmsnorm(h, norm_w, no, eps, stream, norm_w_off_);
+        }
     }
 
     // 3. Gate logits + top-k routing
     //    Gemma 4: router input = rms_norm(h) * ffn_gate_inp_scale / sqrt(d_model).
     //    Other archs: router input = no (ffn-normalized h).
     Tensor router_in = no;
+    // Gemma-4 custom router: disabled by default. The implementation
+    // (rmsnorm(h, ffn_gate_inp_scale) * 1/sqrt(d_model)) does not match
+    // llama.cpp's reference (rmsnorm(h) * 1/sqrt(d_model) * ffn_gate_inp_scale)
+    // and caused ~1.5% drift per layer that cumulatively flipped the argmax
+    // at the final logit. Standard path (router_in = rmsnorm(h, ffn_norm))
+    // matches llama and produces coherent output (' Paris' for
+    // "The capital of France is"). Set IMP_G4_CUSTOM_ROUTER=1 to re-enable
+    // the legacy broken path for debugging.
     if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_gate_inp_scale.data != nullptr &&
-        getenv("IMP_G4_NO_CUSTOM_ROUTER") == nullptr) {
+        getenv("IMP_G4_CUSTOM_ROUTER") != nullptr) {
         // Reuse moe_.scatter_out (FP32, max_tokens*d) as FP16 scratch:
         // FP16 needs half the bytes so we only use half of it.
         int64_t ri_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
         router_in = Tensor(moe_.scatter_out.data, compute_dtype_, 2, ri_shape, true);
         // Step 1: rmsnorm(h, ffn_gate_inp_scale, router_in) with offset=0
         //         (the scale tensor holds raw per-channel scales, no -1 trick)
-        rmsnorm(h, ly.ffn_gate_inp_scale, router_in, eps, stream, 0.0f);
+        if (fp32_accum_buf_ != nullptr) {
+            Tensor fp32_h = view_tokens(fp32_hidden_, n);
+            rmsnorm_fp32_to_fp16(fp32_h, ly.ffn_gate_inp_scale, router_in, eps, stream, 0.0f);
+        } else {
+            rmsnorm(h, ly.ffn_gate_inp_scale, router_in, eps, stream, 0.0f);
+        }
         // Step 2: multiply by 1/sqrt(d_model) scalar
         int64_t total_elems = static_cast<int64_t>(n) * d;
         int threads = 256;
@@ -1434,10 +1453,10 @@ moe_after_experts:
                       static_cast<int64_t>(n) * d, stream);
     }
 
-    if (layer <= 2) {
+    if (layer == 0) {
         char buf[64];
         snprintf(buf, sizeof(buf), "L%d_moe_pre_post_norm2", layer);
-        debug_tensor_stats(buf, h, stream);
+        debug_tensor_stats_all(buf, h, stream);
         auto dump_norm = [&](const char* nm, const Tensor& t){
             if (!t.data) return;
             // Explicitly read 2816 halves from device memory
@@ -1467,10 +1486,10 @@ moe_after_experts:
         getenv("IMP_G4_NO_POST_FFW_2") == nullptr) {
         rmsnorm(h, ly.ffn_post_norm_2, h, eps, stream, norm_w_off_);
     }
-    if (layer <= 2) {
+    if (layer == 0) {
         char buf[64];
         snprintf(buf, sizeof(buf), "L%d_moe_post_post_norm2", layer);
-        debug_tensor_stats(buf, h, stream);
+        debug_tensor_stats_all(buf, h, stream);
     }
 
     // Gemma 4: re-derive `no` for the shared MLP from the saved residual
@@ -1479,6 +1498,10 @@ moe_after_experts:
     if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_pre_norm_2.data != nullptr &&
         ly.w_up_shared.data != nullptr && ly.ffn_norm.data != nullptr) {
         rmsnorm(r, ly.ffn_norm, no, eps, stream, norm_w_off_);
+    }
+    if (layer == 0) {
+        debug_tensor_stats_all("L0_shared_input_no", view_tokens(no, n), stream);
+        debug_tensor_stats_all("L0_residual_r",      view_tokens(r,  n), stream);
     }
 
     // Shared expert: enabled by default. Gemma 4: requires post_ffw_norm_1 to be uploaded.
@@ -1526,8 +1549,15 @@ moe_after_experts:
                 relu_sqr_inplace(sh_up, stream);
             }
 
+            if (layer == 0) {
+                Tensor sh_gate_raw(moe_.expert_gate.data, compute_dtype_, 2, sh_shape, true);
+                debug_tensor_stats_all("L0_sh_up_raw",    sh_up, stream);
+                debug_tensor_stats_all("L0_sh_gate_raw",  sh_gate_raw, stream);
+                debug_tensor_stats_all("L0_sh_swiglu",    sh_swiglu, stream);
+            }
             // Down projection (reads from sh_up for non-gated since relu² was in-place)
             Tensor& sh_act = shared_gated ? sh_swiglu : sh_up;
+            if (layer == 0) debug_tensor_stats_all("L0_sh_act_preDown", sh_act, stream);
             gemm_dispatch(sh_act, ly.w_down_shared, Tensor(), ly.w_down_shared_qtype,
                           sh_down, qscratch_.dequant, stream, q8, qscratch_.d8_buf, &wcache_.fp16,
                           (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
@@ -1536,6 +1566,7 @@ moe_after_experts:
                                   mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
         }
 
+        if (layer == 0) debug_tensor_stats_all("L0_sh_down_raw", sh_down, stream);
         // Gemma 4: shared MLP can overflow FP16 at deep layers. Sanitize inf/NaN
         // to zero before the post-norm so rmsnorm doesn't produce all-zero output.
         if (cfg.arch == ModelArch::GEMMA4) {
@@ -1548,39 +1579,65 @@ moe_after_experts:
             rmsnorm(sh_down, ly.ffn_post_norm_1, sh_down, eps, stream, norm_w_off_);
         }
 
-        if (layer <= 2) {
+        if (layer == 0) {
             char buf[64];
             snprintf(buf, sizeof(buf), "L%d_shared_post_post_norm1", layer);
-            debug_tensor_stats(buf, sh_down, stream);
+            debug_tensor_stats_all(buf, sh_down, stream);
         }
         // Add shared expert output to hidden (which already has routed expert output)
         elementwise_add(h, sh_down, stream);
     }
-    if (layer <= 2) {
+    if (layer == 0) {
         char buf[64];
         snprintf(buf, sizeof(buf), "L%d_combined_pre_post_ffn_norm", layer);
-        debug_tensor_stats(buf, h, stream);
+        debug_tensor_stats_all(buf, h, stream);
     }
 
     // Gemma 4: apply post_ffn_norm (combined post-norm) BEFORE residual add.
-    if (cfg.arch == ModelArch::GEMMA4 && ly.post_ffn_norm.data != nullptr) {
-        rmsnorm(h, ly.post_ffn_norm, h, eps, stream, norm_w_off_);
-    }
-    if (layer <= 2) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "L%d_combined_post_post_ffn_norm", layer);
-        debug_tensor_stats(buf, h, stream);
-    }
+    // If FP32 accumulator is active, fuse post_ffn_norm + residual add into
+    // rmsnorm_fp32_accum_to_fp16_kernel so the residual stays in FP32 precision.
+    // Without this, every MoE layer does a FP16 elementwise_add and the downstream
+    // forced sync (executor_forward.cu:373-381) clobbers the FP32 accum with
+    // FP16-rounded data, accumulating ~1-2% drift per layer over 30 layers.
+    const bool moe_fp32_accum = (cfg.arch == ModelArch::GEMMA4 &&
+                                  ly.post_ffn_norm.data != nullptr &&
+                                  fp32_accum_buf_ != nullptr &&
+                                  !residual_fused);
+    if (moe_fp32_accum) {
+        // fp32_hidden_ holds the pre-MoE residual (written by run_attention's
+        // FP32 accum path). Kernel: fp32_h += rmsnorm(h) * post_ffn_norm; h = half(fp32_h).
+        Tensor fp32_h = view_tokens(fp32_hidden_, n);
+        rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
+            static_cast<const half*>(h.data),
+            static_cast<const half*>(ly.post_ffn_norm.data),
+            static_cast<float*>(fp32_h.data),
+            static_cast<half*>(h.data),
+            cfg.d_model, eps, norm_w_off_);
+        if (layer == 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "L%d_combined_post_post_ffn_norm_fp32accum", layer);
+            debug_tensor_stats_all(buf, h, stream);
+        }
+    } else {
+        if (cfg.arch == ModelArch::GEMMA4 && ly.post_ffn_norm.data != nullptr) {
+            rmsnorm(h, ly.post_ffn_norm, h, eps, stream, norm_w_off_);
+        }
+        if (layer == 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "L%d_combined_post_post_ffn_norm", layer);
+            debug_tensor_stats_all(buf, h, stream);
+        }
 
-    // 9. Residual connection: hidden += residual
-    //    Skipped when decode fast path already fused residual into weighted_sum.
-    if (!residual_fused) {
-        elementwise_add(h, r, stream);
+        // 9. Residual connection: hidden += residual
+        //    Skipped when decode fast path already fused residual into weighted_sum.
+        if (!residual_fused) {
+            elementwise_add(h, r, stream);
+        }
     }
-    if (layer <= 2) {
+    if (layer == 0) {
         char buf[64];
         snprintf(buf, sizeof(buf), "L%d_after_residual_pre_scale", layer);
-        debug_tensor_stats(buf, h, stream);
+        debug_tensor_stats_all(buf, h, stream);
     }
 
     // 10. Free routing result tensors only if allocated by moe_topk_gating.

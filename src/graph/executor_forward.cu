@@ -78,6 +78,15 @@ __global__ __launch_bounds__(256) void scale_fp16_by_fp16ptr_kernel(
     }
 }
 
+__global__ __launch_bounds__(256) void scale_fp32_by_fp16ptr_kernel(
+    float* __restrict__ data, const half* __restrict__ scale_ptr, int64_t n) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float s = __half2float(*scale_ptr);
+        data[idx] *= s;
+    }
+}
+
 // write_kv_cache: moved to executor_kv_write.cu
 
 // ---------------------------------------------------------------------------
@@ -90,19 +99,30 @@ __global__ __launch_bounds__(256) void scale_fp16_by_fp16ptr_kernel(
 void debug_top_logits(const Tensor& logits, cudaStream_t stream, int topk = 10) {
     if (!debug_forward_enabled()) return;
     int vocab = static_cast<int>(logits.shape[logits.ndim - 1]);
+    int nrows = (logits.ndim >= 2) ? static_cast<int>(logits.shape[0]) : 1;
+    // Dump the LAST row (the one that actually gets sampled from for the next token).
+    int row = nrows - 1;
+    int64_t row_stride = (logits.ndim >= 2 && logits.stride[0] > 0) ? logits.stride[0] : vocab;
+    const size_t elem_sz = (logits.dtype == DType::FP32) ? sizeof(float) : sizeof(half);
+    const char* src = static_cast<const char*>(logits.data) + (int64_t)row * row_stride * elem_sz;
     std::vector<float> host(vocab);
 
     if (logits.dtype == DType::FP32) {
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(host.data(), logits.data, vocab * sizeof(float),
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(host.data(), src, vocab * sizeof(float),
                          cudaMemcpyDeviceToHost, stream));
     } else if (logits.dtype == DType::FP16) {
         std::vector<half> tmp(vocab);
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(tmp.data(), logits.data, vocab * sizeof(half),
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(tmp.data(), src, vocab * sizeof(half),
                          cudaMemcpyDeviceToHost, stream));
         cudaStreamSynchronize(stream);
         for (int i = 0; i < vocab; i++) host[i] = __half2float(tmp[i]);
     }
     cudaStreamSynchronize(stream);
+    // Also print min/max/L2 over the dumped row for cross-impl comparison.
+    float mn = host[0], mx = host[0]; double ss = 0.0;
+    for (int i = 0; i < vocab; i++) { mn = std::min(mn, host[i]); mx = std::max(mx, host[i]); ss += (double)host[i]*host[i]; }
+    fprintf(stderr, "[DEBUG_FWD] logits row=%d/%d  min=%+.4f max=%+.4f L2=%.4f\n",
+            row, nrows, mn, mx, std::sqrt(ss));
 
     // Find top-k by partial sort
     std::vector<std::pair<float, int>> scored(vocab);
@@ -287,7 +307,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                      layer_has_gdn(i) ? "gdn" :
                      layer_has_attention(i) ? "attn" : "ssm");
             debug_tensor_stats_all(buf, view_tokens(h, n), stream);
-            {
+            const bool dump_this_layer = (i <= 6 || i == 10 || i == 15 || i == 17 || i == 20 || i == 23 || i == 25 || i == 26 || i == 27 || i == 28 || i == 29);
+            if (dump_this_layer) {
                 char rbuf[64];
                 snprintf(rbuf, sizeof(rbuf), "attn_out-%d", i);
                 debug_tensor_rows(rbuf, view_tokens(h, n), stream);
@@ -307,6 +328,12 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             snprintf(buf, sizeof(buf), "after_layer%02d_%s", i,
                      layer_has_moe(i) ? "moe" : (layer_has_dense_ffn(i) ? "ffn" : "no_ffn"));
             debug_tensor_stats_all(buf, view_tokens(h, n), stream);
+            const bool dump_this_layer = (i <= 6 || i == 10 || i == 15 || i == 17 || i == 20 || i == 23 || i == 25 || i == 26 || i == 27 || i == 28 || i == 29);
+            if (dump_this_layer) {
+                char rbuf[64];
+                snprintf(rbuf, sizeof(rbuf), "moe_out-%d", i);
+                debug_tensor_rows(rbuf, view_tokens(h, n), stream);
+            }
         }
 
         // Gemma 4: per-layer output scale (a scalar weight). llama.cpp's
@@ -323,6 +350,17 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                     static_cast<half*>(h.data),
                     static_cast<const half*>(ly.layer_out_scale.data),
                     total);
+                // Also scale the FP32 residual accumulator so next layer's
+                // attention sees the correctly-scaled residual stream.
+                // Without this the FP32 accum grows unbounded (layer_out_scale
+                // ~0.1-0.2 compensates residual growth per llama's gemma4-iswa).
+                if (fp32_accum_buf_ && cfg.arch == ModelArch::GEMMA4) {
+                    int blocks_f32 = static_cast<int>((total + threads - 1) / threads);
+                    scale_fp32_by_fp16ptr_kernel<<<blocks_f32, threads, 0, stream>>>(
+                        static_cast<float*>(view_tokens(fp32_hidden_, n).data),
+                        static_cast<const half*>(ly.layer_out_scale.data),
+                        total);
+                }
                 if (debug_forward_enabled() && i <= 2) {
                     // Read the scalar back to stderr once per layer for verification.
                     float sval = 0.0f;
@@ -338,7 +376,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 char buf[64];
                 snprintf(buf, sizeof(buf), "L%02d_after_out_scale", i);
                 debug_tensor_stats_all(buf, view_tokens(h, n), stream);
-                if (i == 0 || i == 25 || i == 26 || i == 27 || i == 28 || i == 29) {
+                if (i <= 6 || i == 10 || i == 15 || i == 17 || i == 20 || i == 23 || i == 25 || i == 26 || i == 27 || i == 28 || i == 29) {
                     char rbuf[64];
                     snprintf(rbuf, sizeof(rbuf), "l_out-%d", i);
                     debug_tensor_rows(rbuf, view_tokens(h, n), stream);
@@ -346,13 +384,14 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             }
         }
 
-        // Gemma-4 FP32 residual sync: run_moe_ffn does all FFN arithmetic in FP16
-        // and never touches fp32_hidden_, so the FP32 accumulator used by the
-        // NEXT layer's attention would be stale (missing this layer's FFN
-        // contribution). Force-sync h → fp32_hidden_ here so the next layer's
-        // attention sees the correct residual baseline. One FP16 round per
-        // layer, but avoids accumulated drift across 30 layers.
-        if (fp32_accum_buf_ && cfg.arch == ModelArch::GEMMA4) {
+        // Gemma-4 FP32 residual sync: run_moe_ffn now updates fp32_hidden_ itself
+        // via the rmsnorm_fp32_accum_to_fp16_kernel path when post_ffn_norm is
+        // present and fp32_accum_buf_ is active. The forced FP16→FP32 sync here
+        // would clobber the FP32 precision and cause ~1-2% drift per layer.
+        // Only sync when the MoE path did NOT go through the FP32 accum kernel
+        // (e.g. layer has no post_ffn_norm or residual was fused into decode path).
+        if (fp32_accum_buf_ && cfg.arch == ModelArch::GEMMA4 &&
+            getenv("IMP_FORCE_MOE_FP16_SYNC") != nullptr) {
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             int64_t total = static_cast<int64_t>(n) * cfg.d_model;
             int threads = 256;
@@ -392,7 +431,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     // bandwidth vs cuBLAS FP16 path (reads quantized weights directly).
     const auto out_qtype = model_->out_proj_qtype_;
     const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == DType::FP16 &&
-        is_dp4a_qtype(out_qtype);
+        is_dp4a_qtype(out_qtype) && getenv("IMP_NO_DP4A_LM") == nullptr;
 
     // GemmContext for LM head GEMM dispatches.
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_);
@@ -429,14 +468,36 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 debug_tensor_stats("W_output_norm", model_->output_norm(), stream);
                 rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
                 debug_tensor_stats("after_final_rmsnorm", no_last, stream);
+                debug_tensor_rows("after_final_rmsnorm_row", no_last, stream);
+                debug_tensor_rows("h_last_row", h_last, stream);
             }
-            auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
-            rmsnorm_quantize_q8_1(
-                static_cast<const half*>(h_last.data),
-                static_cast<const half*>(model_->output_norm().data),
-                q8, qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
-            dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
-                               static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+            // DEBUG experiment (b): bypass fused rmsnorm_quantize_q8_1 + dp4a GEMV.
+            // Dequant output_proj to FP16 temp buffer, cuBLAS FP16 GEMM into FP32 logits.
+            // If this gives llama-matching top logit (~+2.07) then the dp4a path is buggy;
+            // if it still gives +8.83 then the bug is in hidden state or output_norm.
+            if (getenv("IMP_LM_DEQUANT_FP16") != nullptr) {
+                Tensor no_last = view_tokens(norm_out_, 1);
+                rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
+                int N = cfg.vocab_size;
+                int K = cfg.d_model;
+                void* w_fp16_dev = nullptr;
+                size_t fp16_bytes = static_cast<size_t>(N) * K * sizeof(half);
+                IMP_CUDA_CHECK_LOG(cudaMallocAsync(&w_fp16_dev, fp16_bytes, stream));
+                dequant_gpu(model_->output_proj().data, w_fp16_dev, out_qtype, N, K, stream);
+                int64_t w_shape[2] = {N, K};
+                Tensor w_fp16(w_fp16_dev, DType::FP16, 2, w_shape, true);
+                gemm(no_last, w_fp16, lg, 1.0f, 0.0f, stream);
+                IMP_CUDA_CHECK_LOG(cudaFreeAsync(w_fp16_dev, stream));
+                fprintf(stderr, "[DEBUG_FWD] LM head via dequant->FP16->cuBLAS path\n");
+            } else {
+                auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
+                rmsnorm_quantize_q8_1(
+                    static_cast<const half*>(h_last.data),
+                    static_cast<const half*>(model_->output_norm().data),
+                    q8, qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
+                dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
+                                   static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+            }
         } else {
             Tensor no_last = view_tokens(norm_out_, 1);
             debug_tensor_stats("before_final_rmsnorm", h_last, stream);
