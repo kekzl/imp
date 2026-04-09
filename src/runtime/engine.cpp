@@ -13,6 +13,7 @@
 #include "core/logging.h"
 
 #include <cstring>
+#include <cstdlib>
 #include <cmath>
 #include <chrono>
 #include <algorithm>
@@ -334,6 +335,10 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     const auto& mcfg = model_->config();
 
     // --- Auto-detect max_seq_len and max_batch_size if not set ---
+    if (const char* env_msl = std::getenv("IMP_MAX_SEQ_LEN")) {
+        int v = std::atoi(env_msl);
+        if (v > 0) { config_.max_seq_len = v; IMP_LOG_INFO("max_seq_len: env IMP_MAX_SEQ_LEN=%d", v); }
+    }
     if (config_.max_seq_len <= 0) {
         int model_ctx = mcfg.max_seq_len;  // from GGUF metadata
         // Cap based on available VRAM: reserve ~30% for KV cache

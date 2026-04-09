@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <unordered_map>
 
 #ifdef __linux__

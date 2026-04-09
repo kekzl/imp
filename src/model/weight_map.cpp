@@ -237,7 +237,31 @@ bool WeightMap::apply_weights(
     int assigned = 0;
     int skipped  = 0;
 
-    for (auto& [name, tensor] : tensors) {
+    const bool is_gemma4 = (arch_ == ModelArch::GEMMA4);
+
+    for (auto& [orig_name, tensor] : tensors) {
+        // Gemma 4 uses Gemma4ForConditionalGeneration wrapper with
+        // `model.language_model.` and `model.vision_tower.` prefixes. Strip
+        // the language_model prefix so downstream handlers see the same
+        // `model.layers.X...` layout as other archs. Skip vision tower for
+        // now (text-only loading path).
+        std::string name = orig_name;
+        if (is_gemma4) {
+            const std::string vt_prefix = "model.vision_tower.";
+            if (name.compare(0, vt_prefix.size(), vt_prefix) == 0) {
+                ++skipped;  // silently skip vision encoder weights
+                continue;
+            }
+            const std::string lm_prefix = "model.language_model.";
+            if (name.compare(0, lm_prefix.size(), lm_prefix) == 0) {
+                name = "model." + name.substr(lm_prefix.size());
+            }
+            // Also handle top-level aliases the wrapper introduces.
+            if (name == "model.embed_tokens.weight" ||
+                name == "language_model.embed_tokens.weight") {
+                name = "model.embed_tokens.weight";
+            }
+        }
         auto parts = split(name, '.');
 
         // -----------------------------------------------------------------
@@ -284,7 +308,7 @@ bool WeightMap::apply_weights(
         // -----------------------------------------------------------------
         // Layer weights: model.layers.{i}.<rest>
         // -----------------------------------------------------------------
-        if (parts.size() < 5 || parts[0] != "model" || parts[1] != "layers") {
+        if (parts.size() < 4 || parts[0] != "model" || parts[1] != "layers") {
             IMP_LOG_WARN("WeightMap: unrecognised weight name: %s", name.c_str());
             ++skipped;
             continue;
@@ -318,10 +342,80 @@ bool WeightMap::apply_weights(
         }
 
         // -- FFN norm: post_attention_layernorm.weight --
-        if (!matched && parts.size() >= 5 &&
+        //    Llama convention: post_attention_layernorm is actually the pre-FFN norm.
+        //    Gemma 3/4 convention: post_attention_layernorm is the sandwich norm
+        //    applied AFTER attention output. Routed below in the Gemma-4 block.
+        if (!matched && !is_gemma4 && parts.size() >= 5 &&
             parts[3] == "post_attention_layernorm" && parts[4] == "weight") {
             layer.ffn_norm = tensor;
             matched = true;
+        }
+
+        // -- Gemma 4: mlp.{gate,up,down}_proj.weight is the SHARED EXPERT,
+        //    NOT dense MLP. Route to w_*_shared instead. Must come before
+        //    the generic dense-MLP branch below.
+        if (!matched && is_gemma4 && parts.size() >= 6 &&
+            parts[3] == "mlp" && parts[5] == "weight") {
+            const std::string& proj = parts[4];
+            if (proj == "gate_proj") { layer.w_gate_shared = tensor; matched = true; }
+            else if (proj == "up_proj") { layer.w_up_shared = tensor; matched = true; }
+            else if (proj == "down_proj") { layer.w_down_shared = tensor; matched = true; }
+        }
+
+        // -- Gemma 4: router + packed MoE experts + per-layer extras --
+        //    experts.gate_up_proj  (3D fused [n_exp, 2*moe_ff, d]) -> expert_gate_packed
+        //    experts.down_proj     (3D      [n_exp, d, moe_ff])    -> expert_down_packed
+        //    router.proj.weight    [n_exp, d]                      -> moe_gate
+        //    *_layernorm(_1|_2) variants                            -> ffn_{pre,post}_norm_{1,2}
+        //    post_attention_layernorm.weight                        -> post_attn_norm
+        if (!matched && is_gemma4) {
+            // experts.gate_up_proj / experts.down_proj
+            if (parts.size() >= 5 && parts[3] == "experts") {
+                if (parts[4] == "gate_up_proj") {
+                    layer.expert_gate_packed = tensor;
+                    // expert_up_packed left null → weight_upload splits the fused tensor
+                    matched = true;
+                } else if (parts[4] == "down_proj") {
+                    layer.expert_down_packed = tensor;
+                    matched = true;
+                }
+            }
+            // router.proj.weight (the gating matrix)
+            else if (parts.size() >= 6 && parts[3] == "router" &&
+                     parts[4] == "proj" && parts[5] == "weight") {
+                layer.moe_gate = tensor;
+                matched = true;
+            }
+            // router.scale  (per-channel router input scale == ffn_gate_inp.scale)
+            else if (parts.size() >= 5 && parts[3] == "router" &&
+                     parts[4] == "scale") {
+                layer.ffn_gate_inp_scale = tensor;
+                matched = true;
+            }
+            // router.per_expert_scale  (per-expert down output scale)
+            else if (parts.size() >= 5 && parts[3] == "router" &&
+                     parts[4] == "per_expert_scale") {
+                layer.expert_down_scale = tensor;
+                matched = true;
+            }
+            // layer_scalar  (per-layer output scalar)
+            else if (parts.size() >= 4 && parts[3] == "layer_scalar") {
+                layer.layer_out_scale = tensor;
+                matched = true;
+            }
+            // Gemma 4 FFN norm variants (parallel shared-MLP + MoE branches)
+            else if (parts.size() >= 5 && parts[4] == "weight") {
+                if (parts[3] == "pre_feedforward_layernorm_2") {
+                    layer.ffn_pre_norm_2 = tensor; matched = true;
+                } else if (parts[3] == "post_feedforward_layernorm_1") {
+                    layer.ffn_post_norm_1 = tensor; matched = true;
+                } else if (parts[3] == "post_feedforward_layernorm_2") {
+                    layer.ffn_post_norm_2 = tensor; matched = true;
+                } else if (parts[3] == "post_attention_layernorm") {
+                    // Gemma 3/4 sandwich norm — distinct from Llama's FFN norm.
+                    layer.post_attn_norm = tensor; matched = true;
+                }
+            }
         }
 
         // -- Dense MLP (Llama / Mistral / DeepSeek dense layers) --
