@@ -322,7 +322,10 @@ static void benchmark_and_select_algo(
     cublasLtMatmulPreferenceDestroy(pref);
 
     if (nresults <= 0) { entry.has_algo = false; entry.workspace_size = 0; return; }
-    if (nresults == 1) {
+    // IMP_DETERMINISTIC_GEMM=1 skips timing-based selection so repeat runs
+    // produce bitwise-identical prefill outputs (needed for layer-drift A/B).
+    static const bool s_deterministic_gemm = getenv("IMP_DETERMINISTIC_GEMM") != nullptr;
+    if (s_deterministic_gemm || nresults == 1) {
         entry.algo = results[0].algo;
         entry.workspace_size = (results[0].workspaceSize <= s_workspace_size)
                                    ? results[0].workspaceSize : 0;

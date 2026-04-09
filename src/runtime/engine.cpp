@@ -470,6 +470,18 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             IMP_LOG_INFO("Gemma 4: forcing FP16 KV cache (FP8 stride mismatch)");
             config_.kv_cache_dtype = DType::FP16;
         }
+        // Gemma 4 output_norm has extreme outliers (max=588). Small numeric jitter
+        // from cuBLAS algo autotuning / split-K atomics amplifies into wildly
+        // different top-1 picks (coherent " Paris" vs garbage "\n"). Force
+        // deterministic GEMM paths so generation is stable run-to-run.
+        if (!getenv("IMP_DETERMINISTIC_GEMM")) {
+            setenv("IMP_DETERMINISTIC_GEMM", "1", 1);
+            IMP_LOG_INFO("Gemma 4: enabling IMP_DETERMINISTIC_GEMM (output_norm outliers amplify algo jitter)");
+        }
+        if (!getenv("CUBLAS_WORKSPACE_CONFIG")) {
+            setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 1);
+            IMP_LOG_INFO("Gemma 4: setting CUBLAS_WORKSPACE_CONFIG=:4096:8 for deterministic grouped GEMM");
+        }
     }
 
     // --- Core initialization ---
