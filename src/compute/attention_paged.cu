@@ -146,7 +146,8 @@ paged_attention_gqa_kernel(
     // ---- Load Q vector into registers ----
     const int elems_per_thread = (head_dim + WARP_SIZE - 1) / WARP_SIZE;
 
-    float q_reg[8];
+    // Max head_dim supported = 512 → 16 elems per lane (512/32).
+    float q_reg[16];
     if (active) {
         const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * head_dim
                               + (int64_t)head_idx * head_dim;
@@ -166,7 +167,7 @@ paged_attention_gqa_kernel(
     // ---- Per-warp running softmax state ----
     float m_w = -FLT_MAX;
     float l_w = 0.0f;
-    float o_reg[8];
+    float o_reg[16];  // max head_dim=512 → 16 elems/lane
     for (int i = 0; i < elems_per_thread; i++) o_reg[i] = 0.0f;
 
     // ---- Shared memory for K/V tile (double-buffered FP16) ----
@@ -512,7 +513,7 @@ __global__ void paged_attention_decode_kernel_generic(
     // Load Q into registers (strided mapping with bounds check)
     const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * head_dim
                           + (int64_t)head_idx  * head_dim;
-    float q_reg[8]; // max elems_per_thread for reasonable head_dim
+    float q_reg[16]; // max head_dim=512 → 16 elems/lane
     for (int i = 0; i < elems_per_thread; i++) {
         int d = lane_id + i * WARP_SIZE;
         q_reg[i] = (d < head_dim) ? __half2float(Q_ptr[d]) : 0.0f;
@@ -524,7 +525,7 @@ __global__ void paged_attention_decode_kernel_generic(
 
     float m_w = -FLT_MAX;
     float l_w = 0.0f;
-    float o_reg[8];
+    float o_reg[16];  // max head_dim=512 → 16 elems/lane
     for (int i = 0; i < elems_per_thread; i++) o_reg[i] = 0.0f;
 
     const auto [effective_start, first_block, num_ctx_blocks] =
