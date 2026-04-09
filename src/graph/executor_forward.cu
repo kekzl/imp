@@ -238,6 +238,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     }
 
     debug_tensor_stats("after_embedding", h, stream);
+    debug_tensor_stats_all("after_embedding_all", view_tokens(h, n), stream);
 
     // Initialize FP32 residual accumulator from FP16 embedding (post-norm models only).
     if (fp32_accum_buf_) {
@@ -280,12 +281,17 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         } else if (layer_has_ssm(i)) {
             run_ssm(i, state, stream);
         }
-        if (i <= 2) {
+        {
             char buf[64];
-            snprintf(buf, sizeof(buf), "after_layer%d_%s", i,
+            snprintf(buf, sizeof(buf), "after_layer%02d_%s", i,
                      layer_has_gdn(i) ? "gdn" :
                      layer_has_attention(i) ? "attn" : "ssm");
-            debug_tensor_stats(buf, h, stream);
+            debug_tensor_stats_all(buf, view_tokens(h, n), stream);
+            {
+                char rbuf[64];
+                snprintf(rbuf, sizeof(rbuf), "attn_out-%d", i);
+                debug_tensor_rows(rbuf, view_tokens(h, n), stream);
+            }
         }
         if (profile_active) cudaEventRecord(ev_attn[i], stream);
 
@@ -296,11 +302,11 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         } else if (layer_has_dense_ffn(i)) {
             run_ffn(i, stream);
         }
-        if (i <= 2) {
+        {
             char buf[64];
-            snprintf(buf, sizeof(buf), "after_layer%d_%s", i,
+            snprintf(buf, sizeof(buf), "after_layer%02d_%s", i,
                      layer_has_moe(i) ? "moe" : (layer_has_dense_ffn(i) ? "ffn" : "no_ffn"));
-            debug_tensor_stats(buf, h, stream);
+            debug_tensor_stats_all(buf, view_tokens(h, n), stream);
         }
 
         // Gemma 4: per-layer output scale (a scalar weight). llama.cpp's
@@ -328,11 +334,32 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                     fprintf(stderr, "[DEBUG_FWD] L%d_out_scale = %.6f\n", i, sval);
                 }
             }
-            if (debug_forward_enabled() && i <= 2) {
+            if (debug_forward_enabled()) {
                 char buf[64];
-                snprintf(buf, sizeof(buf), "L%d_after_out_scale", i);
-                debug_tensor_stats(buf, h, stream);
+                snprintf(buf, sizeof(buf), "L%02d_after_out_scale", i);
+                debug_tensor_stats_all(buf, view_tokens(h, n), stream);
+                if (i == 0 || i == 25 || i == 26 || i == 27 || i == 28 || i == 29) {
+                    char rbuf[64];
+                    snprintf(rbuf, sizeof(rbuf), "l_out-%d", i);
+                    debug_tensor_rows(rbuf, view_tokens(h, n), stream);
+                }
             }
+        }
+
+        // Gemma-4 FP32 residual sync: run_moe_ffn does all FFN arithmetic in FP16
+        // and never touches fp32_hidden_, so the FP32 accumulator used by the
+        // NEXT layer's attention would be stale (missing this layer's FFN
+        // contribution). Force-sync h → fp32_hidden_ here so the next layer's
+        // attention sees the correct residual baseline. One FP16 round per
+        // layer, but avoids accumulated drift across 30 layers.
+        if (fp32_accum_buf_ && cfg.arch == ModelArch::GEMMA4) {
+            Tensor fp32_h = view_tokens(fp32_hidden_, n);
+            int64_t total = static_cast<int64_t>(n) * cfg.d_model;
+            int threads = 256;
+            int blocks = static_cast<int>((total + threads - 1) / threads);
+            fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(
+                static_cast<const half*>(h.data),
+                static_cast<float*>(fp32_h.data), total);
         }
 
         if (i == max_layer - 1) {
@@ -398,6 +425,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         } else if (use_dp4a_lm) {
             if (debug_forward_enabled()) {
                 Tensor no_last = view_tokens(norm_out_, 1);
+                debug_tensor_stats("before_final_rmsnorm", h_last, stream);
+                debug_tensor_stats("W_output_norm", model_->output_norm(), stream);
                 rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
                 debug_tensor_stats("after_final_rmsnorm", no_last, stream);
             }
@@ -410,6 +439,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         } else {
             Tensor no_last = view_tokens(norm_out_, 1);
+            debug_tensor_stats("before_final_rmsnorm", h_last, stream);
+            debug_tensor_stats("W_output_norm", model_->output_norm(), stream);
             rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
             debug_tensor_stats("after_final_rmsnorm", no_last, stream);
             // LM head fallback: use gemm_dispatch for consistent MXFP4/FP16 handling
@@ -494,6 +525,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             }
         } else {
             Tensor no_final = view_tokens(norm_out_, n);
+            debug_tensor_stats("before_final_rmsnorm", h_final, stream);
+            debug_tensor_stats("W_output_norm", model_->output_norm(), stream);
             rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
             debug_tensor_stats("after_final_rmsnorm", no_final, stream);
 
