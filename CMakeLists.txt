@@ -121,6 +121,8 @@ set(IMP_COMPUTE_SOURCES
     src/compute/gemm.cu
     src/compute/gemm_dp4a.cu
     src/compute/gemm_grouped.cu
+    src/compute/gemv_ggml_compat.cu
+    src/compute/ggml_mmvq.cu
     src/compute/gemm_moe_fused.cu
     src/compute/gemm_moe_fused_tc.cu
     src/compute/gemm_q6k.cu

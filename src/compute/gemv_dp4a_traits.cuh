@@ -18,7 +18,7 @@ namespace imp {
 static constexpr int kSmemQ8Stride = 9;
 
 // Tag enum for template dispatch (separate from GGMLQuantType)
-enum class QType { Q4_0, Q8_0, Q6_K, Q4_K, Q5_K, Q2_K, Q3_K };
+enum class QType { Q4_0, Q8_0, Q6_K, Q4_K, Q5_K, Q2_K, Q3_K, Q5_1 };
 
 // ============================================================================
 // Helper device functions (moved from gemm.cu, unchanged)
@@ -480,6 +480,58 @@ template<> struct DequantTraits<QType::Q3_K> {
 };
 
 // Convenience aliases
+// Q5_1: 24 bytes per 32 elements: [2B delta_fp16] [2B min_fp16] [16B low_nibbles] [4B high_bits]
+// Dequant: val = q5 * delta + min, where q5 = low4 | (hi1 << 4), range 0..31
+template<> struct DequantTraits<QType::Q5_1> {
+    static constexpr int kBlockBytes   = 24;
+    static constexpr int kBlockElems   = 32;
+    static constexpr int kQ8PerWeight  = 1;
+    static constexpr bool kNeedsQ8Sum  = false;   // compute q8_sum internally
+    static constexpr int kSmemExtra    = 0;
+    static constexpr int kMaxNRows     = 4;
+    static constexpr bool kPreferKpar  = false;
+
+    static __device__ __forceinline__ float
+    dp4a_block(const uint8_t* bp, int /*sub*/,
+               const int* xi, float dq, float /*q8_sum*/) {
+        half d_w_h, m_w_h;
+        memcpy(&d_w_h, bp, sizeof(half));
+        memcpy(&m_w_h, bp + 2, sizeof(half));
+        float d_w = __half2float(d_w_h);
+        float m_w = __half2float(m_w_h);
+        const uint8_t* qh = bp + 4;   // 4 bytes high bits (comes FIRST in Q5_1)
+        const uint8_t* qs = bp + 8;   // 16 bytes low nibbles
+
+        uint32_t hbits;
+        memcpy(&hbits, qh, sizeof(uint32_t));
+
+        int32_t sumi = 0;
+        int32_t q8_sum_int = 0;
+        const int ones = 0x01010101;
+
+        #pragma unroll
+        for (int g = 0; g < 8; g++) {
+            int base = g * 4;
+            int32_t packed = 0;
+            #pragma unroll
+            for (int j = 0; j < 4; j++) {
+                int idx = base + j;
+                uint8_t byte = qs[idx / 2];
+                int lo = (idx & 1) ? (byte >> 4) & 0xF : byte & 0xF;
+                int hi = (hbits >> idx) & 1;
+                int q5 = lo | (hi << 4);  // 0..31
+                packed |= (q5 & 0xFF) << (j * 8);
+            }
+            sumi = __dp4a(packed, xi[g], sumi);
+            q8_sum_int = __dp4a(xi[g], ones, q8_sum_int);
+        }
+
+        // val = q5 * d_w + m_w → sum = d_w * dq * sumi + m_w * dq * q8_sum_int
+        return dq * (d_w * (float)sumi + m_w * (float)q8_sum_int);
+    }
+};
+
+using Q5_1_Traits = DequantTraits<QType::Q5_1>;
 using Q4_0_Traits = DequantTraits<QType::Q4_0>;
 using Q8_0_Traits = DequantTraits<QType::Q8_0>;
 using Q6_K_Traits = DequantTraits<QType::Q6_K>;

@@ -264,10 +264,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         auto nvfp4_wv = wcache_.nvfp4.find(ly.wv.data);
         bool nvfp4_qkv = (!has_attn_output_gate && n == 1 && nvfp4_wq != wcache_.nvfp4.end() &&
                           nvfp4_wk != wcache_.nvfp4.end() && nvfp4_wv != wcache_.nvfp4.end());
+        // Gemma-4: disable fused QKV when FP32 accum is active — the fused kernel
+        // reads FP16 h instead of fp32_hidden_, losing precision through 128-expert routing.
         bool fused_qkv = (!has_attn_output_gate && n == 1 && q8 != nullptr && qscratch_.d8_buf != nullptr &&
                           no.dtype == DType::FP16 &&
                           ly.wq_qtype == ly.wk_qtype && ly.wk_qtype == ly.wv_qtype &&
-                          is_dp4a_qtype(ly.wq_qtype));
+                          is_dp4a_qtype(ly.wq_qtype) &&
+                          !(using_fp32_accum && cfg.arch == ModelArch::GEMMA4));
         if (mxfp4_qkv) {
             // MXFP4 fused QKV: RMSNorm, optional Hadamard, then MXFP4 GEMV
             rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);

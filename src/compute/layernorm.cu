@@ -375,6 +375,53 @@ void rmsnorm_fp32_to_fp16(const Tensor& x_fp32, const Tensor& weight,
         d_model, eps, weight_offset);
 }
 
+// FP32 input, FP32 output, FP16 weight. Used for Gemma-4 ggml MMVQ prefill:
+// keeps full FP32 precision through norm → Q8_1 quantization, matching llama's
+// FP32→Q8_1 path and avoiding the ~0.03% per-element FP16 truncation.
+__global__ void rmsnorm_fp32_in_fp32_out_kernel(
+    const float* __restrict__ x,
+    const __half* __restrict__ weight,
+    float* __restrict__ out,
+    int d_model,
+    float eps,
+    float weight_offset)
+{
+    const int row = blockIdx.x;
+    const float* x_row = x + static_cast<int64_t>(row) * d_model;
+    float* out_row = out + static_cast<int64_t>(row) * d_model;
+
+    float sum_sq = 0.0f;
+    for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
+        float v = x_row[i];
+        sum_sq += v * v;
+    }
+    sum_sq = block_reduce_sum(sum_sq);
+
+    __shared__ float s_inv_rms;
+    if (threadIdx.x == 0) {
+        s_inv_rms = rsqrtf(sum_sq / static_cast<float>(d_model) + eps);
+    }
+    __syncthreads();
+    const float inv_rms = s_inv_rms;
+
+    for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
+        out_row[i] = x_row[i] * inv_rms * (__half2float(weight[i]) + weight_offset);
+    }
+}
+
+void rmsnorm_fp32_to_fp32(const Tensor& x_fp32, const Tensor& weight,
+                          float* out_fp32, int rows, int d_model,
+                          float eps, cudaStream_t stream,
+                          float weight_offset) {
+    if (rows == 0 || d_model == 0) return;
+    const int block = 512;
+    pdl::launch(rmsnorm_fp32_in_fp32_out_kernel, dim3(rows), dim3(block), 0, stream,
+        static_cast<const float*>(x_fp32.data),
+        static_cast<const __half*>(weight.data),
+        out_fp32,
+        d_model, eps, weight_offset);
+}
+
 // --------------------------------------------------------------------------
 // Host dispatch: rmsnorm_residual
 // --------------------------------------------------------------------------

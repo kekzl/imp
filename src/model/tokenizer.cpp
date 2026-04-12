@@ -893,6 +893,164 @@ static std::vector<std::string> llama3_pre_tokenize(const std::string& text) {
     return result;
 }
 
+// ---- Gemma-4 encode: SPM-style ▁ escaping + BPE merge ranks ----
+// Gemma-4 uses SentencePiece-style BPE: spaces→▁, no word-level pre-splitting
+// (only split on newlines), raw UTF-8 characters, BPE merges by rank.
+std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
+    if (text.empty() || vocab_.empty()) return {};
+
+    // Debug: check merge rank availability for Hello characters
+    static bool debug_once = false;
+    if (!debug_once) {
+        debug_once = true;
+        fprintf(stderr, "[GEMMA4_TOK] merge_ranks size=%zu\n", merge_ranks_.size());
+        // Check specific merge pairs for "Hello"
+        for (auto& key : {"H e", "e l", "l l", "l o", "He l", "Hel l", "Hell o"}) {
+            auto it = merge_ranks_.find(key);
+            fprintf(stderr, "[GEMMA4_TOK] merge '%s' -> %s\n", key,
+                    it != merge_ranks_.end() ? std::to_string(it->second).c_str() : "NOT FOUND");
+        }
+        // Check what single-char tokens exist
+        for (auto ch : {'H', 'e', 'l', 'o'}) {
+            std::string s(1, ch);
+            auto it = token_to_id_.find(s);
+            fprintf(stderr, "[GEMMA4_TOK] token '%c' -> %s\n", ch,
+                    it != token_to_id_.end() ? std::to_string(it->second).c_str() : "NOT FOUND");
+        }
+    }
+
+    // 1. Escape spaces → ▁
+    std::string processed;
+    processed.reserve(text.size() + 4);
+    for (size_t i = 0; i < text.size(); i++) {
+        if (text[i] == ' ') {
+            processed += SPIECE_SPACE;  // ▁ (U+2581)
+        } else {
+            processed += text[i];
+        }
+    }
+
+    // 2. Split on newlines only (gemma4 pre-tokenizer regex: [^\n]+|[\n]+)
+    std::vector<std::string> chunks;
+    size_t start = 0;
+    while (start < processed.size()) {
+        if (processed[start] == '\n') {
+            size_t end = start;
+            while (end < processed.size() && processed[end] == '\n') end++;
+            chunks.push_back(processed.substr(start, end - start));
+            start = end;
+        } else {
+            size_t end = start;
+            while (end < processed.size() && processed[end] != '\n') end++;
+            chunks.push_back(processed.substr(start, end - start));
+            start = end;
+        }
+    }
+
+    std::vector<int32_t> all_ids;
+    all_ids.reserve(text.size());
+
+    for (const auto& chunk : chunks) {
+        // 3. Split into UTF-8 characters (raw, no byte encoding)
+        std::vector<std::string> symbols;
+        symbols.reserve(chunk.size());
+        for (size_t i = 0; i < chunk.size(); ) {
+            int len = utf8_char_len(static_cast<uint8_t>(chunk[i]));
+            if (i + len > chunk.size()) len = 1;
+            symbols.push_back(chunk.substr(i, len));
+            i += len;
+        }
+
+        // Debug: print initial symbols
+        {
+            fprintf(stderr, "[GEMMA4_TOK] chunk='%s' nsyms=%zu\n", chunk.c_str(), symbols.size());
+            for (size_t si = 0; si < symbols.size() && si < 10; si++)
+                fprintf(stderr, "[GEMMA4_TOK]   sym[%zu]='%s'\n", si, symbols[si].c_str());
+        }
+
+        // 4. BPE merge loop using merge ranks (lower rank = merge first)
+        int ns = static_cast<int>(symbols.size());
+        std::vector<int> sprev(ns), snext(ns);
+        std::vector<bool> sdel(ns, false);
+        for (int i = 0; i < ns; i++) {
+            sprev[i] = i - 1;
+            snext[i] = i + 1;
+        }
+
+        struct BPEMerge {
+            int rank;
+            int pos;
+            int seq;
+        };
+        auto cmp = [](const BPEMerge& a, const BPEMerge& b) {
+            if (a.rank != b.rank) return a.rank > b.rank;  // min-heap: lower rank first
+            return a.pos > b.pos;
+        };
+        std::priority_queue<BPEMerge, std::vector<BPEMerge>, decltype(cmp)> pq(cmp);
+        std::vector<int> sseq(ns, 0);
+
+        for (int i = 0; i < ns - 1; i++) {
+            std::string key = symbols[i] + " " + symbols[snext[i]];
+            auto it = merge_ranks_.find(key);
+            if (it != merge_ranks_.end()) {
+                pq.push({it->second, i, sseq[i]});
+            }
+        }
+
+        while (!pq.empty()) {
+            auto [rank, pos, s] = pq.top();
+            pq.pop();
+            if (sdel[pos] || sseq[pos] != s) continue;
+            int right = snext[pos];
+            if (right >= ns || sdel[right]) continue;
+
+            symbols[pos] = symbols[pos] + symbols[right];
+            sdel[right] = true;
+            sseq[pos]++;
+            snext[pos] = snext[right];
+            if (snext[right] < ns) sprev[snext[right]] = pos;
+
+            if (sprev[pos] >= 0) {
+                int lp = sprev[pos];
+                std::string key = symbols[lp] + " " + symbols[pos];
+                auto it = merge_ranks_.find(key);
+                if (it != merge_ranks_.end()) {
+                    pq.push({it->second, lp, sseq[lp]});
+                }
+            }
+            if (snext[pos] < ns) {
+                std::string key = symbols[pos] + " " + symbols[snext[pos]];
+                auto it = merge_ranks_.find(key);
+                if (it != merge_ranks_.end()) {
+                    pq.push({it->second, pos, sseq[pos]});
+                }
+            }
+        }
+
+        // 5. Convert symbols to token IDs
+        for (int i = 0; i < ns; i++) {
+            if (sdel[i]) continue;
+            fprintf(stderr, "[GEMMA4_TOK] final sym[%d]='%s'\n", i, symbols[i].c_str());
+            auto it = token_to_id_.find(symbols[i]);
+            if (it != token_to_id_.end()) {
+                all_ids.push_back(it->second);
+            } else {
+                // Byte fallback: encode each byte as <0xNN>
+                for (unsigned char c : symbols[i]) {
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "<0x%02X>", c);
+                    auto bit = token_to_id_.find(buf);
+                    if (bit != token_to_id_.end()) {
+                        all_ids.push_back(bit->second);
+                    }
+                }
+            }
+        }
+    }
+
+    return all_ids;
+}
+
 std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
     if (text.empty() || vocab_.empty()) return {};
 
@@ -1272,6 +1430,9 @@ std::vector<int32_t> Tokenizer::encode(const std::string& text, bool no_prefix) 
     std::string normalized = normalize_nfc(text);
     if (type_ == "gpt2") {
         return encode_gpt2(normalized);
+    }
+    if (type_ == "gemma4") {
+        return encode_gemma4(normalized);
     }
     return encode_spm(normalized, no_prefix);
 }
