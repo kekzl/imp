@@ -67,6 +67,15 @@ static __device__ __forceinline__ int get_int_b4(const void* x, const int& i32) 
     return ((const int*)x)[i32];
 }
 
+static __device__ __forceinline__ int get_int_b2(const void* x, const int& i32) {
+    // 2-byte aligned read for structs with 2-byte prefix (Q8_0: half d + int8_t qs[32] = 34 bytes).
+    // Reads two uint16_t and packs into int32, matching llama.cpp's get_int_b2.
+    const uint16_t* x16 = (const uint16_t*)x;
+    int x32  = x16[2 * i32 + 0] << 0;
+    x32     |= x16[2 * i32 + 1] << 16;
+    return x32;
+}
+
 static __device__ __forceinline__ int ggml_dp4a(const int a, const int b, int c) {
     return __dp4a(a, b, c);
 }
@@ -316,11 +325,6 @@ static constexpr int QI8_1 = 4;    // QK8_1 / (4 * QR8_1) where QR8_1=2
 static constexpr int VDR_Q5_K = 2; // VDR_Q5_K_Q8_1_MMVQ
 static constexpr int VDR_Q8_0 = 2; // VDR_Q8_0_Q8_1_MMVQ
 
-static __device__ __forceinline__ int get_int_b2(const void* x, const int& i32) {
-    // Read int from packed int8 array (stride 1 byte per element, 4 elements per int)
-    return ((const int*)x)[i32];
-}
-
 // -------------------------------------------------------------------------
 // vec_dot_q5_K_q8_1 — ported from ggml vecdotq.cuh
 // -------------------------------------------------------------------------
@@ -404,12 +408,6 @@ static __device__ __forceinline__ float vec_dot_q5_K_q8_1(
 // -------------------------------------------------------------------------
 // vec_dot_q8_0_q8_1 — ported from ggml vecdotq.cuh
 // -------------------------------------------------------------------------
-static __device__ __forceinline__ int load_int_unaligned(const int8_t* p) {
-    // Load 4 bytes from potentially misaligned address (Q8_0 blocks are 34 bytes)
-    int val;
-    memcpy(&val, p, 4);
-    return val;
-}
 
 static __device__ __forceinline__ float vec_dot_q8_0_q8_1(
     const void* __restrict__ vbq, const ggml_block_q8_1* __restrict__ bq8_1,
@@ -417,18 +415,24 @@ static __device__ __forceinline__ float vec_dot_q8_0_q8_1(
 
     const ggml_block_q8_0* bq8_0 = (const ggml_block_q8_0*)vbq + kbx;
 
+    int v[VDR_Q8_0];
+    int u[VDR_Q8_0];
+
+#pragma unroll
+    for (int i = 0; i < VDR_Q8_0; ++i) {
+        v[i] = get_int_b2(bq8_0->qs, iqs + i);
+        u[i] = get_int_b4(bq8_1->qs, iqs + i);
+    }
+
+    float d8_0 = __half2float(bq8_0->d);
+    float d8_1 = __half2float(bq8_1->d);
+
     int sumi = 0;
 #pragma unroll
     for (int i = 0; i < VDR_Q8_0; ++i) {
-        // Q8_0 blocks are 34 bytes — qs at offset 2 is NOT always 4-byte aligned.
-        // Use byte-wise load to avoid misaligned access.
-        int v = load_int_unaligned(bq8_0->qs + 4 * (iqs + i));
-        int u = get_int_b4(bq8_1->qs, iqs + i);
-        sumi = ggml_dp4a(v, u, sumi);
+        sumi = ggml_dp4a(v[i], u[i], sumi);
     }
 
-    const float d8_0 = __half2float(bq8_0->d);
-    const float d8_1 = __half2float(bq8_1->d);
     return d8_0 * d8_1 * (float)sumi;
 }
 
