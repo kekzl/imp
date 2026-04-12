@@ -101,10 +101,9 @@ __global__ void rope_forward_kernel(
 
     float cos_val, sin_val;
     if (longrope_inv_freqs) {
-        // Gemma-4 proportional RoPE: freq_factor multiplies the standard frequency.
-        // angle = pos * (1/theta^(2i/rope_dim)) * freq_factor[i]
-        float base_freq = 1.0f / powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs));
-        float angle = static_cast<float>(pos) * base_freq * longrope_inv_freqs[pair_idx];
+        // Pre-computed effective frequencies (base_freq/divisor already applied in gguf_loader).
+        // longrope_inv_freqs[i] = theta^(-2i/hd) / freq_divisor[i], ready to use directly.
+        float angle = static_cast<float>(pos) * longrope_inv_freqs[pair_idx];
         cos_val = __cosf(angle);
         sin_val = __sinf(angle);
     } else if (ext_factor != 0.0f) {
@@ -296,9 +295,8 @@ __global__ void qknorm_rope_fused_fp16_kernel(
         for (int pair = threadIdx.x; pair < rope_pairs; pair += blockDim.x) {
             float cos_val, sin_val;
             if (longrope_inv_freqs) {
-                // Proportional RoPE: freq_factor multiplies standard frequency
-                float base_freq = 1.0f / powf(theta, (2.0f * pair) / (float)(2 * rope_pairs));
-                float angle = (float)pos * base_freq * longrope_inv_freqs[pair];
+                // Pre-computed effective frequencies (see gguf_loader.cpp rope_freqs conversion)
+                float angle = (float)pos * longrope_inv_freqs[pair];
                 cos_val = __cosf(angle);
                 sin_val = __sinf(angle);
             } else if (ext_factor != 0.0f) {
@@ -368,9 +366,8 @@ __global__ void qknorm_rope_fused_fp16_kernel(
         for (int pair = threadIdx.x; pair < rope_pairs; pair += blockDim.x) {
             float cos_val, sin_val;
             if (longrope_inv_freqs) {
-                // Proportional RoPE: freq_factor multiplies standard frequency
-                float base_freq = 1.0f / powf(theta, (2.0f * pair) / (float)(2 * rope_pairs));
-                float angle = (float)pos * base_freq * longrope_inv_freqs[pair];
+                // Pre-computed effective frequencies (see gguf_loader.cpp rope_freqs conversion)
+                float angle = (float)pos * longrope_inv_freqs[pair];
                 cos_val = __cosf(angle);
                 sin_val = __sinf(angle);
             } else if (ext_factor != 0.0f) {

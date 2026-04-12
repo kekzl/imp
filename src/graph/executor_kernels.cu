@@ -1281,13 +1281,13 @@ __global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
                 idx1 = head_offset + 2 * pair_idx + 1;
             }
 
-            float base_freq = 1.0f / (powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs)));
             float freq;
             if (longrope_inv_freqs) {
-                // Proportional RoPE: freq_factor multiplies standard frequency
-                freq = base_freq * longrope_inv_freqs[pair_idx];
+                // Pre-computed effective frequencies (see gguf_loader.cpp rope_freqs conversion)
+                freq = longrope_inv_freqs[pair_idx];
             } else {
-                freq = base_freq * inv_scaling;
+                freq = 1.0f / (powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs)));
+                freq *= inv_scaling;
             }
             float angle = static_cast<float>(pos) * freq;
             float cos_val = __cosf(angle);
