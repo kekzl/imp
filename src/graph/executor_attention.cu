@@ -628,10 +628,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             if (cfg.arch == ModelArch::GEMMA4) {
                 bool is_swa_l = (!cfg.swa_layers.empty() && layer < (int)cfg.swa_layers.size() &&
                                  cfg.swa_layers[layer]);
-                // SWA: hd=256, rope_dim=256 (full). Global: hd=512, rope_dim=128 (quarter).
-                // Uses hd/4 because rope_freqs are pre-computed with base_freq baked in.
-                // The kernel reads longrope_inv_freqs directly (no base_freq multiply).
-                effective_rope_dim = is_swa_l ? hd : (hd / 4);
+                // SWA: hd=256, rope_dim=256 (full). Global: hd=512, rope_dim=256 (half).
+                // Must match prefill rope_dim (lines 500, 550) for consistent KV cache.
+                effective_rope_dim = is_swa_l ? hd : (hd / 2);
             } else {
                 effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
                 if (effective_rope_dim > hd) effective_rope_dim = hd;
