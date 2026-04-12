@@ -532,22 +532,7 @@ void ggml_mmvq_q4k(
         const int threads = 256;
         const int nblk = (total_q8_blocks + threads - 1) / threads;
         quantize_fp16_to_q8_1_ggml_kernel<<<nblk, threads, 0, stream>>>(x, x_q8, M * K);
-        // DEBUG: dump first 3 Q8_1 blocks and verify
-        cudaStreamSynchronize(stream);
-        ggml_block_q8_1 tmp_blks[3];
-        cudaMemcpy(tmp_blks, x_q8, 3 * sizeof(ggml_block_q8_1), cudaMemcpyDeviceToHost);
-        for (int b = 0; b < 3; b++) {
-            fprintf(stderr, "[Q8_1_DBG] blk%d: d=%.6f s=%.6f qs[0..3]=%d %d %d %d\n",
-                    b, __half2float(tmp_blks[b].d), __half2float(tmp_blks[b].s),
-                    tmp_blks[b].qs[0], tmp_blks[b].qs[1], tmp_blks[b].qs[2], tmp_blks[b].qs[3]);
-            // Also verify: reconstruct first element
-            float recon = __half2float(tmp_blks[b].d) * tmp_blks[b].qs[0];
-            // Read original FP16 value
-            half orig_h;
-            cudaMemcpy(&orig_h, &x[b * 32], sizeof(half), cudaMemcpyDeviceToHost);
-            fprintf(stderr, "[Q8_1_DBG] blk%d: recon[0]=%.6f orig[0]=%.6f ratio=%.2f\n",
-                    b, recon, __half2float(orig_h), (__half2float(orig_h) != 0) ? recon / __half2float(orig_h) : 0.0f);
-        }
+        // (Q8_1 quantization verified correct — debug dumps removed)
     }
     {
         constexpr int nwarps = 4;

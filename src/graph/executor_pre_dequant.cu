@@ -98,6 +98,11 @@ static void for_each_dense_weight(const Model& model, const ModelConfig& cfg, Fn
 
 void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& budget) {
     if (!initialized_ || !model_) return;
+    // Skip all weight caching for debugging numerical precision issues
+    if (getenv("IMP_NO_FP16_CACHE")) {
+        IMP_LOG_INFO("FP16 weight cache DISABLED (IMP_NO_FP16_CACHE)");
+        return;
+    }
 
     const auto& cfg = model_->config();
     size_t total_cache_bytes = 0;
