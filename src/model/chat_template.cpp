@@ -157,6 +157,9 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer,
         case ChatTemplateFamily::GEMMA: {
             start_of_turn_id_ = tokenizer.find_token("<start_of_turn>");
             end_of_turn_id_   = tokenizer.find_token("<end_of_turn>");
+            // Gemma-4 uses different token names: <|turn> / <turn|>
+            if (start_of_turn_id_ < 0) start_of_turn_id_ = tokenizer.find_token("<|turn>");
+            if (end_of_turn_id_ < 0)   end_of_turn_id_   = tokenizer.find_token("<turn|>");
             if (start_of_turn_id_ < 0 || end_of_turn_id_ < 0) {
                 IMP_LOG_WARN("Gemma template: missing special tokens "
                              "(start_of_turn=%d, end_of_turn=%d), falling back to raw",
