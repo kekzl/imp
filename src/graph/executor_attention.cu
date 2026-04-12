@@ -567,9 +567,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
 
     // 7. Attention scale.
     //   Standard archs: 1/sqrt(head_dim).
-    //   Gemma 4: 1.0 (matches llama.cpp's f_attention_scale=1.0 per
-    //                 llama-model.cpp:1273. The K-norm and Q-norm constants
-    //                 already absorb the per-element scaling).
+    //   Gemma 4: 1.0 (confirmed by llama.cpp print_info: f_attn_scale = 1.0.
+    //                 Q-norm and K-norm absorb the per-element scaling).
     float scale = (cfg.arch == ModelArch::GEMMA4)
                   ? 1.0f
                   : (1.0f / std::sqrt(static_cast<float>(hd)));
