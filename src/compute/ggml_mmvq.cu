@@ -289,11 +289,155 @@ static __global__ void quantize_fp32_to_q8_1_ggml_kernel(
 }
 
 // -------------------------------------------------------------------------
+// Q5_K: 256 elements per block, 176 bytes
+// -------------------------------------------------------------------------
+struct ggml_block_q5_K {
+    half d;              // super-block scale
+    half dmin;           // super-block min
+    uint8_t scales[12];  // sub-block scales and mins, 6-bit quantized
+    uint8_t qh[32];      // high bits of 5-bit quants
+    uint8_t qs[128];     // lower 4 bits of quants
+};
+static_assert(sizeof(ggml_block_q5_K) == 176, "Q5_K block must be 176 bytes");
+
+// Q8_0: 32 elements per block, 34 bytes
+struct ggml_block_q8_0 {
+    half d;              // scale
+    int8_t qs[32];       // quantized values
+};
+static_assert(sizeof(ggml_block_q8_0) == 34, "Q8_0 block must be 34 bytes");
+
+static constexpr int QK5_K = 256;
+static constexpr int QK8_0 = 32;
+static constexpr int QI5_K = 32;   // QK_K / (4 * QR5_K)
+static constexpr int QR5_K = 2;
+static constexpr int QI8_0 = 8;    // QK8_0 / 4
+static constexpr int QI8_1 = 4;    // QK8_1 / (4 * QR8_1) where QR8_1=2
+static constexpr int VDR_Q5_K = 2; // VDR_Q5_K_Q8_1_MMVQ
+static constexpr int VDR_Q8_0 = 2; // VDR_Q8_0_Q8_1_MMVQ
+
+static __device__ __forceinline__ int get_int_b2(const void* x, const int& i32) {
+    // Read int from packed int8 array (stride 1 byte per element, 4 elements per int)
+    return ((const int*)x)[i32];
+}
+
+// -------------------------------------------------------------------------
+// vec_dot_q5_K_q8_1 — ported from ggml vecdotq.cuh
+// -------------------------------------------------------------------------
+static __device__ __forceinline__ float vec_dot_q5_K_q8_1_impl_vmmq(
+    const int* __restrict__ vl, const int* __restrict__ vh,
+    const int* __restrict__ u, const uint8_t* __restrict__ sc,
+    const uint8_t* __restrict__ m, const half2& dm5,
+    const float* __restrict__ d8) {
+
+    float sumf_d = 0.0f;
+    float sumf_m = 0.0f;
+
+#pragma unroll
+    for (int i = 0; i < QR5_K; ++i) {
+        const int vl0i = (vl[0] >> (4*i)) & 0x0F0F0F0F;
+        const int vl1i = (vl[1] >> (4*i)) & 0x0F0F0F0F;
+
+        const int vh0i = ((vh[0] >> i) << 4) & 0x10101010;
+        const int vh1i = ((vh[1] >> i) << 4) & 0x10101010;
+
+        const int v0i = vl0i | vh0i;
+        const int v1i = vl1i | vh1i;
+
+        const int dot1 = ggml_dp4a(v0i, u[2*i+0], ggml_dp4a(v1i, u[2*i+1], 0));
+        const int dot2 = ggml_dp4a(0x01010101, u[2*i+0], ggml_dp4a(0x01010101, u[2*i+1], 0));
+
+        sumf_d += d8[i] * (dot1 * sc[i]);
+        sumf_m += d8[i] * (dot2 * m[i]);
+    }
+
+    const float2 dm5f = __half22float2(dm5);
+    return dm5f.x * sumf_d - dm5f.y * sumf_m;
+}
+
+static __device__ __forceinline__ float vec_dot_q5_K_q8_1(
+    const void* __restrict__ vbq, const ggml_block_q8_1* __restrict__ bq8_1,
+    const int& kbx, const int& iqs) {
+
+    const ggml_block_q5_K* bq5_K = (const ggml_block_q5_K*)vbq + kbx;
+
+    int vl[2];
+    int vh[2];
+    int u[2 * QR5_K];
+    float d8[QR5_K];
+
+    const int bq8_offset = QR5_K * ((iqs/2) / (QI8_1 / 2));
+    const int* ql = (const int*)(bq5_K->qs + 16 * bq8_offset + 4 * ((iqs/2) % 4));
+    const int* qh = (const int*)(bq5_K->qh + 4 * ((iqs/2) % 4));
+
+    vl[0] = ql[0];
+    vl[1] = ql[4];
+
+    vh[0] = qh[0] >> bq8_offset;
+    vh[1] = qh[4] >> bq8_offset;
+
+    const uint16_t* scales = (const uint16_t*)bq5_K->scales;
+    uint16_t aux[2];
+    const int j = bq8_offset / 2;
+    if (j < 2) {
+        aux[0] = scales[j+0] & 0x3f3f;
+        aux[1] = scales[j+2] & 0x3f3f;
+    } else {
+        aux[0] = ((scales[j+2] >> 0) & 0x0f0f) | ((scales[j-2] & 0xc0c0) >> 2);
+        aux[1] = ((scales[j+2] >> 4) & 0x0f0f) | ((scales[j-0] & 0xc0c0) >> 2);
+    }
+    const uint8_t* sc = (const uint8_t*)aux;
+    const uint8_t* m_ptr  = sc + 2;
+
+    for (int i = 0; i < QR5_K; ++i) {
+        const ggml_block_q8_1* bq8i = bq8_1 + bq8_offset + i;
+        d8[i] = __half2float(bq8i->d);
+        const int* q8 = (const int*)bq8i->qs + ((iqs/2) % 4);
+        u[2*i+0] = q8[0];
+        u[2*i+1] = q8[4];
+    }
+
+    const half2 dm = make_half2(bq5_K->d, bq5_K->dmin);
+    return vec_dot_q5_K_q8_1_impl_vmmq(vl, vh, u, sc, m_ptr, dm, d8);
+}
+
+// -------------------------------------------------------------------------
+// vec_dot_q8_0_q8_1 — ported from ggml vecdotq.cuh
+// -------------------------------------------------------------------------
+static __device__ __forceinline__ int load_int_unaligned(const int8_t* p) {
+    // Load 4 bytes from potentially misaligned address (Q8_0 blocks are 34 bytes)
+    int val;
+    memcpy(&val, p, 4);
+    return val;
+}
+
+static __device__ __forceinline__ float vec_dot_q8_0_q8_1(
+    const void* __restrict__ vbq, const ggml_block_q8_1* __restrict__ bq8_1,
+    const int& kbx, const int& iqs) {
+
+    const ggml_block_q8_0* bq8_0 = (const ggml_block_q8_0*)vbq + kbx;
+
+    int sumi = 0;
+#pragma unroll
+    for (int i = 0; i < VDR_Q8_0; ++i) {
+        // Q8_0 blocks are 34 bytes — qs at offset 2 is NOT always 4-byte aligned.
+        // Use byte-wise load to avoid misaligned access.
+        int v = load_int_unaligned(bq8_0->qs + 4 * (iqs + i));
+        int u = get_int_b4(bq8_1->qs, iqs + i);
+        sumi = ggml_dp4a(v, u, sumi);
+    }
+
+    const float d8_0 = __half2float(bq8_0->d);
+    const float d8_1 = __half2float(bq8_1->d);
+    return d8_0 * d8_1 * (float)sumi;
+}
+
+// -------------------------------------------------------------------------
 // MMVQ kernel — warp-per-row, simplified from ggml mul_mat_vec_q
 // -------------------------------------------------------------------------
 
 // Template tag for dispatch
-enum class QType { Q4_K, Q5_1 };
+enum class QType { Q4_K, Q5_1, Q5_K, Q8_0 };
 
 template <QType qtype>
 static __global__ void mmvq_kernel(
@@ -306,9 +450,15 @@ static __global__ void mmvq_kernel(
     // Grid: (N, M), Block: (32, nwarps)
     constexpr int nwarps = 4;
 
-    constexpr int qk  = (qtype == QType::Q4_K) ? QK4_K : QK5_1;
-    constexpr int qi  = (qtype == QType::Q4_K) ? QI4_K : QI5_1;
-    constexpr int vdr = (qtype == QType::Q4_K) ? VDR_Q4_K : VDR_Q5_1;
+    constexpr int qk  = (qtype == QType::Q4_K) ? QK4_K
+                       : (qtype == QType::Q5_K) ? QK5_K
+                       : (qtype == QType::Q8_0) ? QK8_0 : QK5_1;
+    constexpr int qi  = (qtype == QType::Q4_K) ? QI4_K
+                       : (qtype == QType::Q5_K) ? QI5_K
+                       : (qtype == QType::Q8_0) ? QI8_0 : QI5_1;
+    constexpr int vdr = (qtype == QType::Q4_K) ? VDR_Q4_K
+                       : (qtype == QType::Q5_K) ? VDR_Q5_K
+                       : (qtype == QType::Q8_0) ? VDR_Q8_0 : VDR_Q5_1;
     constexpr int blocks_per_iter = vdr * nwarps * WARP_SIZE / qi;
 
     const int tid = WARP_SIZE * threadIdx.y + threadIdx.x;
@@ -330,6 +480,10 @@ static __global__ void mmvq_kernel(
 
         if constexpr (qtype == QType::Q4_K) {
             tmp += vec_dot_q4_K_q8_1(W, &yq[kby], row * blocks_per_row + kbx, kqs);
+        } else if constexpr (qtype == QType::Q5_K) {
+            tmp += vec_dot_q5_K_q8_1(W, &yq[kby], row * blocks_per_row + kbx, kqs);
+        } else if constexpr (qtype == QType::Q8_0) {
+            tmp += vec_dot_q8_0_q8_1(W, &yq[kby], row * blocks_per_row + kbx, kqs);
         } else {
             tmp += vec_dot_q5_1_q8_1(W, &yq[kby], row * blocks_per_row + kbx, kqs);
         }
@@ -463,6 +617,56 @@ void ggml_mmvq_q5_1_f32(
         dim3 block(WARP_SIZE, nwarps);
         dim3 grid(N, M);
         mmvq_kernel<QType::Q5_1><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
+    }
+}
+
+void ggml_mmvq_q5k(
+    const void* W, const half* x, half* y,
+    int M, int N, int K,
+    void* scratch, size_t scratch_size,
+    cudaStream_t stream) {
+
+    const int num_q8_blocks = (K / QK8_1);
+    const int total_q8_blocks = M * num_q8_blocks;
+    size_t need = (size_t)total_q8_blocks * sizeof(ggml_block_q8_1);
+    if (need > scratch_size) return;
+    ggml_block_q8_1* x_q8 = (ggml_block_q8_1*)scratch;
+
+    {
+        const int threads = 256;
+        const int nblk = (total_q8_blocks + threads - 1) / threads;
+        quantize_fp16_to_q8_1_ggml_kernel<<<nblk, threads, 0, stream>>>(x, x_q8, M * K);
+    }
+    {
+        constexpr int nwarps = 4;
+        dim3 block(WARP_SIZE, nwarps);
+        dim3 grid(N, M);
+        mmvq_kernel<QType::Q5_K><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
+    }
+}
+
+void ggml_mmvq_q8_0(
+    const void* W, const half* x, half* y,
+    int M, int N, int K,
+    void* scratch, size_t scratch_size,
+    cudaStream_t stream) {
+
+    const int num_q8_blocks = (K / QK8_1);
+    const int total_q8_blocks = M * num_q8_blocks;
+    size_t need = (size_t)total_q8_blocks * sizeof(ggml_block_q8_1);
+    if (need > scratch_size) return;
+    ggml_block_q8_1* x_q8 = (ggml_block_q8_1*)scratch;
+
+    {
+        const int threads = 256;
+        const int nblk = (total_q8_blocks + threads - 1) / threads;
+        quantize_fp16_to_q8_1_ggml_kernel<<<nblk, threads, 0, stream>>>(x, x_q8, M * K);
+    }
+    {
+        constexpr int nwarps = 4;
+        dim3 block(WARP_SIZE, nwarps);
+        dim3 grid(N, M);
+        mmvq_kernel<QType::Q8_0><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
     }
 }
 
