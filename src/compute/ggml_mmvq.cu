@@ -321,7 +321,7 @@ static constexpr int QK8_0 = 32;
 static constexpr int QI5_K = 32;   // QK_K / (4 * QR5_K)
 static constexpr int QR5_K = 2;
 static constexpr int QI8_0 = 8;    // QK8_0 / 4
-static constexpr int QI8_1 = 4;    // QK8_1 / (4 * QR8_1) where QR8_1=2
+static constexpr int QI8_1 = 8;    // QK8_1 / (4 * QR8_1) where QR8_1=1
 static constexpr int VDR_Q5_K = 2; // VDR_Q5_K_Q8_1_MMVQ
 static constexpr int VDR_Q8_0 = 2; // VDR_Q8_0_Q8_1_MMVQ
 
