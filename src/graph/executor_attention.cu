@@ -888,15 +888,41 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             // FP32 residual += attn_out, then post_attn_norm → FP16 hidden.
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             float eps = model_->config().rms_norm_eps;
+            if (layer == 0 && debug_attn_steps) {
+                fprintf(stderr, "[DEBUG_FWD] L0 fp32_accum_kernel: po=%p h=%p fp32_h=%p d=%d n=%d\n",
+                        po.data, h.data, fp32_h.data, model_->config().d_model, n);
+            }
             // Add attn output to FP32 accumulator, apply post_attn_norm, write FP16
             // 256 threads: d_model_v = d_model/8 (e.g. 480 for Gemma-3 3840),
             // so 2 iterations/thread. 512 wastes half the threads on idle lanes.
+            if (layer == 0 && debug_attn_steps) {
+                debug_tensor_stats_all("L0_pre_fp32accum_h", view_tokens(h, n), stream);
+                debug_tensor_stats_all("L0_pre_fp32accum_po", view_tokens(po, n), stream);
+                // Dump FP32 accumulator state
+                {
+                    std::vector<float> fp32_tmp(n * model_->config().d_model);
+                    cudaMemcpy(fp32_tmp.data(), fp32_h.data, fp32_tmp.size() * sizeof(float), cudaMemcpyDeviceToHost);
+                    double fs = 0, fss = 0;
+                    for (auto v : fp32_tmp) { fs += v; fss += v*v; }
+                    fprintf(stderr, "[DEBUG_FWD] L0_fp32_accum_pre: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f\n",
+                            fs, std::sqrt(fss), fp32_tmp[0], fp32_tmp[1], fp32_tmp[2]);
+                    // Last row (row n-1)
+                    int off = (n-1) * model_->config().d_model;
+                    double rs = 0, rss = 0;
+                    for (int i = 0; i < model_->config().d_model; i++) { rs += fp32_tmp[off+i]; rss += fp32_tmp[off+i]*fp32_tmp[off+i]; }
+                    fprintf(stderr, "[DEBUG_FWD] L0_fp32_accum_pre[%d]: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f\n",
+                            n-1, rs, std::sqrt(rss), fp32_tmp[off], fp32_tmp[off+1], fp32_tmp[off+2]);
+                }
+            }
             rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
                 static_cast<const half*>(po.data),
                 static_cast<const half*>(ly.post_attn_norm.data),
                 static_cast<float*>(fp32_h.data),
                 static_cast<half*>(h.data),
                 model_->config().d_model, eps, norm_w_off_);
+            if (layer == 0 && debug_attn_steps) {
+                debug_tensor_stats_all("L0_post_fp32accum_h", view_tokens(h, n), stream);
+            }
         } else if (has_post_attn_norm && model_->config().arch == ModelArch::GEMMA4) {
             // Gemma 4 sandwich norm: h = r + post_attn_norm(po).
             // Normalize attention output first, THEN add residual (HF reference order).
