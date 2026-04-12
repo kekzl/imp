@@ -351,6 +351,20 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         }
     }
 
+    // Dump routing for last token (use direct getenv, not debug_forward_enabled)
+    fprintf(stderr, "[MoE_ENTRY] layer=%d n=%d ne=%d\n", layer, n, ne);
+    if (layer == 0 && getenv("IMP_DUMP_ROUTING")) {
+        int last_tok = n - 1;
+        std::vector<int32_t> h_idx(top_k);
+        std::vector<float> h_wts(top_k);
+        cudaMemcpy(h_idx.data(), static_cast<const int32_t*>(routing.expert_indices.data) + last_tok * top_k,
+                   top_k * sizeof(int32_t), cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_wts.data(), static_cast<const float*>(routing.expert_weights.data) + last_tok * top_k,
+                   top_k * sizeof(float), cudaMemcpyDeviceToHost);
+        fprintf(stderr, "[DEBUG_FWD] L0_routing[%d]: experts=[%d,%d,%d,%d,%d,%d,%d,%d] weights=[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]\n",
+                last_tok, h_idx[0], h_idx[1], h_idx[2], h_idx[3], h_idx[4], h_idx[5], h_idx[6], h_idx[7],
+                h_wts[0], h_wts[1], h_wts[2], h_wts[3], h_wts[4], h_wts[5], h_wts[6], h_wts[7]);
+    }
     // 4b. Expert weight scaling (Nemotron: scale = 2.5)
     if (cfg.expert_weights_scale != 1.0f) {
         int64_t n_weights = static_cast<int64_t>(n) * top_k;
@@ -1792,3 +1806,5 @@ moe_after_experts:
 }
 
 } // namespace imp
+// force rebuild 1776011079
+// Sun Apr 12 06:27:12 PM CEST 2026
