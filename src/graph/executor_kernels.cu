@@ -1935,20 +1935,33 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
                 (int)(dequant_scratch != nullptr));
     }
     static bool no_dp4a_gemv = (getenv("IMP_NO_DP4A_GEMV") != nullptr);
-    // Gemma-4: dp4a GEMV for n=1 produces numerically different results from cuBLAS GEMM
-    // used during n>1 prefill. For models with 128 experts, this ~6% difference compounds
-    // over 30 layers to produce wrong output. Force cuBLAS for Gemma-4 n=1.
-    static bool gemma4_no_dp4a = (getenv("IMP_GEMMA4_NO_DP4A") != nullptr);
-    if (!no_dp4a_gemv && !gemma4_no_dp4a && !prefer_fp16_cache && input.shape[0] == 1 && input.dtype == DType::FP16 &&
-               q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype)) {
-        if (getenv("IMP_DEBUG_GEMM_DISPATCH") != nullptr) fprintf(stderr, "[GEMM_DISP]   -> dp4a MMVQ\n");
-        // dp4a MMVQ: quantize input to Q8_1, then dp4a dot product
+    static bool gemma4_force_dp4a = (getenv("IMP_GEMMA4_FORCE_DP4A") != nullptr);
+    // dp4a MMVQ path: for n=1 (standard) or n>1 when forced for Gemma-4 (per-row loop).
+    // Gemma-4 with 128 experts requires numerical parity with llama.cpp's dp4a kernels —
+    // the cuBLAS dequant→FP16 path produces ~6% different results that compound over 30 layers.
+    bool use_dp4a = !no_dp4a_gemv && !prefer_fp16_cache && input.dtype == DType::FP16 &&
+                    q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype) &&
+                    (input.shape[0] == 1 || gemma4_force_dp4a);
+    if (use_dp4a) {
+        int M = static_cast<int>(input.shape[0]);
+        int N = static_cast<int>(weight.shape[0]);
         int K = static_cast<int>(weight.shape[1]);
-        quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
-                               q8_1_buf, d8_buf, K, stream);
-        dispatch_dp4a_gemv(qtype, weight.data, q8_1_buf, d8_buf,
-                           static_cast<half*>(output.data),
-                           static_cast<int>(weight.shape[0]), K, stream);
+        if (M == 1) {
+            // Single row: standard dp4a GEMV
+            quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
+                                   q8_1_buf, d8_buf, K, stream);
+            dispatch_dp4a_gemv(qtype, weight.data, q8_1_buf, d8_buf,
+                               static_cast<half*>(output.data), N, K, stream);
+        } else {
+            // Multi-row: per-row dp4a GEMV loop for numerical parity with llama
+            for (int row = 0; row < M; row++) {
+                const half* in_row = static_cast<const half*>(input.data) + static_cast<int64_t>(row) * K;
+                half* out_row = static_cast<half*>(output.data) + static_cast<int64_t>(row) * N;
+                quantize_fp16_to_q8_1(in_row, q8_1_buf, d8_buf, K, stream);
+                dispatch_dp4a_gemv(qtype, weight.data, q8_1_buf, d8_buf,
+                                   out_row, N, K, stream);
+            }
+        }
     } else if (qtype == GGMLQuantType::Q4_1 && fp16_cache != nullptr) {
         // Prefer pre-dequantized FP16 cache (P3 optimization)
         auto it = fp16_cache->find(weight.data);

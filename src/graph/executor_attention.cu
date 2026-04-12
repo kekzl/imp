@@ -898,6 +898,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             if (layer == 0 && debug_attn_steps) {
                 debug_tensor_stats_all("L0_pre_fp32accum_h", view_tokens(h, n), stream);
                 debug_tensor_stats_all("L0_pre_fp32accum_po", view_tokens(po, n), stream);
+                debug_tensor_rows("pre_fp32accum_po_rows", view_tokens(po, n), stream);
+                debug_tensor_rows("pre_fp32accum_h_rows", view_tokens(h, n), stream);
                 // Dump FP32 accumulator state
                 {
                     std::vector<float> fp32_tmp(n * model_->config().d_model);
