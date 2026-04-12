@@ -26,8 +26,7 @@ RUN sed -i 's/-march=native/-march=x86-64-v3/g' cmake/CompilerFlags.cmake
 ARG IMP_BUILD_TESTS=OFF
 ARG IMP_BUILD_BENCH=OFF
 
-RUN --mount=type=cache,target=/src/build \
-    cmake -B build -G Ninja \
+RUN cmake -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} \
         -DIMP_BUILD_TESTS=${IMP_BUILD_TESTS} \
         -DIMP_BUILD_BENCH=${IMP_BUILD_BENCH} \
