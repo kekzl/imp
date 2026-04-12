@@ -899,26 +899,6 @@ static std::vector<std::string> llama3_pre_tokenize(const std::string& text) {
 std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
     if (text.empty() || vocab_.empty()) return {};
 
-    // Debug: check merge rank availability for Hello characters
-    static bool debug_once = false;
-    if (!debug_once) {
-        debug_once = true;
-        fprintf(stderr, "[GEMMA4_TOK] merge_ranks size=%zu\n", merge_ranks_.size());
-        // Check specific merge pairs for "Hello"
-        for (auto& key : {"H e", "e l", "l l", "l o", "He l", "Hel l", "Hell o"}) {
-            auto it = merge_ranks_.find(key);
-            fprintf(stderr, "[GEMMA4_TOK] merge '%s' -> %s\n", key,
-                    it != merge_ranks_.end() ? std::to_string(it->second).c_str() : "NOT FOUND");
-        }
-        // Check what single-char tokens exist
-        for (auto ch : {'H', 'e', 'l', 'o'}) {
-            std::string s(1, ch);
-            auto it = token_to_id_.find(s);
-            fprintf(stderr, "[GEMMA4_TOK] token '%c' -> %s\n", ch,
-                    it != token_to_id_.end() ? std::to_string(it->second).c_str() : "NOT FOUND");
-        }
-    }
-
     // 1. Escape spaces → ▁
     std::string processed;
     processed.reserve(text.size() + 4);
@@ -959,13 +939,6 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
             if (i + len > chunk.size()) len = 1;
             symbols.push_back(chunk.substr(i, len));
             i += len;
-        }
-
-        // Debug: print initial symbols
-        {
-            fprintf(stderr, "[GEMMA4_TOK] chunk='%s' nsyms=%zu\n", chunk.c_str(), symbols.size());
-            for (size_t si = 0; si < symbols.size() && si < 10; si++)
-                fprintf(stderr, "[GEMMA4_TOK]   sym[%zu]='%s'\n", si, symbols[si].c_str());
         }
 
         // 4. BPE merge loop using merge ranks (lower rank = merge first)
@@ -1030,7 +1003,6 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
         // 5. Convert symbols to token IDs
         for (int i = 0; i < ns; i++) {
             if (sdel[i]) continue;
-            fprintf(stderr, "[GEMMA4_TOK] final sym[%d]='%s'\n", i, symbols[i].c_str());
             auto it = token_to_id_.find(symbols[i]);
             if (it != token_to_id_.end()) {
                 all_ids.push_back(it->second);
