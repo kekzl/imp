@@ -1935,7 +1935,11 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
                 (int)(dequant_scratch != nullptr));
     }
     static bool no_dp4a_gemv = (getenv("IMP_NO_DP4A_GEMV") != nullptr);
-    if (!no_dp4a_gemv && !prefer_fp16_cache && input.shape[0] == 1 && input.dtype == DType::FP16 &&
+    // Gemma-4: dp4a GEMV for n=1 produces numerically different results from cuBLAS GEMM
+    // used during n>1 prefill. For models with 128 experts, this ~6% difference compounds
+    // over 30 layers to produce wrong output. Force cuBLAS for Gemma-4 n=1.
+    static bool gemma4_no_dp4a = (getenv("IMP_GEMMA4_NO_DP4A") != nullptr);
+    if (!no_dp4a_gemv && !gemma4_no_dp4a && !prefer_fp16_cache && input.shape[0] == 1 && input.dtype == DType::FP16 &&
                q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype)) {
         if (getenv("IMP_DEBUG_GEMM_DISPATCH") != nullptr) fprintf(stderr, "[GEMM_DISP]   -> dp4a MMVQ\n");
         // dp4a MMVQ: quantize input to Q8_1, then dp4a dot product
