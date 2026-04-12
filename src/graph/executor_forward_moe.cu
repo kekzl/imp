@@ -1615,9 +1615,15 @@ moe_after_experts:
                       static_cast<int64_t>(n) * d, stream);
     }
 
+    if (debug_forward_enabled() && layer == 0) {
+        debug_tensor_rows("L0_moe_scatter_out", view_tokens(h, n), stream);
+    }
     // Gemma 4: apply post_ffw_norm_2 on the MoE branch output (h) BEFORE shared adds.
     if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_post_norm_2.data != nullptr) {
         rmsnorm(h, ly.ffn_post_norm_2, h, eps, stream, norm_w_off_);
+    }
+    if (debug_forward_enabled() && layer == 0) {
+        debug_tensor_rows("L0_moe_post_norm2", view_tokens(h, n), stream);
     }
 
     // Gemma 4: re-derive `no` for the shared MLP from the saved residual
@@ -1713,8 +1719,14 @@ moe_after_experts:
             snprintf(buf, sizeof(buf), "L%d_shared_post_post_norm1", layer);
             debug_tensor_stats_all(buf, sh_down, stream);
         }
+        if (debug_forward_enabled() && layer == 0) {
+            debug_tensor_rows("L0_shared_post_norm1", sh_down, stream);
+        }
         // Add shared expert output to hidden (which already has routed expert output)
         elementwise_add(h, sh_down, stream);
+    }
+    if (debug_forward_enabled() && layer == 0) {
+        debug_tensor_rows("L0_combined", view_tokens(h, n), stream);
     }
     if (layer == 0) {
         char buf[64];

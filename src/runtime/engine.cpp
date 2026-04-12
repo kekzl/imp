@@ -499,7 +499,11 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     if (!init_weights()) return false;
     if (!init_kv_cache()) return false;
     if (!init_features()) return false;
-    warmup();
+    if (getenv("IMP_NO_WARMUP")) {
+        IMP_LOG_INFO("Warmup SKIPPED (IMP_NO_WARMUP)");
+    } else {
+        warmup();
+    }
 
     return true;
 }
