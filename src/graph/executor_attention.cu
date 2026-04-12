@@ -493,6 +493,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         if (cfg.arch == ModelArch::GEMMA4) {
             bool is_swa_l = (!cfg.swa_layers.empty() && layer < (int)cfg.swa_layers.size() &&
                              cfg.swa_layers[layer]);
+            // SWA: hd=256, rope_dim=256 (full). Global: hd=512, rope_dim=256 (half).
+            // llama: "full_attention layer only use half of the RoPE dimensions"
             fused_rope_dim = is_swa_l ? hd : (hd / 4);
         } else if (fused_rope_dim > hd || fused_rope_dim <= 0) {
             fused_rope_dim = hd;
@@ -542,6 +544,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             if (cfg.arch == ModelArch::GEMMA4) {
                 bool is_swa_l = (!cfg.swa_layers.empty() && layer < (int)cfg.swa_layers.size() &&
                                  cfg.swa_layers[layer]);
+                // SWA: hd=256, rope_dim=256 (full). Global: hd=512, rope_dim=256 (half).
                 layer_rope_dim = is_swa_l ? hd : (hd / 4);
             } else if (layer_rope_dim > hd || layer_rope_dim <= 0) {
                 layer_rope_dim = hd;  // safety clamp
@@ -624,6 +627,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             if (cfg.arch == ModelArch::GEMMA4) {
                 bool is_swa_l = (!cfg.swa_layers.empty() && layer < (int)cfg.swa_layers.size() &&
                                  cfg.swa_layers[layer]);
+                // SWA: hd=256, rope_dim=256 (full). Global: hd=512, rope_dim=256 (half).
                 effective_rope_dim = is_swa_l ? hd : (hd / 4);
             } else {
                 effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
