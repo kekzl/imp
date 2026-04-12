@@ -168,6 +168,10 @@ void GraphExecutor::forward_logits(const InferenceState& state,
 
     // Store for use by run_ffn (which doesn't receive the InferenceState).
     cur_n_tokens_ = n;
+    // Decode step counter for debug dump tagging
+    static int s_decode_step = 0;
+    if (n == 1) s_decode_step++;
+    const int decode_step = (n == 1) ? s_decode_step : 0;
     cur_force_fp16_ = state.force_fp16_gemm;
     cur_per_row_lm_ = state.per_row_lm_head;
 
@@ -228,7 +232,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     if (debug_forward_enabled()) {
         std::vector<int32_t> h_ids(n);
         IMP_CUDA_CHECK_LOG(cudaMemcpy(h_ids.data(), state.token_ids, n * sizeof(int32_t), cudaMemcpyDeviceToHost));
-        fprintf(stderr, "[DEBUG_FWD] input_tokens (%d):", n);
+        fprintf(stderr, "[DEBUG_FWD] [step=%d] input_tokens (%d):", decode_step, n);
         for (int i = 0; i < n; i++) fprintf(stderr, " %d", h_ids[i]);
         fprintf(stderr, "\n");
     }
@@ -303,14 +307,14 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         }
         {
             char buf[64];
-            snprintf(buf, sizeof(buf), "after_layer%02d_%s", i,
+            snprintf(buf, sizeof(buf), "[step=%d] after_layer%02d_%s", decode_step, i,
                      layer_has_gdn(i) ? "gdn" :
                      layer_has_attention(i) ? "attn" : "ssm");
             debug_tensor_stats_all(buf, view_tokens(h, n), stream);
-            const bool dump_this_layer = (i <= 6 || i == 10 || i == 15 || i == 17 || i == 20 || i == 23 || i == 25 || i == 26 || i == 27 || i == 28 || i == 29);
+            const bool dump_this_layer = debug_forward_enabled();
             if (dump_this_layer) {
                 char rbuf[64];
-                snprintf(rbuf, sizeof(rbuf), "attn_out-%d", i);
+                snprintf(rbuf, sizeof(rbuf), "[step=%d] attn_out-%d", decode_step, i);
                 debug_tensor_rows(rbuf, view_tokens(h, n), stream);
             }
         }
@@ -325,13 +329,13 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         }
         {
             char buf[64];
-            snprintf(buf, sizeof(buf), "after_layer%02d_%s", i,
+            snprintf(buf, sizeof(buf), "[step=%d] after_layer%02d_%s", decode_step, i,
                      layer_has_moe(i) ? "moe" : (layer_has_dense_ffn(i) ? "ffn" : "no_ffn"));
             debug_tensor_stats_all(buf, view_tokens(h, n), stream);
-            const bool dump_this_layer = (i <= 6 || i == 10 || i == 15 || i == 17 || i == 20 || i == 23 || i == 25 || i == 26 || i == 27 || i == 28 || i == 29);
+            const bool dump_this_layer = debug_forward_enabled();
             if (dump_this_layer) {
                 char rbuf[64];
-                snprintf(rbuf, sizeof(rbuf), "moe_out-%d", i);
+                snprintf(rbuf, sizeof(rbuf), "[step=%d] moe_out-%d", decode_step, i);
                 debug_tensor_rows(rbuf, view_tokens(h, n), stream);
             }
         }
@@ -374,11 +378,11 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             }
             if (debug_forward_enabled()) {
                 char buf[64];
-                snprintf(buf, sizeof(buf), "L%02d_after_out_scale", i);
+                snprintf(buf, sizeof(buf), "[step=%d] L%02d_after_out_scale", decode_step, i);
                 debug_tensor_stats_all(buf, view_tokens(h, n), stream);
-                if (i <= 6 || i == 10 || i == 15 || i == 17 || i == 20 || i == 23 || i == 25 || i == 26 || i == 27 || i == 28 || i == 29) {
+                {
                     char rbuf[64];
-                    snprintf(rbuf, sizeof(rbuf), "l_out-%d", i);
+                    snprintf(rbuf, sizeof(rbuf), "[step=%d] l_out-%d", decode_step, i);
                     debug_tensor_rows(rbuf, view_tokens(h, n), stream);
                 }
             }
