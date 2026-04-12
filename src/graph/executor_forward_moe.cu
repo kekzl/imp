@@ -352,7 +352,6 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     }
 
     // Dump routing for last token (use direct getenv, not debug_forward_enabled)
-    fprintf(stderr, "[MoE_ENTRY] layer=%d n=%d ne=%d\n", layer, n, ne);
     if (layer == 0 && getenv("IMP_DUMP_ROUTING")) {
         int last_tok = n - 1;
         std::vector<int32_t> h_idx(top_k);
@@ -1806,5 +1805,4 @@ moe_after_experts:
 }
 
 } // namespace imp
-// force rebuild 1776011079
 // Sun Apr 12 06:27:12 PM CEST 2026
