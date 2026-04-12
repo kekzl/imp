@@ -1934,7 +1934,8 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
                 (int)(is_dp4a_qtype(qtype) && q8_1_buf && d8_buf),
                 (int)(dequant_scratch != nullptr));
     }
-    if (!prefer_fp16_cache && input.shape[0] == 1 && input.dtype == DType::FP16 &&
+    static bool no_dp4a_gemv = (getenv("IMP_NO_DP4A_GEMV") != nullptr);
+    if (!no_dp4a_gemv && !prefer_fp16_cache && input.shape[0] == 1 && input.dtype == DType::FP16 &&
                q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype)) {
         if (getenv("IMP_DEBUG_GEMM_DISPATCH") != nullptr) fprintf(stderr, "[GEMM_DISP]   -> dp4a MMVQ\n");
         // dp4a MMVQ: quantize input to Q8_1, then dp4a dot product
