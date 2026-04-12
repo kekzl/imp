@@ -1938,10 +1938,10 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
     static bool no_dp4a_gemv = (getenv("IMP_NO_DP4A_GEMV") != nullptr);
     static bool gemma4_force_mmvq = (getenv("IMP_GEMMA4_FORCE_MMVQ") != nullptr);
     // MMVQ path: ggml-compatible quantized GEMM for numerical parity with llama.cpp.
-    // MMVQ for K-quant types. Q8_0 excluded due to misaligned access bug (34-byte blocks).
+    // MMVQ for verified quant types only. Q4_K verified correct (dp4a ≈ MMVQ < 0.1%).
+    // Q5_K, Q5_1, Q8_0 need separate verification.
     bool use_mmvq = gemma4_force_mmvq && !prefer_fp16_cache && input.dtype == DType::FP16 &&
-                    (qtype == GGMLQuantType::Q4_K || qtype == GGMLQuantType::Q5_K ||
-                     qtype == GGMLQuantType::Q5_1) &&
+                    qtype == GGMLQuantType::Q4_K &&
                     (weight.shape[1] % 32 == 0);
     bool use_dp4a = !no_dp4a_gemv && !prefer_fp16_cache && input.shape[0] == 1 &&
                     input.dtype == DType::FP16 &&
