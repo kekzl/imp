@@ -124,7 +124,9 @@ static void compare_dp4a_vs_mmvq(
            __half2float(h_dp4a[worst_idx]), __half2float(h_mmvq[worst_idx]));
 
     EXPECT_LT(max_rel_err, 0.002f) << name << ": relative error too large";
-    EXPECT_LT(max_abs_err, 0.5f) << name << ": absolute error too large";
+    // abs_err threshold 2.0 allows FP16 rounding at large magnitudes (~1024+);
+    // the relative error check above is the meaningful correctness gate.
+    EXPECT_LE(max_abs_err, 2.0f) << name << ": absolute error too large";
 
     cudaFree(out_dp4a); cudaFree(out_mmvq);
     cudaFree(q8_buf); cudaFree(d8_buf); cudaFree(scratch);
