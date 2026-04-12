@@ -320,7 +320,6 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // (Matches llama.cpp ffn_moe_down_scaled = MUL(ffn_moe_down, repeat(scale)).)
     if (cfg.arch == ModelArch::GEMMA4 && ly.expert_down_scale.data != nullptr &&
         ly.expert_down_scale.on_device) {
-        if (layer == 0) IMP_LOG_INFO("Gemma 4: applying per-expert down_scale (on_device=%d)", ly.expert_down_scale.on_device);
         int64_t n_weights = static_cast<int64_t>(n) * top_k;
         int threads_s = 256;
         int blocks_s = static_cast<int>((n_weights + threads_s - 1) / threads_s);
@@ -1569,43 +1568,9 @@ moe_after_experts:
                       static_cast<int64_t>(n) * d, stream);
     }
 
-    if (layer == 0) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "L%d_moe_pre_post_norm2", layer);
-        debug_tensor_stats_all(buf, h, stream);
-        auto dump_norm = [&](const char* nm, const Tensor& t){
-            if (!t.data) return;
-            // Explicitly read 2816 halves from device memory
-            std::vector<half> tmp(2816);
-            cudaMemcpy(tmp.data(), t.data, 2816*sizeof(half), cudaMemcpyDeviceToHost);
-            double s=0, ss=0; float mn=1e30f, mx=-1e30f;
-            for (int i=0;i<2816;i++){
-                float v=__half2float(tmp[i]); s+=v; ss+=v*v;
-                if(v<mn)mn=v; if(v>mx)mx=v;
-            }
-            fprintf(stderr,"[DEBUG_FWD] L%d %-22s n=2816 sum=%+.4f mean=%+.4f L2=%.4f min=%+.4f max=%+.4f  [0..4]=%.4f %.4f %.4f %.4f %.4f\n",
-                layer, nm, s, s/2816.0, std::sqrt(ss), mn, mx,
-                __half2float(tmp[0]), __half2float(tmp[1]), __half2float(tmp[2]),
-                __half2float(tmp[3]), __half2float(tmp[4]));
-        };
-        dump_norm("W_post_ffw_norm_2", ly.ffn_post_norm_2);
-        dump_norm("W_post_ffw_norm_1", ly.ffn_post_norm_1);
-        dump_norm("W_post_ffw_norm",   ly.post_ffn_norm);
-        dump_norm("W_pre_ffw_norm_2",  ly.ffn_pre_norm_2);
-        dump_norm("W_ffn_norm",        ly.ffn_norm);
-        dump_norm("W_attn_norm",       ly.attn_norm);
-        dump_norm("W_post_attn_norm",  ly.post_attn_norm);
-    }
     // Gemma 4: apply post_ffw_norm_2 on the MoE branch output (h) BEFORE shared adds.
-    // This matches the parallel-branch structure: rms_norm(moe_out, post_ffw_norm_2).
-    if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_post_norm_2.data != nullptr &&
-        getenv("IMP_G4_NO_POST_FFW_2") == nullptr) {
+    if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_post_norm_2.data != nullptr) {
         rmsnorm(h, ly.ffn_post_norm_2, h, eps, stream, norm_w_off_);
-    }
-    if (layer == 0) {
-        char buf[64];
-        snprintf(buf, sizeof(buf), "L%d_moe_post_post_norm2", layer);
-        debug_tensor_stats_all(buf, h, stream);
     }
 
     // Gemma 4: re-derive `no` for the shared MLP from the saved residual
@@ -1614,10 +1579,6 @@ moe_after_experts:
     if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_pre_norm_2.data != nullptr &&
         ly.w_up_shared.data != nullptr && ly.ffn_norm.data != nullptr) {
         rmsnorm(r, ly.ffn_norm, no, eps, stream, norm_w_off_);
-    }
-    if (layer == 0) {
-        debug_tensor_stats_all("L0_shared_input_no", view_tokens(no, n), stream);
-        debug_tensor_stats_all("L0_residual_r",      view_tokens(r,  n), stream);
     }
 
     // Shared expert: enabled by default. Gemma 4: requires post_ffw_norm_1 to be uploaded.
