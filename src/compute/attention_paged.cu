@@ -1432,6 +1432,7 @@ void paged_attention_decode(
                 case 96:  LAUNCH_SPLITK_PIPE(96);  break;
                 case 128: LAUNCH_SPLITK_PIPE(128); break;
                 case 256: LAUNCH_SPLITK_PIPE(256); break;
+                case 512: LAUNCH_SPLITK_PIPE(512); break;
                 default:
                     IMP_LOG_ERROR("paged_attention_splitk_pipeline: unsupported head_dim %d", head_dim);
                     return;
@@ -1454,6 +1455,7 @@ void paged_attention_decode(
                 case 96:  LAUNCH_SPLITK(96);  break;
                 case 128: LAUNCH_SPLITK(128); break;
                 case 256: LAUNCH_SPLITK(256); break;
+                case 512: LAUNCH_SPLITK(512); break;
                 default:
                     IMP_LOG_ERROR("paged_attention_splitk: unsupported head_dim %d", head_dim);
                     return;
@@ -1514,6 +1516,7 @@ void paged_attention_decode(
                 case 96:  LAUNCH_CLUSTER(96);  used_cluster = true; break;
                 case 128: LAUNCH_CLUSTER(128); used_cluster = true; break;
                 case 256: LAUNCH_CLUSTER(256); used_cluster = true; break;
+                case 512: LAUNCH_CLUSTER(512); used_cluster = true; break;
                 default: break;
             }
             #undef LAUNCH_CLUSTER
@@ -1581,6 +1584,7 @@ void paged_attention_decode(
             case 96:  LAUNCH_MHA(96);  break;
             case 128: LAUNCH_MHA(128); break;
             case 256: LAUNCH_MHA(256); break;
+            case 512: LAUNCH_MHA(512); break;
             default:
                 // Generic non-templated fallback for non-standard head_dim (e.g. tests)
                 paged_attention_decode_kernel_generic<<<grid, block, smem_bytes, stream>>>(
