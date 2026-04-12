@@ -1951,6 +1951,27 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
         int M = static_cast<int>(input.shape[0]);
         int N = static_cast<int>(weight.shape[0]);
         int K = static_cast<int>(weight.shape[1]);
+        // DEBUG: compare MMVQ against dp4a for first call
+        static int s_mmvq_call = 0;
+        if (s_mmvq_call == 0 && M == 1 && is_dp4a_qtype(qtype) && q8_1_buf && d8_buf) {
+            s_mmvq_call = 1;
+            // Run dp4a GEMV first
+            half* dp4a_out = nullptr;
+            cudaMalloc(&dp4a_out, N * sizeof(half));
+            quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8_1_buf, d8_buf, K, stream);
+            dispatch_dp4a_gemv(qtype, weight.data, q8_1_buf, d8_buf, dp4a_out, N, K, stream);
+            // Now compare after MMVQ runs below
+            cudaStreamSynchronize(stream);
+            // Store dp4a output for comparison
+            std::vector<half> dp4a_host(N);
+            cudaMemcpy(dp4a_host.data(), dp4a_out, N * sizeof(half), cudaMemcpyDeviceToHost);
+            cudaFree(dp4a_out);
+            // Print first 5 dp4a values
+            fprintf(stderr, "[MMVQ_CMP] dp4a[0..4]: %.4f %.4f %.4f %.4f %.4f\n",
+                    __half2float(dp4a_host[0]), __half2float(dp4a_host[1]),
+                    __half2float(dp4a_host[2]), __half2float(dp4a_host[3]),
+                    __half2float(dp4a_host[4]));
+        }
         // Allocate scratch for Q8_1 quantization: M * (K/32) * 36 bytes
         // ggml_block_q8_1 = 36 bytes (half d + half s + int8_t qs[32])
         size_t q8_need = static_cast<size_t>(M) * ((K + 31) / 32) * 36;
@@ -1977,6 +1998,16 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
             cudaStreamSynchronize(stream);
             auto e = cudaGetLastError();
             if (e != cudaSuccess) fprintf(stderr, "[MMVQ] Q4_K error M=%d N=%d K=%d: %s\n", M, N, K, cudaGetErrorString(e));
+            // DEBUG: compare against dp4a
+            if (s_mmvq_call == 1 && M == 1) {
+                s_mmvq_call = 2;
+                std::vector<half> mmvq_host(N);
+                cudaMemcpy(mmvq_host.data(), output.data, N * sizeof(half), cudaMemcpyDeviceToHost);
+                fprintf(stderr, "[MMVQ_CMP] mmvq[0..4]: %.4f %.4f %.4f %.4f %.4f\n",
+                        __half2float(mmvq_host[0]), __half2float(mmvq_host[1]),
+                        __half2float(mmvq_host[2]), __half2float(mmvq_host[3]),
+                        __half2float(mmvq_host[4]));
+            }
         }
         else if (qtype == GGMLQuantType::Q5_K) {
             ggml_mmvq_q5k(weight.data, static_cast<const half*>(input.data),
