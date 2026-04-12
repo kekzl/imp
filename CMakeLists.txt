@@ -366,6 +366,7 @@ if(IMP_BUILD_TESTS)
         tests/test_json_constrain.cu
         tests/test_gdn.cu
         tests/test_gemm_dp4a.cu
+        tests/test_mmvq.cu
         tests/test_e2e_models.cpp
         tests/test_degeneration.cpp
         tests/test_tokenizer_compat.cpp
