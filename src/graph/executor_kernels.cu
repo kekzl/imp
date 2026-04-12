@@ -1937,99 +1937,27 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
     }
     static bool no_dp4a_gemv = (getenv("IMP_NO_DP4A_GEMV") != nullptr);
     static bool gemma4_force_mmvq = (getenv("IMP_GEMMA4_FORCE_MMVQ") != nullptr);
-    // MMVQ path: ggml-compatible quantized GEMM for numerical parity with llama.cpp.
-    // Supports Q4_K, Q5_K, Q5_1, Q8_0 for any batch size M.
-    // For n=1: uses dp4a GEMV (fast). For n>1 with MMVQ: uses batched mmvq kernel.
-    bool use_mmvq = gemma4_force_mmvq && !prefer_fp16_cache && input.dtype == DType::FP16 &&
-                    (qtype == GGMLQuantType::Q4_K || qtype == GGMLQuantType::Q5_K ||
-                     qtype == GGMLQuantType::Q5_1 || qtype == GGMLQuantType::Q8_0) &&
-                    (weight.shape[1] % 32 == 0);  // Q8_1 quantization requires K divisible by 32
+    // Per-row dp4a GEMV path: for Gemma-4 numerical parity with llama.cpp.
+    // Processes each row of the input matrix as a separate dp4a GEMV call.
+    // Slower than batched cuBLAS but uses the same kernels as n=1 decode (known correct).
+    bool use_perrow_dp4a = gemma4_force_mmvq && !prefer_fp16_cache && input.dtype == DType::FP16 &&
+                    q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype) &&
+                    (weight.shape[1] % 32 == 0);
     bool use_dp4a = !no_dp4a_gemv && !prefer_fp16_cache && input.shape[0] == 1 &&
                     input.dtype == DType::FP16 &&
                     q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype);
-    if (use_mmvq) {
+    if (use_perrow_dp4a) {
         int M = static_cast<int>(input.shape[0]);
         int N = static_cast<int>(weight.shape[0]);
         int K = static_cast<int>(weight.shape[1]);
-        // DEBUG: compare MMVQ against dp4a for first call
-        static int s_mmvq_call = 0;
-        if (s_mmvq_call == 0 && M == 1 && is_dp4a_qtype(qtype) && q8_1_buf && d8_buf) {
-            s_mmvq_call = 1;
-            // Run dp4a GEMV first
-            half* dp4a_out = nullptr;
-            cudaMalloc(&dp4a_out, N * sizeof(half));
-            quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8_1_buf, d8_buf, K, stream);
-            dispatch_dp4a_gemv(qtype, weight.data, q8_1_buf, d8_buf, dp4a_out, N, K, stream);
-            // Now compare after MMVQ runs below
-            cudaStreamSynchronize(stream);
-            // Store dp4a output for comparison
-            std::vector<half> dp4a_host(N);
-            cudaMemcpy(dp4a_host.data(), dp4a_out, N * sizeof(half), cudaMemcpyDeviceToHost);
-            cudaFree(dp4a_out);
-            // Print first 5 dp4a values
-            fprintf(stderr, "[MMVQ_CMP] dp4a[0..4]: %.4f %.4f %.4f %.4f %.4f\n",
-                    __half2float(dp4a_host[0]), __half2float(dp4a_host[1]),
-                    __half2float(dp4a_host[2]), __half2float(dp4a_host[3]),
-                    __half2float(dp4a_host[4]));
-        }
-        // Allocate scratch for Q8_1 quantization: M * (K/32) * 36 bytes
-        // ggml_block_q8_1 = 36 bytes (half d + half s + int8_t qs[32])
-        size_t q8_need = static_cast<size_t>(M) * ((K + 31) / 32) * 36;
-        // Use a static persistent buffer (model-lifetime)
-        static void* s_mmvq_scratch = nullptr;
-        static size_t s_mmvq_scratch_size = 0;
-        if (!s_mmvq_scratch || s_mmvq_scratch_size < q8_need) {
-            if (s_mmvq_scratch) cudaFree(s_mmvq_scratch);
-            // Allocate with 2x headroom for varying M
-            size_t alloc = q8_need * 2;
-            auto err = cudaMalloc(&s_mmvq_scratch, alloc);
-            if (err != cudaSuccess) {
-                fprintf(stderr, "[ERROR] MMVQ scratch alloc failed (%zu bytes): %s\n", alloc, cudaGetErrorString(err));
-                s_mmvq_scratch = nullptr;
-                s_mmvq_scratch_size = 0;
-            } else {
-                s_mmvq_scratch_size = alloc;
-            }
-        }
-        if (qtype == GGMLQuantType::Q4_K) {
-            ggml_mmvq_q4k(weight.data, static_cast<const half*>(input.data),
-                          static_cast<half*>(output.data), M, N, K,
-                          s_mmvq_scratch, s_mmvq_scratch_size, stream);
-            cudaStreamSynchronize(stream);
-            auto e = cudaGetLastError();
-            if (e != cudaSuccess) fprintf(stderr, "[MMVQ] Q4_K error M=%d N=%d K=%d: %s\n", M, N, K, cudaGetErrorString(e));
-            // DEBUG: compare against dp4a
-            if (s_mmvq_call == 1 && M == 1) {
-                s_mmvq_call = 2;
-                std::vector<half> mmvq_host(N);
-                cudaMemcpy(mmvq_host.data(), output.data, N * sizeof(half), cudaMemcpyDeviceToHost);
-                fprintf(stderr, "[MMVQ_CMP] mmvq[0..4]: %.4f %.4f %.4f %.4f %.4f\n",
-                        __half2float(mmvq_host[0]), __half2float(mmvq_host[1]),
-                        __half2float(mmvq_host[2]), __half2float(mmvq_host[3]),
-                        __half2float(mmvq_host[4]));
-            }
-        }
-        else if (qtype == GGMLQuantType::Q5_K) {
-            ggml_mmvq_q5k(weight.data, static_cast<const half*>(input.data),
-                          static_cast<half*>(output.data), M, N, K,
-                          s_mmvq_scratch, s_mmvq_scratch_size, stream);
-            cudaStreamSynchronize(stream);
-            auto e = cudaGetLastError();
-            if (e != cudaSuccess) fprintf(stderr, "[MMVQ] Q5_K error M=%d N=%d K=%d: %s\n", M, N, K, cudaGetErrorString(e));
-        } else if (qtype == GGMLQuantType::Q5_1) {
-            ggml_mmvq_q5_1(weight.data, static_cast<const half*>(input.data),
-                           static_cast<half*>(output.data), M, N, K,
-                           s_mmvq_scratch, s_mmvq_scratch_size, stream);
-            cudaStreamSynchronize(stream);
-            auto e = cudaGetLastError();
-            if (e != cudaSuccess) fprintf(stderr, "[MMVQ] Q5_1 error M=%d N=%d K=%d: %s\n", M, N, K, cudaGetErrorString(e));
-        } else if (qtype == GGMLQuantType::Q8_0) {
-            ggml_mmvq_q8_0(weight.data, static_cast<const half*>(input.data),
-                           static_cast<half*>(output.data), M, N, K,
-                           s_mmvq_scratch, s_mmvq_scratch_size, stream);
-            cudaStreamSynchronize(stream);
-            auto e = cudaGetLastError();
-            if (e != cudaSuccess) fprintf(stderr, "[MMVQ] Q8_0 error M=%d N=%d K=%d: %s\n", M, N, K, cudaGetErrorString(e));
+        // Per-row dp4a GEMV: process each row independently using the same
+        // kernels as n=1 decode (known to produce correct results matching llama).
+        for (int row = 0; row < M; row++) {
+            const half* in_row = static_cast<const half*>(input.data) + static_cast<int64_t>(row) * K;
+            half* out_row = static_cast<half*>(output.data) + static_cast<int64_t>(row) * N;
+            quantize_fp16_to_q8_1(in_row, q8_1_buf, d8_buf, K, stream);
+            dispatch_dp4a_gemv(qtype, weight.data, q8_1_buf, d8_buf,
+                               out_row, N, K, stream);
         }
     } else if (use_dp4a) {
         int N = static_cast<int>(weight.shape[0]);
