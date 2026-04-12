@@ -1690,7 +1690,12 @@ moe_after_experts:
                                   mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
         }
 
-        if (layer == 0) debug_tensor_stats_all("L0_sh_down_raw", sh_down, stream);
+        if (layer == 0) {
+            debug_tensor_stats_all("L0_sh_down_raw", sh_down, stream);
+            debug_tensor_rows("L0_sh_down_rows", sh_down, stream);
+            // Also dump shared expert norm input
+            debug_tensor_rows("L0_shared_norm_in", view_tokens(no, n), stream);
+        }
         // Gemma 4: shared MLP can overflow FP16 at deep layers. Sanitize inf/NaN
         // to zero before the post-norm so rmsnorm doesn't produce all-zero output.
         if (cfg.arch == ModelArch::GEMMA4) {
