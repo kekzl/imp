@@ -224,13 +224,49 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     }
 
     // 3. Gate logits + top-k routing
-    //    Gemma 4: router input = rms_norm(h) * ffn_gate_inp_scale / sqrt(d_model).
-    //    Other archs: router input = no (ffn-normalized h).
-    // Router input: use the FFN-normalized hidden state (rmsnorm(h, ffn_pre_norm_2)).
-    // Gemma-4 note: ffn_gate_inp.scale and 1/sqrt(d_model) scaling are already
-    // absorbed into the gate weights (ffn_gate_inp) during quantization. The
-    // standard path (router_in = no) produces correct output matching llama.cpp.
     Tensor router_in = no;
+    // Gemma-4 custom router: logits = gate_inp @ (rmsnorm_noweight(h) * (1/sqrt(d)) * gate_inp_scale)
+    // This matches llama.cpp's gemma4-iswa.cpp:151-155.
+    // The standard path (router_in = rmsnorm(h, ffn_pre_norm_2)) uses the WRONG norm weight
+    // and produces ~2x too small router logits, causing wrong expert selection.
+    if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_gate_inp_scale.data != nullptr) {
+        // Reuse moe_.scatter_out (FP32, max_tokens*d) as FP16 scratch
+        int64_t ri_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
+        router_in = Tensor(moe_.scatter_out.data, compute_dtype_, 2, ri_shape, true);
+        // Step 1: unweighted rmsnorm(h) — no weight multiplication, just normalize
+        if (fp32_accum_buf_ != nullptr) {
+            // Read from FP32 accumulator for precision
+            Tensor fp32_h = view_tokens(fp32_hidden_, n);
+            // rmsnorm with ones weight = unweighted norm. Use ffn_gate_inp_scale AS the weight
+            // but need to separate: first do unweighted norm, then multiply by scale.
+            // rmsnorm_fp32_to_fp16(fp32_h, weight=ones, out) gives unweighted norm.
+            // But we don't have a ones buffer of d_model size...
+            // Alternative: rmsnorm(fp32_h, ffn_gate_inp_scale, router_in, eps, 0.0)
+            // = (h/rms) * ffn_gate_inp_scale — this fuses steps 1+2!
+            // Then just multiply by 1/sqrt(d) separately.
+            rmsnorm_fp32_to_fp16(fp32_h, ly.ffn_gate_inp_scale, router_in, eps, stream, 0.0f);
+        } else {
+            rmsnorm(h, ly.ffn_gate_inp_scale, router_in, eps, stream, 0.0f);
+        }
+        if (debug_forward_enabled() && layer == 0) {
+            // Dump scale tensor stats
+            std::vector<half> sc(d);
+            cudaMemcpy(sc.data(), ly.ffn_gate_inp_scale.data, d * sizeof(half), cudaMemcpyDeviceToHost);
+            double ss = 0, sss = 0;
+            for (int i = 0; i < d; i++) { float v = __half2float(sc[i]); ss += v; sss += v*v; }
+            fprintf(stderr, "[DEBUG_FWD] L0_gate_inp_scale: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f\n",
+                    ss, std::sqrt(sss), __half2float(sc[0]), __half2float(sc[1]), __half2float(sc[2]));
+        }
+        // Step 2: multiply by 1/sqrt(d_model)
+        int64_t total_elems = static_cast<int64_t>(n) * d;
+        int threads_s = 256;
+        int blocks_s = static_cast<int>((total_elems / 2 + threads_s - 1) / threads_s);
+        float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
+        scale_fp16_kernel<<<blocks_s, threads_s, 0, stream>>>(
+            static_cast<half*>(router_in.data),
+            __float2half(inv_sqrt_d),
+            total_elems);
+    }
 
     const void* router_bias_ptr = ly.moe_router_bias.data;
     // Gemma-4: moe_router_bias may hold ffn_down_exps.scale (per-expert output
@@ -297,6 +333,17 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             }
         }
 
+        if (debug_forward_enabled() && layer == 0) {
+            // Dump router logits for last token
+            std::vector<float> rl(ne);
+            int last_tok = n - 1;
+            cudaMemcpy(rl.data(), static_cast<const float*>(gate_logits_f32.data) + last_tok * ne,
+                       ne * sizeof(float), cudaMemcpyDeviceToHost);
+            double rsum = 0; for (auto v : rl) rsum += v;
+            double rss = 0; for (auto v : rl) rss += v*v;
+            fprintf(stderr, "[DEBUG_FWD] L0_router_logits[%d]: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f\n",
+                    last_tok, rsum, std::sqrt(rss), rl[0], rl[1], rl[2]);
+        }
         if (moe_.routing_buffers.pool) {
             moe_topk_gating(gate_logits_f32, top_k, moe_.routing_buffers, routing, stream, use_sigmoid, norm_weights, router_bias_ptr, /*skip_sorting=*/will_decode_fast);
         } else {
