@@ -13,6 +13,8 @@
 #include "graph/executor_kernels.h"
 #include "graph/executor_debug.h"
 #include "compute/embedding.h"
+#include "compute/gemv_ggml_compat.h"
+#include "compute/ggml_mmvq.h"
 #include "compute/layernorm.h"
 #include "compute/rope.h"
 #include "compute/gemm.h"
@@ -104,7 +106,7 @@ static bool can_decode_fast(int n, const Tensor& expert_up_packed,
             (up_qtype == GGMLQuantType::Q6_K || up_qtype == GGMLQuantType::Q8_0 ||
              up_qtype == GGMLQuantType::Q4_0 || up_qtype == GGMLQuantType::Q4_K ||
              up_qtype == GGMLQuantType::Q5_K || up_qtype == GGMLQuantType::Q2_K ||
-             up_qtype == GGMLQuantType::Q3_K));
+             up_qtype == GGMLQuantType::Q3_K || up_qtype == GGMLQuantType::Q5_1));
 }
 
 // ---------------------------------------------------------------------------
@@ -192,8 +194,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                         cudaMemcpyDeviceToDevice, stream));
     }
     // Fused RMSNorm + Q8_1: skip for NVFP4-covered layers (NVFP4 takes FP16 directly)
+    // Gemma-4 with FP32 accum: compute norm from FP32 residual, then quantize to Q8_1
+    // separately. The fused kernel reads FP16 h which loses ~0.03% per element that
+    // compounds catastrophically through the 128-expert top-8 MoE routing.
+    bool gemma4_fp32_norm = (cfg.arch == ModelArch::GEMMA4 && fp32_accum_buf_ != nullptr);
     bool moe_fused_norm_q8 = (n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
-                               h.dtype == DType::FP16 && !nvfp4_covers_layer);
+                               h.dtype == DType::FP16 && !nvfp4_covers_layer && !gemma4_fp32_norm);
     if (moe_fused_norm_q8) {
         // Fused: RMSNorm + Q8_1 (also writes FP16 norm_out for gate logits)
         rmsnorm_quantize_q8_1(static_cast<const half*>(h.data),
@@ -203,9 +209,15 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                 d, eps, stream, norm_w_off_);
     } else {
         // Gemma-4 FP32 accum: read FP32 residual directly to avoid FP16 round-trip.
-        if (cfg.arch == ModelArch::GEMMA4 && fp32_accum_buf_ != nullptr) {
+        if (gemma4_fp32_norm) {
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             rmsnorm_fp32_to_fp16(fp32_h, norm_w, no, eps, stream, norm_w_off_);
+            // Populate Q8_1 buffer from FP16 norm_out for dp4a decode path
+            if (n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr) {
+                quantize_fp16_to_q8_1(static_cast<const half*>(no.data),
+                                       static_cast<block_q8_1*>(qscratch_.q8_1_buf),
+                                       qscratch_.d8_buf, d, stream);
+            }
         } else {
             rmsnorm(h, norm_w, no, eps, stream, norm_w_off_);
         }
@@ -214,53 +226,29 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // 3. Gate logits + top-k routing
     //    Gemma 4: router input = rms_norm(h) * ffn_gate_inp_scale / sqrt(d_model).
     //    Other archs: router input = no (ffn-normalized h).
+    // Router input: use the FFN-normalized hidden state (rmsnorm(h, ffn_pre_norm_2)).
+    // Gemma-4 note: ffn_gate_inp.scale and 1/sqrt(d_model) scaling are already
+    // absorbed into the gate weights (ffn_gate_inp) during quantization. The
+    // standard path (router_in = no) produces correct output matching llama.cpp.
     Tensor router_in = no;
-    // Gemma-4 custom router (2026-04-10): ENABLED by default. Direct
-    // comparison against llama-eval-callback L0 dump shows llama computes
-    // router input as:
-    //    rmsnorm_noweight(attn_out) * (1/sqrt(d_model)) * ffn_gate_inp.scale
-    // whereas the "standard" path (router_in = rmsnorm(h, ffn_pre_norm_2))
-    // uses the wrong weight and is missing the 1/sqrt(d_model) scale,
-    // producing router inputs ~50x too large and a completely different
-    // expert selection at L0 row 5. The earlier conclusion that the
-    // standard path "matched llama and produced coherent Paris" was wrong
-    // — llama actually picks token 45518 with these inputs, not " Paris".
-    // Set IMP_G4_NO_CUSTOM_ROUTER=1 to fall back to the broken path.
-    if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_gate_inp_scale.data != nullptr &&
-        getenv("IMP_G4_NO_CUSTOM_ROUTER") == nullptr) {
-        // Reuse moe_.scatter_out (FP32, max_tokens*d) as FP16 scratch:
-        // FP16 needs half the bytes so we only use half of it.
-        int64_t ri_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
-        router_in = Tensor(moe_.scatter_out.data, compute_dtype_, 2, ri_shape, true);
-        // Step 1: rmsnorm(h, ffn_gate_inp_scale, router_in) with offset=0
-        //         (the scale tensor holds raw per-channel scales, no -1 trick)
-        if (fp32_accum_buf_ != nullptr) {
-            Tensor fp32_h = view_tokens(fp32_hidden_, n);
-            rmsnorm_fp32_to_fp16(fp32_h, ly.ffn_gate_inp_scale, router_in, eps, stream, 0.0f);
-        } else {
-            rmsnorm(h, ly.ffn_gate_inp_scale, router_in, eps, stream, 0.0f);
-        }
-        // Step 2: multiply by 1/sqrt(d_model) scalar
-        int64_t total_elems = static_cast<int64_t>(n) * d;
-        int threads = 256;
-        int blocks = static_cast<int>((total_elems / 2 + threads - 1) / threads);
-        float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
-        scale_fp16_kernel<<<blocks, threads, 0, stream>>>(
-            static_cast<half*>(router_in.data),
-            __float2half(inv_sqrt_d),
-            total_elems);
-    }
 
     const void* router_bias_ptr = ly.moe_router_bias.data;
+    // Gemma-4: moe_router_bias may hold ffn_down_exps.scale (per-expert output
+    // multiplier) due to GGUF name collision — NOT a router bias. Don't use it.
+    if (cfg.arch == ModelArch::GEMMA4 && router_bias_ptr != nullptr) {
+        if (layer == 0) IMP_LOG_INFO("Gemma 4: ignoring moe_router_bias (likely ffn_down_exps.scale, not router bias)");
+        router_bias_ptr = nullptr;
+    }
     bool use_sigmoid = cfg.moe_sigmoid_gating;
     bool norm_weights = cfg.expert_weights_norm;
 
     GGMLQuantType up_qtype = ly.expert_up_qtype;
     bool will_decode_fast = can_decode_fast(n, ly.expert_up_packed, up_qtype,
                                             moe_.dequant_buf, compute_dtype_);
-    // Gemma 4: decode fast path uses gemv_*_moe_gate_up_fused kernels that have
-    // stride/layout issues with the split gate_up_exps tensor. Force slow path.
-    if (cfg.arch == ModelArch::GEMMA4) {
+    // Gemma 4: dp4a decode fast path ENABLED by default. dp4a matches llama's
+    // Q4_K×Q8_1 accumulation for MoE experts, preventing the routing drift that
+    // occurs with FP16 dequant+cuBLAS. Set IMP_G4_NO_DECODE_FAST=1 to disable.
+    if (cfg.arch == ModelArch::GEMMA4 && getenv("IMP_G4_NO_DECODE_FAST")) {
         will_decode_fast = false;
     }
 
@@ -332,6 +320,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // (Matches llama.cpp ffn_moe_down_scaled = MUL(ffn_moe_down, repeat(scale)).)
     if (cfg.arch == ModelArch::GEMMA4 && ly.expert_down_scale.data != nullptr &&
         ly.expert_down_scale.on_device) {
+        if (layer == 0) IMP_LOG_INFO("Gemma 4: applying per-expert down_scale (on_device=%d)", ly.expert_down_scale.on_device);
         int64_t n_weights = static_cast<int64_t>(n) * top_k;
         int threads_s = 256;
         int blocks_s = static_cast<int>((n_weights + threads_s - 1) / threads_s);
@@ -577,19 +566,23 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 relu_sqr_quantize_q8_1(up_buf, q8, qscratch_.d8_buf, top_k * eff, stream);
             }
 
-            // Down projection with dp4a GEMV
-            auto moe_gemv_dp4a_down = (up_qtype == GGMLQuantType::Q6_K)
+            // Down projection with dp4a GEMV — use down_qtype, NOT up_qtype
+            GGMLQuantType dqt = ly.expert_down_qtype;
+            auto moe_gemv_dp4a_down = (dqt == GGMLQuantType::Q6_K)
                 ? gemv_q6k_q8_1_moe_decode
-                : (up_qtype == GGMLQuantType::Q4_0)
+                : (dqt == GGMLQuantType::Q4_0)
                 ? gemv_q4_0_q8_1_moe_decode
-                : (up_qtype == GGMLQuantType::Q4_K)
+                : (dqt == GGMLQuantType::Q4_K)
                 ? gemv_q4_k_q8_1_moe_decode
-                : (up_qtype == GGMLQuantType::Q5_K)
+                : (dqt == GGMLQuantType::Q5_K)
                 ? gemv_q5_k_q8_1_moe_decode
-                : (up_qtype == GGMLQuantType::Q2_K)
+                : (dqt == GGMLQuantType::Q2_K)
                 ? gemv_q2_k_q8_1_moe_decode
-                : (up_qtype == GGMLQuantType::Q3_K)
-                ? gemv_q3_k_q8_1_moe_decode : gemv_q8_0_q8_1_moe_decode;
+                : (dqt == GGMLQuantType::Q3_K)
+                ? gemv_q3_k_q8_1_moe_decode
+                : (dqt == GGMLQuantType::Q5_1)
+                ? gemv_q5_1_q8_1_moe_decode
+                : gemv_q8_0_q8_1_moe_decode;
             size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_qtype);
             moe_gemv_dp4a_down(ly.expert_down_packed.data, expert_indices,
                           q8, qscratch_.d8_buf, down_buf,
@@ -603,16 +596,16 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                     compute_dtype_, cfg.ffn_activation, stream);
             size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_qtype);
             half* down_input = non_gated_experts ? up_buf : act_buf;
-            if (up_qtype == GGMLQuantType::Q6_K) {
+            if (ly.expert_down_qtype == GGMLQuantType::Q6_K) {
                 gemv_q6k_moe_decode(ly.expert_down_packed.data, expert_indices,
                                     down_input, down_buf,
                                     d, eff, down_stride, /*x_stride=*/eff, top_k, stream);
-            } else if (up_qtype == GGMLQuantType::Q8_0) {
+            } else if (ly.expert_down_qtype == GGMLQuantType::Q8_0) {
                 gemv_q8_0_moe_decode(ly.expert_down_packed.data, expert_indices,
                                      down_input, down_buf,
                                      d, eff, down_stride, /*x_stride=*/eff, top_k, stream);
             } else {
-                IMP_LOG_ERROR("MoE non-dp4a down projection: no kernel for qtype %d, skipping GEMV", (int)up_qtype);
+                IMP_LOG_ERROR("MoE non-dp4a down projection: no kernel for qtype %d, skipping GEMV", (int)ly.expert_down_qtype);
             }
         }
 
@@ -737,6 +730,126 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         }
 
         // Falls through to scatter (step 7)
+    } else if (getenv("IMP_G4_GGML_PREFILL") && cfg.arch == ModelArch::GEMMA4 &&
+               ly.expert_gate_packed.on_device && ly.expert_up_packed.on_device &&
+               ly.expert_down_packed.on_device) {
+    // =========================================================================
+    // GEMMA-4 ggml MMVQ PREFILL: process each token individually using ggml-
+    // compatible Q4_K×Q8_1 dp4a kernels with FP32 norm output, matching llama's
+    // full-precision path (no FP16 truncation at norm output).
+    // =========================================================================
+    if (layer == 0) IMP_LOG_INFO("MoE prefill: ggml MMVQ per-token path (n=%d, top_k=%d)", n, top_k);
+
+    half* gate_buf = static_cast<half*>(moe_.expert_gate.data);
+    half* up_buf   = static_cast<half*>(moe_.expert_up.data);
+    half* down_buf = static_cast<half*>(moe_.expert_down.data);
+
+    size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_qtype);
+    size_t up_stride = expert_stride(ly.expert_up_packed, up_qtype);
+    size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_qtype);
+
+    // Dedicated Q8_1 scratch buffer (persistent, sized for max of gate/up input d and down input eff)
+    static void* s_q8_scratch = nullptr;
+    static size_t s_q8_scratch_size = 0;
+    size_t q8_needed = std::max(
+        static_cast<size_t>((d + 31) / 32) * 36,
+        static_cast<size_t>((eff + 31) / 32) * 36);
+    if (!s_q8_scratch || s_q8_scratch_size < q8_needed) {
+        if (s_q8_scratch) cudaFree(s_q8_scratch);
+        cudaMalloc(&s_q8_scratch, q8_needed);
+        s_q8_scratch_size = q8_needed;
+    }
+
+    // FP32 norm output buffer (1 token × d floats, persistent)
+    static float* s_norm_fp32 = nullptr;
+    static int s_norm_fp32_d = 0;
+    if (!s_norm_fp32 || s_norm_fp32_d < d) {
+        if (s_norm_fp32) cudaFree(s_norm_fp32);
+        cudaMalloc(&s_norm_fp32, static_cast<size_t>(d) * sizeof(float));
+        s_norm_fp32_d = d;
+    }
+
+    // Process each token
+    for (int t = 0; t < n; t++) {
+        const int32_t* tok_experts = static_cast<const int32_t*>(routing.expert_indices.data)
+                                   + static_cast<int64_t>(t) * top_k;
+        const float* tok_weights = static_cast<const float*>(routing.expert_weights.data)
+                                 + static_cast<int64_t>(t) * top_k;
+
+        // FP32 norm output (FP32 residual → FP32 norm → FP32 Q8_1 quant)
+        const float* tok_norm_f32 = s_norm_fp32;
+        if (fp32_accum_buf_ != nullptr) {
+            int64_t tok_shape[2] = {1, static_cast<int64_t>(d)};
+            Tensor fp32_tok(static_cast<float*>(fp32_hidden_.data) + static_cast<int64_t>(t) * d,
+                           DType::FP32, 2, tok_shape, true);
+            rmsnorm_fp32_to_fp32(fp32_tok, norm_w, s_norm_fp32, 1, d,
+                                eps, stream, norm_w_off_);
+        } else {
+            tok_norm_f32 = nullptr;
+        }
+
+        // D2H copy expert indices
+        int32_t h_experts[32];
+        cudaMemcpyAsync(h_experts, tok_experts, top_k * sizeof(int32_t),
+                       cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+
+        // Gate + Up projections (Q4_K)
+        for (int k = 0; k < top_k; k++) {
+            int32_t eid = h_experts[k];
+            const uint8_t* gate_w = static_cast<const uint8_t*>(ly.expert_gate_packed.data)
+                                  + static_cast<size_t>(eid) * gate_stride;
+            const uint8_t* up_w = static_cast<const uint8_t*>(ly.expert_up_packed.data)
+                                + static_cast<size_t>(eid) * up_stride;
+
+            if (tok_norm_f32) {
+                ggml_mmvq_q4k_f32(gate_w, tok_norm_f32,
+                                  gate_buf + static_cast<int64_t>(k) * eff,
+                                  1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
+                ggml_mmvq_q4k_f32(up_w, tok_norm_f32,
+                                  up_buf + static_cast<int64_t>(k) * eff,
+                                  1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
+            } else {
+                const half* tok_norm_fp16 = static_cast<const half*>(no.data) + static_cast<int64_t>(t) * d;
+                ggml_mmvq_q4k(gate_w, tok_norm_fp16,
+                              gate_buf + static_cast<int64_t>(k) * eff,
+                              1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
+                ggml_mmvq_q4k(up_w, tok_norm_fp16,
+                              up_buf + static_cast<int64_t>(k) * eff,
+                              1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
+            }
+        }
+
+        // Expert activation (GeGLU for Gemma-4)
+        half* swiglu_buf = static_cast<half*>(moe_.expert_swiglu.data);
+        apply_expert_activation(gate_buf, up_buf, swiglu_buf,
+                                false /*non_gated*/, top_k, eff,
+                                compute_dtype_, cfg.ffn_activation, stream);
+
+        // Down projection (Q5_1): ggml MMVQ for numerical parity with llama
+        for (int k = 0; k < top_k; k++) {
+            int32_t eid = h_experts[k];
+            size_t expert_off = static_cast<size_t>(eid) * down_stride;
+            const uint8_t* w_down = static_cast<const uint8_t*>(ly.expert_down_packed.data) + expert_off;
+            half* act_k = swiglu_buf + static_cast<int64_t>(k) * eff;
+            half* out_k = down_buf + static_cast<int64_t>(k) * d;
+
+            // y[1, d] = act_k[1, eff] × W_down[d, eff]^T via ggml Q5_1×Q8_1 dot product
+            ggml_mmvq_q5_1(w_down, act_k, out_k,
+                           1, d, eff, s_q8_scratch, s_q8_scratch_size, stream);
+        }
+
+        // Weighted sum for this token → write to h[t]
+        half* h_tok = static_cast<half*>(h.data) + static_cast<int64_t>(t) * d;
+        bool has_shared_expert = (ly.w_up_shared.data != nullptr);
+        const void* res_ptr = has_shared_expert ? nullptr :
+            static_cast<const void*>(static_cast<const half*>(r.data) + static_cast<int64_t>(t) * d);
+        moe_weighted_sum_residual(down_buf, tok_weights, res_ptr,
+                                   h_tok, d, top_k, stream);
+    }
+    if (ly.w_up_shared.data == nullptr) residual_fused = true;
+    goto moe_after_experts;
+
     } else {
     // =========================================================================
     // FP16 BATCH or FP8 BATCH PREFILL PATH

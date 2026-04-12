@@ -8,6 +8,12 @@
 #include <cstdlib>
 #include <cfloat>
 
+// Forward declarations for kernels defined in executor_kernels.cu
+namespace imp {
+__global__ __launch_bounds__(256) void fp32_to_fp16_kernel(
+    const float* __restrict__ in, half* __restrict__ out, int64_t n);
+}
+
 namespace imp {
 
 static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
@@ -26,6 +32,57 @@ static cublasHandle_t get_attn_cublas_handle() {
         cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH);
     }
     return handle;
+}
+
+// ---------------------------------------------------------------------------
+// FP32 causal softmax: reads/writes FP32 S matrix.
+// Used when QK^T scores are stored as FP32 (Gemma-4 with scale=1.0).
+// ---------------------------------------------------------------------------
+__global__ void causal_softmax_fp32_inplace_kernel(
+    float* __restrict__ S, int seq_len, bool causal)
+{
+    int row = blockIdx.x, head = blockIdx.y, tid = threadIdx.x;
+    int warp_id = tid / 32, lane_id = tid % 32;
+    int n_warps = (blockDim.x + 31) / 32;
+    float* row_ptr = S + (static_cast<int64_t>(head) * seq_len + row) * seq_len;
+
+    float max_val = -FLT_MAX;
+    for (int j = tid; j < seq_len; j += blockDim.x)
+        max_val = fmaxf(max_val, (causal && j > row) ? -FLT_MAX : row_ptr[j]);
+
+    __shared__ float s_max[32];
+    for (int m = 16; m > 0; m >>= 1)
+        max_val = fmaxf(max_val, __shfl_xor_sync(0xffffffff, max_val, m));
+    if (lane_id == 0) s_max[warp_id] = max_val;
+    __syncthreads();
+    if (tid < 32) {
+        float v = (tid < n_warps) ? s_max[tid] : -FLT_MAX;
+        for (int m = 16; m > 0; m >>= 1)
+            v = fmaxf(v, __shfl_xor_sync(0xffffffff, v, m));
+        s_max[0] = v;
+    }
+    __syncthreads();
+    max_val = s_max[0];
+
+    float sum_val = 0.0f;
+    for (int j = tid; j < seq_len; j += blockDim.x)
+        sum_val += (causal && j > row) ? 0.0f : expf(row_ptr[j] - max_val);
+
+    __shared__ float s_sum[32];
+    for (int m = 16; m > 0; m >>= 1)
+        sum_val += __shfl_xor_sync(0xffffffff, sum_val, m);
+    if (lane_id == 0) s_sum[warp_id] = sum_val;
+    __syncthreads();
+    if (tid < 32) {
+        float v = (tid < n_warps) ? s_sum[tid] : 0.0f;
+        for (int m = 16; m > 0; m >>= 1) v += __shfl_xor_sync(0xffffffff, v, m);
+        s_sum[0] = v;
+    }
+    __syncthreads();
+    float inv_sum = (s_sum[0] > 0.0f) ? (1.0f / s_sum[0]) : 0.0f;
+
+    for (int j = tid; j < seq_len; j += blockDim.x)
+        row_ptr[j] = (causal && j > row) ? 0.0f : expf(row_ptr[j] - max_val) * inv_sum;
 }
 
 // ---------------------------------------------------------------------------
@@ -203,46 +260,70 @@ void attention_cublas_prefill(
     float one_f = 1.0f;
     float zero_f = 0.0f;
 
+    // FP32 S matrix: avoids FP16 truncation of attention scores before softmax.
+    // Critical for Gemma-4 (scale=1.0 → large QK^T scores, FP16 loses precision).
+    // llama's flash attention keeps scores in FP32 throughout.
+    // Check: FP32 S needs n_heads * seq_len^2 * 4 bytes, FP16 buffer has
+    //        n_heads * S_capacity^2 * 2 bytes. FP32 fits when seq_len <= S_capacity/sqrt(2).
+    int64_t s_buf_fp16_elems = static_cast<int64_t>(S.shape[0]) * S.shape[1];
+    if (S.ndim >= 3) s_buf_fp16_elems *= S.shape[2];
+    int64_t s_fp32_elems = static_cast<int64_t>(n_heads) * seq_len * seq_len;
+    bool use_fp32_s = (scale == 1.0f && s_fp32_elems * 2 <= s_buf_fp16_elems);
+    float* S_f32 = use_fp32_s ? reinterpret_cast<float*>(S.data) : nullptr;
+
     if (gqa_ratio == 1) {
         // ---------------------------------------------------------------
         // MHA path: single strided batched call per direction
         // ---------------------------------------------------------------
 
-        // S = scale * Q × K^T
+        // S = scale * Q × K^T (FP32 output when use_fp32_s)
         cublasGemmStridedBatchedEx(
             handle,
             CUBLAS_OP_T, CUBLAS_OP_N,
             seq_len, seq_len, head_dim,
             &alpha_f,
             K_base, CUDA_R_16F, ld_k,
-            static_cast<long long>(head_dim),  // strideK = hd
+            static_cast<long long>(head_dim),
             Q_base, CUDA_R_16F, ld_q,
-            static_cast<long long>(head_dim),  // strideQ = hd
+            static_cast<long long>(head_dim),
             &beta_f,
-            S_base, CUDA_R_16F, ld_s,
+            use_fp32_s ? static_cast<void*>(S_f32) : static_cast<void*>(S_base),
+            use_fp32_s ? CUDA_R_32F : CUDA_R_16F,
+            ld_s,
             strideS,
             n_heads,
             CUBLAS_COMPUTE_32F,
             kGemmAlgo);
 
-        // Softcap (if enabled)
-        if (softcap > 0.0f) {
+        // Softcap (if enabled — only for FP16 path, Gemma-4 has no attn softcap)
+        if (softcap > 0.0f && !use_fp32_s) {
             int64_t total = static_cast<int64_t>(n_heads) * seq_len * seq_len;
             int block = 256;
             int grid_sc = static_cast<int>((total + block - 1) / block);
             softcap_fp16_kernel<<<grid_sc, block, 0, stream>>>(S_base, total, softcap);
         }
 
-        // Softmax
+        // Softmax (FP32 or FP16)
         {
             int threads = (seq_len <= 128) ? 128 : ((seq_len <= 256) ? 256 : 512);
             if (threads > 1024) threads = 1024;
             dim3 grid(seq_len, n_heads);
-            causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(
-                S_base, seq_len, causal);
+            if (use_fp32_s) {
+                // FP32 softmax: reads FP32 scores, writes FP32 probabilities
+                causal_softmax_fp32_inplace_kernel<<<grid, threads, 0, stream>>>(
+                    S_f32, seq_len, causal);
+                // Convert FP32 → FP16 for P@V GEMM
+                int64_t total = static_cast<int64_t>(n_heads) * seq_len * seq_len;
+                int thr = 256;
+                int blk = static_cast<int>((total + thr - 1) / thr);
+                fp32_to_fp16_kernel<<<blk, thr, 0, stream>>>(S_f32, S_base, total);
+            } else {
+                causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(
+                    S_base, seq_len, causal);
+            }
         }
 
-        // O = P × V
+        // O = P × V (always FP16)
         cublasGemmStridedBatchedEx(
             handle,
             CUBLAS_OP_N, CUBLAS_OP_N,
@@ -271,13 +352,13 @@ void attention_cublas_prefill(
         const void* h_B[256];
         void* h_C[256];
 
-        // Step 1: S = scale * Q × K^T
-        // cuBLAS: C = alpha * op(A) * op(B) where A=K (OP_T), B=Q (OP_N)
+        // Step 1: S = scale * Q × K^T (FP32 S for Gemma-4)
         for (int h = 0; h < n_heads; h++) {
             int g = h / gqa_ratio;
-            h_A[h] = K_base + g * head_dim;          // K head (GQA: shared)
-            h_B[h] = Q_base + h * head_dim;           // Q head
-            h_C[h] = S_base + h * strideS;            // S head
+            h_A[h] = K_base + g * head_dim;
+            h_B[h] = Q_base + h * head_dim;
+            h_C[h] = use_fp32_s ? static_cast<void*>(S_f32 + h * strideS)
+                                : static_cast<void*>(S_base + h * strideS);
         }
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_attn_d_ptrs,               h_A, n_heads * sizeof(void*), cudaMemcpyHostToDevice, stream));
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_attn_d_ptrs + n_heads,     h_B, n_heads * sizeof(void*), cudaMemcpyHostToDevice, stream));
@@ -291,26 +372,37 @@ void attention_cublas_prefill(
             (const void**)s_attn_d_ptrs,               CUDA_R_16F, ld_k,
             (const void**)(s_attn_d_ptrs + n_heads),   CUDA_R_16F, ld_q,
             &beta_f,
-            (void**)(s_attn_d_ptrs + 2 * n_heads),     CUDA_R_16F, ld_s,
+            (void**)(s_attn_d_ptrs + 2 * n_heads),
+            use_fp32_s ? CUDA_R_32F : CUDA_R_16F, ld_s,
             n_heads,
             CUBLAS_COMPUTE_32F,
             kGemmAlgo);
 
-        // Step 1.5: Softcap (if enabled)
-        if (softcap > 0.0f) {
+        // Softcap (only FP16 path — Gemma-4 has no attn softcap)
+        if (softcap > 0.0f && !use_fp32_s) {
             int64_t total = static_cast<int64_t>(n_heads) * seq_len * seq_len;
             int block = 256;
             int grid_sc = static_cast<int>((total + block - 1) / block);
             softcap_fp16_kernel<<<grid_sc, block, 0, stream>>>(S_base, total, softcap);
         }
 
-        // Step 2: Softmax
+        // Softmax
         {
             int threads = (seq_len <= 128) ? 128 : ((seq_len <= 256) ? 256 : 512);
             if (threads > 1024) threads = 1024;
             dim3 grid(seq_len, n_heads);
-            causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(
-                S_base, seq_len, causal);
+            if (use_fp32_s) {
+                causal_softmax_fp32_inplace_kernel<<<grid, threads, 0, stream>>>(
+                    S_f32, seq_len, causal);
+                // Convert FP32 → FP16 for P@V
+                int64_t total = static_cast<int64_t>(n_heads) * seq_len * seq_len;
+                int thr = 256;
+                int blk = static_cast<int>((total + thr - 1) / thr);
+                imp::fp32_to_fp16_kernel<<<blk, thr, 0, stream>>>(S_f32, S_base, total);
+            } else {
+                causal_softmax_inplace_kernel<<<grid, threads, 0, stream>>>(
+                    S_base, seq_len, causal);
+            }
         }
 
         // Step 3: O = P × V

@@ -1270,6 +1270,8 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     if (it_tok_model != metadata.end()) {
         const std::string& tm = it_tok_model->second.str_val;
         if (tm == "gpt2") tok_type = "gpt2";
+        // Gemma-4 uses SPM-style BPE: ▁ for spaces + BPE merge ranks.
+        else if (tm == "gemma4") tok_type = "gemma4";
     }
     tokenizer->set_type(tok_type);
 
@@ -1288,6 +1290,13 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         // GPT2/BPE tokenizers (Qwen, etc.) typically don't use BOS.
         // Default to false when metadata is absent.
         tokenizer->set_add_bos(false);
+    }
+
+    // Gemma-4: always add BOS regardless of GGUF metadata.
+    // Some GGUF converters (ggml-org) set add_bos=false incorrectly.
+    // llama.cpp forces add_bos=true for Gemma-4 (see llama-vocab.cpp "override").
+    if (tok_type == "gemma4") {
+        tokenizer->set_add_bos(true);
     }
 
     // add_space_prefix flag (Gemma: false, LLaMA: true/default)
@@ -1317,8 +1326,8 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
         tokenizer->load_vocab(tokens, scores, bos_id, eos_id);
 
-        // Load BPE merge rules (for GPT2-style tokenizers)
-        if (tok_type == "gpt2") {
+        // Load BPE merge rules (for GPT2-style tokenizers and gemma4)
+        if (tok_type == "gpt2" || tok_type == "gemma4") {
             auto it_merges = metadata.find("tokenizer.ggml.merges");
             if (it_merges != metadata.end() && !it_merges->second.str_array.empty()) {
                 tokenizer->load_merges(it_merges->second.str_array);

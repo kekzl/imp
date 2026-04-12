@@ -26,6 +26,13 @@ void rmsnorm_fp32_to_fp16(const Tensor& x_fp32, const Tensor& weight,
                           float eps = 1e-5f, cudaStream_t stream = nullptr,
                           float weight_offset = 0.0f);
 
+// RMSNorm with FP32 input and FP32 output (FP16 weight). Used for Gemma-4 ggml
+// MMVQ prefill to keep full FP32 precision through norm → Q8_1 quantization.
+void rmsnorm_fp32_to_fp32(const Tensor& x_fp32, const Tensor& weight,
+                          float* out_fp32, int rows, int d_model,
+                          float eps = 1e-5f, cudaStream_t stream = nullptr,
+                          float weight_offset = 0.0f);
+
 // Register layernorm kernels for PDL tail/head overlap.
 void layernorm_pdl_register();
 
