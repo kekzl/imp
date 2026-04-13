@@ -1936,12 +1936,11 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
                 (int)(dequant_scratch != nullptr));
     }
     static bool no_dp4a_gemv = (getenv("IMP_NO_DP4A_GEMV") != nullptr);
-    static bool gemma4_force_mmvq = (getenv("IMP_GEMMA4_FORCE_MMVQ") != nullptr);
-    // MMVQ path: ggml-compatible quantized GEMM for numerical parity with llama.cpp.
-    // Verified correct for Q4_K, Q5_K, Q5_1, Q8_0 — all improve Gemma-4 decode quality.
-    // Enabled by default for Gemma-4 (IMP_GEMMA4_FORCE_MMVQ not required).
-    static bool gemma4_model = (getenv("IMP_GEMMA4_FORCE_MMVQ") != nullptr);  // TODO: detect from model arch
-    bool use_mmvq = (gemma4_force_mmvq || gemma4_model) && !prefer_fp16_cache && input.dtype == DType::FP16 &&
+    // MMVQ: ggml-compatible quantized GEMM for llama.cpp numerical parity.
+    // Auto-enabled for Gemma-4 via engine.cpp setenv. Non-static to pick up
+    // env var set during engine init (after static init of other flags).
+    bool use_mmvq = (getenv("IMP_GEMMA4_FORCE_MMVQ") != nullptr) &&
+                    !prefer_fp16_cache && input.dtype == DType::FP16 &&
                     (qtype == GGMLQuantType::Q4_K || qtype == GGMLQuantType::Q5_K ||
                      qtype == GGMLQuantType::Q5_1 || qtype == GGMLQuantType::Q8_0) &&
                     (weight.shape[1] % 32 == 0);
