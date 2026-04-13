@@ -289,8 +289,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         fprintf(stderr, "[DEBUG_FWD] [step=%d] fp32_accum_init: [%.4f %.4f %.4f %.4f]\n",
                 decode_step, tmp[0], tmp[1], tmp[2], tmp[3]);
     }
-    // Binary dump: write the full FP16 hidden state to file for step 0 (prefill)
-    if (n <= 4 && getenv("IMP_DUMP_HIDDEN")) {
+    // Binary dump: write the full FP16 hidden state to file
+    if (getenv("IMP_DUMP_HIDDEN")) {
         std::vector<half> h_buf(n * cfg.d_model);
         cudaMemcpy(h_buf.data(), h.data, h_buf.size() * sizeof(half), cudaMemcpyDeviceToHost);
         char fname[256];
