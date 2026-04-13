@@ -230,42 +230,57 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // The standard path (router_in = rmsnorm(h, ffn_pre_norm_2)) uses the WRONG norm weight
     // and produces ~2x too small router logits, causing wrong expert selection.
     if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_gate_inp_scale.data != nullptr) {
-        // Reuse moe_.scatter_out (FP32, max_tokens*d) as FP16 scratch
-        int64_t ri_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
-        router_in = Tensor(moe_.scatter_out.data, compute_dtype_, 2, ri_shape, true);
-        // Step 1: unweighted rmsnorm(h) — no weight multiplication, just normalize
-        if (fp32_accum_buf_ != nullptr) {
-            // Read from FP32 accumulator for precision
+        // Gemma-4 custom router: logits = gate_inp @ (rmsnorm_noweight(h) * scale * (1/sqrt(d)))
+        // Keep router_in in FP32 to prevent precision loss that causes routing instability
+        // at later layers (L29). The FP16 intermediate loses enough precision to change
+        // expert selection in the 128-expert top-8 MoE.
+        if (fp32_accum_buf_ != nullptr && n == 1) {
+            // FP32 router path: rmsnorm(fp32_h, gate_inp_scale) → FP32, then FP32 GEMV
+            // Reuse moe_.scatter_out (FP32, max_tokens*d) as FP32 scratch
+            float* fp32_router = static_cast<float*>(moe_.scatter_out.data);
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
-            // rmsnorm with ones weight = unweighted norm. Use ffn_gate_inp_scale AS the weight
-            // but need to separate: first do unweighted norm, then multiply by scale.
-            // rmsnorm_fp32_to_fp16(fp32_h, weight=ones, out) gives unweighted norm.
-            // But we don't have a ones buffer of d_model size...
-            // Alternative: rmsnorm(fp32_h, ffn_gate_inp_scale, router_in, eps, 0.0)
-            // = (h/rms) * ffn_gate_inp_scale — this fuses steps 1+2!
-            // Then just multiply by 1/sqrt(d) separately.
-            rmsnorm_fp32_to_fp16(fp32_h, ly.ffn_gate_inp_scale, router_in, eps, stream, 0.0f);
+            float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
+            // Fused: rmsnorm(fp32_h, gate_inp_scale) * inv_sqrt_d → fp32_router
+            rmsnorm_fp32_to_fp32(fp32_h, ly.ffn_gate_inp_scale,
+                                  fp32_router, n, d, eps, stream, 0.0f);
+            // Scale by 1/sqrt(d) in FP32
+            {
+                int64_t total = static_cast<int64_t>(n) * d;
+                int thr = 256;
+                int blk = static_cast<int>((total + thr - 1) / thr);
+                scale_fp32_kernel<<<blk, thr, 0, stream>>>(fp32_router, inv_sqrt_d, total);
+            }
+            // Gate GEMV: FP32 input × FP16 gate → FP32 logits
+            // Convert router_in to FP16 for the existing gemv_gate_fp32 kernel.
+            // TODO: implement FP32-input gate GEMV for full precision
+            int64_t ri_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
+            router_in = Tensor(moe_.expert_down.data, compute_dtype_, 2, ri_shape, true);
+            {
+                int64_t total = static_cast<int64_t>(n) * d;
+                int thr = 256;
+                int blk = static_cast<int>((total + thr - 1) / thr);
+                fp32_to_fp16_kernel<<<blk, thr, 0, stream>>>(
+                    fp32_router, static_cast<half*>(router_in.data), total);
+            }
         } else {
-            rmsnorm(h, ly.ffn_gate_inp_scale, router_in, eps, stream, 0.0f);
+            // FP16 fallback (prefill or non-FP32-accum)
+            int64_t ri_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
+            router_in = Tensor(moe_.scatter_out.data, compute_dtype_, 2, ri_shape, true);
+            if (fp32_accum_buf_ != nullptr) {
+                Tensor fp32_h = view_tokens(fp32_hidden_, n);
+                rmsnorm_fp32_to_fp16(fp32_h, ly.ffn_gate_inp_scale, router_in, eps, stream, 0.0f);
+            } else {
+                rmsnorm(h, ly.ffn_gate_inp_scale, router_in, eps, stream, 0.0f);
+            }
+            int64_t total_elems = static_cast<int64_t>(n) * d;
+            int threads_s = 256;
+            int blocks_s = static_cast<int>((total_elems / 2 + threads_s - 1) / threads_s);
+            float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
+            scale_fp16_kernel<<<blocks_s, threads_s, 0, stream>>>(
+                static_cast<half*>(router_in.data),
+                __float2half(inv_sqrt_d),
+                total_elems);
         }
-        if (debug_forward_enabled() && layer == 0) {
-            // Dump scale tensor stats
-            std::vector<half> sc(d);
-            cudaMemcpy(sc.data(), ly.ffn_gate_inp_scale.data, d * sizeof(half), cudaMemcpyDeviceToHost);
-            double ss = 0, sss = 0;
-            for (int i = 0; i < d; i++) { float v = __half2float(sc[i]); ss += v; sss += v*v; }
-            fprintf(stderr, "[DEBUG_FWD] L0_gate_inp_scale: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f\n",
-                    ss, std::sqrt(sss), __half2float(sc[0]), __half2float(sc[1]), __half2float(sc[2]));
-        }
-        // Step 2: multiply by 1/sqrt(d_model)
-        int64_t total_elems = static_cast<int64_t>(n) * d;
-        int threads_s = 256;
-        int blocks_s = static_cast<int>((total_elems / 2 + threads_s - 1) / threads_s);
-        float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
-        scale_fp16_kernel<<<blocks_s, threads_s, 0, stream>>>(
-            static_cast<half*>(router_in.data),
-            __float2half(inv_sqrt_d),
-            total_elems);
     }
 
     const void* router_bias_ptr = ly.moe_router_bias.data;
