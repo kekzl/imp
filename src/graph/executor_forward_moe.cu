@@ -875,7 +875,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                        cudaMemcpyDeviceToHost, stream);
         cudaStreamSynchronize(stream);
 
-        // Gate + Up projections (Q4_K)
+        // Gate + Up projections: dispatch by actual quant type
         for (int k = 0; k < top_k; k++) {
             int32_t eid = h_experts[k];
             const uint8_t* gate_w = static_cast<const uint8_t*>(ly.expert_gate_packed.data)
@@ -883,22 +883,33 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             const uint8_t* up_w = static_cast<const uint8_t*>(ly.expert_up_packed.data)
                                 + static_cast<size_t>(eid) * up_stride;
 
-            if (tok_norm_f32) {
-                ggml_mmvq_q4k_f32(gate_w, tok_norm_f32,
-                                  gate_buf + static_cast<int64_t>(k) * eff,
-                                  1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
-                ggml_mmvq_q4k_f32(up_w, tok_norm_f32,
-                                  up_buf + static_cast<int64_t>(k) * eff,
-                                  1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
-            } else {
-                const half* tok_norm_fp16 = static_cast<const half*>(no.data) + static_cast<int64_t>(t) * d;
-                ggml_mmvq_q4k(gate_w, tok_norm_fp16,
-                              gate_buf + static_cast<int64_t>(k) * eff,
-                              1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
-                ggml_mmvq_q4k(up_w, tok_norm_fp16,
-                              up_buf + static_cast<int64_t>(k) * eff,
-                              1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
-            }
+            auto do_mmvq = [&](const uint8_t* w, half* out, GGMLQuantType qt) {
+                if (tok_norm_f32) {
+                    switch (qt) {
+                        case GGMLQuantType::Q4_K:
+                            ggml_mmvq_q4k_f32(w, tok_norm_f32, out, 1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
+                            break;
+                        default:
+                            ggml_mmvq_q4k_f32(w, tok_norm_f32, out, 1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
+                            break;
+                    }
+                } else {
+                    const half* tok_norm_fp16 = static_cast<const half*>(no.data) + static_cast<int64_t>(t) * d;
+                    switch (qt) {
+                        case GGMLQuantType::Q4_K:
+                            ggml_mmvq_q4k(w, tok_norm_fp16, out, 1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
+                            break;
+                        case GGMLQuantType::Q8_0:
+                            ggml_mmvq_q8_0(w, tok_norm_fp16, out, 1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
+                            break;
+                        default:
+                            ggml_mmvq_q4k(w, tok_norm_fp16, out, 1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
+                            break;
+                    }
+                }
+            };
+            do_mmvq(gate_w, gate_buf + static_cast<int64_t>(k) * eff, ly.expert_gate_qtype);
+            do_mmvq(up_w, up_buf + static_cast<int64_t>(k) * eff, up_qtype);
         }
 
         // Expert activation (GeGLU for Gemma-4)
@@ -907,7 +918,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                 false /*non_gated*/, top_k, eff,
                                 compute_dtype_, cfg.ffn_activation, stream);
 
-        // Down projection (Q5_1): ggml MMVQ for numerical parity with llama
+        // Down projection: dispatch by actual quant type
         for (int k = 0; k < top_k; k++) {
             int32_t eid = h_experts[k];
             size_t expert_off = static_cast<size_t>(eid) * down_stride;
@@ -915,9 +926,23 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             half* act_k = swiglu_buf + static_cast<int64_t>(k) * eff;
             half* out_k = down_buf + static_cast<int64_t>(k) * d;
 
-            // y[1, d] = act_k[1, eff] × W_down[d, eff]^T via ggml Q5_1×Q8_1 dot product
-            ggml_mmvq_q5_1(w_down, act_k, out_k,
-                           1, d, eff, s_q8_scratch, s_q8_scratch_size, stream);
+            switch (ly.expert_down_qtype) {
+                case GGMLQuantType::Q4_K:
+                    ggml_mmvq_q4k(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size, stream);
+                    break;
+                case GGMLQuantType::Q5_K:
+                    ggml_mmvq_q5k(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size, stream);
+                    break;
+                case GGMLQuantType::Q8_0:
+                    ggml_mmvq_q8_0(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size, stream);
+                    break;
+                case GGMLQuantType::Q5_1:
+                    ggml_mmvq_q5_1(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size, stream);
+                    break;
+                default:
+                    ggml_mmvq_q4k(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size, stream);
+                    break;
+            }
         }
 
         // Weighted sum for this token → write to h[t]

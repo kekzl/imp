@@ -998,14 +998,14 @@ bool Engine::init_features() {
         }
         for (int32_t sid : chat_template_.stop_token_ids())
             keep_ids.push_back(sid);
-        // Think tokens (<think>/<\/think>) must not be banned — think models
-        // generate these to enter/exit reasoning mode. Banning them causes
-        // immediate stop on structured output prompts.
+        // Think tokens must not be banned — think models generate these to
+        // enter/exit reasoning mode. Support both Qwen (<think>/<\/think>) and
+        // Gemma-4 (<|think|>/<|/think|>) naming conventions.
         if (tok) {
-            int32_t ts = tok->find_token("<think>");
-            int32_t te = tok->find_token("</think>");
-            if (ts >= 0) keep_ids.push_back(ts);
-            if (te >= 0) keep_ids.push_back(te);
+            for (const char* name : {"<think>", "</think>", "<|think|>", "<|/think|>"}) {
+                int32_t tid = tok->find_token(name);
+                if (tid >= 0) keep_ids.push_back(tid);
+            }
         }
         auto is_kept = [&](int32_t id) {
             return std::find(keep_ids.begin(), keep_ids.end(), id) != keep_ids.end();
@@ -1060,6 +1060,13 @@ bool Engine::init_features() {
         if (!banned_token_ids_.empty()) {
             IMP_LOG_INFO("Banned %zu special tokens from generation",
                          banned_token_ids_.size());
+            if (tok) {
+                std::string bl;
+                for (int32_t bid : banned_token_ids_) {
+                    bl += std::to_string(bid) + "(" + tok->token_text(bid) + ") ";
+                }
+                IMP_LOG_INFO("  banned: %s", bl.c_str());
+            }
         }
     }
 
