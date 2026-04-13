@@ -485,19 +485,14 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                   qv.dtype == DType::FP16 &&
                                   state.kv_cache &&
                                   state.kv_cache->dtype() == DType::FP16);
-        // Per-layer rope_dim. Gemma 4: SWA layers (hd=256) rotate full head_dim,
-        // but Global layers (hd=512) use partial_rotary_factor=0.25 per HF config
-        // → only first 128 of 512 dims are rotated. Matches llama.cpp rope_freqs
-        // tensor length (loaded as ly.rope_freqs for global layers).
+        // Per-layer rope_dim. Gemma 4: both SWA (hd=256) and Global (hd=512)
+        // rotate all head_dim dimensions. GGUF: rope.dimension_count=512,
+        // rope.dimension_count_swa=256. rope_freqs has 256 entries = 256 pairs
+        // = 512 rotated dims = full hd.
         int fused_rope_dim = cfg.rope_dim;
         if (cfg.arch == ModelArch::GEMMA4) {
-            bool is_swa_l = (!cfg.swa_layers.empty() && layer < (int)cfg.swa_layers.size() &&
-                             cfg.swa_layers[layer]);
-            // SWA: hd=256, rope_dim=256 (full). Global: hd=512, rope_dim=256 (half).
-            // llama: "full_attention layer only use half of the RoPE dimensions"
-            // SWA: rope_dim = hd = 256 (full rotation)
-            // Global: rope_dim = hd/2 = 256 (half rotation, matching llama's n_rot_full/2)
-            fused_rope_dim = is_swa_l ? hd : (hd / 2);
+            // Both SWA and Global: full rotation (rope_dim = hd)
+            fused_rope_dim = hd;
         } else if (fused_rope_dim > hd || fused_rope_dim <= 0) {
             fused_rope_dim = hd;
         }
@@ -544,10 +539,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             // Per-layer rope_dim. Gemma 4: SWA full rotation, Global partial 1/4.
             int layer_rope_dim = cfg.rope_dim;
             if (cfg.arch == ModelArch::GEMMA4) {
-                bool is_swa_l = (!cfg.swa_layers.empty() && layer < (int)cfg.swa_layers.size() &&
-                                 cfg.swa_layers[layer]);
-                // SWA: hd=256, rope_dim=256 (full). Global: hd=512, rope_dim=256 (half).
-                layer_rope_dim = is_swa_l ? hd : (hd / 2);
+                // Both SWA and Global: full rotation (rope_dim = hd)
+                layer_rope_dim = hd;
             } else if (layer_rope_dim > hd || layer_rope_dim <= 0) {
                 layer_rope_dim = hd;  // safety clamp
             }
@@ -626,11 +619,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             // Per-layer rope_dim (same as prefill rope path above)
             int effective_rope_dim;
             if (cfg.arch == ModelArch::GEMMA4) {
-                bool is_swa_l = (!cfg.swa_layers.empty() && layer < (int)cfg.swa_layers.size() &&
-                                 cfg.swa_layers[layer]);
-                // SWA: hd=256, rope_dim=256 (full). Global: hd=512, rope_dim=256 (half).
-                // Must match prefill rope_dim (lines 500, 550) for consistent KV cache.
-                effective_rope_dim = is_swa_l ? hd : (hd / 2);
+                // Both SWA and Global: full rotation (rope_dim = hd)
+                effective_rope_dim = hd;
             } else {
                 effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
                 if (effective_rope_dim > hd) effective_rope_dim = hd;

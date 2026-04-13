@@ -30,6 +30,9 @@ ChatTemplateFamily ChatTemplate::detect_family(const std::string& jinja2_str) {
         return ChatTemplateFamily::LLAMA3;
     if (jinja2_str.find("<start_of_turn>") != std::string::npos)
         return ChatTemplateFamily::GEMMA;
+    // Gemma-4 uses <|turn> instead of <start_of_turn>
+    if (jinja2_str.find("<|turn>") != std::string::npos)
+        return ChatTemplateFamily::GEMMA;
     if (jinja2_str.find("[INST]") != std::string::npos)
         return ChatTemplateFamily::LLAMA2;
     if (jinja2_str.find("<extra_id_0>") != std::string::npos)
@@ -56,6 +59,7 @@ ChatTemplateFamily ChatTemplate::default_family_for_arch(ModelArch arch) {
         case ModelArch::QWEN35:         return ChatTemplateFamily::CHATML;
         case ModelArch::QWEN35_MOE:     return ChatTemplateFamily::CHATML;
         case ModelArch::GEMMA3:         return ChatTemplateFamily::GEMMA;
+        case ModelArch::GEMMA4:         return ChatTemplateFamily::GEMMA;
         case ModelArch::LLAMA4:         return ChatTemplateFamily::LLAMA3;
         default:                        return ChatTemplateFamily::RAW;
     }
@@ -683,7 +687,15 @@ std::vector<int32_t> ChatTemplate::tokenize_rendered(
     // Control tokens appear as literal text in the rendered output (e.g. "<|im_start|>").
     // We identify them via the control_tokens_ map (sorted longest-first).
     std::vector<int32_t> result;
-    if (tok.add_bos()) {
+    // Skip BOS if the rendered string already contains the BOS token text —
+    // the control token splitter below will add it. Adding it here would duplicate.
+    bool rendered_has_bos = false;
+    if (bos_id_ >= 0) {
+        const std::string& bos_text = tok.token_text(bos_id_);
+        if (!bos_text.empty() && rendered.find(bos_text) != std::string::npos)
+            rendered_has_bos = true;
+    }
+    if (tok.add_bos() && !rendered_has_bos) {
         result.push_back(bos_id_);
     }
 
@@ -895,6 +907,14 @@ std::vector<int32_t> ChatTemplate::apply_jinja(
         return {};
     }
     IMP_LOG_DEBUG("Jinja2 rendered (%zu chars)", rendered.size());
+    if (getenv("IMP_DEBUG_TEMPLATE")) {
+        std::string escaped;
+        for (char c : rendered) {
+            if (c == '\n') escaped += "\\n";
+            else escaped += c;
+        }
+        fprintf(stderr, "[DEBUG_TPL_JINJA] rendered: \"%s\"\n", escaped.c_str());
+    }
 
     auto result = tokenize_rendered(tok, rendered);
 

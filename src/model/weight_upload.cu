@@ -929,7 +929,7 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i,
     // Post-layer norms (Gemma-3/4)
     for (auto* norm : {&L.post_attn_norm, &L.post_ffn_norm,
                        &L.ffn_pre_norm_2, &L.ffn_post_norm_1, &L.ffn_post_norm_2,
-                       &L.ffn_gate_inp_scale, &L.layer_out_scale, &L.rope_freqs,
+                       &L.ffn_gate_inp_scale, &L.layer_out_scale,
                        &L.expert_down_scale}) {
         if (norm->data && !norm->on_device) {
             if (!upload_unquantized_weight(*norm, GGMLQuantType::NONE,
@@ -939,6 +939,26 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i,
                 return false;
             }
         }
+    }
+
+    // rope_freqs: upload as raw FP32 (NOT converted to FP16).
+    // The RoPE kernel reads these as float* — FP16 conversion would corrupt them.
+    if (L.rope_freqs.data && !L.rope_freqs.on_device &&
+        L.rope_freqs.dtype == DType::FP32) {
+        IMP_LOG_INFO("Layer %d: uploading rope_freqs as raw FP32 (%lld elements)",
+                     i, L.rope_freqs.numel());
+        size_t bytes = L.rope_freqs.nbytes();
+        void* d_data = nullptr;
+        IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_data, bytes, ctx.stream));
+        if (!d_data) {
+            IMP_LOG_ERROR("Failed to allocate GPU memory for rope_freqs layer %d", i);
+            return false;
+        }
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_data, L.rope_freqs.data, bytes,
+                                            cudaMemcpyHostToDevice, ctx.stream));
+        ctx.gpu_allocs.push_back(d_data);
+        L.rope_freqs.data = d_data;
+        L.rope_freqs.on_device = true;
     }
 
     return true;
