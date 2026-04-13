@@ -274,7 +274,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             static_cast<float*>(view_tokens(fp32_hidden_, n).data), total);
     }
 
-    // Dump first 4 FP32 accumulator values for decode debugging
+    // Dump FP32 accumulator for decode debugging
     if (fp32_accum_buf_ && n == 1 && debug_forward_enabled()) {
         float tmp[4];
         cudaMemcpyAsync(tmp, view_tokens(fp32_hidden_, n).data, 4*sizeof(float),
@@ -282,6 +282,16 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         cudaStreamSynchronize(stream);
         fprintf(stderr, "[DEBUG_FWD] [step=%d] fp32_accum_init: [%.4f %.4f %.4f %.4f]\n",
                 decode_step, tmp[0], tmp[1], tmp[2], tmp[3]);
+    }
+    // Binary dump: write the full FP16 hidden state to file for step 0 (prefill)
+    if (n <= 4 && getenv("IMP_DUMP_HIDDEN")) {
+        std::vector<half> h_buf(n * cfg.d_model);
+        cudaMemcpy(h_buf.data(), h.data, h_buf.size() * sizeof(half), cudaMemcpyDeviceToHost);
+        char fname[256];
+        snprintf(fname, sizeof(fname), "/tmp/imp_embed_step%d.bin", decode_step);
+        FILE* f = fopen(fname, "wb");
+        if (f) { fwrite(h_buf.data(), sizeof(half), h_buf.size(), f); fclose(f); }
+        fprintf(stderr, "[DUMP_BIN] Wrote %s (%zu halfs)\n", fname, h_buf.size());
     }
 
     if (profile_active) cudaEventRecord(ev_emb, stream);
@@ -385,7 +395,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                     if (i == 0 || i == 29)
                         fprintf(stderr, "[DEBUG_FWD] L%d_out_scale = %.6f\n", i, sval);
                     // Dump FP16 hidden after scale for all layers (decode only)
-                    if (n == 1) {
+                    if (n == 1 && debug_forward_enabled()) {
                         half h_tmp[8];
                         cudaMemcpyAsync(h_tmp, view_tokens(h, n).data, 8*sizeof(half),
                                         cudaMemcpyDeviceToHost, stream);
@@ -396,6 +406,15 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                                 __half2float(h_tmp[2]), __half2float(h_tmp[3]),
                                 __half2float(h_tmp[4]), __half2float(h_tmp[5]),
                                 __half2float(h_tmp[6]), __half2float(h_tmp[7]));
+                    }
+                    // Binary dump: full hidden state for selected layers
+                    if (n <= 4 && getenv("IMP_DUMP_HIDDEN") && (i == 0 || i == 29)) {
+                        std::vector<half> h_buf(n * cfg.d_model);
+                        cudaMemcpy(h_buf.data(), view_tokens(h, n).data, h_buf.size() * sizeof(half), cudaMemcpyDeviceToHost);
+                        char fname[256];
+                        snprintf(fname, sizeof(fname), "/tmp/imp_L%02d_step%d.bin", i, decode_step);
+                        FILE* f = fopen(fname, "wb");
+                        if (f) { fwrite(h_buf.data(), sizeof(half), h_buf.size(), f); fclose(f); }
                     }
                 }
             }
