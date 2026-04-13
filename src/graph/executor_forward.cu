@@ -274,6 +274,16 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             static_cast<float*>(view_tokens(fp32_hidden_, n).data), total);
     }
 
+    // Dump first 4 FP32 accumulator values for decode debugging
+    if (fp32_accum_buf_ && n == 1 && debug_forward_enabled()) {
+        float tmp[4];
+        cudaMemcpyAsync(tmp, view_tokens(fp32_hidden_, n).data, 4*sizeof(float),
+                        cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+        fprintf(stderr, "[DEBUG_FWD] [step=%d] fp32_accum_init: [%.4f %.4f %.4f %.4f]\n",
+                decode_step, tmp[0], tmp[1], tmp[2], tmp[3]);
+    }
+
     if (profile_active) cudaEventRecord(ev_emb, stream);
 
     // ---- Step 2: Transformer/Hybrid layers ----
@@ -366,14 +376,27 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                         total);
                 }
                 if (debug_forward_enabled()) {
-                    // Read the scalar back to stderr once per layer for verification.
                     float sval = 0.0f;
                     half h_scale;
                     cudaMemcpyAsync(&h_scale, ly.layer_out_scale.data, sizeof(half),
                                     cudaMemcpyDeviceToHost, stream);
                     cudaStreamSynchronize(stream);
                     sval = __half2float(h_scale);
-                    fprintf(stderr, "[DEBUG_FWD] L%d_out_scale = %.6f\n", i, sval);
+                    if (i == 0 || i == 29)
+                        fprintf(stderr, "[DEBUG_FWD] L%d_out_scale = %.6f\n", i, sval);
+                    // Dump FP16 hidden after scale for all layers (decode only)
+                    if (n == 1) {
+                        half h_tmp[8];
+                        cudaMemcpyAsync(h_tmp, view_tokens(h, n).data, 8*sizeof(half),
+                                        cudaMemcpyDeviceToHost, stream);
+                        cudaStreamSynchronize(stream);
+                        fprintf(stderr, "[DUMP] step=%d L%02d h=[%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f]\n",
+                                decode_step, i,
+                                __half2float(h_tmp[0]), __half2float(h_tmp[1]),
+                                __half2float(h_tmp[2]), __half2float(h_tmp[3]),
+                                __half2float(h_tmp[4]), __half2float(h_tmp[5]),
+                                __half2float(h_tmp[6]), __half2float(h_tmp[7]));
+                    }
                 }
             }
             if (debug_forward_enabled()) {
