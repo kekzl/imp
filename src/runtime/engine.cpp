@@ -449,10 +449,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // incompatibilities with the per-layer head_dim + split MoE tensor layout.
     // Force plain FP16 paths for Gemma 4 until proper kernels are added.
     if (model_->config().arch == ModelArch::GEMMA4) {
-        if (config_.use_cuda_graphs) {
-            IMP_LOG_INFO("Gemma 4: disabling CUDA graphs (slow MoE path uses cublasCreate)");
-            config_.use_cuda_graphs = false;
-        }
+        // CUDA graphs: enabled for Gemma-4 decode. The MoE decode fast path is fully
+        // device-side (dp4a GEMV, no D2H memcpy), so graph capture works.
+        // Only the MoE prefill path uses D2H sync, but prefill is never graph-captured.
         if (config_.use_fp8_prefill) {
             IMP_LOG_INFO("Gemma 4: disabling FP8 prefill (per-layer head_dim not yet supported)");
             config_.use_fp8_prefill = 0;
@@ -564,7 +563,13 @@ bool Engine::init_weights() {
         if (n_attn == 0) n_attn = mcfg.n_layers;
         size_t kv_block_bytes = static_cast<size_t>(est_bs) * mcfg.n_kv_heads * head_dim_est * elem_sz;
         size_t kv_est = static_cast<size_t>(blocks_per_seq * config_.max_batch_size) * 2 * n_attn * kv_block_bytes;
-        { size_t total_vram = 0, f = 0; cudaMemGetInfo(&f, &total_vram); kv_est = std::min(kv_est, total_vram / 5); }
+        { size_t total_vram = 0, f = 0; cudaMemGetInfo(&f, &total_vram);
+          // For large MoE models (128 experts), prefer fitting all experts on GPU
+          // over reserving huge KV cache. All-GPU experts enable the decode fast
+          // path (dp4a GEMV, no D2H sync) and CUDA graph capture.
+          size_t vram_frac = (mcfg.n_experts > 16) ? 10 : 5;
+          kv_est = std::min(kv_est, total_vram / vram_frac);
+        }
         expert_reserve += kv_est;
 
         if (mcfg.ssm_inner_size > 0) {
