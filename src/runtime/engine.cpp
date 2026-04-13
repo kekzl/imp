@@ -482,6 +482,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 1);
             IMP_LOG_INFO("Gemma 4: setting CUBLAS_WORKSPACE_CONFIG=:4096:8 for deterministic grouped GEMM");
         }
+        // Enable MMVQ for all weight GEMMs — quantized matmul matching llama.cpp's
+        // accumulation behavior, critical for 128-expert MoE precision.
+        if (!getenv("IMP_GEMMA4_FORCE_MMVQ")) {
+            setenv("IMP_GEMMA4_FORCE_MMVQ", "1", 0);
+            IMP_LOG_INFO("Gemma 4: enabling MMVQ for all weight GEMMs (numerical parity with llama.cpp)");
+        }
     }
 
     // --- Core initialization ---
