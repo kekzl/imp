@@ -617,9 +617,16 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             int eff_q8_blocks = eff / 32;
 
             if (!non_gated_experts) {
-                // Fused SwiGLU → Q8_1 (1 kernel instead of 2)
-                swiglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf,
-                                      top_k * eff, stream);
+                // Fused activation → Q8_1 (1 kernel instead of 2)
+                if (cfg.ffn_activation == FFNActivation::GEGLU) {
+                    if (layer == 0 && getenv("IMP_DEBUG_FORWARD"))
+                        fprintf(stderr, "[DEBUG_MoE] Using GEGLU activation for MoE experts\n");
+                    geglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf,
+                                         top_k * eff, stream);
+                } else {
+                    swiglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf,
+                                          top_k * eff, stream);
+                }
             } else {
                 // Non-gated (relu²): fused relu² + Q8_1 quantization (1 kernel)
                 relu_sqr_quantize_q8_1(up_buf, q8, qscratch_.d8_buf, top_k * eff, stream);
