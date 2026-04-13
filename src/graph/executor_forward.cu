@@ -365,7 +365,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                         static_cast<const half*>(ly.layer_out_scale.data),
                         total);
                 }
-                if (debug_forward_enabled() && i <= 2) {
+                if (debug_forward_enabled()) {
                     // Read the scalar back to stderr once per layer for verification.
                     float sval = 0.0f;
                     half h_scale;
