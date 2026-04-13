@@ -1513,25 +1513,37 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C,
 // ---------------------------------------------------------------------------
 void nvfp4_gemv_pdl_register() {
     constexpr int NR = 8;
+
+    // GEMV kernels are bandwidth-bound with minimal SMEM usage.
+    // Maximize L1 cache to improve weight data locality.
+    #define NVFP4_REGISTER(kern) do { \
+        pdl::enable_kernel(kern); \
+        cudaFuncSetAttribute(kern, \
+            cudaFuncAttributePreferredSharedMemoryCarveout, \
+            cudaSharedmemCarveoutMaxL1); \
+    } while (0)
+
     // Dense GEMV kernels
-    pdl::enable_kernel(gemv_nvfp4_kpar_kernel);
-    pdl::enable_kernel(gemv_nvfp4_kpar_fp32_kernel);
-    pdl::enable_kernel(gemv_nvfp4_multirow_kernel<NR>);
-    pdl::enable_kernel(gemv_nvfp4_multirow_fp32_kernel<NR>);
-    pdl::enable_kernel(gemv_nvfp4_residual_kernel);
-    pdl::enable_kernel(gemv_nvfp4_residual_mr_kernel<NR>);
-    pdl::enable_kernel(gemv_nvfp4_qkv_fused_kernel);
-    pdl::enable_kernel(gemv_nvfp4_qkv_fused_mr_kernel<NR>);
-    pdl::enable_kernel(gemv_nvfp4_gate_up_fused_kernel);
-    pdl::enable_kernel(gemv_nvfp4_gate_up_fused_mr_kernel<NR>);
-    pdl::enable_kernel(gemv_nvfp4_swiglu_residual_kernel);
-    pdl::enable_kernel(gemv_nvfp4_swiglu_residual_mr_kernel<NR>);
-    pdl::enable_kernel(gemv_nvfp4_geglu_residual_kernel);
-    pdl::enable_kernel(gemv_nvfp4_geglu_residual_mr_kernel<NR>);
+    NVFP4_REGISTER(gemv_nvfp4_kpar_kernel);
+    NVFP4_REGISTER(gemv_nvfp4_kpar_fp32_kernel);
+    NVFP4_REGISTER(gemv_nvfp4_multirow_kernel<NR>);
+    NVFP4_REGISTER(gemv_nvfp4_multirow_fp32_kernel<NR>);
+    NVFP4_REGISTER(gemv_nvfp4_residual_kernel);
+    NVFP4_REGISTER(gemv_nvfp4_residual_mr_kernel<NR>);
+    NVFP4_REGISTER(gemv_nvfp4_qkv_fused_kernel);
+    NVFP4_REGISTER(gemv_nvfp4_qkv_fused_mr_kernel<NR>);
+    NVFP4_REGISTER(gemv_nvfp4_gate_up_fused_kernel);
+    NVFP4_REGISTER(gemv_nvfp4_gate_up_fused_mr_kernel<NR>);
+    NVFP4_REGISTER(gemv_nvfp4_swiglu_residual_kernel);
+    NVFP4_REGISTER(gemv_nvfp4_swiglu_residual_mr_kernel<NR>);
+    NVFP4_REGISTER(gemv_nvfp4_geglu_residual_kernel);
+    NVFP4_REGISTER(gemv_nvfp4_geglu_residual_mr_kernel<NR>);
     // MoE GEMV kernels
-    pdl::enable_kernel(gemv_nvfp4_moe_decode_kernel);
-    pdl::enable_kernel(gemv_nvfp4_moe_gate_up_fused_kernel);
-    pdl::enable_kernel(gemv_nvfp4_moe_swiglu_decode_kernel);
+    NVFP4_REGISTER(gemv_nvfp4_moe_decode_kernel);
+    NVFP4_REGISTER(gemv_nvfp4_moe_gate_up_fused_kernel);
+    NVFP4_REGISTER(gemv_nvfp4_moe_swiglu_decode_kernel);
+
+    #undef NVFP4_REGISTER
 }
 
 } // namespace imp

@@ -5,6 +5,7 @@
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <vector>
 #include <cstring>
 #include <cmath>
@@ -540,8 +541,8 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         }
     }
 
-    // ---- F16 / BF16: direct upload ----
-    if (qtype == GGMLQuantType::F16 || qtype == GGMLQuantType::BF16) {
+    // ---- F16: direct upload ----
+    if (qtype == GGMLQuantType::F16) {
         size_t bytes = weight.nbytes();
         void* d_data = nullptr;
         checked_cuda_malloc(&d_data, bytes);
@@ -553,12 +554,53 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         weight.on_device = true;
         return true;
     }
+    // ---- BF16 (GGUF): convert to FP16 on host, then upload ----
+    if (qtype == GGMLQuantType::BF16) {
+        int64_t n_elem = weight.numel();
+        const uint16_t* src = static_cast<const uint16_t*>(weight.data);
+        std::vector<uint16_t> h_fp16(static_cast<size_t>(n_elem));
+        for (int64_t i = 0; i < n_elem; ++i) {
+            uint32_t bits = static_cast<uint32_t>(src[i]) << 16;
+            float f;
+            std::memcpy(&f, &bits, sizeof(float));
+            h_fp16[i] = float_to_fp16(f);
+        }
+        size_t bytes = static_cast<size_t>(n_elem) * sizeof(uint16_t);
+        void* d_data = nullptr;
+        checked_cuda_malloc(&d_data, bytes);
+        if (!d_data) return false;
+        h2d_copy(d_data, h_fp16.data(), bytes, stream);
+        gpu_allocs.push_back(d_data);
+        weight = Tensor(d_data, DType::FP16, weight.ndim, weight.shape, true);
+        return true;
+    }
 
     // ---- F32: convert to FP16 on host, then upload ----
     if (qtype == GGMLQuantType::F32 || qtype == GGMLQuantType::NONE) {
+        // BF16 (SafeTensors non-quantized weights): convert to FP16
+        if (weight.dtype == DType::BF16) {
+            int64_t n_elem = weight.numel();
+            const uint16_t* src = static_cast<const uint16_t*>(weight.data);
+            std::vector<uint16_t> h_fp16(static_cast<size_t>(n_elem));
+            for (int64_t i = 0; i < n_elem; ++i) {
+                // BF16 → float: zero-fill lower mantissa bits
+                uint32_t bits = static_cast<uint32_t>(src[i]) << 16;
+                float f;
+                std::memcpy(&f, &bits, sizeof(float));
+                h_fp16[i] = float_to_fp16(f);
+            }
+            size_t bytes = static_cast<size_t>(n_elem) * sizeof(uint16_t);
+            void* d_data = nullptr;
+            checked_cuda_malloc(&d_data, bytes);
+            if (!d_data) return false;
+            h2d_copy(d_data, h_fp16.data(), bytes, stream);
+            gpu_allocs.push_back(d_data);
+            weight = Tensor(d_data, DType::FP16, weight.ndim, weight.shape, true);
+            return true;
+        }
         // NONE maps to F32 (both are enum value 0)
         if (weight.dtype != DType::FP32) {
-            // If it's not actually FP32 data, just do a direct upload
+            // If it's not actually FP32 data (e.g. INT8/U8 packed FP4), direct upload
             size_t bytes = weight.nbytes();
             void* d_data = nullptr;
             checked_cuda_malloc(&d_data, bytes);
@@ -884,8 +926,11 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i,
         }
     }
 
-    // Post-layer norms (Gemma-3 style)
-    for (auto* norm : {&L.post_attn_norm, &L.post_ffn_norm}) {
+    // Post-layer norms (Gemma-3/4)
+    for (auto* norm : {&L.post_attn_norm, &L.post_ffn_norm,
+                       &L.ffn_pre_norm_2, &L.ffn_post_norm_1, &L.ffn_post_norm_2,
+                       &L.ffn_gate_inp_scale, &L.layer_out_scale,
+                       &L.expert_down_scale}) {
         if (norm->data && !norm->on_device) {
             if (!upload_unquantized_weight(*norm, GGMLQuantType::NONE,
                                            ctx.compute_dtype, ctx.stream,
@@ -894,6 +939,26 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i,
                 return false;
             }
         }
+    }
+
+    // rope_freqs: upload as raw FP32 (NOT converted to FP16).
+    // The RoPE kernel reads these as float* — FP16 conversion would corrupt them.
+    if (L.rope_freqs.data && !L.rope_freqs.on_device &&
+        L.rope_freqs.dtype == DType::FP32) {
+        IMP_LOG_INFO("Layer %d: uploading rope_freqs as raw FP32 (%lld elements)",
+                     i, L.rope_freqs.numel());
+        size_t bytes = L.rope_freqs.nbytes();
+        void* d_data = nullptr;
+        IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_data, bytes, ctx.stream));
+        if (!d_data) {
+            IMP_LOG_ERROR("Failed to allocate GPU memory for rope_freqs layer %d", i);
+            return false;
+        }
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_data, L.rope_freqs.data, bytes,
+                                            cudaMemcpyHostToDevice, ctx.stream));
+        ctx.gpu_allocs.push_back(d_data);
+        L.rope_freqs.data = d_data;
+        L.rope_freqs.on_device = true;
     }
 
     return true;
@@ -1108,6 +1173,7 @@ static bool upload_expert_weights(
                                          std::vector<Tensor>& expert_vec,
                                          const char* name) -> bool {
             if (!packed.data || packed.ndim < 3) return true;  // nothing to do
+            if (packed.on_device) return true;  // already on GPU (e.g. from Gemma 4 fused split)
 
             int n_experts = static_cast<int>(packed.shape[0]);
             int64_t rows = packed.shape[1];
@@ -1208,6 +1274,85 @@ static bool upload_expert_weights(
         if (!upload_packed_experts(L.expert_gate_packed, L.expert_gate_qtype,
                                    L.expert_w_gate, "expert_gate_exps"))
             return false;
+
+        // Gemma 4: split fused ffn_gate_up_exps into separate gate and up packed tensors.
+        // The original tensor (in expert_gate_packed) has shape [n_exp, 2*n_ff_exp, d_model].
+        // Layout per expert: rows [0, n_ff_exp) = gate, rows [n_ff_exp, 2*n_ff_exp) = up.
+        // We split physically on GPU via cudaMemcpy2D, then free the fused buffer.
+        if (L.expert_gate_packed.data && L.expert_gate_packed.on_device &&
+            L.expert_up_packed.data == nullptr &&
+            L.expert_gate_packed.ndim >= 3 &&
+            (L.expert_gate_packed.shape[1] & 1) == 0 &&
+            dequant_gpu_supported(L.expert_gate_qtype)) {
+
+            int64_t n_exp = L.expert_gate_packed.shape[0];
+            int64_t fused_rows = L.expert_gate_packed.shape[1];
+            int64_t cols = L.expert_gate_packed.shape[2];
+            int64_t half_rows = fused_rows / 2;
+            size_t row_bytes = ggml_quant_row_bytes(L.expert_gate_qtype, cols);
+            size_t half_raw = static_cast<size_t>(n_exp) * half_rows * row_bytes;
+
+            // Memory-efficient split: allocate only ONE half-sized buffer for the
+            // up half, copy it out, then reuse the fused buffer in-place for the
+            // gate half (its rows are already at the front; the trailing half is
+            // simply ignored via the new shape). Peak overhead = 0.5x fused
+            // instead of 1.0x for a two-buffer split.
+            void* up_buf = nullptr;
+            cudaError_t e2 = checked_cuda_malloc(&up_buf, half_raw);
+            if (e2 != cudaSuccess) {
+                IMP_LOG_ERROR("Gemma 4: cudaMalloc failed for fused expert split (layer %d, %.1f MiB)",
+                              i, half_raw / (1024.0 * 1024.0));
+                return false;
+            }
+
+            size_t dst_pitch = static_cast<size_t>(half_rows) * row_bytes;
+            size_t src_pitch = static_cast<size_t>(fused_rows) * row_bytes;
+            const char* src_base = static_cast<const char*>(L.expert_gate_packed.data);
+
+            // Copy up half (rows [half_rows, fused_rows)) into the new up buffer.
+            cudaError_t cp = cudaMemcpy2DAsync(
+                up_buf, dst_pitch,
+                src_base + dst_pitch, src_pitch,
+                dst_pitch, n_exp, cudaMemcpyDeviceToDevice, ctx.stream);
+            if (cp != cudaSuccess) {
+                IMP_LOG_ERROR("Gemma 4: cudaMemcpy2DAsync failed (layer %d): %s",
+                              i, cudaGetErrorString(cp));
+                cudaFree(up_buf);
+                return false;
+            }
+            // Compact the gate half in-place: row e at offset e*src_pitch must
+            // move to offset e*dst_pitch. Walk experts forward — for forward
+            // copy, dst[e] starts BEFORE src[e] (e*dst_pitch < e*src_pitch +
+            // half_pitch for e>=1, but src[e] of expert e is read fully before
+            // expert e+1's dst is written, so this is safe as a sequential 2D
+            // copy from a single launch only when there is no inter-expert
+            // overlap. With dst_pitch < src_pitch the expert-1 dst region
+            // overlaps with expert-0 src — so we must serialize per expert.
+            for (int64_t e = 1; e < n_exp; ++e) {  // e=0 already at the right offset
+                cudaError_t cp_e = cudaMemcpyAsync(
+                    const_cast<char*>(src_base) + e * dst_pitch,
+                    src_base + e * src_pitch,
+                    dst_pitch, cudaMemcpyDeviceToDevice, ctx.stream);
+                if (cp_e != cudaSuccess) {
+                    IMP_LOG_ERROR("Gemma 4: gate compact memcpy failed (layer %d, expert %ld): %s",
+                                  i, (long)e, cudaGetErrorString(cp_e));
+                    cudaFree(up_buf);
+                    return false;
+                }
+            }
+
+            // Reuse fused buffer (now compacted to half size) as gate_packed.
+            int64_t split_shape[4] = {n_exp, half_rows, cols, 0};
+            void* gate_buf = L.expert_gate_packed.data;
+            L.expert_gate_packed = Tensor(gate_buf, L.expert_gate_packed.dtype, 3, split_shape, true);
+            L.expert_up_packed = Tensor(up_buf, L.expert_gate_packed.dtype, 3, split_shape, true);
+            L.expert_up_qtype = L.expert_gate_qtype;
+            // gate_buf is already in ctx.gpu_allocs from the original upload.
+            ctx.gpu_allocs.push_back(up_buf);
+            IMP_LOG_INFO("Gemma 4: split fused gate_up_exps layer %d (n_ff_exp=%ld, %.1f MiB each)",
+                          i, (long)half_rows, half_raw / (1024.0 * 1024.0));
+        }
+
         if (!upload_packed_experts(L.expert_up_packed, L.expert_up_qtype,
                                    L.expert_w_up, "expert_up_exps"))
             return false;
@@ -1352,6 +1497,44 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
 
     if (!upload_expert_weights(layers_, n_layers(), expert_reserve_bytes, ctx)) {
         return false;
+    }
+
+    // Upload NVFP4 pre-quantized scale tensors (weight_scale, weight_scale_2, input_scale)
+    if (config_.is_nvfp4_prequant) {
+        int scale_count = 0;
+        auto upload_scale = [&](Tensor& t) {
+            if (!t.data || t.on_device || t.numel() == 0) return;
+            size_t bytes = t.nbytes();
+            void* d_ptr = nullptr;
+            if (cudaMalloc(&d_ptr, bytes) != cudaSuccess) return;
+            cudaMemcpyAsync(d_ptr, t.data, bytes, cudaMemcpyHostToDevice, stream);
+            gpu_allocations_.push_back(d_ptr);
+            t.data = d_ptr;
+            t.on_device = true;
+            scale_count++;
+        };
+
+        for (auto& L : layers_) {
+            for (auto* nw : {&L.nvfp4_q, &L.nvfp4_k, &L.nvfp4_v, &L.nvfp4_o,
+                             &L.nvfp4_gate, &L.nvfp4_up, &L.nvfp4_down}) {
+                upload_scale(nw->weight_scale);
+                upload_scale(nw->weight_scale_2);
+                upload_scale(nw->input_scale);
+            }
+            for (auto* vec : {&L.expert_nvfp4_gate, &L.expert_nvfp4_up, &L.expert_nvfp4_down}) {
+                for (auto& nw : *vec) {
+                    upload_scale(nw.weight_scale);
+                    upload_scale(nw.weight_scale_2);
+                    upload_scale(nw.input_scale);
+                }
+            }
+        }
+        // LM head (output projection) scales
+        upload_scale(nvfp4_out_proj_.weight_scale);
+        upload_scale(nvfp4_out_proj_.weight_scale_2);
+        upload_scale(nvfp4_out_proj_.input_scale);
+        if (scale_count > 0)
+            IMP_LOG_INFO("NVFP4 prequant: uploaded %d scale tensors to GPU", scale_count);
     }
 
     // Final sync

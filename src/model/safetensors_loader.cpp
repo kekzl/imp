@@ -233,6 +233,8 @@ static DType safetensors_dtype(const std::string& s) {
     if (s == "I32")  return DType::INT32;
     if (s == "I64")  return DType::INT32;  // closest proxy
     if (s == "BOOL") return DType::INT8;
+    if (s == "F8_E4M3") return DType::FP8_E4M3;
+    if (s == "F8_E5M2") return DType::FP8_E4M3;  // closest proxy
     IMP_LOG_WARN("Unknown SafeTensors dtype '%s', defaulting to FP32", s.c_str());
     return DType::FP32;
 }
@@ -357,9 +359,15 @@ static void infer_config(ModelConfig& cfg,
     }
 
     if (cfg.expert_d_ff == 0 && cfg.n_experts > 0) {
-        auto it_expert = tensors.find("model.layers.0.block_sparse_moe.experts.0.w1.weight");
-        if (it_expert != tensors.end() && it_expert->second.ndim == 2) {
-            cfg.expert_d_ff = static_cast<int>(it_expert->second.shape[0]);
+        // Try Mixtral-style (w1) then DeepSeek/Qwen-style (gate_proj)
+        for (const char* name : {
+            "model.layers.0.block_sparse_moe.experts.0.w1.weight",
+            "model.layers.0.mlp.experts.0.gate_proj.weight"}) {
+            auto it_expert = tensors.find(name);
+            if (it_expert != tensors.end() && it_expert->second.ndim == 2) {
+                cfg.expert_d_ff = static_cast<int>(it_expert->second.shape[0]);
+                break;
+            }
         }
     }
 
@@ -638,6 +646,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
             auto link = [](TransformerLayer::NvFP4PreQuantWeight& nw, const Tensor& w) {
                 if (nw.weight_scale.data != nullptr) nw.weight = w;
             };
+            // Dense weights
             link(layer.nvfp4_q, layer.wq);
             link(layer.nvfp4_k, layer.wk);
             link(layer.nvfp4_v, layer.wv);
@@ -645,16 +654,28 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
             link(layer.nvfp4_gate, layer.w_gate);
             link(layer.nvfp4_up, layer.w_up);
             link(layer.nvfp4_down, layer.w_down);
+            // Expert weights
+            for (size_t e = 0; e < layer.expert_nvfp4_gate.size(); e++) {
+                if (e < layer.expert_w_gate.size()) link(layer.expert_nvfp4_gate[e], layer.expert_w_gate[e]);
+                if (e < layer.expert_w_up.size())   link(layer.expert_nvfp4_up[e],   layer.expert_w_up[e]);
+                if (e < layer.expert_w_down.size()) link(layer.expert_nvfp4_down[e], layer.expert_w_down[e]);
+            }
         }
         int nvfp4_count = 0;
+        int nvfp4_expert_count = 0;
         for (const auto& layer : model->layers_) {
             for (const auto* nw : {&layer.nvfp4_q, &layer.nvfp4_k, &layer.nvfp4_v, &layer.nvfp4_o,
                                    &layer.nvfp4_gate, &layer.nvfp4_up, &layer.nvfp4_down}) {
                 if (nw->valid()) nvfp4_count++;
             }
+            for (const auto* vec : {&layer.expert_nvfp4_gate, &layer.expert_nvfp4_up, &layer.expert_nvfp4_down}) {
+                for (const auto& nw : *vec) {
+                    if (nw.valid()) nvfp4_expert_count++;
+                }
+            }
         }
-        IMP_LOG_INFO("NVFP4 pre-quantized: %d weight tensors (group_size=%d)",
-                     nvfp4_count, nvfp4_cfg.group_size);
+        IMP_LOG_INFO("NVFP4 pre-quantized: %d dense + %d expert weight tensors (group_size=%d)",
+                     nvfp4_count, nvfp4_expert_count, nvfp4_cfg.group_size);
     }
 
     // 7. Tie output projection if not found

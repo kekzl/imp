@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include "imp/types.h"
 
 namespace imp {
 
@@ -26,5 +27,17 @@ std::string find_gguf_in_dir(const std::string& dir);
 // Returns empty string on failure.
 std::string resolve_model_gguf(const std::string& model_id,
                                 const std::string& revision = "");
+
+// Resolve a model identifier to a path and auto-detect format.
+// Checks for SafeTensors first (directory with model.safetensors[.index.json]),
+// then falls back to GGUF resolution.
+// Sets out_format to the detected format.
+// Returns empty string on failure.
+std::string resolve_model_auto(const std::string& model_id,
+                                ImpModelFormat& out_format,
+                                const std::string& revision = "");
+
+// Check if a directory contains SafeTensors model files.
+bool is_safetensors_dir(const std::string& dir);
 
 } // namespace imp

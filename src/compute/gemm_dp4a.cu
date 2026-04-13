@@ -738,6 +738,19 @@ void gemv_q3_k_q8_1_moe_decode(const void* packed_weights,
         q8_1_stride, d8_stride, top_k, stream);
 }
 
+void gemv_q5_1_q8_1_moe_decode(const void* packed_weights,
+                                 const int32_t* expert_indices,
+                                 const block_q8_1* q8_1, const float* d8,
+                                 half* y, int rows, int K,
+                                 size_t expert_stride_bytes,
+                                 int q8_1_stride, int d8_stride, int top_k,
+                                 cudaStream_t stream) {
+    launch_gemv_dp4a_moe_decode<Q5_1_Traits>(
+        static_cast<const uint8_t*>(packed_weights), expert_indices,
+        q8_1, d8, y, rows, K, expert_stride_bytes,
+        q8_1_stride, d8_stride, top_k, stream);
+}
+
 // ---------------------------------------------------------------------------
 // dp4a MoE gate+up fused wrappers (4 functions)
 // ---------------------------------------------------------------------------
@@ -864,11 +877,19 @@ void gemv_q3_k_q8_1_moe_gate_up_fused(
 // PDL registration for all dp4a GEMV kernel template instantiations.
 // Called from GraphExecutor::init() when PDL is enabled.
 // ---------------------------------------------------------------------------
+// GEMV kernels are bandwidth-bound with minimal SMEM: maximize L1 cache.
+// Variadic to handle template commas: SET_MAXL1(kernel<A, B, C>)
+#define SET_MAXL1(...) \
+    cudaFuncSetAttribute(__VA_ARGS__, cudaFuncAttributePreferredSharedMemoryCarveout, \
+                         cudaSharedmemCarveoutMaxL1)
+
 void gemv_pdl_register() {
     // Kernel #1: basic + residual
     #define REG1(QT, NR) \
         pdl::enable_kernel(gemv_dp4a_kernel<QT, NR, true>); \
-        pdl::enable_kernel(gemv_dp4a_kernel<QT, NR, false>)
+        pdl::enable_kernel(gemv_dp4a_kernel<QT, NR, false>); \
+        SET_MAXL1(gemv_dp4a_kernel<QT, NR, true>); \
+        SET_MAXL1(gemv_dp4a_kernel<QT, NR, false>)
     REG1(Q6_K_Traits, 1); REG1(Q6_K_Traits, 2);
     REG1(Q8_0_Traits, 1); REG1(Q8_0_Traits, 2); REG1(Q8_0_Traits, 4);
     REG1(Q4_0_Traits, 1); REG1(Q4_0_Traits, 2); REG1(Q4_0_Traits, 4);
@@ -879,7 +900,9 @@ void gemv_pdl_register() {
     #undef REG1
 
     // Kernel #2: FP32 output
-    #define REG2(QT, NR) pdl::enable_kernel(gemv_dp4a_fp32_kernel<QT, NR>)
+    #define REG2(QT, NR) \
+        pdl::enable_kernel(gemv_dp4a_fp32_kernel<QT, NR>); \
+        SET_MAXL1(gemv_dp4a_fp32_kernel<QT, NR>)
     REG2(Q6_K_Traits, 1); REG2(Q6_K_Traits, 2);
     REG2(Q8_0_Traits, 1); REG2(Q8_0_Traits, 2); REG2(Q8_0_Traits, 4);
     REG2(Q4_0_Traits, 1); REG2(Q4_0_Traits, 2); REG2(Q4_0_Traits, 4);
@@ -890,7 +913,9 @@ void gemv_pdl_register() {
     #undef REG2
 
     // Kernel #3: QKV fused
-    #define REG3(QT, NR) pdl::enable_kernel(gemv_dp4a_qkv_kernel<QT, NR>)
+    #define REG3(QT, NR) \
+        pdl::enable_kernel(gemv_dp4a_qkv_kernel<QT, NR>); \
+        SET_MAXL1(gemv_dp4a_qkv_kernel<QT, NR>)
     REG3(Q6_K_Traits, 1); REG3(Q6_K_Traits, 2);
     REG3(Q8_0_Traits, 1); REG3(Q8_0_Traits, 2); REG3(Q8_0_Traits, 4);
     REG3(Q4_0_Traits, 1); REG3(Q4_0_Traits, 2); REG3(Q4_0_Traits, 4);
@@ -901,7 +926,9 @@ void gemv_pdl_register() {
     #undef REG3
 
     // Kernel #4: gate+up fused
-    #define REG4(QT, NR) pdl::enable_kernel(gemv_dp4a_gate_up_kernel<QT, NR>)
+    #define REG4(QT, NR) \
+        pdl::enable_kernel(gemv_dp4a_gate_up_kernel<QT, NR>); \
+        SET_MAXL1(gemv_dp4a_gate_up_kernel<QT, NR>)
     REG4(Q6_K_Traits, 1); REG4(Q6_K_Traits, 2);
     REG4(Q8_0_Traits, 1); REG4(Q8_0_Traits, 2); REG4(Q8_0_Traits, 4);
     REG4(Q4_0_Traits, 1); REG4(Q4_0_Traits, 2); REG4(Q4_0_Traits, 4);
@@ -923,7 +950,12 @@ void gemv_pdl_register() {
         pdl::enable_kernel(gemv_dp4a_kpar_kernel<QT, false>); \
         pdl::enable_kernel(gemv_dp4a_kpar_fp32_kernel<QT>); \
         pdl::enable_kernel(gemv_dp4a_kpar_qkv_kernel<QT>); \
-        pdl::enable_kernel(gemv_dp4a_kpar_gate_up_kernel<QT>)
+        pdl::enable_kernel(gemv_dp4a_kpar_gate_up_kernel<QT>); \
+        SET_MAXL1(gemv_dp4a_kpar_kernel<QT, true>); \
+        SET_MAXL1(gemv_dp4a_kpar_kernel<QT, false>); \
+        SET_MAXL1(gemv_dp4a_kpar_fp32_kernel<QT>); \
+        SET_MAXL1(gemv_dp4a_kpar_qkv_kernel<QT>); \
+        SET_MAXL1(gemv_dp4a_kpar_gate_up_kernel<QT>)
     REG_KPAR(Q6_K_Traits); REG_KPAR(Q8_0_Traits);
     REG_KPAR(Q4_0_Traits); REG_KPAR(Q4_K_Traits); REG_KPAR(Q5_K_Traits);
     REG_KPAR(Q2_K_Traits); REG_KPAR(Q3_K_Traits);
@@ -932,7 +964,9 @@ void gemv_pdl_register() {
     // Kernel #7: inline quant
     #define REG7(QT, NR) \
         pdl::enable_kernel(gemv_dp4a_inline_quant_kernel<QT, NR, true>); \
-        pdl::enable_kernel(gemv_dp4a_inline_quant_kernel<QT, NR, false>)
+        pdl::enable_kernel(gemv_dp4a_inline_quant_kernel<QT, NR, false>); \
+        SET_MAXL1(gemv_dp4a_inline_quant_kernel<QT, NR, true>); \
+        SET_MAXL1(gemv_dp4a_inline_quant_kernel<QT, NR, false>)
     REG7(Q6_K_Traits, 1); REG7(Q6_K_Traits, 2);
     REG7(Q8_0_Traits, 1); REG7(Q8_0_Traits, 2); REG7(Q8_0_Traits, 4);
     REG7(Q4_0_Traits, 1); REG7(Q4_0_Traits, 2); REG7(Q4_0_Traits, 4);
@@ -942,5 +976,7 @@ void gemv_pdl_register() {
     REG7(Q3_K_Traits, 1); REG7(Q3_K_Traits, 2);
     #undef REG7
 }
+
+#undef SET_MAXL1
 
 } // namespace imp

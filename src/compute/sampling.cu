@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cub/cub.cuh>
+#include <cub/device/device_topk.cuh>
 #include <cmath>
 #include <cstdio>
 #include <cfloat>
@@ -732,12 +733,29 @@ struct CubSortScratch {
             free();
             return false;
         }
-        // Query CUB temp storage requirement
+        // Query CUB temp storage requirements: take max of full RadixSort
+        // (fallback) and DeviceTopK (preferred) + a small RadixSort over the
+        // top-K results (to produce sorted output for top-p).
         temp_bytes = 0;
+        size_t rs_full_bytes = 0;
         cub::DeviceRadixSort::SortPairsDescending(
-            nullptr, temp_bytes,
+            nullptr, rs_full_bytes,
             d_keys_in, d_keys_out, d_vals_in, d_vals_out,
             vocab_size, 0, 32, stream);
+        size_t topk_bytes = 0;
+        cub::DeviceTopK::MaxPairs(
+            nullptr, topk_bytes,
+            d_keys_in, d_keys_out, d_vals_in, d_vals_out,
+            vocab_size, vocab_size,
+            ::cuda::execution::require(
+                ::cuda::execution::determinism::not_guaranteed,
+                ::cuda::execution::output_ordering::unsorted));
+        size_t rs_topk_bytes = 0;
+        cub::DeviceRadixSort::SortPairsDescending(
+            nullptr, rs_topk_bytes,
+            d_keys_in, d_keys_out, d_vals_in, d_vals_out,
+            vocab_size, 0, 32, stream);
+        temp_bytes = std::max({rs_full_bytes, topk_bytes, rs_topk_bytes});
         if (cudaMalloc(&d_temp, temp_bytes) != cudaSuccess) {
             free();
             return false;
@@ -800,12 +818,31 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size,
         d_logits, vocab_size, inv_temperature, sc.d_max_sum,
         sc.d_keys_in, sc.d_vals_in);
 
-    // Step 3: CUB radix sort descending
-    cub::DeviceRadixSort::SortPairsDescending(
-        sc.d_temp, sc.temp_bytes,
-        sc.d_keys_in, sc.d_keys_out,
-        sc.d_vals_in, sc.d_vals_out,
-        vocab_size, 0, 32, stream);
+    // Step 3: extract top_k via DeviceTopK (unsorted), then sort just those k.
+    // Much faster than a full radix sort over the whole vocab when k << vocab.
+    {
+        size_t tk_bytes = sc.temp_bytes;
+        cub::DeviceTopK::MaxPairs(
+            sc.d_temp, tk_bytes,
+            sc.d_keys_in, sc.d_keys_out,
+            sc.d_vals_in, sc.d_vals_out,
+            vocab_size, top_k,
+            ::cuda::execution::require(
+                ::cuda::execution::determinism::not_guaranteed,
+                ::cuda::execution::output_ordering::unsorted));
+        size_t rs_bytes = sc.temp_bytes;
+        // In-place sort: copy outputs back to inputs as the source for the
+        // small sort, write sorted result to outputs.
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(sc.d_keys_in, sc.d_keys_out,
+            top_k * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(sc.d_vals_in, sc.d_vals_out,
+            top_k * sizeof(int32_t), cudaMemcpyDeviceToDevice, stream));
+        cub::DeviceRadixSort::SortPairsDescending(
+            sc.d_temp, rs_bytes,
+            sc.d_keys_in, sc.d_keys_out,
+            sc.d_vals_in, sc.d_vals_out,
+            top_k, 0, 32, stream);
+    }
 
     // Step 4: Top-p filter + sample from sorted top-k
     topp_sample_from_sorted_kernel<<<1, 1, 0, stream>>>(

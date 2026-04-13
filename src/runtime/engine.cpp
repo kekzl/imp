@@ -13,6 +13,7 @@
 #include "core/logging.h"
 
 #include <cstring>
+#include <cstdlib>
 #include <cmath>
 #include <chrono>
 #include <algorithm>
@@ -334,6 +335,10 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     const auto& mcfg = model_->config();
 
     // --- Auto-detect max_seq_len and max_batch_size if not set ---
+    if (const char* env_msl = std::getenv("IMP_MAX_SEQ_LEN")) {
+        int v = std::atoi(env_msl);
+        if (v > 0) { config_.max_seq_len = v; IMP_LOG_INFO("max_seq_len: env IMP_MAX_SEQ_LEN=%d", v); }
+    }
     if (config_.max_seq_len <= 0) {
         int model_ctx = mcfg.max_seq_len;  // from GGUF metadata
         // Cap based on available VRAM: reserve ~30% for KV cache
@@ -382,23 +387,16 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
 
     // --- Auto-detect KV cache dtype ---
-    // Default to FP8 E4M3 on sm_90+ for ~50% KV VRAM savings
+    // Default to FP8 E4M3 for ~50% KV VRAM savings
     if (config_.kv_cache_dtype == DType::FP16) {
-        int sm = get_device_sm_version();
-        if (sm >= 90) {
-            config_.kv_cache_dtype = DType::FP8_E4M3;
-            IMP_LOG_INFO("KV cache dtype: auto → FP8_E4M3 (sm_%d)", sm);
-        }
+        config_.kv_cache_dtype = DType::FP8_E4M3;
+        IMP_LOG_INFO("KV cache dtype: auto → FP8_E4M3");
     }
 
     // --- Auto-detect FP8 prefill ---
-    // Enable by default on sm_90+ unless already set
     if (!config_.use_fp8_prefill) {
-        int sm = get_device_sm_version();
-        if (sm >= 90) {
-            config_.use_fp8_prefill = true;
-            IMP_LOG_INFO("FP8 prefill: auto → enabled (sm_%d)", sm);
-        }
+        config_.use_fp8_prefill = true;
+        IMP_LOG_INFO("FP8 prefill: auto → enabled");
     }
 
     // --- Resolve auto-detection flags ---
@@ -408,38 +406,16 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         if (model_->layer(i).gdn_gate.data != nullptr) n_gdn_auto++;
 
     if (config_.use_nvfp4_decode < 0) {
-        int sm = get_device_sm_version();
         if (n_gdn_auto > 0) {
             // GDN models with large d_model: enable NVFP4 for attention + FFN weights,
             // but SSM/GDN projections (ssm_in/ssm_out) will be excluded in
             // pre_dequant_weights to preserve recurrent state precision.
-            // Small GDN models (d_model<3072, e.g. Qwen3.5-4B d_model=2560) are
-            // ~2% slower with NVFP4 — only ~40% of weights benefit (attention+FFN)
-            // and the GEMV overhead doesn't pay off at small dimensions.
-            if (sm >= 120) {
-                config_.use_nvfp4_decode = 2;
-                IMP_LOG_INFO("NVFP4 decode: auto → mode 2 (GDN model, %d recurrent layers — "
-                             "ssm_in/ssm_out excluded for precision)", n_gdn_auto);
-            } else if (sm >= 90) {
-                config_.use_nvfp4_decode = 1;
-                IMP_LOG_INFO("NVFP4 decode: auto → mode 1 (GDN model, %d recurrent layers — "
-                             "ssm_in/ssm_out excluded for precision)", n_gdn_auto);
-            } else {
-                config_.use_nvfp4_decode = 0;
-            }
-        } else if (n_gdn_auto > 0) {
-            // Small GDN model (d_model < 3072): NVFP4 overhead exceeds savings
-            config_.use_nvfp4_decode = 0;
-            IMP_LOG_INFO("NVFP4 decode: auto → disabled (GDN model, d_model=%d < 3072)", mcfg.d_model);
-        } else if (sm >= 120) {
             config_.use_nvfp4_decode = 2;
-            IMP_LOG_INFO("NVFP4 decode: auto → mode %d (sm_%d)", config_.use_nvfp4_decode, sm);
-        } else if (sm >= 90) {
-            config_.use_nvfp4_decode = 1;
-            IMP_LOG_INFO("NVFP4 decode: auto → mode %d (sm_%d)", config_.use_nvfp4_decode, sm);
+            IMP_LOG_INFO("NVFP4 decode: auto → mode 2 (GDN model, %d recurrent layers — "
+                         "ssm_in/ssm_out excluded for precision)", n_gdn_auto);
         } else {
-            config_.use_nvfp4_decode = 0;
-            IMP_LOG_INFO("NVFP4 decode: auto → disabled (sm_%d < sm_90)", sm);
+            config_.use_nvfp4_decode = 2;
+            IMP_LOG_INFO("NVFP4 decode: auto → mode 2");
         }
     }
 
@@ -469,6 +445,50 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         }
     }
 
+    // Gemma 4: FP8 prefill, NVFP4 prefill, CUTLASS paths, and CUDA graphs all have
+    // incompatibilities with the per-layer head_dim + split MoE tensor layout.
+    // Force plain FP16 paths for Gemma 4 until proper kernels are added.
+    if (model_->config().arch == ModelArch::GEMMA4) {
+        // CUDA graphs: enabled for Gemma-4 decode. The MoE decode fast path is fully
+        // device-side (dp4a GEMV, no D2H memcpy), so graph capture works.
+        // Only the MoE prefill path uses D2H sync, but prefill is never graph-captured.
+        if (config_.use_fp8_prefill) {
+            IMP_LOG_INFO("Gemma 4: disabling FP8 prefill (per-layer head_dim not yet supported)");
+            config_.use_fp8_prefill = 0;
+        }
+        if (config_.use_nvfp4_decode) {
+            IMP_LOG_INFO("Gemma 4: disabling NVFP4 decode cache (per-layer head_dim not yet supported)");
+            config_.use_nvfp4_decode = 0;
+        }
+        if (config_.dual_path_quant) {
+            IMP_LOG_INFO("Gemma 4: disabling dual_path_quant");
+            config_.dual_path_quant = false;
+        }
+        // Force FP16 KV cache (FP8 KV cache calibration reads narrow stride incorrectly)
+        if (config_.kv_cache_dtype == DType::FP8_E4M3) {
+            IMP_LOG_INFO("Gemma 4: forcing FP16 KV cache (FP8 stride mismatch)");
+            config_.kv_cache_dtype = DType::FP16;
+        }
+        // Gemma 4 output_norm has extreme outliers (max=588). Small numeric jitter
+        // from cuBLAS algo autotuning / split-K atomics amplifies into wildly
+        // different top-1 picks (coherent " Paris" vs garbage "\n"). Force
+        // deterministic GEMM paths so generation is stable run-to-run.
+        if (!getenv("IMP_DETERMINISTIC_GEMM")) {
+            setenv("IMP_DETERMINISTIC_GEMM", "1", 1);
+            IMP_LOG_INFO("Gemma 4: enabling IMP_DETERMINISTIC_GEMM (output_norm outliers amplify algo jitter)");
+        }
+        if (!getenv("CUBLAS_WORKSPACE_CONFIG")) {
+            setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 1);
+            IMP_LOG_INFO("Gemma 4: setting CUBLAS_WORKSPACE_CONFIG=:4096:8 for deterministic grouped GEMM");
+        }
+        // Enable MMVQ for all weight GEMMs — quantized matmul matching llama.cpp's
+        // accumulation behavior, critical for 128-expert MoE precision.
+        if (!getenv("IMP_GEMMA4_FORCE_MMVQ")) {
+            setenv("IMP_GEMMA4_FORCE_MMVQ", "1", 0);
+            IMP_LOG_INFO("Gemma 4: enabling MMVQ for all weight GEMMs (numerical parity with llama.cpp)");
+        }
+    }
+
     // --- Core initialization ---
     // 5% headroom (was 10%) — MoE models (30B Q6_K) need every MiB on 32GB.
     // WSL2/WDDM has ~500 MiB driver overhead, 5% of 32GB = 1.6 GB covers it.
@@ -484,7 +504,11 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     if (!init_weights()) return false;
     if (!init_kv_cache()) return false;
     if (!init_features()) return false;
-    warmup();
+    if (getenv("IMP_NO_WARMUP")) {
+        IMP_LOG_INFO("Warmup SKIPPED (IMP_NO_WARMUP)");
+    } else {
+        warmup();
+    }
 
     return true;
 }
@@ -539,7 +563,13 @@ bool Engine::init_weights() {
         if (n_attn == 0) n_attn = mcfg.n_layers;
         size_t kv_block_bytes = static_cast<size_t>(est_bs) * mcfg.n_kv_heads * head_dim_est * elem_sz;
         size_t kv_est = static_cast<size_t>(blocks_per_seq * config_.max_batch_size) * 2 * n_attn * kv_block_bytes;
-        { size_t total_vram = 0, f = 0; cudaMemGetInfo(&f, &total_vram); kv_est = std::min(kv_est, total_vram / 5); }
+        { size_t total_vram = 0, f = 0; cudaMemGetInfo(&f, &total_vram);
+          // For large MoE models (128 experts), prefer fitting all experts on GPU
+          // over reserving huge KV cache. All-GPU experts enable the decode fast
+          // path (dp4a GEMV, no D2H sync) and CUDA graph capture.
+          size_t vram_frac = (mcfg.n_experts > 16) ? 10 : 5;
+          kv_est = std::min(kv_est, total_vram / vram_frac);
+        }
         expert_reserve += kv_est;
 
         if (mcfg.ssm_inner_size > 0) {
@@ -610,6 +640,9 @@ bool Engine::init_weights() {
             IMP_LOG_INFO("Disabling CUDA graphs: expert weights on host");
             config_.use_cuda_graphs = false;
         }
+        // MoE decode fast path is fully device-side (no D2H memcpy) — graph-safe.
+        // Only MoE prefill paths use D2H sync for expert_offsets, but prefill is
+        // never captured in CUDA graphs.
     }
 
     // Phase 2: allocate GPU workspace
@@ -682,22 +715,42 @@ bool Engine::init_kv_cache() {
         kv_sketch_dim = head_dim * mult;
     }
 
-    // Detect sm_120+ for MXFP4 TurboQuant: FP4 E2M1 + UE8M0 micro-scales
+    // MXFP4 TurboQuant: FP4 E2M1 + UE8M0 micro-scales (requires head_dim % 32 == 0)
     bool tq_use_mxfp4 = false;
-    if (config_.kv_cache_dtype == DType::TURBOQUANT) {
-        cudaDeviceProp prop;
-        cudaGetDeviceProperties(&prop, 0);
-        int sm_ver = prop.major * 10 + prop.minor;
-        if (sm_ver >= 120 && (head_dim % 32 == 0)) {
-            tq_use_mxfp4 = true;
-            IMP_LOG_INFO("TurboQuant: sm_%d detected, using MXFP4 FP4 E2M1 + UE8M0 for K directions", sm_ver);
-        }
+    if (config_.kv_cache_dtype == DType::TURBOQUANT && (head_dim % 32 == 0)) {
+        tq_use_mxfp4 = true;
+        IMP_LOG_INFO("TurboQuant: using MXFP4 FP4 E2M1 + UE8M0 for K directions");
     }
 
-    auto kv_cache = std::make_unique<KVCache>(
-        n_kv_layers, mcfg.n_kv_heads, head_dim,
-        config_.kv_cache_dtype, max_blocks, kv_bs, &vram_alloc_, kv_sketch_dim,
-        tq_use_mxfp4);
+    // Per-layer KV shape path (Gemma 4 dual attention geometry): build per-layer
+    // nkv/hd arrays restricted to attention layers (hybrid models may have non-attn layers).
+    std::unique_ptr<KVCache> kv_cache;
+    if (!mcfg.head_dim_per_layer.empty() &&
+        config_.kv_cache_dtype != DType::TURBOQUANT &&
+        config_.kv_cache_dtype != DType::TURBOQUANT_LITE &&
+        config_.kv_cache_dtype != DType::INT8 &&
+        config_.kv_cache_dtype != DType::INT4) {
+        std::vector<int> per_layer_nkv(n_kv_layers, 0);
+        std::vector<int> per_layer_hd(n_kv_layers, 0);
+        for (int l = 0, k = 0; l < mcfg.n_layers && k < n_kv_layers; l++) {
+            // Only attention layers get KV cache entries
+            int attn_nkv = (l < (int)mcfg.n_kv_heads_per_layer.size())
+                           ? mcfg.n_kv_heads_per_layer[l] : mcfg.n_kv_heads;
+            if (attn_nkv <= 0) continue;  // non-attention layer (SSM/GDN)
+            per_layer_nkv[k] = attn_nkv;
+            per_layer_hd[k] = (l < (int)mcfg.head_dim_per_layer.size() && mcfg.head_dim_per_layer[l] > 0)
+                              ? mcfg.head_dim_per_layer[l] : head_dim;
+            k++;
+        }
+        kv_cache = std::make_unique<KVCache>(
+            n_kv_layers, per_layer_nkv, per_layer_hd,
+            config_.kv_cache_dtype, max_blocks, kv_bs, &vram_alloc_);
+    } else {
+        kv_cache = std::make_unique<KVCache>(
+            n_kv_layers, mcfg.n_kv_heads, head_dim,
+            config_.kv_cache_dtype, max_blocks, kv_bs, &vram_alloc_, kv_sketch_dim,
+            tq_use_mxfp4);
+    }
     kv_cache_raw_ = kv_cache.get();
     kv_manager_ = std::make_unique<KVCacheManager>(std::move(kv_cache));
 
@@ -782,6 +835,8 @@ bool Engine::init_kv_cache() {
             }
         }
     }
+
+    // (Gemma 4 FP8 prefill disabled earlier, before executor init)
 
     // Detect pure Mamba2 SSM layers (layers with ssm_in but without gdn_gate).
     // GDN-only models (Qwen3.5) are graph-compatible; pure SSM (Nemotron-H) is not yet.
@@ -948,14 +1003,14 @@ bool Engine::init_features() {
         }
         for (int32_t sid : chat_template_.stop_token_ids())
             keep_ids.push_back(sid);
-        // Think tokens (<think>/<\/think>) must not be banned — think models
-        // generate these to enter/exit reasoning mode. Banning them causes
-        // immediate stop on structured output prompts.
+        // Think tokens must not be banned — think models generate these to
+        // enter/exit reasoning mode. Support both Qwen (<think>/<\/think>) and
+        // Gemma-4 (<|think|>/<|/think|>) naming conventions.
         if (tok) {
-            int32_t ts = tok->find_token("<think>");
-            int32_t te = tok->find_token("</think>");
-            if (ts >= 0) keep_ids.push_back(ts);
-            if (te >= 0) keep_ids.push_back(te);
+            for (const char* name : {"<think>", "</think>", "<|think|>", "<|/think|>"}) {
+                int32_t tid = tok->find_token(name);
+                if (tid >= 0) keep_ids.push_back(tid);
+            }
         }
         auto is_kept = [&](int32_t id) {
             return std::find(keep_ids.begin(), keep_ids.end(), id) != keep_ids.end();
@@ -1010,6 +1065,13 @@ bool Engine::init_features() {
         if (!banned_token_ids_.empty()) {
             IMP_LOG_INFO("Banned %zu special tokens from generation",
                          banned_token_ids_.size());
+            if (tok) {
+                std::string bl;
+                for (int32_t bid : banned_token_ids_) {
+                    bl += std::to_string(bid) + "(" + tok->token_text(bid) + ") ";
+                }
+                IMP_LOG_INFO("  banned: %s", bl.c_str());
+            }
         }
     }
 
@@ -1876,7 +1938,7 @@ void Engine::step_decode_process_outputs(
     // Try async graph loop after first decode step.
     // Think budget is now handled device-side in post_decode_step_kernel.
     if (decode_graph_pool_[0].is_ready() && valid_decode.size() == 1 &&
-        !offload_mgr_ && !ssm_state_ &&
+        !offload_mgr_ &&
         !config_.enable_speculative &&
         config_.use_cuda_graphs && !async_graph_runner_.is_setup() &&
         !needs_logprobs && !needs_json_mode && !needs_schema_mode) {
@@ -1968,7 +2030,6 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     // Penalties are applied device-side via apply_penalties_device_count in the graph loop.
     if (req->status == RequestStatus::DECODING && !req->output_tokens.empty() &&
         config_.use_cuda_graphs && !offload_mgr_ &&
-        !ssm_state_ &&
         !config_.enable_speculative) {
         int32_t first_token = req->output_tokens.back();
         auto graph_tokens = try_graph_loop_decode(req, first_token, decode_stream());

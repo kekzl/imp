@@ -42,12 +42,10 @@ private:
     int decode_sms_ = 0;
     float prefill_ratio_ = 0.8f;
 
-#if IMP_CUDA_13_1
     cudaExecutionContext_t prefill_green_ctx_ = nullptr;
     cudaExecutionContext_t decode_green_ctx_ = nullptr;
     cudaDevResourceDesc_t prefill_resource_desc_ = nullptr;
     cudaDevResourceDesc_t decode_resource_desc_ = nullptr;
-#endif
 };
 
 } // namespace imp

@@ -59,12 +59,26 @@ python -m modelopt.llm.ptq \
 
 ## imp inference pipeline
 
+**Dense models (attention + FFN):**
 ```
 Model Optimizer SafeTensors
-  → SafeTensors loader (FP4 packed + scales)
-  → Prefill: CUTLASS MXFP4 GEMM (sm_120 Tensor Cores)
-  → Decode:  MXFP4 GEMV (register-cached warp-parallel)
+  → SafeTensors loader (FP4 packed + scales, BF16 norms/router → FP16)
+  → Phase 0: direct registration in NVFP4 decode cache (no re-quantization)
+  → Phase 3b: CUTLASS NVFP4 conversion (SfAtom scale factor layout)
+  → Prefill: CUTLASS NVFP4 GEMM via gemm_dispatch() (sm_120 Tensor Cores)
+  → Decode:  NVFP4 GEMV (prmt register LUT, K-parallel)
 ```
+
+**MoE models (per-expert dispatch):**
+```
+Model Optimizer SafeTensors (per-expert weights)
+  → Per-expert registration in NVFP4 cache
+  → Prefill: per-expert NVFP4 GEMV (serial dispatch, legacy path)
+  → Decode:  per-expert NVFP4 GEMV (serial dispatch)
+  → CUDA Graphs disabled (MoE routing uses D2H memcpy)
+```
+
+**Tested:** Qwen3-Coder-30B-A3B-FP4 (128 experts, 38 tok/s decode, 90 tok/s prefill on RTX 5090).
 
 ## Legacy note
 

@@ -463,6 +463,9 @@ bool fmha_sm120_prefill(
                          BQ, HD, smem, cudaGetErrorString(attr_err)); \
             return false; \
         } \
+        cudaFuncSetAttribute(fmha_sm120_kernel<BQ, HD>, \
+            cudaFuncAttributePreferredSharedMemoryCarveout, \
+            cudaSharedmemCarveoutMaxShared); \
         fmha_sm120_kernel<BQ, HD><<<grid, block, smem, stream>>>( \
             reinterpret_cast<const half*>(Q.data), \
             reinterpret_cast<const half*>(K.data), \
@@ -920,6 +923,9 @@ bool fmha_sm120_fp8_prefill(
             cudaFuncAttributeMaxDynamicSharedMemorySize, \
             static_cast<int>(smem)); \
         if (attr_err != cudaSuccess) return false; \
+        cudaFuncSetAttribute(fmha_sm120_fp8_kernel<BQ, HD>, \
+            cudaFuncAttributePreferredSharedMemoryCarveout, \
+            cudaSharedmemCarveoutMaxShared); \
         fmha_sm120_fp8_kernel<BQ, HD><<<grid, block, smem, stream>>>( \
             reinterpret_cast<const half*>(Q.data), \
             reinterpret_cast<const half*>(K.data), \

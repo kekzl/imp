@@ -11,7 +11,10 @@
 
 #include "graph/executor.h"
 #include "graph/executor_kernels.h"
+#include "graph/executor_debug.h"
 #include "compute/embedding.h"
+#include "compute/gemv_ggml_compat.h"
+#include "compute/ggml_mmvq.h"
 #include "compute/layernorm.h"
 #include "compute/rope.h"
 #include "compute/gemm.h"
@@ -21,7 +24,6 @@
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/attention_cutlass_fmha.h"
 #include "compute/activation.h"
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"
@@ -32,6 +34,7 @@
 #include "compute/gdn.h"
 #include "memory/gdn_state.h"
 #include "quant/quant_gemm.h"
+#include "quant/nvfp4_gemm.h"
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
@@ -46,10 +49,46 @@
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
+#include <vector>
 #include <algorithm>
 
 
 namespace imp {
+
+// Multiply each routing weight by the scale of its selected expert.
+// Used by Gemma 4 to apply per-expert output scale before the routing sum.
+__global__ void moe_apply_per_expert_scale_kernel(
+    float* __restrict__ weights,            // [n_weights = n_tokens * top_k]
+    const int32_t* __restrict__ indices,    // [n_weights]
+    const __half* __restrict__ scales,      // [n_experts]
+    int n_weights)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n_weights) return;
+    int eid = indices[idx];
+    float s = __half2float(scales[eid]);
+    weights[idx] *= s;
+}
+
+// Replace +/-Inf with 0 in an FP16 tensor (in-place).
+// Used to sanitize FP16 GEMM outputs that overflow (e.g. Gemma 4 shared MLP at deep layers).
+__global__ void sanitize_fp16_kernel(__half* __restrict__ data, int64_t n) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    __half v = data[idx];
+    // __hisinf returns ±1 for ±inf, 0 otherwise. __hisnan returns non-zero for NaN.
+    if (__hisinf(v) != 0 || __hisnan(v)) {
+        data[idx] = __float2half(0.0f);
+    }
+}
+
+static void sanitize_fp16(__half* data, int64_t n, cudaStream_t stream) {
+    if (n <= 0) return;
+    int threads = 256;
+    int blocks = static_cast<int>((n + threads - 1) / threads);
+    sanitize_fp16_kernel<<<blocks, threads, 0, stream>>>(data, n);
+}
+
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -67,7 +106,7 @@ static bool can_decode_fast(int n, const Tensor& expert_up_packed,
             (up_qtype == GGMLQuantType::Q6_K || up_qtype == GGMLQuantType::Q8_0 ||
              up_qtype == GGMLQuantType::Q4_0 || up_qtype == GGMLQuantType::Q4_K ||
              up_qtype == GGMLQuantType::Q5_K || up_qtype == GGMLQuantType::Q2_K ||
-             up_qtype == GGMLQuantType::Q3_K));
+             up_qtype == GGMLQuantType::Q3_K || up_qtype == GGMLQuantType::Q5_1));
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +115,8 @@ static bool can_decode_fast(int n, const Tensor& expert_up_packed,
 // ---------------------------------------------------------------------------
 static void apply_expert_activation(void* gate_data, void* up_data, void* swiglu_data,
                                     bool non_gated, int64_t rows, int64_t eff,
-                                    DType compute_dtype, cudaStream_t stream) {
+                                    DType compute_dtype, FFNActivation act_type,
+                                    cudaStream_t stream) {
     int64_t act_shape[2] = {rows, eff};
     if (non_gated) {
         Tensor up_t(up_data, compute_dtype, 2, act_shape, true);
@@ -85,7 +125,8 @@ static void apply_expert_activation(void* gate_data, void* up_data, void* swiglu
         Tensor g(gate_data, compute_dtype, 2, act_shape, true);
         Tensor u(up_data, compute_dtype, 2, act_shape, true);
         Tensor a(swiglu_data, compute_dtype, 2, act_shape, true);
-        swiglu(g, u, a, stream);
+        if (act_type == FFNActivation::GEGLU) geglu(g, u, a, stream);
+        else swiglu(g, u, a, stream);
     }
 }
 
@@ -123,7 +164,13 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
     // 1. Save residual (skip if decode fast path will handle it —
     //    h.data is never written before the final weighted_sum_residual).
-    const Tensor& norm_w = (ly.ffn_norm.data != nullptr) ? ly.ffn_norm : ly.attn_norm;
+    // Gemma 4: parallel branches — MoE experts use rmsnorm(h, pre_ffw_norm_2),
+    // shared MLP uses rmsnorm(h, ffn_norm). Pick MoE-side norm here; the shared
+    // branch recomputes its own norm later (reading from the saved residual).
+    const Tensor& norm_w =
+        (cfg.arch == ModelArch::GEMMA4 && ly.ffn_pre_norm_2.data != nullptr)
+            ? ly.ffn_pre_norm_2
+        : (ly.ffn_norm.data != nullptr) ? ly.ffn_norm : ly.attn_norm;
 
     // Pre-check: does NVFP4 MoE cache cover all expert tensors for this layer?
     // If so, the NVFP4 path doesn't need Q8_1 quantization (takes FP16 directly).
@@ -147,8 +194,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                         cudaMemcpyDeviceToDevice, stream));
     }
     // Fused RMSNorm + Q8_1: skip for NVFP4-covered layers (NVFP4 takes FP16 directly)
+    // Gemma-4 with FP32 accum: compute norm from FP32 residual, then quantize to Q8_1
+    // separately. The fused kernel reads FP16 h which loses ~0.03% per element that
+    // compounds catastrophically through the 128-expert top-8 MoE routing.
+    bool gemma4_fp32_norm = (cfg.arch == ModelArch::GEMMA4 && fp32_accum_buf_ != nullptr);
     bool moe_fused_norm_q8 = (n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
-                               h.dtype == DType::FP16 && !nvfp4_covers_layer);
+                               h.dtype == DType::FP16 && !nvfp4_covers_layer && !gemma4_fp32_norm);
     if (moe_fused_norm_q8) {
         // Fused: RMSNorm + Q8_1 (also writes FP16 norm_out for gate logits)
         rmsnorm_quantize_q8_1(static_cast<const half*>(h.data),
@@ -157,20 +208,100 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                                 static_cast<half*>(no.data),
                                 d, eps, stream, norm_w_off_);
     } else {
-        rmsnorm(h, norm_w, no, eps, stream, norm_w_off_);
+        // Gemma-4 FP32 accum: read FP32 residual directly to avoid FP16 round-trip.
+        if (gemma4_fp32_norm) {
+            Tensor fp32_h = view_tokens(fp32_hidden_, n);
+            rmsnorm_fp32_to_fp16(fp32_h, norm_w, no, eps, stream, norm_w_off_);
+            // Populate Q8_1 buffer from FP16 norm_out for dp4a decode path
+            if (n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr) {
+                quantize_fp16_to_q8_1(static_cast<const half*>(no.data),
+                                       static_cast<block_q8_1*>(qscratch_.q8_1_buf),
+                                       qscratch_.d8_buf, d, stream);
+            }
+        } else {
+            rmsnorm(h, norm_w, no, eps, stream, norm_w_off_);
+        }
     }
 
     // 3. Gate logits + top-k routing
-    //    For n=1 decode with FP16 weights and pre-allocated buffers: use fused
-    //    kernel that computes gate GEMV + softmax/sigmoid + top-k in one launch.
-    //    Otherwise: separate gate GEMV + topk gating kernels.
+    Tensor router_in = no;
+    // Gemma-4 custom router: logits = gate_inp @ (rmsnorm_noweight(h) * (1/sqrt(d)) * gate_inp_scale)
+    // This matches llama.cpp's gemma4-iswa.cpp:151-155.
+    // The standard path (router_in = rmsnorm(h, ffn_pre_norm_2)) uses the WRONG norm weight
+    // and produces ~2x too small router logits, causing wrong expert selection.
+    if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_gate_inp_scale.data != nullptr) {
+        // Gemma-4 custom router: logits = gate_inp @ (rmsnorm_noweight(h) * scale * (1/sqrt(d)))
+        // Keep router_in in FP32 to prevent precision loss that causes routing instability
+        // at later layers (L29). The FP16 intermediate loses enough precision to change
+        // expert selection in the 128-expert top-8 MoE.
+        if (fp32_accum_buf_ != nullptr && n == 1) {
+            // FP32 router path: rmsnorm(fp32_h, gate_inp_scale) → FP32, then FP32 GEMV
+            // Reuse moe_.scatter_out (FP32, max_tokens*d) as FP32 scratch
+            float* fp32_router = static_cast<float*>(moe_.scatter_out.data);
+            Tensor fp32_h = view_tokens(fp32_hidden_, n);
+            float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
+            // Fused: rmsnorm(fp32_h, gate_inp_scale) * inv_sqrt_d → fp32_router
+            rmsnorm_fp32_to_fp32(fp32_h, ly.ffn_gate_inp_scale,
+                                  fp32_router, n, d, eps, stream, 0.0f);
+            // Scale by 1/sqrt(d) in FP32
+            {
+                int64_t total = static_cast<int64_t>(n) * d;
+                int thr = 256;
+                int blk = static_cast<int>((total + thr - 1) / thr);
+                scale_fp32_kernel<<<blk, thr, 0, stream>>>(fp32_router, inv_sqrt_d, total);
+            }
+            // Gate GEMV: FP32 input × FP16 gate → FP32 logits
+            // Convert router_in to FP16 for the existing gemv_gate_fp32 kernel.
+            // TODO: implement FP32-input gate GEMV for full precision
+            int64_t ri_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
+            router_in = Tensor(moe_.expert_down.data, compute_dtype_, 2, ri_shape, true);
+            {
+                int64_t total = static_cast<int64_t>(n) * d;
+                int thr = 256;
+                int blk = static_cast<int>((total + thr - 1) / thr);
+                fp32_to_fp16_kernel<<<blk, thr, 0, stream>>>(
+                    fp32_router, static_cast<half*>(router_in.data), total);
+            }
+        } else {
+            // FP16 fallback (prefill or non-FP32-accum)
+            int64_t ri_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
+            router_in = Tensor(moe_.scatter_out.data, compute_dtype_, 2, ri_shape, true);
+            if (fp32_accum_buf_ != nullptr) {
+                Tensor fp32_h = view_tokens(fp32_hidden_, n);
+                rmsnorm_fp32_to_fp16(fp32_h, ly.ffn_gate_inp_scale, router_in, eps, stream, 0.0f);
+            } else {
+                rmsnorm(h, ly.ffn_gate_inp_scale, router_in, eps, stream, 0.0f);
+            }
+            int64_t total_elems = static_cast<int64_t>(n) * d;
+            int threads_s = 256;
+            int blocks_s = static_cast<int>((total_elems / 2 + threads_s - 1) / threads_s);
+            float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
+            scale_fp16_kernel<<<blocks_s, threads_s, 0, stream>>>(
+                static_cast<half*>(router_in.data),
+                __float2half(inv_sqrt_d),
+                total_elems);
+        }
+    }
+
     const void* router_bias_ptr = ly.moe_router_bias.data;
+    // Gemma-4: moe_router_bias may hold ffn_down_exps.scale (per-expert output
+    // multiplier) due to GGUF name collision — NOT a router bias. Don't use it.
+    if (cfg.arch == ModelArch::GEMMA4 && router_bias_ptr != nullptr) {
+        if (layer == 0) IMP_LOG_INFO("Gemma 4: ignoring moe_router_bias (likely ffn_down_exps.scale, not router bias)");
+        router_bias_ptr = nullptr;
+    }
     bool use_sigmoid = cfg.moe_sigmoid_gating;
     bool norm_weights = cfg.expert_weights_norm;
 
     GGMLQuantType up_qtype = ly.expert_up_qtype;
     bool will_decode_fast = can_decode_fast(n, ly.expert_up_packed, up_qtype,
                                             moe_.dequant_buf, compute_dtype_);
+    // Gemma 4: dp4a decode fast path ENABLED by default. dp4a matches llama's
+    // Q4_K×Q8_1 accumulation for MoE experts, preventing the routing drift that
+    // occurs with FP16 dequant+cuBLAS. Set IMP_G4_NO_DECODE_FAST=1 to disable.
+    if (cfg.arch == ModelArch::GEMMA4 && getenv("IMP_G4_NO_DECODE_FAST")) {
+        will_decode_fast = false;
+    }
 
     MoeRoutingResult routing;
 
@@ -184,7 +315,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         moe_.routing_buffers.pool && will_decode_fast) {
         // Fused: gate GEMV + softmax/sigmoid + top-k in one kernel (1 launch)
         moe_gate_topk_fused(static_cast<const half*>(ly.moe_gate.data),
-                            static_cast<const half*>(no.data),
+                            static_cast<const half*>(router_in.data),
                             ne, d, top_k,
                             moe_.routing_buffers, routing, stream,
                             use_sigmoid, norm_weights, router_bias_ptr);
@@ -194,13 +325,13 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
         if (n == 1 && compute_dtype_ == DType::FP16 && ly.moe_gate.dtype == DType::FP16) {
             gemv_gate_fp32(static_cast<const half*>(ly.moe_gate.data),
-                           static_cast<const half*>(no.data),
+                           static_cast<const half*>(router_in.data),
                            static_cast<float*>(gate_logits_f32.data),
                            ne, d, stream);
         } else {
             int64_t gl_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(ne)};
             Tensor gate_logits_tmp(moe_.gathered.data, compute_dtype_, 2, gl_shape, true);
-            gemm(no, ly.moe_gate, gate_logits_tmp, 1.0f, 0.0f, stream);
+            gemm(router_in, ly.moe_gate, gate_logits_tmp, 1.0f, 0.0f, stream);
 
             int64_t numel = static_cast<int64_t>(n) * ne;
             int threads = 256;
@@ -217,6 +348,17 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             }
         }
 
+        if (debug_forward_enabled() && layer == 0) {
+            // Dump router logits for last token
+            std::vector<float> rl(ne);
+            int last_tok = n - 1;
+            cudaMemcpy(rl.data(), static_cast<const float*>(gate_logits_f32.data) + last_tok * ne,
+                       ne * sizeof(float), cudaMemcpyDeviceToHost);
+            double rsum = 0; for (auto v : rl) rsum += v;
+            double rss = 0; for (auto v : rl) rss += v*v;
+            fprintf(stderr, "[DEBUG_FWD] L0_router_logits[%d]: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f\n",
+                    last_tok, rsum, std::sqrt(rss), rl[0], rl[1], rl[2]);
+        }
         if (moe_.routing_buffers.pool) {
             moe_topk_gating(gate_logits_f32, top_k, moe_.routing_buffers, routing, stream, use_sigmoid, norm_weights, router_bias_ptr, /*skip_sorting=*/will_decode_fast);
         } else {
@@ -224,6 +366,19 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         }
     }
 
+    // Dump routing for last token (use direct getenv, not debug_forward_enabled)
+    if (layer == 0 && getenv("IMP_DUMP_ROUTING")) {
+        int last_tok = n - 1;
+        std::vector<int32_t> h_idx(top_k);
+        std::vector<float> h_wts(top_k);
+        cudaMemcpy(h_idx.data(), static_cast<const int32_t*>(routing.expert_indices.data) + last_tok * top_k,
+                   top_k * sizeof(int32_t), cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_wts.data(), static_cast<const float*>(routing.expert_weights.data) + last_tok * top_k,
+                   top_k * sizeof(float), cudaMemcpyDeviceToHost);
+        fprintf(stderr, "[DEBUG_FWD] L0_routing[%d]: experts=[%d,%d,%d,%d,%d,%d,%d,%d] weights=[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]\n",
+                last_tok, h_idx[0], h_idx[1], h_idx[2], h_idx[3], h_idx[4], h_idx[5], h_idx[6], h_idx[7],
+                h_wts[0], h_wts[1], h_wts[2], h_wts[3], h_wts[4], h_wts[5], h_wts[6], h_wts[7]);
+    }
     // 4b. Expert weight scaling (Nemotron: scale = 2.5)
     if (cfg.expert_weights_scale != 1.0f) {
         int64_t n_weights = static_cast<int64_t>(n) * top_k;
@@ -232,6 +387,22 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         scale_fp32_kernel<<<blocks_s, threads_s, 0, stream>>>(
             static_cast<float*>(routing.expert_weights.data),
             cfg.expert_weights_scale, n_weights);
+    }
+
+    // 4c. Gemma 4: per-expert output scale. Multiply each token's routing weight
+    // by the scale of its selected expert. Mathematically equivalent to scaling
+    // each expert's down output then summing — saves a separate scatter pass.
+    // (Matches llama.cpp ffn_moe_down_scaled = MUL(ffn_moe_down, repeat(scale)).)
+    if (cfg.arch == ModelArch::GEMMA4 && ly.expert_down_scale.data != nullptr &&
+        ly.expert_down_scale.on_device) {
+        int64_t n_weights = static_cast<int64_t>(n) * top_k;
+        int threads_s = 256;
+        int blocks_s = static_cast<int>((n_weights + threads_s - 1) / threads_s);
+        moe_apply_per_expert_scale_kernel<<<blocks_s, threads_s, 0, stream>>>(
+            static_cast<float*>(routing.expert_weights.data),
+            static_cast<const int32_t*>(routing.expert_indices.data),
+            static_cast<const half*>(ly.expert_down_scale.data),
+            static_cast<int>(n_weights));
     }
 
     // Build per-expert tensor views for grouped GEMM.
@@ -461,27 +632,38 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             int eff_q8_blocks = eff / 32;
 
             if (!non_gated_experts) {
-                // Fused SwiGLU → Q8_1 (1 kernel instead of 2)
-                swiglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf,
-                                      top_k * eff, stream);
+                // Fused activation → Q8_1 (1 kernel instead of 2)
+                if (cfg.ffn_activation == FFNActivation::GEGLU) {
+                    if (layer == 0 && getenv("IMP_DEBUG_FORWARD"))
+                        fprintf(stderr, "[DEBUG_MoE] Using GEGLU activation for MoE experts\n");
+                    geglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf,
+                                         top_k * eff, stream);
+                } else {
+                    swiglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf,
+                                          top_k * eff, stream);
+                }
             } else {
                 // Non-gated (relu²): fused relu² + Q8_1 quantization (1 kernel)
                 relu_sqr_quantize_q8_1(up_buf, q8, qscratch_.d8_buf, top_k * eff, stream);
             }
 
-            // Down projection with dp4a GEMV
-            auto moe_gemv_dp4a_down = (up_qtype == GGMLQuantType::Q6_K)
+            // Down projection with dp4a GEMV — use down_qtype, NOT up_qtype
+            GGMLQuantType dqt = ly.expert_down_qtype;
+            auto moe_gemv_dp4a_down = (dqt == GGMLQuantType::Q6_K)
                 ? gemv_q6k_q8_1_moe_decode
-                : (up_qtype == GGMLQuantType::Q4_0)
+                : (dqt == GGMLQuantType::Q4_0)
                 ? gemv_q4_0_q8_1_moe_decode
-                : (up_qtype == GGMLQuantType::Q4_K)
+                : (dqt == GGMLQuantType::Q4_K)
                 ? gemv_q4_k_q8_1_moe_decode
-                : (up_qtype == GGMLQuantType::Q5_K)
+                : (dqt == GGMLQuantType::Q5_K)
                 ? gemv_q5_k_q8_1_moe_decode
-                : (up_qtype == GGMLQuantType::Q2_K)
+                : (dqt == GGMLQuantType::Q2_K)
                 ? gemv_q2_k_q8_1_moe_decode
-                : (up_qtype == GGMLQuantType::Q3_K)
-                ? gemv_q3_k_q8_1_moe_decode : gemv_q8_0_q8_1_moe_decode;
+                : (dqt == GGMLQuantType::Q3_K)
+                ? gemv_q3_k_q8_1_moe_decode
+                : (dqt == GGMLQuantType::Q5_1)
+                ? gemv_q5_1_q8_1_moe_decode
+                : gemv_q8_0_q8_1_moe_decode;
             size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_qtype);
             moe_gemv_dp4a_down(ly.expert_down_packed.data, expert_indices,
                           q8, qscratch_.d8_buf, down_buf,
@@ -492,19 +674,19 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             // Non-dp4a: separate activation + FP16 down GEMV
             apply_expert_activation(gate_buf, up_buf, act_buf,
                                     non_gated_experts, top_k, eff,
-                                    compute_dtype_, stream);
+                                    compute_dtype_, cfg.ffn_activation, stream);
             size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_qtype);
             half* down_input = non_gated_experts ? up_buf : act_buf;
-            if (up_qtype == GGMLQuantType::Q6_K) {
+            if (ly.expert_down_qtype == GGMLQuantType::Q6_K) {
                 gemv_q6k_moe_decode(ly.expert_down_packed.data, expert_indices,
                                     down_input, down_buf,
                                     d, eff, down_stride, /*x_stride=*/eff, top_k, stream);
-            } else if (up_qtype == GGMLQuantType::Q8_0) {
+            } else if (ly.expert_down_qtype == GGMLQuantType::Q8_0) {
                 gemv_q8_0_moe_decode(ly.expert_down_packed.data, expert_indices,
                                      down_input, down_buf,
                                      d, eff, down_stride, /*x_stride=*/eff, top_k, stream);
             } else {
-                IMP_LOG_ERROR("MoE non-dp4a down projection: no kernel for qtype %d, skipping GEMV", (int)up_qtype);
+                IMP_LOG_ERROR("MoE non-dp4a down projection: no kernel for qtype %d, skipping GEMV", (int)ly.expert_down_qtype);
             }
         }
 
@@ -608,7 +790,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         // Activation (FP16)
         apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                 moe_.expert_swiglu.data, non_gated_experts,
-                                expanded, eff, compute_dtype_, stream);
+                                expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
 
         // Down projection (reads from expanded-layout SwiGLU output, no indirection)
         char* fused_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -629,6 +811,151 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         }
 
         // Falls through to scatter (step 7)
+    } else if (getenv("IMP_G4_GGML_PREFILL") && cfg.arch == ModelArch::GEMMA4 &&
+               ly.expert_gate_packed.on_device && ly.expert_up_packed.on_device &&
+               ly.expert_down_packed.on_device) {
+    // =========================================================================
+    // GEMMA-4 ggml MMVQ PREFILL: process each token individually using ggml-
+    // compatible Q4_K×Q8_1 dp4a kernels with FP32 norm output, matching llama's
+    // full-precision path (no FP16 truncation at norm output).
+    // =========================================================================
+    if (layer == 0) IMP_LOG_INFO("MoE prefill: ggml MMVQ per-token path (n=%d, top_k=%d)", n, top_k);
+
+    half* gate_buf = static_cast<half*>(moe_.expert_gate.data);
+    half* up_buf   = static_cast<half*>(moe_.expert_up.data);
+    half* down_buf = static_cast<half*>(moe_.expert_down.data);
+
+    size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_qtype);
+    size_t up_stride = expert_stride(ly.expert_up_packed, up_qtype);
+    size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_qtype);
+
+    // Dedicated Q8_1 scratch buffer (persistent, sized for max of gate/up input d and down input eff)
+    static void* s_q8_scratch = nullptr;
+    static size_t s_q8_scratch_size = 0;
+    size_t q8_needed = std::max(
+        static_cast<size_t>((d + 31) / 32) * 36,
+        static_cast<size_t>((eff + 31) / 32) * 36);
+    if (!s_q8_scratch || s_q8_scratch_size < q8_needed) {
+        if (s_q8_scratch) cudaFree(s_q8_scratch);
+        cudaMalloc(&s_q8_scratch, q8_needed);
+        s_q8_scratch_size = q8_needed;
+    }
+
+    // FP32 norm output buffer (1 token × d floats, persistent)
+    static float* s_norm_fp32 = nullptr;
+    static int s_norm_fp32_d = 0;
+    if (!s_norm_fp32 || s_norm_fp32_d < d) {
+        if (s_norm_fp32) cudaFree(s_norm_fp32);
+        cudaMalloc(&s_norm_fp32, static_cast<size_t>(d) * sizeof(float));
+        s_norm_fp32_d = d;
+    }
+
+    // Process each token
+    for (int t = 0; t < n; t++) {
+        const int32_t* tok_experts = static_cast<const int32_t*>(routing.expert_indices.data)
+                                   + static_cast<int64_t>(t) * top_k;
+        const float* tok_weights = static_cast<const float*>(routing.expert_weights.data)
+                                 + static_cast<int64_t>(t) * top_k;
+
+        // FP32 norm output (FP32 residual → FP32 norm → FP32 Q8_1 quant)
+        const float* tok_norm_f32 = s_norm_fp32;
+        if (fp32_accum_buf_ != nullptr) {
+            int64_t tok_shape[2] = {1, static_cast<int64_t>(d)};
+            Tensor fp32_tok(static_cast<float*>(fp32_hidden_.data) + static_cast<int64_t>(t) * d,
+                           DType::FP32, 2, tok_shape, true);
+            rmsnorm_fp32_to_fp32(fp32_tok, norm_w, s_norm_fp32, 1, d,
+                                eps, stream, norm_w_off_);
+        } else {
+            tok_norm_f32 = nullptr;
+        }
+
+        // D2H copy expert indices
+        int32_t h_experts[32];
+        cudaMemcpyAsync(h_experts, tok_experts, top_k * sizeof(int32_t),
+                       cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+
+        // Gate + Up projections: dispatch by actual quant type
+        for (int k = 0; k < top_k; k++) {
+            int32_t eid = h_experts[k];
+            const uint8_t* gate_w = static_cast<const uint8_t*>(ly.expert_gate_packed.data)
+                                  + static_cast<size_t>(eid) * gate_stride;
+            const uint8_t* up_w = static_cast<const uint8_t*>(ly.expert_up_packed.data)
+                                + static_cast<size_t>(eid) * up_stride;
+
+            auto do_mmvq = [&](const uint8_t* w, half* out, GGMLQuantType qt) {
+                if (tok_norm_f32) {
+                    switch (qt) {
+                        case GGMLQuantType::Q4_K:
+                            ggml_mmvq_q4k_f32(w, tok_norm_f32, out, 1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
+                            break;
+                        default:
+                            ggml_mmvq_q4k_f32(w, tok_norm_f32, out, 1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
+                            break;
+                    }
+                } else {
+                    const half* tok_norm_fp16 = static_cast<const half*>(no.data) + static_cast<int64_t>(t) * d;
+                    switch (qt) {
+                        case GGMLQuantType::Q4_K:
+                            ggml_mmvq_q4k(w, tok_norm_fp16, out, 1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
+                            break;
+                        case GGMLQuantType::Q8_0:
+                            ggml_mmvq_q8_0(w, tok_norm_fp16, out, 1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
+                            break;
+                        default:
+                            ggml_mmvq_q4k(w, tok_norm_fp16, out, 1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
+                            break;
+                    }
+                }
+            };
+            do_mmvq(gate_w, gate_buf + static_cast<int64_t>(k) * eff, ly.expert_gate_qtype);
+            do_mmvq(up_w, up_buf + static_cast<int64_t>(k) * eff, up_qtype);
+        }
+
+        // Expert activation (GeGLU for Gemma-4)
+        half* swiglu_buf = static_cast<half*>(moe_.expert_swiglu.data);
+        apply_expert_activation(gate_buf, up_buf, swiglu_buf,
+                                false /*non_gated*/, top_k, eff,
+                                compute_dtype_, cfg.ffn_activation, stream);
+
+        // Down projection: dispatch by actual quant type
+        for (int k = 0; k < top_k; k++) {
+            int32_t eid = h_experts[k];
+            size_t expert_off = static_cast<size_t>(eid) * down_stride;
+            const uint8_t* w_down = static_cast<const uint8_t*>(ly.expert_down_packed.data) + expert_off;
+            half* act_k = swiglu_buf + static_cast<int64_t>(k) * eff;
+            half* out_k = down_buf + static_cast<int64_t>(k) * d;
+
+            switch (ly.expert_down_qtype) {
+                case GGMLQuantType::Q4_K:
+                    ggml_mmvq_q4k(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size, stream);
+                    break;
+                case GGMLQuantType::Q5_K:
+                    ggml_mmvq_q5k(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size, stream);
+                    break;
+                case GGMLQuantType::Q8_0:
+                    ggml_mmvq_q8_0(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size, stream);
+                    break;
+                case GGMLQuantType::Q5_1:
+                    ggml_mmvq_q5_1(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size, stream);
+                    break;
+                default:
+                    ggml_mmvq_q4k(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size, stream);
+                    break;
+            }
+        }
+
+        // Weighted sum for this token → write to h[t]
+        half* h_tok = static_cast<half*>(h.data) + static_cast<int64_t>(t) * d;
+        bool has_shared_expert = (ly.w_up_shared.data != nullptr);
+        const void* res_ptr = has_shared_expert ? nullptr :
+            static_cast<const void*>(static_cast<const half*>(r.data) + static_cast<int64_t>(t) * d);
+        moe_weighted_sum_residual(down_buf, tok_weights, res_ptr,
+                                   h_tok, d, top_k, stream);
+    }
+    if (ly.w_up_shared.data == nullptr) residual_fused = true;
+    goto moe_after_experts;
+
     } else {
     // =========================================================================
     // FP16 BATCH or FP8 BATCH PREFILL PATH
@@ -686,6 +1013,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                          ly.expert_gate_packed.on_device &&
                          ly.expert_gate_qtype == GGMLQuantType::Q6_K);
 
+    if (debug_forward_enabled() && layer == 0) {
+        int64_t gs[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(d)};
+        Tensor gv(moe_.gathered.data, compute_dtype_, 2, gs, true);
+        debug_tensor_stats("L0_moe_gathered", gv, stream);
+        debug_tensor_stats("L0_moe_norm_out_no", no, stream);
+    }
     if (can_fp16_batch_nosync) {
         // =================================================================
         // FP16 BATCH DEQUANT + cublasGemmGroupedBatchedEx
@@ -734,20 +1067,40 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         if (!non_gated_experts)
             batch_dequant_gemm(ly.expert_gate_packed, ly.expert_gate_qtype,
                                 gathered_base, expert_gate_base, d, eff);
+        if (debug_forward_enabled() && layer == 0) {
+            int64_t sh[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
+            Tensor gv(moe_.expert_gate.data, compute_dtype_, 2, sh, true);
+            debug_tensor_stats("L0_moe_gate_out", gv, stream);
+        }
 
         // Up projection
         batch_dequant_gemm(ly.expert_up_packed, up_qtype,
                             gathered_base, expert_up_base, d, eff);
+        if (debug_forward_enabled() && layer == 0) {
+            int64_t sh[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
+            Tensor uv(moe_.expert_up.data, compute_dtype_, 2, sh, true);
+            debug_tensor_stats("L0_moe_up_out", uv, stream);
+        }
 
         // Activation
         apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                 moe_.expert_swiglu.data, non_gated_experts,
-                                expanded, eff, compute_dtype_, stream);
+                                expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
+        if (debug_forward_enabled() && layer == 0) {
+            int64_t sh[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
+            Tensor sv(moe_.expert_swiglu.data, compute_dtype_, 2, sh, true);
+            debug_tensor_stats("L0_moe_swiglu_out", sv, stream);
+        }
 
         // Down projection
         char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
         batch_dequant_gemm(ly.expert_down_packed, ly.expert_down_qtype,
                             down_act, expert_down_base, eff, d);
+        if (debug_forward_enabled() && layer == 0) {
+            int64_t sh[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(d)};
+            Tensor dv(moe_.expert_down.data, compute_dtype_, 2, sh, true);
+            debug_tensor_stats("L0_moe_down_out", dv, stream);
+        }
 
         // Falls through to scatter (step 7)
 
@@ -838,7 +1191,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         // Activation (FP16 — reuse existing kernels)
         apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                 moe_.expert_swiglu.data, non_gated_experts,
-                                expanded, eff, compute_dtype_, stream);
+                                expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
 
         // Down projection: up buffer for non-gated (relu² in-place), swiglu for gated
         char* fp8_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -906,7 +1259,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         // Activation
         apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                 moe_.expert_swiglu.data, non_gated_experts,
-                                expanded, eff, compute_dtype_, stream);
+                                expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
 
         // Down projection
         char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -995,6 +1348,28 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     auto expert_gemm = [&](const Tensor& a, Tensor& c,
                             const Tensor& packed, GGMLQuantType qtype,
                             const std::vector<Tensor>& fallback, int eidx) {
+        // NVFP4 prequant path: native NVFP4 GEMV (any batch size)
+        if (!fallback.empty() &&
+            static_cast<size_t>(eidx) < fallback.size() &&
+            wcache_.nvfp4.count(fallback[eidx].data)) {
+            const auto& nw = wcache_.nvfp4.at(fallback[eidx].data);
+            int N_dim = static_cast<int>(nw.N);
+            int K_dim = static_cast<int>(nw.K);
+            int M = static_cast<int>(a.shape[0]);
+            if (M == 1) {
+                // Single-token decode: direct NVFP4 GEMV
+                gemv_nvfp4_kpar(nw, static_cast<const half*>(a.data),
+                               static_cast<half*>(c.data), N_dim, K_dim, stream);
+            } else {
+                // Multi-token: per-row GEMV (each row is one token)
+                for (int r = 0; r < M; r++) {
+                    const half* a_row = static_cast<const half*>(a.data) + r * K_dim;
+                    half* c_row = static_cast<half*>(c.data) + r * N_dim;
+                    gemv_nvfp4_kpar(nw, a_row, c_row, N_dim, K_dim, stream);
+                }
+            }
+            return;
+        }
         if (a.shape[0] == 1 && use_packed_dequant &&
             compute_dtype_ == DType::FP16 &&
             (qtype == GGMLQuantType::Q6_K || qtype == GGMLQuantType::Q8_0)) {
@@ -1158,7 +1533,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
             apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                     moe_.expert_swiglu.data, non_gated_experts,
-                                    expanded, eff, compute_dtype_, stream);
+                                    expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
 
             {
                 char* batch_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -1179,7 +1554,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
             apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                     moe_.expert_swiglu.data, non_gated_experts,
-                                    expanded, eff, compute_dtype_, stream);
+                                    expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
 
             {
                 char* dequant_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
@@ -1219,7 +1594,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
             apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                     moe_.expert_swiglu.data, non_gated_experts,
-                                    expanded, eff, compute_dtype_, stream);
+                                    expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
 
             // Down projection activation source: up buffer for non-gated (relu² in-place),
             // swiglu buffer for gated.
@@ -1294,6 +1669,32 @@ moe_after_experts:
     //     dense FFN whose output is added to the routed expert output.
     //     Reuses MoE workspace buffers (routed computation is complete).
     //     Supports both gated (Qwen3: gate+up+SwiGLU) and non-gated (Nemotron: up+SiLU).
+    // Gemma 4: sanitize inf/NaN in MoE scatter output before post-norm.
+    if (cfg.arch == ModelArch::GEMMA4) {
+        sanitize_fp16(static_cast<__half*>(h.data),
+                      static_cast<int64_t>(n) * d, stream);
+    }
+
+    if (debug_forward_enabled() && layer == 0) {
+        debug_tensor_rows("L0_moe_scatter_out", view_tokens(h, n), stream);
+    }
+    // Gemma 4: apply post_ffw_norm_2 on the MoE branch output (h) BEFORE shared adds.
+    if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_post_norm_2.data != nullptr) {
+        rmsnorm(h, ly.ffn_post_norm_2, h, eps, stream, norm_w_off_);
+    }
+    if (debug_forward_enabled() && layer == 0) {
+        debug_tensor_rows("L0_moe_post_norm2", view_tokens(h, n), stream);
+    }
+
+    // Gemma 4: re-derive `no` for the shared MLP from the saved residual
+    // (which still holds the original hidden state) using ffn_norm — the MoE
+    // branch consumed `no` produced from pre_ffw_norm_2 above.
+    if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_pre_norm_2.data != nullptr &&
+        ly.w_up_shared.data != nullptr && ly.ffn_norm.data != nullptr) {
+        rmsnorm(r, ly.ffn_norm, no, eps, stream, norm_w_off_);
+    }
+
+    // Shared expert: enabled by default. Gemma 4: requires post_ffw_norm_1 to be uploaded.
     if (ly.w_up_shared.data != nullptr) {
         int eff_shared = static_cast<int>(ly.w_up_shared.shape[0]);
         bool shared_gated = (ly.w_gate_shared.data != nullptr);
@@ -1329,14 +1730,24 @@ moe_after_experts:
                               qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
                               nvfp4_ptr, ct4_ptr, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
                                   mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
-                swiglu(sh_gate, sh_up, sh_swiglu, stream);
+                if (cfg.ffn_activation == FFNActivation::GEGLU)
+                    geglu(sh_gate, sh_up, sh_swiglu, stream);
+                else
+                    swiglu(sh_gate, sh_up, sh_swiglu, stream);
             } else {
                 // Non-gated: relu^2(up) in-place [Nemotron-H uses squared ReLU]
                 relu_sqr_inplace(sh_up, stream);
             }
 
+            if (layer == 0) {
+                Tensor sh_gate_raw(moe_.expert_gate.data, compute_dtype_, 2, sh_shape, true);
+                debug_tensor_stats_all("L0_sh_up_raw",    sh_up, stream);
+                debug_tensor_stats_all("L0_sh_gate_raw",  sh_gate_raw, stream);
+                debug_tensor_stats_all("L0_sh_swiglu",    sh_swiglu, stream);
+            }
             // Down projection (reads from sh_up for non-gated since relu² was in-place)
             Tensor& sh_act = shared_gated ? sh_swiglu : sh_up;
+            if (layer == 0) debug_tensor_stats_all("L0_sh_act_preDown", sh_act, stream);
             gemm_dispatch(sh_act, ly.w_down_shared, Tensor(), ly.w_down_shared_qtype,
                           sh_down, qscratch_.dequant, stream, q8, qscratch_.d8_buf, &wcache_.fp16,
                           (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
@@ -1345,14 +1756,89 @@ moe_after_experts:
                                   mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
         }
 
+        if (layer == 0) {
+            debug_tensor_stats_all("L0_sh_down_raw", sh_down, stream);
+            debug_tensor_rows("L0_sh_down_rows", sh_down, stream);
+            // Also dump shared expert norm input
+            debug_tensor_rows("L0_shared_norm_in", view_tokens(no, n), stream);
+        }
+        // Gemma 4: shared MLP can overflow FP16 at deep layers. Sanitize inf/NaN
+        // to zero before the post-norm so rmsnorm doesn't produce all-zero output.
+        if (cfg.arch == ModelArch::GEMMA4) {
+            sanitize_fp16(static_cast<__half*>(sh_down.data),
+                          static_cast<int64_t>(n) * d, stream);
+        }
+        // Gemma 4: apply post_ffw_norm_1 on shared MLP output (sh_down).
+        if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_post_norm_1.data != nullptr &&
+            getenv("IMP_G4_NO_POST_FFW_1") == nullptr) {
+            rmsnorm(sh_down, ly.ffn_post_norm_1, sh_down, eps, stream, norm_w_off_);
+        }
+
+        if (layer == 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "L%d_shared_post_post_norm1", layer);
+            debug_tensor_stats_all(buf, sh_down, stream);
+        }
+        if (debug_forward_enabled() && layer == 0) {
+            debug_tensor_rows("L0_shared_post_norm1", sh_down, stream);
+        }
         // Add shared expert output to hidden (which already has routed expert output)
         elementwise_add(h, sh_down, stream);
     }
+    if (debug_forward_enabled() && layer == 0) {
+        debug_tensor_rows("L0_combined", view_tokens(h, n), stream);
+    }
+    if (layer == 0) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "L%d_combined_pre_post_ffn_norm", layer);
+        debug_tensor_stats_all(buf, h, stream);
+    }
 
-    // 9. Residual connection: hidden += residual
-    //    Skipped when decode fast path already fused residual into weighted_sum.
-    if (!residual_fused) {
-        elementwise_add(h, r, stream);
+    // Gemma 4: apply post_ffn_norm (combined post-norm) BEFORE residual add.
+    // If FP32 accumulator is active, fuse post_ffn_norm + residual add into
+    // rmsnorm_fp32_accum_to_fp16_kernel so the residual stays in FP32 precision.
+    // Without this, every MoE layer does a FP16 elementwise_add and the downstream
+    // forced sync (executor_forward.cu:373-381) clobbers the FP32 accum with
+    // FP16-rounded data, accumulating ~1-2% drift per layer over 30 layers.
+    const bool moe_fp32_accum = (cfg.arch == ModelArch::GEMMA4 &&
+                                  ly.post_ffn_norm.data != nullptr &&
+                                  fp32_accum_buf_ != nullptr &&
+                                  !residual_fused);
+    if (moe_fp32_accum) {
+        // fp32_hidden_ holds the pre-MoE residual (written by run_attention's
+        // FP32 accum path). Kernel: fp32_h += rmsnorm(h) * post_ffn_norm; h = half(fp32_h).
+        Tensor fp32_h = view_tokens(fp32_hidden_, n);
+        rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
+            static_cast<const half*>(h.data),
+            static_cast<const half*>(ly.post_ffn_norm.data),
+            static_cast<float*>(fp32_h.data),
+            static_cast<half*>(h.data),
+            cfg.d_model, eps, norm_w_off_);
+        if (layer == 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "L%d_combined_post_post_ffn_norm_fp32accum", layer);
+            debug_tensor_stats_all(buf, h, stream);
+        }
+    } else {
+        if (cfg.arch == ModelArch::GEMMA4 && ly.post_ffn_norm.data != nullptr) {
+            rmsnorm(h, ly.post_ffn_norm, h, eps, stream, norm_w_off_);
+        }
+        if (layer == 0) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "L%d_combined_post_post_ffn_norm", layer);
+            debug_tensor_stats_all(buf, h, stream);
+        }
+
+        // 9. Residual connection: hidden += residual
+        //    Skipped when decode fast path already fused residual into weighted_sum.
+        if (!residual_fused) {
+            elementwise_add(h, r, stream);
+        }
+    }
+    if (layer == 0) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "L%d_after_residual_pre_scale", layer);
+        debug_tensor_stats_all(buf, h, stream);
     }
 
     // 10. Free routing result tensors only if allocated by moe_topk_gating.
@@ -1366,3 +1852,4 @@ moe_after_experts:
 }
 
 } // namespace imp
+// Sun Apr 12 06:27:12 PM CEST 2026

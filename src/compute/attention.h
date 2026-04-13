@@ -5,22 +5,8 @@
 
 namespace imp {
 
-// Flash Attention prefill: Q,K,V -> O
-// Q: [batch, seq_q, n_heads, head_dim]
-// K,V: [batch, seq_kv, n_kv_heads, head_dim]
-// O: [batch, seq_q, n_heads, head_dim]
-// sliding_window: 0 = disabled, >0 = only attend to last N KV positions
-// softcap: 0 = disabled, >0 = apply tanh(score/cap)*cap (Gemma-2/3)
-void flash_attention_prefill(
-    const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal = true, int sliding_window = 0,
-    float softcap = 0.0f, cudaStream_t stream = nullptr);
-
-// Runtime-dispatched attention prefill.
-// Selects the best kernel based on compute capability:
-//   sm_120+ (Blackwell)  -> Optimized WMMA 128x64 tiles (attention_blackwell.cu)
-//   sm_90+  (Hopper)     -> WMMA tensor-core attention 64x64 (attention_tc.cu)
-//   <sm_90               -> Scalar Flash Attention 2 (attention.cu)
+// Runtime-dispatched attention prefill (SM120 / Blackwell).
+// Dispatch: MXFP4 FMHA -> FP8 FMHA -> FP16 FMHA -> Blackwell WMMA 128x64.
 void attention_prefill_dispatch(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
     float scale, bool causal = true, int sliding_window = 0,

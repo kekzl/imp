@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**imp** is a high-performance LLM inference engine written in C++20 and CUDA. It targets NVIDIA Hopper (sm_90a) and Blackwell (sm_100, sm_120) GPUs, leveraging CUDA 13.2+ features such as Green Contexts, Programmatic Dependent Launch (PDL), and CUDA Graphs. The engine supports GGUF and SafeTensors model formats, multiple quantization schemes (FP8, INT8, INT4, NVFP4), and architectures including LLaMA, Mistral, Mixtral, DeepSeek, Qwen3, Qwen3.5 (Gated DeltaNet), Gemma-3 (text + vision), and Nemotron-H. Vision support uses a SigLIP encoder for Gemma-3 multimodal via separate mmproj.gguf files.
+**imp** is a high-performance LLM inference engine written in C++20 and CUDA, targeting exclusively the NVIDIA RTX 5090 (GB202, Blackwell, sm_120f). It requires CUDA 13.2+ and leverages Blackwell-specific features: Green Contexts for SM partitioning, Programmatic Dependent Launch (PDL), CUDA Graphs, packed FP8 E4M3 conversion (cvt.e4m3x2), and MXFP4 tensor core attention. No support for older architectures — sm_120 only. The engine supports GGUF and SafeTensors model formats, multiple quantization schemes (FP8, INT8, INT4, NVFP4, MXFP4), and architectures including LLaMA, Mistral, Mixtral, DeepSeek, Qwen3, Qwen3.5 (Gated DeltaNet), Gemma-3 (text + vision), and Nemotron-H. Vision support uses a SigLIP encoder for Gemma-3 multimodal via separate mmproj.gguf files.
 
 ## Repository Structure
 
@@ -71,12 +71,12 @@ cmake -B build-asan -DIMP_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
 | `IMP_BUILD_BENCH` | ON | Build benchmark tool |
 | `IMP_BUILD_SERVER` | ON | Build imp-server (OpenAI-compatible HTTP server) |
 | `IMP_SANITIZERS` | OFF | Enable ASAN + UBSAN (host C++ code only) |
-| `CMAKE_CUDA_ARCHITECTURES` | `90a;100;120` | Target GPU architectures |
+| `CMAKE_CUDA_ARCHITECTURES` | `sm_120f` (hardcoded) | Target GPU architecture (RTX 5090 only) |
 
 ### Dependencies
 
 - **CUDA Toolkit 13.2+** (required) — cudart, cuda_driver, cublas, cublasLt
-- **CUTLASS v4.4.1** (fetched via FetchContent) — Hopper FMHA (Example 88), MoE Grouped GEMM
+- **CUTLASS v4.4.1** (fetched via FetchContent) — SM120 FMHA (FP16/FP8/MXFP4), NVFP4/MXFP4 GEMM, MoE Grouped GEMM
 - **Google Test v1.14.0** (fetched via FetchContent when tests enabled)
 - **stb_image / stb_image_resize2** (vendored in `third_party/stb/`) — image loading for vision
 - **pthread** (linked privately)
@@ -150,8 +150,7 @@ Tests require an NVIDIA GPU with the appropriate compute capability. Test files 
 | `test_gguf_loader.cpp` | GGUF model file parsing |
 | `test_tokenizer.cpp` | Tokenizer encode/decode |
 | `test_kv_cache.cpp` | KV cache block allocation, ref counting, LRU |
-| `test_attention.cu` | Flash attention prefill kernels |
-| `test_attention_tc.cu` | Tensor-core attention (Hopper WMMA) |
+| `test_attention_tc.cu` | Tensor-core attention (WMMA) |
 | `test_paged_attention.cu` | Paged attention decode (split-K, FP8, INT8) |
 | `test_rope.cu` | Rotary positional embeddings |
 | `test_layernorm.cu` | RMSNorm kernels |
@@ -195,14 +194,15 @@ Tests require an NVIDIA GPU with the appropriate compute capability. Test files 
 
 ### imp-cli
 
-Interactive and single-shot LLM inference.
+Interactive and single-shot LLM inference. Supports both GGUF files and SafeTensors directories.
 
 ```bash
 ./build/imp-cli --model path/to/model.gguf --prompt "Hello world"
+./build/imp-cli --model path/to/Qwen3-Coder-30B-A3B-FP4/ --prompt "Hello"
 ./build/imp-cli --model path/to/model.gguf --interactive
 ```
 
-Options: `--model`, `--prompt`, `--max-tokens`, `--temperature`, `--top-p`, `--top-k`, `--seed`, `--interactive`, `--device`, `--mmproj`, `--image`.
+Options: `--model`, `--prompt`, `--max-tokens`, `--temperature`, `--top-p`, `--top-k`, `--seed`, `--interactive`, `--device`, `--mmproj`, `--image`, `--chat-template`, `--bench`.
 
 ### imp-bench
 
@@ -212,32 +212,34 @@ Benchmarks for GEMM, attention, and end-to-end inference.
 ./build/imp-bench
 ```
 
-## Benchmark Results (v0.5.1, RTX 5090, 2026-03-28)
+## Benchmark Results (v0.6, RTX 5090, 2026-04-06)
 
-All benchmarks on a single NVIDIA RTX 5090 (32 GB GDDR7, Blackwell sm_120). CUDA 13.2. Models loaded from GGUF. imp uses NVFP4 decode cache + FP16 prefill (GDN) / FP8 prefill (non-GDN) + upfront VRAM budget planner. llama.cpp b8445 with flash attention enabled.
+All benchmarks on a single NVIDIA RTX 5090 (32 GB GDDR7, Blackwell sm_120). CUDA 13.2. Models loaded from GGUF or SafeTensors. imp uses NVFP4 decode cache + FP8 prefill (non-GDN) / FP16 prefill (GDN) + upfront VRAM budget planner. llama.cpp b8445 with flash attention enabled.
 
 ### Decode Throughput (tg256, tok/s)
 
-| Model | Quant | imp v0.5.1 | llama.cpp | Speedup |
+| Model | Quant | imp v0.6 | llama.cpp | Speedup |
 |-------|-------|----------|-----------|---------|
-| Qwen3-4B | Q8_0 | **375** | 244 | **+54%** |
+| Qwen3-4B | Q8_0 | **377** | 244 | **+55%** |
 | Qwen3-8B | Q8_0 | **255** | 157 | **+62%** |
-| Qwen3.5-4B (GDN) | Q8_0 | **308** | 180 | **+71%** |
+| Qwen3.5-4B (GDN) | Q8_0 | **306** | 180 | **+70%** |
 | Qwen3.5-9B (GDN) | Q8_0 | **134** | — | — |
-| Gemma-3-12B | Q8_0 | **129** | 98 | **+32%** |
+| Llama-3.2-3B | Q8_0 | **208** | — | — |
+| Qwen3-Coder-30B-A3B | NVFP4 | **38** | — | — |
 
 ### Prefill Throughput (pp512, tok/s)
 
-| Model | Quant | imp v0.5.1 | llama.cpp | Speedup |
+| Model | Quant | imp v0.6 | llama.cpp | Speedup |
 |-------|-------|----------|-----------|---------|
-| Qwen3-4B | Q8_0 | **24055** | 21337 | **+13%** |
-| Qwen3-8B | Q8_0 | **17746** | 14172 | **+25%** |
-| Qwen3.5-4B (GDN) | Q8_0 | **14687** | 11149 | **+32%** |
-| Qwen3.5-9B (GDN) | Q8_0 | **8418** | — | — |
-| Gemma-3-12B | Q8_0 | **6998** | 9269 | -25% |
+| Qwen3-4B | Q8_0 | **27201** | 21337 | **+27%** |
+| Qwen3-8B | Q8_0 | **17636** | 14172 | **+24%** |
+| Qwen3.5-4B (GDN) | Q8_0 | **14823** | 11149 | **+33%** |
+| Qwen3.5-9B (GDN) | Q8_0 | **8520** | — | — |
+| Llama-3.2-3B | Q8_0 | **22544** | — | — |
+| Qwen3-Coder-30B-A3B | NVFP4 | **90** | — | — |
 
 **Notes:**
-- Qwen3.5 GDN multi-turn chat now works correctly (v0.5.1 fix: FP16 prefill weights + chunked prefill state carry-forward).
+- Qwen3-Coder-30B-A3B is a 128-expert MoE model loaded from NVIDIA Model Optimizer NVFP4 SafeTensors. Decode uses per-expert NVFP4 GEMV; prefill uses CUTLASS NVFP4 GEMM for dense layers + per-expert NVFP4 GEMV for MoE.
 - GDN prefill uses FP16 weights instead of FP8 for numerical stability (~8% slower than FP8 but eliminates multi-turn degeneration).
 - Prefill numbers have high variance due to cuBLAS autotuning algorithm selection between container restarts (up to 2.6x range on Gemma-3). Decode numbers are stable. Compare decode only for reliable A/B testing.
 
@@ -255,7 +257,7 @@ All benchmarks on a single NVIDIA RTX 5090 (32 GB GDDR7, Blackwell sm_120). CUDA
 - Constants: `kPascalCase` (`kMaxDims`, `kKVBlockSize`)
 - Enums: `PascalCase` values (`DType::FP16`, `OpType::ATTENTION_PREFILL`)
 - C API: `imp_` prefix with `snake_case` (`imp_model_load`, `imp_context_create`)
-- Macros: `IMP_UPPER_CASE` (`IMP_LOG_ERROR`, `IMP_CUDA_13_1`)
+- Macros: `IMP_UPPER_CASE` (`IMP_LOG_ERROR`, `IMP_CUDA_CHECK_LOG`)
 
 ### File Organization
 - Headers (`.h`) and implementations (`.cpp` / `.cu`) are co-located in `src/` subdirectories
@@ -270,7 +272,7 @@ All benchmarks on a single NVIDIA RTX 5090 (32 GB GDDR7, Blackwell sm_120). CUDA
 - CUDA errors are checked and logged (not thrown as exceptions)
 
 ### Memory Management
-- GPU memory: `device_allocator.cu` with `cudaMalloc`/`cudaFree`
+- GPU memory: `device_allocator.cu` with stream-ordered `cudaMallocAsync`/`cudaFreeAsync` + `cudaMemPool`
 - Pinned host memory: `pinned_allocator.cpp`
 - KV cache: block-based allocation with configurable block size (`kKVBlockSize = 16` tokens)
 - Model weights: mmap'd from disk, then uploaded/dequantized to GPU
@@ -285,8 +287,8 @@ All benchmarks on a single NVIDIA RTX 5090 (32 GB GDDR7, Blackwell sm_120). CUDA
 ## Architecture Notes
 
 ### Inference Pipeline
-1. **Model Loading** — GGUF or SafeTensors parsed and weights mmap'd (`src/model/`)
-2. **Weight Upload** — Weights dequantized and uploaded to GPU (`weight_upload.cu`)
+1. **Model Loading** — GGUF or SafeTensors parsed and weights mmap'd (`src/model/`). SafeTensors BF16 weights auto-converted to FP16. NVFP4 prequant scales (weight_scale, weight_scale_2) uploaded separately.
+2. **Weight Upload** — Weights dequantized/converted and uploaded to GPU (`weight_upload.cu`). BF16→FP16 conversion for SafeTensors non-quantized weights.
 3. **Graph Construction** — Transformer DAG built for visualization/debug (`src/graph/`)
 4. **Execution** — `GraphExecutor` runs a hardcoded forward pass (no graph walking at runtime)
 5. **Scheduling** — `Scheduler` manages continuous batching with prefill/decode separation
@@ -294,17 +296,17 @@ All benchmarks on a single NVIDIA RTX 5090 (32 GB GDDR7, Blackwell sm_120). CUDA
 7. **Sampling** — Temperature, top-p, top-k sampling from logits
 
 ### Attention Dispatch
-Runtime dispatch based on GPU compute capability:
-- **Prefill (sm_90+)**: CUTLASS Hopper FMHA (`attention_cutlass_fmha.cu`) — WGMMA + TMA, falls back to WMMA if unsupported config (softcap, sliding window) or disabled via `IMP_NO_CUTLASS_FMHA=1`
-- **Decode / Fallback sm_120+ (Blackwell)**: WMMA 8-warp attention (`attention_blackwell.cu`)
-- **Decode / Fallback sm_90+ (Hopper)**: WMMA tensor-core attention (`attention_tc.cu`)
-- **< sm_90**: Scalar Flash Attention 2 (`attention.cu`)
+Runtime dispatch (SM120 only, no architecture checks):
+- **Prefill**: MXFP4 FMHA (`attention_fmha_mxfp4_sm120.cu`, if enabled) → FP8 FMHA (`attention_fmha_sm120.cu`) → FP16 FMHA → Blackwell WMMA 128x64 (`attention_blackwell.cu`)
+- **Decode**: Paged attention with split-K (`attention_paged.cu`, `attention_paged_fp8.cu`)
+- Environment overrides: `IMP_MXFP4_ATTENTION=1` (enable MXFP4), `IMP_NO_FP8_FMHA=1` (force FP16), `IMP_NO_FMHA_SM120=1` (force WMMA fallback)
 
 ### Quantization Support
 - **FP8 E4M3**: Per-tensor scale, FP8 GEMM via cuBLAS
 - **INT8**: Per-channel dequantization
 - **INT4 (Q4_0, Q4_K_M)**: GGML-compatible block formats
 - **NVFP4 (FP4_E2M1)**: Blackwell-native, two-level micro-scale + tensor-scale
+- **NVFP4 Prequant (Model Optimizer)**: SafeTensors models with calibrated NVFP4 weights (AWQ/SmoothQuant). Loaded directly — no re-quantization. BF16 non-quantized weights (norms, router, embeddings) auto-converted to FP16.
 
 ### Gated DeltaNet (GDN) — Qwen3.5
 Hybrid architecture: 24 GDN layers (recurrent) + 8 attention layers + 32 dense FFN layers.
@@ -320,7 +322,7 @@ Hybrid architecture: 24 GDN layers (recurrent) + 8 attention layers + 32 dense F
 ### CUDA 13.2 Features
 - **Green Contexts**: SM partitioning for concurrent prefill/decode (`green_ctx.cu`)
 - **PDL (Programmatic Dependent Launch)**: Overlaps kernel tails with next kernel heads (`pdl.cu`)
-- **CUDA Graphs**: Captured decode iterations for reduced launch overhead (`cuda_graph.cu`)
+- **CUDA Graphs**: Captured decode iterations for reduced launch overhead (`cuda_graph.cu`). Disabled for MoE models (routing requires D2H memcpy incompatible with graph capture).
 
 ### Supported Model Architectures
 - LLaMA (dense transformer)

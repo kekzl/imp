@@ -13,44 +13,22 @@ namespace imp {
 // cvt.e4m3x2 converts 2 elements per instruction instead of 1, halving
 // instruction count in the FP8 KV cache quantize/dequantize hot paths.
 //
-// On sm_90a/sm_100 the scalar fallback uses __nv_fp8_e4m3 (hardware cvt
-// per element). The packed variant saves one instruction per pair on sm_120+.
+// Uses packed cvt instructions (2 elements/instruction) on SM120+.
 // ---------------------------------------------------------------------------
 
 // Convert 2 packed FP16 (f16x2, 32-bit) → 2 packed FP8 E4M3 (e4m3x2, 16-bit).
 // Applies round-to-nearest-even with saturation-to-finite (no inf/nan output).
 __device__ __forceinline__ uint16_t cvt_f16x2_to_e4m3x2(uint32_t f16x2) {
-#if __CUDA_ARCH__ >= 1200
     uint16_t result;
     asm("cvt.rn.satfinite.e4m3x2.f16x2 %0, %1;" : "=h"(result) : "r"(f16x2));
     return result;
-#else
-    const half* hp = reinterpret_cast<const half*>(&f16x2);
-    uint8_t lo = static_cast<uint8_t>(__nv_fp8_e4m3(__half2float(hp[0])).__x);
-    uint8_t hi = static_cast<uint8_t>(__nv_fp8_e4m3(__half2float(hp[1])).__x);
-    return static_cast<uint16_t>(lo) | (static_cast<uint16_t>(hi) << 8);
-#endif
 }
 
 // Convert 2 packed FP8 E4M3 (e4m3x2, 16-bit) → 2 packed FP16 (f16x2, 32-bit).
 __device__ __forceinline__ uint32_t cvt_e4m3x2_to_f16x2(uint16_t e4m3x2) {
-#if __CUDA_ARCH__ >= 1200
     uint32_t result;
     asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(result) : "h"(e4m3x2));
     return result;
-#else
-    uint8_t lo = e4m3x2 & 0xFF;
-    uint8_t hi = (e4m3x2 >> 8) & 0xFF;
-    half2 result;
-    __nv_fp8_e4m3 v0, v1;
-    memcpy(&v0, &lo, 1);
-    memcpy(&v1, &hi, 1);
-    result.x = static_cast<half>(static_cast<float>(v0));
-    result.y = static_cast<half>(static_cast<float>(v1));
-    uint32_t r;
-    memcpy(&r, &result, 4);
-    return r;
-#endif
 }
 
 // Convenience: convert 4 packed FP8 (uint32_t) → 4 floats via 2 paired cvt ops.

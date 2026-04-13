@@ -92,6 +92,9 @@ private:
     // SentencePiece-style BPE (score-based merging, LOWER_ONE_EIGHTH_BLOCK space)
     std::vector<int32_t> encode_spm(const std::string& text, bool no_prefix = false) const;
 
+    // Gemma-4 SPM-style BPE (▁ escaping + merge ranks, raw UTF-8)
+    std::vector<int32_t> encode_gemma4(const std::string& text) const;
+
     // GPT2-style byte-level BPE (merge-rank based)
     std::vector<int32_t> encode_gpt2(const std::string& text) const;
 

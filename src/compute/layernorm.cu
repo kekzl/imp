@@ -322,6 +322,107 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out,
 }
 
 // --------------------------------------------------------------------------
+// RMSNorm with FP32 input and FP16 output — used for Gemma-4 to avoid
+// losing precision on the attention/FFN entry when the residual stream is
+// kept in FP32 (`fp32_hidden_`) but the downstream GEMM expects FP16 input.
+// --------------------------------------------------------------------------
+__global__ void rmsnorm_fp32_in_fp16_out_kernel(
+    const float* __restrict__ x,
+    const __half* __restrict__ weight,
+    __half* __restrict__ out,
+    int d_model,
+    float eps,
+    float weight_offset)
+{
+    const int row = blockIdx.x;
+    const float* x_row = x + static_cast<int64_t>(row) * d_model;
+    __half* out_row = out + static_cast<int64_t>(row) * d_model;
+
+    // Pass 1: sum of squares in FP32.
+    float sum_sq = 0.0f;
+    for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
+        float v = x_row[i];
+        sum_sq += v * v;
+    }
+    sum_sq = block_reduce_sum(sum_sq);
+
+    __shared__ float s_inv_rms;
+    if (threadIdx.x == 0) {
+        s_inv_rms = rsqrtf(sum_sq / static_cast<float>(d_model) + eps);
+    }
+    __syncthreads();
+    const float inv_rms = s_inv_rms;
+
+    // Pass 2: normalize + weight, cast to FP16 at store.
+    for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
+        float v = x_row[i] * inv_rms * (__half2float(weight[i]) + weight_offset);
+        out_row[i] = __float2half(v);
+    }
+}
+
+void rmsnorm_fp32_to_fp16(const Tensor& x_fp32, const Tensor& weight,
+                          Tensor& out_fp16,
+                          float eps, cudaStream_t stream,
+                          float weight_offset) {
+    const int rows    = static_cast<int>(x_fp32.shape[0]);
+    const int d_model = static_cast<int>(x_fp32.shape[1]);
+    if (rows == 0 || d_model == 0) return;
+    const int block = 512;
+    pdl::launch(rmsnorm_fp32_in_fp16_out_kernel, dim3(rows), dim3(block), 0, stream,
+        static_cast<const float*>(x_fp32.data),
+        static_cast<const __half*>(weight.data),
+        static_cast<__half*>(out_fp16.data),
+        d_model, eps, weight_offset);
+}
+
+// FP32 input, FP32 output, FP16 weight. Used for Gemma-4 ggml MMVQ prefill:
+// keeps full FP32 precision through norm → Q8_1 quantization, matching llama's
+// FP32→Q8_1 path and avoiding the ~0.03% per-element FP16 truncation.
+__global__ void rmsnorm_fp32_in_fp32_out_kernel(
+    const float* __restrict__ x,
+    const __half* __restrict__ weight,
+    float* __restrict__ out,
+    int d_model,
+    float eps,
+    float weight_offset)
+{
+    const int row = blockIdx.x;
+    const float* x_row = x + static_cast<int64_t>(row) * d_model;
+    float* out_row = out + static_cast<int64_t>(row) * d_model;
+
+    float sum_sq = 0.0f;
+    for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
+        float v = x_row[i];
+        sum_sq += v * v;
+    }
+    sum_sq = block_reduce_sum(sum_sq);
+
+    __shared__ float s_inv_rms;
+    if (threadIdx.x == 0) {
+        s_inv_rms = rsqrtf(sum_sq / static_cast<float>(d_model) + eps);
+    }
+    __syncthreads();
+    const float inv_rms = s_inv_rms;
+
+    for (int i = threadIdx.x; i < d_model; i += blockDim.x) {
+        out_row[i] = x_row[i] * inv_rms * (__half2float(weight[i]) + weight_offset);
+    }
+}
+
+void rmsnorm_fp32_to_fp32(const Tensor& x_fp32, const Tensor& weight,
+                          float* out_fp32, int rows, int d_model,
+                          float eps, cudaStream_t stream,
+                          float weight_offset) {
+    if (rows == 0 || d_model == 0) return;
+    const int block = 512;
+    pdl::launch(rmsnorm_fp32_in_fp32_out_kernel, dim3(rows), dim3(block), 0, stream,
+        static_cast<const float*>(x_fp32.data),
+        static_cast<const __half*>(weight.data),
+        out_fp32,
+        d_model, eps, weight_offset);
+}
+
+// --------------------------------------------------------------------------
 // Host dispatch: rmsnorm_residual
 // --------------------------------------------------------------------------
 void rmsnorm_residual(const Tensor& x, const Tensor& residual,

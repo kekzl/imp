@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstring>
@@ -145,6 +146,7 @@ const char* ggml_type_name(GGMLType type) {
         case GGMLType::IQ1_M:   return "IQ1_M";
         case GGMLType::IQ4_NL:  return "IQ4_NL";
         case GGMLType::IQ4_XS:  return "IQ4_XS";
+        case GGMLType::MXFP4:   return "MXFP4";
         default:                return "UNKNOWN";
     }
 }
@@ -273,6 +275,11 @@ static GGUFValue read_gguf_value(BinaryReader& r, GGUFValueType type) {
             } else if (arr_type == GGUFValueType::UINT32) {
                 read_array_elements(r, count, v.int_array,
                     [](BinaryReader& br) { return static_cast<int32_t>(br.read_u32()); }, 4);
+            } else if (arr_type == GGUFValueType::BOOL ||
+                       arr_type == GGUFValueType::UINT8 ||
+                       arr_type == GGUFValueType::INT8) {
+                read_array_elements(r, count, v.int_array,
+                    [](BinaryReader& br) { return static_cast<int32_t>(br.read_u8()); }, 1);
             } else {
                 // Skip unknown array element types
                 for (uint64_t i = 0; i < count && !r.failed(); i++)
@@ -340,6 +347,10 @@ static bool assign_tensor(Model& model, const std::string& name,
     if (name == "output_norm.weight") {
         model.out_norm_ = tensor;
         model.out_norm_qtype_ = qtype;
+        return true;
+    }
+    if (name == "rope_freqs.weight") {
+        model.layers_[0].rope_freqs = tensor;
         return true;
     }
     if (name == "output.weight") {
@@ -431,16 +442,42 @@ static bool assign_tensor(Model& model, const std::string& name,
         // Post-layer norms (Gemma-3)
         else if (field == "post_attention_norm") layer.post_attn_norm = tensor;
         else if (field == "post_ffw_norm")       layer.post_ffn_norm = tensor;
+        // Gemma 4: parallel shared MLP + MoE expert branch norms
+        else if (field == "pre_ffw_norm_2")      layer.ffn_pre_norm_2 = tensor;
+        else if (field == "post_ffw_norm_1")     layer.ffn_post_norm_1 = tensor;
+        else if (field == "post_ffw_norm_2")     layer.ffn_post_norm_2 = tensor;
+        else if (field == "layer_output_scale")  layer.layer_out_scale = tensor;
+        else if (field == "rope_freqs")          layer.rope_freqs = tensor;
+        // Gemma 4: fused gate+up experts: [n_experts, n_ff_exp*2, d_model]
+        // We keep it packed; the MoE executor handles de-interleaving at dispatch.
+        else if (field == "ffn_gate_up_exps") {
+            layer.expert_gate_packed = tensor;  // reuse gate packed slot with full fused tensor
+            layer.expert_gate_qtype = qtype;
+            // Mark fused by leaving expert_up_packed null — executor detects this.
+        }
         // FFN
         else if (field == "ffn_gate")    { layer.w_gate = tensor; layer.w_gate_qtype = qtype; }
         else if (field == "ffn_up")      { layer.w_up = tensor; layer.w_up_qtype = qtype; }
         else if (field == "ffn_down")    { layer.w_down = tensor; layer.w_down_qtype = qtype; }
         else if (field == "ffn_norm")      layer.ffn_norm = tensor;
-        else if (field == "ffn_gate_inp")  layer.moe_gate = tensor;
+        else if (field == "ffn_gate_inp") {
+            // Distinguish .weight (the gate matrix) from .scale (per-channel multiplier).
+            // Gemma 4 stores `blk.X.ffn_gate_inp.scale` as a 4-part tensor name; without
+            // this branch the scale would be silently misassigned to layer.moe_gate.
+            if (suffix == "scale") layer.ffn_gate_inp_scale = tensor;
+            else                   layer.moe_gate = tensor;
+        }
         // Packed expert tensors: 3D [n_experts, rows, cols]
         else if (field == "ffn_gate_exps") { layer.expert_gate_packed = tensor; layer.expert_gate_qtype = qtype; }
         else if (field == "ffn_up_exps")   { layer.expert_up_packed = tensor; layer.expert_up_qtype = qtype; }
-        else if (field == "ffn_down_exps") { layer.expert_down_packed = tensor; layer.expert_down_qtype = qtype; }
+        else if (field == "ffn_down_exps") {
+            // Distinguish .weight (the per-expert FFN down weights) from .scale
+            // (per-expert output multiplier, shape [n_expert]). Same 4-part-name
+            // bug as ffn_gate_inp.scale: the scale tensor would otherwise overwrite
+            // expert_down_packed.
+            if (suffix == "scale") layer.expert_down_scale = tensor;
+            else                   { layer.expert_down_packed = tensor; layer.expert_down_qtype = qtype; }
+        }
         // Shared expert (always-active, e.g. Nemotron/DeepSeek)
         else if (field == "ffn_gate_shexp") { layer.w_gate_shared = tensor; layer.w_gate_shared_qtype = qtype; }
         else if (field == "ffn_up_shexp")   { layer.w_up_shared = tensor; layer.w_up_shared_qtype = qtype; }
@@ -467,8 +504,25 @@ static bool assign_tensor(Model& model, const std::string& name,
     }
 
     // 5-part: "blk.{i}.ffn_*.{expert_idx}.weight" — MoE per-expert weights
+    //    or: "blk.{i}.ffn_gate_inp.scale.weight" / "blk.{i}.ffn_down_exps.scale.weight" (Gemma 4)
     if (parts.size() == 5) {
         const auto& field = parts[2];
+        const auto& subfield = parts[3];
+
+        // Gemma 4 scale tensors
+        if (subfield == "scale") {
+            if (field == "ffn_gate_inp") {
+                layer.ffn_gate_inp_scale = tensor;
+                return true;
+            }
+            if (field == "ffn_down_exps") {
+                // Per-expert output scale. Not yet consumed by the executor — store as
+                // router bias slot so weight_upload at least preserves it.
+                layer.moe_router_bias = tensor;
+                return true;
+            }
+            return false;
+        }
 
         // MoE expert weights: "blk.{i}.ffn_*.{expert_idx}.weight"
         int expert_idx = 0;
@@ -829,6 +883,62 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         }
     }
 
+    // Gemma 4: per-layer SWA pattern (array), SWA-specific head dims, RoPE base.
+    if (arch_str == "gemma4") {
+        // Per-layer SWA bool array: 1 = sliding-window attention, 0 = full/global attention.
+        {
+            auto it = metadata.find("gemma4.attention.sliding_window_pattern");
+            if (it == metadata.end())
+                it = metadata.find("attention.sliding_window_pattern");
+            if (it != metadata.end() && !it->second.int_array.empty()) {
+                cfg.swa_layers.reserve(it->second.int_array.size());
+                for (auto v : it->second.int_array)
+                    cfg.swa_layers.push_back(v ? 1 : 0);
+            }
+        }
+        // Default: 5:1 SWA:full pattern (matches google/gemma-4-26B-A4B-it)
+        if (cfg.swa_layers.empty()) {
+            cfg.swa_layers.resize(cfg.n_layers, 0);
+            for (int i = 0; i < cfg.n_layers; i++)
+                cfg.swa_layers[i] = ((i % 6) == 5) ? 0 : 1;  // every 6th is full
+        }
+
+        // SWA-specific attention dims (full attention uses key_length/value_length)
+        int key_len      = static_cast<int>(get_uint("attention.key_length", 0));
+        int val_len      = static_cast<int>(get_uint("attention.value_length", 0));
+        int key_len_swa  = static_cast<int>(get_uint("attention.key_length_swa", key_len));
+        int val_len_swa  = static_cast<int>(get_uint("attention.value_length_swa", val_len));
+        (void)val_len; (void)val_len_swa;  // V head_dim assumed == K head_dim
+
+        cfg.sliding_window = static_cast<int>(get_uint("attention.sliding_window", 0));
+        cfg.rope_local_theta = static_cast<float>(get_float("rope.freq_base_swa", 0.0));
+        if (cfg.rope_local_theta == 0.0f) cfg.rope_local_theta = 10000.0f;
+        cfg.rope_theta_swa = cfg.rope_local_theta;
+
+        // Build per-layer head_dim and n_kv_heads from swa_layers.
+        // The GGUF may already supply per-layer arrays for head_count_kv; if not,
+        // we derive from swa_layers using key_length / key_length_swa.
+        if (cfg.head_dim_per_layer.empty() && key_len > 0 && key_len_swa > 0) {
+            cfg.head_dim_per_layer.resize(cfg.n_layers);
+            for (int i = 0; i < cfg.n_layers; i++)
+                cfg.head_dim_per_layer[i] = cfg.swa_layers[i] ? key_len_swa : key_len;
+        }
+        // scalar head_dim = max for buffer sizing
+        if (!cfg.head_dim_per_layer.empty()) {
+            int max_hd = 0;
+            for (int v : cfg.head_dim_per_layer) max_hd = std::max(max_hd, v);
+            cfg.head_dim = max_hd;
+            IMP_LOG_INFO("Gemma 4 per-layer head_dim: max=%d", max_hd);
+        }
+
+        IMP_LOG_INFO("Gemma 4: SWA layers=%zu (of %d), rope_theta_swa=%.0f, key_len=%d, key_len_swa=%d",
+                     std::count(cfg.swa_layers.begin(), cfg.swa_layers.end(), uint8_t(1)),
+                     cfg.n_layers, cfg.rope_theta_swa, key_len, key_len_swa);
+        // Per-layer head_dim/n_kv_heads detection happens at runtime in run_attention
+        // by reading wq.shape[0] / hd and wk.shape[0] / hd. Authoritative source =
+        // the loaded tensor shapes, not GGUF metadata.
+    }
+
     // Attention logit softcapping (Gemma-2/3: tanh(score/cap)*cap)
     cfg.attn_logit_softcap  = static_cast<float>(get_float("attn_logit_softcapping", 0.0));
     if (cfg.attn_logit_softcap == 0.0f)
@@ -1094,6 +1204,46 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                          cfg.n_experts_shared, cfg.expert_shared_d_ff);
         }
 
+        // Gemma 4: convert top-level rope_freqs (a freq DIVISOR table for global
+        // layers) into pre-computed effective per-pair frequencies, then fan out
+        // to every global layer. The kernel's `longrope_inv_freqs` parameter
+        // expects ready-to-use freq values, so do the math on the host.
+        if (cfg.arch == ModelArch::GEMMA4 && !cfg.swa_layers.empty() &&
+            model->layers_[0].rope_freqs.data != nullptr &&
+            model->layers_[0].rope_freqs.dtype == DType::FP32) {
+            const Tensor& src = model->layers_[0].rope_freqs;
+            int n_pairs = static_cast<int>(src.shape[0]);  // hd/2 for global layer
+            int hd_global = n_pairs * 2;
+            const float* divisors = static_cast<const float*>(src.data);
+            float theta_global = cfg.rope_theta;  // 1e6 for Gemma 4
+
+            // Pre-compute effective per-pair frequencies = theta^(-2*pair/hd)/divisor[pair]
+            // and present them via the layer's rope_freqs slot. The kernel reads
+            // these directly as the freq value (longrope_inv_freqs path), no further
+            // theta math. Memory is leaked deliberately (4 KB total, model-lifetime).
+            float* effective = new float[n_pairs];
+            for (int p = 0; p < n_pairs; ++p) {
+                float exp_p   = -2.0f * static_cast<float>(p) / static_cast<float>(hd_global);
+                float base_freq = std::pow(theta_global, exp_p);
+                effective[p] = base_freq / divisors[p];
+            }
+            int64_t shape[4] = {n_pairs, 0, 0, 0};
+            Tensor eff_tensor(effective, DType::FP32, 1, shape, /*on_device=*/false);
+            int n_global = 0;
+            for (int i = 0; i < cfg.n_layers; ++i) {
+                bool is_swa = (i < (int)cfg.swa_layers.size() && cfg.swa_layers[i]);
+                if (!is_swa) {
+                    model->layers_[i].rope_freqs = eff_tensor;
+                    n_global++;
+                }
+            }
+            if (cfg.swa_layers[0]) {
+                model->layers_[0].rope_freqs = Tensor();
+            }
+            IMP_LOG_INFO("Gemma 4: rope_freqs → %d effective freqs, %d global layers",
+                         n_pairs, n_global);
+        }
+
         // Warn about config/tensor mismatches
         if (cfg.n_experts_shared > 0 && n_shared_exp == 0) {
             IMP_LOG_WARN("Config declares %d shared expert(s) but no shared expert "
@@ -1120,6 +1270,8 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     if (it_tok_model != metadata.end()) {
         const std::string& tm = it_tok_model->second.str_val;
         if (tm == "gpt2") tok_type = "gpt2";
+        // Gemma-4 uses SPM-style BPE: ▁ for spaces + BPE merge ranks.
+        else if (tm == "gemma4") tok_type = "gemma4";
     }
     tokenizer->set_type(tok_type);
 
@@ -1138,6 +1290,13 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         // GPT2/BPE tokenizers (Qwen, etc.) typically don't use BOS.
         // Default to false when metadata is absent.
         tokenizer->set_add_bos(false);
+    }
+
+    // Gemma-4: always add BOS regardless of GGUF metadata.
+    // Some GGUF converters (ggml-org) set add_bos=false incorrectly.
+    // llama.cpp forces add_bos=true for Gemma-4 (see llama-vocab.cpp "override").
+    if (tok_type == "gemma4") {
+        tokenizer->set_add_bos(true);
     }
 
     // add_space_prefix flag (Gemma: false, LLaMA: true/default)
@@ -1167,8 +1326,8 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
 
         tokenizer->load_vocab(tokens, scores, bos_id, eos_id);
 
-        // Load BPE merge rules (for GPT2-style tokenizers)
-        if (tok_type == "gpt2") {
+        // Load BPE merge rules (for GPT2-style tokenizers and gemma4)
+        if (tok_type == "gpt2" || tok_type == "gemma4") {
             auto it_merges = metadata.find("tokenizer.ggml.merges");
             if (it_merges != metadata.end() && !it_merges->second.str_array.empty()) {
                 tokenizer->load_merges(it_merges->second.str_array);

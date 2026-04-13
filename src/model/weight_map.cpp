@@ -51,6 +51,12 @@ static void ensure_expert(TransformerLayer& layer, int idx) {
         layer.expert_w_up.resize(needed);
     if (static_cast<int>(layer.expert_w_down.size()) < needed)
         layer.expert_w_down.resize(needed);
+    if (static_cast<int>(layer.expert_nvfp4_gate.size()) < needed)
+        layer.expert_nvfp4_gate.resize(needed);
+    if (static_cast<int>(layer.expert_nvfp4_up.size()) < needed)
+        layer.expert_nvfp4_up.resize(needed);
+    if (static_cast<int>(layer.expert_nvfp4_down.size()) < needed)
+        layer.expert_nvfp4_down.resize(needed);
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +237,31 @@ bool WeightMap::apply_weights(
     int assigned = 0;
     int skipped  = 0;
 
-    for (auto& [name, tensor] : tensors) {
+    const bool is_gemma4 = (arch_ == ModelArch::GEMMA4);
+
+    for (auto& [orig_name, tensor] : tensors) {
+        // Gemma 4 uses Gemma4ForConditionalGeneration wrapper with
+        // `model.language_model.` and `model.vision_tower.` prefixes. Strip
+        // the language_model prefix so downstream handlers see the same
+        // `model.layers.X...` layout as other archs. Skip vision tower for
+        // now (text-only loading path).
+        std::string name = orig_name;
+        if (is_gemma4) {
+            const std::string vt_prefix = "model.vision_tower.";
+            if (name.compare(0, vt_prefix.size(), vt_prefix) == 0) {
+                ++skipped;  // silently skip vision encoder weights
+                continue;
+            }
+            const std::string lm_prefix = "model.language_model.";
+            if (name.compare(0, lm_prefix.size(), lm_prefix) == 0) {
+                name = "model." + name.substr(lm_prefix.size());
+            }
+            // Also handle top-level aliases the wrapper introduces.
+            if (name == "model.embed_tokens.weight" ||
+                name == "language_model.embed_tokens.weight") {
+                name = "model.embed_tokens.weight";
+            }
+        }
         auto parts = split(name, '.');
 
         // -----------------------------------------------------------------
@@ -255,11 +285,30 @@ bool WeightMap::apply_weights(
             ++assigned;
             continue;
         }
+        // NVFP4 prequant LM head scales (Model Optimizer)
+        if (name == "lm_head.weight_scale") {
+            model.nvfp4_out_proj_.weight_scale = tensor;
+            IMP_LOG_DEBUG("  assigned: %s -> nvfp4_out_proj.weight_scale", name.c_str());
+            ++assigned;
+            continue;
+        }
+        if (name == "lm_head.weight_scale_2") {
+            model.nvfp4_out_proj_.weight_scale_2 = tensor;
+            IMP_LOG_DEBUG("  assigned: %s -> nvfp4_out_proj.weight_scale_2", name.c_str());
+            ++assigned;
+            continue;
+        }
+        if (name == "lm_head.input_scale") {
+            model.nvfp4_out_proj_.input_scale = tensor;
+            IMP_LOG_DEBUG("  assigned: %s -> nvfp4_out_proj.input_scale", name.c_str());
+            ++assigned;
+            continue;
+        }
 
         // -----------------------------------------------------------------
         // Layer weights: model.layers.{i}.<rest>
         // -----------------------------------------------------------------
-        if (parts.size() < 5 || parts[0] != "model" || parts[1] != "layers") {
+        if (parts.size() < 4 || parts[0] != "model" || parts[1] != "layers") {
             IMP_LOG_WARN("WeightMap: unrecognised weight name: %s", name.c_str());
             ++skipped;
             continue;
@@ -293,10 +342,80 @@ bool WeightMap::apply_weights(
         }
 
         // -- FFN norm: post_attention_layernorm.weight --
-        if (!matched && parts.size() >= 5 &&
+        //    Llama convention: post_attention_layernorm is actually the pre-FFN norm.
+        //    Gemma 3/4 convention: post_attention_layernorm is the sandwich norm
+        //    applied AFTER attention output. Routed below in the Gemma-4 block.
+        if (!matched && !is_gemma4 && parts.size() >= 5 &&
             parts[3] == "post_attention_layernorm" && parts[4] == "weight") {
             layer.ffn_norm = tensor;
             matched = true;
+        }
+
+        // -- Gemma 4: mlp.{gate,up,down}_proj.weight is the SHARED EXPERT,
+        //    NOT dense MLP. Route to w_*_shared instead. Must come before
+        //    the generic dense-MLP branch below.
+        if (!matched && is_gemma4 && parts.size() >= 6 &&
+            parts[3] == "mlp" && parts[5] == "weight") {
+            const std::string& proj = parts[4];
+            if (proj == "gate_proj") { layer.w_gate_shared = tensor; matched = true; }
+            else if (proj == "up_proj") { layer.w_up_shared = tensor; matched = true; }
+            else if (proj == "down_proj") { layer.w_down_shared = tensor; matched = true; }
+        }
+
+        // -- Gemma 4: router + packed MoE experts + per-layer extras --
+        //    experts.gate_up_proj  (3D fused [n_exp, 2*moe_ff, d]) -> expert_gate_packed
+        //    experts.down_proj     (3D      [n_exp, d, moe_ff])    -> expert_down_packed
+        //    router.proj.weight    [n_exp, d]                      -> moe_gate
+        //    *_layernorm(_1|_2) variants                            -> ffn_{pre,post}_norm_{1,2}
+        //    post_attention_layernorm.weight                        -> post_attn_norm
+        if (!matched && is_gemma4) {
+            // experts.gate_up_proj / experts.down_proj
+            if (parts.size() >= 5 && parts[3] == "experts") {
+                if (parts[4] == "gate_up_proj") {
+                    layer.expert_gate_packed = tensor;
+                    // expert_up_packed left null → weight_upload splits the fused tensor
+                    matched = true;
+                } else if (parts[4] == "down_proj") {
+                    layer.expert_down_packed = tensor;
+                    matched = true;
+                }
+            }
+            // router.proj.weight (the gating matrix)
+            else if (parts.size() >= 6 && parts[3] == "router" &&
+                     parts[4] == "proj" && parts[5] == "weight") {
+                layer.moe_gate = tensor;
+                matched = true;
+            }
+            // router.scale  (per-channel router input scale == ffn_gate_inp.scale)
+            else if (parts.size() >= 5 && parts[3] == "router" &&
+                     parts[4] == "scale") {
+                layer.ffn_gate_inp_scale = tensor;
+                matched = true;
+            }
+            // router.per_expert_scale  (per-expert down output scale)
+            else if (parts.size() >= 5 && parts[3] == "router" &&
+                     parts[4] == "per_expert_scale") {
+                layer.expert_down_scale = tensor;
+                matched = true;
+            }
+            // layer_scalar  (per-layer output scalar)
+            else if (parts.size() >= 4 && parts[3] == "layer_scalar") {
+                layer.layer_out_scale = tensor;
+                matched = true;
+            }
+            // Gemma 4 FFN norm variants (parallel shared-MLP + MoE branches)
+            else if (parts.size() >= 5 && parts[4] == "weight") {
+                if (parts[3] == "pre_feedforward_layernorm_2") {
+                    layer.ffn_pre_norm_2 = tensor; matched = true;
+                } else if (parts[3] == "post_feedforward_layernorm_1") {
+                    layer.ffn_post_norm_1 = tensor; matched = true;
+                } else if (parts[3] == "post_feedforward_layernorm_2") {
+                    layer.ffn_post_norm_2 = tensor; matched = true;
+                } else if (parts[3] == "post_attention_layernorm") {
+                    // Gemma 3/4 sandwich norm — distinct from Llama's FFN norm.
+                    layer.post_attn_norm = tensor; matched = true;
+                }
+            }
         }
 
         // -- Dense MLP (Llama / Mistral / DeepSeek dense layers) --
@@ -305,6 +424,37 @@ bool WeightMap::apply_weights(
             if (proj == "gate_proj") { layer.w_gate = tensor; matched = true; }
             else if (proj == "up_proj") { layer.w_up = tensor; matched = true; }
             else if (proj == "down_proj") { layer.w_down = tensor; matched = true; }
+        }
+
+        // -- NVFP4 scale tensors (ModelOpt pre-quantized) --
+        // self_attn.{q,k,v,o}_proj.{weight_scale,weight_scale_2,input_scale}
+        if (!matched && parts.size() >= 6 && parts[3] == "self_attn" &&
+            (parts[5] == "weight_scale" || parts[5] == "weight_scale_2" || parts[5] == "input_scale")) {
+            const std::string& proj = parts[4];
+            const std::string& kind = parts[5];
+            auto assign = [&](TransformerLayer::NvFP4PreQuantWeight& nw) {
+                if (kind == "weight_scale")   nw.weight_scale = tensor;
+                else if (kind == "weight_scale_2") nw.weight_scale_2 = tensor;
+                else if (kind == "input_scale")    nw.input_scale = tensor;
+            };
+            if (proj == "q_proj") { assign(layer.nvfp4_q); matched = true; }
+            else if (proj == "k_proj") { assign(layer.nvfp4_k); matched = true; }
+            else if (proj == "v_proj") { assign(layer.nvfp4_v); matched = true; }
+            else if (proj == "o_proj") { assign(layer.nvfp4_o); matched = true; }
+        }
+        // mlp.{gate,up,down}_proj.{weight_scale,weight_scale_2,input_scale}
+        if (!matched && parts.size() >= 6 && parts[3] == "mlp" &&
+            (parts[5] == "weight_scale" || parts[5] == "weight_scale_2" || parts[5] == "input_scale")) {
+            const std::string& proj = parts[4];
+            const std::string& kind = parts[5];
+            auto assign = [&](TransformerLayer::NvFP4PreQuantWeight& nw) {
+                if (kind == "weight_scale")   nw.weight_scale = tensor;
+                else if (kind == "weight_scale_2") nw.weight_scale_2 = tensor;
+                else if (kind == "input_scale")    nw.input_scale = tensor;
+            };
+            if (proj == "gate_proj") { assign(layer.nvfp4_gate); matched = true; }
+            else if (proj == "up_proj") { assign(layer.nvfp4_up); matched = true; }
+            else if (proj == "down_proj") { assign(layer.nvfp4_down); matched = true; }
         }
 
         // -----------------------------------------------------------------
@@ -362,6 +512,24 @@ bool WeightMap::apply_weights(
                     if (proj == "gate_proj") { layer.expert_w_gate[expert_idx] = tensor; matched = true; }
                     else if (proj == "up_proj") { layer.expert_w_up[expert_idx] = tensor; matched = true; }
                     else if (proj == "down_proj") { layer.expert_w_down[expert_idx] = tensor; matched = true; }
+                }
+            }
+            // MoE expert NVFP4 scales: mlp.experts.{e}.{proj}.{weight_scale,weight_scale_2,input_scale}
+            else if (parts.size() >= 8 && parts[4] == "experts" &&
+                     (parts[7] == "weight_scale" || parts[7] == "weight_scale_2" || parts[7] == "input_scale")) {
+                int expert_idx = parse_int(parts[5]);
+                if (expert_idx >= 0) {
+                    ensure_expert(layer, expert_idx);
+                    const std::string& proj = parts[6];
+                    const std::string& kind = parts[7];
+                    auto assign = [&](TransformerLayer::NvFP4PreQuantWeight& nw) {
+                        if (kind == "weight_scale")   nw.weight_scale = tensor;
+                        else if (kind == "weight_scale_2") nw.weight_scale_2 = tensor;
+                        else if (kind == "input_scale")    nw.input_scale = tensor;
+                    };
+                    if (proj == "gate_proj") { assign(layer.expert_nvfp4_gate[expert_idx]); matched = true; }
+                    else if (proj == "up_proj") { assign(layer.expert_nvfp4_up[expert_idx]); matched = true; }
+                    else if (proj == "down_proj") { assign(layer.expert_nvfp4_down[expert_idx]); matched = true; }
                 }
             }
             // Shared expert: mlp.shared_expert.{gate,up,down}_proj.weight
