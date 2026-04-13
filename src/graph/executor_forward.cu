@@ -235,6 +235,12 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         fprintf(stderr, "[DEBUG_FWD] [step=%d] input_tokens (%d):", decode_step, n);
         for (int i = 0; i < n; i++) fprintf(stderr, " %d", h_ids[i]);
         fprintf(stderr, "\n");
+        // Dump positions
+        std::vector<int> h_pos(n);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(h_pos.data(), state.positions, n * sizeof(int), cudaMemcpyDeviceToHost));
+        fprintf(stderr, "[DEBUG_FWD] [step=%d] positions (%d):", decode_step, n);
+        for (int i = 0; i < std::min(n, 30); i++) fprintf(stderr, " %d", h_pos[i]);
+        fprintf(stderr, "\n");
     }
     Tensor h = view_tokens(hidden_, n);
     embedding_lookup(model_->token_embedding(), state.token_ids, n, h,
@@ -408,7 +414,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                                 __half2float(h_tmp[6]), __half2float(h_tmp[7]));
                     }
                     // Binary dump: full hidden state for selected layers
-                    if (n <= 4 && getenv("IMP_DUMP_HIDDEN") && (i == 0 || i == 29)) {
+                    if (getenv("IMP_DUMP_HIDDEN") && (i == 0 || i == 5 || i == 15 || i == 29)) {
                         std::vector<half> h_buf(n * cfg.d_model);
                         cudaMemcpy(h_buf.data(), view_tokens(h, n).data, h_buf.size() * sizeof(half), cudaMemcpyDeviceToHost);
                         char fname[256];
