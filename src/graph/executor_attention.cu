@@ -497,19 +497,27 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             fused_rope_dim = hd;
         }
         static bool no_qknorm_fused = getenv("IMP_NO_QKNORM_FUSED") != nullptr;
-        if (has_qk_norm && n == 1 && qv.dtype == DType::FP16 && !no_qknorm_fused) {
-            // Fused: QK-norm + RoPE in one kernel launch (saves 2 launches)
-            qknorm_rope_fused(static_cast<half*>(qv.data),
-                               static_cast<half*>(kk.data),
-                               static_cast<const half*>(ly.attn_q_norm.data),
-                               static_cast<const half*>(ly.attn_k_norm.data),
-                               nh, nkv, hd, eps,
-                               state.positions,  // device pointer
-                               layer_rope_theta, layer_rope_freq_scale,
-                               fused_rope_dim, cfg.rope_neox, stream, norm_w_off_,
-                               cfg.yarn_ext_factor, cfg.yarn_attn_factor,
-                               cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr,
-                               longrope_freqs);
+        if (has_qk_norm && qv.dtype == DType::FP16 && !no_qknorm_fused) {
+            // Fused: QK-norm + RoPE in one kernel per token.
+            // The fused kernel keeps norm intermediate values in FP32 shared memory,
+            // avoiding the FP16 round-trip that the separate rmsnorm+rope path has.
+            // This precision is critical for Gemma-4's 128-expert MoE routing stability.
+            int q_stride = nh * hd;
+            int k_stride = nkv * hd;
+            for (int t = 0; t < n; t++) {
+                qknorm_rope_fused(
+                    static_cast<half*>(qv.data) + t * q_stride,
+                    static_cast<half*>(kk.data) + t * k_stride,
+                    static_cast<const half*>(ly.attn_q_norm.data),
+                    static_cast<const half*>(ly.attn_k_norm.data),
+                    nh, nkv, hd, eps,
+                    state.positions + t,  // device pointer to this token's position
+                    layer_rope_theta, layer_rope_freq_scale,
+                    fused_rope_dim, cfg.rope_neox, stream, norm_w_off_,
+                    cfg.yarn_ext_factor, cfg.yarn_attn_factor,
+                    cfg.yarn_ext_factor > 0.0f ? yarn_corr_dims_ : nullptr,
+                    longrope_freqs);
+            }
         } else if (can_fuse_rope_kv && !has_qk_norm) {
             // Fused path: Q-only RoPE here, K-RoPE deferred to KV write
             const int effective_rope_dim = fused_rope_dim;
