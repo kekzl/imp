@@ -47,12 +47,13 @@ Models tested and verified on RTX 5090 (32 GB GDDR7). Sorted by quality-per-VRAM
 
 ## Mixture of Experts (MoE)
 
-| Model | Quant | VRAM | Notes |
-|-------|-------|------|-------|
-| **Qwen3.5-35B-A3B** (MoE) | Q6_K | 27 GB | 35B total, 3B active — fast decode |
-| **Qwen3-Coder-30B-A3B** | Q6_K | 24 GB | Code-specialized MoE |
-| **DeepSeek-R1-Distill-Qwen-14B** | Q6_K | 12 GB | Reasoning-optimized (R1 distillation) |
-| **Nemotron-3-Nano-30B-A3B** | Q6_K | 32 GB | Mamba2+Attention+MoE hybrid, tight fit |
+| Model | Quant | VRAM | Decode tok/s | Notes |
+|-------|-------|------|-------------|-------|
+| **Qwen3-Coder-30B-A3B** | NVFP4 | 24 GB | 38 | Code MoE, 128 experts, Model Optimizer SafeTensors |
+| **Qwen3-Coder-30B-A3B** | Q6_K | 24 GB | — | Code MoE, GGUF format |
+| **Qwen3.5-35B-A3B** (MoE) | Q6_K | 27 GB | — | 35B total, 3B active — fast decode |
+| **DeepSeek-R1-Distill-Qwen-14B** | Q6_K | 12 GB | — | Reasoning-optimized (R1 distillation) |
+| **Nemotron-3-Nano-30B-A3B** | Q6_K | 32 GB | — | Mamba2+Attention+MoE hybrid, tight fit |
 
 ## Quick Recommendations
 
@@ -63,7 +64,8 @@ Models tested and verified on RTX 5090 (32 GB GDDR7). Sorted by quality-per-VRAM
 | **Best quality ≤16 GB** | Qwen3.5-27B Q4_K_M | GDN + large model |
 | **Best quality ≤32 GB** | Qwen3-32B Q4_K_M | Dense frontier |
 | **Long context** | Qwen3.5-9B Q8_0 | GDN = O(1) per token |
-| **Coding** | Devstral-Small Q4_K_M | Code-specialized |
+| **Coding (MoE)** | Qwen3-Coder-30B-A3B NVFP4 | 128 experts, 38 tok/s |
+| **Coding (dense)** | Devstral-Small Q4_K_M | Code-specialized |
 | **Vision** | Gemma-3-12B Q8_0 | Text + image (mmproj) |
 | **Reasoning** | DeepSeek-R1-Distill-14B Q6_K | Chain-of-thought |
 | **Smallest footprint** | Qwen3-4B MXFP4 | 2.8 GB, Blackwell FP4 |
@@ -80,11 +82,15 @@ Models tested and verified on RTX 5090 (32 GB GDDR7). Sorted by quality-per-VRAM
 
 ## Download
 
-All models available from HuggingFace. imp-cli auto-downloads when given a repo ID:
+All models available from HuggingFace. imp supports both GGUF files and SafeTensors directories:
 
 ```bash
-# Direct HuggingFace download
+# GGUF (direct file or HuggingFace download)
 ./imp-cli --model Qwen/Qwen3-8B-GGUF --prompt "Hello"
+./imp-cli --model models/Qwen3-8B-Q8_0.gguf --prompt "Hello"
+
+# SafeTensors (NVFP4 prequant from Model Optimizer)
+./imp-cli --model models/Qwen3-Coder-30B-A3B-FP4/ --prompt "Hello"
 
 # Or download manually
 huggingface-cli download Qwen/Qwen3-8B-GGUF qwen3-8b-q8_0.gguf --local-dir ./models/

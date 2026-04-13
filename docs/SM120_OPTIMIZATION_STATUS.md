@@ -37,11 +37,23 @@ This means:
 3. **GPU clock boost** — RTX 5090 boosts correctly to ~2445 MHz under load (max 3090 MHz)
 4. **Batch>1 decode** — multiple sequences share weight loads, increases arithmetic intensity
 
+## NVFP4 Prequant (Model Optimizer) — NEW
+
+| Item | Status | Notes |
+|------|--------|-------|
+| SafeTensors NVFP4 loading | ✅ Done | Phase 0 direct registration, no re-quantization |
+| BF16→FP16 weight conversion | ✅ Done | Norms, router, embeddings, LM head |
+| CUTLASS NVFP4 prefill GEMM | ✅ Done | Dense layers via gemm_dispatch() |
+| Per-expert NVFP4 GEMV (decode) | ✅ Done | Serial dispatch, legacy MoE path |
+| CUDA graphs for MoE | ⛔ Disabled | D2H routing memcpy incompatible |
+| Packed MoE NVFP4 dispatch | 🔲 TODO | Would enable fused gate+up MoE GEMV |
+| Tested: Qwen3-Coder-30B-A3B | ✅ 38 tok/s | 128 experts, single+multi-turn verified |
+
 ## Open Items
 
 | Item | Impact | Feasibility |
 |------|--------|-------------|
+| Packed MoE NVFP4 (fused dispatch) | High for MoE prequant | Medium — pack per-expert into NvFP4MoEQuantResult |
 | FP8 TC-GEMV for batch decode (M=2-16) | Medium (batch>1 only) | Medium |
 | TMA for contiguous KV (non-paged) | Small (~5%) | Medium |
 | Example 93 cluster decode pattern | High for long ctx | Very High effort, sm100a only |
-| Gemma-3 decode bug (15 tok/s) | Bug fix | Needs compute-sanitizer |

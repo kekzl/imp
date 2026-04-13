@@ -30,6 +30,9 @@ ChatTemplateFamily ChatTemplate::detect_family(const std::string& jinja2_str) {
         return ChatTemplateFamily::LLAMA3;
     if (jinja2_str.find("<start_of_turn>") != std::string::npos)
         return ChatTemplateFamily::GEMMA;
+    // Gemma-4 uses <|turn> instead of <start_of_turn>
+    if (jinja2_str.find("<|turn>") != std::string::npos)
+        return ChatTemplateFamily::GEMMA;
     if (jinja2_str.find("[INST]") != std::string::npos)
         return ChatTemplateFamily::LLAMA2;
     if (jinja2_str.find("<extra_id_0>") != std::string::npos)
@@ -56,6 +59,7 @@ ChatTemplateFamily ChatTemplate::default_family_for_arch(ModelArch arch) {
         case ModelArch::QWEN35:         return ChatTemplateFamily::CHATML;
         case ModelArch::QWEN35_MOE:     return ChatTemplateFamily::CHATML;
         case ModelArch::GEMMA3:         return ChatTemplateFamily::GEMMA;
+        case ModelArch::GEMMA4:         return ChatTemplateFamily::GEMMA;
         case ModelArch::LLAMA4:         return ChatTemplateFamily::LLAMA3;
         default:                        return ChatTemplateFamily::RAW;
     }
@@ -157,6 +161,9 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer,
         case ChatTemplateFamily::GEMMA: {
             start_of_turn_id_ = tokenizer.find_token("<start_of_turn>");
             end_of_turn_id_   = tokenizer.find_token("<end_of_turn>");
+            // Gemma-4 uses different token names: <|turn> / <turn|>
+            if (start_of_turn_id_ < 0) start_of_turn_id_ = tokenizer.find_token("<|turn>");
+            if (end_of_turn_id_ < 0)   end_of_turn_id_   = tokenizer.find_token("<turn|>");
             if (start_of_turn_id_ < 0 || end_of_turn_id_ < 0) {
                 IMP_LOG_WARN("Gemma template: missing special tokens "
                              "(start_of_turn=%d, end_of_turn=%d), falling back to raw",
@@ -680,7 +687,15 @@ std::vector<int32_t> ChatTemplate::tokenize_rendered(
     // Control tokens appear as literal text in the rendered output (e.g. "<|im_start|>").
     // We identify them via the control_tokens_ map (sorted longest-first).
     std::vector<int32_t> result;
-    if (tok.add_bos()) {
+    // Skip BOS if the rendered string already contains the BOS token text —
+    // the control token splitter below will add it. Adding it here would duplicate.
+    bool rendered_has_bos = false;
+    if (bos_id_ >= 0) {
+        const std::string& bos_text = tok.token_text(bos_id_);
+        if (!bos_text.empty() && rendered.find(bos_text) != std::string::npos)
+            rendered_has_bos = true;
+    }
+    if (tok.add_bos() && !rendered_has_bos) {
         result.push_back(bos_id_);
     }
 
@@ -881,6 +896,7 @@ std::vector<int32_t> ChatTemplate::apply_jinja(
     jinja::Context ctx;
     ctx["messages"] = jinja::Value(build_jinja_messages(msgs, suppress_thinking));
     ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt);
+    ctx["enable_thinking"] = jinja::Value(!suppress_thinking);
     ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
     ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
 
@@ -891,6 +907,14 @@ std::vector<int32_t> ChatTemplate::apply_jinja(
         return {};
     }
     IMP_LOG_DEBUG("Jinja2 rendered (%zu chars)", rendered.size());
+    if (getenv("IMP_DEBUG_TEMPLATE")) {
+        std::string escaped;
+        for (char c : rendered) {
+            if (c == '\n') escaped += "\\n";
+            else escaped += c;
+        }
+        fprintf(stderr, "[DEBUG_TPL_JINJA] rendered: \"%s\"\n", escaped.c_str());
+    }
 
     auto result = tokenize_rendered(tok, rendered);
 
@@ -939,6 +963,7 @@ std::vector<int32_t> ChatTemplate::apply_jinja_with_tools(
     ctx["tools"] = jinja::Value(std::move(tools_arr));
     ctx["tool_choice"] = jinja::Value(tool_choice);
     ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt);
+    ctx["enable_thinking"] = jinja::Value(!suppress_thinking);
     ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
     ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
 

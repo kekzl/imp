@@ -36,14 +36,17 @@ int main(int argc, char** argv) {
 
     // Resolve model path early (needed for models_dir fallback)
     std::string resolved_model;
+    ImpModelFormat resolved_format = IMP_FORMAT_GGUF;
     if (!args.model_path.empty()) {
-        resolved_model = imp::resolve_model_gguf(args.model_path, args.revision);
+        resolved_model = imp::resolve_model_auto(args.model_path, resolved_format, args.revision);
         if (resolved_model.empty()) {
             fprintf(stderr, "Failed to resolve model: %s\n", args.model_path.c_str());
             return 1;
         }
         if (resolved_model != args.model_path) {
-            printf("Resolved model: %s -> %s\n", args.model_path.c_str(), resolved_model.c_str());
+            printf("Resolved model: %s -> %s (%s)\n", args.model_path.c_str(),
+                   resolved_model.c_str(),
+                   resolved_format == IMP_FORMAT_SAFETENSORS ? "SafeTensors" : "GGUF");
         }
     }
 

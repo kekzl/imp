@@ -277,6 +277,9 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
         {"Gemma2ForCausalLM",       ModelArch::GEMMA3},
         {"GemmaForCausalLM",        ModelArch::GEMMA3},
         {"Gemma3ForCausalLM",       ModelArch::GEMMA3},
+        {"Gemma3ForConditionalGeneration", ModelArch::GEMMA3},
+        {"Gemma4ForCausalLM",       ModelArch::GEMMA4},
+        {"Gemma4ForConditionalGeneration", ModelArch::GEMMA4},
         {"DeepseekV2ForCausalLM",   ModelArch::DEEPSEEK},
         {"DeepseekV3ForCausalLM",   ModelArch::DEEPSEEK},
         {"PhiForCausalLM",          ModelArch::LLAMA},
@@ -323,6 +326,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
                 {"gemma",     "GemmaForCausalLM"},
                 {"gemma2",    "Gemma2ForCausalLM"},
                 {"gemma3",    "Gemma3ForCausalLM"},
+                {"gemma4",    "Gemma4ForCausalLM"},
                 {"deepseek_v2", "DeepseekV2ForCausalLM"},
                 {"deepseek_v3", "DeepseekV3ForCausalLM"},
                 {"phi",       "PhiForCausalLM"},
@@ -340,30 +344,36 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         }
     }
 
+    // Multimodal wrappers (Gemma 3/4 ConditionalGeneration) nest the text-model
+    // hyperparameters under `text_config`. If present, use that as the effective
+    // root for all subsequent reads so we don't have to duplicate every lookup.
+    const JValue* text_cfg = jobj_find(root, "text_config");
+    const JValue& eff = (text_cfg && text_cfg->type == JType::OBJECT) ? *text_cfg : root;
+
     // Core dimensions
-    jobj_get_int(root, "hidden_size", cfg.d_model);
-    jobj_get_int(root, "num_attention_heads", cfg.n_heads);
-    jobj_get_int(root, "intermediate_size", cfg.d_ff);
-    jobj_get_int(root, "num_hidden_layers", cfg.n_layers);
-    jobj_get_int(root, "vocab_size", cfg.vocab_size);
-    jobj_get_int(root, "max_position_embeddings", cfg.max_seq_len);
-    jobj_get_int(root, "head_dim", cfg.head_dim);
+    jobj_get_int(eff, "hidden_size", cfg.d_model);
+    jobj_get_int(eff, "num_attention_heads", cfg.n_heads);
+    jobj_get_int(eff, "intermediate_size", cfg.d_ff);
+    jobj_get_int(eff, "num_hidden_layers", cfg.n_layers);
+    jobj_get_int(eff, "vocab_size", cfg.vocab_size);
+    jobj_get_int(eff, "max_position_embeddings", cfg.max_seq_len);
+    jobj_get_int(eff, "head_dim", cfg.head_dim);
 
     // KV heads: default to n_heads (MHA) if not specified
-    if (!jobj_get_int(root, "num_key_value_heads", cfg.n_kv_heads)) {
+    if (!jobj_get_int(eff, "num_key_value_heads", cfg.n_kv_heads)) {
         cfg.n_kv_heads = cfg.n_heads;
     }
 
     // Norm epsilon: try rms_norm_eps first, then layer_norm_eps
-    if (!jobj_get_float(root, "rms_norm_eps", cfg.rms_norm_eps)) {
-        jobj_get_float(root, "layer_norm_eps", cfg.rms_norm_eps);
+    if (!jobj_get_float(eff, "rms_norm_eps", cfg.rms_norm_eps)) {
+        jobj_get_float(eff, "layer_norm_eps", cfg.rms_norm_eps);
     }
 
     // RoPE
-    jobj_get_float(root, "rope_theta", cfg.rope_theta);
+    jobj_get_float(eff, "rope_theta", cfg.rope_theta);
 
     // RoPE scaling (object with type, factor, and optional YaRN/LongRoPE params)
-    const JValue* rope_scaling = jobj_find(root, "rope_scaling");
+    const JValue* rope_scaling = jobj_find(eff, "rope_scaling");
     if (rope_scaling && rope_scaling->type == JType::OBJECT) {
         std::string rope_type;
         jobj_get_string(*rope_scaling, "type", rope_type);
@@ -413,16 +423,18 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
     }
 
     // Sliding window attention
-    jobj_get_int(root, "sliding_window", cfg.sliding_window);
+    jobj_get_int(eff, "sliding_window", cfg.sliding_window);
 
     // Softcapping (Gemma-2/3)
-    jobj_get_float(root, "attn_logit_softcapping", cfg.attn_logit_softcap);
+    jobj_get_float(eff, "attn_logit_softcapping", cfg.attn_logit_softcap);
+    jobj_get_float(eff, "final_logit_softcapping", cfg.final_logit_softcap);
+    // Gemma 4 uses `final_logit_softcapping` same semantics.
     jobj_get_float(root, "final_logit_softcapping", cfg.final_logit_softcap);
 
     // FFN activation
     std::string hidden_act;
-    if (jobj_get_string(root, "hidden_act", hidden_act) ||
-        jobj_get_string(root, "hidden_activation", hidden_act)) {
+    if (jobj_get_string(eff, "hidden_act", hidden_act) ||
+        jobj_get_string(eff, "hidden_activation", hidden_act)) {
         if (hidden_act == "silu" || hidden_act == "swiglu") {
             cfg.ffn_activation = FFNActivation::SWIGLU;
         } else if (hidden_act == "gelu" || hidden_act == "gelu_pytorch_tanh" ||
@@ -432,10 +444,59 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
     }
 
     // MoE config
-    if (!jobj_get_int(root, "num_local_experts", cfg.n_experts)) {
-        jobj_get_int(root, "num_experts", cfg.n_experts);
+    if (!jobj_get_int(eff, "num_local_experts", cfg.n_experts)) {
+        jobj_get_int(eff, "num_experts", cfg.n_experts);
     }
-    jobj_get_int(root, "num_experts_per_tok", cfg.n_experts_active);
+    if (!jobj_get_int(eff, "num_experts_per_tok", cfg.n_experts_active)) {
+        jobj_get_int(eff, "top_k_experts", cfg.n_experts_active);
+    }
+    if (!jobj_get_int(eff, "moe_intermediate_size", cfg.expert_d_ff)) {
+        jobj_get_int(eff, "expert_intermediate_size", cfg.expert_d_ff);
+    }
+
+    // Gemma 4: per-layer geometry. layer_types[] tells SWA vs global, and
+    // head_dim / global_head_dim + num_key_value_heads / num_global_key_value_heads
+    // define the dual geometry. Build the per-layer vectors so
+    // executor_attention.cu picks up the right shapes/theta per layer.
+    if (cfg.arch == ModelArch::GEMMA4) {
+        int global_head_dim = 0;
+        int num_global_kv   = 0;
+        jobj_get_int(eff, "global_head_dim", global_head_dim);
+        jobj_get_int(eff, "num_global_key_value_heads", num_global_kv);
+
+        // rope params nested under rope_parameters.{full_attention,sliding_attention}
+        const JValue* rp = jobj_find(eff, "rope_parameters");
+        float theta_full = cfg.rope_theta > 0.0f ? cfg.rope_theta : 1e6f;
+        float theta_swa  = 1e4f;
+        if (rp && rp->type == JType::OBJECT) {
+            const JValue* fa = jobj_find(*rp, "full_attention");
+            if (fa && fa->type == JType::OBJECT) jobj_get_float(*fa, "rope_theta", theta_full);
+            const JValue* sa = jobj_find(*rp, "sliding_attention");
+            if (sa && sa->type == JType::OBJECT) jobj_get_float(*sa, "rope_theta", theta_swa);
+        }
+        cfg.rope_theta     = theta_full;
+        cfg.rope_theta_swa = theta_swa;
+
+        const JValue* lt = jobj_find(eff, "layer_types");
+        if (lt && lt->type == JType::ARRAY) {
+            cfg.swa_layers.clear();
+            cfg.head_dim_per_layer.clear();
+            cfg.n_kv_heads_per_layer.clear();
+            cfg.swa_layers.reserve(lt->arr.size());
+            cfg.head_dim_per_layer.reserve(lt->arr.size());
+            cfg.n_kv_heads_per_layer.reserve(lt->arr.size());
+            for (const auto& v : lt->arr) {
+                bool is_swa = (v.str_val == "sliding_attention");
+                cfg.swa_layers.push_back(is_swa ? 1 : 0);
+                cfg.head_dim_per_layer.push_back(
+                    is_swa ? cfg.head_dim
+                           : (global_head_dim > 0 ? global_head_dim : cfg.head_dim));
+                cfg.n_kv_heads_per_layer.push_back(
+                    is_swa ? cfg.n_kv_heads
+                           : (num_global_kv > 0 ? num_global_kv : cfg.n_kv_heads));
+            }
+        }
+    }
 
     // tie_word_embeddings is informational (logged but not stored in ModelConfig)
     const JValue* tie = jobj_find(root, "tie_word_embeddings");
@@ -487,11 +548,43 @@ std::string HFConfigLoader::load_chat_template(const std::string& model_dir) {
     JValue root;
     if (!parse_json_file(path, root)) return "";
 
+    // Case 1: chat_template is a plain string
     std::string chat_template;
     if (jobj_get_string(root, "chat_template", chat_template)) {
         IMP_LOG_INFO("loaded chat_template from tokenizer_config.json (%zu chars)",
                      chat_template.size());
         return chat_template;
+    }
+
+    // Case 2: chat_template is an array of {name, template} objects
+    // HuggingFace format: [{"name": "default", "template": "..."}, ...]
+    const JValue* ct = jobj_find(root, "chat_template");
+    if (ct && ct->type == JType::ARRAY) {
+        // Prefer "default" entry
+        for (const auto& entry : ct->arr) {
+            if (entry.type != JType::OBJECT) continue;
+            std::string name;
+            if (!jobj_get_string(entry, "name", name)) continue;
+            if (name == "default") {
+                if (jobj_get_string(entry, "template", chat_template)) {
+                    IMP_LOG_INFO("loaded chat_template (default) from tokenizer_config.json (%zu chars)",
+                                 chat_template.size());
+                    return chat_template;
+                }
+            }
+        }
+        // Fallback: first entry with a valid template string
+        for (const auto& entry : ct->arr) {
+            if (entry.type != JType::OBJECT) continue;
+            if (jobj_get_string(entry, "template", chat_template)) {
+                std::string name;
+                jobj_get_string(entry, "name", name);
+                IMP_LOG_INFO("loaded chat_template (%s) from tokenizer_config.json (%zu chars)",
+                             name.empty() ? "unnamed" : name.c_str(), chat_template.size());
+                return chat_template;
+            }
+        }
+        IMP_LOG_WARN("chat_template array found but no usable entry in %s", path.c_str());
     }
 
     return "";

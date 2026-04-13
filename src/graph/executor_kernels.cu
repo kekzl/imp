@@ -12,6 +12,7 @@
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
 #include "quant/mxfp4_gemm.h"
+#include "compute/ggml_mmvq.h"
 #include "compute/hadamard.h"
 #include "compute/gemm_cublaslt_nvfp4.h"
 #include "runtime/pdl.h"
@@ -1283,6 +1284,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
 
             float freq;
             if (longrope_inv_freqs) {
+                // Pre-computed effective frequencies (see gguf_loader.cpp rope_freqs conversion)
                 freq = longrope_inv_freqs[pair_idx];
             } else {
                 freq = 1.0f / (powf(theta, (2.0f * pair_idx) / static_cast<float>(2 * rope_pairs)));
@@ -1918,15 +1920,69 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
             return;
         }
     }
-    if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
-               q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype)) {
-        // dp4a MMVQ: quantize input to Q8_1, then dp4a dot product
+    // Gemma 4: if FP16 cache has the weight, use it (dp4a dispatch has issues
+    // with non-standard strides from per-layer narrow tensors).
+    bool prefer_fp16_cache = (fp16_cache != nullptr && fp16_cache->count(weight.data) > 0 &&
+                               input.stride[0] != weight.shape[1]);  // non-contiguous input
+    if (getenv("IMP_DEBUG_GEMM_DISPATCH") != nullptr) {
+        fprintf(stderr, "[GEMM_DISP] w=%p qtype=%d M=%lld N=%lld K=%lld prefer_fp16=%d "
+                "in_fp16_cache=%d in_fp8_cache=%d dp4a_ok=%d has_dequant=%d\n",
+                weight.data, (int)qtype,
+                (long long)input.shape[0], (long long)weight.shape[0], (long long)weight.shape[1],
+                (int)prefer_fp16_cache,
+                (fp16_cache && fp16_cache->count(weight.data) > 0),
+                (fp8_cache && fp8_cache->count(weight.data) > 0),
+                (int)(is_dp4a_qtype(qtype) && q8_1_buf && d8_buf),
+                (int)(dequant_scratch != nullptr));
+    }
+    static bool no_dp4a_gemv = (getenv("IMP_NO_DP4A_GEMV") != nullptr);
+    // MMVQ: ggml-compatible quantized GEMM for llama.cpp numerical parity.
+    // Auto-enabled for Gemma-4 via engine.cpp setenv. Non-static to pick up
+    // env var set during engine init (after static init of other flags).
+    bool use_mmvq = (getenv("IMP_GEMMA4_FORCE_MMVQ") != nullptr) &&
+                    !prefer_fp16_cache && input.dtype == DType::FP16 &&
+                    (qtype == GGMLQuantType::Q4_K || qtype == GGMLQuantType::Q5_K ||
+                     qtype == GGMLQuantType::Q5_1 || qtype == GGMLQuantType::Q8_0) &&
+                    (weight.shape[1] % 32 == 0);
+    bool use_dp4a = !no_dp4a_gemv && !prefer_fp16_cache && input.shape[0] == 1 &&
+                    input.dtype == DType::FP16 &&
+                    q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype);
+    if (use_mmvq) {
+        int M = static_cast<int>(input.shape[0]);
+        int N = static_cast<int>(weight.shape[0]);
+        int K = static_cast<int>(weight.shape[1]);
+        // Allocate scratch for Q8_1 quantization
+        size_t q8_need = static_cast<size_t>(M) * ((K + 31) / 32) * 36;
+        static void* s_mmvq_scratch = nullptr;
+        static size_t s_mmvq_scratch_size = 0;
+        if (!s_mmvq_scratch || s_mmvq_scratch_size < q8_need) {
+            if (s_mmvq_scratch) cudaFree(s_mmvq_scratch);
+            cudaMalloc(&s_mmvq_scratch, q8_need * 2);
+            s_mmvq_scratch_size = q8_need * 2;
+        }
+        if (qtype == GGMLQuantType::Q4_K)
+            ggml_mmvq_q4k(weight.data, static_cast<const half*>(input.data),
+                          static_cast<half*>(output.data), M, N, K,
+                          s_mmvq_scratch, s_mmvq_scratch_size, stream);
+        else if (qtype == GGMLQuantType::Q5_K)
+            ggml_mmvq_q5k(weight.data, static_cast<const half*>(input.data),
+                          static_cast<half*>(output.data), M, N, K,
+                          s_mmvq_scratch, s_mmvq_scratch_size, stream);
+        else if (qtype == GGMLQuantType::Q5_1)
+            ggml_mmvq_q5_1(weight.data, static_cast<const half*>(input.data),
+                           static_cast<half*>(output.data), M, N, K,
+                           s_mmvq_scratch, s_mmvq_scratch_size, stream);
+        else if (qtype == GGMLQuantType::Q8_0)
+            ggml_mmvq_q8_0(weight.data, static_cast<const half*>(input.data),
+                           static_cast<half*>(output.data), M, N, K,
+                           s_mmvq_scratch, s_mmvq_scratch_size, stream);
+    } else if (use_dp4a) {
+        int N = static_cast<int>(weight.shape[0]);
         int K = static_cast<int>(weight.shape[1]);
         quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
                                q8_1_buf, d8_buf, K, stream);
         dispatch_dp4a_gemv(qtype, weight.data, q8_1_buf, d8_buf,
-                           static_cast<half*>(output.data),
-                           static_cast<int>(weight.shape[0]), K, stream);
+                           static_cast<half*>(output.data), N, K, stream);
     } else if (qtype == GGMLQuantType::Q4_1 && fp16_cache != nullptr) {
         // Prefer pre-dequantized FP16 cache (P3 optimization)
         auto it = fp16_cache->find(weight.data);
@@ -1971,6 +2027,7 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
     } else if (fp16_cache != nullptr && (dequant_gpu_supported(qtype) || qtype == GGMLQuantType::MXFP4)) {
         // Pre-dequantized FP16 cache: zero per-GEMM dequant overhead
         auto it = fp16_cache->find(weight.data);
+        if (getenv("IMP_DEBUG_GEMM_DISPATCH") != nullptr) fprintf(stderr, "[GEMM_DISP]   -> fp16_cache hit=%d\n", (int)(it != fp16_cache->end()));
         if (it != fp16_cache->end()) {
             gemm(input, it->second, output, 1.0f, 0.0f, stream);
         } else if (dequant_scratch != nullptr && qtype != GGMLQuantType::MXFP4) {

@@ -267,6 +267,13 @@ void gemv_q3_k_q8_1_moe_decode(const void* packed_weights, const int32_t* expert
                                  int q8_1_stride, int d8_stride, int top_k,
                                  cudaStream_t stream = nullptr);
 
+void gemv_q5_1_q8_1_moe_decode(const void* packed_weights, const int32_t* expert_indices,
+                                 const block_q8_1* q8_1, const float* d8,
+                                 half* y, int rows, int K,
+                                 size_t expert_stride_bytes,
+                                 int q8_1_stride, int d8_stride, int top_k,
+                                 cudaStream_t stream = nullptr);
+
 // Fused gate+up MoE GEMV: both projections in a single kernel launch.
 // Uses blockIdx.y to select gate(0) or up(1). Saves one launch per MoE layer.
 void gemv_q6k_moe_gate_up_fused(

@@ -47,8 +47,7 @@ bool GreenContextManager::init(int device, float prefill_sm_ratio) {
                  prefill_sms_, 100.0f * prefill_sms_ / total_sms_,
                  decode_sms_, 100.0f * decode_sms_ / total_sms_);
 
-#if IMP_CUDA_13_1
-    // --- CUDA 13.1 Green Contexts (Runtime API): true SM partitioning ---
+    // --- Green Contexts (Runtime API): true SM partitioning ---
     {
         // Get the full SM resource for this device
         cudaDevResource full_sm_resource;
@@ -149,7 +148,6 @@ fallback:
     // Without this, the error propagates to subsequent cuBLAS calls
     // (cublasLtMatmul returns INVALID_VALUE) causing output corruption.
     cudaGetLastError();
-#endif  // IMP_CUDA_13_1
 
     // Fallback: create regular CUDA streams (no SM partitioning)
     IMP_LOG_INFO("GreenContextManager: using regular CUDA streams (no SM partitioning)");
@@ -193,7 +191,6 @@ void GreenContextManager::destroy() {
         decode_stream_ = nullptr;
     }
 
-#if IMP_CUDA_13_1
     if (prefill_green_ctx_) {
         cudaExecutionCtxDestroy(prefill_green_ctx_);
         prefill_green_ctx_ = nullptr;
@@ -204,7 +201,6 @@ void GreenContextManager::destroy() {
     }
     prefill_resource_desc_ = nullptr;
     decode_resource_desc_ = nullptr;
-#endif
 
     has_green_ctx_ = false;
     available_ = false;

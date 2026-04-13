@@ -1,6 +1,7 @@
 #include "graph/executor.h"
 #include "graph/executor_kernels.h"
 #include "graph/executor_gemv_helpers.h"
+#include "graph/executor_helpers.h"
 #include "graph/gemm_context.h"
 #include "compute/layernorm.h"
 #include "compute/gemm.h"
@@ -47,6 +48,25 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     Tensor uo = view_tokens(up_out_,     n);
     Tensor so = view_tokens(swiglu_out_, n);
     Tensor fo = view_tokens(ffn_out_,    n);
+
+    // L2 streaming hint: deprioritize FFN weight data in L2 to preserve cached
+    // activations and KV data from prior layers.  The access policy window covers
+    // the address span of the three weight tensors (gate, up, down).
+    {
+        const char* lo = static_cast<const char*>(ly.w_gate.data);
+        const char* hi = lo;
+        auto update = [&](const void* p, size_t sz) {
+            if (!p) return;
+            auto* cp = static_cast<const char*>(p);
+            if (cp < lo) lo = cp;
+            if (cp + sz > hi) hi = cp + sz;
+        };
+        update(ly.w_gate.data, ly.w_gate.nbytes());
+        update(ly.w_up.data,   ly.w_up.nbytes());
+        update(ly.w_down.data, ly.w_down.nbytes());
+        if (lo < hi)
+            set_l2_streaming(stream, lo, static_cast<size_t>(hi - lo));
+    }
 
     // 1. Save residual (skip if fused down-proj+residual will handle it).
     //    For FP32 accumulator path: residual is kept in fp32_hidden_, skip FP16 copy.
@@ -209,9 +229,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                            M_d, K_d, stream);
             }
         } else if (will_fuse_down_nvfp4) {
-            int K_d = static_cast<int>(ly.w_down.shape[1]);
-            int M_d = static_cast<int>(ly.w_down.shape[0]);
             auto& wd_nvfp4 = wcache_.nvfp4.at(ly.w_down.data);
+            int K_d = static_cast<int>(wd_nvfp4.K);
+            int M_d = static_cast<int>(wd_nvfp4.N);
             int n_mb_d = K_d / 16;
             if (n_mb_d <= 512) {
                 // Small K: fused SwiGLU/GeGLU + NVFP4 GEMV + residual (MR path)
@@ -366,6 +386,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             }
         }
     }
+
+    // Clear L2 streaming hint so subsequent layers start with default policy.
+    clear_l2_policy(stream);
 }
 
 } // namespace imp

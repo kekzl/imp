@@ -15,13 +15,7 @@
 
 namespace imp {
 
-// cuBLAS 13.1 autotune: benchmarks algorithms internally on first call
-// and caches the winner. Falls back to default on older toolkits.
-#if IMP_CUDA_13_1
 static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
-#else
-static constexpr auto kGemmAlgo = CUBLAS_GEMM_DEFAULT;
-#endif
 
 // ---------------------------------------------------------------------------
 // cuBLAS handle (lazily initialized, process-lifetime)
@@ -150,7 +144,7 @@ static void run_expert_matmul(cublasHandle_t handle,
 // All GEMMs are issued on the same stream to allow the GPU scheduler to
 // overlap kernel execution where possible.
 //
-// When IMP_CUDA_13_1 is defined, we could use a true grouped/batched GEMM
+// TODO: Could use a true grouped/batched GEMM
 // API.  For now we fall back to a loop of individual cublasLtMatmul calls
 // which is the safe portable path.
 // ---------------------------------------------------------------------------

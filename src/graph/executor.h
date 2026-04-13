@@ -353,6 +353,7 @@ private:
     const Model* model_ = nullptr;
     DType compute_dtype_ = DType::FP16;
     float norm_w_off_ = 0.0f;  // Gemma: 1.0 (norms use w+1 instead of w)
+    void* v_norm_ones_buf_ = nullptr;  // Gemma 4: ones buffer for V-norm (no learned weight)
     bool initialized_ = false;
     int max_tokens_ = 0;
     int max_logit_tokens_ = 0;  // max tokens needing LM head projection (= max_batch_size)

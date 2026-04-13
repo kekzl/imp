@@ -54,4 +54,7 @@ void gemv_mxfp4_geglu_residual(const CutlassMxFP4Weight& W,
                                 half* y, const half* residual,
                                 int N, int K, cudaStream_t stream);
 
+// One-time L1 cache carveout setup for MXFP4 GEMV kernels.
+void mxfp4_gemv_set_l1_carveout();
+
 } // namespace imp

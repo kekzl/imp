@@ -146,7 +146,8 @@ paged_attention_gqa_kernel(
     // ---- Load Q vector into registers ----
     const int elems_per_thread = (head_dim + WARP_SIZE - 1) / WARP_SIZE;
 
-    float q_reg[8];
+    // Max head_dim supported = 512 → 16 elems per lane (512/32).
+    float q_reg[16];
     if (active) {
         const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * head_dim
                               + (int64_t)head_idx * head_dim;
@@ -166,7 +167,7 @@ paged_attention_gqa_kernel(
     // ---- Per-warp running softmax state ----
     float m_w = -FLT_MAX;
     float l_w = 0.0f;
-    float o_reg[8];
+    float o_reg[16];  // max head_dim=512 → 16 elems/lane
     for (int i = 0; i < elems_per_thread; i++) o_reg[i] = 0.0f;
 
     // ---- Shared memory for K/V tile (double-buffered FP16) ----
@@ -512,7 +513,7 @@ __global__ void paged_attention_decode_kernel_generic(
     // Load Q into registers (strided mapping with bounds check)
     const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * head_dim
                           + (int64_t)head_idx  * head_dim;
-    float q_reg[8]; // max elems_per_thread for reasonable head_dim
+    float q_reg[16]; // max head_dim=512 → 16 elems/lane
     for (int i = 0; i < elems_per_thread; i++) {
         int d = lane_id + i * WARP_SIZE;
         q_reg[i] = (d < head_dim) ? __half2float(Q_ptr[d]) : 0.0f;
@@ -524,7 +525,7 @@ __global__ void paged_attention_decode_kernel_generic(
 
     float m_w = -FLT_MAX;
     float l_w = 0.0f;
-    float o_reg[8];
+    float o_reg[16];  // max head_dim=512 → 16 elems/lane
     for (int i = 0; i < elems_per_thread; i++) o_reg[i] = 0.0f;
 
     const auto [effective_start, first_block, num_ctx_blocks] =
@@ -973,19 +974,15 @@ __global__ void paged_attention_splitk_pipeline_kernel(
             int t = first_tok + ti;
             const half* V_tok = V_block + t * kv_slot_stride + kv_head * HEAD_DIM;
 
-            // Start async V[t] + K[t+1] loads
+            // Start async V[t] + K[t+1] loads (branchless: clamp to last valid token)
+            int t_next = min(t + 1, first_tok + n_toks - 1);
+            const half* K_next = K_block + t_next * kv_slot_stride + kv_head * HEAD_DIM;
             if constexpr (ELEMS >= 8) {
                 cp_async_ca_16(&v_buf[lane_offset], &V_tok[lane_offset]);
-                if (ti + 1 < n_toks) {
-                    const half* K_next = K_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
-                    cp_async_ca_16(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
-                }
+                cp_async_ca_16(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
             } else {
                 cp_async_ca_8(&v_buf[lane_offset], &V_tok[lane_offset]);
-                if (ti + 1 < n_toks) {
-                    const half* K_next = K_block + (t + 1) * kv_slot_stride + kv_head * HEAD_DIM;
-                    cp_async_ca_8(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
-                }
+                cp_async_ca_8(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
             }
             cp_async_commit();
 
@@ -1435,6 +1432,7 @@ void paged_attention_decode(
                 case 96:  LAUNCH_SPLITK_PIPE(96);  break;
                 case 128: LAUNCH_SPLITK_PIPE(128); break;
                 case 256: LAUNCH_SPLITK_PIPE(256); break;
+                case 512: LAUNCH_SPLITK_PIPE(512); break;
                 default:
                     IMP_LOG_ERROR("paged_attention_splitk_pipeline: unsupported head_dim %d", head_dim);
                     return;
@@ -1457,6 +1455,7 @@ void paged_attention_decode(
                 case 96:  LAUNCH_SPLITK(96);  break;
                 case 128: LAUNCH_SPLITK(128); break;
                 case 256: LAUNCH_SPLITK(256); break;
+                case 512: LAUNCH_SPLITK(512); break;
                 default:
                     IMP_LOG_ERROR("paged_attention_splitk: unsupported head_dim %d", head_dim);
                     return;
@@ -1517,6 +1516,7 @@ void paged_attention_decode(
                 case 96:  LAUNCH_CLUSTER(96);  used_cluster = true; break;
                 case 128: LAUNCH_CLUSTER(128); used_cluster = true; break;
                 case 256: LAUNCH_CLUSTER(256); used_cluster = true; break;
+                case 512: LAUNCH_CLUSTER(512); used_cluster = true; break;
                 default: break;
             }
             #undef LAUNCH_CLUSTER
@@ -1584,6 +1584,7 @@ void paged_attention_decode(
             case 96:  LAUNCH_MHA(96);  break;
             case 128: LAUNCH_MHA(128); break;
             case 256: LAUNCH_MHA(256); break;
+            case 512: LAUNCH_MHA(512); break;
             default:
                 // Generic non-templated fallback for non-standard head_dim (e.g. tests)
                 paged_attention_decode_kernel_generic<<<grid, block, smem_bytes, stream>>>(

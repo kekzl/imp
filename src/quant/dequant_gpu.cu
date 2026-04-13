@@ -332,9 +332,11 @@ __global__ void dequant_q4_0_kernel(
     half d_val = *reinterpret_cast<const half*>(block_ptr);
     const uint8_t* qs = block_ptr + 2;
 
-    int byte_idx = i / 2;
+    // ggml layout: element e (0..15) is low nibble of qs[e]; element e+16 is
+    // high nibble of qs[e]. NOT a linear (i/2, i%2) interleave.
+    int byte_idx = i & 15;
     uint8_t packed = qs[byte_idx];
-    int nibble = (i % 2 == 0) ? (packed & 0xF) : ((packed >> 4) & 0xF);
+    int nibble = (i < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
 
     float val = __half2float(d_val) * static_cast<float>(nibble - 8);
     dst[idx] = __float2half(val);
@@ -371,9 +373,9 @@ __global__ void dequant_q4_1_kernel(
     half m_val = *reinterpret_cast<const half*>(block_ptr + 2);
     const uint8_t* qs = block_ptr + 4;
 
-    int byte_idx = i / 2;
+    int byte_idx = i & 15;
     uint8_t packed = qs[byte_idx];
-    int nibble = (i % 2 == 0) ? (packed & 0xF) : ((packed >> 4) & 0xF);
+    int nibble = (i < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
 
     float val = __half2float(d_val) * static_cast<float>(nibble) + __half2float(m_val);
     dst[idx] = __float2half(val);
@@ -408,9 +410,14 @@ __global__ void dequant_q5_0_kernel(
     const uint8_t* qh = block_ptr + 2;   // 4 bytes high bits
     const uint8_t* qs = block_ptr + 6;   // 16 bytes low nibbles
 
-    int byte_idx = i / 2;
+    int byte_idx = i & 15;
     uint8_t packed = qs[byte_idx];
-    int low4 = (i % 2 == 0) ? (packed & 0xF) : ((packed >> 4) & 0xF);
+    int low4 = (i < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
+    // ggml packs high bits into a u32 where element i (0..31) has its high bit
+    // at bit i. Ref dequantize_row_q5_0:
+    //   xh_0 = ((qh >> j) << 4) & 0x10        // bit j   → element j
+    //   xh_1 = ((qh >> (j+12))) & 0x10        // bit j+16→ element j+16
+    // (the j+12 shift picks up bit (4+j+12)=bit j+16 at output position 4).
     int high1 = (qh[i / 8] >> (i % 8)) & 1;
     int q5 = (high1 << 4) | low4;
 
@@ -449,9 +456,10 @@ __global__ void dequant_q5_1_kernel(
     const uint8_t* qh = block_ptr + 4;   // 4 bytes high bits
     const uint8_t* qs = block_ptr + 8;   // 16 bytes low nibbles
 
-    int byte_idx = i / 2;
+    int byte_idx = i & 15;
     uint8_t packed = qs[byte_idx];
-    int low4 = (i % 2 == 0) ? (packed & 0xF) : ((packed >> 4) & 0xF);
+    int low4 = (i < 16) ? (packed & 0xF) : ((packed >> 4) & 0xF);
+    // Element i (0..31) uses bit i of the 32-bit qh (ref Q5_1 dequant).
     int high1 = (qh[i / 8] >> (i % 8)) & 1;
     int q5 = (high1 << 4) | low4;
 
@@ -576,9 +584,19 @@ __global__ void dequant_q5k_kernel(
     uint8_t packed = qs[qs_byte];
     int q4 = use_high ? ((packed >> 4) & 0xF) : (packed & 0xF);
 
-    // Extract 5th bit from qh array
-    // qh has 256 bits = 32 bytes, bit i corresponds to element i
-    int qh_bit = (qh[i / 8] >> (i % 8)) & 1;
+    // Extract 5th bit from qh array. Ref ggml layout (dequantize_row_q5_K):
+    //   32 bytes. Each byte[l] holds the high bits for element l across
+    //   all 4 chunks (j=0,64,128,192) at bit positions 0..7.
+    //   For chunk c (0..3) and half h (0..1):
+    //     - l = index within the chunk-half (0..31)
+    //     - byte_idx = l   (0..31)
+    //     - bit_pos  = c*2 + h
+    //     - element index in block: i = c*64 + h*32 + l
+    int c = i >> 6;          // chunk 0..3
+    int h2 = (i >> 5) & 1;   // half 0/1
+    int l = i & 31;
+    int bit_pos = (c << 1) | h2;
+    int qh_bit = (qh[l] >> bit_pos) & 1;
     int q5 = q4 | (qh_bit << 4);
 
     float val = d * static_cast<float>(sc_val) * static_cast<float>(q5)

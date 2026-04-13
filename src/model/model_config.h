@@ -35,6 +35,10 @@ struct ModelConfig {
     // Per-layer config (empty for standard transformers)
     std::vector<int> n_kv_heads_per_layer;  // 0 = no attention this layer
     std::vector<int> d_ff_per_layer;        // 0 = no dense FFN (SSM or attention-only)
+    std::vector<int> head_dim_per_layer;    // Gemma 4: different head_dim per layer type
+    std::vector<int> n_heads_per_layer;     // Gemma 4: per-layer Q head count
+    std::vector<uint8_t> swa_layers;        // Gemma 4: 1 = SWA layer, 0 = full attention
+    float rope_theta_swa = 0.0f;            // Gemma 4: RoPE theta for SWA layers (default: rope_local_theta)
 
     // Mamba2 SSM config
     int ssm_conv_kernel = 0;    // 4
@@ -85,6 +89,14 @@ struct TransformerLayer {
     Tensor q_bias, k_bias, v_bias;    // Attention biases (Qwen2)
     Tensor attn_q_norm, attn_k_norm;  // QK-norm (Qwen3-style per-head RMSNorm)
     Tensor post_attn_norm, post_ffn_norm;  // Post-layer norms (Gemma-3)
+    // Gemma 4 extras
+    Tensor ffn_pre_norm_2;      // pre-norm for expert branch (operates on attn_out)
+    Tensor ffn_post_norm_1;     // post-norm for shared MLP branch
+    Tensor ffn_post_norm_2;     // post-norm for expert branch
+    Tensor ffn_gate_inp_scale;  // router input scale [d_model]
+    Tensor layer_out_scale;     // per-layer output scalar (optional)
+    Tensor rope_freqs;          // per-layer RoPE frequency factors (full-attn layers only)
+    bool kv_equals_k = false;   // Gemma 4: V=K (wv absent for this layer)
     Tensor w_gate, w_up, w_down, ffn_norm;
     Tensor moe_gate;
     std::vector<Tensor> expert_w_gate, expert_w_up, expert_w_down;
@@ -135,6 +147,11 @@ struct TransformerLayer {
     // Router bias (Nemotron MoE)
     Tensor moe_router_bias;
 
+    // Per-expert output scale (Gemma 4): one scalar per expert, applied to each
+    // expert's down-projection output BEFORE the routing weighted sum. Loaded
+    // from `blk.X.ffn_down_exps.scale` (shape [n_expert]).
+    Tensor expert_down_scale;
+
     // Pre-quantized NVFP4 weights (from Model Optimizer via SafeTensors).
     // weight_scale: FP8 E4M3 micro-scales per group_size elements
     // weight_scale_2: FP32 tensor-scale (single value per tensor)
@@ -148,6 +165,9 @@ struct TransformerLayer {
     };
     NvFP4PreQuantWeight nvfp4_q, nvfp4_k, nvfp4_v, nvfp4_o;
     NvFP4PreQuantWeight nvfp4_gate, nvfp4_up, nvfp4_down;
+
+    // Per-expert NVFP4 weights (MoE models with pre-quantized expert weights)
+    std::vector<NvFP4PreQuantWeight> expert_nvfp4_gate, expert_nvfp4_up, expert_nvfp4_down;
 
     // GPTQ quantized weights (temporary — dequantized to FP16 during upload)
     struct GPTQWeight {

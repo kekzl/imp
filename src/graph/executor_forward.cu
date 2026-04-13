@@ -13,7 +13,6 @@
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
-#include "compute/attention_cutlass_fmha.h"
 #include "compute/activation.h"
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"
@@ -65,197 +64,30 @@ static void dispatch_gemv_fp32(GGMLQuantType qtype,
     }
 }
 
-// ---------------------------------------------------------------------------
-// KV cache write
-// ---------------------------------------------------------------------------
-
-void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
-                                   cudaStream_t stream) {
-    if (!state.kv_cache || !state.block_tables) return;
-
-    // Map global layer index to KV cache layer index
-    int kv_layer = get_kv_layer(kv_layer_map_, layer);
-    if (kv_layer < 0) return;  // not an attention layer
-
-    KVCache* cache = state.kv_cache;
-    int n        = state.n_tokens;
-    int nkv      = cache->n_kv_heads();
-    int hd       = cache->head_dim();
-    const int kv_block_size = cache->block_size();
-    int row_elems    = nkv * hd;
-    int block_stride = kv_block_size * row_elems;
-
-    int threads = std::min(row_elems, 256);
-
-    bool use_fp8 = (cache->dtype() == DType::FP8_E4M3);
-    bool use_int8 = (cache->dtype() == DType::INT8);
-    bool use_int4 = (cache->dtype() == DType::INT4);
-    bool use_turboquant = (cache->dtype() == DType::TURBOQUANT);
-    bool use_turboquant_lite = (cache->dtype() == DType::TURBOQUANT_LITE);
-
-    if (use_turboquant_lite) {
-        // TurboQuant Lite: QJL sketch-only K + INT4 V
-        Tensor kv = view_tokens(k_, n);
-        Tensor vv = view_tokens(v_, n);
-        int int4_block_stride = kv_block_size * nkv * hd / 2;
-        int scale_block_stride_tql = kv_block_size * nkv;
-        int sketch_dim = qjl_proj_.sketch_dim;
-        int sketch_block_stride = kv_block_size * nkv * (sketch_dim / 8);
-        dim3 grid_tql(n, 2);
-        write_kv_cache_turboquant_lite_kernel<<<grid_tql, 256, 0, stream>>>(
-            static_cast<const half*>(kv.data),
-            static_cast<const half*>(vv.data),
-            state.positions,
-            state.block_tables,
-            static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
-            static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
-            static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)),
-            static_cast<uint8_t*>(cache->k_sketch_ptr(kv_layer, 0)),
-            static_cast<const uint8_t*>(qjl_proj_.matrix),
-            int4_block_stride, scale_block_stride_tql, sketch_block_stride,
-            nkv, hd, sketch_dim,
-            kv_block_size, n,
-            state.max_blocks_per_seq, state.n_sequences);
-    } else if (use_turboquant) {
-        // TurboQuant KV cache write: PolarQuant directions + QJL sketch for K, INT4 for V
-        Tensor kv = view_tokens(k_, n);
-        Tensor vv = view_tokens(v_, n);
-        int int4_block_stride = kv_block_size * nkv * hd / 2;
-        int scale_block_stride_tq = kv_block_size * nkv;
-        int sketch_dim = qjl_proj_.sketch_dim;
-        int sketch_block_stride = kv_block_size * nkv * (sketch_dim / 8);
-        dim3 grid_tq(n, 2);
-
-        if (cache->use_mxfp4()) {
-            // MXFP4 path: FP4 E2M1 directions + UE8M0 per-32-element micro-scales
-            int n_groups = hd / 32;
-            int mscale_block_stride = kv_block_size * nkv * n_groups;
-            write_kv_cache_turboquant_mxfp4_kernel<<<grid_tq, 256, 0, stream>>>(
-                static_cast<const half*>(kv.data),
-                static_cast<const half*>(vv.data),
-                state.positions,
-                state.block_tables,
-                static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
-                static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
-                static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
-                static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)),
-                static_cast<uint8_t*>(cache->k_sketch_ptr(kv_layer, 0)),
-                static_cast<uint8_t*>(cache->k_mscale_ptr(kv_layer, 0)),
-                static_cast<const uint8_t*>(qjl_proj_.matrix),
-                int4_block_stride, scale_block_stride_tq, sketch_block_stride,
-                mscale_block_stride,
-                nkv, hd, sketch_dim,
-                kv_block_size, n,
-                state.max_blocks_per_seq, state.n_sequences);
-        } else {
-            // INT4 uniform path
-            write_kv_cache_turboquant_kernel<<<grid_tq, 256, 0, stream>>>(
-                static_cast<const half*>(kv.data),
-                static_cast<const half*>(vv.data),
-                state.positions,
-                state.block_tables,
-                static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
-                static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
-                static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
-                static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)),
-                static_cast<uint8_t*>(cache->k_sketch_ptr(kv_layer, 0)),
-                static_cast<const uint8_t*>(qjl_proj_.matrix),
-                int4_block_stride, scale_block_stride_tq, sketch_block_stride,
-                nkv, hd, sketch_dim,
-                kv_block_size, n,
-                state.max_blocks_per_seq, state.n_sequences);
-        }
-    } else if (use_int4) {
-        // INT4 quantized KV cache write — 2 values packed per byte, per-head scales
-        Tensor kv = view_tokens(k_, n);
-        Tensor vv = view_tokens(v_, n);
-        int int4_block_stride = kv_block_size * nkv * hd / 2;  // bytes (half the INT8 stride)
-        int scale_block_stride = kv_block_size * nkv;
-        dim3 grid_int4(n, 2);
-        write_kv_cache_int4_kernel<<<grid_int4, 256, 0, stream>>>(
-            static_cast<const half*>(kv.data),
-            static_cast<const half*>(vv.data),
-            state.positions,
-            state.block_tables,
-            static_cast<uint8_t*>(cache->k_ptr(kv_layer, 0)),
-            static_cast<uint8_t*>(cache->v_ptr(kv_layer, 0)),
-            static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
-            static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)),
-            int4_block_stride, scale_block_stride, nkv, hd,
-            kv_block_size, n,
-            state.max_blocks_per_seq, state.n_sequences);
-    } else if (use_int8) {
-        // INT8 quantized KV cache write path with per-head scales.
-        // No per-layer calibration needed — scales are computed per-head at write time.
-        Tensor kv = view_tokens(k_, n);
-        Tensor vv = view_tokens(v_, n);
-
-        int scale_block_stride = kv_block_size * nkv;  // half elems per scale block
-        dim3 grid_int8(n, 2);  // blockIdx.y: 0=K, 1=V
-        write_kv_cache_int8_kernel<<<grid_int8, 256, 0, stream>>>(
-            static_cast<const half*>(kv.data),
-            static_cast<const half*>(vv.data),
-            state.positions,
-            state.block_tables,
-            static_cast<int8_t*>(cache->k_ptr(kv_layer, 0)),
-            static_cast<int8_t*>(cache->v_ptr(kv_layer, 0)),
-            static_cast<half*>(cache->k_scale_ptr(kv_layer, 0)),
-            static_cast<half*>(cache->v_scale_ptr(kv_layer, 0)),
-            block_stride, scale_block_stride, nkv, hd,
-            kv_block_size, n,
-            state.max_blocks_per_seq, state.n_sequences);
-    } else if (use_fp8) {
-        // FP8 E4M3 quantized KV cache write path with online calibration.
-        // On first write to each KV layer, calibrate scale from K/V data.
-        float inv_scale;
-        if (!kv_calibrated_.empty() && kv_layer < static_cast<int>(kv_calibrated_.size()) &&
-            !kv_calibrated_[kv_layer]) {
-            // Calibrate from current K/V data: scale = absmax / 448.0
-            Tensor kv_cal = view_tokens(k_, n);
-            Tensor vv_cal = view_tokens(v_, n);
-            float k_scale = calibrate_fp8_scale(kv_cal, stream);
-            float v_scale = calibrate_fp8_scale(vv_cal, stream);
-            float scale = std::max(k_scale, v_scale);
-            if (scale < 1e-12f) scale = 1.0f;  // safety for all-zero
-            kv_scales_[kv_layer] = scale;
-            kv_calibrated_[kv_layer] = true;
-            inv_scale = 1.0f / scale;
-        } else if (!kv_scales_.empty() && kv_layer < static_cast<int>(kv_scales_.size())) {
-            inv_scale = 1.0f / kv_scales_[kv_layer];
-        } else {
-            inv_scale = 1.0f;
-        }
-
-        Tensor kv = view_tokens(k_, n);
-        Tensor vv = view_tokens(v_, n);
-        // Fused K+V FP8 write: single kernel launch with blockIdx.y
-        dim3 fp8_grid(n, 2);
-        write_kv_cache_fp8_fused_kernel<<<fp8_grid, threads, 0, stream>>>(
-            static_cast<const half*>(kv.data),
-            static_cast<const half*>(vv.data),
-            state.positions,
-            state.block_tables,
-            static_cast<__nv_fp8_e4m3*>(cache->k_ptr(kv_layer, 0)),
-            static_cast<__nv_fp8_e4m3*>(cache->v_ptr(kv_layer, 0)),
-            inv_scale,
-            block_stride, row_elems, kv_block_size, n,
-            state.max_blocks_per_seq, state.n_sequences);
-    } else {
-        // Standard FP16 KV cache write path — fused K+V in single launch
-        Tensor kv = view_tokens(k_, n);
-        Tensor vv = view_tokens(v_, n);
-        dim3 fused_grid(n, 2);  // blockIdx.y: 0=K, 1=V
-        write_kv_cache_fused_kernel<<<fused_grid, threads, 0, stream>>>(
-            static_cast<const half*>(kv.data),
-            static_cast<const half*>(vv.data),
-            state.positions,
-            state.block_tables,
-            static_cast<half*>(cache->k_ptr(kv_layer, 0)),
-            static_cast<half*>(cache->v_ptr(kv_layer, 0)),
-            block_stride, row_elems, kv_block_size, n,
-            state.max_blocks_per_seq, state.n_sequences);
+// Gemma 4: per-layer output scale. Multiplies all elements of `data` by the
+// scalar half stored at `scale_ptr` (device memory). Used at end of each layer
+// to keep the residual stream bounded.
+__global__ __launch_bounds__(256) void scale_fp16_by_fp16ptr_kernel(
+    half* __restrict__ data, const half* __restrict__ scale_ptr, int64_t n) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t n2 = n / 2;
+    if (idx < n2) {
+        half2 s2 = __half2half2(*scale_ptr);
+        half2* d2 = reinterpret_cast<half2*>(data);
+        d2[idx] = __hmul2(d2[idx], s2);
     }
 }
+
+__global__ __launch_bounds__(256) void scale_fp32_by_fp16ptr_kernel(
+    float* __restrict__ data, const half* __restrict__ scale_ptr, int64_t n) {
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float s = __half2float(*scale_ptr);
+        data[idx] *= s;
+    }
+}
+
+// write_kv_cache: moved to executor_kv_write.cu
 
 // ---------------------------------------------------------------------------
 // Forward pass diagnostics (IMP_DEBUG_FORWARD=1)
@@ -267,19 +99,30 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
 void debug_top_logits(const Tensor& logits, cudaStream_t stream, int topk = 10) {
     if (!debug_forward_enabled()) return;
     int vocab = static_cast<int>(logits.shape[logits.ndim - 1]);
+    int nrows = (logits.ndim >= 2) ? static_cast<int>(logits.shape[0]) : 1;
+    // Dump the LAST row (the one that actually gets sampled from for the next token).
+    int row = nrows - 1;
+    int64_t row_stride = (logits.ndim >= 2 && logits.stride[0] > 0) ? logits.stride[0] : vocab;
+    const size_t elem_sz = (logits.dtype == DType::FP32) ? sizeof(float) : sizeof(half);
+    const char* src = static_cast<const char*>(logits.data) + (int64_t)row * row_stride * elem_sz;
     std::vector<float> host(vocab);
 
     if (logits.dtype == DType::FP32) {
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(host.data(), logits.data, vocab * sizeof(float),
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(host.data(), src, vocab * sizeof(float),
                          cudaMemcpyDeviceToHost, stream));
     } else if (logits.dtype == DType::FP16) {
         std::vector<half> tmp(vocab);
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(tmp.data(), logits.data, vocab * sizeof(half),
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(tmp.data(), src, vocab * sizeof(half),
                          cudaMemcpyDeviceToHost, stream));
         cudaStreamSynchronize(stream);
         for (int i = 0; i < vocab; i++) host[i] = __half2float(tmp[i]);
     }
     cudaStreamSynchronize(stream);
+    // Also print min/max/L2 over the dumped row for cross-impl comparison.
+    float mn = host[0], mx = host[0]; double ss = 0.0;
+    for (int i = 0; i < vocab; i++) { mn = std::min(mn, host[i]); mx = std::max(mx, host[i]); ss += (double)host[i]*host[i]; }
+    fprintf(stderr, "[DEBUG_FWD] logits row=%d/%d  min=%+.4f max=%+.4f L2=%.4f\n",
+            row, nrows, mn, mx, std::sqrt(ss));
 
     // Find top-k by partial sort
     std::vector<std::pair<float, int>> scored(vocab);
@@ -325,6 +168,10 @@ void GraphExecutor::forward_logits(const InferenceState& state,
 
     // Store for use by run_ffn (which doesn't receive the InferenceState).
     cur_n_tokens_ = n;
+    // Decode step counter for debug dump tagging
+    static int s_decode_step = 0;
+    if (n == 1) s_decode_step++;
+    const int decode_step = (n == 1) ? s_decode_step : 0;
     cur_force_fp16_ = state.force_fp16_gemm;
     cur_per_row_lm_ = state.per_row_lm_head;
 
@@ -385,8 +232,14 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     if (debug_forward_enabled()) {
         std::vector<int32_t> h_ids(n);
         IMP_CUDA_CHECK_LOG(cudaMemcpy(h_ids.data(), state.token_ids, n * sizeof(int32_t), cudaMemcpyDeviceToHost));
-        fprintf(stderr, "[DEBUG_FWD] input_tokens (%d):", n);
+        fprintf(stderr, "[DEBUG_FWD] [step=%d] input_tokens (%d):", decode_step, n);
         for (int i = 0; i < n; i++) fprintf(stderr, " %d", h_ids[i]);
+        fprintf(stderr, "\n");
+        // Dump positions
+        std::vector<int> h_pos(n);
+        IMP_CUDA_CHECK_LOG(cudaMemcpy(h_pos.data(), state.positions, n * sizeof(int), cudaMemcpyDeviceToHost));
+        fprintf(stderr, "[DEBUG_FWD] [step=%d] positions (%d):", decode_step, n);
+        for (int i = 0; i < std::min(n, 30); i++) fprintf(stderr, " %d", h_pos[i]);
         fprintf(stderr, "\n");
     }
     Tensor h = view_tokens(hidden_, n);
@@ -415,6 +268,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     }
 
     debug_tensor_stats("after_embedding", h, stream);
+    debug_tensor_stats_all("after_embedding_all", view_tokens(h, n), stream);
 
     // Initialize FP32 residual accumulator from FP16 embedding (post-norm models only).
     if (fp32_accum_buf_) {
@@ -424,6 +278,26 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(
             static_cast<const half*>(h.data),
             static_cast<float*>(view_tokens(fp32_hidden_, n).data), total);
+    }
+
+    // Dump FP32 accumulator for decode debugging
+    if (fp32_accum_buf_ && n == 1 && debug_forward_enabled()) {
+        float tmp[4];
+        cudaMemcpyAsync(tmp, view_tokens(fp32_hidden_, n).data, 4*sizeof(float),
+                        cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+        fprintf(stderr, "[DEBUG_FWD] [step=%d] fp32_accum_init: [%.4f %.4f %.4f %.4f]\n",
+                decode_step, tmp[0], tmp[1], tmp[2], tmp[3]);
+    }
+    // Binary dump: write the full FP16 hidden state to file
+    if (getenv("IMP_DUMP_HIDDEN")) {
+        std::vector<half> h_buf(n * cfg.d_model);
+        cudaMemcpy(h_buf.data(), h.data, h_buf.size() * sizeof(half), cudaMemcpyDeviceToHost);
+        char fname[256];
+        snprintf(fname, sizeof(fname), "/tmp/imp_embed_step%d.bin", decode_step);
+        FILE* f = fopen(fname, "wb");
+        if (f) { fwrite(h_buf.data(), sizeof(half), h_buf.size(), f); fclose(f); }
+        fprintf(stderr, "[DUMP_BIN] Wrote %s (%zu halfs)\n", fname, h_buf.size());
     }
 
     if (profile_active) cudaEventRecord(ev_emb, stream);
@@ -457,12 +331,18 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         } else if (layer_has_ssm(i)) {
             run_ssm(i, state, stream);
         }
-        if (i <= 1) {
+        {
             char buf[64];
-            snprintf(buf, sizeof(buf), "after_layer%d_%s", i,
+            snprintf(buf, sizeof(buf), "[step=%d] after_layer%02d_%s", decode_step, i,
                      layer_has_gdn(i) ? "gdn" :
                      layer_has_attention(i) ? "attn" : "ssm");
-            debug_tensor_stats(buf, h, stream);
+            debug_tensor_stats_all(buf, view_tokens(h, n), stream);
+            const bool dump_this_layer = debug_forward_enabled();
+            if (dump_this_layer) {
+                char rbuf[64];
+                snprintf(rbuf, sizeof(rbuf), "[step=%d] attn_out-%d", decode_step, i);
+                debug_tensor_rows(rbuf, view_tokens(h, n), stream);
+            }
         }
         if (profile_active) cudaEventRecord(ev_attn[i], stream);
 
@@ -473,12 +353,106 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         } else if (layer_has_dense_ffn(i)) {
             run_ffn(i, stream);
         }
-        if (i <= 1) {
+        {
             char buf[64];
-            snprintf(buf, sizeof(buf), "after_layer%d_%s", i,
+            snprintf(buf, sizeof(buf), "[step=%d] after_layer%02d_%s", decode_step, i,
                      layer_has_moe(i) ? "moe" : (layer_has_dense_ffn(i) ? "ffn" : "no_ffn"));
-            debug_tensor_stats(buf, h, stream);
+            debug_tensor_stats_all(buf, view_tokens(h, n), stream);
+            const bool dump_this_layer = debug_forward_enabled();
+            if (dump_this_layer) {
+                char rbuf[64];
+                snprintf(rbuf, sizeof(rbuf), "[step=%d] moe_out-%d", decode_step, i);
+                debug_tensor_rows(rbuf, view_tokens(h, n), stream);
+            }
         }
+
+        // Gemma 4: per-layer output scale (a scalar weight). llama.cpp's
+        // gemma4-iswa.cpp:215-218 multiplies the layer output by this BEFORE the
+        // next layer reads it. Without it, the residual stream grows unbounded.
+        {
+            const auto& ly = model_->layer(i);
+            if (ly.layer_out_scale.data != nullptr && ly.layer_out_scale.on_device &&
+                h.dtype == DType::FP16) {
+                int64_t total = static_cast<int64_t>(n) * cfg.d_model;
+                int threads = 256;
+                int blocks = static_cast<int>((total / 2 + threads - 1) / threads);
+                scale_fp16_by_fp16ptr_kernel<<<blocks, threads, 0, stream>>>(
+                    static_cast<half*>(h.data),
+                    static_cast<const half*>(ly.layer_out_scale.data),
+                    total);
+                // Also scale the FP32 residual accumulator so next layer's
+                // attention sees the correctly-scaled residual stream.
+                // Without this the FP32 accum grows unbounded (layer_out_scale
+                // ~0.1-0.2 compensates residual growth per llama's gemma4-iswa).
+                if (fp32_accum_buf_ && cfg.arch == ModelArch::GEMMA4) {
+                    int blocks_f32 = static_cast<int>((total + threads - 1) / threads);
+                    scale_fp32_by_fp16ptr_kernel<<<blocks_f32, threads, 0, stream>>>(
+                        static_cast<float*>(view_tokens(fp32_hidden_, n).data),
+                        static_cast<const half*>(ly.layer_out_scale.data),
+                        total);
+                }
+                if (debug_forward_enabled()) {
+                    float sval = 0.0f;
+                    half h_scale;
+                    cudaMemcpyAsync(&h_scale, ly.layer_out_scale.data, sizeof(half),
+                                    cudaMemcpyDeviceToHost, stream);
+                    cudaStreamSynchronize(stream);
+                    sval = __half2float(h_scale);
+                    if (i == 0 || i == 29)
+                        fprintf(stderr, "[DEBUG_FWD] L%d_out_scale = %.6f\n", i, sval);
+                    // Dump FP16 hidden after scale for all layers (decode only)
+                    if (n == 1 && debug_forward_enabled()) {
+                        half h_tmp[8];
+                        cudaMemcpyAsync(h_tmp, view_tokens(h, n).data, 8*sizeof(half),
+                                        cudaMemcpyDeviceToHost, stream);
+                        cudaStreamSynchronize(stream);
+                        fprintf(stderr, "[DUMP] step=%d L%02d h=[%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f]\n",
+                                decode_step, i,
+                                __half2float(h_tmp[0]), __half2float(h_tmp[1]),
+                                __half2float(h_tmp[2]), __half2float(h_tmp[3]),
+                                __half2float(h_tmp[4]), __half2float(h_tmp[5]),
+                                __half2float(h_tmp[6]), __half2float(h_tmp[7]));
+                    }
+                    // Binary dump: full hidden state for selected layers
+                    if (getenv("IMP_DUMP_HIDDEN") && (i == 0 || i == 5 || i == 15 || i == 29)) {
+                        std::vector<half> h_buf(n * cfg.d_model);
+                        cudaMemcpy(h_buf.data(), view_tokens(h, n).data, h_buf.size() * sizeof(half), cudaMemcpyDeviceToHost);
+                        char fname[256];
+                        snprintf(fname, sizeof(fname), "/tmp/imp_L%02d_step%d.bin", i, decode_step);
+                        FILE* f = fopen(fname, "wb");
+                        if (f) { fwrite(h_buf.data(), sizeof(half), h_buf.size(), f); fclose(f); }
+                    }
+                }
+            }
+            if (debug_forward_enabled()) {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "[step=%d] L%02d_after_out_scale", decode_step, i);
+                debug_tensor_stats_all(buf, view_tokens(h, n), stream);
+                {
+                    char rbuf[64];
+                    snprintf(rbuf, sizeof(rbuf), "[step=%d] l_out-%d", decode_step, i);
+                    debug_tensor_rows(rbuf, view_tokens(h, n), stream);
+                }
+            }
+        }
+
+        // Gemma-4 FP32 residual sync: run_moe_ffn now updates fp32_hidden_ itself
+        // via the rmsnorm_fp32_accum_to_fp16_kernel path when post_ffn_norm is
+        // present and fp32_accum_buf_ is active. The forced FP16→FP32 sync here
+        // would clobber the FP32 precision and cause ~1-2% drift per layer.
+        // Only sync when the MoE path did NOT go through the FP32 accum kernel
+        // (e.g. layer has no post_ffn_norm or residual was fused into decode path).
+        if (fp32_accum_buf_ && cfg.arch == ModelArch::GEMMA4 &&
+            getenv("IMP_FORCE_MOE_FP16_SYNC") != nullptr) {
+            Tensor fp32_h = view_tokens(fp32_hidden_, n);
+            int64_t total = static_cast<int64_t>(n) * cfg.d_model;
+            int threads = 256;
+            int blocks = static_cast<int>((total + threads - 1) / threads);
+            fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(
+                static_cast<const half*>(h.data),
+                static_cast<float*>(fp32_h.data), total);
+        }
+
         if (i == max_layer - 1) {
             debug_tensor_stats("after_last_layer", h, stream);
         }
@@ -509,7 +483,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     // bandwidth vs cuBLAS FP16 path (reads quantized weights directly).
     const auto out_qtype = model_->out_proj_qtype_;
     const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == DType::FP16 &&
-        is_dp4a_qtype(out_qtype);
+        is_dp4a_qtype(out_qtype) && getenv("IMP_NO_DP4A_LM") == nullptr;
 
     // GemmContext for LM head GEMM dispatches.
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_);
@@ -542,18 +516,44 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         } else if (use_dp4a_lm) {
             if (debug_forward_enabled()) {
                 Tensor no_last = view_tokens(norm_out_, 1);
+                debug_tensor_stats("before_final_rmsnorm", h_last, stream);
+                debug_tensor_stats("W_output_norm", model_->output_norm(), stream);
                 rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
                 debug_tensor_stats("after_final_rmsnorm", no_last, stream);
+                debug_tensor_rows("after_final_rmsnorm_row", no_last, stream);
+                debug_tensor_rows("h_last_row", h_last, stream);
             }
-            auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
-            rmsnorm_quantize_q8_1(
-                static_cast<const half*>(h_last.data),
-                static_cast<const half*>(model_->output_norm().data),
-                q8, qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
-            dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
-                               static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+            // DEBUG experiment (b): bypass fused rmsnorm_quantize_q8_1 + dp4a GEMV.
+            // Dequant output_proj to FP16 temp buffer, cuBLAS FP16 GEMM into FP32 logits.
+            // If this gives llama-matching top logit (~+2.07) then the dp4a path is buggy;
+            // if it still gives +8.83 then the bug is in hidden state or output_norm.
+            if (getenv("IMP_LM_DEQUANT_FP16") != nullptr) {
+                Tensor no_last = view_tokens(norm_out_, 1);
+                rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
+                int N = cfg.vocab_size;
+                int K = cfg.d_model;
+                void* w_fp16_dev = nullptr;
+                size_t fp16_bytes = static_cast<size_t>(N) * K * sizeof(half);
+                IMP_CUDA_CHECK_LOG(cudaMallocAsync(&w_fp16_dev, fp16_bytes, stream));
+                dequant_gpu(model_->output_proj().data, w_fp16_dev, out_qtype, N, K, stream);
+                int64_t w_shape[2] = {N, K};
+                Tensor w_fp16(w_fp16_dev, DType::FP16, 2, w_shape, true);
+                gemm(no_last, w_fp16, lg, 1.0f, 0.0f, stream);
+                IMP_CUDA_CHECK_LOG(cudaFreeAsync(w_fp16_dev, stream));
+                fprintf(stderr, "[DEBUG_FWD] LM head via dequant->FP16->cuBLAS path\n");
+            } else {
+                auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
+                rmsnorm_quantize_q8_1(
+                    static_cast<const half*>(h_last.data),
+                    static_cast<const half*>(model_->output_norm().data),
+                    q8, qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
+                dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
+                                   static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
+            }
         } else {
             Tensor no_last = view_tokens(norm_out_, 1);
+            debug_tensor_stats("before_final_rmsnorm", h_last, stream);
+            debug_tensor_stats("W_output_norm", model_->output_norm(), stream);
             rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
             debug_tensor_stats("after_final_rmsnorm", no_last, stream);
             // LM head fallback: use gemm_dispatch for consistent MXFP4/FP16 handling
@@ -638,6 +638,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             }
         } else {
             Tensor no_final = view_tokens(norm_out_, n);
+            debug_tensor_stats("before_final_rmsnorm", h_final, stream);
+            debug_tensor_stats("W_output_norm", model_->output_norm(), stream);
             rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
             debug_tensor_stats("after_final_rmsnorm", no_final, stream);
 
@@ -661,7 +663,9 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     }
 
     // ---- Final logit soft-capping (Gemma-2/3) ----
-    if (cfg.final_logit_softcap > 0.0f) {
+    // Gemma 4: disable softcap for now (logits go well beyond cap=30, making argmax ambiguous).
+    bool skip_softcap = (getenv("IMP_NO_LOGIT_SOFTCAP") != nullptr);
+    if (cfg.final_logit_softcap > 0.0f && !skip_softcap) {
         int64_t n_logits = static_cast<int64_t>(logits_out.shape[0]) * cfg.vocab_size;
         int threads = 256;
         int blocks = static_cast<int>((n_logits + threads - 1) / threads);

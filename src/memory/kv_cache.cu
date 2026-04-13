@@ -3,6 +3,7 @@
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <algorithm>
 #include <stdexcept>
 #include <cstdio>
 #include <cstring>
@@ -165,6 +166,102 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Per-layer shape constructor (Gemma 4 dual attention geometry)
+// ---------------------------------------------------------------------------
+KVCache::KVCache(int n_layers,
+                 const std::vector<int>& n_kv_heads_per_layer,
+                 const std::vector<int>& head_dim_per_layer,
+                 DType dtype,
+                 int max_blocks, int block_size,
+                 VRAMAllocator* alloc)
+    : n_layers_(n_layers)
+    , max_blocks_(max_blocks)
+    , block_size_(block_size)
+    , dtype_(dtype)
+    , alloc_(alloc)
+{
+    // Only FP16, BF16, FP8, INT8, INT4 supported for per-layer variant.
+    // (TurboQuant / sketches / mscales aren't per-layer aware yet.)
+    if (dtype == DType::TURBOQUANT || dtype == DType::TURBOQUANT_LITE) {
+        throw std::runtime_error("KVCache per-layer shape: TurboQuant variants not supported");
+    }
+
+    size_t elem_size = (dtype == DType::INT4)
+        ? 0  // INT4 uses /2 below
+        : dtype_size(dtype);
+
+    // Compute per-layer block bytes and offsets.
+    layer_block_bytes_.resize(n_layers_);
+    layer_k_offset_.resize(n_layers_);
+    layer_v_offset_.resize(n_layers_);
+    size_t running = 0;
+    int max_nkv = 0, max_hd = 0;
+    for (int l = 0; l < n_layers_; l++) {
+        int nkv = (l < (int)n_kv_heads_per_layer.size()) ? n_kv_heads_per_layer[l] : 0;
+        int hd  = (l < (int)head_dim_per_layer.size()) ? head_dim_per_layer[l] : 0;
+        if (nkv <= 0 || hd <= 0) {
+            // Layer has no attention (e.g. hybrid SSM layer). Still reserve 0 bytes.
+            layer_block_bytes_[l] = 0;
+            layer_k_offset_[l] = running;
+            layer_v_offset_[l] = running;
+            continue;
+        }
+        max_nkv = std::max(max_nkv, nkv);
+        max_hd  = std::max(max_hd, hd);
+
+        size_t bb = (dtype == DType::INT4)
+            ? (static_cast<size_t>(block_size_) * nkv * hd / 2)
+            : (static_cast<size_t>(block_size_) * nkv * hd * elem_size);
+        layer_block_bytes_[l] = bb;
+
+        // Layout: K region then V region for this layer.
+        layer_k_offset_[l] = running;
+        running += static_cast<size_t>(max_blocks_) * bb;
+        layer_v_offset_[l] = running;
+        running += static_cast<size_t>(max_blocks_) * bb;
+    }
+    size_t total = running;
+
+    // Populate scalar fallback fields with max values (for external queries)
+    n_kv_heads_ = max_nkv;
+    head_dim_   = max_hd;
+    block_bytes_ = (dtype == DType::INT4)
+        ? (static_cast<size_t>(block_size_) * max_nkv * max_hd / 2)
+        : (static_cast<size_t>(block_size_) * max_nkv * max_hd * elem_size);
+
+    // Allocate single contiguous pool
+    if (alloc_) {
+        pool_ = alloc_->allocate(total, "kv_cache");
+    } else {
+        cudaError_t err = cudaMalloc(&pool_, total);
+        if (err != cudaSuccess) pool_ = nullptr;
+    }
+    if (!pool_) {
+        char msg[256];
+        std::snprintf(msg, sizeof(msg),
+                      "KVCache(per-layer): cudaMalloc failed for %.2f MiB",
+                      static_cast<double>(total) / (1024.0 * 1024.0));
+        throw std::runtime_error(msg);
+    }
+    IMP_CUDA_CHECK_LOG(cudaMemset(pool_, 0, total));
+
+    // INT8/INT4 per-layer scales not yet supported in per-layer mode.
+    if (dtype == DType::INT8 || dtype == DType::INT4) {
+        throw std::runtime_error("KVCache per-layer shape: INT8/INT4 scale pools not yet supported");
+    }
+
+    // Initialize ref counts and free list
+    ref_counts_.resize(max_blocks_, 0);
+    free_list_.reserve(max_blocks_);
+    for (int i = max_blocks_ - 1; i >= 0; --i) {
+        free_list_.push_back(i);
+    }
+
+    IMP_LOG_INFO("KVCache (per-layer): %zu layers, pool %.2f MiB, max nkv=%d, max hd=%d",
+                 (size_t)n_layers_, total / (1024.0 * 1024.0), max_nkv, max_hd);
+}
+
 KVCache::~KVCache() {
     if (mscale_pool_) {
         if (alloc_) alloc_->free(mscale_pool_); else IMP_CUDA_CHECK_LOG(cudaFree(mscale_pool_));
@@ -237,6 +334,12 @@ void* KVCache::k_ptr(int layer, int block_id) {
                       layer, n_layers_, block_id, max_blocks_);
     }
 #endif
+    // Per-layer shape path: use precomputed per-layer offsets and block bytes.
+    if (!layer_block_bytes_.empty()) {
+        size_t offset = layer_k_offset_[layer] +
+                        static_cast<size_t>(block_id) * layer_block_bytes_[layer];
+        return static_cast<char*>(pool_) + offset;
+    }
     // K blocks: [layer * 2 * max_blocks + block_id] * block_bytes
     size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ +
                      static_cast<size_t>(block_id)) * block_bytes_;
@@ -254,6 +357,12 @@ void* KVCache::v_ptr(int layer, int block_id) {
         // V-only pool: [layer * max_blocks + block_id] * block_bytes
         size_t offset = (static_cast<size_t>(layer) * max_blocks_ +
                          static_cast<size_t>(block_id)) * block_bytes_;
+        return static_cast<char*>(pool_) + offset;
+    }
+    // Per-layer shape path
+    if (!layer_block_bytes_.empty()) {
+        size_t offset = layer_v_offset_[layer] +
+                        static_cast<size_t>(block_id) * layer_block_bytes_[layer];
         return static_cast<char*>(pool_) + offset;
     }
     // Standard K+V pool: V blocks follow K blocks per layer

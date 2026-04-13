@@ -50,9 +50,10 @@ void handle_health(const httplib::Request& /*req*/, httplib::Response& res,
     res.set_content(body.dump(), "application/json");
 }
 
-// Recursively find all .gguf files in a directory, returning (filename, full_path) pairs.
+// Recursively find all model files in a directory, returning (display_name, full_path) pairs.
+// Finds both .gguf files and SafeTensors directories (containing model.safetensors[.index.json]).
 // Resolves symlinks and rejects any path that escapes the base directory (path traversal).
-std::vector<std::pair<std::string, std::string>> scan_gguf_files(const std::string& dir) {
+std::vector<std::pair<std::string, std::string>> scan_model_files(const std::string& dir) {
     std::vector<std::pair<std::string, std::string>> results;
     if (dir.empty()) return results;
     std::error_code ec;
@@ -61,17 +62,30 @@ std::vector<std::pair<std::string, std::string>> scan_gguf_files(const std::stri
     std::string base_prefix = base.string() + "/";
 
     for (const auto& entry : std::filesystem::recursive_directory_iterator(dir, ec)) {
-        if (!entry.is_regular_file() && !entry.is_symlink()) continue;
         auto path = entry.path();
-        if (path.extension() != ".gguf" || path.string().find(".no_exist") != std::string::npos)
-            continue;
-        // Resolve to real path and verify it stays under the base directory
-        std::error_code ec2;
-        auto real = std::filesystem::canonical(path, ec2);
-        if (ec2) continue;
-        std::string real_str = real.string();
-        if (real_str.compare(0, base_prefix.size(), base_prefix) != 0) continue;
-        results.emplace_back(path.filename().string(), real_str);
+        // GGUF files
+        if ((entry.is_regular_file() || entry.is_symlink()) &&
+            path.extension() == ".gguf" &&
+            path.string().find(".no_exist") == std::string::npos) {
+            std::error_code ec2;
+            auto real = std::filesystem::canonical(path, ec2);
+            if (ec2) continue;
+            std::string real_str = real.string();
+            if (real_str.compare(0, base_prefix.size(), base_prefix) != 0) continue;
+            results.emplace_back(path.filename().string(), real_str);
+        }
+        // SafeTensors directories (check for index or single file)
+        if (entry.is_directory()) {
+            std::string dpath = path.string();
+            if (imp::is_safetensors_dir(dpath)) {
+                std::error_code ec2;
+                auto real = std::filesystem::canonical(path, ec2);
+                if (ec2) continue;
+                std::string real_str = real.string();
+                if (real_str.compare(0, base_prefix.size(), base_prefix) != 0) continue;
+                results.emplace_back(path.filename().string(), real_str);
+            }
+        }
     }
     std::sort(results.begin(), results.end());
     return results;
@@ -92,8 +106,8 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res,
         model_name = state.model_name;
     }
 
-    // Scan models directory for all available .gguf files
-    auto available = scan_gguf_files(models_dir);
+    // Scan models directory for all available models (GGUF + SafeTensors)
+    auto available = scan_model_files(models_dir);
     if (!available.empty()) {
         for (const auto& [name, path] : available) {
             data.push_back({
@@ -119,18 +133,20 @@ void handle_models(const httplib::Request& /*req*/, httplib::Response& res,
     res.set_content(body.dump(), "application/json");
 }
 
-// Find a GGUF file by name in models_dir. Returns full path or empty string.
+// Find a model by name in models_dir. Returns full path or empty string.
+// Supports both GGUF files and SafeTensors directories.
 // Also tries HuggingFace resolution if name looks like a repo ID (contains '/').
 std::string find_model_path(const ServerState& state, const std::string& name) {
     // First try local models directory
-    auto available = scan_gguf_files(state.models_dir);
+    auto available = scan_model_files(state.models_dir);
     for (const auto& [fname, fpath] : available) {
         if (fname == name) return fpath;
     }
 
     // If it looks like a HuggingFace repo ID (contains '/'), try resolving
     if (name.find('/') != std::string::npos) {
-        std::string resolved = imp::resolve_model_gguf(name);
+        ImpModelFormat fmt;
+        std::string resolved = imp::resolve_model_auto(name, fmt);
         if (!resolved.empty()) return resolved;
     }
 
@@ -294,8 +310,12 @@ std::string load_model_into_state(ServerState& state, const std::string& path,
     state.have_template = false;
     state.model_name.clear();
 
+    // Auto-detect format from path
+    ImpModelFormat format = imp::is_safetensors_dir(path)
+                            ? IMP_FORMAT_SAFETENSORS : IMP_FORMAT_GGUF;
+
     // Load model
-    ImpError err = imp_model_load(path.c_str(), IMP_FORMAT_GGUF, &state.model);
+    ImpError err = imp_model_load(path.c_str(), format, &state.model);
     if (err != IMP_SUCCESS) {
         std::string msg = std::string("Failed to load model: ") + imp_error_string(err);
         state.model = nullptr;
