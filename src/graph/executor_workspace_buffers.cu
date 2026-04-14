@@ -249,7 +249,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     break;
                 }
             }
-            if (has_host_experts) {
+            if (has_host_experts && !getenv("IMP_NO_EXPERT_CACHE")) {
                 // Budget: proportional to free VRAM (15%) instead of flat cap.
                 // KV cache + weight caches (FP8/NVFP4) need the remaining VRAM,
                 // so expert cache must not over-commit.
@@ -264,6 +264,8 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                                  expert_cache_.n_slots_ * max_expert_raw / (1024.0 * 1024.0),
                                  budget / (1024.0 * 1024.0));
                 }
+            } else if (has_host_experts) {
+                IMP_LOG_INFO("Expert LRU cache disabled via IMP_NO_EXPERT_CACHE (staging fallback)");
             }
         }
 

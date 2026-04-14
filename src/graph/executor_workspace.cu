@@ -248,7 +248,13 @@ bool GraphExecutor::allocate_workspaces(bool experts_on_host) {
         IMP_LOG_ERROR("Shared workspace allocation failed — cannot run inference");
         return false;
     }
-    allocate_auxiliary_buffers(/*skip_batch_dequant=*/experts_on_host);
+    // Always allocate batch dequant buffer — GPU-resident layers need it even
+    // when some other layers are host-resident. Without it, ALL layers fall to
+    // the serial path (major perf regression; was a correctness regression
+    // before the host gate_up split fix since serial path had undefined
+    // behavior for Gemma-4 host experts).
+    allocate_auxiliary_buffers(/*skip_batch_dequant=*/false);
+    (void)experts_on_host;
 
     return true;
 }
