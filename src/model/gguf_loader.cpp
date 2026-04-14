@@ -1184,6 +1184,20 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         if (n_remapped > 0) {
             IMP_LOG_INFO("Remapped %d layers: dense FFN tensors -> shared expert", n_remapped);
         }
+        // Gemma 4: verify MoE-specific norms and router scale loaded
+        if (cfg.arch == ModelArch::GEMMA4) {
+            int n_pre2 = 0, n_post1 = 0, n_post2 = 0, n_gscale = 0, n_dscale = 0;
+            for (int i = 0; i < cfg.n_layers; ++i) {
+                if (model->layers_[i].ffn_pre_norm_2.data) n_pre2++;
+                if (model->layers_[i].ffn_post_norm_1.data) n_post1++;
+                if (model->layers_[i].ffn_post_norm_2.data) n_post2++;
+                if (model->layers_[i].ffn_gate_inp_scale.data) n_gscale++;
+                if (model->layers_[i].expert_down_scale.data) n_dscale++;
+            }
+            IMP_LOG_INFO("Gemma 4 MoE norms: pre_ffw_norm_2=%d, post_ffw_norm_1=%d, "
+                         "post_ffw_norm_2=%d, gate_inp_scale=%d, down_exps_scale=%d (of %d layers)",
+                         n_pre2, n_post1, n_post2, n_gscale, n_dscale, cfg.n_layers);
+        }
 
         // Qwen3.5: GGUF converter adds +1 to non-GDN norm weights.
         // imp's RMSNorm expects raw weights (w, not w+1). Subtract 1 back.

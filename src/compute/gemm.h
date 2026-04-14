@@ -48,6 +48,10 @@ void gemv_q8_0(const void* W, const half* x, half* y, int M, int K, cudaStream_t
 void gemv_gate_fp32(const half* W, const half* x, float* y,
                     int M, int K, cudaStream_t stream = nullptr);
 
+// FP32-input variant: avoids FP16 truncation of router input (Gemma-4 MoE precision).
+void gemv_gate_fp32_fp32input(const half* W, const float* x, float* y,
+                               int M, int K, cudaStream_t stream = nullptr);
+
 // ---------------------------------------------------------------------------
 // MMVQ (Mixed-precision Matrix-Vector Quantized) — dp4a-accelerated GEMV.
 // Quantizes the FP16 input vector to Q8_1 format, then uses dp4a (INT8x4 dot
