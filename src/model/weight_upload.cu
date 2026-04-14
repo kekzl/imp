@@ -1119,7 +1119,14 @@ static bool upload_expert_weights(
         // CUDA driver overhead on WSL2/WDDM: cudaMalloc alignment, page tables,
         // and WDDM shared memory management consume ~30% beyond the requested size.
         // Empirical on RTX 5090 WSL2: 22 GiB expert alloc leaves 0 MiB from 28.7 GiB free.
-        size_t overhead = free_mem * 3 / 10;  // 30% of available VRAM
+        // IMP_EXPERT_OVERHEAD_PCT: override default 30% (integer 0..50). Useful for
+        // debugging: lowering forces more experts onto GPU, tests host-resident path.
+        int overhead_pct = 30;
+        if (const char* s = getenv("IMP_EXPERT_OVERHEAD_PCT")) {
+            int v = atoi(s);
+            if (v >= 0 && v <= 50) overhead_pct = v;
+        }
+        size_t overhead = static_cast<size_t>(free_mem * overhead_pct / 100);
         size_t total_reserve = expert_reserve_bytes + overhead;
         size_t budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
 
