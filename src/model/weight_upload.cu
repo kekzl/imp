@@ -1130,7 +1130,17 @@ static bool upload_expert_weights(
         size_t total_reserve = expert_reserve_bytes + overhead;
         size_t budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
 
-        if (budget >= total_expert_bytes) {
+        // IMP_FORCE_HOST_EXPERTS=N: debug flag to force the last N MoE layers
+        // off-GPU regardless of budget. Use for reproducing host-resident path
+        // bugs (Q8_0 Gemma-4 gibberish) on a smaller quant that would normally
+        // fit entirely on GPU.
+        int force_host_n = 0;
+        if (const char* s = getenv("IMP_FORCE_HOST_EXPERTS")) {
+            force_host_n = atoi(s);
+            if (force_host_n < 0) force_host_n = 0;
+        }
+
+        if (budget >= total_expert_bytes && force_host_n == 0) {
             // All experts fit
             for (int i = 0; i < n_layers; ++i) {
                 if (layer_expert_bytes[i] > 0) experts_upload_layer[i] = true;
@@ -1140,6 +1150,25 @@ static bool upload_expert_weights(
                          total_expert_bytes / (1024.0*1024.0*1024.0),
                          free_mem / (1024.0*1024.0*1024.0),
                          expert_reserve_bytes / (1024.0*1024.0*1024.0));
+        } else if (force_host_n > 0) {
+            // Debug: force last N MoE layers to host. Still respect budget for
+            // the ones we do upload.
+            std::vector<int> moe_layer_idxs;
+            for (int i = 0; i < n_layers; ++i)
+                if (layer_expert_bytes[i] > 0) moe_layer_idxs.push_back(i);
+            int skip_from = std::max(0, (int)moe_layer_idxs.size() - force_host_n);
+            size_t uploaded = 0;
+            int n_uploaded = 0;
+            for (int k = 0; k < skip_from; ++k) {
+                int i = moe_layer_idxs[k];
+                if (uploaded + layer_expert_bytes[i] <= budget) {
+                    experts_upload_layer[i] = true;
+                    uploaded += layer_expert_bytes[i];
+                    n_uploaded++;
+                }
+            }
+            IMP_LOG_INFO("Expert weights (IMP_FORCE_HOST_EXPERTS=%d): uploading %d/%zu MoE layers, %d forced to host",
+                         force_host_n, n_uploaded, moe_layer_idxs.size(), force_host_n);
         } else {
             // Partial upload: greedily upload layers until budget exhausted
             size_t uploaded = 0;
