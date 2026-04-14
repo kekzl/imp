@@ -481,6 +481,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 1);
             IMP_LOG_INFO("Gemma 4: setting CUBLAS_WORKSPACE_CONFIG=:4096:8 for deterministic grouped GEMM");
         }
+        // Gemma 4: disable CUDA graphs — the async graph loop produces garbage
+        // with per-layer varying head_dim/nkv/theta (SWA vs global layers).
+        if (config_.use_cuda_graphs) {
+            IMP_LOG_INFO("Gemma 4: disabling CUDA graphs (per-layer geometry varies)");
+            config_.use_cuda_graphs = false;
+        }
         // Enable MMVQ for all weight GEMMs — quantized matmul matching llama.cpp's
         // accumulation behavior, critical for 128-expert MoE precision.
         if (!getenv("IMP_GEMMA4_FORCE_MMVQ")) {
@@ -638,6 +644,10 @@ bool Engine::init_weights() {
         }
         if (experts_on_host_ && config_.use_cuda_graphs) {
             IMP_LOG_INFO("Disabling CUDA graphs: expert weights on host");
+            config_.use_cuda_graphs = false;
+        }
+        if (getenv("IMP_NO_CUDA_GRAPH") && config_.use_cuda_graphs) {
+            IMP_LOG_INFO("Disabling CUDA graphs: IMP_NO_CUDA_GRAPH set");
             config_.use_cuda_graphs = false;
         }
         // MoE decode fast path is fully device-side (no D2H memcpy) — graph-safe.

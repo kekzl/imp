@@ -134,6 +134,7 @@ set(IMP_COMPUTE_SOURCES
     src/compute/attention_tc.cu
     src/compute/attention_blackwell.cu
     src/compute/attention_cublas.cu
+    src/compute/attention_naive.cu
     src/compute/attention_dispatch.cu
     src/compute/rope.cu
     src/compute/layernorm.cu

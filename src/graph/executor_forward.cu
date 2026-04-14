@@ -306,6 +306,15 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     int max_layer = (state.exit_layer > 0)
                     ? std::min(state.exit_layer, cfg.n_layers)
                     : cfg.n_layers;
+    // Debug: allow IMP_EXIT_LAYER=N to run only N layers
+    {
+        static int s_exit = -1;
+        if (s_exit < 0) {
+            const char* e = getenv("IMP_EXIT_LAYER");
+            s_exit = e ? atoi(e) : 0;
+        }
+        if (s_exit > 0) max_layer = std::min(max_layer, s_exit);
+    }
     const int skip_start = state.skip_layer_start;
     const int skip_end   = state.skip_layer_end;
     for (int i = 0; i < max_layer; ++i) {
@@ -348,7 +357,10 @@ void GraphExecutor::forward_logits(const InferenceState& state,
 
 
         // FFN: MoE, dense, or none (attention-only layers may have no FFN)
-        if (layer_has_moe(i)) {
+        static bool skip_moe = (getenv("IMP_SKIP_MOE") != nullptr);
+        if (skip_moe) {
+            // Debug: skip all FFN/MoE to isolate attention bugs
+        } else if (layer_has_moe(i)) {
             run_moe_ffn(i, stream);
         } else if (layer_has_dense_ffn(i)) {
             run_ffn(i, stream);
@@ -467,6 +479,13 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     // Final FP32→FP16 conversion for the tokens that need LM head projection.
     // run_attention/run_ffn already keep hidden_ in sync with fp32_hidden_,
     // but this ensures the final state is clean (no stale data from earlier layers).
+    if (debug_forward_enabled() && fp32_accum_buf_) {
+        // Compare FP32 accum vs FP16 hidden for last token before final conversion
+        Tensor h_view = view_tokens(hidden_, n);
+        Tensor fp32_view = view_tokens(fp32_hidden_, n);
+        debug_tensor_stats("pre_final_conv_fp16", h_view, stream);
+        debug_tensor_stats("pre_final_conv_fp32", fp32_view, stream);
+    }
     if (fp32_accum_buf_) {
         fp32_to_fp16_rowscale_kernel<<<n, 256, 256 * sizeof(float), stream>>>(
             static_cast<const float*>(view_tokens(fp32_hidden_, n).data),
@@ -662,8 +681,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         debug_top_logits(lg, stream);
     }
 
-    // ---- Final logit soft-capping (Gemma-2/3) ----
-    // Gemma 4: disable softcap for now (logits go well beyond cap=30, making argmax ambiguous).
+    // ---- Final logit soft-capping (Gemma-2/3/4, cap=30) ----
     bool skip_softcap = (getenv("IMP_NO_LOGIT_SOFTCAP") != nullptr);
     if (cfg.final_logit_softcap > 0.0f && !skip_softcap) {
         int64_t n_logits = static_cast<int64_t>(logits_out.shape[0]) * cfg.vocab_size;
