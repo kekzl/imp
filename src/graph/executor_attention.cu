@@ -17,6 +17,7 @@
 #include "compute/activation.h"
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"
+#include "compute/attention_naive.h"
 #include "compute/attention_paged.h"
 #include "compute/moe_routing.h"
 #include "compute/sampling.h"
@@ -432,12 +433,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         longrope_freqs = (state.max_context_len <= longrope_orig_max_pos_)
                          ? longrope_short_freqs_ : longrope_long_freqs_;
     }
-    // Gemma 4: global attention layers use a separate `rope_freqs` tensor
-    // (loaded as a top-level tensor, fanned out to every global layer's slot).
-    if (cfg.arch == ModelArch::GEMMA4 && ly.rope_freqs.data != nullptr &&
-        ly.rope_freqs.on_device) {
-        longrope_freqs = static_cast<const float*>(ly.rope_freqs.data);
-    }
+    // Gemma 4: do NOT use GGUF rope_freqs for global layers. llama.cpp's
+    // gemma4-iswa arch does not load rope_freqs either — it computes from theta.
+    // The GGUF rope_freqs (256 entries) were computed for dim=512 but Gemma-4
+    // only rotates dim/2=256 dims. Using them with the standard formula gives
+    // wrong frequencies. Let the kernel compute from theta=1e6 directly.
 
     // Qwen3.5 attention output gate: Q projection is INTERLEAVED per head:
     //   [Q_h0(hd), Gate_h0(hd), Q_h1(hd), Gate_h1(hd), ...]
@@ -485,14 +485,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                   qv.dtype == DType::FP16 &&
                                   state.kv_cache &&
                                   state.kv_cache->dtype() == DType::FP16);
-        // Per-layer rope_dim. Gemma 4: both SWA (hd=256) and Global (hd=512)
-        // rotate all head_dim dimensions. GGUF: rope.dimension_count=512,
-        // rope.dimension_count_swa=256. rope_freqs has 256 entries = 256 pairs
-        // = 512 rotated dims = full hd.
+        // Per-layer rope_dim. Gemma 4: SWA layers rotate all dims (256/256),
+        // Global layers rotate half (256/512). Matches llama.cpp: n_rot_full /= 2.
         int fused_rope_dim = cfg.rope_dim;
         if (cfg.arch == ModelArch::GEMMA4) {
-            // Both SWA and Global: full rotation (rope_dim = hd)
-            fused_rope_dim = hd;
+            bool layer_is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
+            fused_rope_dim = layer_is_swa ? hd : hd / 2;  // SWA: full, Global: 50% (llama.cpp: n_rot/2)
         } else if (fused_rope_dim > hd || fused_rope_dim <= 0) {
             fused_rope_dim = hd;
         }
@@ -524,6 +522,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         } else {
             // Separate path: QK-norm (if present) + RoPE on both Q and K
             if (ly.attn_q_norm.data != nullptr) {
+
                 int64_t q_flat[2] = {static_cast<int64_t>(n) * nh, static_cast<int64_t>(hd)};
                 Tensor q_flat_view = qv.reshape(2, q_flat);
                 rmsnorm(q_flat_view, ly.attn_q_norm, q_flat_view, eps, stream, norm_w_off_);
@@ -537,11 +536,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             int64_t k4r[4] = {1, n, nkv, hd};
             Tensor q4r_t = qv.reshape(4, q4r);
             Tensor k4r_t = kk.reshape(4, k4r);
-            // Per-layer rope_dim. Gemma 4: SWA full rotation, Global partial 1/4.
+            // Per-layer rope_dim. Gemma 4: SWA full rotation, Global half.
             int layer_rope_dim = cfg.rope_dim;
             if (cfg.arch == ModelArch::GEMMA4) {
-                // Both SWA and Global: full rotation (rope_dim = hd)
-                layer_rope_dim = hd;
+                bool layer_is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
+                layer_rope_dim = layer_is_swa ? hd : hd / 2;  // SWA: full, Global: 50% (llama.cpp: n_rot/2)
             } else if (layer_rope_dim > hd || layer_rope_dim <= 0) {
                 layer_rope_dim = hd;  // safety clamp
             }
@@ -578,8 +577,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // Gemma 4: flash attention kernels don't support head_dim=512, so we MUST
         // use cuBLAS attention for all layers (it handles arbitrary head_dim).
         static bool no_cublas_attn = getenv("IMP_NO_CUBLAS_ATTN");
+        static bool use_naive_attn = getenv("IMP_NAIVE_ATTN") != nullptr;
         bool force_cublas_attn = per_layer_shapes;  // Gemma 4 dual head_dim
-        if ((force_cublas_attn || !no_cublas_attn) && attn_scores_buf_ && n <= static_cast<int>(attn_scores_.shape[1]) &&
+        if (use_naive_attn && n <= 2048) {
+            // Naive reference attention: simple FP32, no optimization, for debugging
+            if (layer == 0)
+                IMP_LOG_INFO("Using NAIVE reference attention (n=%d, nh=%d, nkv=%d, hd=%d, scale=%.2f)",
+                             n, nh, nkv, hd, scale);
+            naive_attention_prefill(
+                static_cast<const half*>(qv.data),
+                static_cast<const half*>(kk.data),
+                static_cast<const half*>(vv.data),
+                static_cast<half*>(ao.data),
+                n, nh, nkv, hd, scale, cfg.attn_logit_softcap, stream);
+        } else if ((force_cublas_attn || !no_cublas_attn) && attn_scores_buf_ && n <= static_cast<int>(attn_scores_.shape[1]) &&
             n <= 1024 && !sliding_active) {
             int64_t s_shape[3] = {static_cast<int64_t>(nh),
                                   static_cast<int64_t>(n),
@@ -620,8 +631,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             // Per-layer rope_dim (same as prefill rope path above)
             int effective_rope_dim;
             if (cfg.arch == ModelArch::GEMMA4) {
-                // Both SWA and Global: full rotation (rope_dim = hd)
-                effective_rope_dim = hd;
+                bool layer_is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
+                effective_rope_dim = layer_is_swa ? hd : hd / 2;  // SWA: full, Global: 50% (llama.cpp: n_rot/2)
             } else {
                 effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
                 if (effective_rope_dim > hd) effective_rope_dim = hd;

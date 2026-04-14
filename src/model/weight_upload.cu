@@ -1119,11 +1119,28 @@ static bool upload_expert_weights(
         // CUDA driver overhead on WSL2/WDDM: cudaMalloc alignment, page tables,
         // and WDDM shared memory management consume ~30% beyond the requested size.
         // Empirical on RTX 5090 WSL2: 22 GiB expert alloc leaves 0 MiB from 28.7 GiB free.
-        size_t overhead = free_mem * 3 / 10;  // 30% of available VRAM
+        // IMP_EXPERT_OVERHEAD_PCT: override default 30% (integer 0..50). Useful for
+        // debugging: lowering forces more experts onto GPU, tests host-resident path.
+        int overhead_pct = 30;
+        if (const char* s = getenv("IMP_EXPERT_OVERHEAD_PCT")) {
+            int v = atoi(s);
+            if (v >= 0 && v <= 50) overhead_pct = v;
+        }
+        size_t overhead = static_cast<size_t>(free_mem * overhead_pct / 100);
         size_t total_reserve = expert_reserve_bytes + overhead;
         size_t budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
 
-        if (budget >= total_expert_bytes) {
+        // IMP_FORCE_HOST_EXPERTS=N: debug flag to force the last N MoE layers
+        // off-GPU regardless of budget. Use for reproducing host-resident path
+        // bugs (Q8_0 Gemma-4 gibberish) on a smaller quant that would normally
+        // fit entirely on GPU.
+        int force_host_n = 0;
+        if (const char* s = getenv("IMP_FORCE_HOST_EXPERTS")) {
+            force_host_n = atoi(s);
+            if (force_host_n < 0) force_host_n = 0;
+        }
+
+        if (budget >= total_expert_bytes && force_host_n == 0) {
             // All experts fit
             for (int i = 0; i < n_layers; ++i) {
                 if (layer_expert_bytes[i] > 0) experts_upload_layer[i] = true;
@@ -1133,6 +1150,25 @@ static bool upload_expert_weights(
                          total_expert_bytes / (1024.0*1024.0*1024.0),
                          free_mem / (1024.0*1024.0*1024.0),
                          expert_reserve_bytes / (1024.0*1024.0*1024.0));
+        } else if (force_host_n > 0) {
+            // Debug: force last N MoE layers to host. Still respect budget for
+            // the ones we do upload.
+            std::vector<int> moe_layer_idxs;
+            for (int i = 0; i < n_layers; ++i)
+                if (layer_expert_bytes[i] > 0) moe_layer_idxs.push_back(i);
+            int skip_from = std::max(0, (int)moe_layer_idxs.size() - force_host_n);
+            size_t uploaded = 0;
+            int n_uploaded = 0;
+            for (int k = 0; k < skip_from; ++k) {
+                int i = moe_layer_idxs[k];
+                if (uploaded + layer_expert_bytes[i] <= budget) {
+                    experts_upload_layer[i] = true;
+                    uploaded += layer_expert_bytes[i];
+                    n_uploaded++;
+                }
+            }
+            IMP_LOG_INFO("Expert weights (IMP_FORCE_HOST_EXPERTS=%d): uploading %d/%zu MoE layers, %d forced to host",
+                         force_host_n, n_uploaded, moe_layer_idxs.size(), force_host_n);
         } else {
             // Partial upload: greedily upload layers until budget exhausted
             size_t uploaded = 0;
@@ -1279,6 +1315,67 @@ static bool upload_expert_weights(
         // The original tensor (in expert_gate_packed) has shape [n_exp, 2*n_ff_exp, d_model].
         // Layout per expert: rows [0, n_ff_exp) = gate, rows [n_ff_exp, 2*n_ff_exp) = up.
         // We split physically on GPU via cudaMemcpy2D, then free the fused buffer.
+        // Host-resident fused gate_up split (Gemma-4 + partial upload):
+        // When the fused tensor is not uploaded to GPU, we still need to split
+        // it into gate and up tensors so the MoE dispatch can find
+        // expert_up_packed. Without this, host-resident MoE layers have
+        // nullptr expert_up_packed → use_packed_dequant=0 → fallback to
+        // uninitialized expert_w_up[eidx] → garbage output.
+        //
+        // Gate this on `!experts_upload_layer[i]` — only for layers that won't
+        // be uploaded. Upload-destined layers use the GPU split code below,
+        // which runs after upload_packed_experts has set on_device=true.
+        if (!experts_upload_layer[i] &&
+            L.expert_gate_packed.data && !L.expert_gate_packed.on_device &&
+            L.expert_up_packed.data == nullptr &&
+            L.expert_gate_packed.ndim >= 3 &&
+            (L.expert_gate_packed.shape[1] & 1) == 0 &&
+            dequant_gpu_supported(L.expert_gate_qtype)) {
+
+            int64_t n_exp = L.expert_gate_packed.shape[0];
+            int64_t fused_rows = L.expert_gate_packed.shape[1];
+            int64_t cols = L.expert_gate_packed.shape[2];
+            int64_t half_rows = fused_rows / 2;
+            size_t row_bytes = ggml_quant_row_bytes(L.expert_gate_qtype, cols);
+            size_t half_raw = static_cast<size_t>(n_exp) * half_rows * row_bytes;
+            size_t src_pitch = static_cast<size_t>(fused_rows) * row_bytes;
+            size_t dst_pitch = static_cast<size_t>(half_rows) * row_bytes;
+
+            // Allocate two pinned host buffers for the split halves.
+            void* gate_buf = nullptr;
+            void* up_buf = nullptr;
+            cudaError_t eg = cudaHostAlloc(&gate_buf, half_raw, cudaHostAllocDefault);
+            cudaError_t eu = cudaHostAlloc(&up_buf,   half_raw, cudaHostAllocDefault);
+            if (eg != cudaSuccess || eu != cudaSuccess) {
+                IMP_LOG_ERROR("Gemma 4: host split cudaHostAlloc failed (layer %d): %s/%s",
+                              i, cudaGetErrorString(eg), cudaGetErrorString(eu));
+                if (gate_buf) cudaFreeHost(gate_buf);
+                if (up_buf)   cudaFreeHost(up_buf);
+                return false;
+            }
+
+            const char* src_base = static_cast<const char*>(L.expert_gate_packed.data);
+            for (int64_t e = 0; e < n_exp; ++e) {
+                // gate half = rows [0, half_rows)
+                memcpy(static_cast<char*>(gate_buf) + e * dst_pitch,
+                       src_base + e * src_pitch,
+                       dst_pitch);
+                // up half = rows [half_rows, fused_rows)
+                memcpy(static_cast<char*>(up_buf) + e * dst_pitch,
+                       src_base + e * src_pitch + dst_pitch,
+                       dst_pitch);
+            }
+
+            int64_t split_shape[4] = {n_exp, half_rows, cols, 0};
+            L.expert_gate_packed = Tensor(gate_buf, L.expert_gate_packed.dtype, 3, split_shape, false);
+            L.expert_up_packed   = Tensor(up_buf,   L.expert_gate_packed.dtype, 3, split_shape, false);
+            L.expert_up_qtype    = L.expert_gate_qtype;
+            ctx.host_pinned_allocs.push_back(gate_buf);
+            ctx.host_pinned_allocs.push_back(up_buf);
+            IMP_LOG_INFO("Gemma 4: host-split fused gate_up_exps layer %d (n_ff_exp=%ld, %.1f MiB each)",
+                          i, (long)half_rows, half_raw / (1024.0 * 1024.0));
+        }
+
         if (L.expert_gate_packed.data && L.expert_gate_packed.on_device &&
             L.expert_up_packed.data == nullptr &&
             L.expert_gate_packed.ndim >= 3 &&

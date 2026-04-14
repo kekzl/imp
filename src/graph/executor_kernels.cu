@@ -1939,11 +1939,16 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
     // MMVQ: ggml-compatible quantized GEMM for llama.cpp numerical parity.
     // Auto-enabled for Gemma-4 via engine.cpp setenv. Non-static to pick up
     // env var set during engine init (after static init of other flags).
+    // IMP_NO_MMVQ_Q8_0 / IMP_NO_MMVQ: debug bypass for suspected Q8_0 MMVQ bug.
+    static const bool no_mmvq_q8_0 = (getenv("IMP_NO_MMVQ_Q8_0") != nullptr);
+    static const bool no_mmvq_all  = (getenv("IMP_NO_MMVQ") != nullptr);
     bool use_mmvq = (getenv("IMP_GEMMA4_FORCE_MMVQ") != nullptr) &&
                     !prefer_fp16_cache && input.dtype == DType::FP16 &&
                     (qtype == GGMLQuantType::Q4_K || qtype == GGMLQuantType::Q5_K ||
                      qtype == GGMLQuantType::Q5_1 || qtype == GGMLQuantType::Q8_0) &&
-                    (weight.shape[1] % 32 == 0);
+                    (weight.shape[1] % 32 == 0) &&
+                    !(no_mmvq_q8_0 && qtype == GGMLQuantType::Q8_0) &&
+                    !no_mmvq_all;
     bool use_dp4a = !no_dp4a_gemv && !prefer_fp16_cache && input.shape[0] == 1 &&
                     input.dtype == DType::FP16 &&
                     q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype);
