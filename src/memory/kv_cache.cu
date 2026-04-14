@@ -1,5 +1,6 @@
 #include "memory/kv_cache.h"
 #include "memory/vram_allocator.h"
+#include "runtime/graph_diag.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -287,12 +288,30 @@ KVCache::~KVCache() {
 
 int KVCache::allocate_block() {
     if (free_list_.empty()) {
+        if (graph_diag::enabled()) {
+            IMP_LOG_ERROR("[graph_diag:kv_alloc] OOM (phase=%s, 0 free blocks left)",
+                          graph_diag::phase_name(graph_diag::phase()));
+        }
         return -1;
     }
 
     int block_id = free_list_.back();
     free_list_.pop_back();
     ref_counts_[block_id] = 1;
+
+    if (graph_diag::enabled()) {
+        auto p = graph_diag::phase();
+        // Allocations during replay are the smoking gun for Hypothesis H1
+        // (KV-block boundary crossed mid-replay with stale block_tables).
+        if (p == graph_diag::Phase::REPLAY) {
+            IMP_LOG_ERROR("[graph_diag:kv_alloc] allocate_block id=%d free_left=%zu "
+                          "phase=REPLAY  <-- H1 smoking gun",
+                          block_id, free_list_.size());
+        } else {
+            IMP_LOG_INFO("[graph_diag:kv_alloc] allocate_block id=%d free_left=%zu phase=%s",
+                         block_id, free_list_.size(), graph_diag::phase_name(p));
+        }
+    }
     return block_id;
 }
 
