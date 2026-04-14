@@ -301,6 +301,10 @@ void CudaGraphRunner::invalidate() {
 // CudaGraphConditionalRunner — GPU-autonomous decode loop
 // ---------------------------------------------------------------------------
 
+// Device-side enable flag for post_decode_step_kernel tracing.
+// Host sets to 1 via cudaMemcpyToSymbol when IMP_GRAPH_DIAG is enabled.
+__constant__ int d_graph_diag_enabled = 0;
+
 // Device kernel: post-decode-step bookkeeping.
 // Copies sampled token to ring buffer, increments counters, checks stop
 // conditions, and breaks the WHILE loop via cudaGraphSetConditional.
@@ -374,6 +378,21 @@ __global__ void post_decode_step_kernel(
     }
 
     if (should_stop) {
+        if (d_graph_diag_enabled) {
+            int stop_reason = 0;
+            if (step + 1 >= max_steps) stop_reason = 1;          // max_steps
+            else if (!in_think && !ignore_eos) {
+                if (token == eos_id) stop_reason = 2;            // eos
+                for (int i = 0; i < n_stop_ids; i++) {
+                    if (token == d_stop_ids[i]) stop_reason = 3 + i; // stop_ids[i]
+                }
+            }
+            if (in_think && think_budget_limit > 0 &&
+                d_think_count && *d_think_count >= think_budget_limit) stop_reason = 100;
+            printf("[graph_diag:cond_stop] step=%d token=%d in_think=%d "
+                   "eos_id=%d n_stop_ids=%d reason=%d\n",
+                   step, token, in_think ? 1 : 0, eos_id, n_stop_ids, stop_reason);
+        }
         cudaGraphSetConditional(handle, 0);  // break WHILE loop
     }
 }
@@ -390,6 +409,13 @@ bool CudaGraphConditionalRunner::setup(
         cudaStream_t stream) {
     cleanup();  // release any prior state
     config_ = std::move(config);
+
+    // Propagate IMP_GRAPH_DIAG to device-side tracing in post_decode_step_kernel.
+    // Done once per setup(); cheap enough to not bother caching.
+    {
+        int v = graph_diag::enabled() ? 1 : 0;
+        cudaMemcpyToSymbol(d_graph_diag_enabled, &v, sizeof(int));
+    }
 
     cudaError_t err;
 
