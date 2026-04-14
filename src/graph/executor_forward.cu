@@ -426,13 +426,19 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                                 __half2float(h_tmp[6]), __half2float(h_tmp[7]));
                     }
                     // Binary dump: full hidden state for selected layers
-                    if (getenv("IMP_DUMP_HIDDEN") && (i == 0 || i == 5 || i == 15 || i == 29)) {
-                        std::vector<half> h_buf(n * cfg.d_model);
-                        cudaMemcpy(h_buf.data(), view_tokens(h, n).data, h_buf.size() * sizeof(half), cudaMemcpyDeviceToHost);
-                        char fname[256];
-                        snprintf(fname, sizeof(fname), "/tmp/imp_L%02d_step%d.bin", i, decode_step);
-                        FILE* f = fopen(fname, "wb");
-                        if (f) { fwrite(h_buf.data(), sizeof(half), h_buf.size(), f); fclose(f); }
+                    // IMP_DUMP_HIDDEN=1: default layers 0/5/15/29.
+                    // IMP_DUMP_HIDDEN=all: every layer (for host-expert A/B debugging).
+                    if (const char* dh = getenv("IMP_DUMP_HIDDEN")) {
+                        bool dump_all = (strcmp(dh, "all") == 0);
+                        bool sel = dump_all || (i == 0 || i == 5 || i == 15 || i == 29);
+                        if (sel) {
+                            std::vector<half> h_buf(n * cfg.d_model);
+                            cudaMemcpy(h_buf.data(), view_tokens(h, n).data, h_buf.size() * sizeof(half), cudaMemcpyDeviceToHost);
+                            char fname[256];
+                            snprintf(fname, sizeof(fname), "/tmp/imp_L%02d_step%d.bin", i, decode_step);
+                            FILE* f = fopen(fname, "wb");
+                            if (f) { fwrite(h_buf.data(), sizeof(half), h_buf.size(), f); fclose(f); }
+                        }
                     }
                 }
             }
