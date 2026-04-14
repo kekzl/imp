@@ -18,6 +18,8 @@ Tokens generated per second — the metric that determines how fast a model resp
 | Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **134** | — | — |
 | Llama-3.2-3B | 3.2B | Q8_0 | **208** | — | — |
 | Qwen3-Coder-30B-A3B | 30B (3B active) | NVFP4 | **38** | — | — |
+| Gemma-4-26B-A4B-it | 26B (4B active) | Q4_K_M | **61** | 151 | **-60%** |
+| Gemma-4-26B-A4B-it | 26B (4B active) | Q8_0 | **31** | 160 | **-81%** |
 
 ## Prefill Throughput (pp512)
 
@@ -31,6 +33,10 @@ Tokens processed per second during the prompt ingestion phase.
 | Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **8520** | — | — |
 | Llama-3.2-3B | 3.2B | Q8_0 | **22544** | — | — |
 | Qwen3-Coder-30B-A3B | 30B (3B active) | NVFP4 | **90** | — | — |
+| Gemma-4-26B-A4B-it | 26B (4B active) | Q4_K_M | **1650** | 196 | **+742%** |
+| Gemma-4-26B-A4B-it | 26B (4B active) | Q8_0 | — (bench unstable) | — | — |
+
+**Gemma-4 notes**: imp decode is behind llama.cpp because CUDA graphs are disabled (per-layer head_dim=256/512 and nkv=8/2 breaks graph capture). Q8_0 additionally has 10/30 MoE layers host-resident on a 32 GB GPU, using the slower H2D-cache path. Both still produce correct output after the host-resident MoE fix (commit `e879bcd`). Prefill is much faster than llama.cpp because imp uses CUTLASS grouped-GEMM for the 128-expert MoE path while llama.cpp processes experts serially.
 
 **Note**: GDN models now use FP16 prefill weights (v0.5.1) instead of FP8 for numerical stability. This reduces prefill throughput by ~8% vs v0.5 FP8 numbers but fixes multi-turn chat degeneration.
 
