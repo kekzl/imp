@@ -481,9 +481,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 1);
             IMP_LOG_INFO("Gemma 4: setting CUBLAS_WORKSPACE_CONFIG=:4096:8 for deterministic grouped GEMM");
         }
-        // Gemma 4: disable CUDA graphs — the async graph loop produces garbage
-        // with per-layer varying head_dim/nkv/theta (SWA vs global layers).
-        if (config_.use_cuda_graphs) {
+        // Gemma 4: disable CUDA graphs. Tested with host-resident MoE split
+        // fix in place (commit e879bcd) — AsyncGraphLoop still terminates
+        // after ~3 decode tokens. Graph-safe decode for Gemma-4 requires
+        // per-layer-parameter graph support (hd=256/512 varies, nkv=8/2
+        // varies). Opt in for testing via IMP_GEMMA4_CUDA_GRAPHS=1.
+        if (config_.use_cuda_graphs && !getenv("IMP_GEMMA4_CUDA_GRAPHS")) {
             IMP_LOG_INFO("Gemma 4: disabling CUDA graphs (per-layer geometry varies)");
             config_.use_cuda_graphs = false;
         }
