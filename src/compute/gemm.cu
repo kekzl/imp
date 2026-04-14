@@ -1360,7 +1360,43 @@ void gemv_gate_fp32(const half* W, const half* x, float* y,
     gemv_gate_fp32_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(W, x, y, M, K);
 }
 
+// FP32-input variant: avoids FP16 truncation of router input for MoE precision.
+__global__ void gemv_gate_fp32_fp32input_kernel(const half* __restrict__ W,
+                                                 const float* __restrict__ x,
+                                                 float* __restrict__ y,
+                                                 int M, int K) {
+    const int warps_per_block = blockDim.x / 32;
+    const int warp_id = threadIdx.x / 32;
+    const int lane    = threadIdx.x % 32;
+    const int row     = blockIdx.x * warps_per_block + warp_id;
 
+    if (row >= M) return;
+
+    const half* W_row = W + (size_t)row * K;
+    float sum = 0.0f;
+
+    // Process 2 weight elements per iteration (half2), read FP32 input directly
+    const int K2 = K / 2;
+    const half2* W2 = reinterpret_cast<const half2*>(W_row);
+
+    for (int i = lane; i < K2; i += 32) {
+        half2 w = W2[i];
+        sum += __half2float(w.x) * x[i * 2];
+        sum += __half2float(w.y) * x[i * 2 + 1];
+    }
+
+    if ((K & 1) && lane == 0) {
+        sum += __half2float(W_row[K - 1]) * x[K - 1];
+    }
+
+    sum = warp_reduce_sum(sum);
+    if (lane == 0) y[row] = sum;
+}
+
+void gemv_gate_fp32_fp32input(const half* W, const float* x, float* y,
+                               int M, int K, cudaStream_t stream) {
+    gemv_gate_fp32_fp32input_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(W, x, y, M, K);
+}
 
 
 

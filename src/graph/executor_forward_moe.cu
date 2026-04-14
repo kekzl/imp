@@ -225,6 +225,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
     // 3. Gate logits + top-k routing
     Tensor router_in = no;
+    bool fp32_gate_logits_ready = false;  // true when FP32 gate logits computed directly
     // Gemma-4 custom router: logits = gate_inp @ (rmsnorm_noweight(h) * (1/sqrt(d)) * gate_inp_scale)
     // This matches llama.cpp's gemma4-iswa.cpp:151-155.
     // The standard path (router_in = rmsnorm(h, ffn_pre_norm_2)) uses the WRONG norm weight
@@ -235,33 +236,29 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         // at later layers (L29). The FP16 intermediate loses enough precision to change
         // expert selection in the 128-expert top-8 MoE.
         if (fp32_accum_buf_ != nullptr && n == 1) {
-            // FP32 router path: rmsnorm(fp32_h, gate_inp_scale) → FP32, then FP32 GEMV
-            // Reuse moe_.scatter_out (FP32, max_tokens*d) as FP32 scratch
+            // FP32 router path: rmsnorm(fp32_h, gate_inp_scale) * 1/sqrt(d) → FP32
+            // Stays in FP32 all the way through gate GEMV (no FP16 truncation).
             float* fp32_router = static_cast<float*>(moe_.scatter_out.data);
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
-            // Fused: rmsnorm(fp32_h, gate_inp_scale) * inv_sqrt_d → fp32_router
             rmsnorm_fp32_to_fp32(fp32_h, ly.ffn_gate_inp_scale,
                                   fp32_router, n, d, eps, stream, 0.0f);
-            // Scale by 1/sqrt(d) in FP32
             {
                 int64_t total = static_cast<int64_t>(n) * d;
                 int thr = 256;
                 int blk = static_cast<int>((total + thr - 1) / thr);
                 scale_fp32_kernel<<<blk, thr, 0, stream>>>(fp32_router, inv_sqrt_d, total);
             }
-            // Gate GEMV: FP32 input × FP16 gate → FP32 logits
-            // Convert router_in to FP16 for the existing gemv_gate_fp32 kernel.
-            // TODO: implement FP32-input gate GEMV for full precision
-            int64_t ri_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
-            router_in = Tensor(moe_.expert_down.data, compute_dtype_, 2, ri_shape, true);
+            // Gate GEMV directly from FP32 router → FP32 logits (no FP16 truncation).
+            // Writes to moe_.gate_logits — same buffer the topk gating reads from.
             {
-                int64_t total = static_cast<int64_t>(n) * d;
-                int thr = 256;
-                int blk = static_cast<int>((total + thr - 1) / thr);
-                fp32_to_fp16_kernel<<<blk, thr, 0, stream>>>(
-                    fp32_router, static_cast<half*>(router_in.data), total);
+                Tensor gate_logits_f32 = slice_rows(moe_.gate_logits, n);
+                gemv_gate_fp32_fp32input(static_cast<const half*>(ly.moe_gate.data),
+                                          fp32_router,
+                                          static_cast<float*>(gate_logits_f32.data),
+                                          ne, d, stream);
             }
+            fp32_gate_logits_ready = true;
         } else {
             // FP16 fallback (prefill or non-FP32-accum)
             int64_t ri_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(d)};
@@ -310,7 +307,15 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // the separate gemv_gate_fp32 (128 parallel blocks) is much faster than
     // serializing 128/8=16 experts per warp in a single block.
     constexpr int kMaxFusedExperts = 8;
-    if (ne <= kMaxFusedExperts &&
+    if (fp32_gate_logits_ready) {
+        // Gate logits already computed by FP32 router path above — skip to topk.
+        Tensor gate_logits_f32 = slice_rows(moe_.gate_logits, n);
+        if (moe_.routing_buffers.pool) {
+            moe_topk_gating(gate_logits_f32, top_k, moe_.routing_buffers, routing, stream, use_sigmoid, norm_weights, router_bias_ptr, /*skip_sorting=*/will_decode_fast);
+        } else {
+            moe_topk_gating(gate_logits_f32, top_k, routing, stream, use_sigmoid, norm_weights, router_bias_ptr);
+        }
+    } else if (ne <= kMaxFusedExperts &&
         n == 1 && compute_dtype_ == DType::FP16 && ly.moe_gate.dtype == DType::FP16 &&
         moe_.routing_buffers.pool && will_decode_fast) {
         // Fused: gate GEMV + softmax/sigmoid + top-k in one kernel (1 launch)

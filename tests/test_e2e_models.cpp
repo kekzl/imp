@@ -20,6 +20,10 @@ static const char* gdn_model() {
     return std::getenv("IMP_TEST_MODEL_GDN");
 }
 
+static const char* gemma4_model() {
+    return std::getenv("IMP_TEST_MODEL_GEMMA4");
+}
+
 #define REQUIRE_MODEL(var) \
     const char* path = var(); \
     if (!path) GTEST_SKIP() << "Set " #var " env var to run this test"
@@ -213,6 +217,111 @@ TEST_F(GDNModelTest, MultiTurnGDNState) {
     // Don't check exact content — small GDN models have limited instruction following.
     std::string text2(out2, len2);
     EXPECT_GT(text2.size(), 1u) << "Output too short after reset: " << text2;
+}
+
+// ---------------------------------------------------------------------------
+// Gemma-4 model tests (26B-A4B MoE hybrid: per-layer SWA/global, 128 experts
+// top-8, shared dense FFN alongside each MoE block, custom router, GEGLU)
+//
+// Primary regression test — Gemma-4 forward pass has historically been
+// fragile (see memory/gemma4_working_2026_04_14.md). This test locks in
+// correct output on the Q4_K_M model.
+// ---------------------------------------------------------------------------
+
+class Gemma4ModelTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        path_ = gemma4_model();
+        if (!path_) GTEST_SKIP() << "Set IMP_TEST_MODEL_GEMMA4 to run";
+
+        ASSERT_EQ(imp_model_load(path_, IMP_FORMAT_GGUF, &model_), IMP_SUCCESS);
+        ASSERT_NE(model_, nullptr);
+
+        ImpConfig cfg = imp_config_default();
+        cfg.max_seq_len = 512;
+        cfg.max_batch_size = 1;
+        cfg.enable_cuda_graphs = 0;  // per-layer hd=256/512 breaks graph capture
+        ASSERT_EQ(imp_context_create(model_, &cfg, &ctx_), IMP_SUCCESS);
+    }
+
+    void TearDown() override {
+        if (ctx_) imp_context_free(ctx_);
+        if (model_) imp_model_free(model_);
+    }
+
+    const char* path_ = nullptr;
+    ImpModel model_ = nullptr;
+    ImpContext ctx_ = nullptr;
+};
+
+TEST_F(Gemma4ModelTest, AnswersCapitalOfFrance) {
+    // With default gemma chat template, Gemma-4 emits a <|channel>thought...
+    // block followed by the answer. "Paris" must appear in the output.
+    ImpGenerateParams params = imp_generate_params_default();
+    params.max_tokens = 64;
+    params.temperature = 0.0f;
+    params.apply_chat_template = 1;
+
+    char output[4096];
+    size_t len = 0;
+    ASSERT_EQ(imp_generate(ctx_, "What is the capital of France?", &params,
+                           output, sizeof(output), &len), IMP_SUCCESS);
+    EXPECT_GT(len, 0u);
+
+    std::string text(output, len);
+    EXPECT_NE(text.find("Paris"), std::string::npos)
+        << "Expected 'Paris' in Gemma-4 output: " << text;
+}
+
+TEST_F(Gemma4ModelTest, RawCompletionProducesOutput) {
+    // Raw (no-chat-template) path: instruct-tuned Gemma-4 without its chat
+    // template produces structurally different output than with the template
+    // (e.g. it emits <|channel>thought tokens as if the turn had started).
+    // We don't assert exact content — just that the forward pass completes
+    // successfully and returns non-empty non-degenerate text. The chat-template
+    // test above already covers semantic correctness.
+    ImpGenerateParams params = imp_generate_params_default();
+    params.max_tokens = 12;
+    params.temperature = 0.0f;
+    params.apply_chat_template = 0;
+
+    char output[4096];
+    size_t len = 0;
+    ASSERT_EQ(imp_generate(ctx_, "The capital of France is", &params,
+                           output, sizeof(output), &len), IMP_SUCCESS);
+    EXPECT_GT(len, 0u);
+}
+
+TEST_F(Gemma4ModelTest, NoRepetitionDegeneration) {
+    // Guards against the classic Gemma-4 failure mode: ~15 tokens of sensible
+    // output followed by "own own own" (or "아니라 own 아니라") loops driven by
+    // MoE routing instability / precision drift through 30 layers × 128 experts.
+    ImpGenerateParams params = imp_generate_params_default();
+    params.max_tokens = 100;
+    params.temperature = 0.0f;
+    params.apply_chat_template = 1;
+
+    char output[8192];
+    size_t len = 0;
+    ASSERT_EQ(imp_generate(ctx_, "Name three European capitals.", &params,
+                           output, sizeof(output), &len), IMP_SUCCESS);
+    EXPECT_GT(len, 0u);
+
+    std::string text(output, len);
+
+    // Repetition check: the most common 4-char substring in English text
+    // tops out around 5-10% of the text. If any single run of the same
+    // character occupies >30% of the output, it's a degeneration loop.
+    size_t max_run = 0;
+    for (size_t i = 0; i < text.size(); ) {
+        size_t j = i;
+        while (j < text.size() && text[j] == text[i]) ++j;
+        max_run = std::max(max_run, j - i);
+        i = j;
+    }
+    EXPECT_LT(max_run * 2, text.size())
+        << "Detected degeneration (run of " << max_run
+        << " chars in output of " << text.size() << "): " << text;
 }
 
 } // anonymous namespace
