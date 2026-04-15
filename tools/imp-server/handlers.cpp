@@ -494,6 +494,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     }
 
     float temperature = body.value("temperature", 0.7f);
+    const bool top_p_explicit = body.contains("top_p");
+    const bool top_k_explicit = body.contains("top_k");
+    const bool rep_pen_explicit = body.contains("repetition_penalty");
     float top_p = body.value("top_p", 0.95f);
     int top_k = body.value("top_k", 40);
     int max_tokens = body.value("max_tokens", state.default_max_tokens);
@@ -727,6 +730,17 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         if (snap_have_template)
             snap_stop_token_ids = snap_chat_tpl.stop_token_ids();
         snap_has_vision = !image_data.empty() && state.ctx && state.ctx->engine->has_vision();
+    }
+
+    // Channel models (Gemma-4) are more susceptible to sampling-driven
+    // degeneration on casual prompts than DeepSeek-style reasoning models.
+    // If the caller didn't specify a sampler parameter, tighten the default
+    // to suppress the tail of the distribution. Qwen3 / DeepSeek / non-channel
+    // models retain the 0.95 / 40 / 1.0 defaults.
+    if (snap_channel_open_id >= 0) {
+        if (!top_p_explicit) top_p = 0.9f;
+        if (!top_k_explicit) top_k = 20;
+        if (!rep_pen_explicit) repetition_penalty = 1.05f;
     }
 
     // Build tool definitions for Jinja2-native tool calling
