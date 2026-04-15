@@ -601,21 +601,12 @@ bool CudaGraphConditionalRunner::setup(
         body_state.top_p = config_.top_p;
         body_state.top_k = config_.top_k;
         body_state.seed = config_.seed;
-        // max_context_len is used by paged_attention_decode to pick between the
-        // GQA, split-K, and cluster kernels (num_ctx_blocks = ceil(max_context_len
-        // / block_size); split-K triggers at >=4 blocks). Bisect on Gemma-4 2026-04-16
-        // shows that the split-K paged kernel, when baked into a captured WHILE body,
-        // produces divergent logits from the first decoded token onward — the GQA
-        // kernel captured at the same prompt produces correct output. Force the GQA
-        // path during capture by clamping max_context_len below the split-K
-        // threshold (4 * block_size). The per-iteration attention math reads the
-        // real context length from context_lens[] at runtime, so clamping here does
-        // not affect correctness for long sequences — only the kernel variant that
-        // the graph captures.
-        {
-            const int bs = state_template.kv_cache ? state_template.kv_cache->block_size() : 16;
-            body_state.max_context_len = 3 * bs;  // => num_ctx_blocks = 3 < 4 => GQA path
-        }
+        // max_context_len drives kernel-path selection in paged_attention_decode.
+        // The split-K pipeline kernel is broken when captured into a conditional
+        // WHILE body (bisect 2026-04-16), but the dispatch now detects stream
+        // capture and falls back to the non-pipeline split-K — safe to use the
+        // real value here.
+        body_state.max_context_len = config_.initial_context_len + config_.max_steps;
 
         // Penalty parameters for device-side application in forward_decode_async
         if (d_penalty_ring_) {

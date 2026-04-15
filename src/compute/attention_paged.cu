@@ -1408,9 +1408,18 @@ void paged_attention_decode(
         dim3 grid1(batch_size, n_heads, num_splits);
         dim3 block1(BLOCK_THREADS);
 
-        // Use pipelined cp.async kernel on sm_90+ for better memory/compute overlap
+        // Use pipelined cp.async kernel on sm_90+ for better memory/compute overlap.
+        // Fall back to the non-pipelined kernel when the stream is being captured
+        // into a CUDA graph: the pipeline kernel produces divergent logits when
+        // baked into a conditional WHILE body (bisect 2026-04-16). Non-pipeline is
+        // ~10-15% slower but captures correctly. Also respect IMP_SPLITK_NO_PIPE
+        // as a manual bisect escape hatch.
         static int sm_ver = get_device_sm_version();
-        if (sm_ver >= 90) {
+        static bool force_non_pipe = getenv("IMP_SPLITK_NO_PIPE") != nullptr;
+        cudaStreamCaptureStatus cap_status = cudaStreamCaptureStatusNone;
+        if (stream) cudaStreamIsCapturing(stream, &cap_status);
+        bool in_capture = (cap_status != cudaStreamCaptureStatusNone);
+        if (sm_ver >= 90 && !force_non_pipe && !in_capture) {
             // Pipeline smem: 8 warps * 3 * head_dim * 2B (FP16)
             // Must be at least as large as reduction smem
             size_t pipe_smem = NUM_WARPS * 3 * head_dim * sizeof(half);
