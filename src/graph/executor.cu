@@ -421,143 +421,30 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
         return;
     }
 
-    const auto& cfg = model_->config();
-    int n = state.n_tokens;  // should be 1 for decode
-    cur_n_tokens_ = n;
-    cur_force_fp16_ = false;  // async decode path never forces FP16
-    cur_per_row_lm_ = false;
-    // Clear any stale CUDA error state before starting the decode pass.
-    { cudaError_t e_ = cudaGetLastError();
-      if (e_ != cudaSuccess) IMP_LOG_DEBUG("Cleared stale error before decode: %s", cudaGetErrorString(e_)); }
+    // Delegate the heavy lifting (embedding → layers → final norm → LM head →
+    // softcap) to the canonical forward_logits path. Caller must pre-set
+    // state.token_ids = d_token_id so embedding_lookup reads the freshly
+    // sampled token from device memory (CudaGraphConditionalRunner::setup
+    // does this). Unifying here eliminates the parallel reimplementation
+    // that previously diverged on Gemma-4 (samples <eos> at step 0).
+    Tensor logits;
+    forward_logits(state, logits, stream);
 
-    // ---- Step 1: Embedding lookup from device-side token ID ----
-    Tensor h = view_tokens(hidden_, n);
-    embedding_lookup_from_device(model_->token_embedding(), d_token_id, h,
-                                  model_->tok_emb_qtype_, stream);
+    // ---- Device-side post-processing (graph-safe, runs each iteration) ----
+    int vocab = static_cast<int>(logits.shape[logits.ndim - 1]);
+    float* lp = static_cast<float*>(logits.data);
 
-    // Gemma: scale embeddings by sqrt(d_model)
-    if (cfg.embed_scale > 0.0f && h.dtype == DType::FP16) {
-        int64_t total = static_cast<int64_t>(n) * cfg.d_model;
-        int threads = 256;
-        int blocks = static_cast<int>((total / 2 + threads - 1) / threads);
-        scale_fp16_kernel<<<blocks, threads, 0, stream>>>(
-            static_cast<half*>(h.data), __float2half(cfg.embed_scale), total);
-    }
-
-    // Initialize FP32 residual accumulator from FP16 embedding (post-norm models).
-    // Without this, the graph loop would accumulate on stale FP32 state from
-    // the previous iteration instead of starting fresh from the embedding.
-    if (fp32_accum_buf_) {
-        int64_t total = static_cast<int64_t>(n) * cfg.d_model;
-        int threads = 256;
-        int blocks = static_cast<int>((total + threads - 1) / threads);
-        fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(
-            static_cast<const half*>(h.data),
-            static_cast<float*>(view_tokens(fp32_hidden_, n).data), total);
-    }
-
-    // ---- Step 2: Transformer layers ----
-    for (int i = 0; i < cfg.n_layers; ++i) {
-        if (offload_mgr_) {
-            offload_mgr_->ensure_layer(i, stream);
-            if (i + 1 < cfg.n_layers) offload_mgr_->prefetch_layer(i + 1);
-        }
-
-        if (layer_has_gdn(i))            run_gdn(i, state, stream);
-        else if (layer_has_ssm(i))       run_ssm(i, state, stream);
-        else if (layer_has_attention(i)) run_attention(i, state, stream);
-
-        if (layer_has_moe(i))            run_moe_ffn(i, stream);
-        else if (layer_has_dense_ffn(i)) run_ffn(i, stream);
-
-        if (offload_mgr_) offload_mgr_->release_layer(i);
-    }
-
-    // ---- Step 2b: Final FP32→FP16 conversion (post-norm models) ----
-    // run_attention/run_ffn keep fp32_hidden_ in sync, but hidden_ (FP16) may
-    // lag behind. Convert now so the LM head reads correct values.
-    if (fp32_accum_buf_) {
-        fp32_to_fp16_rowscale_kernel<<<n, 256, 256 * sizeof(float), stream>>>(
-            static_cast<const float*>(view_tokens(fp32_hidden_, n).data),
-            static_cast<half*>(view_tokens(hidden_, n).data), n, cfg.d_model);
-    }
-
-    // ---- Step 3: Final RMSNorm + LM head ----
-    Tensor h_final = view_tokens(hidden_, n);
-    Tensor lg = view_tokens(logits_, n);
-
-    const auto out_qtype = model_->out_proj_qtype_;
-    auto nvfp4_lm = wcache_.nvfp4.find(model_->output_proj().data);
-    if (nvfp4_lm != wcache_.nvfp4.end()) {
-        Tensor no_final = view_tokens(norm_out_, n);
-        rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
-        gemv_nvfp4_kpar_fp32(nvfp4_lm->second,
-                              static_cast<const half*>(no_final.data),
-                              static_cast<float*>(lg.data),
-                              cfg.vocab_size, cfg.d_model, stream);
-    } else if (qscratch_.q8_1_buf && compute_dtype_ == DType::FP16 &&
-        (out_qtype == GGMLQuantType::Q6_K || out_qtype == GGMLQuantType::Q8_0 ||
-         out_qtype == GGMLQuantType::Q4_0 || out_qtype == GGMLQuantType::Q4_K ||
-         out_qtype == GGMLQuantType::Q5_K || out_qtype == GGMLQuantType::Q2_K ||
-         out_qtype == GGMLQuantType::Q3_K)) {
-        auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
-        rmsnorm_quantize_q8_1(
-            static_cast<const half*>(h_final.data),
-            static_cast<const half*>(model_->output_norm().data),
-            q8, qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
-        if (out_qtype == GGMLQuantType::Q6_K)
-            gemv_q6k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
-                               static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-        else if (out_qtype == GGMLQuantType::Q8_0)
-            gemv_q8_0_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
-                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-        else if (out_qtype == GGMLQuantType::Q4_K)
-            gemv_q4_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
-                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-        else if (out_qtype == GGMLQuantType::Q5_K)
-            gemv_q5_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
-                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-        else if (out_qtype == GGMLQuantType::Q2_K)
-            gemv_q2_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
-                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-        else if (out_qtype == GGMLQuantType::Q3_K)
-            gemv_q3_k_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
-                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-        else
-            gemv_q4_0_q8_1_fp32(model_->output_proj().data, q8, qscratch_.d8_buf,
-                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-    } else {
-        Tensor no_final = view_tokens(norm_out_, n);
-        rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
-        gemm(no_final, model_->output_proj(), lg, 1.0f, 0.0f, stream);
-    }
-
-    // ---- Step 3b: Final logit soft-capping (Gemma-2/3) ----
-    if (cfg.final_logit_softcap > 0.0f) {
-        int64_t n_logits = static_cast<int64_t>(n) * cfg.vocab_size;
-        int sc_threads = 256;
-        int sc_blocks = static_cast<int>((n_logits + sc_threads - 1) / sc_threads);
-        logit_softcap_fp32_kernel<<<sc_blocks, sc_threads, 0, stream>>>(
-            static_cast<float*>(lg.data),
-            cfg.final_logit_softcap, 1.0f / cfg.final_logit_softcap, n_logits);
-    }
-
-    // ---- Step 4: Ban special tokens (device-side for CUDA graph capture) ----
+    // Ban special tokens — device-side variant for graph capture.
     if (state.d_banned_tokens && state.n_d_banned_tokens > 0) {
-        float* lp = static_cast<float*>(lg.data);
-        int vocab = static_cast<int>(lg.shape[lg.ndim - 1]);
         int threads = ((state.n_d_banned_tokens + 31) / 32) * 32;
         if (threads > 256) threads = 256;
         ban_logits_kernel<<<1, threads, 0, stream>>>(
             lp, state.d_banned_tokens, state.n_d_banned_tokens, vocab);
     }
 
-    // ---- Step 4b: Apply penalties (repetition/frequency/presence) ----
-    // In the CUDA graph loop, d_n_penalty_tokens points to a device counter
-    // that grows each iteration as tokens are generated.
+    // Repetition / frequency / presence penalties — device counter grows each
+    // iteration as tokens are appended to the penalty ring.
     if (state.penalty_tokens != nullptr && state.d_n_penalty_tokens != nullptr) {
-        float* lp = static_cast<float*>(lg.data);
-        int vocab = static_cast<int>(lg.shape[lg.ndim - 1]);
         apply_penalties_device_count(lp, vocab, state.penalty_tokens,
                                      state.d_n_penalty_tokens,
                                      state.repeat_last_n,
@@ -566,8 +453,8 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
                                      state.presence_penalty, stream);
     }
 
-    // ---- Step 5: Async sampling → write to d_token_id + h_mapped ----
-    Tensor last_logits = lg.slice(0, 1);
+    // ---- Async sampling → write to d_token_id + h_mapped (mapped pinned) ----
+    Tensor last_logits = logits.slice(0, 1);
     int64_t vocab_shape[1] = {last_logits.shape[1]};
     last_logits = last_logits.reshape(1, vocab_shape);
 
@@ -583,7 +470,7 @@ void GraphExecutor::forward_decode_async(const InferenceState& state,
                                  state.temperature, seed,
                                  d_token_id, h_mapped, stream);
     }
-    // No cudaStreamSynchronize — host polls h_mapped asynchronously
+    // No cudaStreamSynchronize — host polls h_mapped asynchronously.
 }
 
 } // namespace imp
