@@ -240,7 +240,7 @@ protected:
         ImpConfig cfg = imp_config_default();
         cfg.max_seq_len = 512;
         cfg.max_batch_size = 1;
-        cfg.enable_cuda_graphs = 0;  // per-layer hd=256/512 breaks graph capture
+        cfg.enable_cuda_graphs = 0;  // baseline path — paired with Gemma4GraphsTest
         ASSERT_EQ(imp_context_create(model_, &cfg, &ctx_), IMP_SUCCESS);
     }
 
@@ -321,6 +321,93 @@ TEST_F(Gemma4ModelTest, NoRepetitionDegeneration) {
     }
     EXPECT_LT(max_run * 2, text.size())
         << "Detected degeneration (run of " << max_run
+        << " chars in output of " << text.size() << "): " << text;
+}
+
+// ---------------------------------------------------------------------------
+// Gemma-4 with CUDA graphs enabled — regression guard for the graph path.
+//
+// History: the AsyncGraphLoop captured forward_decode_async() — a parallel
+// reimplementation that diverged on Gemma-4 Q4_K_M (sampled <eos> at step 0
+// of the WHILE body, terminating after ~3 tokens with garbage). Fixed by
+// unifying forward_decode_async() with forward_logits() (the canonical
+// path). Locks in: graphs MUST produce identical output to the no-graph
+// path, both in the short (single-token capture) and long (async WHILE)
+// regimes.
+// ---------------------------------------------------------------------------
+
+class Gemma4GraphsTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        path_ = gemma4_model();
+        if (!path_) GTEST_SKIP() << "Set IMP_TEST_MODEL_GEMMA4 to run";
+
+        ASSERT_EQ(imp_model_load(path_, IMP_FORMAT_GGUF, &model_), IMP_SUCCESS);
+        ASSERT_NE(model_, nullptr);
+
+        ImpConfig cfg = imp_config_default();
+        cfg.max_seq_len = 512;
+        cfg.max_batch_size = 1;
+        cfg.enable_cuda_graphs = 1;
+        ASSERT_EQ(imp_context_create(model_, &cfg, &ctx_), IMP_SUCCESS);
+    }
+
+    void TearDown() override {
+        if (ctx_) imp_context_free(ctx_);
+        if (model_) imp_model_free(model_);
+    }
+
+    const char* path_ = nullptr;
+    ImpModel model_ = nullptr;
+    ImpContext ctx_ = nullptr;
+};
+
+TEST_F(Gemma4GraphsTest, AnswersCapitalOfFranceWithGraphs) {
+    // Same prompt as the no-graph baseline above. Output must contain "Paris".
+    // Generates >3 decoded tokens to ensure the AsyncGraphLoop launches and
+    // produces correct output (the previous bug terminated at ~3 tokens).
+    ImpGenerateParams params = imp_generate_params_default();
+    params.max_tokens = 64;
+    params.temperature = 0.0f;
+    params.apply_chat_template = 1;
+
+    char output[4096];
+    size_t len = 0;
+    ASSERT_EQ(imp_generate(ctx_, "What is the capital of France?", &params,
+                           output, sizeof(output), &len), IMP_SUCCESS);
+    EXPECT_GT(len, 0u);
+
+    std::string text(output, len);
+    EXPECT_NE(text.find("Paris"), std::string::npos)
+        << "Expected 'Paris' in Gemma-4 graph output: " << text;
+}
+
+TEST_F(Gemma4GraphsTest, LongDecodeStaysCoherent) {
+    // 256 decode tokens: long enough for the AsyncGraphLoop to drive most
+    // of the generation. Guards against state drift over a captured WHILE
+    // body that runs many iterations from the same baked-in pointers.
+    ImpGenerateParams params = imp_generate_params_default();
+    params.max_tokens = 256;
+    params.temperature = 0.0f;
+    params.apply_chat_template = 1;
+
+    char output[16384];
+    size_t len = 0;
+    ASSERT_EQ(imp_generate(ctx_, "Name three European capitals.", &params,
+                           output, sizeof(output), &len), IMP_SUCCESS);
+    EXPECT_GT(len, 0u);
+
+    // Same degeneration heuristic as the no-graph variant.
+    std::string text(output, len);
+    size_t max_run = 0;
+    for (size_t i = 0; i < text.size(); ) {
+        size_t j = i;
+        while (j < text.size() && text[j] == text[i]) ++j;
+        max_run = std::max(max_run, j - i);
+        i = j;
+    }
+    EXPECT_LT(max_run * 2, text.size())
+        << "Graph-path degeneration (run of " << max_run
         << " chars in output of " << text.size() << "): " << text;
 }
 
