@@ -194,6 +194,7 @@ bool CudaGraphCapture::try_update(cudaGraph_t new_graph) {
 }
 
 void CudaGraphCapture::reset() {
+    bool had_exec = (graph_exec_ != nullptr);
     if (graph_exec_) {
         cudaGraphExecDestroy(graph_exec_);
         graph_exec_ = nullptr;
@@ -204,6 +205,15 @@ void CudaGraphCapture::reset() {
     }
     capture_stream_ = nullptr;
     captured_ = false;
+    // Release the per-device graph memory pool. Without this, instantiated
+    // graphs (esp. for 128-expert MoE models) hold reserved VRAM until process
+    // exit, which compounds across re-captures (config changes, batch size
+    // changes). Trim is a no-op when the pool is already empty.
+    if (had_exec) {
+        int dev = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGraphMemTrim(dev);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -718,6 +728,7 @@ void CudaGraphConditionalRunner::cleanup() {
         launched_ = false;
     }
 
+    bool had_exec = (exec_ != nullptr);
     if (exec_) { cudaGraphExecDestroy(exec_); exec_ = nullptr; }
     if (graph_) { cudaGraphDestroy(graph_); graph_ = nullptr; }
 
@@ -736,6 +747,14 @@ void CudaGraphConditionalRunner::cleanup() {
     d_ring_buffer_ = nullptr;
     if (h_step_counter_) { IMP_CUDA_CHECK_LOG(cudaFreeHost(h_step_counter_)); h_step_counter_ = nullptr; }
     d_step_counter_mapped_ = nullptr;
+
+    // Release the per-device graph memory pool (matches CudaGraphCapture::reset).
+    // Keeps long-running sessions from holding stale graph reservations.
+    if (had_exec) {
+        int dev = 0;
+        cudaGetDevice(&dev);
+        cudaDeviceGraphMemTrim(dev);
+    }
 
     launched_ = false;
     last_read_step_ = 0;
