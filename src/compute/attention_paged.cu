@@ -958,10 +958,17 @@ __global__ void paged_attention_splitk_pipeline_kernel(
         // Prime: async load K[first_tok] into k_buf0
         {
             const half* K_tok = K_block + first_tok * kv_slot_stride + kv_head * HEAD_DIM;
-            // Each thread loads ELEMS halves. Use 16B copy for HD≥256 (ELEMS≥8).
-            if constexpr (ELEMS >= 8) {
-                cp_async_ca_16(&k_buf0[lane_offset], &K_tok[lane_offset]);
-            } else {
+            // Each thread loads ELEMS halves. cp.async.ca.shared.global with
+            // size=16 copies 16 bytes = 8 halves; size=8 copies 4 halves. For
+            // ELEMS>8 (HEAD_DIM>256), issue multiple cp.async instructions.
+            #pragma unroll
+            for (int chunk = 0; chunk < ELEMS; chunk += 8) {
+                if constexpr (ELEMS - 0 >= 8) {
+                    cp_async_ca_16(&k_buf0[lane_offset + chunk],
+                                   &K_tok[lane_offset + chunk]);
+                }
+            }
+            if constexpr (ELEMS < 8) {
                 cp_async_ca_8(&k_buf0[lane_offset], &K_tok[lane_offset]);
             }
             cp_async_commit();
@@ -977,10 +984,18 @@ __global__ void paged_attention_splitk_pipeline_kernel(
             // Start async V[t] + K[t+1] loads (branchless: clamp to last valid token)
             int t_next = min(t + 1, first_tok + n_toks - 1);
             const half* K_next = K_block + t_next * kv_slot_stride + kv_head * HEAD_DIM;
-            if constexpr (ELEMS >= 8) {
-                cp_async_ca_16(&v_buf[lane_offset], &V_tok[lane_offset]);
-                cp_async_ca_16(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
-            } else {
+            // Each thread loads ELEMS halves. cp_async_ca_16 copies 8 halves;
+            // for ELEMS>8 (HEAD_DIM>256) issue multiple 16-byte copies.
+            #pragma unroll
+            for (int chunk = 0; chunk < ELEMS; chunk += 8) {
+                if constexpr (ELEMS >= 8) {
+                    cp_async_ca_16(&v_buf[lane_offset + chunk],
+                                   &V_tok[lane_offset + chunk]);
+                    cp_async_ca_16(&k_bufs[1 - cur][lane_offset + chunk],
+                                   &K_next[lane_offset + chunk]);
+                }
+            }
+            if constexpr (ELEMS < 8) {
                 cp_async_ca_8(&v_buf[lane_offset], &V_tok[lane_offset]);
                 cp_async_ca_8(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
             }
@@ -1409,17 +1424,10 @@ void paged_attention_decode(
         dim3 block1(BLOCK_THREADS);
 
         // Use pipelined cp.async kernel on sm_90+ for better memory/compute overlap.
-        // Fall back to the non-pipelined kernel when the stream is being captured
-        // into a CUDA graph: the pipeline kernel produces divergent logits when
-        // baked into a conditional WHILE body (bisect 2026-04-16). Non-pipeline is
-        // ~10-15% slower but captures correctly. Also respect IMP_SPLITK_NO_PIPE
-        // as a manual bisect escape hatch.
+        // IMP_SPLITK_NO_PIPE forces non-pipeline as a bisect escape hatch.
         static int sm_ver = get_device_sm_version();
         static bool force_non_pipe = getenv("IMP_SPLITK_NO_PIPE") != nullptr;
-        cudaStreamCaptureStatus cap_status = cudaStreamCaptureStatusNone;
-        if (stream) cudaStreamIsCapturing(stream, &cap_status);
-        bool in_capture = (cap_status != cudaStreamCaptureStatusNone);
-        if (sm_ver >= 90 && !force_non_pipe && !in_capture) {
+        if (sm_ver >= 90 && !force_non_pipe) {
             // Pipeline smem: 8 warps * 3 * head_dim * 2B (FP16)
             // Must be at least as large as reduction smem
             size_t pipe_smem = NUM_WARPS * 3 * head_dim * sizeof(half);
