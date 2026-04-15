@@ -22,6 +22,13 @@ std::vector<uint8_t> base64_decode(const std::string& encoded);
 void strip_think_block(std::string& text);
 std::pair<std::string, std::string> extract_reasoning(const std::string& text);
 
+// Strip Gemma-4 "<|channel>NAME\n..." and "<channel|>\n..." structural headers
+// from a content string. Only the header (up to and including the newline) is
+// removed; the body text is preserved. Model variants that never emit
+// <channel|> produce a single leading header that this function drops; ones
+// that emit both get both stripped, leaving only the body text concatenated.
+void strip_channel_headers(std::string& text);
+
 std::string sse_chunk(const std::string& id, int64_t created,
                       const std::string& model,
                       const json& delta,

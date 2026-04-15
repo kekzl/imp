@@ -51,6 +51,13 @@ struct ServerState {
     bool is_think_model = false;  // model has <think> token (DeepSeek R1 etc.)
     int32_t think_start_id = -1;  // <think> token ID (-1 if not present)
     int32_t think_end_id = -1;    // </think> token ID (-1 if not present)
+    // Gemma-4 emits its reasoning/answer structure as "<|channel>NAME\n...<channel|>\n..."
+    // where NAME is one of {thought, analysis, final, ...}. The closing <channel|> is
+    // often omitted on short answers. We route these headers out of the user-facing
+    // content stream; see handlers.cpp for the state-machine filter.
+    int32_t channel_open_id = -1;   // <|channel>  (-1 if not a channel model)
+    int32_t channel_close_id = -1;  // <channel|>
+    int32_t channel_newline_id = -1; // '\n' used to terminate a channel header
     float default_think_budget = 0.5f;  // fraction of max_tokens for reasoning (0=disabled, 0.5=50%)
     ServerMetrics metrics;
 
