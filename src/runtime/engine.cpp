@@ -481,14 +481,24 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 1);
             IMP_LOG_INFO("Gemma 4: setting CUBLAS_WORKSPACE_CONFIG=:4096:8 for deterministic grouped GEMM");
         }
-        // Gemma 4: disable CUDA graphs. Tested with host-resident MoE split
-        // fix in place (commit e879bcd) — AsyncGraphLoop still terminates
-        // after ~3 decode tokens. Graph-safe decode for Gemma-4 requires
-        // per-layer-parameter graph support (hd=256/512 varies, nkv=8/2
-        // varies). Opt in for testing via IMP_GEMMA4_CUDA_GRAPHS=1.
-        if (config_.use_cuda_graphs && !getenv("IMP_GEMMA4_CUDA_GRAPHS")) {
-            IMP_LOG_INFO("Gemma 4: disabling CUDA graphs (per-layer geometry varies)");
+        // Gemma 4: the single-token decode graph (decode_graph_pool_) captures
+        // forward_logits() and works correctly. The AsyncGraphLoop (conditional
+        // WHILE runner) captures the structurally-different forward_decode_async()
+        // path — which on Gemma-4 produces divergent logits (EOS sampled at
+        // step 0 instead of the expected token). Pending a full fix, default
+        // to allowing single-token graphs but skipping async.
+        //   IMP_GEMMA4_NO_GRAPHS=1    → disable all graph capture (old blanket
+        //                               behavior; use for bisect / regressions)
+        //   IMP_GEMMA4_ASYNC_GRAPHS=1 → force-enable AsyncGraphLoop despite
+        //                               known divergence (for continued RCA)
+        //   IMP_GEMMA4_CUDA_GRAPHS=1  → alias kept for backwards compat
+        if (getenv("IMP_GEMMA4_NO_GRAPHS")) {
+            IMP_LOG_INFO("Gemma 4: disabling all CUDA graphs (IMP_GEMMA4_NO_GRAPHS=1)");
             config_.use_cuda_graphs = false;
+        } else if (config_.use_cuda_graphs) {
+            IMP_LOG_INFO("Gemma 4: single-token CUDA graphs enabled, AsyncGraphLoop "
+                         "disabled (known forward_decode_async divergence). "
+                         "Override with IMP_GEMMA4_ASYNC_GRAPHS=1.");
         }
         // Enable MMVQ for all weight GEMMs — quantized matmul matching llama.cpp's
         // accumulation behavior, critical for 128-expert MoE precision.
@@ -1950,11 +1960,19 @@ void Engine::step_decode_process_outputs(
 
     // Try async graph loop after first decode step.
     // Think budget is now handled device-side in post_decode_step_kernel.
+    // Gemma-4: the async path captures forward_decode_async() which diverges
+    // from the non-graph path — gate behind IMP_GEMMA4_ASYNC_GRAPHS (or the
+    // legacy IMP_GEMMA4_CUDA_GRAPHS alias) until the divergence is fixed.
+    bool gemma4_async_blocked =
+        (model_->config().arch == ModelArch::GEMMA4) &&
+        !getenv("IMP_GEMMA4_ASYNC_GRAPHS") &&
+        !getenv("IMP_GEMMA4_CUDA_GRAPHS");
     if (decode_graph_pool_[0].is_ready() && valid_decode.size() == 1 &&
         !offload_mgr_ &&
         !config_.enable_speculative &&
         config_.use_cuda_graphs && !async_graph_runner_.is_setup() &&
-        !needs_logprobs && !needs_json_mode && !needs_schema_mode) {
+        !needs_logprobs && !needs_json_mode && !needs_schema_mode &&
+        !gemma4_async_blocked) {
         auto& dreq = valid_decode[0];
         if (dreq->status == RequestStatus::DECODING &&
             !dreq->output_tokens.empty()) {
