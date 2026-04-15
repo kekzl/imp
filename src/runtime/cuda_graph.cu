@@ -411,9 +411,11 @@ bool CudaGraphConditionalRunner::setup(
     config_ = std::move(config);
 
     // Propagate IMP_GRAPH_DIAG to device-side tracing in post_decode_step_kernel.
-    // Done once per setup(); cheap enough to not bother caching.
-    {
-        int v = graph_diag::enabled() ? 1 : 0;
+    // Done once per setup(); cheap enough to not bother caching. Symbol write
+    // is skipped in the normal (non-diag) path to avoid perturbing CUDA error
+    // state in pre-launch phases.
+    if (graph_diag::enabled()) {
+        int v = 1;
         cudaMemcpyToSymbol(d_graph_diag_enabled, &v, sizeof(int));
     }
 
