@@ -42,12 +42,13 @@ test-all: build
 	$(DOCKER_RUN) test-gdn
 
 # E2E model tests: load real models, generate, verify output
-# Uses Qwen3-4B (dense) + Qwen3.5-4B (GDN hybrid) from ./models/
+# Uses Qwen3-4B (dense) + Qwen3.5-4B (GDN hybrid) + Gemma-4-26B-A4B (MoE) from ./models/
 test-e2e: build
 	docker run --rm --gpus all -v $(PWD)/models:/models \
 		-e IMP_TEST_MODEL=/models/Qwen3-4B-Instruct-2507-Q8_0.gguf \
 		-e IMP_TEST_MODEL_GDN=/models/Qwen3.5-4B-Q8_0.gguf \
-		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*"
+		-e IMP_TEST_MODEL_GEMMA4=/models/gemma-4-26B-A4B-it-Q4_K_M.gguf \
+		$(DOCKER_IMG) imp-tests --gtest_filter="PrimaryModelTest.*:GDNModelTest.*:EndToEndModelTest.*:Gemma4ModelTest.*:Gemma4GraphsTest.*"
 
 # Full benchmark suite: all baseline models (requires GPU to be free)
 bench: build check-gpu
