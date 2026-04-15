@@ -1,4 +1,5 @@
 #include "runtime/cuda_graph.h"
+#include "runtime/graph_diag.h"
 #include "runtime/pdl.h"
 #include "graph/executor.h"
 #include "compute/sampling.h"
@@ -119,6 +120,7 @@ bool CudaGraphCapture::begin_capture(cudaStream_t stream) {
     }
 
     capture_stream_ = stream;
+    graph_diag::g_phase = graph_diag::Phase::CAPTURE;
     return true;
 }
 
@@ -128,6 +130,7 @@ bool CudaGraphCapture::end_capture() {
     }
 
     cudaError_t err = cudaStreamEndCapture(capture_stream_, &graph_);
+    graph_diag::g_phase = graph_diag::Phase::NORMAL;
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("CudaGraphCapture: end_capture failed: %s",
                       cudaGetErrorString(err));
@@ -141,6 +144,9 @@ bool CudaGraphCapture::end_capture() {
         if (converted > 0)
             IMP_LOG_DEBUG("CudaGraphCapture: %d edges converted to PDL", converted);
     }
+
+    graph_diag::log_kernel_nodes(graph_, "capture.plain");
+    graph_diag::dump_graph(graph_, "capture.plain");
 
     err = cudaGraphInstantiate(&graph_exec_, graph_, 0);
     if (err != cudaSuccess) {
@@ -162,12 +168,14 @@ bool CudaGraphCapture::replay(cudaStream_t stream) {
         return false;
     }
 
+    graph_diag::PhaseScope scope(graph_diag::Phase::REPLAY);
     cudaError_t err = cudaGraphLaunch(graph_exec_, stream);
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("CudaGraphCapture: replay failed: %s",
                       cudaGetErrorString(err));
         return false;
     }
+    graph_diag::check_post_launch(stream, "replay");
     return true;
 }
 
@@ -293,6 +301,10 @@ void CudaGraphRunner::invalidate() {
 // CudaGraphConditionalRunner — GPU-autonomous decode loop
 // ---------------------------------------------------------------------------
 
+// Device-side enable flag for post_decode_step_kernel tracing.
+// Host sets to 1 via cudaMemcpyToSymbol when IMP_GRAPH_DIAG is enabled.
+__constant__ int d_graph_diag_enabled = 0;
+
 // Device kernel: post-decode-step bookkeeping.
 // Copies sampled token to ring buffer, increments counters, checks stop
 // conditions, and breaks the WHILE loop via cudaGraphSetConditional.
@@ -366,6 +378,21 @@ __global__ void post_decode_step_kernel(
     }
 
     if (should_stop) {
+        if (d_graph_diag_enabled) {
+            int stop_reason = 0;
+            if (step + 1 >= max_steps) stop_reason = 1;          // max_steps
+            else if (!in_think && !ignore_eos) {
+                if (token == eos_id) stop_reason = 2;            // eos
+                for (int i = 0; i < n_stop_ids; i++) {
+                    if (token == d_stop_ids[i]) stop_reason = 3 + i; // stop_ids[i]
+                }
+            }
+            if (in_think && think_budget_limit > 0 &&
+                d_think_count && *d_think_count >= think_budget_limit) stop_reason = 100;
+            printf("[graph_diag:cond_stop] step=%d token=%d in_think=%d "
+                   "eos_id=%d n_stop_ids=%d reason=%d\n",
+                   step, token, in_think ? 1 : 0, eos_id, n_stop_ids, stop_reason);
+        }
         cudaGraphSetConditional(handle, 0);  // break WHILE loop
     }
 }
@@ -382,6 +409,15 @@ bool CudaGraphConditionalRunner::setup(
         cudaStream_t stream) {
     cleanup();  // release any prior state
     config_ = std::move(config);
+
+    // Propagate IMP_GRAPH_DIAG to device-side tracing in post_decode_step_kernel.
+    // Done once per setup(); cheap enough to not bother caching. Symbol write
+    // is skipped in the normal (non-diag) path to avoid perturbing CUDA error
+    // state in pre-launch phases.
+    if (graph_diag::enabled()) {
+        int v = 1;
+        cudaMemcpyToSymbol(d_graph_diag_enabled, &v, sizeof(int));
+    }
 
     cudaError_t err;
 
@@ -559,6 +595,8 @@ bool CudaGraphConditionalRunner::setup(
             goto fail;
         }
 
+        graph_diag::g_phase = graph_diag::Phase::CAPTURE;
+
         // 5a. Forward decode step: embedding → layers → norm → LM head → sample
         //     Writes sampled token to d_token_id_. The h_mapped parameter receives
         //     a D2H copy each iteration (harmless scratch write; the real ring buffer
@@ -582,6 +620,7 @@ bool CudaGraphConditionalRunner::setup(
         // 5c. End capture
         cudaGraph_t captured_body = nullptr;
         err = cudaStreamEndCapture(stream, &captured_body);
+        graph_diag::g_phase = graph_diag::Phase::NORMAL;
         if (err != cudaSuccess) {
             IMP_LOG_ERROR("ConditionalRunner: capture failed — falling back to per-step decode "
                           "(up to 15x slower). Check for unsupported CUDA operations in the "
@@ -596,6 +635,10 @@ bool CudaGraphConditionalRunner::setup(
             if (converted > 0)
                 IMP_LOG_INFO("ConditionalRunner: %d body graph edges converted to PDL", converted);
         }
+
+        graph_diag::log_kernel_nodes(body_graph, "capture.cond_body");
+        graph_diag::dump_graph(body_graph, "capture.cond_body");
+        graph_diag::dump_graph(graph_, "capture.cond_top");
 
         // 6. Instantiate the top-level graph
         err = cudaGraphInstantiate(&exec_, graph_, 0);
@@ -623,12 +666,14 @@ fail:
 bool CudaGraphConditionalRunner::launch(cudaStream_t stream) {
     if (!exec_) return false;
 
+    graph_diag::PhaseScope scope(graph_diag::Phase::REPLAY);
     cudaError_t err = cudaGraphLaunch(exec_, stream);
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("ConditionalRunner: launch failed: %s",
                       cudaGetErrorString(err));
         return false;
     }
+    graph_diag::check_post_launch(stream, "cond_launch");
     launched_ = true;
     return true;
 }
