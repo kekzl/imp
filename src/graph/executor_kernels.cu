@@ -1,6 +1,7 @@
 #include "graph/executor_kernels.h"
 #include "graph/gemm_context.h"
 #include "graph/executor.h"
+#include "core/logging.h"
 #include "compute/gemm.h"
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_cutlass.h"
@@ -2072,6 +2073,32 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
     const auto* wc = ctx.wcache;
     const auto* qs = ctx.qscratch;
     if (!wc || !qs) return;
+
+    // Residual-add fuse (beta != 0): only FP16 weight cache or dequantable-to-FP16
+    // is supported. GEMV and block-scaled quant paths don't honor beta — callers
+    // for those cases must continue to use their explicit fast paths.
+    if (ctx.beta != 0.0f) {
+        auto it = wc->fp16.find(weight.data);
+        if (it != wc->fp16.end()) {
+            gemm(input, it->second, output, 1.0f, ctx.beta, ctx.stream);
+            return;
+        }
+        if (qs->dequant != nullptr && dequant_gpu_supported(qtype)) {
+            int rows = static_cast<int>(weight.shape[0]);
+            int cols = static_cast<int>(weight.shape[1]);
+            dequant_gpu(weight.data, qs->dequant, qtype, rows, cols, ctx.stream);
+            Tensor w_fp16(qs->dequant, DType::FP16, weight.ndim, weight.shape, true);
+            gemm(input, w_fp16, output, 1.0f, ctx.beta, ctx.stream);
+            return;
+        }
+        if (weight.dtype == DType::FP16 || weight.dtype == DType::BF16) {
+            gemm(input, weight, output, 1.0f, ctx.beta, ctx.stream);
+            return;
+        }
+        IMP_LOG_ERROR("gemm_dispatch: beta=%.3f requested but no FP16 path available "
+                      "for qtype=%d", ctx.beta, (int)qtype);
+        return;
+    }
 
     const auto* fp16  = &wc->fp16;
     const auto* fp8   = (wc->use_fp8 && !ctx.force_fp16) ? &wc->fp8 : nullptr;
