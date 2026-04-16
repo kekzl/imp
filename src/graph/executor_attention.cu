@@ -77,22 +77,33 @@ static void dispatch_gemv_qkv_fused(GGMLQuantType qtype,
 // Resets automatically when the stream attribute is overwritten next layer.
 static void set_l2_persist_kv(cudaStream_t stream, const void* kv_ptr, size_t kv_bytes) {
     if (!kv_ptr || kv_bytes == 0 || !stream) return;
-    // Clamp to device's persisting L2 cache limit
+    // Query device limits once. persistingL2CacheMaxSize caps how much of L2 can
+    // persist (hitRatio target); accessPolicyMaxWindowSize caps the attribute's
+    // address-window extent. Setting num_bytes above the window cap returns
+    // cudaErrorInvalidValue, which poisons the stream for every subsequent kernel.
     static size_t max_persist = 0;
+    static size_t max_window = 0;
     if (max_persist == 0) {
         cudaDeviceProp prop;
         cudaGetDeviceProperties(&prop, 0);
         max_persist = prop.persistingL2CacheMaxSize;
         if (max_persist == 0) return;  // L2 persistence not supported
+        int mw = 0;
+        if (cudaDeviceGetAttribute(&mw, cudaDevAttrMaxAccessPolicyWindowSize, 0)
+            == cudaSuccess && mw > 0) {
+            max_window = static_cast<size_t>(mw);
+        } else {
+            max_window = 128ULL * 1024 * 1024;
+        }
     }
-    // Use proportional hitRatio when KV exceeds L2 capacity, so the hardware
-    // probabilistically persists a representative subset across the full range
-    // (not just the first max_persist bytes).
+    // hitRatio: compare against total KV size so the hardware probabilistically
+    // persists a representative subset even when kv_bytes exceeds the window.
     float ratio = (kv_bytes <= max_persist) ? 1.0f
                 : static_cast<float>(max_persist) / static_cast<float>(kv_bytes);
+    size_t window_bytes = kv_bytes < max_window ? kv_bytes : max_window;
     cudaStreamAttrValue attr = {};
     attr.accessPolicyWindow.base_ptr = const_cast<void*>(kv_ptr);
-    attr.accessPolicyWindow.num_bytes = kv_bytes;
+    attr.accessPolicyWindow.num_bytes = window_bytes;
     attr.accessPolicyWindow.hitRatio = ratio;
     attr.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
     attr.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
