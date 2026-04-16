@@ -11,6 +11,7 @@
 
 #include "graph/executor.h"
 #include "graph/executor_kernels.h"
+#include "graph/gemm_context.h"
 #include "graph/executor_debug.h"
 #include "compute/embedding.h"
 #include "compute/gemv_ggml_compat.h"
@@ -1715,26 +1716,13 @@ moe_after_experts:
 
         // Up projection (dp4a MMVQ for decode)
         {
-            auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
-            const auto* nvfp4_ptr = (wcache_.nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.nvfp4;
-            const auto* ct4_ptr = (wcache_.cutlass_nvfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_nvfp4;
-            const auto* mx4p = (wcache_.cutlass_mxfp4.empty() || cur_force_fp16_) ? nullptr : &wcache_.cutlass_mxfp4;
-            gemm_dispatch(no, ly.w_up_shared, Tensor(), ly.w_up_shared_qtype,
-                          sh_up, qscratch_.dequant, stream, q8, qscratch_.d8_buf, &wcache_.fp16,
-                          (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
-                          qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
-                          nvfp4_ptr, ct4_ptr, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
-                                  mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
+            auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_);
+            gemm_dispatch(no, ly.w_up_shared, ly.w_up_shared_qtype, sh_up, ctx);
 
             if (shared_gated) {
                 // Gated: gate + SwiGLU
                 Tensor sh_gate(moe_.expert_gate.data, compute_dtype_, 2, sh_shape, true);
-                gemm_dispatch(no, ly.w_gate_shared, Tensor(), ly.w_gate_shared_qtype,
-                              sh_gate, qscratch_.dequant, stream, q8, qscratch_.d8_buf, &wcache_.fp16,
-                              (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
-                              qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
-                              nvfp4_ptr, ct4_ptr, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
-                                  mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
+                gemm_dispatch(no, ly.w_gate_shared, ly.w_gate_shared_qtype, sh_gate, ctx);
                 if (cfg.ffn_activation == FFNActivation::GEGLU)
                     geglu(sh_gate, sh_up, sh_swiglu, stream);
                 else
@@ -1753,12 +1741,7 @@ moe_after_experts:
             // Down projection (reads from sh_up for non-gated since relu² was in-place)
             Tensor& sh_act = shared_gated ? sh_swiglu : sh_up;
             if (layer == 0) debug_tensor_stats_all("L0_sh_act_preDown", sh_act, stream);
-            gemm_dispatch(sh_act, ly.w_down_shared, Tensor(), ly.w_down_shared_qtype,
-                          sh_down, qscratch_.dequant, stream, q8, qscratch_.d8_buf, &wcache_.fp16,
-                          (wcache_.use_fp8 && !cur_force_fp16_) ? &wcache_.fp8 : nullptr, qscratch_.fp8_act, qscratch_.d_act_scale,
-                          qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid,
-                          nvfp4_ptr, ct4_ptr, qscratch_.cutlass_act_data, qscratch_.cutlass_act_sf, qscratch_.cutlass_workspace, qscratch_.cutlass_workspace_size,
-                                  mx4p, qscratch_.mxfp4_act_sf, qscratch_.mxfp4_workspace, qscratch_.mxfp4_workspace_size);
+            gemm_dispatch(sh_act, ly.w_down_shared, ly.w_down_shared_qtype, sh_down, ctx);
         }
 
         if (layer == 0) {

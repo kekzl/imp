@@ -1796,15 +1796,16 @@ Tensor slice_rows(const Tensor& buf, int n_tokens) {
     return buf.slice(0, n_tokens);
 }
 
-// Dispatch GEMM based on weight quantization type.
-// For Q4_0/Q4_1: uses fused quant_gemm_int4 with packed nibbles + scales.
-// For Q8_0/Q6_K (with dequant_scratch): dequant into scratch, then cuBLAS gemm.
-// For NONE/F16/BF16: uses standard cuBLAS gemm.
+// File-scope helper: the original multi-path GEMM dispatcher. Kept as a private
+// body inside the translation unit; the public API is the GemmContext-based
+// overload below, which forwards into this helper.
 //
-// When q8_1_buf/d8_buf are non-null and input is a single vector (M=1), the
-// dp4a MMVQ path is used: input is pre-quantized to Q8_1 and dot products use
-// native INT8 SIMD (dp4a). This is ~2x faster than FP16 dequant for Q6_K/Q8_0.
-void gemm_dispatch(const Tensor& input, const Tensor& weight,
+// - Q4_0/Q4_1: fused quant_gemm_int4 with packed nibbles + scales.
+// - Q8_0/Q6_K (with dequant_scratch): dequant into scratch, then cuBLAS gemm.
+// - NONE/FP16/BF16: standard cuBLAS gemm.
+// - dp4a MMVQ path (M=1 + q8_1_buf/d8_buf): pre-quantize input to Q8_1, dot
+//   products via native INT8 SIMD (~2x faster than FP16 dequant for Q6_K/Q8_0).
+static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
                            const Tensor& scales, GGMLQuantType qtype,
                            Tensor& output, void* dequant_scratch,
                            cudaStream_t stream,
@@ -2106,7 +2107,7 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
     const auto* ct4   = (wc->cutlass_nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_nvfp4;
     const auto* mx4   = (wc->cutlass_mxfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_mxfp4;
 
-    gemm_dispatch(input, weight, Tensor(), qtype, output,
+    gemm_dispatch_impl(input, weight, Tensor(), qtype, output,
                   qs->dequant, ctx.stream,
                   static_cast<block_q8_1*>(qs->q8_1_buf), qs->d8_buf,
                   fp16, fp8,
