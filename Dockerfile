@@ -7,7 +7,10 @@ FROM nvidia/cuda:13.2.1-devel-ubuntu24.04 AS builder
 
 ARG CMAKE_BUILD_TYPE=Release
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update \
+    && apt-get install -y --only-upgrade --allow-change-held-packages \
+        $(dpkg-query -W -f='${Package}\n' | grep -E '^(cuda-|libcublas|libcudnn|libnvjitlink|libnvjpeg|libnpp|libcurand|libcusolver|libcusparse|libcufft|libnccl|libnvfatbin|libnvptxcompiler|libnvvm|libcufile|libcuobjclient)') \
+    && apt-get install -y --no-install-recommends \
         g++ git ninja-build ca-certificates python3 wget \
     && wget -qO /tmp/cmake.sh https://github.com/Kitware/CMake/releases/download/v4.3.1/cmake-4.3.1-linux-x86_64.sh \
     && sh /tmp/cmake.sh --skip-license --prefix=/usr/local \
