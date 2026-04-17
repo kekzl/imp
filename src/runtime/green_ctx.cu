@@ -5,6 +5,25 @@
 
 namespace imp {
 
+// Memory sync domains separate prefill and decode so concurrent operations
+// on different domains don't need to honor implicit memory ordering. Explicit
+// event/stream waits still work. Reduces cross-stream fence overhead on
+// sm_90+ when prefill and decode overlap under a green context split.
+// CUDA 13.2: cudaLaunchMemSyncDomainRemote is the non-default domain.
+static constexpr cudaLaunchMemSyncDomain kPrefillSyncDomain = cudaLaunchMemSyncDomainDefault;
+static constexpr cudaLaunchMemSyncDomain kDecodeSyncDomain  = cudaLaunchMemSyncDomainRemote;
+
+// Apply stream attributes (sync domain) best-effort. Failures are ignored —
+// the feature requires CUDA 12.2+ and falls back silently on older drivers.
+static void apply_stream_sync_domain(cudaStream_t stream,
+                                     cudaLaunchMemSyncDomain domain) {
+    cudaStreamAttrValue v = {};
+    v.memSyncDomain = domain;
+    cudaStreamSetAttribute(stream, cudaStreamAttributeMemSyncDomain, &v);
+    // Clear any error — this attribute is advisory.
+    cudaGetLastError();
+}
+
 GreenContextManager::~GreenContextManager() {
     destroy();
 }
@@ -46,6 +65,15 @@ bool GreenContextManager::init(int device, float prefill_sm_ratio) {
                  device, total_sms_,
                  prefill_sms_, 100.0f * prefill_sms_ / total_sms_,
                  decode_sms_, 100.0f * decode_sms_ / total_sms_);
+
+    // Query stream priority range. `high` is numerically smaller than `low`.
+    // Decode latency dominates user-visible TTFT so it gets the highest priority;
+    // prefill runs at the lowest priority so it yields to decode work.
+    int low_prio = 0, high_prio = 0;
+    if (cudaDeviceGetStreamPriorityRange(&low_prio, &high_prio) != cudaSuccess) {
+        low_prio = 0;
+        high_prio = 0;
+    }
 
     // --- Green Contexts (Runtime API): true SM partitioning ---
     {
@@ -105,9 +133,11 @@ bool GreenContextManager::init(int device, float prefill_sm_ratio) {
             goto fallback;
         }
 
-        // Create streams directly on green contexts — no push/pop needed
+        // Create streams directly on green contexts. Priority: decode > prefill
+        // so the scheduler yields to latency-critical decode work when both are
+        // ready on different SM partitions.
         err = cudaExecutionCtxStreamCreate(&prefill_stream_, prefill_green_ctx_,
-                                            cudaStreamNonBlocking, 0);
+                                            cudaStreamNonBlocking, low_prio);
         if (err != cudaSuccess) {
             IMP_LOG_WARN("GreenContextManager: failed to create prefill stream (%s)",
                          cudaGetErrorString(err));
@@ -115,7 +145,7 @@ bool GreenContextManager::init(int device, float prefill_sm_ratio) {
         }
 
         err = cudaExecutionCtxStreamCreate(&decode_stream_, decode_green_ctx_,
-                                            cudaStreamNonBlocking, 0);
+                                            cudaStreamNonBlocking, high_prio);
         if (err != cudaSuccess) {
             IMP_LOG_WARN("GreenContextManager: failed to create decode stream (%s)",
                          cudaGetErrorString(err));
@@ -124,10 +154,18 @@ bool GreenContextManager::init(int device, float prefill_sm_ratio) {
             goto cleanup_green;
         }
 
+        // Assign distinct memory sync domains. Cross-stream ordering between
+        // prefill and decode is handled explicitly via events, so the implicit
+        // fences the scheduler otherwise inserts are unnecessary.
+        apply_stream_sync_domain(prefill_stream_, kPrefillSyncDomain);
+        apply_stream_sync_domain(decode_stream_,  kDecodeSyncDomain);
+
         has_green_ctx_ = true;
         available_ = true;
-        IMP_LOG_INFO("GreenContextManager: initialized with CUDA 13.1 Green Contexts "
-                     "(prefill=%d SMs, decode=%d SMs)", prefill_sms_, decode_sms_);
+        IMP_LOG_INFO("GreenContextManager: initialized with CUDA 13.2 Green Contexts "
+                     "(prefill=%d SMs @ prio %d, decode=%d SMs @ prio %d, "
+                     "distinct memSyncDomains)",
+                     prefill_sms_, low_prio, decode_sms_, high_prio);
         return true;
 
     cleanup_green:
@@ -149,22 +187,30 @@ fallback:
     // (cublasLtMatmul returns INVALID_VALUE) causing output corruption.
     cudaGetLastError();
 
-    // Fallback: create regular CUDA streams (no SM partitioning)
-    IMP_LOG_INFO("GreenContextManager: using regular CUDA streams (no SM partitioning)");
+    // Fallback: create regular CUDA streams (no SM partitioning) but keep
+    // the priority + memory-sync-domain separation so that prefill and
+    // decode can still overlap efficiently when run concurrently.
+    IMP_LOG_INFO("GreenContextManager: using regular CUDA streams with "
+                 "priority %d/%d and distinct memSyncDomains", low_prio, high_prio);
 
-    err = cudaStreamCreate(&prefill_stream_);
+    err = cudaStreamCreateWithPriority(&prefill_stream_,
+                                        cudaStreamNonBlocking, low_prio);
     if (err != cudaSuccess) {
         IMP_LOG_ERROR("GreenContextManager: failed to create prefill stream");
         return false;
     }
 
-    err = cudaStreamCreate(&decode_stream_);
+    err = cudaStreamCreateWithPriority(&decode_stream_,
+                                        cudaStreamNonBlocking, high_prio);
     if (err != cudaSuccess) {
         cudaStreamDestroy(prefill_stream_);
         prefill_stream_ = nullptr;
         IMP_LOG_ERROR("GreenContextManager: failed to create decode stream");
         return false;
     }
+
+    apply_stream_sync_domain(prefill_stream_, kPrefillSyncDomain);
+    apply_stream_sync_domain(decode_stream_,  kDecodeSyncDomain);
 
     has_green_ctx_ = false;
     available_ = true;
