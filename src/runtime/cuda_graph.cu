@@ -85,8 +85,18 @@ static int apply_pdl_edges(cudaGraph_t graph) {
         // Add PDL edge
         err = cudaGraphAddDependencies(graph, &from[i], &to[i], &pdl_edge, 1);
         if (err != cudaSuccess) {
-            // Rollback: re-add the default edge
-            cudaGraphAddDependencies(graph, &from[i], &to[i], &edge_data[i], 1);
+            // Rollback: re-add the default edge. If rollback fails the graph
+            // has lost an edge entirely — surface it so the eventual
+            // instantiate/launch failure can be traced back.
+            cudaError_t rb_err = cudaGraphAddDependencies(graph, &from[i],
+                                                          &to[i],
+                                                          &edge_data[i], 1);
+            if (rb_err != cudaSuccess) {
+                IMP_LOG_ERROR("apply_pdl_edges: rollback failed after PDL add "
+                              "error (%s); dropped edge — graph is corrupted: %s",
+                              cudaGetErrorString(err),
+                              cudaGetErrorString(rb_err));
+            }
             continue;
         }
         converted++;
@@ -367,6 +377,13 @@ __global__ void post_decode_step_kernel(
     *d_context_len = new_ctx;
     *d_step_counter = step + 1;
 
+    // Flush the ring buffer write to system-scope memory before publishing the
+    // host-visible counter. Without this, on WSL2 (and in principle any system
+    // where mapped-pinned writes are not strongly ordered w.r.t. the host) the
+    // host can observe the incremented counter while still reading the stale
+    // previous token from the ring — producing corrupted streamed output.
+    __threadfence_system();
+
     // Update mapped step counter (host-visible, for polling)
     *d_ring_step_counter = step + 1;
 
@@ -447,9 +464,14 @@ bool CudaGraphConditionalRunner::setup(
     if (!config_.stop_ids.empty()) {
         err = cudaMalloc(&d_stop_ids_, config_.stop_ids.size() * sizeof(int32_t));
         if (err != cudaSuccess) goto fail;
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_stop_ids_, config_.stop_ids.data(),
-                         config_.stop_ids.size() * sizeof(int32_t),
-                         cudaMemcpyHostToDevice, stream));
+        err = cudaMemcpyAsync(d_stop_ids_, config_.stop_ids.data(),
+                              config_.stop_ids.size() * sizeof(int32_t),
+                              cudaMemcpyHostToDevice, stream);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("ConditionalRunner: stop_ids upload failed: %s",
+                          cudaGetErrorString(err));
+            goto fail;
+        }
     }
 
     // Think budget counters (device-side)
@@ -460,8 +482,20 @@ bool CudaGraphConditionalRunner::setup(
         if (err != cudaSuccess) goto fail;
         int zero = 0;
         int init_think = config_.initial_in_think ? 1 : 0;
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_think_count_, &zero, sizeof(int), cudaMemcpyHostToDevice, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_in_think_, &init_think, sizeof(int), cudaMemcpyHostToDevice, stream));
+        err = cudaMemcpyAsync(d_think_count_, &zero, sizeof(int),
+                              cudaMemcpyHostToDevice, stream);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("ConditionalRunner: think_count init failed: %s",
+                          cudaGetErrorString(err));
+            goto fail;
+        }
+        err = cudaMemcpyAsync(d_in_think_, &init_think, sizeof(int),
+                              cudaMemcpyHostToDevice, stream);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("ConditionalRunner: in_think init failed: %s",
+                          cudaGetErrorString(err));
+            goto fail;
+        }
     }
 
     // ---- Allocate penalty ring buffer (prefix history + generated tokens) ----
@@ -478,13 +512,24 @@ bool CudaGraphConditionalRunner::setup(
             if (err != cudaSuccess) goto fail;
             // Copy prefix history to the beginning of the penalty ring
             if (penalty_prefix_len_ > 0) {
-                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_ring_, config_.penalty_history.data(),
-                                 penalty_prefix_len_ * sizeof(int32_t),
-                                 cudaMemcpyHostToDevice, stream));
+                err = cudaMemcpyAsync(d_penalty_ring_,
+                                      config_.penalty_history.data(),
+                                      penalty_prefix_len_ * sizeof(int32_t),
+                                      cudaMemcpyHostToDevice, stream);
+                if (err != cudaSuccess) {
+                    IMP_LOG_ERROR("ConditionalRunner: penalty prefix upload "
+                                  "failed: %s", cudaGetErrorString(err));
+                    goto fail;
+                }
             }
             // Initialize penalty count to prefix length (before any generation)
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_penalty_count_, &penalty_prefix_len_, sizeof(int),
-                             cudaMemcpyHostToDevice, stream));
+            err = cudaMemcpyAsync(d_penalty_count_, &penalty_prefix_len_,
+                                  sizeof(int), cudaMemcpyHostToDevice, stream);
+            if (err != cudaSuccess) {
+                IMP_LOG_ERROR("ConditionalRunner: penalty_count init failed: %s",
+                              cudaGetErrorString(err));
+                goto fail;
+            }
         }
     }
 
@@ -511,14 +556,34 @@ bool CudaGraphConditionalRunner::setup(
         *h_step_counter_ = 0;
         memset(h_ring_buffer_, 0, config_.max_steps * sizeof(int32_t));
 
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_id_, &first_token, sizeof(int32_t),
-                         cudaMemcpyHostToDevice, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_position_, &init_pos, sizeof(int),
-                         cudaMemcpyHostToDevice, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_context_len_, &init_ctx, sizeof(int),
-                         cudaMemcpyHostToDevice, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_step_counter_, &init_step, sizeof(int),
-                         cudaMemcpyHostToDevice, stream));
+        err = cudaMemcpyAsync(d_token_id_, &first_token, sizeof(int32_t),
+                              cudaMemcpyHostToDevice, stream);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("ConditionalRunner: first_token upload failed: %s",
+                          cudaGetErrorString(err));
+            goto fail;
+        }
+        err = cudaMemcpyAsync(d_position_, &init_pos, sizeof(int),
+                              cudaMemcpyHostToDevice, stream);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("ConditionalRunner: position init failed: %s",
+                          cudaGetErrorString(err));
+            goto fail;
+        }
+        err = cudaMemcpyAsync(d_context_len_, &init_ctx, sizeof(int),
+                              cudaMemcpyHostToDevice, stream);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("ConditionalRunner: context_len init failed: %s",
+                          cudaGetErrorString(err));
+            goto fail;
+        }
+        err = cudaMemcpyAsync(d_step_counter_, &init_step, sizeof(int),
+                              cudaMemcpyHostToDevice, stream);
+        if (err != cudaSuccess) {
+            IMP_LOG_ERROR("ConditionalRunner: step_counter init failed: %s",
+                          cudaGetErrorString(err));
+            goto fail;
+        }
     }
 
     // ---- Build InferenceState for graph body (uses our device pointers) ----
