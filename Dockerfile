@@ -3,7 +3,7 @@
 # =============================================================================
 # Stage 1: Build imp from source
 # =============================================================================
-FROM nvidia/cuda:13.2.0-devel-ubuntu24.04 AS builder
+FROM nvidia/cuda:13.2.1-devel-ubuntu24.04 AS builder
 
 ARG CMAKE_BUILD_TYPE=Release
 
@@ -41,7 +41,7 @@ RUN cmake -B build -G Ninja \
 # =============================================================================
 # Stage 2: Minimal runtime image
 # =============================================================================
-FROM nvidia/cuda:13.2.0-runtime-ubuntu24.04
+FROM nvidia/cuda:13.2.1-runtime-ubuntu24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends --allow-change-held-packages \
         libcublas-13-2 \
