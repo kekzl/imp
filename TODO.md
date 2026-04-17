@@ -163,7 +163,7 @@ Tensor-core-based decoding with low-bit KV cache. 8.6x vs FP16 FlashDecoding on 
 Residual-based KV compression. 187 tok/s at 128k context on Blackwell PRO 6000. Orthogonal to weight quantization.
 
 ### CUDA 13.2 / CCCL 3.2 Features
-Available in our CUDA 13.2.0 toolkit but not yet used:
+Available in our CUDA 13.2.1 toolkit but not yet used:
 
 **High Priority:**
 - **Grouped GEMM with CUDA Graphs + device-side shapes** (cuBLASLt):
