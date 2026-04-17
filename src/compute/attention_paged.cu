@@ -1494,11 +1494,19 @@ void paged_attention_decode(
             config.dynamicSmemBytes = cluster_smem;
             config.stream = stream;
 
-            cudaLaunchAttribute attrs[1];
+            // CUDA 13.2: spread cluster blocks across GPCs (GB202 has 12 GPCs).
+            // Default "load-balancing" packs clusters per-GPC, which oversubscribes
+            // a single GPC's L1/SMEM/tensor-core resources when only a handful of
+            // clusters are live. Spread gives each cluster its own GPC on RTX 5090
+            // as long as the grid is small enough, keeping DSMEM traffic local and
+            // freeing other GPCs for concurrent decode work on a separate stream.
+            cudaLaunchAttribute attrs[2];
             attrs[0].id = cudaLaunchAttributeClusterDimension;
             attrs[0].val.clusterDim = {(unsigned int)n_q_per_kv, 1, 1};
+            attrs[1].id = cudaLaunchAttributeClusterSchedulingPolicyPreference;
+            attrs[1].val.clusterSchedulingPolicyPreference = cudaClusterSchedulingPolicySpread;
             config.attrs = attrs;
-            config.numAttrs = 1;
+            config.numAttrs = 2;
 
             #define LAUNCH_CLUSTER(HD) \
                 cudaLaunchKernelEx(&config, paged_attention_cluster_kernel<HD>, \
