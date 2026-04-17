@@ -1955,7 +1955,18 @@ void Engine::step_decode_process_outputs(
         config_.use_cuda_graphs && !async_graph_runner_.is_setup() &&
         !needs_logprobs && !needs_json_mode && !needs_schema_mode) {
         auto& dreq = valid_decode[0];
-        if (dreq->status == RequestStatus::DECODING &&
+        // forward_decode_async only implements banned_tokens + rep/freq/presence
+        // penalties device-side. Any sampling feature that requires host-side
+        // logic (logit_bias, mirostat, typical_p, min_p, DRY) would be silently
+        // skipped inside the captured graph — stay on the eager path instead.
+        const bool async_compatible =
+            dreq->logit_bias.empty() &&
+            dreq->mirostat == 0 &&
+            dreq->dry_multiplier == 0.0f &&
+            dreq->min_p == 0.0f &&
+            dreq->typical_p >= 1.0f;
+        if (async_compatible &&
+            dreq->status == RequestStatus::DECODING &&
             !dreq->output_tokens.empty()) {
             int32_t last_token = dreq->output_tokens.back();
             try_launch_async_graph_loop(dreq, last_token, dec_stream);
