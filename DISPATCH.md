@@ -17,7 +17,6 @@ All dp4a GEMV function variants declared in `src/compute/gemm.h`, grouped by qua
 | `_residual`           |  Y   |  Y   |  Y   |  Y   |  Y   |  Y   |  Y   | GEMV + residual add fused        |
 | `_qkv_fused`          |  Y   |  Y   |  Y   |  Y   |  Y   |  Y   |  Y   | Fused Q/K/V triple projection    |
 | `_fp32`               |  Y   |  Y   |  Y   |  Y   |  Y   |  Y   |  Y   | FP32 output (LM head)            |
-| `_inline_quant`       |  Y   |  Y   |  —   |  Y   |  Y   |  Y   |  Y   | Inline FP16→Q8_1 (unused)        |
 | `_moe_decode`         |  Y   |  Y   |  Y   |  Y   |  Y   |  Y   |  Y   | MoE per-expert GEMV              |
 | `_moe_gate_up_fused`  |  Y   |  Y   |  Y   |  Y   |  Y   |  Y   |  Y   | MoE fused gate+up projection     |
 
@@ -25,8 +24,9 @@ Additional non-dp4a (FP16 dequant) variants exist for Q6_K and Q8_0 only:
 `gemv_q6k`, `gemv_q8_0`, `gemv_q6k_moe_decode`, `gemv_q8_0_moe_decode`,
 `gemv_q6k_moe_gate_up_fused`, `gemv_q8_0_moe_gate_up_fused`.
 
-Note: `_inline_quant` variants are registered with PDL but never called by the executor.
-The executor uses separate `quantize_fp16_to_q8_1` + K-parallel GEMV for higher occupancy.
+Note: an `_inline_quant` variant (FP16 → Q8_1 in smem → dp4a GEMV in one kernel) was
+prototyped but removed — the executor uses separate `quantize_fp16_to_q8_1` + K-parallel
+GEMV for higher occupancy (see `executor_attention.cu:839`).
 
 ---
 
