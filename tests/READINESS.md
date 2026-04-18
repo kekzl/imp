@@ -47,9 +47,9 @@ Last evaluated: 2026-03-27
 |--------|------|
 | PASS | Mock server API tests pass (66 tests, 3.9s, no GPU) |
 | PASS | Perf/tools tests correctly skipped in mock mode (8 deselected) |
-| N/A | `ctest -L unit` passes — *CTest labels not yet added to CMakeLists.txt* |
+| PASS | `ctest -L unit` passes — labels `unit`, `gpu`, `perf` added in `CMakeLists.txt:393-403` |
 | N/A | No CUDA symbols linked into unit test binaries — *all GTest tests link `imp` which includes CUDA* |
-| N/A | GPU tests gated behind flag — *GTest tests skip via `SKIP_IF_NO_CUDA()` macro, but no CTest label* |
+| PASS | GPU tests gated behind `ctest -L gpu` label; `-L unit` runs CPU-only filter |
 
 ## Summary
 
@@ -66,5 +66,4 @@ Last evaluated: 2026-03-27
 | Golden output tests | Not implemented yet | M — need fixture generation + comparison logic | No (manual testing covers this) |
 | VRAM leak test | Needs GPU automation | S — `nvidia-smi` before/after 100 requests | No (manual testing done) |
 | Runtime log level | Compile-time macros only | M — add `--log-level` flag + runtime dispatch | No |
-| CTest labels | CMakeLists.txt doesn't use labels | S — add `set_tests_properties(... LABELS ...)` | No |
 | Perf baseline capture | Infra ready, no baseline file | S — one `--update-baseline` run | No |
