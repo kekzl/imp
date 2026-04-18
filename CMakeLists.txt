@@ -94,6 +94,7 @@ set(IMP_MODEL_SOURCES
     src/model/model.cpp
     src/model/gguf_loader.cpp
     src/model/safetensors_loader.cpp
+    src/model/json_util.cpp
     src/model/hf_config_loader.cpp
     src/model/hf_hub.cpp
     src/model/weight_map.cpp

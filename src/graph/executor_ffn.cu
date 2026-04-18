@@ -351,18 +351,11 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 gemm_cublaslt(fp8_so, e.weight, h, 1.0f, 1.0f, qscratch_.d_act_scale, e.d_scale, stream);
             } else if (will_fuse_down_beta1 && wcache_.fp16.count(ly.w_down.data)) {
                 // Fused: hidden = swiglu_out @ w_down^T + hidden (cuBLAS beta=1).
-                const Tensor& wd_fp16 = wcache_.fp16.at(ly.w_down.data);
-                // TODO: migrate to gemm_dispatch with beta=1.0
-                gemm(so, wd_fp16, h, 1.0f, 1.0f, stream);
+                gemm_dispatch(so, ly.w_down, ly.w_down_qtype, h, ctx.with_beta(1.0f));
             } else if ((will_fuse_down_beta1 || will_fuse_down_dequant_beta1) &&
                        qscratch_.dequant != nullptr && dequant_gpu_supported(ly.w_down_qtype)) {
                 // Dequant into scratch, then beta=1.0 GEMM directly into hidden (which holds residual)
-                int rows = static_cast<int>(ly.w_down.shape[0]);
-                int cols = static_cast<int>(ly.w_down.shape[1]);
-                dequant_gpu(ly.w_down.data, qscratch_.dequant, ly.w_down_qtype, rows, cols, stream);
-                Tensor w_fp16(qscratch_.dequant, DType::FP16, ly.w_down.ndim, ly.w_down.shape, true);
-                // TODO: migrate to gemm_dispatch with beta=1.0
-                gemm(so, w_fp16, h, 1.0f, 1.0f, stream);
+                gemm_dispatch(so, ly.w_down, ly.w_down_qtype, h, ctx.with_beta(1.0f));
             } else {
                 gemm_dispatch(so, ly.w_down, ly.w_down_qtype, fo, ctx);
                 if (has_post_ffn_norm && using_fp32_accum) {
