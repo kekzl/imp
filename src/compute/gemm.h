@@ -360,28 +360,6 @@ void gemv_q3_k_q8_1_moe_gate_up_fused(
         int q8_1_stride, int d8_stride, int top_k,
         cudaStream_t stream = nullptr);
 
-// Inline-quant dp4a GEMV: takes FP16 input, quantizes to Q8_1 in shared memory,
-// then runs dp4a GEMV — eliminates the separate quantize_fp16_to_q8_1 kernel.
-// y[i] = dot(W[i], quant(x_fp16)) [+ residual[i] if residual != nullptr]
-void gemv_q6k_q8_1_inline_quant(const void* W, const half* x_fp16,
-                                  half* y, const half* residual,
-                                  int M, int K, cudaStream_t stream = nullptr);
-void gemv_q8_0_q8_1_inline_quant(const void* W, const half* x_fp16,
-                                   half* y, const half* residual,
-                                   int M, int K, cudaStream_t stream = nullptr);
-void gemv_q4_k_q8_1_inline_quant(const void* W, const half* x_fp16,
-                                    half* y, const half* residual,
-                                    int M, int K, cudaStream_t stream = nullptr);
-void gemv_q5_k_q8_1_inline_quant(const void* W, const half* x_fp16,
-                                    half* y, const half* residual,
-                                    int M, int K, cudaStream_t stream = nullptr);
-void gemv_q2_k_q8_1_inline_quant(const void* W, const half* x_fp16,
-                                    half* y, const half* residual,
-                                    int M, int K, cudaStream_t stream = nullptr);
-void gemv_q3_k_q8_1_inline_quant(const void* W, const half* x_fp16,
-                                    half* y, const half* residual,
-                                    int M, int K, cudaStream_t stream = nullptr);
-
 // Register all dp4a GEMV kernel template instantiations with PDL.
 // Called from GraphExecutor::init() when PDL is enabled.
 void gemv_pdl_register();

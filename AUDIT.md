@@ -251,13 +251,12 @@ FP8 Prefill nutzt eine hybride Strategie: FP16-Cache mit Fused KV/Gate+Up wird i
   15. `swiglu_fp16_kernel`
   16. `geglu_fp16_kernel`
 
-  dp4a GEMV Template-Instantiierungen (gemm.cu, 110+ Varianten):
+  dp4a GEMV Template-Instantiierungen (gemm.cu):
   - `gemv_dp4a_kernel<QT, NR, Residual>` — 5 QTypes × 3 NR × 2 = 30
   - `gemv_dp4a_fp32_kernel<QT, NR>` — 5 × 3 = 15
   - `gemv_dp4a_qkv_kernel<QT, NR>` — 5 × 3 = 15
   - `gemv_dp4a_gate_up_kernel<QT, NR>` — 5 × 3 = 15
   - `gemv_dp4a_kpar_kernel<QT, Residual>` + Varianten — 5 × 5 = 25
-  - `gemv_dp4a_inline_quant_kernel<QT, NR, Residual>` — 5 × 2 × 2 = 20
 
   MoE-Kernels bewusst **nicht** PDL-registriert (atomare Expert-Scatter).
 
@@ -363,7 +362,6 @@ Die GEMV-Infrastruktur wurde von 33 handgeschriebenen Kernels auf ein Template-S
 | `gemv_dp4a_fp32_kernel<QT, NR>` | FP32 Output (LM Head) | 5 × 3 = 15 |
 | `gemv_dp4a_qkv_kernel<QT, NR>` | Fused Q/K/V Projektion | 5 × 3 = 15 |
 | `gemv_dp4a_gate_up_kernel<QT, NR>` | Fused Gate+Up+SwiGLU | 5 × 3 = 15 |
-| `gemv_dp4a_inline_quant_kernel<QT, NR, Res>` | Q8_1 Quant + GEMV | 5 × 2 × 2 = 20 |
 | `gemv_dp4a_moe_decode_kernel<QT>` | MoE Expert (smem Q8_1) | 5 |
 | `gemv_dp4a_moe_gate_up_kernel<QT>` | MoE Gate+Up (smem) | 5 |
 | `gemv_dp4a_kpar_kernel<QT, Residual>` | K-parallel Standard | 5 × 2 = 10 |
@@ -371,7 +369,7 @@ Die GEMV-Infrastruktur wurde von 33 handgeschriebenen Kernels auf ein Template-S
 | `gemv_dp4a_kpar_qkv_kernel<QT>` | K-parallel QKV | 5 |
 | `gemv_dp4a_kpar_gate_up_kernel<QT>` | K-parallel Gate+Up | 5 |
 
-**Total: ~130 Instantiierungen** aus 11 Template-Kernels.
+**Total: ~110 Instantiierungen** aus 10 Template-Kernels.
 
 #### Dispatch-Heuristik
 

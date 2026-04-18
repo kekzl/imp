@@ -403,58 +403,6 @@ void gemv_q3_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float*
 }
 
 // ---------------------------------------------------------------------------
-// Inline-quant wrappers: FP16 input → Q8_1 in smem → dp4a GEMV (4 functions)
-// ---------------------------------------------------------------------------
-
-void gemv_q6k_q8_1_inline_quant(const void* W, const half* x_fp16,
-                                  half* y, const half* residual,
-                                  int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a_inline_quant<Q6_K_Traits>(
-        static_cast<const uint8_t*>(W), x_fp16, y, residual,
-        residual != nullptr, M, K, stream);
-}
-
-void gemv_q8_0_q8_1_inline_quant(const void* W, const half* x_fp16,
-                                   half* y, const half* residual,
-                                   int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a_inline_quant<Q8_0_Traits>(
-        static_cast<const uint8_t*>(W), x_fp16, y, residual,
-        residual != nullptr, M, K, stream);
-}
-
-void gemv_q4_k_q8_1_inline_quant(const void* W, const half* x_fp16,
-                                    half* y, const half* residual,
-                                    int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a_inline_quant<Q4_K_Traits>(
-        static_cast<const uint8_t*>(W), x_fp16, y, residual,
-        residual != nullptr, M, K, stream);
-}
-
-void gemv_q5_k_q8_1_inline_quant(const void* W, const half* x_fp16,
-                                    half* y, const half* residual,
-                                    int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a_inline_quant<Q5_K_Traits>(
-        static_cast<const uint8_t*>(W), x_fp16, y, residual,
-        residual != nullptr, M, K, stream);
-}
-
-void gemv_q2_k_q8_1_inline_quant(const void* W, const half* x_fp16,
-                                    half* y, const half* residual,
-                                    int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a_inline_quant<Q2_K_Traits>(
-        static_cast<const uint8_t*>(W), x_fp16, y, residual,
-        residual != nullptr, M, K, stream);
-}
-
-void gemv_q3_k_q8_1_inline_quant(const void* W, const half* x_fp16,
-                                    half* y, const half* residual,
-                                    int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a_inline_quant<Q3_K_Traits>(
-        static_cast<const uint8_t*>(W), x_fp16, y, residual,
-        residual != nullptr, M, K, stream);
-}
-
-// ---------------------------------------------------------------------------
 // FP32 output wrappers (5 functions)
 // ---------------------------------------------------------------------------
 
@@ -961,20 +909,6 @@ void gemv_pdl_register() {
     REG_KPAR(Q2_K_Traits); REG_KPAR(Q3_K_Traits);
     #undef REG_KPAR
 
-    // Kernel #7: inline quant
-    #define REG7(QT, NR) \
-        pdl::enable_kernel(gemv_dp4a_inline_quant_kernel<QT, NR, true>); \
-        pdl::enable_kernel(gemv_dp4a_inline_quant_kernel<QT, NR, false>); \
-        SET_MAXL1(gemv_dp4a_inline_quant_kernel<QT, NR, true>); \
-        SET_MAXL1(gemv_dp4a_inline_quant_kernel<QT, NR, false>)
-    REG7(Q6_K_Traits, 1); REG7(Q6_K_Traits, 2);
-    REG7(Q8_0_Traits, 1); REG7(Q8_0_Traits, 2); REG7(Q8_0_Traits, 4);
-    REG7(Q4_0_Traits, 1); REG7(Q4_0_Traits, 2); REG7(Q4_0_Traits, 4);
-    REG7(Q4_K_Traits, 1); REG7(Q4_K_Traits, 2); REG7(Q4_K_Traits, 4);
-    REG7(Q5_K_Traits, 1); REG7(Q5_K_Traits, 2); REG7(Q5_K_Traits, 4);
-    REG7(Q2_K_Traits, 1); REG7(Q2_K_Traits, 2); REG7(Q2_K_Traits, 4);
-    REG7(Q3_K_Traits, 1); REG7(Q3_K_Traits, 2);
-    #undef REG7
 }
 
 #undef SET_MAXL1
