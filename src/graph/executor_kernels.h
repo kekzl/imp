@@ -348,6 +348,7 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
                    const std::unordered_map<const void*, CutlassMxFP4Weight>* mxfp4_cache = nullptr,
                    void* mxfp4_act_sf = nullptr,
                    void* mxfp4_workspace = nullptr,
-                   size_t mxfp4_workspace_size = 0);
+                   size_t mxfp4_workspace_size = 0,
+                   float beta = 0.0f);
 
 } // namespace imp

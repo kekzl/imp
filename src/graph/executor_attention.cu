@@ -859,19 +859,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     } else if (will_fuse_o_beta1 && wcache_.fp16.count(ly.wo.data)) {
         // Fused: hidden = attn_out @ wo^T + hidden (cuBLAS beta=1).
         // Safe: hidden is only READ (never written) between attn_norm and here.
-        const Tensor& wo_fp16 = wcache_.fp16.at(ly.wo.data);
-        // TODO: migrate to gemm_dispatch with beta=1.0
-        gemm(ao, wo_fp16, h, 1.0f, 1.0f, stream);
+        gemm_dispatch(ao, ly.wo, ly.wo_qtype, h, ctx.with_beta(1.0f));
     } else if ((will_fuse_o_beta1 || will_fuse_o_dequant_beta1) &&
                qscratch_.dequant != nullptr && dequant_gpu_supported(ly.wo_qtype) &&
                !per_layer_shapes) {  // Gemma 4: workspace stride mismatch with narrow ao
         // Dequant beta=1: dequant weights on-the-fly, then FP16 GEMM + residual
-        int rows = static_cast<int>(ly.wo.shape[0]);
-        int cols = static_cast<int>(ly.wo.shape[1]);
-        dequant_gpu(ly.wo.data, qscratch_.dequant, ly.wo_qtype, rows, cols, stream);
-        Tensor w_fp16(qscratch_.dequant, DType::FP16, ly.wo.ndim, ly.wo.shape, true);
-        // TODO: migrate to gemm_dispatch with beta=1.0
-        gemm(ao, w_fp16, h, 1.0f, 1.0f, stream);
+        gemm_dispatch(ao, ly.wo, ly.wo_qtype, h, ctx.with_beta(1.0f));
     } else {
         // Fallback: separate O-projection + optional post-norm + residual add
         gemm_dispatch(ao, ly.wo, ly.wo_qtype, po, ctx);

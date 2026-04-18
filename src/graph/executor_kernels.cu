@@ -1825,7 +1825,10 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
                            const std::unordered_map<const void*, CutlassMxFP4Weight>* mxfp4_cache,
                            void* mxfp4_act_sf,
                            void* mxfp4_workspace,
-                           size_t mxfp4_workspace_size) {
+                           size_t mxfp4_workspace_size,
+                           float beta) {
+    // beta != 0 (residual-fused GEMM) is only supported on FP16/dequant/FP8 paths
+    // below; callers must ensure their preconditions route there.
     // Native MXFP4 GGUF: GEMV for M=1, CUTLASS for M>1.
     if (mxfp4_cache != nullptr && input.dtype == DType::FP16) {
         auto mx_it = mxfp4_cache->find(weight.data);
@@ -1854,7 +1857,7 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
                 dequant_mxfp4_to_fp16(mx_it->second.data, N, K, dequant_scratch, stream);
                 int64_t w_shape[2] = {N, K};
                 Tensor w_fp16(dequant_scratch, DType::FP16, 2, w_shape, true);
-                gemm(input, w_fp16, output, 1.0f, 0.0f, stream);
+                gemm(input, w_fp16, output, 1.0f, beta, stream);
                 return;
             }
         }
@@ -1992,7 +1995,7 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
         // Prefer pre-dequantized FP16 cache (P3 optimization)
         auto it = fp16_cache->find(weight.data);
         if (it != fp16_cache->end()) {
-            gemm(input, it->second, output, 1.0f, 0.0f, stream);
+            gemm(input, it->second, output, 1.0f, beta, stream);
         } else {
             quant_gemm_int4(input, weight, scales, output, stream);
         }
@@ -2018,32 +2021,32 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
             Tensor fp8_act(fp8_act_buf, DType::FP8_E4M3, input.ndim, input.shape, true);
             quantize_fp16_to_fp8_e4m3(input, fp8_act, d_act_scale, stream,
                                        d_fp8_block_maxes, d_fp8_absmax, fp8_max_grid);
-            gemm_cublaslt(fp8_act, it->second.weight, output, 1.0f, 0.0f,
+            gemm_cublaslt(fp8_act, it->second.weight, output, 1.0f, beta,
                           d_act_scale, it->second.d_scale, stream);
         } else if (dequant_scratch != nullptr && dequant_gpu_supported(qtype)) {
             int rows = static_cast<int>(weight.shape[0]);
             int cols = static_cast<int>(weight.shape[1]);
             dequant_gpu(weight.data, dequant_scratch, qtype, rows, cols, stream);
             Tensor w_fp16(dequant_scratch, DType::FP16, weight.ndim, weight.shape, true);
-            gemm(input, w_fp16, output, 1.0f, 0.0f, stream);
+            gemm(input, w_fp16, output, 1.0f, beta, stream);
         } else {
-            gemm(input, weight, output, 1.0f, 0.0f, stream);
+            gemm(input, weight, output, 1.0f, beta, stream);
         }
     } else if (fp16_cache != nullptr && (dequant_gpu_supported(qtype) || qtype == GGMLQuantType::MXFP4)) {
         // Pre-dequantized FP16 cache: zero per-GEMM dequant overhead
         auto it = fp16_cache->find(weight.data);
         if (getenv("IMP_DEBUG_GEMM_DISPATCH") != nullptr) fprintf(stderr, "[GEMM_DISP]   -> fp16_cache hit=%d\n", (int)(it != fp16_cache->end()));
         if (it != fp16_cache->end()) {
-            gemm(input, it->second, output, 1.0f, 0.0f, stream);
+            gemm(input, it->second, output, 1.0f, beta, stream);
         } else if (dequant_scratch != nullptr && qtype != GGMLQuantType::MXFP4) {
             // Cache miss (shouldn't happen) — fall back to on-the-fly dequant
             int rows = static_cast<int>(weight.shape[0]);
             int cols = static_cast<int>(weight.shape[1]);
             dequant_gpu(weight.data, dequant_scratch, qtype, rows, cols, stream);
             Tensor w_fp16(dequant_scratch, DType::FP16, weight.ndim, weight.shape, true);
-            gemm(input, w_fp16, output, 1.0f, 0.0f, stream);
+            gemm(input, w_fp16, output, 1.0f, beta, stream);
         } else {
-            gemm(input, weight, output, 1.0f, 0.0f, stream);
+            gemm(input, weight, output, 1.0f, beta, stream);
         }
     } else if (dequant_scratch != nullptr && dequant_gpu_supported(qtype)) {
         // Raw quantized bytes on GPU — dequant into scratch, then GEMM
@@ -2051,10 +2054,10 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
         int cols = static_cast<int>(weight.shape[1]);
         dequant_gpu(weight.data, dequant_scratch, qtype, rows, cols, stream);
         Tensor w_fp16(dequant_scratch, DType::FP16, weight.ndim, weight.shape, true);
-        gemm(input, w_fp16, output, 1.0f, 0.0f, stream);
+        gemm(input, w_fp16, output, 1.0f, beta, stream);
     } else {
         // Standard FP16/BF16 GEMM
-        gemm(input, weight, output, 1.0f, 0.0f, stream);
+        gemm(input, weight, output, 1.0f, beta, stream);
     }
 }
 
@@ -2085,7 +2088,8 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
                   nv4, ct4,
                   qs->cutlass_act_data, qs->cutlass_act_sf,
                   qs->cutlass_workspace, qs->cutlass_workspace_size,
-                  mx4, qs->mxfp4_act_sf, qs->mxfp4_workspace, qs->mxfp4_workspace_size);
+                  mx4, qs->mxfp4_act_sf, qs->mxfp4_workspace, qs->mxfp4_workspace_size,
+                  ctx.beta);
 }
 
 } // namespace imp
