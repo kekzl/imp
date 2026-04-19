@@ -146,6 +146,43 @@ void strip_think_block(std::string& text) {
     }
 }
 
+void strip_channel_headers(std::string& text) {
+    // Scan for "<|channel>" and "<channel|>" markers. Each one begins a header
+    // that runs until the next '\n'. Remove the markers and the characters up
+    // to (and including) that newline. Body text between headers is kept.
+    static const char kOpen[] = "<|channel>";
+    static const char kClose[] = "<channel|>";
+    constexpr size_t kOpenLen = sizeof(kOpen) - 1;
+    constexpr size_t kCloseLen = sizeof(kClose) - 1;
+    std::string out;
+    out.reserve(text.size());
+    size_t i = 0;
+    while (i < text.size()) {
+        const bool is_open = (i + kOpenLen <= text.size() &&
+                              text.compare(i, kOpenLen, kOpen) == 0);
+        const bool is_close = (!is_open &&
+                               i + kCloseLen <= text.size() &&
+                               text.compare(i, kCloseLen, kClose) == 0);
+        if (is_open || is_close) {
+            size_t marker_len = is_open ? kOpenLen : kCloseLen;
+            size_t nl = text.find('\n', i + marker_len);
+            if (nl == std::string::npos) {
+                // No closing newline — drop the rest of the text (it's all header).
+                break;
+            }
+            i = nl + 1;
+            continue;
+        }
+        out.push_back(text[i++]);
+    }
+    text = std::move(out);
+    // Trim a single leading newline left behind by a dropped header.
+    if (!text.empty() && (text.front() == '\n' || text.front() == '\r')) {
+        size_t s = text.find_first_not_of("\n\r");
+        text = (s == std::string::npos) ? std::string() : text.substr(s);
+    }
+}
+
 std::pair<std::string, std::string> extract_reasoning(const std::string& text) {
     // Find the last </think>
     auto last_end = text.rfind("</think>");

@@ -485,6 +485,32 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C,
     cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.dtype);
     cublasComputeType_t compute_type = dtype_to_compute(A.dtype);
 
+    // Mixed-precision output (e.g. FP16×FP16 → FP32 for diagnostic precision
+    // probes): bypass cuBLASLt and use cublasGemmEx directly. cuBLASLt's
+    // descriptor + algo selection produces wildly wrong results with our
+    // FP16→FP32 dimensions on sm_120 (sums in the billions while real
+    // attention output is ±100). cublasGemmEx is the legacy, well-tested API
+    // that handles FP16×FP16→FP32 with CUBLAS_COMPUTE_32F correctly.
+    if (A.dtype != C.dtype && A.dtype == DType::FP16 && B.dtype == DType::FP16
+        && C.dtype == DType::FP32) {
+        cublasHandle_t fb_handle = get_cublas_handle();
+        cublasSetStream(fb_handle, stream);
+        cublasStatus_t st = cublasGemmEx(fb_handle,
+            CUBLAS_OP_T, CUBLAS_OP_N,
+            (int)N, (int)M, (int)K,
+            &alpha,
+            B.data, cuda_dtype_B, (int)K,
+            A.data, cuda_dtype_A, (int)K,
+            &beta,
+            C.data, cuda_dtype_C, (int)N,
+            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        if (st != CUBLAS_STATUS_SUCCESS) {
+            IMP_LOG_WARN("gemm: cublasGemmEx FP16→FP32 failed status=%d M=%ld K=%ld N=%ld",
+                         (int)st, (long)M, (long)K, (long)N);
+        }
+        return;
+    }
+
     cublasLtHandle_t lt = get_cublaslt_handle();
 
     GemmCacheKey cache_key{cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, compute_type, bucket_m(M), K, N, false};

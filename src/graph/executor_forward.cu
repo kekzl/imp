@@ -329,6 +329,9 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             }
         }
 
+        // Layer-diff dump: Snapshot A — pre-attention layer input.
+        dump_tensor_npy("A_pre_attn", view_tokens(h, n), stream, i, decode_step);
+
         // Attention, GDN, or SSM (mutually exclusive per layer).
         // GDN check first: GDN layers have ssm_in (from attn_qkv) but use delta rule.
         if (layer_has_gdn(i)) {
@@ -340,6 +343,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         } else if (layer_has_ssm(i)) {
             run_ssm(i, state, stream);
         }
+        // Layer-diff dump: Snapshot B — post-attention residual-added state (input to FFN).
+        dump_tensor_npy("B_post_attn", view_tokens(h, n), stream, i, decode_step);
         {
             char buf[64];
             snprintf(buf, sizeof(buf), "[step=%d] after_layer%02d_%s", decode_step, i,
@@ -469,6 +474,16 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(
                 static_cast<const half*>(h.data),
                 static_cast<float*>(fp32_h.data), total);
+        }
+
+        // Layer-diff dump: Snapshot C — end-of-layer state (input to next layer).
+        // Captures the final hidden state after attention, FFN/MoE, residuals,
+        // layer_out_scale (Gemma-4), and any FP16→FP32 sync.
+        dump_tensor_npy("C_post_layer", view_tokens(h, n), stream, i, decode_step);
+        // Also dump the FP32 shadow so we can diff FP32-truth vs FP16-view vs llama.cpp.
+        if (fp32_accum_buf_) {
+            dump_tensor_npy("C_fp32_shadow", view_tokens(fp32_hidden_, n), stream,
+                            i, decode_step);
         }
 
         if (i == max_layer - 1) {

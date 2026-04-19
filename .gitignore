@@ -36,6 +36,9 @@ __pycache__/
 *.ncu-rep
 *.qdrep
 
+# Layer-diff hidden-state dumps (large binaries)
+dumps/
+
 # Benchmark results
 benchmarks/results/
 bench_results.txt
@@ -46,3 +49,8 @@ bench_int8_kv*.sh
 inspect_gguf.py
 test_detail.json
 .playwright-mcp/
+
+# Claude Code transient state (keep .claude/settings.json if ever added)
+.claude/*.lock
+.claude/worktrees/
+.claude/settings.local.json

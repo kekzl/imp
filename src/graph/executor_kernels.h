@@ -46,6 +46,18 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
         float eps,
         float weight_offset);
 
+// FP32-input variant of rmsnorm_fp32_accum_to_fp16_kernel — used when the
+// upstream op (e.g. attention output projection) keeps its result in FP32 to
+// avoid cuBLAS's internal FP16 output truncation.
+__global__ __launch_bounds__(512) void rmsnorm_fp32in_fp32_accum_to_fp16_kernel(
+        const float* __restrict__ input,
+        const half* __restrict__ norm_w,
+        float* __restrict__ fp32_accum,
+        half* __restrict__ output,
+        int d_model,
+        float eps,
+        float weight_offset);
+
 __global__ __launch_bounds__(256) void fp16_to_fp32_kernel(const half* __restrict__ in, float* __restrict__ out, int64_t n);
 
 __global__ __launch_bounds__(256) void elementwise_add_fp32_kernel(float* __restrict__ a, const float* __restrict__ b, int64_t n);
@@ -319,36 +331,12 @@ void rmsnorm_add_residual(const Tensor& input, const Tensor& weight,
 
 Tensor slice_rows(const Tensor& buf, int n_tokens);
 
-// New: simplified dispatch via GemmContext (preferred for new code)
+// GemmContext-based dispatch. The only public gemm_dispatch signature —
+// the legacy 23-parameter overload has been folded into a file-private helper
+// inside executor_kernels.cu.
 struct GemmContext;  // forward decl — defined in gemm_context.h
 void gemm_dispatch(const Tensor& input, const Tensor& weight,
                    GGMLQuantType qtype, Tensor& output,
                    const GemmContext& ctx);
-
-// Legacy: 23-parameter dispatch (to be removed after migration)
-void gemm_dispatch(const Tensor& input, const Tensor& weight,
-                   const Tensor& scales, GGMLQuantType qtype,
-                   Tensor& output, void* dequant_scratch,
-                   cudaStream_t stream,
-                   block_q8_1* q8_1_buf = nullptr,
-                   float* d8_buf = nullptr,
-                   const std::unordered_map<const void*, Tensor>* fp16_cache = nullptr,
-                   const std::unordered_map<const void*, FP8CacheEntry>* fp8_cache = nullptr,
-                   void* fp8_act_buf = nullptr,
-                   float* d_act_scale = nullptr,
-                   float* d_fp8_block_maxes = nullptr,
-                   float* d_fp8_absmax = nullptr,
-                   int fp8_max_grid = 0,
-                   const std::unordered_map<const void*, NvFP4QuantResult>* nvfp4_cache = nullptr,
-                   const std::unordered_map<const void*, CutlassNvFP4Weight>* cutlass_nvfp4_cache = nullptr,
-                   void* cutlass_act_data = nullptr,
-                   void* cutlass_act_sf = nullptr,
-                   void* cutlass_workspace = nullptr,
-                   size_t cutlass_workspace_size = 0,
-                   const std::unordered_map<const void*, CutlassMxFP4Weight>* mxfp4_cache = nullptr,
-                   void* mxfp4_act_sf = nullptr,
-                   void* mxfp4_workspace = nullptr,
-                   size_t mxfp4_workspace_size = 0,
-                   float beta = 0.0f);
 
 } // namespace imp

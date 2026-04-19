@@ -4,9 +4,12 @@
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cmath>
 #include <algorithm>
+#include <string>
 #include <vector>
 
 namespace imp {
@@ -14,6 +17,95 @@ namespace imp {
 inline bool debug_forward_enabled() {
     static const bool enabled = (std::getenv("IMP_DEBUG_FORWARD") != nullptr);
     return enabled;
+}
+
+// Hidden-state npy dump for layer-diff analysis against llama.cpp.
+// Returns the directory if IMP_DUMP_HIDDEN is set to a non-empty string, else nullptr.
+// Accepts IMP_DUMP_HIDDEN=1 or "all" for backwards compat (mapped to /tmp).
+inline const char* dump_hidden_dir() {
+    static const char* dir = []() -> const char* {
+        const char* v = std::getenv("IMP_DUMP_HIDDEN");
+        if (!v || !*v) return nullptr;
+        if (std::strcmp(v, "1") == 0 || std::strcmp(v, "all") == 0) return "/tmp";
+        return v;
+    }();
+    return dir;
+}
+
+// Writes a numpy .npy v1.0 file with a 2D FP32 array.
+// Self-describing (python: np.load(path) just works).
+inline void write_npy_fp32(const std::string& path, const float* data,
+                           int rows, int cols) {
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) {
+        std::fprintf(stderr, "[DUMP_NPY] open failed: %s\n", path.c_str());
+        return;
+    }
+    // Build header. Total = 6(magic) + 2(version) + 2(hlen) + header.size
+    // Pad with spaces so total is a multiple of 64 (numpy convention).
+    std::string hdr = "{'descr': '<f4', 'fortran_order': False, 'shape': (";
+    hdr += std::to_string(rows);
+    hdr += ", ";
+    hdr += std::to_string(cols);
+    hdr += "), }";
+    size_t pre = 6 + 2 + 2;
+    size_t need = pre + hdr.size() + 1; // +1 for trailing \n
+    size_t pad = (64 - (need % 64)) % 64;
+    hdr.append(pad, ' ');
+    hdr += '\n';
+    uint16_t hlen = static_cast<uint16_t>(hdr.size());
+    std::fwrite("\x93NUMPY", 1, 6, f);
+    std::fwrite("\x01\x00", 1, 2, f);
+    std::fwrite(&hlen, 2, 1, f);
+    std::fwrite(hdr.data(), 1, hdr.size(), f);
+    std::fwrite(data, sizeof(float), static_cast<size_t>(rows) * cols, f);
+    std::fclose(f);
+}
+
+// Dump a 2D [rows, cols] tensor (FP16 or FP32) as FP32 .npy.
+// Early-returns when IMP_DUMP_HIDDEN is unset. Syncs the stream (debug only).
+inline void dump_tensor_npy(const char* tag, const Tensor& t, cudaStream_t stream,
+                            int layer, int step) {
+    const char* dir = dump_hidden_dir();
+    if (!dir) return;
+    if (t.dtype != DType::FP16 && t.dtype != DType::FP32) return;
+    int cols = static_cast<int>(t.shape[t.ndim - 1]);
+    int rows = (t.ndim >= 2) ? static_cast<int>(t.shape[0]) : 1;
+    int64_t row_stride = (t.ndim >= 2 && t.stride[0] > 0) ? t.stride[0] : cols;
+    size_t n = static_cast<size_t>(rows) * cols;
+
+    std::vector<float> host(n);
+    cudaStreamSynchronize(stream);
+    if (t.dtype == DType::FP16) {
+        std::vector<half> tmp(n);
+        if (row_stride == cols) {
+            cudaMemcpy(tmp.data(), t.data, n * sizeof(half), cudaMemcpyDeviceToHost);
+        } else {
+            for (int r = 0; r < rows; r++) {
+                cudaMemcpy(tmp.data() + static_cast<size_t>(r) * cols,
+                           static_cast<const char*>(t.data) +
+                               static_cast<int64_t>(r) * row_stride * sizeof(half),
+                           cols * sizeof(half), cudaMemcpyDeviceToHost);
+            }
+        }
+        for (size_t i = 0; i < n; i++) host[i] = __half2float(tmp[i]);
+    } else {
+        if (row_stride == cols) {
+            cudaMemcpy(host.data(), t.data, n * sizeof(float), cudaMemcpyDeviceToHost);
+        } else {
+            for (int r = 0; r < rows; r++) {
+                cudaMemcpy(host.data() + static_cast<size_t>(r) * cols,
+                           static_cast<const char*>(t.data) +
+                               static_cast<int64_t>(r) * row_stride * sizeof(float),
+                           cols * sizeof(float), cudaMemcpyDeviceToHost);
+            }
+        }
+    }
+
+    char fname[512];
+    std::snprintf(fname, sizeof(fname), "%s/imp_step%02d_L%02d_%s.npy",
+                  dir, step, layer, tag);
+    write_npy_fp32(fname, host.data(), rows, cols);
 }
 
 // Print min/max/mean/L2norm of a GPU tensor (first row only for multi-row tensors).
