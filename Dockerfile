@@ -7,7 +7,9 @@ FROM nvidia/cuda:13.2.1-devel-ubuntu24.04 AS builder
 
 ARG CMAKE_BUILD_TYPE=Release
 
-RUN apt-get update \
+RUN { sed -i 's|archive.ubuntu.com|de.archive.ubuntu.com|g; s|security.ubuntu.com|de.archive.ubuntu.com|g' \
+          /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true; } \
+    && apt-get update \
     && apt-get install -y --only-upgrade --allow-change-held-packages \
         $(dpkg-query -W -f='${Package}\n' | grep -E '^(cuda-|libcublas|libcudnn|libnvjitlink|libnvjpeg|libnpp|libcurand|libcusolver|libcusparse|libcufft|libnccl|libnvfatbin|libnvptxcompiler|libnvvm|libcufile|libcuobjclient)') \
     && apt-get install -y --no-install-recommends \

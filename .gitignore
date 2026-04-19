@@ -36,6 +36,9 @@ __pycache__/
 *.ncu-rep
 *.qdrep
 
+# Layer-diff hidden-state dumps (large binaries)
+dumps/
+
 # Benchmark results
 benchmarks/results/
 bench_results.txt
