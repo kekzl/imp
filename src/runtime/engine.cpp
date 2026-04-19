@@ -1144,6 +1144,16 @@ void Engine::warmup() {
         return;
     }
 
+    // Gemma-4 has outlier-heavy output_norm activations that amplify cuBLAS
+    // algo jitter — warming up with BOS-filled buffers pins an algo that
+    // produces wrong logits under real inputs and drives decode into
+    // backtick/markdown degeneration. IMP_NO_WARMUP=1 was the manual
+    // mitigation; make it automatic for the arch.
+    if (model_->config().arch == ModelArch::GEMMA4) {
+        IMP_LOG_INFO("Warmup skipped (Gemma-4 algo-jitter protection)");
+        return;
+    }
+
     Tokenizer* tok = model_->tokenizer();
     int32_t warmup_id = tok ? tok->bos_id() : 1;
     if (warmup_id < 0) warmup_id = 1;

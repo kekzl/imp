@@ -601,7 +601,11 @@ bool CudaGraphConditionalRunner::setup(
         body_state.top_p = config_.top_p;
         body_state.top_k = config_.top_k;
         body_state.seed = config_.seed;
-        // max_context_len is set to cover the full generation
+        // max_context_len drives kernel-path selection in paged_attention_decode.
+        // The split-K pipeline kernel is broken when captured into a conditional
+        // WHILE body (bisect 2026-04-16), but the dispatch now detects stream
+        // capture and falls back to the non-pipeline split-K — safe to use the
+        // real value here.
         body_state.max_context_len = config_.initial_context_len + config_.max_steps;
 
         // Penalty parameters for device-side application in forward_decode_async

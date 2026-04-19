@@ -76,6 +76,15 @@ void moe_scatter_fused_residual(const void* expert_output,
                                  int n_tokens, int d_model, int top_k,
                                  cudaStream_t stream = nullptr);
 
+// FP32-input variant for diagnostic IMP_GEMMA4_FP32_EXPERT_DOWN.
+// expert_output_fp32: [expanded, d_model] FP32 (down GEMM kept output in FP32).
+void moe_scatter_fused_residual_fp32in(const void* expert_output_fp32,
+                                        const int32_t* token_to_expanded,
+                                        const float* expert_weights,
+                                        const void* residual, void* output,
+                                        int n_tokens, int d_model, int top_k,
+                                        cudaStream_t stream = nullptr);
+
 // Weighted sum of expert outputs for single-token decode (replaces gather+scatter).
 // expert_outputs: [top_k, d_model] FP16 (passed as void*). expert_weights: [top_k] FP32 on device.
 // output: [d_model] FP32. Accumulates in FP32.

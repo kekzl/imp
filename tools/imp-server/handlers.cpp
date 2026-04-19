@@ -377,6 +377,21 @@ std::string load_model_into_state(ServerState& state, const std::string& path,
         }
     }
 
+    // Detect Gemma-4 channel model: has <|channel> and <channel|> as dedicated tokens.
+    // These wrap reasoning/answer headers like "<|channel>thought\n...<channel|>\n".
+    // We strip the headers from the user-facing content stream.
+    {
+        int32_t co = state.tok->find_token("<|channel>");
+        int32_t cc = state.tok->find_token("<channel|>");
+        int32_t nl = state.tok->find_token("\n");
+        if (co >= 0 && cc >= 0) {
+            state.channel_open_id = co;
+            state.channel_close_id = cc;
+            state.channel_newline_id = nl;
+            printf("Channel model: <|channel>=%d, <channel|>=%d, \\n=%d\n", co, cc, nl);
+        }
+    }
+
     if (state.have_template) {
         printf("Chat template: %s\n",
                imp::chat_template_family_name(state.chat_tpl.family()));
@@ -479,6 +494,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     }
 
     float temperature = body.value("temperature", 0.7f);
+    const bool top_p_explicit = body.contains("top_p");
+    const bool top_k_explicit = body.contains("top_k");
+    const bool rep_pen_explicit = body.contains("repetition_penalty");
     float top_p = body.value("top_p", 0.95f);
     int top_k = body.value("top_k", 40);
     int max_tokens = body.value("max_tokens", state.default_max_tokens);
@@ -687,6 +705,9 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     bool snap_is_think_model;
     int32_t snap_think_start_id;
     int32_t snap_think_end_id;
+    int32_t snap_channel_open_id;
+    int32_t snap_channel_close_id;
+    int32_t snap_channel_newline_id;
     int snap_max_seq_len;
     bool snap_has_vision = false;
     std::vector<int32_t> snap_stop_token_ids;
@@ -700,12 +721,26 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         snap_is_think_model = state.is_think_model;
         snap_think_start_id = state.think_start_id;
         snap_think_end_id = state.think_end_id;
+        snap_channel_open_id = state.channel_open_id;
+        snap_channel_close_id = state.channel_close_id;
+        snap_channel_newline_id = state.channel_newline_id;
         snap_max_seq_len = state.max_seq_len;
         tpl_family = snap_have_template
             ? snap_chat_tpl.family() : imp::ChatTemplateFamily::CHATML;
         if (snap_have_template)
             snap_stop_token_ids = snap_chat_tpl.stop_token_ids();
         snap_has_vision = !image_data.empty() && state.ctx && state.ctx->engine->has_vision();
+    }
+
+    // Channel models (Gemma-4) are more susceptible to sampling-driven
+    // degeneration on casual prompts than DeepSeek-style reasoning models.
+    // If the caller didn't specify a sampler parameter, tighten the default
+    // to suppress the tail of the distribution. Qwen3 / DeepSeek / non-channel
+    // models retain the 0.95 / 40 / 1.0 defaults.
+    if (snap_channel_open_id >= 0) {
+        if (!top_p_explicit) top_p = 0.9f;
+        if (!top_k_explicit) top_k = 20;
+        if (!rep_pen_explicit) repetition_penalty = 1.05f;
     }
 
     // Build tool definitions for Jinja2-native tool calling
@@ -1040,7 +1075,8 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
              stop_sequences, max_stop_len, req_logprobs, include_usage,
              enable_thinking, has_tools, tpl_family, think_budget,
              snap_tok, snap_have_template, snap_model_name, snap_is_think_model,
-             snap_think_start_id, snap_think_end_id, snap_stop_token_ids](
+             snap_think_start_id, snap_think_end_id, snap_channel_open_id,
+             snap_channel_close_id, snap_channel_newline_id, snap_stop_token_ids](
                 size_t /*offset*/, httplib::DataSink& sink) -> bool {
 
                 // Active request ref for logprobs access
@@ -1099,6 +1135,10 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 int think_reentries = 0;
                 const int kMaxThinkReentries = 1;
                 const int kThinkScanLimit = 8;
+
+                // Gemma-4 channel filter state: when we see <|channel> or <channel|>,
+                // skip tokens until the next newline (the channel header).
+                bool channel_header_active = false;
 
                 // Helper: emit reasoning_content SSE chunk
                 auto emit_reasoning = [&](const std::string& text) -> bool {
@@ -1176,6 +1216,23 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                         ttft_ms = std::chrono::duration<double, std::milli>(t_first - t_start).count();
                     }
                     std::string piece = snap_tok->decode_token(token);
+
+                    // Gemma-4 channel filter: strip "<|channel>NAME\n" / "<channel|>\n"
+                    // structural headers from the content stream.
+                    if (snap_channel_open_id >= 0) {
+                        if (channel_header_active) {
+                            if (token == snap_channel_newline_id ||
+                                (!piece.empty() && piece.back() == '\n')) {
+                                channel_header_active = false;
+                            }
+                            continue;
+                        }
+                        if (token == snap_channel_open_id ||
+                            token == snap_channel_close_id) {
+                            channel_header_active = true;
+                            continue;
+                        }
+                    }
 
                     // Reasoning content extraction (DeepSeek format)
                     if (think_phase == ThinkPhase::SCAN) {
@@ -1854,6 +1911,12 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 strip_think_block(content);
             }
 
+            // Gemma-4 channel headers: structural "<|channel>NAME\n" / "<channel|>\n"
+            // never belong in user-facing content. Strip regardless of reasoning_format.
+            if (snap_channel_open_id >= 0) {
+                strip_channel_headers(content);
+            }
+
             // Build logprobs object if requested
             json logprobs_obj = nullptr;
             if (req_logprobs && active_req) {
@@ -2065,6 +2128,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
     imp::Tokenizer* snap_tok;
     std::string snap_model_name;
     bool snap_is_think_model;
+    int32_t snap_channel_open_id;
     int snap_max_seq_len;
     {
         std::lock_guard<std::timed_mutex> lock(state.mtx);
@@ -2072,6 +2136,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
         snap_tok = state.tok;
         snap_model_name = state.model_name;
         snap_is_think_model = state.is_think_model;
+        snap_channel_open_id = state.channel_open_id;
         snap_max_seq_len = state.max_seq_len;
     }
 
@@ -2421,6 +2486,9 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
         // Strip <think>...</think> for text completions (no reasoning_content field)
         if (snap_is_think_model && state.default_args.reasoning_format != "none") {
             strip_think_block(text);
+        }
+        if (snap_channel_open_id >= 0) {
+            strip_channel_headers(text);
         }
 
         // Prepend prompt if echo requested

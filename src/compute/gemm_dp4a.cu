@@ -308,99 +308,32 @@ void rmsnorm_quantize_q8_1(const half* x, const half* weight,
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
-// Basic + Residual wrappers (10 functions → 5 types × 2 variants)
+// Basic + Residual wrappers (14 functions = 7 quant types × 2 variants)
 // ---------------------------------------------------------------------------
 
-void gemv_q6k_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
-                    half* y, int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a<Q6_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
-                                    y, nullptr, false, M, K, stream);
-}
+#define IMP_DP4A_QUANT_TYPES(X) \
+    X(q6k,  Q6_K_Traits)        \
+    X(q8_0, Q8_0_Traits)        \
+    X(q4_0, Q4_0_Traits)        \
+    X(q4_k, Q4_K_Traits)        \
+    X(q5_k, Q5_K_Traits)        \
+    X(q2_k, Q2_K_Traits)        \
+    X(q3_k, Q3_K_Traits)
 
-void gemv_q6k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
-                              half* y, const half* residual,
-                              int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a<Q6_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
-                                    y, residual, true, M, K, stream);
-}
-
-void gemv_q8_0_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
-                     half* y, int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a<Q8_0_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
-                                    y, nullptr, false, M, K, stream);
-}
-
-void gemv_q8_0_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
-                               half* y, const half* residual,
-                               int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a<Q8_0_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
-                                    y, residual, true, M, K, stream);
-}
-
-void gemv_q4_0_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
-                     half* y, int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a<Q4_0_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
-                                    y, nullptr, false, M, K, stream);
-}
-
-void gemv_q4_0_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
-                               half* y, const half* residual,
-                               int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a<Q4_0_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
-                                    y, residual, true, M, K, stream);
-}
-
-void gemv_q4_k_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
-                      half* y, int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a<Q4_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
-                                    y, nullptr, false, M, K, stream);
-}
-
-void gemv_q4_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
-                                half* y, const half* residual,
-                                int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a<Q4_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
-                                    y, residual, true, M, K, stream);
-}
-
-void gemv_q5_k_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
-                      half* y, int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a<Q5_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
-                                    y, nullptr, false, M, K, stream);
-}
-
-void gemv_q5_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
-                                half* y, const half* residual,
-                                int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a<Q5_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
-                                    y, residual, true, M, K, stream);
-}
-
-void gemv_q2_k_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
-                      half* y, int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a<Q2_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
-                                    y, nullptr, false, M, K, stream);
-}
-
-void gemv_q2_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
-                                half* y, const half* residual,
-                                int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a<Q2_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
-                                    y, residual, true, M, K, stream);
-}
-
-void gemv_q3_k_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,
-                      half* y, int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a<Q3_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
-                                    y, nullptr, false, M, K, stream);
-}
-
-void gemv_q3_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float* d8,
-                                half* y, const half* residual,
-                                int M, int K, cudaStream_t stream) {
-    launch_gemv_dp4a<Q3_K_Traits>(static_cast<const uint8_t*>(W), q8_1, d8,
-                                    y, residual, true, M, K, stream);
-}
+#define IMP_DEFINE_GEMV_DP4A(name, traits)                                           \
+    void gemv_##name##_q8_1(const void* W, const block_q8_1* q8_1, const float* d8,  \
+                             half* y, int M, int K, cudaStream_t stream) {           \
+        launch_gemv_dp4a<traits>(static_cast<const uint8_t*>(W), q8_1, d8,           \
+                                  y, nullptr, false, M, K, stream);                  \
+    }                                                                                \
+    void gemv_##name##_q8_1_residual(const void* W, const block_q8_1* q8_1,          \
+                                      const float* d8, half* y, const half* residual,\
+                                      int M, int K, cudaStream_t stream) {           \
+        launch_gemv_dp4a<traits>(static_cast<const uint8_t*>(W), q8_1, d8,           \
+                                  y, residual, true, M, K, stream);                  \
+    }
+IMP_DP4A_QUANT_TYPES(IMP_DEFINE_GEMV_DP4A)
+#undef IMP_DEFINE_GEMV_DP4A
 
 // ---------------------------------------------------------------------------
 // FP32 output wrappers (5 functions)
@@ -449,85 +382,23 @@ void gemv_q3_k_q8_1_fp32(const void* W, const block_q8_1* q8_1, const float* d8,
 }
 
 // ---------------------------------------------------------------------------
-// QKV fused wrappers (5 functions)
+// QKV fused wrappers (7 functions, one per quant type)
 // ---------------------------------------------------------------------------
 
-void gemv_qkv_fused_q6k_q8_1(const void* W_q, const void* W_k, const void* W_v,
-                               const block_q8_1* q8_1, const float* d8,
-                               half* y_q, half* y_k, half* y_v,
-                               int q_rows, int k_rows, int v_rows, int K,
-                               cudaStream_t stream) {
-    launch_gemv_dp4a_qkv<Q6_K_Traits>(
-        static_cast<const uint8_t*>(W_q), static_cast<const uint8_t*>(W_k),
-        static_cast<const uint8_t*>(W_v), q8_1, d8, y_q, y_k, y_v,
-        q_rows, k_rows, v_rows, K, stream);
-}
-
-void gemv_qkv_fused_q8_0_q8_1(const void* W_q, const void* W_k, const void* W_v,
-                                const block_q8_1* q8_1, const float* d8,
-                                half* y_q, half* y_k, half* y_v,
-                                int q_rows, int k_rows, int v_rows, int K,
-                                cudaStream_t stream) {
-    launch_gemv_dp4a_qkv<Q8_0_Traits>(
-        static_cast<const uint8_t*>(W_q), static_cast<const uint8_t*>(W_k),
-        static_cast<const uint8_t*>(W_v), q8_1, d8, y_q, y_k, y_v,
-        q_rows, k_rows, v_rows, K, stream);
-}
-
-void gemv_qkv_fused_q4_0_q8_1(const void* W_q, const void* W_k, const void* W_v,
-                                const block_q8_1* q8_1, const float* d8,
-                                half* y_q, half* y_k, half* y_v,
-                                int q_rows, int k_rows, int v_rows, int K,
-                                cudaStream_t stream) {
-    launch_gemv_dp4a_qkv<Q4_0_Traits>(
-        static_cast<const uint8_t*>(W_q), static_cast<const uint8_t*>(W_k),
-        static_cast<const uint8_t*>(W_v), q8_1, d8, y_q, y_k, y_v,
-        q_rows, k_rows, v_rows, K, stream);
-}
-
-void gemv_qkv_fused_q4_k_q8_1(const void* W_q, const void* W_k, const void* W_v,
-                                const block_q8_1* q8_1, const float* d8,
-                                half* y_q, half* y_k, half* y_v,
-                                int q_rows, int k_rows, int v_rows, int K,
-                                cudaStream_t stream) {
-    launch_gemv_dp4a_qkv<Q4_K_Traits>(
-        static_cast<const uint8_t*>(W_q), static_cast<const uint8_t*>(W_k),
-        static_cast<const uint8_t*>(W_v), q8_1, d8, y_q, y_k, y_v,
-        q_rows, k_rows, v_rows, K, stream);
-}
-
-void gemv_qkv_fused_q5_k_q8_1(const void* W_q, const void* W_k, const void* W_v,
-                                const block_q8_1* q8_1, const float* d8,
-                                half* y_q, half* y_k, half* y_v,
-                                int q_rows, int k_rows, int v_rows, int K,
-                                cudaStream_t stream) {
-    launch_gemv_dp4a_qkv<Q5_K_Traits>(
-        static_cast<const uint8_t*>(W_q), static_cast<const uint8_t*>(W_k),
-        static_cast<const uint8_t*>(W_v), q8_1, d8, y_q, y_k, y_v,
-        q_rows, k_rows, v_rows, K, stream);
-}
-
-void gemv_qkv_fused_q2_k_q8_1(const void* W_q, const void* W_k, const void* W_v,
-                                const block_q8_1* q8_1, const float* d8,
-                                half* y_q, half* y_k, half* y_v,
-                                int q_rows, int k_rows, int v_rows, int K,
-                                cudaStream_t stream) {
-    launch_gemv_dp4a_qkv<Q2_K_Traits>(
-        static_cast<const uint8_t*>(W_q), static_cast<const uint8_t*>(W_k),
-        static_cast<const uint8_t*>(W_v), q8_1, d8, y_q, y_k, y_v,
-        q_rows, k_rows, v_rows, K, stream);
-}
-
-void gemv_qkv_fused_q3_k_q8_1(const void* W_q, const void* W_k, const void* W_v,
-                                const block_q8_1* q8_1, const float* d8,
-                                half* y_q, half* y_k, half* y_v,
-                                int q_rows, int k_rows, int v_rows, int K,
-                                cudaStream_t stream) {
-    launch_gemv_dp4a_qkv<Q3_K_Traits>(
-        static_cast<const uint8_t*>(W_q), static_cast<const uint8_t*>(W_k),
-        static_cast<const uint8_t*>(W_v), q8_1, d8, y_q, y_k, y_v,
-        q_rows, k_rows, v_rows, K, stream);
-}
+#define IMP_DEFINE_GEMV_DP4A_QKV(name, traits)                                       \
+    void gemv_qkv_fused_##name##_q8_1(                                               \
+        const void* W_q, const void* W_k, const void* W_v,                           \
+        const block_q8_1* q8_1, const float* d8,                                     \
+        half* y_q, half* y_k, half* y_v,                                             \
+        int q_rows, int k_rows, int v_rows, int K,                                   \
+        cudaStream_t stream) {                                                       \
+        launch_gemv_dp4a_qkv<traits>(                                                \
+            static_cast<const uint8_t*>(W_q), static_cast<const uint8_t*>(W_k),      \
+            static_cast<const uint8_t*>(W_v), q8_1, d8, y_q, y_k, y_v,               \
+            q_rows, k_rows, v_rows, K, stream);                                      \
+    }
+IMP_DP4A_QUANT_TYPES(IMP_DEFINE_GEMV_DP4A_QKV)
+#undef IMP_DEFINE_GEMV_DP4A_QKV
 
 // ---------------------------------------------------------------------------
 // Gate+Up fused dispatcher (1 function, dispatches by qtype)
