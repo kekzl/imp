@@ -1010,6 +1010,44 @@ void moe_scatter_fused_residual(const void* expert_output,
         d_model, top_k);
 }
 
+// FP32-input variant: expert_output is float* (not half*).
+// Used by IMP_GEMMA4_FP32_EXPERT_DOWN to test if FP16 truncation at down GEMM
+// output is the source of the L3+ precision drift.
+__global__ void moe_scatter_fused_residual_fp32in_kernel(
+        const float* __restrict__ expert_output_fp32,  // [expanded, d_model] FP32
+        const int32_t* __restrict__ token_to_expanded,
+        const float* __restrict__ expert_weights,
+        const half* residual,
+        half* output,
+        int d_model, int top_k) {
+    const int token = blockIdx.x;
+    const int base_flat = token * top_k;
+
+    for (int col = threadIdx.x; col < d_model; col += blockDim.x) {
+        float sum = 0.0f;
+        for (int k = 0; k < top_k; ++k) {
+            int expanded_row = token_to_expanded[base_flat + k];
+            float w = expert_weights[base_flat + k];
+            sum += w * expert_output_fp32[static_cast<int64_t>(expanded_row) * d_model + col];
+        }
+        if (residual) sum += __half2float(residual[static_cast<int64_t>(token) * d_model + col]);
+        output[static_cast<int64_t>(token) * d_model + col] = __float2half(sum);
+    }
+}
+
+void moe_scatter_fused_residual_fp32in(const void* expert_output_fp32,
+                                        const int32_t* token_to_expanded,
+                                        const float* expert_weights,
+                                        const void* residual, void* output,
+                                        int n_tokens, int d_model, int top_k,
+                                        cudaStream_t stream) {
+    int threads = 256;
+    moe_scatter_fused_residual_fp32in_kernel<<<n_tokens, threads, 0, stream>>>(
+        static_cast<const float*>(expert_output_fp32), token_to_expanded, expert_weights,
+        static_cast<const half*>(residual), static_cast<half*>(output),
+        d_model, top_k);
+}
+
 // ============================================================================
 // Fused gate GEMV + topk routing launcher
 // ============================================================================

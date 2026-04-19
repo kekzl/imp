@@ -46,6 +46,18 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
         float eps,
         float weight_offset);
 
+// FP32-input variant of rmsnorm_fp32_accum_to_fp16_kernel — used when the
+// upstream op (e.g. attention output projection) keeps its result in FP32 to
+// avoid cuBLAS's internal FP16 output truncation.
+__global__ __launch_bounds__(512) void rmsnorm_fp32in_fp32_accum_to_fp16_kernel(
+        const float* __restrict__ input,
+        const half* __restrict__ norm_w,
+        float* __restrict__ fp32_accum,
+        half* __restrict__ output,
+        int d_model,
+        float eps,
+        float weight_offset);
+
 __global__ __launch_bounds__(256) void fp16_to_fp32_kernel(const half* __restrict__ in, float* __restrict__ out, int64_t n);
 
 __global__ __launch_bounds__(256) void elementwise_add_fp32_kernel(float* __restrict__ a, const float* __restrict__ b, int64_t n);

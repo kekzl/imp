@@ -322,6 +322,87 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
     }
 }
 
+// FP32-input variant of rmsnorm_fp32_accum_to_fp16_kernel.
+// Input is FP32 (e.g. attention output projection kept in FP32 to preserve
+// cuBLAS internal accumulator precision). Same accum + overflow protection as
+// the FP16-input variant. Used by IMP_GEMMA4_FP32_GEMM_OUT for attention.
+__global__ __launch_bounds__(512) void rmsnorm_fp32in_fp32_accum_to_fp16_kernel(
+        const float* __restrict__ input,     // [n, d_model] FP32 pre-norm data
+        const half* __restrict__ norm_w,     // [d_model] RMSNorm weights
+        float* __restrict__ fp32_accum,      // [n, d_model] FP32 accumulator (RMW)
+        half* __restrict__ output,           // [n, d_model] FP16 output for next layer
+        int d_model,
+        float eps,
+        float weight_offset) {
+    __shared__ float warp_reduce[32];
+    __shared__ float s_inv_rms;
+    __shared__ float s_row_max;
+
+    const int tid = threadIdx.x;
+    const int lane = tid % 32;
+    const int warp_id = tid / 32;
+    const int n_warps = blockDim.x / 32;
+    const int row = blockIdx.x;
+
+    const float* x_row = input + static_cast<int64_t>(row) * d_model;
+    const half* nw = norm_w;
+    float* accum_row = fp32_accum + static_cast<int64_t>(row) * d_model;
+    half* out_row = output + static_cast<int64_t>(row) * d_model;
+
+    // Phase 1: sum of squares (input already FP32)
+    float sum_sq = 0.0f;
+    for (int i = tid; i < d_model; i += blockDim.x) {
+        float v = x_row[i];
+        sum_sq += v * v;
+    }
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        sum_sq += __shfl_xor_sync(0xFFFFFFFF, sum_sq, off);
+    if (lane == 0) warp_reduce[warp_id] = sum_sq;
+    __syncthreads();
+    if (warp_id == 0) {
+        float total = (lane < n_warps) ? warp_reduce[lane] : 0.0f;
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1)
+            total += __shfl_xor_sync(0xFFFFFFFF, total, off);
+        if (lane == 0)
+            s_inv_rms = rsqrtf(total / static_cast<float>(d_model) + eps);
+    }
+    __syncthreads();
+    float inv_rms = s_inv_rms;
+
+    // Phase 2: accum += norm(x) * weight; track max
+    float local_max = 0.0f;
+    for (int i = tid; i < d_model; i += blockDim.x) {
+        float v = x_row[i];
+        float w = __half2float(nw[i]) + weight_offset;
+        float val = v * inv_rms * w;
+        float new_acc = accum_row[i] + val;
+        accum_row[i] = new_acc;
+        local_max = fmaxf(local_max, fabsf(new_acc));
+    }
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        local_max = fmaxf(local_max, __shfl_xor_sync(0xFFFFFFFF, local_max, off));
+    if (lane == 0) warp_reduce[warp_id] = local_max;
+    __syncthreads();
+    if (warp_id == 0) {
+        float m = (lane < n_warps) ? warp_reduce[lane] : 0.0f;
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1)
+            m = fmaxf(m, __shfl_xor_sync(0xFFFFFFFF, m, off));
+        if (lane == 0)
+            s_row_max = m;
+    }
+    __syncthreads();
+    float inv_scale = (s_row_max > 65000.0f) ? (65000.0f / s_row_max) : 1.0f;
+
+    // Phase 3: write FP16 output (with overflow scaling)
+    for (int i = tid; i < d_model; i += blockDim.x) {
+        out_row[i] = __float2half(accum_row[i] * inv_scale);
+    }
+}
+
 // Convert FP16 → FP32: out[i] = __half2float(in[i])
 __global__ __launch_bounds__(256) void fp16_to_fp32_kernel(const half* __restrict__ in, float* __restrict__ out, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -1947,15 +2028,19 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
     // IMP_NO_MMVQ_Q8_0 / IMP_NO_MMVQ: debug bypass for suspected Q8_0 MMVQ bug.
     static const bool no_mmvq_q8_0 = (getenv("IMP_NO_MMVQ_Q8_0") != nullptr);
     static const bool no_mmvq_all  = (getenv("IMP_NO_MMVQ") != nullptr);
+    // FP16-only fast paths (mmvq, dp4a, gemv_q6k, gemv_q8_0) write directly to
+    // half* — must skip when caller requested FP32 output, otherwise the FP16
+    // bytes get interpreted as FP32 and produce billions-magnitude garbage.
+    const bool fp32_output = (output.dtype == DType::FP32);
     bool use_mmvq = (getenv("IMP_GEMMA4_FORCE_MMVQ") != nullptr) &&
-                    !prefer_fp16_cache && input.dtype == DType::FP16 &&
+                    !prefer_fp16_cache && input.dtype == DType::FP16 && !fp32_output &&
                     (qtype == GGMLQuantType::Q4_K || qtype == GGMLQuantType::Q5_K ||
                      qtype == GGMLQuantType::Q5_1 || qtype == GGMLQuantType::Q8_0) &&
                     (weight.shape[1] % 32 == 0) &&
                     !(no_mmvq_q8_0 && qtype == GGMLQuantType::Q8_0) &&
                     !no_mmvq_all;
     bool use_dp4a = !no_dp4a_gemv && !prefer_fp16_cache && input.shape[0] == 1 &&
-                    input.dtype == DType::FP16 &&
+                    input.dtype == DType::FP16 && !fp32_output &&
                     q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype);
     if (use_mmvq) {
         int M = static_cast<int>(input.shape[0]);

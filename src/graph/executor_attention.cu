@@ -444,11 +444,18 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         longrope_freqs = (state.max_context_len <= longrope_orig_max_pos_)
                          ? longrope_short_freqs_ : longrope_long_freqs_;
     }
-    // Gemma 4: do NOT use GGUF rope_freqs for global layers. llama.cpp's
-    // gemma4-iswa arch does not load rope_freqs either — it computes from theta.
-    // The GGUF rope_freqs (256 entries) were computed for dim=512 but Gemma-4
-    // only rotates dim/2=256 dims. Using them with the standard formula gives
-    // wrong frequencies. Let the kernel compute from theta=1e6 directly.
+    // Gemma 4: per-layer rope_freqs (pre-computed effective frequencies for
+    // global layers, see gguf_loader.cpp:1221). llama.cpp's gemma4-iswa.cpp:55-59
+    // passes these as freq_factors to ggml_rope_ext on full_attention layers
+    // (n_rot=hd, with most pairs effectively zeroed by 1e30 divisors). This
+    // matches the proportional-rope schema (ccss000000000000) the converter
+    // emits via partial_rotary_factor=0.25.
+    if (cfg.arch == ModelArch::GEMMA4 && !cfg.swa_layers.empty()) {
+        bool layer_is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
+        if (!layer_is_swa && ly.rope_freqs.data && ly.rope_freqs.on_device) {
+            longrope_freqs = static_cast<const float*>(ly.rope_freqs.data);
+        }
+    }
 
     // Qwen3.5 attention output gate: Q projection is INTERLEAVED per head:
     //   [Q_h0(hd), Gate_h0(hd), Q_h1(hd), Gate_h1(hd), ...]
@@ -496,12 +503,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                   qv.dtype == DType::FP16 &&
                                   state.kv_cache &&
                                   state.kv_cache->dtype() == DType::FP16);
-        // Per-layer rope_dim. Gemma 4: SWA layers rotate all dims (256/256),
-        // Global layers rotate half (256/512). Matches llama.cpp: n_rot_full /= 2.
+        // Per-layer rope_dim. Gemma 4: both SWA and global layers rotate the
+        // full head_dim. Global layers' freq_factors (loaded into
+        // longrope_freqs above) zero out most pairs to realize the
+        // partial-rotary schedule from the GGUF (ccss000000000000).
         int fused_rope_dim = cfg.rope_dim;
         if (cfg.arch == ModelArch::GEMMA4) {
-            bool layer_is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
-            fused_rope_dim = layer_is_swa ? hd : hd / 2;  // SWA: full, Global: 50% (llama.cpp: n_rot/2)
+            fused_rope_dim = hd;
         } else if (fused_rope_dim > hd || fused_rope_dim <= 0) {
             fused_rope_dim = hd;
         }
@@ -547,11 +555,12 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             int64_t k4r[4] = {1, n, nkv, hd};
             Tensor q4r_t = qv.reshape(4, q4r);
             Tensor k4r_t = kk.reshape(4, k4r);
-            // Per-layer rope_dim. Gemma 4: SWA full rotation, Global half.
+            // Per-layer rope_dim. Gemma 4: full hd for both SWA and global;
+            // global layers' freq_factors (longrope_freqs) realize the
+            // partial-rotary schedule from the GGUF.
             int layer_rope_dim = cfg.rope_dim;
             if (cfg.arch == ModelArch::GEMMA4) {
-                bool layer_is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
-                layer_rope_dim = layer_is_swa ? hd : hd / 2;  // SWA: full, Global: 50% (llama.cpp: n_rot/2)
+                layer_rope_dim = hd;
             } else if (layer_rope_dim > hd || layer_rope_dim <= 0) {
                 layer_rope_dim = hd;  // safety clamp
             }
@@ -639,11 +648,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             int row_elems    = nkv * hd;
             int block_stride = kv_block_size_d * row_elems;
             int threads = std::min(row_elems, 256);
-            // Per-layer rope_dim (same as prefill rope path above)
+            // Per-layer rope_dim (same as prefill rope path above): Gemma 4
+            // uses full hd; longrope_freqs encodes the partial-rotary schedule.
             int effective_rope_dim;
             if (cfg.arch == ModelArch::GEMMA4) {
-                bool layer_is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
-                effective_rope_dim = layer_is_swa ? hd : hd / 2;  // SWA: full, Global: 50% (llama.cpp: n_rot/2)
+                effective_rope_dim = hd;
             } else {
                 effective_rope_dim = (cfg.rope_dim > 0) ? cfg.rope_dim : hd;
                 if (effective_rope_dim > hd) effective_rope_dim = hd;
@@ -877,8 +886,32 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // Dequant beta=1: dequant weights on-the-fly, then FP16 GEMM + residual
         gemm_dispatch(ao, ly.wo, ly.wo_qtype, h, ctx.with_beta(1.0f));
     } else {
-        // Fallback: separate O-projection + optional post-norm + residual add
-        gemm_dispatch(ao, ly.wo, ly.wo_qtype, po, ctx);
+        // Fallback: separate O-projection + optional post-norm + residual add.
+        // Diagnostic: when IMP_GEMMA4_FP32_GEMM_OUT is set on Gemma-4, after the
+        // FP16 GEMM, also produce an FP32 view (fp16_to_fp32). Then route the
+        // post-attn-norm through the FP32-input variant. This keeps the proven
+        // FP16 GEMM path while letting us validate the FP32-input rmsnorm
+        // independently. Any precision win comes from the rmsnorm pre-cast
+        // happening once in __half2float vs implicit casts inside the kernel.
+        // IMP_GEMMA4_FP32_GEMM_OUT: keep attention output projection in FP32 to
+        // preserve cuBLAS's internal FP32 accumulator precision through the
+        // post-attention rmsnorm. Uses the cublasGemmEx FP16×FP16→FP32 path
+        // (gemm.cu mixed-precision short-circuit). Skips the FP16-only mmvq
+        // and dp4a fast paths via output.dtype==FP32 guards in dispatch.
+        const bool fp32_attn_out = (model_->config().arch == ModelArch::GEMMA4 &&
+            using_fp32_accum &&
+            std::getenv("IMP_GEMMA4_FP32_GEMM_OUT") != nullptr);
+        void* po_fp32_buf = nullptr;
+        if (fp32_attn_out) {
+            size_t bytes = static_cast<size_t>(n) * model_->config().d_model * sizeof(float);
+            IMP_CUDA_CHECK_LOG(cudaMallocAsync(&po_fp32_buf, bytes, stream));
+            int64_t shape[2] = {static_cast<int64_t>(n),
+                                static_cast<int64_t>(model_->config().d_model)};
+            Tensor po_fp32(po_fp32_buf, DType::FP32, 2, shape, true);
+            gemm_dispatch(ao, ly.wo, ly.wo_qtype, po_fp32, ctx);
+        } else {
+            gemm_dispatch(ao, ly.wo, ly.wo_qtype, po, ctx);
+        }
         if (debug_attn_steps) {
             debug_tensor_stats_all("L0_ao_pre_wo",  view_tokens(ao, n), stream);
             debug_tensor_stats_all("L0_po_after_wo", view_tokens(po, n), stream);
@@ -921,12 +954,21 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                             n-1, rs, std::sqrt(rss), fp32_tmp[off], fp32_tmp[off+1], fp32_tmp[off+2]);
                 }
             }
-            rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
-                static_cast<const half*>(po.data),
-                static_cast<const half*>(ly.post_attn_norm.data),
-                static_cast<float*>(fp32_h.data),
-                static_cast<half*>(h.data),
-                model_->config().d_model, eps, norm_w_off_);
+            if (fp32_attn_out) {
+                rmsnorm_fp32in_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
+                    static_cast<const float*>(po_fp32_buf),
+                    static_cast<const half*>(ly.post_attn_norm.data),
+                    static_cast<float*>(fp32_h.data),
+                    static_cast<half*>(h.data),
+                    model_->config().d_model, eps, norm_w_off_);
+            } else {
+                rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
+                    static_cast<const half*>(po.data),
+                    static_cast<const half*>(ly.post_attn_norm.data),
+                    static_cast<float*>(fp32_h.data),
+                    static_cast<half*>(h.data),
+                    model_->config().d_model, eps, norm_w_off_);
+            }
             if (layer == 0 && debug_attn_steps) {
                 debug_tensor_stats_all("L0_post_fp32accum_h", view_tokens(h, n), stream);
             }
@@ -945,13 +987,15 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             // Standard pre-norm: h = attn_out + residual
             elementwise_add_store(po, r, h, stream);
         }
+        if (po_fp32_buf) {
+            cudaFreeAsync(po_fp32_buf, stream);
+        }
     }
     if (debug_attn_steps) {
         debug_tensor_stats("L0_step4_after_oproj_residual", h, stream);
         debug_tensor_rows("step4_h-0", view_tokens(h, n), stream);
         debug_tensor_stats_all("L0_step4_post_attn_all", view_tokens(h, n), stream);
     }
-
 }
 
 } // namespace imp

@@ -199,6 +199,20 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // separately. The fused kernel reads FP16 h which loses ~0.03% per element that
     // compounds catastrophically through the 128-expert top-8 MoE routing.
     bool gemma4_fp32_norm = (cfg.arch == ModelArch::GEMMA4 && fp32_accum_buf_ != nullptr);
+    // When FP32 residual accumulator is active AND post_ffn_norm exists, defer the
+    // residual add to rmsnorm_fp32_accum_to_fp16_kernel (which keeps fp32_hidden_ in
+    // sync + applies overflow scaling). Without this, moe_weighted_sum_residual
+    // adds residual in FP16 and the shadow goes stale — measured ~7% drift at L3
+    // that compounds to 260% by L29 vs llama.cpp (docs/gemma4_layer_diff.md).
+    bool moe_use_fp32_residual = (cfg.arch == ModelArch::GEMMA4 &&
+                                   fp32_accum_buf_ != nullptr &&
+                                   ly.post_ffn_norm.data != nullptr);
+    // Diagnostic: keep MoE down-projection output in FP32 (no FP16 truncation
+    // at GEMM output) to isolate precision drift. Allocated below in the FP16
+    // batch path; freed at moe_after_experts. Other prefill paths ignore this.
+    const bool fp32_down_active = (cfg.arch == ModelArch::GEMMA4 &&
+        std::getenv("IMP_GEMMA4_FP32_EXPERT_DOWN") != nullptr);
+    void* fp32_down_buf = nullptr;
     bool moe_fused_norm_q8 = (n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
                                h.dtype == DType::FP16 && !nvfp4_covers_layer && !gemma4_fp32_norm);
     if (moe_fused_norm_q8) {
@@ -311,6 +325,29 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     if (fp32_gate_logits_ready) {
         // Gate logits already computed by FP32 router path above — skip to topk.
         Tensor gate_logits_f32 = slice_rows(moe_.gate_logits, n);
+        // Diagnostic: dump gate logits pre-topk when IMP_DUMP_LOGITS is set.
+        // Compares imp's softmax-input against llama.cpp's ffn_moe_probs-N.
+        if (const char* dl = getenv("IMP_DUMP_LOGITS")) {
+            bool dump_all = (std::strcmp(dl, "all") == 0);
+            if (layer == 29 || dump_all) {
+                int last_tok = n - 1;
+                std::vector<float> h_logits(ne);
+                cudaStreamSynchronize(stream);
+                cudaMemcpy(h_logits.data(),
+                           static_cast<const float*>(gate_logits_f32.data) + last_tok * ne,
+                           ne * sizeof(float), cudaMemcpyDeviceToHost);
+                // Find top-8 by value
+                std::vector<std::pair<float,int>> sorted;
+                sorted.reserve(ne);
+                for (int i = 0; i < ne; ++i) sorted.emplace_back(h_logits[i], i);
+                std::partial_sort(sorted.begin(), sorted.begin() + 8, sorted.end(),
+                                   [](auto&a, auto&b){return a.first > b.first;});
+                fprintf(stderr, "[LOGITS] L%02d tok=%d top8_by_value: ", layer, last_tok);
+                for (int i = 0; i < 8; ++i)
+                    fprintf(stderr, "[e=%d v=%.4f] ", sorted[i].second, sorted[i].first);
+                fprintf(stderr, "\n");
+            }
+        }
         if (moe_.routing_buffers.pool) {
             moe_topk_gating(gate_logits_f32, top_k, moe_.routing_buffers, routing, stream, use_sigmoid, norm_weights, router_bias_ptr, /*skip_sorting=*/will_decode_fast);
         } else {
@@ -365,6 +402,27 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             fprintf(stderr, "[DEBUG_FWD] L0_router_logits[%d]: sum=%.4f L2=%.4f [0..2]=%.6f %.6f %.6f\n",
                     last_tok, rsum, std::sqrt(rss), rl[0], rl[1], rl[2]);
         }
+        // IMP_DUMP_LOGITS=all: dump top-8-by-value of gate logits per layer.
+        if (const char* dl = getenv("IMP_DUMP_LOGITS")) {
+            bool dump_all = (std::strcmp(dl, "all") == 0);
+            if (layer == 29 || dump_all) {
+                int last_tok = n - 1;
+                std::vector<float> h_logits(ne);
+                cudaStreamSynchronize(stream);
+                cudaMemcpy(h_logits.data(),
+                           static_cast<const float*>(gate_logits_f32.data) + last_tok * ne,
+                           ne * sizeof(float), cudaMemcpyDeviceToHost);
+                std::vector<std::pair<float,int>> sorted;
+                sorted.reserve(ne);
+                for (int i = 0; i < ne; ++i) sorted.emplace_back(h_logits[i], i);
+                std::partial_sort(sorted.begin(), sorted.begin() + 8, sorted.end(),
+                                   [](auto&a, auto&b){return a.first > b.first;});
+                fprintf(stderr, "[LOGITS] L%02d tok=%d top8_by_value: ", layer, last_tok);
+                for (int i = 0; i < 8; ++i)
+                    fprintf(stderr, "[e=%d v=%.4f] ", sorted[i].second, sorted[i].first);
+                fprintf(stderr, "\n");
+            }
+        }
         if (moe_.routing_buffers.pool) {
             moe_topk_gating(gate_logits_f32, top_k, moe_.routing_buffers, routing, stream, use_sigmoid, norm_weights, router_bias_ptr, /*skip_sorting=*/will_decode_fast);
         } else {
@@ -372,18 +430,23 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         }
     }
 
-    // Dump routing for last token (use direct getenv, not debug_forward_enabled)
-    if (layer == 0 && getenv("IMP_DUMP_ROUTING")) {
-        int last_tok = n - 1;
-        std::vector<int32_t> h_idx(top_k);
-        std::vector<float> h_wts(top_k);
-        cudaMemcpy(h_idx.data(), static_cast<const int32_t*>(routing.expert_indices.data) + last_tok * top_k,
-                   top_k * sizeof(int32_t), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_wts.data(), static_cast<const float*>(routing.expert_weights.data) + last_tok * top_k,
-                   top_k * sizeof(float), cudaMemcpyDeviceToHost);
-        fprintf(stderr, "[DEBUG_FWD] L0_routing[%d]: experts=[%d,%d,%d,%d,%d,%d,%d,%d] weights=[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]\n",
-                last_tok, h_idx[0], h_idx[1], h_idx[2], h_idx[3], h_idx[4], h_idx[5], h_idx[6], h_idx[7],
-                h_wts[0], h_wts[1], h_wts[2], h_wts[3], h_wts[4], h_wts[5], h_wts[6], h_wts[7]);
+    // Dump routing for last token (use direct getenv, not debug_forward_enabled).
+    // IMP_DUMP_ROUTING=1: only layer 0. IMP_DUMP_ROUTING=all: every layer.
+    if (const char* drv = getenv("IMP_DUMP_ROUTING")) {
+        bool dump_all = (std::strcmp(drv, "all") == 0);
+        if (layer == 0 || dump_all) {
+            int last_tok = n - 1;
+            std::vector<int32_t> h_idx(top_k);
+            std::vector<float> h_wts(top_k);
+            cudaMemcpy(h_idx.data(), static_cast<const int32_t*>(routing.expert_indices.data) + last_tok * top_k,
+                       top_k * sizeof(int32_t), cudaMemcpyDeviceToHost);
+            cudaMemcpy(h_wts.data(), static_cast<const float*>(routing.expert_weights.data) + last_tok * top_k,
+                       top_k * sizeof(float), cudaMemcpyDeviceToHost);
+            fprintf(stderr, "[ROUTE] L%02d tok=%d experts=[%3d,%3d,%3d,%3d,%3d,%3d,%3d,%3d] weights=[%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f]\n",
+                    layer, last_tok,
+                    h_idx[0], h_idx[1], h_idx[2], h_idx[3], h_idx[4], h_idx[5], h_idx[6], h_idx[7],
+                    h_wts[0], h_wts[1], h_wts[2], h_wts[3], h_wts[4], h_wts[5], h_wts[6], h_wts[7]);
+        }
     }
     // 4b. Expert weight scaling (Nemotron: scale = 2.5)
     if (cfg.expert_weights_scale != 1.0f) {
@@ -504,11 +567,11 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             // Weighted sum + residual
             {
                 bool has_shared_expert = (ly.w_up_shared.data != nullptr);
-                const void* res_ptr = has_shared_expert ? nullptr :
+                const void* res_ptr = (has_shared_expert || moe_use_fp32_residual) ? nullptr :
                     (will_skip_residual_copy ? h.data : r.data);
                 moe_weighted_sum_residual(down_buf, expert_weights, res_ptr,
                                           h.data, d, top_k, stream);
-                if (!has_shared_expert) residual_fused = true;
+                if (!has_shared_expert && !moe_use_fp32_residual) residual_fused = true;
             }
 
             goto moe_after_experts;
@@ -700,11 +763,11 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         {
             bool has_shared_expert = (ly.w_up_shared.data != nullptr);
             // Use h.data as residual source when memcpy was skipped
-            const void* res_ptr = has_shared_expert ? nullptr :
+            const void* res_ptr = (has_shared_expert || moe_use_fp32_residual) ? nullptr :
                 (will_skip_residual_copy ? h.data : r.data);
             moe_weighted_sum_residual(down_buf, expert_weights, res_ptr,
                                       h.data, d, top_k, stream);
-            if (!has_shared_expert) residual_fused = true;
+            if (!has_shared_expert && !moe_use_fp32_residual) residual_fused = true;
         }
 
         goto moe_after_experts;
@@ -954,12 +1017,12 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         // Weighted sum for this token → write to h[t]
         half* h_tok = static_cast<half*>(h.data) + static_cast<int64_t>(t) * d;
         bool has_shared_expert = (ly.w_up_shared.data != nullptr);
-        const void* res_ptr = has_shared_expert ? nullptr :
+        const void* res_ptr = (has_shared_expert || moe_use_fp32_residual) ? nullptr :
             static_cast<const void*>(static_cast<const half*>(r.data) + static_cast<int64_t>(t) * d);
         moe_weighted_sum_residual(down_buf, tok_weights, res_ptr,
                                    h_tok, d, top_k, stream);
     }
-    if (ly.w_up_shared.data == nullptr) residual_fused = true;
+    if (ly.w_up_shared.data == nullptr && !moe_use_fp32_residual) residual_fused = true;
     goto moe_after_experts;
 
     } else {
@@ -1049,9 +1112,15 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         char* expert_swiglu_base= static_cast<char*>(moe_.expert_swiglu.data);
         char* expert_down_base  = static_cast<char*>(moe_.expert_down.data);
 
+        if (fp32_down_active) {
+            size_t fp32_bytes = static_cast<size_t>(expanded) * d * sizeof(float);
+            IMP_CUDA_CHECK_LOG(cudaMallocAsync(&fp32_down_buf, fp32_bytes, stream));
+        }
+
         auto batch_dequant_gemm = [&](const Tensor& packed, GGMLQuantType qtype,
                                        const char* a_base, char* c_base,
-                                       int K_dim, int N_dim) {
+                                       int K_dim, int N_dim,
+                                       DType out_dtype = DType::FP16) {
             int64_t rows = packed.shape[1];
             int64_t cols = packed.shape[2];
             size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
@@ -1066,7 +1135,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             gemm_moe_batched(a_base, c_base,
                              h_offsets.data(), b_ptrs.data(),
                              K_dim, N_dim, DType::FP16, ne, stream,
-                             moe_.d_work_ptrs);
+                             moe_.d_work_ptrs,
+                             out_dtype);
         };
 
         // Gate projection
@@ -1100,9 +1170,13 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
         // Down projection
         char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
+        char* down_target = fp32_down_active
+            ? static_cast<char*>(fp32_down_buf)
+            : expert_down_base;
+        DType down_out_dtype = fp32_down_active ? DType::FP32 : DType::FP16;
         batch_dequant_gemm(ly.expert_down_packed, ly.expert_down_qtype,
-                            down_act, expert_down_base, eff, d);
-        if (debug_forward_enabled() && layer == 0) {
+                            down_act, down_target, eff, d, down_out_dtype);
+        if (debug_forward_enabled() && layer == 0 && !fp32_down_active) {
             int64_t sh[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(d)};
             Tensor dv(moe_.expert_down.data, compute_dtype_, 2, sh, true);
             debug_tensor_stats("L0_moe_down_out", dv, stream);
@@ -1636,13 +1710,24 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         if (routing.token_to_expanded && compute_dtype_ == DType::FP16) {
             // Fused token-centric scatter: no atomics, no FP32 intermediate buffer.
             // If no shared expert, also fuse residual add.
-            const void* res_ptr = (!has_shared_expert && !residual_fused) ? r.data : nullptr;
-            moe_scatter_fused_residual(
-                moe_.expert_down.data, routing.token_to_expanded,
-                static_cast<const float*>(routing.expert_weights.data),
-                res_ptr, h.data,
-                n, d, top_k, stream);
-            if (!has_shared_expert) residual_fused = true;
+            // Gemma-4 FP32 path: defer residual to post_ffn_norm (FP32 accumulator).
+            const void* res_ptr = (!has_shared_expert && !residual_fused && !moe_use_fp32_residual)
+                ? r.data : nullptr;
+            if (fp32_down_buf) {
+                // Down GEMM kept FP32 output — use FP32-input scatter variant.
+                moe_scatter_fused_residual_fp32in(
+                    fp32_down_buf, routing.token_to_expanded,
+                    static_cast<const float*>(routing.expert_weights.data),
+                    res_ptr, h.data,
+                    n, d, top_k, stream);
+            } else {
+                moe_scatter_fused_residual(
+                    moe_.expert_down.data, routing.token_to_expanded,
+                    static_cast<const float*>(routing.expert_weights.data),
+                    res_ptr, h.data,
+                    n, d, top_k, stream);
+            }
+            if (!has_shared_expert && !moe_use_fp32_residual) residual_fused = true;
         } else {
             // Fallback: atomicAdd scatter into FP32 buffer, then convert
             int64_t expert_out_shape[2] = {static_cast<int64_t>(expanded),
@@ -1671,6 +1756,11 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     }
 
 moe_after_experts:
+    // Free diagnostic FP32 expert-down buffer if it was allocated (FP16 batch path only).
+    if (fp32_down_buf) {
+        cudaFreeAsync(fp32_down_buf, stream);
+        fp32_down_buf = nullptr;
+    }
     // 8b. Shared expert FFN: all tokens pass through an additional
     //     dense FFN whose output is added to the routed expert output.
     //     Reuses MoE workspace buffers (routed computation is complete).
