@@ -50,9 +50,14 @@ cmake --build build -j$(nproc)
 
 # Benchmark (matches llama-bench methodology)
 ./build/imp-cli --model model.gguf --bench --bench-pp 512 --max-tokens 128 --bench-reps 5
+
+# Long-context prompt (trade weight-cache VRAM for KV headroom)
+./build/imp-cli --model gemma-4-26B-A4B-it-Q4_K_M.gguf --min-kv-tokens 14000 --prompt "$(cat long.txt)"
 ```
 
 Format auto-detection: directories with `model.safetensors` or `model.safetensors.index.json` load as SafeTensors. Everything else loads as GGUF.
+
+`--max-seq-len` and `--min-kv-tokens` control how much VRAM the engine reserves for the KV cache. Auto defaults target ~60% of free VRAM for KV, sized for the actual KV dtype after model-specific overrides (e.g. Gemma-4 → FP16 KV). Setting `--min-kv-tokens` explicitly overrides the defensive 80% cap and trades FP16 weight-cache capacity for more context.
 
 <details>
 <summary>Full CLI options</summary>
@@ -68,6 +73,8 @@ Model:
 Generation:
   --prompt <text>           Input prompt
   --max-tokens <n>          Max tokens to generate (default: 256)
+  --max-seq-len <n>         KV context ceiling in tokens (default: auto from VRAM)
+  --min-kv-tokens <n>       Minimum KV capacity in tokens (default: auto)
   --interactive             Interactive chat mode
   --stop <str>              Stop sequence (repeatable, up to 4)
   --chat-template <t>       auto|none|chatml|llama2|llama3|nemotron|gemma|deepseek_r1|phi
@@ -112,7 +119,7 @@ Benchmark:
 
 ## Server (OpenAI-compatible)
 
-Supports both GGUF and SafeTensors models with hot-swap between formats.
+Supports both GGUF and SafeTensors models. `--model` is required at startup.
 
 ```bash
 # Start with GGUF
