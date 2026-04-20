@@ -17,19 +17,36 @@ Architecture summary:
 
 Both use the same GDN kernels (scan + fused RMSNormGated+SiLU + attention output gate + partial RoPE) and MoE kernels. What's new: the combination.
 
-## Current State (2026-04-20)
+## Current State (2026-04-20, second pass after initial download)
 
-**Scaffold added on branch `qwen36-support-scaffolding`:**
-- `ModelArch::QWEN36_MOE` enum + `IMP_ARCH_QWEN36_MOE = 13` in C API
-- `parse_model_arch()` recognizes `"qwen36moe"`, `"qwen3.6_moe"`, `"qwen3.6moe"` strings
-- `ArchRegistry` entry with ChatML chat template + Qwen sampling defaults (T=0.6, top_p=0.95, top_k=20)
-- `chat_template.cpp` routes QWEN36_MOE → CHATML family
+**Verified on unsloth/Qwen3.6-35B-A3B-GGUF (Q4_K_M variant, 22 GB):**
+- GGUF ships as `general.architecture = "qwen35moe"` — unsloth reuses the
+  Qwen 3.5 MoE arch name. imp's existing `qwen35moe` parser picks it up;
+  the `QWEN36_MOE` enum I added earlier is therefore dead scaffolding.
+- Layer census correctly detects 10 attention + 30 GDN + 40 MoE + 40
+  shared experts + 30 SSM state slots.
+- Tensor names match imp's existing `attn_gate → gdn_gate` mapping.
 
-**Not yet implemented:**
-- GGUF config parsing for Qwen 3.6 metadata
-- Per-layer dispatch verifying MoE-on-all-layers (not MoE-on-attention-only)
-- SafeTensors loader extension for the FP8 variant
-- E2E test
+**Shipped fixes (main branch):**
+- PR / commit `dc0be95`: `run_moe_ffn` FFN input norm fallback now includes
+  `post_attn_norm` (Qwen's single-norm variant stores the FFN norm under
+  `post_attention_norm`, not `ffn_norm`). Without this, residual stream
+  explodes: logits L2=108k, semantic garbage.
+
+**Still blocked — output not yet coherent:**
+- `ffn_gate_inp_shexp.weight [2048] F32` — one per layer, 40 total. Not
+  mapped by imp's GGUF loader (hence the "40 skipped" line in the log).
+  This looks like Qwen 3.6's per-channel sigmoid gate for the shared
+  expert output (new architecture detail vs Qwen 3.5 MoE). Need to:
+  1. Add mapper entry in `gguf_loader.cpp:445-484` (same block that
+     handles `ffn_gate_shexp`/`ffn_up_shexp`/`ffn_down_shexp`).
+  2. Add a storage field in `TransformerLayer` (e.g.
+     `shared_expert_channel_gate`).
+  3. Apply in the shared-expert branch of `run_moe_ffn` — multiply the
+     shared expert output (or its input) elementwise by the sigmoid of
+     this tensor (exact formula needs verification against reference
+     implementation: llama.cpp Qwen3 MoE or the official Qwen3.6 paper/repo).
+- Still TODO: 1M-context RoPE extension if needed; E2E test.
 
 ## Remaining Work
 
