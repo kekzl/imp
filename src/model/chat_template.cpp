@@ -58,6 +58,7 @@ ChatTemplateFamily ChatTemplate::default_family_for_arch(ModelArch arch) {
         case ModelArch::QWEN3_MOE:      return ChatTemplateFamily::CHATML;
         case ModelArch::QWEN35:         return ChatTemplateFamily::CHATML;
         case ModelArch::QWEN35_MOE:     return ChatTemplateFamily::CHATML;
+        case ModelArch::QWEN36_MOE:     return ChatTemplateFamily::CHATML;
         case ModelArch::GEMMA3:         return ChatTemplateFamily::GEMMA;
         case ModelArch::GEMMA4:         return ChatTemplateFamily::GEMMA;
         case ModelArch::LLAMA4:         return ChatTemplateFamily::LLAMA3;
