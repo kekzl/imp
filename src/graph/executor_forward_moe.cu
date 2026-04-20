@@ -2013,6 +2013,21 @@ moe_after_experts:
         if (debug_forward_enabled() && layer == 0) {
             debug_tensor_rows("L0_shared_post_norm1", sh_down, stream);
         }
+        // Qwen3-Next / Qwen3.6: per-token sigmoid gate on the shared expert output.
+        //   gate[r] = sigmoid(sum_d no[r,d] * W_gate_inp_shexp[d])
+        //   sh_down[r, :] *= gate[r]
+        // Absent in Qwen3 MoE / Gemma-4 (tensor pointer is null → skip).
+        static const bool skip_shexp_gate = std::getenv("IMP_NO_SHEXP_GATE") != nullptr;
+        if (!skip_shexp_gate &&
+            ly.shared_expert_gate_inp.data != nullptr &&
+            ly.shared_expert_gate_inp.on_device &&
+            compute_dtype_ == DType::FP16) {
+            shared_expert_gate_scale(
+                no.data,
+                ly.shared_expert_gate_inp.data,
+                sh_down.data,
+                n, d, d, stream);
+        }
         // Add shared expert output to hidden (which already has routed expert output)
         elementwise_add(h, sh_down, stream);
     }
