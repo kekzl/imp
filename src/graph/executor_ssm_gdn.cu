@@ -15,6 +15,22 @@
 
 namespace imp {
 
+// Helper: FP32 ssm_out + FP16 residual → FP16 h. Preserves FP32 GEMM-accum
+// precision through the residual add so downstream RMSNorm sees bit-accurate
+// inputs (fixes Qwen 3.6 sign flips). Used when IMP_GDN_FP32_OUT=1.
+__global__ void fp32_plus_fp16_to_fp16(
+    const float* __restrict__ a_fp32,
+    const __half* __restrict__ b_fp16,
+    __half* __restrict__ out_fp16,
+    int64_t n)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float v = a_fp32[idx] + __half2float(b_fp16[idx]);
+        out_fp16[idx] = __float2half(v);
+    }
+}
+
 // Map global layer index to SSM/GDN state index.
 static inline int get_ssm_layer(const std::vector<int>& ssm_layer_map, int layer) {
     return ssm_layer_map[layer];
@@ -331,6 +347,39 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
             static_cast<const half*>(xBC_out.data), conv_f32, total);
     }
 
+    // 4b. V-head reorder (tiled → grouped) for asymmetric-head GDN models.
+    // The GGUF converter may store V in tiled layout (h0_g0, h1_g1, ... then
+    // h0_g0_r1, ...) while the scan kernel reads V[h*HD+d] assuming grouped
+    // layout. Qwen 3.6 uses 16K/32V asymmetric heads and triggers this
+    // mismatch. Gated by IMP_GDN_VHEAD_REORDER to avoid regressing symmetric
+    // models or models whose converters already emit grouped layout.
+    static const bool vhead_reorder = std::getenv("IMP_GDN_VHEAD_REORDER") != nullptr;
+    if (vhead_reorder && n_groups != n_heads) {
+        const int inner_v = n_heads * head_dim_ssm;  // V channels = 32 * 128 = 4096 for Qwen 3.6
+        const int BC_size_vh = n_groups * ssize;      // Q/K per-group size = 16 * 128 = 2048
+        // Scratch buffers at tail of ssm_proj_buf_ (FP32, max_tokens * ssm_in_dim floats).
+        // ssm_proj_buf_ already contains conv_f32 (n * conv_channels floats) at the head;
+        // reserve two scratch regions past that.
+        float* v_scratch_tiled   = conv_f32 + static_cast<size_t>(n) * conv_channels;
+        float* v_scratch_grouped = v_scratch_tiled + static_cast<size_t>(n) * inner_v;
+
+        // Gather V slice from strided conv_f32 into contiguous [n, n_heads, head_dim_ssm].
+        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(
+            v_scratch_tiled, static_cast<size_t>(inner_v) * sizeof(float),
+            conv_f32 + 2 * BC_size_vh, static_cast<size_t>(conv_channels) * sizeof(float),
+            static_cast<size_t>(inner_v) * sizeof(float), n,
+            cudaMemcpyDeviceToDevice, stream));
+        // Tiled → grouped reorder.
+        vhead_tiled_to_grouped_f32(v_scratch_tiled, v_scratch_grouped,
+                                    n, n_heads, head_dim_ssm, n_groups, stream);
+        // Scatter reordered V back into conv_f32 V slice.
+        IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(
+            conv_f32 + 2 * BC_size_vh, static_cast<size_t>(conv_channels) * sizeof(float),
+            v_scratch_grouped, static_cast<size_t>(inner_v) * sizeof(float),
+            static_cast<size_t>(inner_v) * sizeof(float), n,
+            cudaMemcpyDeviceToDevice, stream));
+    }
+
     // 5. Run delta rule scan
     Tensor y_buf = view_tokens(ssm_y_buf_, n);
 
@@ -342,6 +391,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
     Tensor gate_out(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
     gemm_dispatch(no, ly.gdn_gate, ly.gdn_gate_qtype, gate_out, ctx);
+
+    static const bool use_fp32_scan = std::getenv("IMP_GDN_FP32_SCAN") != nullptr;
 
     if (h_st) {
         size_t es = dtype_size(compute_dtype_);
@@ -362,17 +413,66 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
             gemm_dispatch(no, ly.gdn_beta, ly.gdn_beta_qtype, beta_proj_out, ctx);
         }
 
-        // 5b. Fused multi-token delta rule scan.
-        // Single kernel launch processes ALL tokens with register-cached state.
-        // Eliminates n×32 kernel launches and 125x state memory traffic.
-        gdn_scan_fused_f32(conv_f32, conv_channels,
-                            static_cast<const half*>(alpha_proj_out.data),
-                            static_cast<const half*>(beta_proj_out.data),
-                            static_cast<const float*>(ly.ssm_a.data),
-                            static_cast<const float*>(ly.ssm_dt_b.data),
-                            static_cast<float*>(h_st),
-                            static_cast<half*>(y_buf.data),
-                            n, n_heads, head_dim_ssm, ssize, n_groups, stream);
+        // 5b. Multi-token delta rule scan.
+        // Default: fused kernel with register-cached state (n×32 fewer launches,
+        // 125× less state memory traffic).
+        // IMP_GDN_REF=1: reference kernel with shared-memory state, no fusion.
+        //   Use when debugging new architectures — if outputs differ it isolates
+        //   bugs to the fused-kernel optimizations.
+        // IMP_GDN_FP32_SCAN=1: keep scan output in FP32 through RMSNorm+Gate.
+        //   FP16 subnormal truncation (~6e-5) breaks RMS for near-zero heads on
+        //   models with sparse scan activations (Qwen 3.6 L1 head 0).
+        static const bool use_ref = std::getenv("IMP_GDN_REF") != nullptr;
+        if (use_fp32_scan) {
+            // Layout in conv_f32 tail:
+            //   [n*conv_channels)                : conv_f32 (done)
+            //   [+n*inner)                       : y_fp32 scan output
+            //   [+n*inner)                       : y_fp32_postnorm (rmsnorm_gated_silu output)
+            // The post-norm FP32 buffer feeds directly into the ssm_out GEMM when
+            // FP32_OUT is also active — bypasses the FP16 y_buf that would drop
+            // ~3-4 bits of per-element precision (root cause of Qwen 3.6 L0 drift).
+            float* y_fp32 = conv_f32 + static_cast<size_t>(n) * conv_channels;
+            float* y_fp32_postnorm = y_fp32 + static_cast<size_t>(n) * n_heads * head_dim_ssm;
+            gdn_scan_fused_fp32out(conv_f32, conv_channels,
+                                static_cast<const half*>(alpha_proj_out.data),
+                                static_cast<const half*>(beta_proj_out.data),
+                                static_cast<const float*>(ly.ssm_a.data),
+                                static_cast<const float*>(ly.ssm_dt_b.data),
+                                static_cast<float*>(h_st),
+                                y_fp32,
+                                n, n_heads, head_dim_ssm, ssize, n_groups, stream);
+            // FP32-in, FP32-out RMSNorm+Gate+SiLU: preserves precision for the
+            // ssm_out matmul. Ancillary copy to FP16 y_buf only for debug prints.
+            gdn_rmsnorm_gated_silu_fp32inout(y_fp32_postnorm, y_fp32,
+                                              static_cast<const half*>(gate_out.data),
+                                              static_cast<const half*>(ly.ssm_norm_w.data),
+                                              eps, n, n_heads, head_dim_ssm, stream);
+            if (debug_forward_enabled()) {
+                int64_t total = static_cast<int64_t>(n) * n_heads * head_dim_ssm;
+                int threads_ = 256;
+                int blocks_ = static_cast<int>((total + threads_ - 1) / threads_);
+                fp32_to_fp16_kernel<<<blocks_, threads_, 0, stream>>>(
+                    y_fp32_postnorm, static_cast<__half*>(y_buf.data), total);
+            }
+        } else if (use_ref) {
+            gdn_scan_reference_f32(conv_f32, conv_channels,
+                                static_cast<const half*>(alpha_proj_out.data),
+                                static_cast<const half*>(beta_proj_out.data),
+                                static_cast<const float*>(ly.ssm_a.data),
+                                static_cast<const float*>(ly.ssm_dt_b.data),
+                                static_cast<float*>(h_st),
+                                static_cast<half*>(y_buf.data),
+                                n, n_heads, head_dim_ssm, ssize, n_groups, stream);
+        } else {
+            gdn_scan_fused_f32(conv_f32, conv_channels,
+                                static_cast<const half*>(alpha_proj_out.data),
+                                static_cast<const half*>(beta_proj_out.data),
+                                static_cast<const float*>(ly.ssm_a.data),
+                                static_cast<const float*>(ly.ssm_dt_b.data),
+                                static_cast<float*>(h_st),
+                                static_cast<half*>(y_buf.data),
+                                n, n_heads, head_dim_ssm, ssize, n_groups, stream);
+        }
     }
 
     debug_tensor_stats("gdn_after_scan_y", y_buf, stream);
@@ -380,20 +480,57 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
 
     // 6. Fused RMSNormGated + SiLU: y = rmsnorm(y) * silu(gate)
     // Single kernel launch for all tokens × heads (replaces n×32×2 launches).
-    gdn_rmsnorm_gated_silu(static_cast<half*>(y_buf.data),
-                            static_cast<const half*>(gate_out.data),
-                            static_cast<const half*>(ly.ssm_norm_w.data),
-                            eps, n, n_heads, head_dim_ssm, stream);
-
+    // When IMP_GDN_FP32_SCAN is active, this was already done inline with the
+    // scan above (FP32-input variant). Skip to avoid double-applying.
+    // IMP_GDN_NORM_EPS env can override eps (diagnostic).
+    float norm_eps = eps;
+    if (const char* e = std::getenv("IMP_GDN_NORM_EPS")) {
+        norm_eps = strtof(e, nullptr);
+    }
+    if (!use_fp32_scan) {
+        gdn_rmsnorm_gated_silu(static_cast<half*>(y_buf.data),
+                                static_cast<const half*>(gate_out.data),
+                                static_cast<const half*>(ly.ssm_norm_w.data),
+                                norm_eps, n, n_heads, head_dim_ssm, stream);
+    }
 
     // 7. ssm_out projection: [n, inner] → [n, d_model]
+    // IMP_GDN_FP32_OUT=1: compute the ssm_out GEMM with FP32 output and add the
+    // residual in FP32 before downcast. FP16 accumulation here drifts ~5% per
+    // element vs llama.cpp; that small drift amplifies to sign flips in
+    // downstream near-zero projections and breaks Qwen 3.6.
+    static const bool use_fp32_out = std::getenv("IMP_GDN_FP32_OUT") != nullptr;
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
-    gemm_dispatch(y_buf, ly.ssm_out, ly.ssm_out_qtype, out_buf, ctx);
+    if (use_fp32_out) {
+        // Allocate FP32 scratch via cudaMallocAsync (small: n * d_model * 4 bytes)
+        size_t fp32_bytes = static_cast<size_t>(n) * cfg.d_model * sizeof(float);
+        void* fp32_out = nullptr;
+        IMP_CUDA_CHECK_LOG(cudaMallocAsync(&fp32_out, fp32_bytes, stream));
+        int64_t out_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(cfg.d_model)};
+        Tensor fp32_out_t(fp32_out, DType::FP32, 2, out_shape, true);
 
-    // 8. Residual add
-    elementwise_add(out_buf, r, stream);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(),
-                    cudaMemcpyDeviceToDevice, stream));
+        // NOTE: when FP32_SCAN is also active, the post-norm-gated tensor lives
+        // in FP32 memory, but we can't pass it directly to gemm_dispatch because
+        // cuBLAS FP32-input × FP16-cached-weight path silently produces zeros on
+        // sm_120 with CUBLAS_COMPUTE_32F (tested 2026-04-21). Stay on FP16 y_buf
+        // input; precision benefit from FP32 scan is limited to the rmsnorm stage.
+        gemm_dispatch(y_buf, ly.ssm_out, ly.ssm_out_qtype, fp32_out_t, ctx);
+
+        // FP16 residual → FP32 + add + FP16 writeback to h in one kernel.
+        int64_t total = static_cast<int64_t>(n) * cfg.d_model;
+        int threads = 256;
+        int blocks = static_cast<int>((total + threads - 1) / threads);
+        fp32_plus_fp16_to_fp16<<<blocks, threads, 0, stream>>>(
+            static_cast<const float*>(fp32_out),
+            static_cast<const __half*>(r.data),
+            static_cast<__half*>(h.data), total);
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(fp32_out, stream));
+    } else {
+        gemm_dispatch(y_buf, ly.ssm_out, ly.ssm_out_qtype, out_buf, ctx);
+        elementwise_add(out_buf, r, stream);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(),
+                        cudaMemcpyDeviceToDevice, stream));
+    }
 
 }
 

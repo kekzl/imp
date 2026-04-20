@@ -14,6 +14,7 @@
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "compute/hadamard.h"
 #include "quant/nvfp4_quant.h"
+#include "quant/fp8_utils.cuh"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -154,19 +155,7 @@ __device__ __forceinline__ uint8_t float_to_ue8m0(float val) {
     return (uint8_t)f_exp;
 }
 
-__device__ __forceinline__ float fp8_e4m3_to_float(uint8_t bits) {
-    uint32_t sign = (bits >> 7) & 1;
-    uint32_t exp  = (bits >> 3) & 0x0F;
-    uint32_t man  = bits & 0x07;
-    float val;
-    if (exp == 0) {
-        val = (float)man * (1.0f / 512.0f);
-    } else {
-        uint32_t fp32 = ((exp + 120u) << 23) | (man << 20);
-        val = __uint_as_float(fp32);
-    }
-    return sign ? -val : val;
-}
+// fp8_e4m3_to_float is provided by quant/fp8_utils.cuh (shared across NVFP4/MXFP4).
 
 // Merge 2 NVFP4 micro-scales (UE4M3, per 16 elements each) into 1 MXFP4 scale (UE8M0, per 32).
 // Takes the max of the two micro-scales, then encodes as UE8M0 (nearest power of 2).

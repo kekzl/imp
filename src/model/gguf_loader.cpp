@@ -482,6 +482,9 @@ static bool assign_tensor(Model& model, const std::string& name,
         else if (field == "ffn_gate_shexp") { layer.w_gate_shared = tensor; layer.w_gate_shared_qtype = qtype; }
         else if (field == "ffn_up_shexp")   { layer.w_up_shared = tensor; layer.w_up_shared_qtype = qtype; }
         else if (field == "ffn_down_shexp") { layer.w_down_shared = tensor; layer.w_down_shared_qtype = qtype; }
+        // Qwen3-Next / Qwen3.6 per-token sigmoid gate on the shared expert
+        // output. 1D [d_model] FP32 projection; sigmoid(cur @ W) yields [M, 1].
+        else if (field == "ffn_gate_inp_shexp") { layer.shared_expert_gate_inp = tensor; }
         // SSM weights (Mamba2)
         else if (field == "ssm_in")   { layer.ssm_in = tensor; layer.ssm_in_qtype = qtype; }
         else if (field == "ssm_out")  { layer.ssm_out = tensor; layer.ssm_out_qtype = qtype; }

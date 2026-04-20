@@ -5,7 +5,6 @@
 #include "graph/executor.h"
 #include "graph/executor_kernels.h"
 #include "graph/executor_helpers.h"
-#include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/sampling.h"
 #include "quant/quant_gemm.h"
@@ -301,6 +300,46 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
             IMP_LOG_INFO("MoE batch dequant buffer: skipped (experts on host)");
             moe_.batch_dequant_buf = nullptr;
             moe_.batch_dequant_buf_size = 0;
+        }
+
+        // CUTLASS 3.x NVFP4 grouped activation staging. Auto-used for prefill
+        // (n > 1) on NVFP4-prequant MoE models — 4.6× speedup on Qwen3-Coder-30B-A3B-FP4.
+        // Decode (n == 1) keeps using the legacy per-expert GEMV. Max K = d_model,
+        // max_expanded = max_tokens * top_k. ~38 MiB on 128-experts / 4096 tokens.
+        if (cfg.n_experts > 0) {
+            int top_k = cfg.n_experts_active;
+            int max_expanded = max_tokens_ * top_k;
+            int max_K = std::max(d, eff);  // gate/up use d (=d_model), down uses eff
+            // Packed FP4: 1 byte per 2 values
+            size_t packed_sz = static_cast<size_t>(max_expanded) * max_K / 2;
+            // SFA worst-case: each expert's rows pad to SfAtom row tile (128),
+            // so sum over ne of cutlass_nvfp4_sf_size(M_i, max_K) ≤
+            // cutlass_nvfp4_sf_size(max_expanded + 128*ne, max_K).
+            size_t sf_sz = cutlass_nvfp4_sf_size(max_expanded + 128 * cfg.n_experts, max_K);
+            moe_.cutlass3x_packed = vram_alloc(vram_alloc_, packed_sz, "moe_3x_packed");
+            moe_.cutlass3x_sf = vram_alloc(vram_alloc_, sf_sz, "moe_3x_sf");
+            if (moe_.cutlass3x_packed && moe_.cutlass3x_sf) {
+                moe_.cutlass3x_packed_size = packed_sz;
+                moe_.cutlass3x_sf_size = sf_sz;
+                // Device array of per-expert SFA base pointers for the fused quantize kernel.
+                size_t sfa_ptr_bytes = static_cast<size_t>(cfg.n_experts) * sizeof(uint8_t*);
+                cudaError_t err = cudaMalloc(&moe_.cutlass3x_sfa_ptrs, sfa_ptr_bytes);
+                if (err == cudaSuccess) {
+                    moe_.cutlass3x_sfa_ptrs_count = cfg.n_experts;
+                } else {
+                    IMP_LOG_WARN("CUTLASS 3.x SFA pointer array alloc failed: %s", cudaGetErrorString(err));
+                    moe_.cutlass3x_sfa_ptrs = nullptr;
+                }
+                IMP_LOG_INFO("CUTLASS 3.x MoE staging: %.2f MiB (packed=%.2f, sf=%.2f) max_expanded=%d",
+                             (packed_sz + sf_sz) / (1024.0 * 1024.0),
+                             packed_sz / (1024.0 * 1024.0),
+                             sf_sz / (1024.0 * 1024.0),
+                             max_expanded);
+            } else {
+                IMP_LOG_WARN("CUTLASS 3.x MoE staging: allocation failed, path disabled");
+                if (moe_.cutlass3x_packed) { vram_free(vram_alloc_, moe_.cutlass3x_packed); moe_.cutlass3x_packed = nullptr; }
+                if (moe_.cutlass3x_sf) { vram_free(vram_alloc_, moe_.cutlass3x_sf); moe_.cutlass3x_sf = nullptr; }
+            }
         }
 
         // Pre-allocated device pointer arrays for batched MoE GEMM.

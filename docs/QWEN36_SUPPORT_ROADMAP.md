@@ -17,19 +17,81 @@ Architecture summary:
 
 Both use the same GDN kernels (scan + fused RMSNormGated+SiLU + attention output gate + partial RoPE) and MoE kernels. What's new: the combination.
 
-## Current State (2026-04-20)
+## Current State (2026-04-20, second pass after initial download)
 
-**Scaffold added on branch `qwen36-support-scaffolding`:**
-- `ModelArch::QWEN36_MOE` enum + `IMP_ARCH_QWEN36_MOE = 13` in C API
-- `parse_model_arch()` recognizes `"qwen36moe"`, `"qwen3.6_moe"`, `"qwen3.6moe"` strings
-- `ArchRegistry` entry with ChatML chat template + Qwen sampling defaults (T=0.6, top_p=0.95, top_k=20)
-- `chat_template.cpp` routes QWEN36_MOE → CHATML family
+**Verified on unsloth/Qwen3.6-35B-A3B-GGUF (Q4_K_M variant, 22 GB):**
+- GGUF ships as `general.architecture = "qwen35moe"` — unsloth reuses the
+  Qwen 3.5 MoE arch name. imp's existing `qwen35moe` parser picks it up;
+  the `QWEN36_MOE` enum I added earlier is therefore dead scaffolding.
+- Layer census correctly detects 10 attention + 30 GDN + 40 MoE + 40
+  shared experts + 30 SSM state slots.
+- Tensor names match imp's existing `attn_gate → gdn_gate` mapping.
 
-**Not yet implemented:**
-- GGUF config parsing for Qwen 3.6 metadata
-- Per-layer dispatch verifying MoE-on-all-layers (not MoE-on-attention-only)
-- SafeTensors loader extension for the FP8 variant
-- E2E test
+**Shipped fixes (main branch):**
+- PR / commit `dc0be95`: `run_moe_ffn` FFN input norm fallback now includes
+  `post_attn_norm` (Qwen's single-norm variant stores the FFN norm under
+  `post_attention_norm`, not `ffn_norm`). Without this, residual stream
+  explodes: logits L2=108k, semantic garbage.
+
+**Shipped, commit `b3c300b`:**
+- `ffn_gate_inp_shexp.weight [2048]` now mapped →
+  `TransformerLayer::shared_expert_gate_inp`. Uploaded as FP16 (matches the
+  other norm-weight path). Applied in `run_moe_ffn` via the new
+  `shared_expert_gate_scale` device kernel: per-row dot product,
+  sigmoid, elementwise scale of the shared-expert output.
+- 733/733 tensors load (0 skipped). No more NaN cascade.
+
+**Still blocked — output still garbage, next architecture gap:**
+
+Attention layers (blk.3, blk.7, ..., blk.39 in the 3:1 GDN:attn pattern)
+ship a **fused Q + attention-output-gate** tensor:
+
+```
+blk.3.attn_q.weight shape=[2048, 8192]   # 2× expected Q size
+blk.3.attn_k.weight shape=[2048, 512]    # 2 kv heads × 256 head_dim
+blk.3.attn_v.weight shape=[2048, 512]
+blk.3.attn_output.weight shape=[4096, 2048]  # 4096 in, 2048 out
+```
+
+Reference (llama.cpp `qwen3next.cpp::build_layer_attn`):
+```
+Qcur_full = cur @ wq         // [n, 8192]
+Qcur, gate = split(Qcur_full)  // each [n, 4096]
+Kcur = cur @ wk              // [n, 512]
+Vcur = cur @ wv              // [n, 512]
+Qcur = q_norm(Qcur); Kcur = k_norm(Kcur)   // per-head RMSNorm
+Qcur = RoPE(Qcur); Kcur = RoPE(Kcur)        # n_rot = 64 (partial)
+attn_out = attention(Q, K, V)    // [n, 4096]
+gate = sigmoid(gate)
+attn_out *= gate
+cur = attn_out @ w_output       // [n, 2048]
+```
+
+imp's current `run_attention` does not handle the fused Q+gate split or
+the post-attention sigmoid multiply. With the 8192-wide Q, imp currently
+interprets all of it as Q heads (2× the real head count), producing
+invalid attention outputs that are then multiplied by the wrong
+`attn_output` shape.
+
+GDN layers (blk.0, blk.1, blk.2, ...) have `attn_qkv [2048, 8192]` and a
+separate `attn_gate [2048, 4096]`. These go through `run_gdn`, not
+`run_attention`, but the same Q+gate structure likely applies for the
+delta-rule path. imp's existing `gdn_gate` mapping may already handle
+this correctly for GDN (needs verification); the blocker is specifically
+the attention-layer path.
+
+**Remaining work (approximate, ~300-500 LoC):**
+1. Shape-detect fused Q in `run_attention`: if `attn_q.shape[1] == 2 *
+   n_heads * head_dim`, split.
+2. Cache the gate after Q projection; apply `out *= sigmoid(gate)` after
+   the attention computation, before `attn_output` GEMM.
+3. Verify partial RoPE matches: GGUF metadata says `rope_dim=64` (not
+   full `head_dim=256`). Current imp logs "Partial RoPE: rope_dim=64 (full
+   head_dim=256)" so this looks plumbed, but needs tensor-level
+   comparison against a reference forward pass.
+4. E2E test once output is coherent.
+- Still TODO: 1M-context RoPE extension if needed; real E2E test in
+  `tests/test_e2e_models.cpp`.
 
 ## Remaining Work
 

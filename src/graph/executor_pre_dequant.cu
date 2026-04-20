@@ -2,12 +2,10 @@
 #include "graph/executor_kernels.h"
 #include "graph/executor_helpers.h"
 #include "compute/gemm.h"
-#include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
-#include "compute/gemm_cublaslt_nvfp4.h"
 #include "core/logging.h"
 #include "memory/vram_allocator.h"
 
@@ -798,13 +796,34 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 }
             }
 
-            // Free remaining FP16 cache
+            // Free remaining FP16 cache — but KEEP entries that have no NVFP4
+            // or FP8 alternative (e.g. GDN `ssm_in`/`ssm_out` on hybrid models
+            // like Qwen 3.5/3.6). Without this, run_gdn falls back to on-the-fly
+            // dequant which produces ~5% per-element drift at L0 and cascades
+            // to sign-flips at the shared MLP → garbage output.
+            size_t freed = 0;
+            size_t kept_bytes = 0;
+            int kept_count = 0;
+            std::vector<const void*> to_erase;
             for (auto& [ptr, tensor] : wcache_.fp16) {
-                vram_free(vram_alloc_, tensor.data);
+                const bool has_nvfp4 = (wcache_.nvfp4.find(ptr) != wcache_.nvfp4.end());
+                const bool has_fp8   = (wcache_.fp8.find(ptr)   != wcache_.fp8.end());
+                if (has_nvfp4 || has_fp8) {
+                    vram_free(vram_alloc_, tensor.data);
+                    freed += static_cast<size_t>(tensor.shape[0]) * tensor.shape[1] * sizeof(half);
+                    to_erase.push_back(ptr);
+                } else {
+                    kept_bytes += static_cast<size_t>(tensor.shape[0]) * tensor.shape[1] * sizeof(half);
+                    kept_count++;
+                }
             }
-            size_t freed = wcache_.fp16_bytes;
-            wcache_.fp16.clear();
-            wcache_.fp16_bytes = 0;
+            for (auto p : to_erase) wcache_.fp16.erase(p);
+            wcache_.fp16_bytes = kept_bytes;
+            if (kept_count > 0) {
+                IMP_LOG_INFO("NVFP4 only mode: preserved %d FP16 entries (%.2f MiB) "
+                             "with no NVFP4/FP8 alternative (GDN/hybrid weights)",
+                             kept_count, kept_bytes / (1024.0 * 1024.0));
+            }
 
             // Free fused caches (prefill uses individual FP8 weights)
             for (auto& [idx, tensor] : wcache_.fused_kv) {

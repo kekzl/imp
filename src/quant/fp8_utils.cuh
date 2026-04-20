@@ -98,23 +98,35 @@ __device__ __forceinline__ uint8_t float_to_fp8_e4m3(float val)
 }
 
 // ---------------------------------------------------------------------------
-// FP8 E4M3 -> FP32 software conversion.
-// ---------------------------------------------------------------------------
-__device__ __forceinline__ float fp8_e4m3_to_float(uint8_t bits)
+// FP8 E4M3 -> FP32 software conversion (fast, branchless bit repack).
+//
+// Normal (exp>0):  value = (1 + man/8) * 2^(exp - 7)  [bias = 7]
+// Denorm (exp=0):  value = man * 2^-9
+// Sign bit (bit 7) applied to output sign bit.
+//
+// Previously two copies existed: a slow exp2f-based version here and a fast
+// bit-repack version in nvfp4_gemm.cu. The bit-repack version produced wrong
+// denorm values until the NVFP4 prequant debug (50× inflation) forced a fix;
+// now both are consolidated into this single correct fast implementation.
+__device__ __forceinline__ float fp8_e4m3_to_float_fast(uint8_t bits)
 {
     uint32_t sign = (bits >> 7) & 1;
     uint32_t exp  = (bits >> 3) & 0x0F;
     uint32_t man  = bits & 0x07;
-
-    float abs_val;
+    uint32_t fp32;
     if (exp == 0) {
-        // Subnormal: value = 0.mantissa * 2^(1 - bias) = man * 2^(-9)
-        abs_val = (float)man * (1.0f / 512.0f);
+        float v = (float)man * (1.0f / 512.0f);
+        fp32 = (sign << 31) | __float_as_uint(v);
     } else {
-        // Normal: value = 1.mantissa * 2^(exp - bias) = (8 + man) * 2^(exp - 10)
-        abs_val = (float)(8 + man) * exp2f((float)(exp) - 10.0f);
+        fp32 = (sign << 31) | ((exp + 120u) << 23) | (man << 20);
     }
-    return sign ? -abs_val : abs_val;
+    return __uint_as_float(fp32);
+}
+
+// Alias for code that used the slow exp2f-based name. Both refer to the same
+// fast implementation now.
+__device__ __forceinline__ float fp8_e4m3_to_float(uint8_t bits) {
+    return fp8_e4m3_to_float_fast(bits);
 }
 
 } // namespace imp
