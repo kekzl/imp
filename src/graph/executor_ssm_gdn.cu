@@ -421,11 +421,16 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     // Single kernel launch for all tokens × heads (replaces n×32×2 launches).
     // When IMP_GDN_FP32_SCAN is active, this was already done inline with the
     // scan above (FP32-input variant). Skip to avoid double-applying.
+    // IMP_GDN_NORM_EPS env can override eps (diagnostic).
+    float norm_eps = eps;
+    if (const char* e = std::getenv("IMP_GDN_NORM_EPS")) {
+        norm_eps = strtof(e, nullptr);
+    }
     if (!use_fp32_scan) {
         gdn_rmsnorm_gated_silu(static_cast<half*>(y_buf.data),
                                 static_cast<const half*>(gate_out.data),
                                 static_cast<const half*>(ly.ssm_norm_w.data),
-                                eps, n, n_heads, head_dim_ssm, stream);
+                                norm_eps, n, n_heads, head_dim_ssm, stream);
     }
 
     // 7. ssm_out projection: [n, inner] → [n, d_model]
