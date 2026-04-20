@@ -167,10 +167,16 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // Gemma 4: parallel branches — MoE experts use rmsnorm(h, pre_ffw_norm_2),
     // shared MLP uses rmsnorm(h, ffn_norm). Pick MoE-side norm here; the shared
     // branch recomputes its own norm later (reading from the saved residual).
+    // Qwen3.5/3.6 GGUFs store FFN input norm as `post_attention_norm` (no
+    // dedicated `ffn_norm`); match the fallback chain used in run_ffn. Without
+    // this, MoE reuses the pre-attention norm and the residual stream explodes
+    // (observed on Qwen3.6-35B-A3B GDN+MoE: logits L2=100k, garbage output).
     const Tensor& norm_w =
         (cfg.arch == ModelArch::GEMMA4 && ly.ffn_pre_norm_2.data != nullptr)
             ? ly.ffn_pre_norm_2
-        : (ly.ffn_norm.data != nullptr) ? ly.ffn_norm : ly.attn_norm;
+        : (ly.ffn_norm.data != nullptr) ? ly.ffn_norm
+        : (ly.post_attn_norm.data != nullptr) ? ly.post_attn_norm
+        : ly.attn_norm;
 
     // Pre-check: does NVFP4 MoE cache cover all expert tensors for this layer?
     // If so, the NVFP4 path doesn't need Q8_1 quantization (takes FP16 directly).
