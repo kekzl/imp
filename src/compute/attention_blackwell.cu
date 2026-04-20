@@ -256,11 +256,15 @@ __global__ void flash_attention_blackwell_kernel(
             float m_new = fmaxf(m_old, m_ij);
             float alpha = __expf(m_old - m_new);  // fast math: correction for old accumulator
 
-            // Step 3: Parallel exp + sum, and write SP_half in-place
+            // Step 3: Parallel exp + sum, and write SP_half in-place.
+            // Mask guard: fully-masked tile (Gemma-4 SWA long-seq) would give
+            // __expf(-FLT_MAX - (-FLT_MAX)) = 1, corrupting partial_sum.
             float partial_sum = 0.0f;
             if (row_valid) {
                 for (int c = sm_lane; c < BW_Bc; c += TPR) {
-                    float p = __expf(SP_float[r * BW_Bc + c] - m_new);
+                    float s_val = SP_float[r * BW_Bc + c];
+                    float p = (s_val <= -FLT_MAX * 0.5f) ? 0.0f
+                                                         : __expf(s_val - m_new);
                     partial_sum += p;
                     SP_float[r * BW_Bc + c] = p;  // store for half conversion below
                 }

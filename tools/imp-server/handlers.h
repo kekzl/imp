@@ -113,7 +113,5 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 void handle_completions(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_tokenize(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_detokenize(const httplib::Request& req, httplib::Response& res, ServerState& state);
-void handle_load_model(const httplib::Request& req, httplib::Response& res, ServerState& state);
-void handle_unload_model(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_metrics(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_embeddings(const httplib::Request& req, httplib::Response& res, ServerState& state);

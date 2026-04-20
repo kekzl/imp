@@ -13,6 +13,8 @@ void print_usage(const char* prog) {
         "  --revision <rev>      HuggingFace model revision (branch, tag, or commit hash)\n"
         "  --prompt <text>       Input prompt for generation\n"
         "  --max-tokens <n>      Maximum tokens to generate (default: 256)\n"
+        "  --max-seq-len <n>     KV context ceiling in tokens (default: auto from VRAM)\n"
+        "  --min-kv-tokens <n>   Minimum KV capacity in tokens (default: auto)\n"
         "  --temperature <f>     Sampling temperature (default: 0.7)\n"
         "  --top-p <f>           Top-p (nucleus) sampling (default: 0.9)\n"
         "  --top-k <n>           Top-k sampling (default: 40)\n"
@@ -84,6 +86,10 @@ CliArgs parse_args(int argc, char** argv) {
         } else if (std::strcmp(arg, "--max-tokens") == 0 && i + 1 < argc) {
             args.max_tokens = std::atoi(argv[++i]);
             args.max_tokens_set = true;
+        } else if (std::strcmp(arg, "--max-seq-len") == 0 && i + 1 < argc) {
+            args.max_seq_len = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--min-kv-tokens") == 0 && i + 1 < argc) {
+            args.min_kv_tokens = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--temperature") == 0 && i + 1 < argc) {
             args.temperature = static_cast<float>(std::atof(argv[++i]));
             args.temperature_set = true;

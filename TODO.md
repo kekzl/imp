@@ -59,7 +59,7 @@ Current gap vs FP8 baseline: -23% decode (191 vs 248 tok/s). This is algorithm-i
 - [x] SafeTensors model loading in imp-server (was GGUF-only)
 - [x] `resolve_model_auto()` with format auto-detection (SafeTensors directory vs GGUF file)
 - [x] Server model list includes both GGUF files and SafeTensors directories
-- [x] Server hot-swap between GGUF and SafeTensors models
+- [x] ~~Server hot-swap between GGUF and SafeTensors models~~ (reverted post-v0.6: `--model` is now required at startup, POST/DELETE `/v1/models` removed)
 - [x] Chat template array-format support in `tokenizer_config.json` (HuggingFace convention)
 
 ### Verified

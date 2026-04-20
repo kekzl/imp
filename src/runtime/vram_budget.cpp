@@ -196,14 +196,20 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
     // Enforce minimum KV token budget. Auto default: 16K tokens or 4x max_seq_len,
     // whichever is smaller (capped to not exceed what VRAM can physically hold).
     int min_kv_tok = config.min_kv_tokens;
-    if (min_kv_tok <= 0) {
+    bool user_requested_min = (min_kv_tok > 0);
+    if (!user_requested_min) {
         min_kv_tok = std::min(16384, config.max_seq_len * 4);
     }
     int min_kv_blocks = (min_kv_tok + bs - 1) / bs;
     int max_affordable = (per_block_total > 0)
         ? static_cast<int>(available / per_block_total) : budget.kv_max_blocks;
-    // Don't exceed 80% of total affordable (leave room for weight caches)
-    min_kv_blocks = std::min(min_kv_blocks, static_cast<int>(max_affordable * 0.8));
+    // Defensive cap for auto mode (leaves room for weight caches). When the
+    // user explicitly sets min_kv_tokens, respect their request up to the
+    // physical max_affordable — they're opting into a tighter weight-cache
+    // budget in exchange for more context.
+    int cap = user_requested_min ? max_affordable
+                                 : static_cast<int>(max_affordable * 0.8);
+    min_kv_blocks = std::min(min_kv_blocks, cap);
     if (budget.kv_max_blocks < min_kv_blocks) {
         IMP_LOG_INFO("VRAM budget: raising KV from %d to %d blocks (min_kv_tokens=%d)",
                      budget.kv_max_blocks, min_kv_blocks, min_kv_tok);

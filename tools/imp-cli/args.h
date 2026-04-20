@@ -8,6 +8,8 @@ struct CliArgs {
     std::string revision;      // --revision: HuggingFace model revision (branch/tag/commit)
     std::string prompt;
     int max_tokens = 256;
+    int max_seq_len = 0;        // --max-seq-len: KV context ceiling (0 = auto from VRAM)
+    int min_kv_tokens = 0;      // --min-kv-tokens: floor KV capacity (0 = auto)
     float temperature = 0.7f;
     float top_p = 0.9f;
     int top_k = 40;
