@@ -23,8 +23,8 @@
 #include "compute/gemm_moe_fused.h"
 #include "compute/gemm_moe_fused_tc.h"
 #include "compute/gemm_q6k.h"
-#include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
+#include "compute/gemm_cutlass_grouped_3x.h"
 #include "compute/activation.h"
 #include "compute/attention.h"
 #include "compute/attention_cublas.h"
@@ -39,7 +39,6 @@
 #include "quant/dequant_gpu.h"
 #include "quant/fp8_quant.h"
 #include "quant/nvfp4_gemm.h"
-#include "compute/gemm_cublaslt_nvfp4.h"
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "runtime/pdl.h"
@@ -1345,6 +1344,154 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
         nvfp4_batch_dequant_gemm(ly.expert_down_packed.data,
                                   down_act, expert_down_base, eff, d);
+
+        // Falls through to scatter (step 7)
+
+    } else if (([&] {
+        // Predicate: CUTLASS 3.x NVFP4 grouped path.
+        // Measured on Qwen3-Coder-30B-A3B-FP4:
+        //   Prefill n=120: ~2750 tok/s (vs legacy ~77)   — 35× win
+        //   Decode n=1:    ~48 tok/s (vs legacy ~38)     — 25% win
+        // After shared-quantize gate+up (2026-04-20), 3.x beats legacy at all n.
+        // `IMP_NO_CUTLASS3X_MOE=1` forces legacy (for debugging).
+        static const bool force_off = std::getenv("IMP_NO_CUTLASS3X_MOE") != nullptr;
+        if (force_off) return false;
+        if (!cutlass_grouped_3x_nvfp4_available()) return false;
+        if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf) return false;
+        auto covers = [&](const std::vector<Tensor>& vec) {
+            if (static_cast<int>(vec.size()) < ne) return false;
+            for (int e = 0; e < ne; ++e) {
+                if (!vec[e].data) return false;
+                if (!wcache_.cutlass_nvfp4.count(vec[e].data)) return false;
+            }
+            return true;
+        };
+        if (!covers(ly.expert_w_up)) return false;
+        if (!covers(ly.expert_w_down)) return false;
+        if (!non_gated_experts && !covers(ly.expert_w_gate)) return false;
+        return true;
+    })()) {
+        // =========================================================================
+        // CUTLASS 3.x NVFP4 BlockScaled Grouped GEMM path (NVFP4 × NVFP4 → FP16).
+        // Gated by IMP_CUTLASS3X_MOE=1. Zero dequant overhead vs the nvfp4→FP16
+        // batch path; per-group alpha via CUTLASS fusion_args.alpha_ptr_array.
+        // =========================================================================
+        if (layer == 0) IMP_LOG_INFO("MoE prefill: CUTLASS 3.x NVFP4 grouped (n=%d, expanded=%d)",
+                                      n, expanded);
+
+        std::vector<int32_t> h_offsets(ne + 1);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_offsets.data(), routing.expert_offsets.data,
+                        static_cast<size_t>(ne + 1) * sizeof(int32_t),
+                        cudaMemcpyDeviceToHost, stream));
+        cudaStreamSynchronize(stream);
+
+        std::vector<int> M_per(ne);
+        for (int e = 0; e < ne; ++e) M_per[e] = h_offsets[e + 1] - h_offsets[e];
+
+        char* gathered_base     = static_cast<char*>(moe_.gathered.data);
+        char* expert_gate_base  = static_cast<char*>(moe_.expert_gate.data);
+        char* expert_up_base    = static_cast<char*>(moe_.expert_up.data);
+        char* expert_swiglu_base= static_cast<char*>(moe_.expert_swiglu.data);
+        char* expert_down_base  = static_cast<char*>(moe_.expert_down.data);
+
+        // Active-expert SFA offset table (computed per K_in; different for d vs eff).
+        // Shared across same-K_in projections: gate and up both use K_in=d,
+        // so a single quantize of `gathered_base` + pointer array is reused
+        // for both grouped GEMMs. Down reuses the staging buffer with fresh
+        // quantize for K_in=eff (stream-ordered overwrite).
+        auto quantize_once = [&](const char* a_base, int K_in,
+                                 std::vector<size_t>& sfa_offsets,
+                                 std::vector<uint8_t*>& h_sfa_bases) -> bool {
+            sfa_offsets.assign(ne + 1, 0);
+            h_sfa_bases.assign(ne, nullptr);
+            size_t total_packed = 0;
+            for (int e = 0; e < ne; ++e) {
+                total_packed += static_cast<size_t>(M_per[e]) * K_in / 2;
+                sfa_offsets[e + 1] = sfa_offsets[e] + cutlass_nvfp4_sf_size(M_per[e], K_in);
+            }
+            const size_t total_sfa = sfa_offsets[ne];
+            if (total_packed > moe_.cutlass3x_packed_size ||
+                total_sfa    > moe_.cutlass3x_sf_size) {
+                IMP_LOG_ERROR("CUTLASS 3.x MoE staging too small: need packed=%zu sf=%zu, have %zu/%zu",
+                              total_packed, total_sfa,
+                              moe_.cutlass3x_packed_size, moe_.cutlass3x_sf_size);
+                return false;
+            }
+            uint8_t* all_sfa = static_cast<uint8_t*>(moe_.cutlass3x_sf);
+            for (int e = 0; e < ne; ++e) {
+                if (M_per[e] > 0) h_sfa_bases[e] = all_sfa + sfa_offsets[e];
+            }
+            // Upload SFA pointer array to device (~1 KB).
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(moe_.cutlass3x_sfa_ptrs,
+                                               h_sfa_bases.data(),
+                                               static_cast<size_t>(ne) * sizeof(uint8_t*),
+                                               cudaMemcpyHostToDevice, stream));
+            // Zero active SFA region (SfAtom pads rows to 128).
+            IMP_CUDA_CHECK_LOG(cudaMemsetAsync(all_sfa, 0, total_sfa, stream));
+            // Fused per-expert quantize in one kernel launch.
+            quantize_fp16_to_nvfp4_cutlass_moe(
+                a_base, moe_.cutlass3x_packed,
+                moe_.cutlass3x_sfa_ptrs,
+                routing.expert_offsets.data ? static_cast<const int*>(routing.expert_offsets.data) : nullptr,
+                expanded, K_in, ne, stream);
+            return true;
+        };
+
+        // Dispatch a grouped GEMM given already-quantized activations.
+        auto grouped_gemm = [&](const std::vector<Tensor>& weights,
+                                char* c_base, int K_in, int N_out,
+                                const std::vector<size_t>& sfa_offsets) {
+            char* all_packed = static_cast<char*>(moe_.cutlass3x_packed);
+            uint8_t* all_sfa = static_cast<uint8_t*>(moe_.cutlass3x_sf);
+            // Active experts only (CUTLASS 3.x wants non-empty groups).
+            std::vector<int> active_M;
+            std::vector<const void*> hA, hSFA, hB, hSFB;
+            std::vector<void*> hD;
+            std::vector<float> hAlpha;
+            active_M.reserve(ne); hA.reserve(ne); hSFA.reserve(ne);
+            hB.reserve(ne); hSFB.reserve(ne); hD.reserve(ne); hAlpha.reserve(ne);
+            for (int e = 0; e < ne; ++e) {
+                if (M_per[e] == 0) continue;
+                const auto& cw = wcache_.cutlass_nvfp4.at(weights[e].data);
+                active_M.push_back(M_per[e]);
+                hA.push_back(all_packed + static_cast<size_t>(h_offsets[e]) * K_in / 2);
+                hSFA.push_back(all_sfa + sfa_offsets[e]);
+                hB.push_back(cw.data);
+                hSFB.push_back(cw.scale_factors);
+                hD.push_back(c_base + static_cast<size_t>(h_offsets[e]) * N_out * sizeof(half));
+                hAlpha.push_back(cw.tensor_scale);
+            }
+            const int na = static_cast<int>(active_M.size());
+            if (na == 0) return;
+            bool ok = gemm_grouped_cutlass_3x_nvfp4(
+                na, active_M.data(), N_out, K_in,
+                hA.data(), hSFA.data(), hB.data(), hSFB.data(),
+                hD.data(), hAlpha.data(), stream);
+            if (!ok) IMP_LOG_ERROR("CUTLASS 3.x grouped dispatch failed (K=%d N=%d ne=%d)", K_in, N_out, na);
+        };
+
+        // Gate+Up share the same input (gathered_base, K_in=d) → quantize once,
+        // run two grouped GEMMs reusing staging buffers.
+        std::vector<size_t> sfa_offs;
+        std::vector<uint8_t*> sfa_bases;
+        if (quantize_once(gathered_base, d, sfa_offs, sfa_bases)) {
+            if (!non_gated_experts)
+                grouped_gemm(ly.expert_w_gate, expert_gate_base, d, eff, sfa_offs);
+            grouped_gemm(ly.expert_w_up, expert_up_base, d, eff, sfa_offs);
+        }
+
+        apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
+                                moe_.expert_swiglu.data, non_gated_experts,
+                                expanded, eff, compute_dtype_, cfg.ffn_activation, stream);
+
+        // Down has a different activation (post-SwiGLU, K_in=eff) → re-quantize.
+        // (A fused silu(gate)*up+quantize kernel was tried but regressed short-prompt
+        //  decode ~11% due to low SM occupancy at small expanded — existing swiglu
+        //  kernel has better per-element parallelism, so keep it separate.)
+        char* down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
+        if (quantize_once(down_act, eff, sfa_offs, sfa_bases)) {
+            grouped_gemm(ly.expert_w_down, expert_down_base, eff, d, sfa_offs);
+        }
 
         // Falls through to scatter (step 7)
 

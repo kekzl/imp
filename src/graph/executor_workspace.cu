@@ -5,7 +5,6 @@
 #include "compute/layernorm.h"
 #include "compute/rope.h"
 #include "compute/gemm.h"
-#include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/activation.h"
 #include "compute/moe_routing.h"

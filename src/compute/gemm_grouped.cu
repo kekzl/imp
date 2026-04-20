@@ -1,7 +1,6 @@
 #include "compute/gemm_grouped.h"
 #include "core/logging.h"
 
-#include "compute/gemm_cutlass_grouped_sm120.h"
 
 #include <cublas_v2.h>
 #include <cublasLt.h>
@@ -201,90 +200,11 @@ void gemm_moe_batched(const void* a_base, void* c_base,
     // CUTLASS grouped GEMM: single persistent kernel for all experts.
     // Only applies to FP16 without per-expert scales (non-FP8 path).
     // -----------------------------------------------------------------------
-    if (cutlass_grouped_gemm_sm120_available() && dtype == DType::FP16 &&
-        !a_scales && (output_dtype == DType(255) || output_dtype == DType::FP16))
-    {
-        // Count active experts and build host pointer/M arrays
-        int n_active = 0;
-        for (int e = 0; e < n_experts; e++) {
-            if (offsets[e + 1] > offsets[e]) n_active++;
-        }
-
-        if (n_active > 0) {
-            size_t elem_sz_fp16 = sizeof(half);
-            std::vector<const void*> h_A(n_active);
-            std::vector<const void*> h_B(n_active);
-            std::vector<void*>       h_C(n_active);
-            std::vector<int>         h_M(n_active);
-
-            const char* a_bytes = static_cast<const char*>(a_base);
-            char* c_bytes = static_cast<char*>(c_base);
-            int gi = 0;
-            for (int e = 0; e < n_experts; e++) {
-                int count = offsets[e + 1] - offsets[e];
-                if (count <= 0) continue;
-                h_A[gi] = a_bytes + static_cast<size_t>(offsets[e]) * K * elem_sz_fp16;
-                h_B[gi] = b_ptrs[e];
-                h_C[gi] = c_bytes + static_cast<size_t>(offsets[e]) * N * elem_sz_fp16;
-                h_M[gi] = count;
-                gi++;
-            }
-
-            // Upload pointer arrays and M values to device
-            // Use pre-allocated d_work_ptrs if available, else allocate
-            void** d_A_ptrs_cu;
-            void** d_B_ptrs_cu;
-            void** d_C_ptrs_cu;
-            int*   d_M_values;
-            bool owns_cu_ptrs = false;
-
-            size_t ptr_bytes = n_active * sizeof(void*);
-            size_t m_bytes = n_active * sizeof(int);
-
-            if (d_work_ptrs && n_active <= n_experts) {
-                // Reuse pre-allocated workspace: [A..., B..., C..., M...]
-                // d_work_ptrs has space for 3 * n_experts void* entries.
-                // We borrow additional space for M values after the 3 pointer arrays.
-                d_A_ptrs_cu = d_work_ptrs;
-                d_B_ptrs_cu = d_work_ptrs + n_experts;
-                d_C_ptrs_cu = d_work_ptrs + 2 * n_experts;
-                // M values: allocate separately (d_work_ptrs may not have extra room)
-                IMP_CUDA_CHECK_LOG(cudaMallocAsync(&d_M_values, m_bytes, stream));
-                owns_cu_ptrs = true;  // only owns d_M_values
-            } else {
-                IMP_CUDA_CHECK_LOG(cudaMallocAsync(reinterpret_cast<void**>(&d_A_ptrs_cu), ptr_bytes, stream));
-                IMP_CUDA_CHECK_LOG(cudaMallocAsync(reinterpret_cast<void**>(&d_B_ptrs_cu), ptr_bytes, stream));
-                IMP_CUDA_CHECK_LOG(cudaMallocAsync(reinterpret_cast<void**>(&d_C_ptrs_cu), ptr_bytes, stream));
-                IMP_CUDA_CHECK_LOG(cudaMallocAsync(reinterpret_cast<void**>(&d_M_values), m_bytes, stream));
-                owns_cu_ptrs = true;
-            }
-
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_A_ptrs_cu, h_A.data(), ptr_bytes, cudaMemcpyHostToDevice, stream));
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_B_ptrs_cu, h_B.data(), ptr_bytes, cudaMemcpyHostToDevice, stream));
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_C_ptrs_cu, h_C.data(), ptr_bytes, cudaMemcpyHostToDevice, stream));
-            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_M_values, h_M.data(), m_bytes, cudaMemcpyHostToDevice, stream));
-
-            bool ok = gemm_grouped_cutlass_sm120(
-                reinterpret_cast<const void* const*>(d_A_ptrs_cu),
-                reinterpret_cast<const void* const*>(d_B_ptrs_cu),
-                reinterpret_cast<void* const*>(d_C_ptrs_cu),
-                d_M_values,
-                N, K, n_active,
-                nullptr, 0,  // workspace auto-managed internally
-                stream);
-
-            // Cleanup async allocations
-            IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_M_values, stream));
-            if (owns_cu_ptrs && !d_work_ptrs) {
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_A_ptrs_cu, stream));
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_B_ptrs_cu, stream));
-                IMP_CUDA_CHECK_LOG(cudaFreeAsync(d_C_ptrs_cu, stream));
-            }
-
-            if (ok) return;  // Success — skip cuBLAS path
-            // Fall through to cuBLAS on failure
-        }
-    }
+    // CUTLASS 2.x GemmGrouped wrapper was removed 2026-04-20 — benchmark on Gemma-4
+    // Q5_K_M showed cuBLAS grouped path is ~14% faster on prefill and equivalent
+    // on decode on SM120. NVIDIA optimized cublasLtMatmulGrouped in CUDA 13.2+,
+    // making the hand-rolled 2.x wrapper redundant. cuBLAS dispatch below handles
+    // all cases previously routed through CUTLASS 2.x.
 
     cublasHandle_t handle = get_cublas_handle();
     cublasSetStream(handle, stream);

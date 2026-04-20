@@ -41,6 +41,20 @@ void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data,
                                      void* dst_sf, int M, int K,
                                      cudaStream_t stream);
 
+// MoE fused variant: single kernel quantizes all [expanded, K] rows into
+//   dst_packed: [expanded, K/2] contiguous FP4 bytes (row-major, same as input layout)
+//   d_sfa_bases[e]: pointer to expert e's SFA slab (device array of ne pointers)
+//   d_offsets[ne+1]: cumulative row offsets (device int array)
+// Inactive experts (offsets[e+1] == offsets[e]) contribute no threads and their
+// sfa_bases entry is unused; set to nullptr for defensive no-op.
+void quantize_fp16_to_nvfp4_cutlass_moe(const void* src_fp16,
+                                        void* dst_packed,
+                                        uint8_t* const* d_sfa_bases,
+                                        const int* d_offsets,
+                                        int expanded, int K, int ne,
+                                        cudaStream_t stream);
+
+
 // Run CUTLASS sm_120 block-scaled NVFP4xNVFP4 GEMM: D = alpha * A x B^T
 //   A (activation): [M, K] NVFP4 RowMajor + SFA scale factors
 //   B (weight):     [N, K] NVFP4 RowMajor + SFB scale factors (micro_scale only)

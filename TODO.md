@@ -113,7 +113,7 @@ Current gap vs FP8 baseline: -23% decode (191 vs 248 tok/s). This is algorithm-i
 ### CUTLASS 4.4.2 — Upgraded
 Already on v4.4.2. SM120 fixes (SMEM alignment, memory fence, PDL, Hopper FMHA perf) are automatic via headers.
 
-**Remaining opportunity:** MoE Grouped GEMM uses CUTLASS 2.x API with D2H sync workaround (`gemm_cutlass_grouped_sm120.cu:115-131`). Migration to CUTLASS 3.x device-side problem shapes would eliminate 2 cudaStreamSynchronize() per MoE forward. Low priority — only matters at MoE-heavy workloads.
+**Completed 2026-04-20:** CUTLASS 2.x `GemmGrouped` path removed. NVFP4 MoE now dispatches via CUTLASS 3.x `GroupProblemShape` (`gemm_cutlass_grouped_3x.cu`) with fused per-expert quantize — 30×+ prefill speedup on Qwen3-Coder-30B-A3B-FP4. FP16 MoE grouped path (Gemma-4 etc.) now goes directly to cuBLAS grouped, which is +24% faster than the retired 2.x wrapper on Gemma-4 Q5_K_M.
 
 SM120 GEMM architecture notes:
 - Pingpong (2×4 MMA warps) and Cooperative (1×8 MMA warps) schedules

@@ -1,5 +1,6 @@
 #include "quant/nvfp4_gemm.h"
 #include "quant/nvfp4_quant.h"
+#include "quant/fp8_utils.cuh"
 #include "compute/gemm.h"
 #include "core/tensor.h"
 #include "core/logging.h"
@@ -57,21 +58,8 @@ static bool use_multirow(int n_mb, int mr_blocks) {
     return n_mb <= 512 && mr_blocks >= kMinBlocksPerSM * nvfp4_n_sms();
 }
 
-// Fast FP8 E4M3 -> FP32 via bit manipulation (branchless, no exp2f).
-// Uses the normal-path formula for all values including denorms.
-// For exp=0: produces a tiny but non-zero value (~0.008) instead of exact denorm.
-// Micro-scales are practically never denorm, so this is safe for NVFP4 GEMV.
-__device__ __forceinline__ float fp8_e4m3_to_float_fast(uint8_t bits)
-{
-    uint32_t sign = (bits >> 7) & 1;
-    uint32_t exp  = (bits >> 3) & 0x0F;
-    uint32_t man  = bits & 0x07;
-    // Normal: FP8 bias=7, FP32 bias=127 -> exp offset=120.
-    // Denorm (exp=0): gives 2^(-7) * (1 + man/8) ≈ 0.008-0.015 instead of
-    // exact 0 or man*2^(-9), but these values are negligible for micro-scales.
-    uint32_t fp32 = (sign << 31) | ((exp + 120u) << 23) | (man << 20);
-    return __uint_as_float(fp32);
-}
+// fp8_e4m3_to_float_fast moved to quant/fp8_utils.cuh (shared with MXFP4 +
+// CUTLASS block-scale kernels). Single correct implementation, denorm-safe.
 
 // Process one micro-block (8 packed bytes = 16 FP4 values).
 // Returns unscaled dot product: sum(dequant(nibble) * activation).
