@@ -147,7 +147,7 @@ for chunk in client.chat.completions.create(
     print(chunk.choices[0].delta.content or "", end="", flush=True)
 ```
 
-Supports `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/tokenize`, `/detokenize`, `/health`, tool/function calling, streaming usage stats, logprobs, and API key auth (`--api-key`). The `/v1/models` endpoint lists all available GGUF and SafeTensors models in the models directory. Requesting a different model via the `model` field triggers automatic hot-swap.
+Supports `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/tokenize`, `/detokenize`, `/health`, tool/function calling, streaming usage stats, logprobs, and API key auth (`--api-key`). The `/v1/models` endpoint lists all available GGUF and SafeTensors models in the models directory.
 
 ## C API
 

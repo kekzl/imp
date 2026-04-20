@@ -7,25 +7,17 @@
 
 #include <csignal>
 #include <cstdio>
-#include <cstdlib>
 #include <filesystem>
 
 using json = nlohmann::json;
 
-// Resolve HuggingFace cache directory:
-//   $HUGGINGFACE_HUB_CACHE > $HF_HOME/hub > ~/.cache/huggingface/hub
-static std::string resolve_hf_cache_dir() {
-    if (const char* v = std::getenv("HUGGINGFACE_HUB_CACHE"))
-        return v;
-    if (const char* v = std::getenv("HF_HOME"))
-        return std::string(v) + "/hub";
-    if (const char* v = std::getenv("HOME"))
-        return std::string(v) + "/.cache/huggingface/hub";
-    return {};
-}
-
 int main(int argc, char** argv) {
     ServerArgs args = parse_server_args(argc, argv);
+
+    if (args.model_path.empty()) {
+        fprintf(stderr, "Error: --model is required\n");
+        return 1;
+    }
 
     printf("IMP Server %s\n", imp_version());
 
@@ -34,50 +26,37 @@ int main(int argc, char** argv) {
     state.default_think_budget = args.think_budget;
     state.default_args = args;
 
-    // Resolve model path early (needed for models_dir fallback)
-    std::string resolved_model;
     ImpModelFormat resolved_format = IMP_FORMAT_GGUF;
-    if (!args.model_path.empty()) {
-        resolved_model = imp::resolve_model_auto(args.model_path, resolved_format, args.revision);
-        if (resolved_model.empty()) {
-            fprintf(stderr, "Failed to resolve model: %s\n", args.model_path.c_str());
-            return 1;
-        }
-        if (resolved_model != args.model_path) {
-            printf("Resolved model: %s -> %s (%s)\n", args.model_path.c_str(),
-                   resolved_model.c_str(),
-                   resolved_format == IMP_FORMAT_SAFETENSORS ? "SafeTensors" : "GGUF");
-        }
+    std::string resolved_model = imp::resolve_model_auto(
+        args.model_path, resolved_format, args.revision);
+    if (resolved_model.empty()) {
+        fprintf(stderr, "Failed to resolve model: %s\n", args.model_path.c_str());
+        return 1;
+    }
+    if (resolved_model != args.model_path) {
+        printf("Resolved model: %s -> %s (%s)\n", args.model_path.c_str(),
+               resolved_model.c_str(),
+               resolved_format == IMP_FORMAT_SAFETENSORS ? "SafeTensors" : "GGUF");
     }
 
-    // Set models directory (explicit flag → model parent → /models → HF cache)
+    // Models directory: explicit --models-dir overrides, else the resolved model's parent.
     if (!args.models_dir.empty()) {
         state.models_dir = args.models_dir;
-    } else if (!resolved_model.empty()) {
+    } else {
         auto parent = std::filesystem::path(resolved_model).parent_path().string();
         if (!parent.empty()) state.models_dir = parent;
-    } else if (std::filesystem::is_directory("/models")) {
-        state.models_dir = "/models";
-    } else {
-        std::string hf = resolve_hf_cache_dir();
-        if (!hf.empty() && std::filesystem::is_directory(hf))
-            state.models_dir = hf;
     }
-
     if (!state.models_dir.empty()) {
         printf("Models directory: %s\n", state.models_dir.c_str());
     }
 
-    // Load model at startup if provided
-    if (!resolved_model.empty()) {
-        printf("Loading model: %s\n", resolved_model.c_str());
+    printf("Loading model: %s\n", resolved_model.c_str());
+    {
         std::string error = load_model_into_state(state, resolved_model);
         if (!error.empty()) {
             fprintf(stderr, "%s\n", error.c_str());
             return 1;
         }
-    } else {
-        printf("No model specified — server will wait for POST /v1/models\n");
     }
 
     // Set up HTTP server
@@ -211,8 +190,6 @@ int main(int argc, char** argv) {
     printf("Endpoints:\n");
     printf("  GET    /health\n");
     printf("  GET    /v1/models\n");
-    printf("  POST   /v1/models          Load/swap model\n");
-    printf("  DELETE /v1/models          Unload model\n");
     printf("  POST   /v1/chat/completions\n");
     printf("  POST   /v1/completions\n");
     printf("  POST   /v1/embeddings\n");
