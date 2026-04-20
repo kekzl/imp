@@ -599,9 +599,31 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         static bool no_cublas_attn = getenv("IMP_NO_CUBLAS_ATTN");
         static bool use_naive_attn = getenv("IMP_NAIVE_ATTN") != nullptr;
         bool force_cublas_attn = per_layer_shapes;  // Gemma 4 dual head_dim
-        if (use_naive_attn && n <= 2048) {
-            // Naive reference attention: simple FP32, no optimization, for debugging
-            if (layer == 0)
+        // Gemma-4 long-context workarounds. Two failure modes at n > 1024:
+        //   (a) SWA layers (hd=256) with sliding_active → FMHA chain emits
+        //       "own owners and" garbage. Root cause not yet isolated.
+        //   (b) Global layers (hd=512) at n > cuBLAS S-matrix capacity
+        //       (attn_scores_.shape[1], typically 2896): cuBLAS gate fails,
+        //       FMHA fallback chain dispatches flash_attention_prefill_tc
+        //       whose ~280 KB static tile exceeds sm_120's 100 KB opt-in
+        //       smem (cudaErrorInvalidValue, stale-error warning).
+        // Workaround: route both cases through naive FP32 reference
+        // attention (smem bound = seq_len*4B; n=8192 → 32 KB). Correct at
+        // any head_dim, supports sliding_window. Bypassable via
+        // IMP_NO_NAIVE_SWA=1.
+        int cublas_cap = attn_scores_buf_ ? static_cast<int>(attn_scores_.shape[1]) : 0;
+        bool gemma4_swa_broken    = (cfg.arch == ModelArch::GEMMA4 && sliding_active);
+        bool gemma4_global_too_long = (cfg.arch == ModelArch::GEMMA4 && !sliding_active
+                                       && n > cublas_cap);
+        bool use_naive_for_swa = ((gemma4_swa_broken || gemma4_global_too_long)
+                                  && n <= 8192
+                                  && getenv("IMP_NO_NAIVE_SWA") == nullptr);
+        if ((use_naive_attn && n <= 2048) || use_naive_for_swa) {
+            // Naive reference attention: simple FP32, no optimization.
+            if (layer == 0 && use_naive_for_swa && !use_naive_attn)
+                IMP_LOG_INFO("Gemma-4 SWA workaround: layer %d using NAIVE attention (n=%d > sw=%d; FMHA chain is incorrect at hd=%d + SWA)",
+                             layer, n, layer_sliding_window, hd);
+            else if (layer == 0)
                 IMP_LOG_INFO("Using NAIVE reference attention (n=%d, nh=%d, nkv=%d, hd=%d, scale=%.2f)",
                              n, nh, nkv, hd, scale);
             naive_attention_prefill(
@@ -609,9 +631,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                 static_cast<const half*>(kk.data),
                 static_cast<const half*>(vv.data),
                 static_cast<half*>(ao.data),
-                n, nh, nkv, hd, scale, cfg.attn_logit_softcap, stream);
+                n, nh, nkv, hd, scale, cfg.attn_logit_softcap, stream,
+                layer_sliding_window);
         } else if ((force_cublas_attn || !no_cublas_attn) && attn_scores_buf_ && n <= static_cast<int>(attn_scores_.shape[1]) &&
-            n <= 1024 && !sliding_active) {
+            (force_cublas_attn || n <= 1024) && !sliding_active) {
+            // The n<=1024 heuristic below picks Flash Attention for long contexts
+            // (O(1) memory) over cuBLAS (O(n^2) S-matrix). Gemma-4 with mixed
+            // head_dims (256 SWA / 512 global) MUST stay on cuBLAS for the
+            // global layers at any n that fits the S-matrix: the FMHA chain
+            // (fmha_sm120_prefill → flash_attention_blackwell → _tc) tops out at
+            // head_dim=256 with per-tile kernels; head_dim=512 falls to
+            // flash_attention_prefill_tc whose ~280 KB static tile exceeds
+            // sm_120's 100 KB opt-in dynamic smem, poisoning the stream with
+            // cudaErrorInvalidValue. force_cublas_attn (set on per-layer shapes)
+            // therefore overrides the n<=1024 heuristic.
             int64_t s_shape[3] = {static_cast<int64_t>(nh),
                                   static_cast<int64_t>(n),
                                   static_cast<int64_t>(n)};

@@ -141,6 +141,8 @@ Model:
 Generation:
   --prompt <text>           Input prompt
   --max-tokens <n>          Max tokens to generate (default: 256)
+  --max-seq-len <n>         KV context ceiling in tokens (default: auto from VRAM)
+  --min-kv-tokens <n>       Minimum KV capacity in tokens (default: auto)
   --interactive             Interactive chat mode
   --stop <str>              Stop sequence (repeatable, up to 4)
   --chat-template <t>       auto|none|chatml|llama2|llama3|nemotron|gemma|deepseek_r1|phi

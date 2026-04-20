@@ -264,11 +264,20 @@ fmha_sm120_kernel(
             float m_new = fmaxf(m_old, m_ij);
             float alpha = __expf(m_old - m_new);
 
-            // Step 3: Parallel exp + sum, store exp values back
+            // Step 3: Parallel exp + sum, store exp values back.
+            // Mask guard: apply_score_masks writes -FLT_MAX for causal/SWA-out-of-window
+            // positions. When ALL positions in a tile are masked for this row
+            // (Gemma-4 SWA query beyond the window hitting the first KV tile at
+            // kv_start=0), m_new collapses to -FLT_MAX and `expf(-FLT_MAX -
+            // (-FLT_MAX)) = expf(0) = 1` would inflate partial_sum by Bkv per row
+            // and poison the running softmax denominator. Explicit sentinel check
+            // maps masked scores to 0 without relying on the subtractive cancel.
             float partial_sum = 0.0f;
             if (row_valid) {
                 for (int c = sm_lane; c < Bkv; c += TPR) {
-                    float p = __expf(S_tile[r * Bkv + c] - m_new);
+                    float s_val = S_tile[r * Bkv + c];
+                    float p = (s_val <= -FLT_MAX * 0.5f) ? 0.0f
+                                                         : __expf(s_val - m_new);
                     partial_sum += p;
                     S_tile[r * Bkv + c] = p;
                 }
@@ -776,10 +785,15 @@ fmha_sm120_fp8_kernel(
             float m_new = fmaxf(m_old, m_ij);
             float alpha = __expf(m_old - m_new);
 
+            // Mask guard: see Step 3 of the other fmha_sm120_kernel template above.
+            // Fully-masked tile (Gemma-4 SWA query > sliding_window) would
+            // otherwise poison partial_sum via __expf(-FLT_MAX - (-FLT_MAX)) = 1.
             float partial_sum = 0.0f;
             if (row_valid) {
                 for (int c = sm_lane; c < Bkv; c += TPR) {
-                    float p = __expf(S_tile[r * Bkv + c] - m_new);
+                    float s_val = S_tile[r * Bkv + c];
+                    float p = (s_val <= -FLT_MAX * 0.5f) ? 0.0f
+                                                         : __expf(s_val - m_new);
                     partial_sum += p;
                     S_tile[r * Bkv + c] = p;
                 }

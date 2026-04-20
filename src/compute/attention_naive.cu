@@ -26,7 +26,7 @@ __global__ void naive_attention_prefill_kernel(
     const half* __restrict__ V,      // [seq_len, n_kv_heads * head_dim]
     half* __restrict__ O,            // [seq_len, n_heads * head_dim]
     int seq_len, int n_heads, int n_kv_heads, int head_dim,
-    float scale, float softcap)
+    float scale, float softcap, int sliding_window)
 {
     const int head = blockIdx.x;
     const int q_pos = blockIdx.y;
@@ -47,6 +47,9 @@ __global__ void naive_attention_prefill_kernel(
     for (int k_pos = tid; k_pos < seq_len; k_pos += blockDim.x) {
         if (k_pos > q_pos) {
             // Causal mask: future positions get -inf
+            scores[k_pos] = -FLT_MAX;
+        } else if (sliding_window > 0 && (q_pos - k_pos) >= sliding_window) {
+            // Sliding window: positions outside the window get -inf
             scores[k_pos] = -FLT_MAX;
         } else {
             // Dot product: Q[q_pos, head] . K[k_pos, gqa_group]
@@ -137,14 +140,15 @@ __global__ void naive_attention_prefill_kernel(
 void naive_attention_prefill(
     const half* Q, const half* K, const half* V, half* O,
     int seq_len, int n_heads, int n_kv_heads, int head_dim,
-    float scale, float softcap, cudaStream_t stream)
+    float scale, float softcap, cudaStream_t stream,
+    int sliding_window)
 {
     int threads = 256;
     dim3 grid(n_heads, seq_len);
     size_t smem = seq_len * sizeof(float);  // scores array
 
     naive_attention_prefill_kernel<<<grid, threads, smem, stream>>>(
-        Q, K, V, O, seq_len, n_heads, n_kv_heads, head_dim, scale, softcap);
+        Q, K, V, O, seq_len, n_heads, n_kv_heads, head_dim, scale, softcap, sliding_window);
 }
 
 } // namespace imp
