@@ -15,6 +15,22 @@
 
 namespace imp {
 
+// Helper: FP32 ssm_out + FP16 residual → FP16 h. Preserves FP32 GEMM-accum
+// precision through the residual add so downstream RMSNorm sees bit-accurate
+// inputs (fixes Qwen 3.6 sign flips). Used when IMP_GDN_FP32_OUT=1.
+__global__ void fp32_plus_fp16_to_fp16(
+    const float* __restrict__ a_fp32,
+    const __half* __restrict__ b_fp16,
+    __half* __restrict__ out_fp16,
+    int64_t n)
+{
+    int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float v = a_fp32[idx] + __half2float(b_fp16[idx]);
+        out_fp16[idx] = __float2half(v);
+    }
+}
+
 // Map global layer index to SSM/GDN state index.
 static inline int get_ssm_layer(const std::vector<int>& ssm_layer_map, int layer) {
     return ssm_layer_map[layer];
@@ -434,13 +450,36 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     }
 
     // 7. ssm_out projection: [n, inner] → [n, d_model]
+    // IMP_GDN_FP32_OUT=1: compute the ssm_out GEMM with FP32 output and add the
+    // residual in FP32 before downcast. FP16 accumulation here drifts ~5% per
+    // element vs llama.cpp; that small drift amplifies to sign flips in
+    // downstream near-zero projections and breaks Qwen 3.6.
+    static const bool use_fp32_out = std::getenv("IMP_GDN_FP32_OUT") != nullptr;
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
-    gemm_dispatch(y_buf, ly.ssm_out, ly.ssm_out_qtype, out_buf, ctx);
+    if (use_fp32_out) {
+        // Allocate FP32 scratch via cudaMallocAsync (small: n * d_model * 4 bytes)
+        size_t fp32_bytes = static_cast<size_t>(n) * cfg.d_model * sizeof(float);
+        void* fp32_out = nullptr;
+        IMP_CUDA_CHECK_LOG(cudaMallocAsync(&fp32_out, fp32_bytes, stream));
+        int64_t out_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(cfg.d_model)};
+        Tensor fp32_out_t(fp32_out, DType::FP32, 2, out_shape, true);
+        gemm_dispatch(y_buf, ly.ssm_out, ly.ssm_out_qtype, fp32_out_t, ctx);
 
-    // 8. Residual add
-    elementwise_add(out_buf, r, stream);
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(),
-                    cudaMemcpyDeviceToDevice, stream));
+        // FP16 residual → FP32 + add + FP16 writeback to h in one kernel.
+        int64_t total = static_cast<int64_t>(n) * cfg.d_model;
+        int threads = 256;
+        int blocks = static_cast<int>((total + threads - 1) / threads);
+        fp32_plus_fp16_to_fp16<<<blocks, threads, 0, stream>>>(
+            static_cast<const float*>(fp32_out),
+            static_cast<const __half*>(r.data),
+            static_cast<__half*>(h.data), total);
+        IMP_CUDA_CHECK_LOG(cudaFreeAsync(fp32_out, stream));
+    } else {
+        gemm_dispatch(y_buf, ly.ssm_out, ly.ssm_out_qtype, out_buf, ctx);
+        elementwise_add(out_buf, r, stream);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(),
+                        cudaMemcpyDeviceToDevice, stream));
+    }
 
 }
 
