@@ -85,10 +85,19 @@ void gdn_scan_prefill_f32(const float* x, const float* B, const float* C,
                           int state_size, int n_groups,
                           cudaStream_t stream);
 
-// V-head reorder: tiled → grouped
+// V-head reorder: tiled → grouped (FP16 variant, for post-scan y_buf).
 void vhead_tiled_to_grouped(const half* src, half* dst,
                              int n_tokens, int n_heads, int head_dim, int n_groups,
                              cudaStream_t stream);
+
+// V-head reorder: tiled → grouped (FP32 variant, for conv1d-SiLU output).
+// Asymmetric heads (n_groups != n_heads): the GGUF converter may store V in
+// tiled order (h0_g0, h1_g1, ..., h15_g15, h0_g0_r1, ...) while the scan
+// kernel reads V[h * HD + d] assuming grouped order. Qwen 3.6 uses 16K/32V
+// and triggers this mismatch. Skips when n_heads == n_groups.
+void vhead_tiled_to_grouped_f32(const float* src, float* dst,
+                                  int n_tokens, int n_heads, int head_dim, int n_groups,
+                                  cudaStream_t stream);
 
 // Legacy stubs
 void gdn_scan_decode(const half*, const half*, const half*,

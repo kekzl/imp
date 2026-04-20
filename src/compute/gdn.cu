@@ -254,6 +254,42 @@ void vhead_tiled_to_grouped(const half* src, half* dst,
         src, dst, n_tokens, n_heads, head_dim, n_groups);
 }
 
+// FP32 variant for conv1d-SiLU output (= scan V input). Same math as FP16,
+// different element type. Used when the GGUF stored V in tiled layout and the
+// scan kernel reads V[h*HD+d] assuming grouped layout.
+__global__ void vhead_tiled_to_grouped_f32_kernel(
+    const float* __restrict__ src,
+    float* __restrict__       dst,
+    int n_tokens, int n_heads, int head_dim, int n_groups)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = n_tokens * n_heads * head_dim;
+    if (tid >= total) return;
+
+    int d = tid % head_dim;
+    int h_tiled = (tid / head_dim) % n_heads;
+    int t = tid / (n_heads * head_dim);
+
+    int n_v_per_k = n_heads / n_groups;
+    int replica = h_tiled / n_groups;
+    int group = h_tiled % n_groups;
+    int h_grouped = group * n_v_per_k + replica;
+
+    dst[t * n_heads * head_dim + h_grouped * head_dim + d] =
+        src[t * n_heads * head_dim + h_tiled * head_dim + d];
+}
+
+void vhead_tiled_to_grouped_f32(const float* src, float* dst,
+                                  int n_tokens, int n_heads, int head_dim, int n_groups,
+                                  cudaStream_t stream) {
+    if (n_heads == n_groups) return;
+    int total = n_tokens * n_heads * head_dim;
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+    vhead_tiled_to_grouped_f32_kernel<<<blocks, threads, 0, stream>>>(
+        src, dst, n_tokens, n_heads, head_dim, n_groups);
+}
+
 // ---------------------------------------------------------------------------
 // Host launchers
 // ---------------------------------------------------------------------------
