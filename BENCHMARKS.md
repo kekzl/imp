@@ -18,8 +18,8 @@ Tokens generated per second — the metric that determines how fast a model resp
 | Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **134** | — | — |
 | Llama-3.2-3B | 3.2B | Q8_0 | **208** | — | — |
 | Qwen3-Coder-30B-A3B | 30B (3B active) | NVFP4 | **38** | — | — |
-| Gemma-4-26B-A4B-it | 26B (4B active) | Q4_K_M | **61** | 151 | **-60%** |
-| Gemma-4-26B-A4B-it | 26B (4B active) | Q8_0 | **31** | 160 | **-81%** |
+| Gemma-4-26B-A4B-it | 26B (4B active) | Q4_K_M | **183** | 151 | **+21%** |
+| Gemma-4-26B-A4B-it | 26B (4B active) | Q5_K_M | **55** | — | — |
 
 ## Prefill Throughput (pp512)
 
@@ -34,9 +34,8 @@ Tokens processed per second during the prompt ingestion phase.
 | Llama-3.2-3B | 3.2B | Q8_0 | **22544** | — | — |
 | Qwen3-Coder-30B-A3B | 30B (3B active) | NVFP4 | **90** | — | — |
 | Gemma-4-26B-A4B-it | 26B (4B active) | Q4_K_M | **1650** | 196 | **+742%** |
-| Gemma-4-26B-A4B-it | 26B (4B active) | Q8_0 | — (bench unstable) | — | — |
 
-**Gemma-4 notes**: imp decode is behind llama.cpp because CUDA graphs are disabled (per-layer head_dim=256/512 and nkv=8/2 breaks graph capture). Q8_0 additionally has 10/30 MoE layers host-resident on a 32 GB GPU, using the slower H2D-cache path. Both still produce correct output after the host-resident MoE fix (commit `e879bcd`). Prefill is much faster than llama.cpp because imp uses CUTLASS grouped-GEMM for the 128-expert MoE path while llama.cpp processes experts serially.
+**Gemma-4 notes**: CUDA Graphs are now enabled (PRs #11–#14 unified `forward_decode_async`, PR #20 rope_freqs fix, 2026-04-20 SWA long-context fix). Decode is now **1.21× llama.cpp** on Q4_K_M. The previous gap was two separate bugs: pipeline kernel split-K only issued one 16-byte `cp.async` per load (missing half the data at head_dim=512 on global layers) and cuBLAS dispatch gate forced global layers through a broken FMHA fallback above n=1024. Prefill remains dominated by CUTLASS grouped-GEMM advantage vs llama.cpp's serial expert processing. Q5_K_M recommended when output quality matters on complex prompts — Q4_K_M can degenerate on code-gen (see `docs/BENCHMARKS.md` footnote).
 
 **Note**: GDN models now use FP16 prefill weights (v0.5.1) instead of FP8 for numerical stability. This reduces prefill throughput by ~8% vs v0.5 FP8 numbers but fixes multi-turn chat degeneration.
 
@@ -69,6 +68,7 @@ Tokens processed per second during the prompt ingestion phase.
 - **Prefill variance**: cuBLAS autotuning can cause up to 2.6x variance in prefill numbers between container restarts. Decode numbers are stable. Compare decode only for reliable A/B testing.
 - **MXFP4 Prefill**: CUTLASS block-scaled GEMM for prefill (`--mxfp4-prefill`). Currently ~10% slower than FP8 cuBLASLt for Q8_0 models due to activation quantization overhead.
 - **Qwen3-Coder-30B-A3B**: NVIDIA Model Optimizer NVFP4 prequant (128 experts, 8 active). Loaded from SafeTensors. Decode uses per-expert NVFP4 GEMV (serial dispatch); prefill uses CUTLASS NVFP4 GEMM for dense + per-expert NVFP4 GEMV for MoE. Multi-turn chat verified working.
+- **Gemma-4 output quality**: Q4_K_M can degenerate on complex code-gen prompts (Fibonacci → backtick loop). Root cause is accumulated FP16 drift over 30 layers, not a single-layer bug. Q5_K_M and Q8_0 produce clean output — use those when quality matters. Long context up to ~11800 tokens supported with `--min-kv-tokens 14000` (from 2026-04-20 KV-budget fix).
 
 ## Hardware
 
