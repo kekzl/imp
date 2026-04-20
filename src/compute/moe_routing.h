@@ -85,15 +85,10 @@ void moe_scatter_fused_residual_fp32in(const void* expert_output_fp32,
                                         int n_tokens, int d_model, int top_k,
                                         cudaStream_t stream = nullptr);
 
-// Weighted sum of expert outputs for single-token decode (replaces gather+scatter).
-// expert_outputs: [top_k, d_model] FP16 (passed as void*). expert_weights: [top_k] FP32 on device.
-// output: [d_model] FP32. Accumulates in FP32.
-void moe_weighted_sum(const void* expert_outputs, const float* expert_weights,
-                      float* output, int d_model, int top_k,
-                      cudaStream_t stream = nullptr);
-
 // Fused weighted sum + FP16 output + optional residual add.
-// Combines moe_weighted_sum + fp32_to_fp16 + residual_add into one kernel.
+// Combines expert weighted sum + residual add in one kernel. Only this fused
+// variant is used by run_moe_ffn; the older non-residual `moe_weighted_sum`
+// was removed 2026-04-20 (was declared but never called).
 // expert_outputs: [top_k, d_model] FP16. expert_weights: [top_k] FP32 on device.
 // residual: [d_model] FP16 (or nullptr to skip). output: [d_model] FP16.
 void moe_weighted_sum_residual(const void* expert_outputs, const float* expert_weights,

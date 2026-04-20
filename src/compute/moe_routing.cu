@@ -845,27 +845,6 @@ void MoeRoutingBuffers::free() {
 }
 
 // ============================================================================
-// Kernel 7: Weighted sum for single-token decode (replaces gather+scatter)
-//
-// output[i] = Σ_k expert_weights[k] * expert_outputs[k * d_model + i]
-// Each thread handles one output element, looping over top_k.
-// ============================================================================
-
-__global__ void moe_weighted_sum_kernel(const half* __restrict__ expert_outputs,
-                                         const float* __restrict__ expert_weights,
-                                         float* __restrict__ output,
-                                         int d_model, int top_k) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= d_model) return;
-
-    float sum = 0.0f;
-    for (int k = 0; k < top_k; ++k) {
-        sum += expert_weights[k] * __half2float(expert_outputs[k * d_model + i]);
-    }
-    output[i] = sum;
-}
-
-// ============================================================================
 // moe_topk_gating with pre-allocated buffers
 // ============================================================================
 
@@ -918,19 +897,6 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
                                              total_assignments, true);
     result.expert_offsets = make_tensor_1d(d_expert_offsets, DType::INT32,
                                            n_experts + 1, true);
-}
-
-// ============================================================================
-// Public API: moe_weighted_sum
-// ============================================================================
-
-void moe_weighted_sum(const void* expert_outputs, const float* expert_weights,
-                      float* output, int d_model, int top_k,
-                      cudaStream_t stream) {
-    int threads = 256;
-    int blocks = (d_model + threads - 1) / threads;
-    moe_weighted_sum_kernel<<<blocks, threads, 0, stream>>>(
-        static_cast<const half*>(expert_outputs), expert_weights, output, d_model, top_k);
 }
 
 // ============================================================================
