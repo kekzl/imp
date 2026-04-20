@@ -455,38 +455,58 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         }
     }
 
-    // Qwen3.5 attention output gate: Q projection is INTERLEAVED per head:
-    //   [Q_h0(hd), Gate_h0(hd), Q_h1(hd), Gate_h1(hd), ...]
-    // NOT [Q_all, Gate_all]. De-interleave Q and gate.
+    // Attention output gate (fused Q + gate projection). Two known layouts:
+    //   (a) Per-head interleaved: [Q_h0(hd), Gate_h0(hd), Q_h1(hd), Gate_h1(hd), ...]
+    //       — original Qwen 3.5 layout imp was built for.
+    //   (b) Feature-dim concat:   [Q_all(nh*hd) | Gate_all(nh*hd)]
+    //       — Qwen 3.6 / Qwen3-Next layout used by llama.cpp `qwen3next.cpp`.
+    // Select via `IMP_ATTN_GATE_CONCAT=1` — default stays on interleaved for
+    // backwards compat with Qwen 3.5 GDN models. Planned: auto-detect via
+    // arch or config, once Qwen 3.6 passes an E2E test.
     Tensor attn_gate_buf;
     if (has_attn_output_gate) {
         size_t es_q = dtype_size(compute_dtype_);
         int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(q_actual_dim)};
         attn_gate_buf = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
 
-        // De-interleave: src has stride 2*hd per head, dst has stride hd per head
-        // For each token t, for each head h:
-        //   Q[t, h*hd : (h+1)*hd] = src[t, h*2*hd : h*2*hd + hd]
-        //   Gate[t, h*hd : (h+1)*hd] = src[t, h*2*hd + hd : (h+1)*2*hd]
-        for (int h_idx = 0; h_idx < nh; h_idx++) {
-            // Q: copy hd elements per head per token
+        static const bool use_concat = std::getenv("IMP_ATTN_GATE_CONCAT") != nullptr;
+        if (use_concat) {
+            // Feature-dim concat: Q = src[:, :q_actual_dim]; gate = src[:, q_actual_dim:]
+            // One 2D copy each, width = q_actual_dim bytes per row.
             IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(
-                static_cast<char*>(qv.data) + h_idx * hd * es_q,          // dst: Q head h
-                static_cast<size_t>(q_actual_dim) * es_q,                  // dst pitch (full Q row)
-                static_cast<char*>(q_target.data) + h_idx * 2 * hd * es_q, // src: interleaved Q_h
-                static_cast<size_t>(q_out_dim) * es_q,                     // src pitch (full QG row)
-                static_cast<size_t>(hd) * es_q,                            // width (one head)
-                n,                                                          // height (n tokens)
+                qv.data,
+                static_cast<size_t>(q_actual_dim) * es_q,           // dst pitch
+                q_target.data,
+                static_cast<size_t>(q_out_dim) * es_q,              // src pitch
+                static_cast<size_t>(q_actual_dim) * es_q, n,
                 cudaMemcpyDeviceToDevice, stream));
-            // Gate: copy hd elements per head per token
             IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(
-                static_cast<char*>(attn_gate_buf.data) + h_idx * hd * es_q,
+                attn_gate_buf.data,
                 static_cast<size_t>(q_actual_dim) * es_q,
-                static_cast<char*>(q_target.data) + (h_idx * 2 + 1) * hd * es_q,
+                static_cast<char*>(q_target.data) + static_cast<size_t>(q_actual_dim) * es_q,
                 static_cast<size_t>(q_out_dim) * es_q,
-                static_cast<size_t>(hd) * es_q,
-                n,
+                static_cast<size_t>(q_actual_dim) * es_q, n,
                 cudaMemcpyDeviceToDevice, stream));
+        } else {
+            // Per-head interleaved: Qwen 3.5 layout.
+            // Q[t, h*hd:(h+1)*hd] = src[t, h*2*hd : h*2*hd+hd]
+            // Gate[t, h*hd:(h+1)*hd] = src[t, h*2*hd+hd : (h+1)*2*hd]
+            for (int h_idx = 0; h_idx < nh; h_idx++) {
+                IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(
+                    static_cast<char*>(qv.data) + h_idx * hd * es_q,
+                    static_cast<size_t>(q_actual_dim) * es_q,
+                    static_cast<char*>(q_target.data) + h_idx * 2 * hd * es_q,
+                    static_cast<size_t>(q_out_dim) * es_q,
+                    static_cast<size_t>(hd) * es_q, n,
+                    cudaMemcpyDeviceToDevice, stream));
+                IMP_CUDA_CHECK_LOG(cudaMemcpy2DAsync(
+                    static_cast<char*>(attn_gate_buf.data) + h_idx * hd * es_q,
+                    static_cast<size_t>(q_actual_dim) * es_q,
+                    static_cast<char*>(q_target.data) + (h_idx * 2 + 1) * hd * es_q,
+                    static_cast<size_t>(q_out_dim) * es_q,
+                    static_cast<size_t>(hd) * es_q, n,
+                    cudaMemcpyDeviceToDevice, stream));
+            }
         }
     }
 
