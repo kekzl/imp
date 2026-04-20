@@ -352,6 +352,77 @@ void gelu(const Tensor& x, Tensor& out, cudaStream_t stream)
 }
 
 // --------------------------------------------------------------------------
+// Shared-expert sigmoid gate (Qwen3-Next / Qwen3.6):
+//   per row r: gate = sigmoid( sum_d x[r,d] * W[d] )
+//   y[r,:]   *= gate
+// One block per row, block reduces the dot product in shared memory and then
+// rescales the entire row of y in place.
+// --------------------------------------------------------------------------
+__global__ void shared_expert_gate_scale_kernel(
+    const __half* __restrict__ x,       // [n, d_model]
+    const __half* __restrict__ W,       // [d_model] — FP16 (upload converts F32→FP16)
+    __half*       __restrict__ y,       // [n, d]  — scaled in place
+    int d_model, int d)
+{
+    const int row = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int block_threads = blockDim.x;
+
+    // Dot product x[row, :] * W[:] accumulated in FP32.
+    const __half* xr = x + static_cast<int64_t>(row) * d_model;
+    float local = 0.0f;
+    for (int k = tid; k < d_model; k += block_threads) {
+        local += __half2float(xr[k]) * __half2float(W[k]);
+    }
+
+    __shared__ float s_reduce[32];
+    // Warp reduce
+    unsigned mask = 0xffffffff;
+    for (int off = 16; off > 0; off >>= 1) {
+        local += __shfl_xor_sync(mask, local, off);
+    }
+    int lane = tid & 31;
+    int warp = tid >> 5;
+    if (lane == 0) s_reduce[warp] = local;
+    __syncthreads();
+
+    // First warp reduces across warps
+    int n_warps = block_threads >> 5;
+    if (warp == 0) {
+        local = (tid < n_warps) ? s_reduce[tid] : 0.0f;
+        for (int off = 16; off > 0; off >>= 1) {
+            local += __shfl_xor_sync(mask, local, off);
+        }
+        if (tid == 0) s_reduce[0] = local;
+    }
+    __syncthreads();
+
+    // Sigmoid
+    float sum = s_reduce[0];
+    float gate = 1.0f / (1.0f + __expf(-sum));
+    __half gate_h = __float2half(gate);
+
+    // Scale y[row, :] by gate in place
+    __half* yr = y + static_cast<int64_t>(row) * d;
+    for (int j = tid; j < d; j += block_threads) {
+        yr[j] = __hmul(yr[j], gate_h);
+    }
+}
+
+void shared_expert_gate_scale(const void* x_fp16, const void* W_fp16,
+                               void* y_fp16_inout,
+                               int n, int d_model, int d,
+                               cudaStream_t stream)
+{
+    if (n == 0) return;
+    const int block = 256;
+    shared_expert_gate_scale_kernel<<<n, block, 0, stream>>>(
+        static_cast<const __half*>(x_fp16),
+        static_cast<const __half*>(W_fp16),
+        static_cast<__half*>(y_fp16_inout), d_model, d);
+}
+
+// --------------------------------------------------------------------------
 // PDL registration
 // --------------------------------------------------------------------------
 void activation_pdl_register() {

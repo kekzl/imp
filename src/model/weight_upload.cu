@@ -1017,6 +1017,12 @@ static bool upload_layer_ffn_weights(TransformerLayer& L, int i,
         UPLOAD_OR_FAIL(L.w_gate_shared, L.w_gate_shared_qtype, dummy_scales,
                        "w_gate_shared", i, ctx);
     }
+    // Qwen3-Next / Qwen3.6 shared-expert input gate (FP32 [d_model]).
+    if (L.shared_expert_gate_inp.data && !L.shared_expert_gate_inp.on_device) {
+        Tensor dummy_scales;
+        UPLOAD_OR_FAIL(L.shared_expert_gate_inp, GGMLQuantType::F32, dummy_scales,
+                       "shared_expert_gate_inp", i, ctx);
+    }
 
     return true;
 }

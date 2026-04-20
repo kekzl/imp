@@ -150,15 +150,12 @@ set(IMP_COMPUTE_SOURCES
     src/compute/reduce.cu
     src/compute/ssm.cu
     src/compute/gdn.cu
-    src/compute/gemm_cublaslt_nvfp4.cu
     src/compute/hadamard.cu
 )
 
 if(IMP_USE_CUTLASS)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_mxfp4_sm120.cu)
-    list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_grouped_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_grouped_3x.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_mxfp4_sm120.cu)
@@ -342,6 +339,7 @@ if(IMP_BUILD_TESTS)
         tests/test_fp8_gemm.cu
         tests/test_attention_tc.cu
         tests/test_nvfp4_quant.cu
+        tests/test_cutlass_grouped_3x_nvfp4.cu
         tests/test_turboquant.cu
         tests/test_fp8_kv_cache.cu
         tests/test_speculative.cpp

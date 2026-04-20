@@ -20,6 +20,7 @@
 
 #include "compute/gemm_cutlass_sm120.h"
 #include "quant/nvfp4_quant.h"
+#include "quant/fp8_utils.cuh"
 #include "core/logging.h"
 
 #include <cuda_runtime.h>
@@ -173,81 +174,12 @@ __global__ void convert_scales_sfatom_kernel(
     int n = idx / K_groups;
     int k_group = idx % K_groups;
 
-    // Read signed E4M3 micro-scale and convert to float
-    uint8_t ms_byte = src_ms[idx];
-    uint32_t sign = (ms_byte >> 7) & 1;
-    uint32_t exp  = (ms_byte >> 3) & 0x0F;
-    uint32_t man  = ms_byte & 0x07;
-
-    float ms_float;
-    if (exp == 0) {
-        ms_float = (float)man * (1.0f / 512.0f);
-    } else {
-        // Normal: (8 + man) * 2^(exp - 10)
-        uint32_t fp32 = ((exp + 120u) << 23) | (man << 20);
-        ms_float = __uint_as_float(fp32);
-    }
-    if (sign) ms_float = -ms_float;  // shouldn't happen for scales
-
-    // Use micro_scale directly (tensor_scale deferred to GEMM alpha)
-    float combined = fabsf(ms_float);
-
-    // Convert to unsigned E4M3 (same bit layout as signed, sign=0)
-    // Clamp to [0, 448]
-    uint8_t ue4m3;
-    if (combined < (1.0f / 512.0f)) {
-        ue4m3 = 0;
-    } else if (combined > 448.0f) {
-        ue4m3 = (14 << 3) | 7;  // max E4M3 = 448
-    } else {
-        uint32_t fbits;
-        memcpy(&fbits, &combined, sizeof(float));
-        int f_exp = (int)((fbits >> 23) & 0xFF) - 127;
-        uint32_t f_man = fbits & 0x7FFFFF;
-
-        int e4 = f_exp + 7;  // E4M3 bias = 7
-        if (e4 <= 0) {
-            int shift = 1 - e4;
-            uint32_t full_man = (1u << 23) | f_man;
-            int right_shift = 20 + shift;
-            uint8_t m3 = 0;
-            if (right_shift < 32) {
-                uint32_t shifted = full_man >> right_shift;
-                uint32_t remainder = full_man & ((1u << right_shift) - 1);
-                uint32_t half_point = 1u << (right_shift - 1);
-                if (remainder > half_point || (remainder == half_point && (shifted & 1)))
-                    shifted += 1;
-                m3 = (uint8_t)(shifted & 0x07);
-                if (shifted > 7) {
-                    ue4m3 = (1 << 3);  // overflow to smallest normal
-                } else {
-                    ue4m3 = m3;
-                }
-            } else {
-                ue4m3 = 0;
-            }
-            if (m3 <= 7 && e4 <= 0) ue4m3 = m3;
-        } else if (e4 >= 15) {
-            ue4m3 = (14 << 3) | 7;  // clamp to max
-        } else {
-            uint32_t round_bit = (f_man >> 19) & 1;
-            uint32_t sticky = (f_man & 0x7FFFF) ? 1 : 0;
-            uint8_t m3 = (uint8_t)((f_man >> 20) & 0x07);
-            if (round_bit && (sticky || (m3 & 1))) {
-                m3 += 1;
-                if (m3 > 7) { m3 = 0; e4 += 1; }
-                if (e4 >= 15) { ue4m3 = (14 << 3) | 7; } else {
-                    ue4m3 = (uint8_t)(((e4 & 0x0F) << 3) | (m3 & 0x07));
-                }
-            } else {
-                ue4m3 = (uint8_t)(((e4 & 0x0F) << 3) | (m3 & 0x07));
-            }
-        }
-    }
-
-    // Write to SfAtom position
-    int dst_idx = sfatom_offset(n, k_group, n_k_tiles);
-    dst_sf[dst_idx] = ue4m3;
+    // Read signed E4M3 micro-scale, drop its sign (always positive for scales),
+    // then re-encode as UE4M3 via the shared float↔E4M3 helper. UE4M3 is
+    // bit-identical to positive E4M3, so float_to_fp8_e4m3 with a positive
+    // argument yields the UE4M3 byte directly (sign bit = 0).
+    float combined = fabsf(fp8_e4m3_to_float_fast(src_ms[idx]));
+    dst_sf[sfatom_offset(n, k_group, n_k_tiles)] = float_to_fp8_e4m3(combined);
 }
 
 // ---------------------------------------------------------------------------
@@ -262,8 +194,71 @@ __device__ __forceinline__ uint8_t quantize_abs_to_fp4(float abs_val) {
     return code;  // 0..7
 }
 
-// Each thread handles one micro-block of 16 elements.
-// Outputs packed FP4 + computes UE4M3 scale factor written to SfAtom layout.
+// Given 16 pre-computed float values + their absmax, encode UE4M3 scale and
+// pack FP4 bytes. The caller supplies the values (so this helper is reusable
+// for fused paths like SwiGLU+quantize where values come from a computation
+// rather than a direct FP16 load).
+__device__ __forceinline__ void quantize_micro_block_nvfp4_from_vals(
+    const float vals[kSFVecSize],
+    float local_absmax,
+    uint8_t* packed_out_row,
+    int k_group,
+    uint8_t* sfa_target)
+{
+    // Encode UE4M3 scale (positive — `float_to_fp8_e4m3` handles clamp + rounding
+    // and returns sign=0 for non-negative input, which is a valid UE4M3 byte).
+    float scale_f = local_absmax / 6.0f;
+    uint8_t ue4m3 = float_to_fp8_e4m3(scale_f);
+
+    // Reconstruct actual scale from UE4M3 for consistent quantization. If the
+    // scale rounds to zero, fall back to the smallest denorm (2^-9) to avoid
+    // division by zero — matches the >=2^-9 clamp used elsewhere in imp.
+    float actual_scale = fp8_e4m3_to_float_fast(ue4m3);
+    if (actual_scale == 0.0f) actual_scale = 1.0f / 512.0f;
+    float inv_scale = 1.0f / actual_scale;
+
+    *sfa_target = ue4m3;
+
+    uint8_t* packed_at = packed_out_row + k_group * (kSFVecSize / 2);
+    #pragma unroll
+    for (int i = 0; i < kSFVecSize; i += 2) {
+        float s0 = vals[i] * inv_scale;
+        uint8_t sign0 = (s0 < 0.0f) ? 1u : 0u;
+        uint8_t code0 = quantize_abs_to_fp4(fabsf(s0));
+        uint8_t fp4_0 = (sign0 << 3) | code0;
+
+        float s1 = vals[i + 1] * inv_scale;
+        uint8_t sign1 = (s1 < 0.0f) ? 1u : 0u;
+        uint8_t code1 = quantize_abs_to_fp4(fabsf(s1));
+        uint8_t fp4_1 = (sign1 << 3) | code1;
+
+        packed_at[i / 2] = (fp4_1 << 4) | fp4_0;
+    }
+}
+
+// Direct FP16 quantize: load 16 FP16 values, pass to the above helper.
+__device__ __forceinline__ void quantize_micro_block_nvfp4(
+    const half* input_row_base,
+    int k_group,
+    uint8_t* packed_out_row,
+    uint8_t* sfa_target)
+{
+    float vals[kSFVecSize];
+    float local_absmax = 0.0f;
+    const half2* src_h2 = reinterpret_cast<const half2*>(input_row_base + k_group * kSFVecSize);
+    #pragma unroll
+    for (int i = 0; i < kSFVecSize / 2; i++) {
+        half2 h2 = src_h2[i];
+        vals[i * 2]     = __half2float(h2.x);
+        vals[i * 2 + 1] = __half2float(h2.y);
+        local_absmax = fmaxf(local_absmax, fmaxf(fabsf(vals[i * 2]), fabsf(vals[i * 2 + 1])));
+    }
+    quantize_micro_block_nvfp4_from_vals(vals, local_absmax, packed_out_row, k_group, sfa_target);
+}
+
+
+// Single-tensor quantize: row numbering is direct, SFA is a single linear buffer
+// with SfAtom layout over (row, k_group).
 __global__ void quantize_fp16_nvfp4_cutlass_kernel(
     const half* __restrict__ input,        // [M, K] FP16
     uint8_t*    __restrict__ packed_out,    // [M, K/2] packed nibbles
@@ -277,100 +272,54 @@ __global__ void quantize_fp16_nvfp4_cutlass_kernel(
 
     int row    = mb_idx / K_groups;
     int k_group = mb_idx % K_groups;
-    int base   = row * K + k_group * kSFVecSize;
 
-    // Load 16 values via vectorized half2 loads and find absmax
-    float vals[kSFVecSize];
-    float local_absmax = 0.0f;
-    const half2* src_h2 = reinterpret_cast<const half2*>(input + base);
-    #pragma unroll
-    for (int i = 0; i < kSFVecSize / 2; i++) {
-        half2 h2 = src_h2[i];
-        vals[i * 2]     = __half2float(h2.x);
-        vals[i * 2 + 1] = __half2float(h2.y);
-        local_absmax = fmaxf(local_absmax, fmaxf(fabsf(vals[i * 2]), fabsf(vals[i * 2 + 1])));
-    }
-
-    // Compute UE4M3 scale factor = local_absmax / 6.0
-    // (tensor_scale is absorbed: combined = local_absmax / 6.0)
-    float scale_f = local_absmax / 6.0f;
-    if (scale_f < (1.0f / 512.0f)) scale_f = (1.0f / 512.0f);
-    if (scale_f > 448.0f) scale_f = 448.0f;
-
-    // Encode as UE4M3 (same bit layout as E4M3, sign=0)
-    uint8_t ue4m3;
-    {
-        uint32_t fbits;
-        memcpy(&fbits, &scale_f, sizeof(float));
-        int f_exp = (int)((fbits >> 23) & 0xFF) - 127;
-        uint32_t f_man = fbits & 0x7FFFFF;
-        int e4 = f_exp + 7;
-
-        if (e4 <= 0) {
-            int shift = 1 - e4;
-            uint32_t full_man = (1u << 23) | f_man;
-            int right_shift = 20 + shift;
-            if (right_shift >= 32) { ue4m3 = 0; }
-            else {
-                uint32_t shifted = full_man >> right_shift;
-                uint32_t rem = full_man & ((1u << right_shift) - 1);
-                uint32_t half_pt = 1u << (right_shift - 1);
-                if (rem > half_pt || (rem == half_pt && (shifted & 1))) shifted++;
-                ue4m3 = (shifted > 7) ? (uint8_t)(1 << 3) : (uint8_t)(shifted & 0x07);
-            }
-        } else if (e4 >= 15) {
-            ue4m3 = (14 << 3) | 7;
-        } else {
-            uint32_t rb = (f_man >> 19) & 1;
-            uint32_t st = (f_man & 0x7FFFF) ? 1 : 0;
-            uint8_t m3 = (uint8_t)((f_man >> 20) & 0x07);
-            if (rb && (st || (m3 & 1))) {
-                m3++;
-                if (m3 > 7) { m3 = 0; e4++; }
-                if (e4 >= 15) ue4m3 = (14 << 3) | 7;
-                else ue4m3 = (uint8_t)(((e4 & 0x0F) << 3) | (m3 & 0x07));
-            } else {
-                ue4m3 = (uint8_t)(((e4 & 0x0F) << 3) | (m3 & 0x07));
-            }
-        }
-    }
-
-    // Reconstruct actual scale from UE4M3 for consistent quantization
-    float actual_scale;
-    {
-        uint32_t exp_bits = (ue4m3 >> 3) & 0x0F;
-        uint32_t man_bits = ue4m3 & 0x07;
-        if (exp_bits == 0) {
-            actual_scale = (float)man_bits * (1.0f / 512.0f);
-        } else {
-            uint32_t fp32 = ((exp_bits + 120u) << 23) | (man_bits << 20);
-            actual_scale = __uint_as_float(fp32);
-        }
-    }
-    if (actual_scale == 0.0f) actual_scale = 1.0f / 512.0f;
-    float inv_scale = 1.0f / actual_scale;
-
-    // Write scale to SfAtom position
-    int sf_idx = sfatom_offset(row, k_group, n_k_tiles);
-    sf_out[sf_idx] = ue4m3;
-
-    // Quantize and pack FP4 values
-    int packed_base = row * (K / 2) + k_group * (kSFVecSize / 2);
-    #pragma unroll
-    for (int i = 0; i < kSFVecSize; i += 2) {
-        float s0 = vals[i] * inv_scale;
-        uint8_t sign0 = (s0 < 0.0f) ? 1u : 0u;
-        uint8_t code0 = quantize_abs_to_fp4(fabsf(s0));
-        uint8_t fp4_0 = (sign0 << 3) | code0;
-
-        float s1 = vals[i + 1] * inv_scale;
-        uint8_t sign1 = (s1 < 0.0f) ? 1u : 0u;
-        uint8_t code1 = quantize_abs_to_fp4(fabsf(s1));
-        uint8_t fp4_1 = (sign1 << 3) | code1;
-
-        packed_out[packed_base + i / 2] = (fp4_1 << 4) | fp4_0;
-    }
+    quantize_micro_block_nvfp4(
+        input + static_cast<int64_t>(row) * K,
+        k_group,
+        packed_out + static_cast<int64_t>(row) * (K / 2),
+        sf_out + sfatom_offset(row, k_group, n_k_tiles));
 }
+
+// Device helper: binary-search `offsets` for the expert owning `row`.
+// Returns expert index and writes `local_row` (row relative to expert's slab).
+__device__ __forceinline__ int moe_find_expert(const int* offsets, int ne, int row, int& local_row) {
+    int lo = 0, hi = ne;
+    while (lo + 1 < hi) {
+        int mid = (lo + hi) >> 1;
+        if (offsets[mid] <= row) lo = mid;
+        else hi = mid;
+    }
+    local_row = row - offsets[lo];
+    return lo;
+}
+
+// MoE variant: one kernel quantizes all [expanded, K] rows into contiguous
+// packed output + per-expert SFA slabs (one per expert).
+__global__ void quantize_fp16_nvfp4_cutlass_moe_kernel(
+    const half* __restrict__ input,           // [expanded, K] FP16
+    uint8_t*    __restrict__ packed_out,       // [expanded, K/2] contiguous
+    uint8_t* const* __restrict__ sfa_bases,    // [ne] per-expert SFA base (may be null)
+    const int*    __restrict__ offsets,        // [ne+1] cumulative row offsets
+    int expanded, int K, int ne, int n_k_tiles)
+{
+    int mb_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int K_groups = K / kSFVecSize;
+    if (mb_idx >= expanded * K_groups) return;
+
+    int row     = mb_idx / K_groups;
+    int k_group = mb_idx % K_groups;
+    int local_row;
+    int expert = moe_find_expert(offsets, ne, row, local_row);
+    uint8_t* sfa = sfa_bases[expert];
+    if (!sfa) return;
+
+    quantize_micro_block_nvfp4(
+        input + static_cast<int64_t>(row) * K,
+        k_group,
+        packed_out + static_cast<int64_t>(row) * (K / 2),
+        sfa + sfatom_offset(local_row, k_group, n_k_tiles));
+}
+
 
 // ---------------------------------------------------------------------------
 // Host-callable functions
@@ -448,6 +397,30 @@ void quantize_fp16_to_nvfp4_cutlass(const void* src_fp16, void* dst_data,
         reinterpret_cast<uint8_t*>(dst_sf),
         M, K, n_k_tiles);
 }
+
+void quantize_fp16_to_nvfp4_cutlass_moe(const void* src_fp16,
+                                        void* dst_packed,
+                                        uint8_t* const* d_sfa_bases,
+                                        const int* d_offsets,
+                                        int expanded, int K, int ne,
+                                        cudaStream_t stream)
+{
+    assert(K % kSFVecSize == 0 && "K must be multiple of 16");
+    if (expanded == 0) return;
+
+    int K_groups = K / kSFVecSize;
+    int total_mb = expanded * K_groups;
+    int n_k_tiles = (K + kAtomKElems - 1) / kAtomKElems;
+
+    int threads = 256;
+    int blocks = (total_mb + threads - 1) / threads;
+    quantize_fp16_nvfp4_cutlass_moe_kernel<<<blocks, threads, 0, stream>>>(
+        reinterpret_cast<const half*>(src_fp16),
+        reinterpret_cast<uint8_t*>(dst_packed),
+        d_sfa_bases, d_offsets,
+        expanded, K, ne, n_k_tiles);
+}
+
 
 // ---------------------------------------------------------------------------
 // CUTLASS GEMM execution

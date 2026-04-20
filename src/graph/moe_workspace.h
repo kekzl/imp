@@ -53,6 +53,17 @@ struct MoEWorkspace {
     void* raw_staging_buf = nullptr;
     size_t raw_staging_size = 0;
 
+    // CUTLASS 3.x NVFP4 grouped GEMM staging:
+    //   packed: [max_expanded, max_K/2] — contiguous FP4 activations
+    //   sf:     per-expert SfAtom slabs (worst-case padded to 128 rows per expert)
+    //   sfa_ptrs: device array of [ne] pointers into sf slab (fused-quantize kernel input)
+    void* cutlass3x_packed = nullptr;
+    size_t cutlass3x_packed_size = 0;
+    void* cutlass3x_sf = nullptr;
+    size_t cutlass3x_sf_size = 0;
+    uint8_t** cutlass3x_sfa_ptrs = nullptr;   // device [ne] uint8_t* array
+    int cutlass3x_sfa_ptrs_count = 0;
+
     // Free all separately allocated buffers (NOT the phase tensor views).
     void free(VRAMAllocator* alloc);
 };

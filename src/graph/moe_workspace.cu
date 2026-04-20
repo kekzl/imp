@@ -39,6 +39,16 @@ void MoEWorkspace::free(VRAMAllocator* alloc) {
 
     vfree(raw_staging_buf);
     raw_staging_size = 0;
+
+    vfree(cutlass3x_packed);
+    cutlass3x_packed_size = 0;
+    vfree(cutlass3x_sf);
+    cutlass3x_sf_size = 0;
+    if (cutlass3x_sfa_ptrs) {
+        IMP_CUDA_CHECK_LOG(cudaFree(cutlass3x_sfa_ptrs));
+        cutlass3x_sfa_ptrs = nullptr;
+        cutlass3x_sfa_ptrs_count = 0;
+    }
 }
 
 } // namespace imp

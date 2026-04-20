@@ -7,24 +7,32 @@
 namespace imp {
 
 // CUTLASS 3.x NVFP4 BlockScaled Grouped GEMM for MoE (SM120).
-// Zero D2H sync — problem shapes built on GPU from device-side expert offsets.
+// Per-expert M varies, shared N and K across all experts.
 // Replaces CUTLASS 2.x GemmGrouped for NVFP4-quantized MoE expert weights.
 bool cutlass_grouped_3x_nvfp4_available();
 
-// NVFP4 × NVFP4 → FP16 grouped GEMM.
-// A: [expanded, K] NVFP4 quantized activations (packed + SfAtom scales)
-// B: [n_experts] × CutlassNvFP4Weight (per-expert NVFP4 weights)
-// D: [expanded, N] FP16 output
-// d_offsets: [n_experts+1] device expert offsets into expanded dimension
+// Per-expert inputs for grouped NVFP4×NVFP4 → FP16 GEMM.
+// All pointer fields below are HOST arrays of DEVICE pointers (length n_experts).
+// The dispatch copies these to device internally and builds per-expert layouts.
+//
+//   A_i : [M_i,   K] packed NVFP4 (K-contiguous RowMajor, K/2 bytes per row)
+//   SFA_i: SfAtom UE4M3 layout (size = cutlass_nvfp4_sf_size(M_i, K))
+//   B_i : [N,     K] packed NVFP4 (from CutlassNvFP4Weight::data, per-expert)
+//   SFB_i: SfAtom UE4M3 layout (from CutlassNvFP4Weight::scale_factors, per-expert)
+//   D_i : [M_i,   N] FP16 output (RowMajor)
+//   alpha_i: per-expert tensor_scale (applied as GEMM alpha)
+//
+// K and N must be identical across all experts.  M_i varies.
 bool gemm_grouped_cutlass_3x_nvfp4(
-    const void* a_packed,          // [expanded, K/2] NVFP4 packed activations
-    const void* a_sf,              // SfAtom UE4M3 activation scales
-    void* d_fp16,                  // [expanded, N] FP16 output
-    const int32_t* d_offsets,      // [n_experts+1] device expert offsets
-    const CutlassNvFP4Weight* const* d_weight_ptrs,  // [n_experts] device weight struct pointers
-    int K, int N,
     int n_experts,
-    float tensor_scale,            // global tensor scale (applied as alpha)
+    const int* host_M,                     // [n_experts] M_i per expert
+    int N, int K,
+    const void* const* host_ptr_A,         // [n_experts] device pointers to packed A
+    const void* const* host_ptr_SFA,       // [n_experts] device pointers to SFA
+    const void* const* host_ptr_B,         // [n_experts] device pointers to packed B weight
+    const void* const* host_ptr_SFB,       // [n_experts] device pointers to SFB
+    void*       const* host_ptr_D,         // [n_experts] device pointers to FP16 output
+    const float*       host_alpha,         // [n_experts] per-expert tensor_scale (alpha)
     cudaStream_t stream);
 
 void gemm_grouped_3x_nvfp4_cleanup();

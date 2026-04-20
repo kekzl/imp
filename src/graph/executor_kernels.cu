@@ -4,7 +4,6 @@
 #include "core/logging.h"
 #include "compute/gemm.h"
 #include "compute/gemm_q6k.h"
-#include "compute/gemm_cutlass.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "compute/hadamard.h"
@@ -15,7 +14,6 @@
 #include "quant/mxfp4_gemm.h"
 #include "compute/ggml_mmvq.h"
 #include "compute/hadamard.h"
-#include "compute/gemm_cublaslt_nvfp4.h"
 #include "runtime/pdl.h"
 #include "compute/ptx92_utils.cuh"
 #include "compute/warp_reduce.cuh"  // kWarpSize
@@ -1981,16 +1979,9 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
                         }
                     }
 
-                    // cuBLASLt NVFP4: same data/scale format, auto-tuned kernels
-                    if (cublaslt_nvfp4_available()) {
-                        bool ok = gemm_nvfp4_cublaslt(
-                            cutlass_act_data, cutlass_act_sf,
-                            ct_it->second,
-                            output.data, M, N, K, stream);
-                        if (ok) return;
-                    }
-
-                    // Fallback: CUTLASS sm_120 block-scaled kernel
+                    // CUTLASS sm_120 block-scaled NVFP4 kernel. (cuBLASLt NVFP4
+                    // was an alternate path but NVIDIA ships no FP4 kernels for
+                    // consumer Blackwell (sm_120); deleted in favor of CUTLASS.)
                     bool ok = gemm_nvfp4_cutlass_sm120(
                         cutlass_act_data, cutlass_act_sf,
                         ct_it->second,

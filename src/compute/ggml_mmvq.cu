@@ -600,30 +600,8 @@ void ggml_mmvq_q4k_f32(
     }
 }
 
-void ggml_mmvq_q5_1_f32(
-    const void* W, const float* x, half* y,
-    int M, int N, int K,
-    void* scratch, size_t scratch_size,
-    cudaStream_t stream) {
-
-    const int num_q8_blocks = (K / QK8_1);
-    const int total_q8_blocks = M * num_q8_blocks;
-    size_t need = (size_t)total_q8_blocks * sizeof(ggml_block_q8_1);
-    if (need > scratch_size) return;
-    ggml_block_q8_1* x_q8 = (ggml_block_q8_1*)scratch;
-
-    {
-        const int threads = 256;
-        const int nblk = (total_q8_blocks + threads - 1) / threads;
-        quantize_fp32_to_q8_1_ggml_kernel<<<nblk, threads, 0, stream>>>(x, x_q8, M * K);
-    }
-    {
-        constexpr int nwarps = 4;
-        dim3 block(WARP_SIZE, nwarps);
-        dim3 grid(N, M);
-        mmvq_kernel<QType::Q5_1><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
-    }
-}
+// ggml_mmvq_q5_1_f32 removed 2026-04-20 — never called. Other Q5_1 GEMV
+// dispatch goes through `gemv_q5_1_q8_1` (dp4a path) in gemm.cu.
 
 void ggml_mmvq_q5k(
     const void* W, const half* x, half* y,

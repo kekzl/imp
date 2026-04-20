@@ -114,6 +114,12 @@ struct TransformerLayer {
     GGMLQuantType w_down_shared_qtype = GGMLQuantType::NONE;
     GGMLQuantType w_gate_shared_qtype = GGMLQuantType::NONE;
 
+    // Qwen3-Next / Qwen3.6 shared-expert input gate: a [d_model] FP32 projection
+    // that, after sigmoid, produces a per-token scalar used to gate the shared
+    // expert output before it is added to the MoE output. Stored in the GGUF as
+    // `blk.{i}.ffn_gate_inp_shexp.weight`. Absent for Qwen2-MoE / Qwen3 MoE.
+    Tensor shared_expert_gate_inp;
+
     // Per-group scales for quantized weights (GPU, FP16)
     Tensor wq_scales, wk_scales, wv_scales, wo_scales;
     Tensor w_gate_scales, w_up_scales, w_down_scales;
