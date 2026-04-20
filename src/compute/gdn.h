@@ -25,6 +25,39 @@ void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight,
                               float eps, int n_tokens, int n_heads, int head_dim,
                               cudaStream_t stream);
 
+// FP32-input variant. Reads scan output from FP32 buffer (preserves precision
+// when scan values are subnormal in FP16, ~6e-5). Writes FP16 result to `y`.
+// Use together with FP32 scan output to match llama.cpp numerics.
+void gdn_rmsnorm_gated_silu_fp32in(half* y_fp16_out, const float* y_fp32_in,
+                                     const half* gate, const half* weight,
+                                     float eps, int n_tokens, int n_heads,
+                                     int head_dim, cudaStream_t stream);
+
+// FP32-output scan. Same math as `gdn_scan_fused_f32` but keeps result in FP32
+// for feeding into `gdn_rmsnorm_gated_silu_fp32in`.
+void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels,
+                             const half* alpha, const half* beta,
+                             const float* A_log, const float* dt_bias,
+                             float* h_state, float* y_fp32,
+                             int n_tokens, int n_heads, int head_dim_ssm,
+                             int state_size, int n_groups,
+                             cudaStream_t stream);
+
+// ---------------------------------------------------------------------------
+// Reference multi-token GDN scan.
+// Deliberately unfused: state lives in global memory, per-token loop serial,
+// L2-norm of Q/K applied in-kernel but via shared-memory reductions (no
+// register-cached state). Same delta-rule math as `gdn_scan_fused_f32` but
+// trivially inspectable for validation. Enable via `IMP_GDN_REF=1`.
+// ---------------------------------------------------------------------------
+void gdn_scan_reference_f32(const float* conv_f32, int conv_channels,
+                             const half* alpha, const half* beta,
+                             const float* A_log, const float* dt_bias,
+                             float* h_state, half* y,
+                             int n_tokens, int n_heads, int head_dim_ssm,
+                             int state_size, int n_groups,
+                             cudaStream_t stream);
+
 // ---------------------------------------------------------------------------
 // Legacy per-token interfaces (kept for fallback / testing)
 // ---------------------------------------------------------------------------

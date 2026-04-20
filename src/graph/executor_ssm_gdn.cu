@@ -343,6 +343,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     Tensor gate_out(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
     gemm_dispatch(no, ly.gdn_gate, ly.gdn_gate_qtype, gate_out, ctx);
 
+    static const bool use_fp32_scan = std::getenv("IMP_GDN_FP32_SCAN") != nullptr;
+
     if (h_st) {
         size_t es = dtype_size(compute_dtype_);
 
@@ -362,17 +364,54 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
             gemm_dispatch(no, ly.gdn_beta, ly.gdn_beta_qtype, beta_proj_out, ctx);
         }
 
-        // 5b. Fused multi-token delta rule scan.
-        // Single kernel launch processes ALL tokens with register-cached state.
-        // Eliminates n×32 kernel launches and 125x state memory traffic.
-        gdn_scan_fused_f32(conv_f32, conv_channels,
-                            static_cast<const half*>(alpha_proj_out.data),
-                            static_cast<const half*>(beta_proj_out.data),
-                            static_cast<const float*>(ly.ssm_a.data),
-                            static_cast<const float*>(ly.ssm_dt_b.data),
-                            static_cast<float*>(h_st),
-                            static_cast<half*>(y_buf.data),
-                            n, n_heads, head_dim_ssm, ssize, n_groups, stream);
+        // 5b. Multi-token delta rule scan.
+        // Default: fused kernel with register-cached state (n×32 fewer launches,
+        // 125× less state memory traffic).
+        // IMP_GDN_REF=1: reference kernel with shared-memory state, no fusion.
+        //   Use when debugging new architectures — if outputs differ it isolates
+        //   bugs to the fused-kernel optimizations.
+        // IMP_GDN_FP32_SCAN=1: keep scan output in FP32 through RMSNorm+Gate.
+        //   FP16 subnormal truncation (~6e-5) breaks RMS for near-zero heads on
+        //   models with sparse scan activations (Qwen 3.6 L1 head 0).
+        static const bool use_ref = std::getenv("IMP_GDN_REF") != nullptr;
+        if (use_fp32_scan) {
+            // Repurpose conv_f32 scratch tail as FP32 scan output buffer.
+            // Size needed: n * inner floats. conv_f32 is n * conv_channels floats.
+            // For Qwen 3.6: conv_channels=8192, inner=4096 — ample room at tail.
+            float* y_fp32 = conv_f32 + static_cast<size_t>(n) * conv_channels;
+            gdn_scan_fused_fp32out(conv_f32, conv_channels,
+                                static_cast<const half*>(alpha_proj_out.data),
+                                static_cast<const half*>(beta_proj_out.data),
+                                static_cast<const float*>(ly.ssm_a.data),
+                                static_cast<const float*>(ly.ssm_dt_b.data),
+                                static_cast<float*>(h_st),
+                                y_fp32,
+                                n, n_heads, head_dim_ssm, ssize, n_groups, stream);
+            // FP32-in RMSNorm+Gate+SiLU → FP16 y_buf
+            gdn_rmsnorm_gated_silu_fp32in(static_cast<half*>(y_buf.data),
+                                            y_fp32,
+                                            static_cast<const half*>(gate_out.data),
+                                            static_cast<const half*>(ly.ssm_norm_w.data),
+                                            eps, n, n_heads, head_dim_ssm, stream);
+        } else if (use_ref) {
+            gdn_scan_reference_f32(conv_f32, conv_channels,
+                                static_cast<const half*>(alpha_proj_out.data),
+                                static_cast<const half*>(beta_proj_out.data),
+                                static_cast<const float*>(ly.ssm_a.data),
+                                static_cast<const float*>(ly.ssm_dt_b.data),
+                                static_cast<float*>(h_st),
+                                static_cast<half*>(y_buf.data),
+                                n, n_heads, head_dim_ssm, ssize, n_groups, stream);
+        } else {
+            gdn_scan_fused_f32(conv_f32, conv_channels,
+                                static_cast<const half*>(alpha_proj_out.data),
+                                static_cast<const half*>(beta_proj_out.data),
+                                static_cast<const float*>(ly.ssm_a.data),
+                                static_cast<const float*>(ly.ssm_dt_b.data),
+                                static_cast<float*>(h_st),
+                                static_cast<half*>(y_buf.data),
+                                n, n_heads, head_dim_ssm, ssize, n_groups, stream);
+        }
     }
 
     debug_tensor_stats("gdn_after_scan_y", y_buf, stream);
@@ -380,11 +419,14 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
 
     // 6. Fused RMSNormGated + SiLU: y = rmsnorm(y) * silu(gate)
     // Single kernel launch for all tokens × heads (replaces n×32×2 launches).
-    gdn_rmsnorm_gated_silu(static_cast<half*>(y_buf.data),
-                            static_cast<const half*>(gate_out.data),
-                            static_cast<const half*>(ly.ssm_norm_w.data),
-                            eps, n, n_heads, head_dim_ssm, stream);
-
+    // When IMP_GDN_FP32_SCAN is active, this was already done inline with the
+    // scan above (FP32-input variant). Skip to avoid double-applying.
+    if (!use_fp32_scan) {
+        gdn_rmsnorm_gated_silu(static_cast<half*>(y_buf.data),
+                                static_cast<const half*>(gate_out.data),
+                                static_cast<const half*>(ly.ssm_norm_w.data),
+                                eps, n, n_heads, head_dim_ssm, stream);
+    }
 
     // 7. ssm_out projection: [n, inner] → [n, d_model]
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
