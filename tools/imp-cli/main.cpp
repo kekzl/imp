@@ -74,6 +74,8 @@ int main(int argc, char** argv) {
     // CLI is single-request — always cap batch size to 1
     config.max_batch_size = 1;
     // max_seq_len: 0 = auto-detect in engine (from model metadata + VRAM)
+    if (args.max_seq_len > 0) config.max_seq_len = args.max_seq_len;
+    if (args.min_kv_tokens > 0) config.min_kv_tokens = args.min_kv_tokens;
     config.gpu_layers = args.gpu_layers;
     if (args.kv_fp8) config.kv_cache_dtype = IMP_DTYPE_FP8_E4M3;
     if (args.kv_int8) config.kv_cache_dtype = IMP_DTYPE_INT8;

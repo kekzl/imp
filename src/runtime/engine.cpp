@@ -334,24 +334,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     const auto& mcfg = model_->config();
 
-    // --- Auto-detect max_seq_len and max_batch_size if not set ---
-    if (const char* env_msl = std::getenv("IMP_MAX_SEQ_LEN")) {
-        int v = std::atoi(env_msl);
-        if (v > 0) { config_.max_seq_len = v; IMP_LOG_INFO("max_seq_len: env IMP_MAX_SEQ_LEN=%d", v); }
-    }
-    if (config_.max_seq_len <= 0) {
-        int model_ctx = mcfg.max_seq_len;  // from GGUF metadata
-        // Cap based on available VRAM: reserve ~30% for KV cache
-        size_t free_vram = 0, total_vram = 0;
-        cudaMemGetInfo(&free_vram, &total_vram);
-        int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
-        int kv_bytes_per_token = mcfg.n_kv_heads * head_dim * 2 * mcfg.n_layers * 2;  // K+V, FP16
-        int max_by_vram = (kv_bytes_per_token > 0)
-            ? static_cast<int>(free_vram * 0.3 / kv_bytes_per_token)
-            : 131072;
-        config_.max_seq_len = std::min(model_ctx, std::max(max_by_vram, 4096));
-        IMP_LOG_INFO("max_seq_len: auto → %d (model=%d, vram_cap=%d)",
-                     config_.max_seq_len, model_ctx, max_by_vram);
+    // --- Auto-detect KV cache dtype ---
+    // Default to FP8 E4M3 for ~50% KV VRAM savings.
+    // Model-specific overrides (e.g. Gemma-4 → FP16) run later and may revert this.
+    if (config_.kv_cache_dtype == DType::FP16) {
+        config_.kv_cache_dtype = DType::FP8_E4M3;
+        IMP_LOG_INFO("KV cache dtype: auto → FP8_E4M3");
     }
 
     if (config_.max_batch_size <= 0) {
@@ -384,13 +372,6 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         config_.ssm_state_dtype = DType::FP16;
         IMP_LOG_INFO("SSM state dtype: auto → FP16 (hybrid SSM model, state_size=%d)",
                      mcfg.ssm_state_size);
-    }
-
-    // --- Auto-detect KV cache dtype ---
-    // Default to FP8 E4M3 for ~50% KV VRAM savings
-    if (config_.kv_cache_dtype == DType::FP16) {
-        config_.kv_cache_dtype = DType::FP8_E4M3;
-        IMP_LOG_INFO("KV cache dtype: auto → FP8_E4M3");
     }
 
     // --- Auto-detect FP8 prefill ---
@@ -495,6 +476,37 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             setenv("IMP_GEMMA4_FORCE_MMVQ", "1", 0);
             IMP_LOG_INFO("Gemma 4: enabling MMVQ for all weight GEMMs (numerical parity with llama.cpp)");
         }
+    }
+
+    // --- Auto-detect max_seq_len ---
+    // Runs AFTER model-specific overrides (Gemma-4 forces FP16 KV etc.) so the
+    // per-token cost reflects the actual dtype that will be allocated.
+    if (const char* env_msl = std::getenv("IMP_MAX_SEQ_LEN")) {
+        int v = std::atoi(env_msl);
+        if (v > 0) { config_.max_seq_len = v; IMP_LOG_INFO("max_seq_len: env IMP_MAX_SEQ_LEN=%d", v); }
+    }
+    if (config_.max_seq_len <= 0) {
+        int model_ctx = mcfg.max_seq_len;  // from GGUF metadata
+        size_t free_vram = 0, total_vram = 0;
+        cudaMemGetInfo(&free_vram, &total_vram);
+        int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
+        // Per-token KV bytes for the real kv dtype (INT4/TQ pack 2 elems/byte).
+        auto kv = config_.kv_cache_dtype;
+        bool packed_int4 = (kv == DType::INT4 || kv == DType::TURBOQUANT ||
+                            kv == DType::TURBOQUANT_LITE);
+        size_t per_tok_elems = static_cast<size_t>(mcfg.n_kv_heads) * head_dim *
+                               mcfg.n_layers * 2;  // K+V, per KV head, all layers
+        size_t kv_bytes_per_token = packed_int4 ? (per_tok_elems / 2)
+                                                : (per_tok_elems * dtype_size(kv));
+        // The budget planner downstream uses 80% of free VRAM for KV. Cap the
+        // auto-detect at ~60% so it doesn't undershoot what the planner can
+        // afford. (Was 30%, calibrated when weight caches competed at FP16.)
+        int max_by_vram = (kv_bytes_per_token > 0)
+            ? static_cast<int>(free_vram * 0.6 / kv_bytes_per_token)
+            : 131072;
+        config_.max_seq_len = std::min(model_ctx, std::max(max_by_vram, 4096));
+        IMP_LOG_INFO("max_seq_len: auto → %d (model=%d, vram_cap=%d, kv=%zu B/tok)",
+                     config_.max_seq_len, model_ctx, max_by_vram, kv_bytes_per_token);
     }
 
     // --- Core initialization ---
