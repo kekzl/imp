@@ -14,6 +14,7 @@ enum class ModelArch {
     QWEN3_MOE,
     QWEN35,
     QWEN35_MOE,
+    QWEN36_MOE,
     GEMMA3,
     GEMMA4,
     LLAMA4,

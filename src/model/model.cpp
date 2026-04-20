@@ -93,6 +93,7 @@ enum {
     kApiNemotronHMoe = 4, kApiQwen3 = 5, kApiQwen3Moe = 6,
     kApiGemma3 = 7, kApiLlama4 = 8, kApiGeneric = 9,
     kApiQwen35 = 10, kApiQwen35Moe = 11, kApiGemma4 = 12,
+    kApiQwen36Moe = 13,
 };
 
 static constexpr ArchEntry kArchRegistry[] = {
@@ -106,6 +107,7 @@ static constexpr ArchEntry kArchRegistry[] = {
     {ModelArch::QWEN3_MOE,      "qwen3moe",        kApiQwen3Moe,      -1, 0,    -1, -1, false, true,  0.6f, 0.95f, 20},
     {ModelArch::QWEN35,         "qwen35",          kApiQwen35,        -1, 0,    -1, -1, false, false, 0.6f, 0.95f, 20},
     {ModelArch::QWEN35_MOE,     "qwen35moe",       kApiQwen35Moe,     -1, 0,    -1, -1, false, false, 0.6f, 0.95f, 20},
+    {ModelArch::QWEN36_MOE,     "qwen36moe",       kApiQwen36Moe,     -1, 0,    -1, -1, false, false, 0.6f, 0.95f, 20},
     {ModelArch::GEMMA3,         "gemma3",          kApiGemma3,        -1, 0,     1,   1, false, false, 0.6f, 0.95f, 0},
     {ModelArch::GEMMA4,         "gemma4",          kApiGemma4,        -1, 0,     1,   1, false, true,  0.6f, 0.9f,  20},
     {ModelArch::LLAMA4,         "llama4",          kApiLlama4,         0, 0,    -1, -1, false, false, 0.6f, 0.95f, 0},
@@ -146,6 +148,9 @@ ModelArch parse_model_arch(const std::string& s) {
         {"qwen3moe", ModelArch::QWEN3_MOE},
         {"qwen35", ModelArch::QWEN35},
         {"qwen35moe", ModelArch::QWEN35_MOE},
+        {"qwen36moe", ModelArch::QWEN36_MOE},
+        {"qwen3.6_moe", ModelArch::QWEN36_MOE},
+        {"qwen3.6moe", ModelArch::QWEN36_MOE},
         {"gemma3", ModelArch::GEMMA3},
         {"gemma", ModelArch::GEMMA3},
         {"gemma2", ModelArch::GEMMA3},
