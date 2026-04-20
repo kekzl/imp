@@ -403,7 +403,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                                 static_cast<float*>(h_st),
                                 y_fp32,
                                 n, n_heads, head_dim_ssm, ssize, n_groups, stream);
-            // FP32-in RMSNorm+Gate+SiLU → FP16 y_buf
+            // FP32-in RMSNorm+Gate+SiLU → FP16 y_buf. (Can't chain to FP32 ssm_out
+            // input: cuBLAS doesn't support Q8_0 × FP32 matmul — fails status=7.)
             gdn_rmsnorm_gated_silu_fp32in(static_cast<half*>(y_buf.data),
                                             y_fp32,
                                             static_cast<const half*>(gate_out.data),
