@@ -526,28 +526,45 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     // GemmContext for LM head GEMM dispatches.
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_);
 
+    // Registry handle for LM head — replaces wcache_ probe per call (Task 3.5).
+    const WeightHandle* lm_h = (model_->out_proj_id != kInvalidTensorID)
+                                    ? &registry_.handle(model_->out_proj_id)
+                                    : nullptr;
+    const StorageTier lm_tier = lm_h ? lm_h->primary_tier : StorageTier::Undefined;
+
     if (state.is_prefill && !state.all_logits) {
         Tensor h_last = view_tokens(hidden_, n).slice(n - 1, n);
         Tensor lg = view_tokens(logits_, 1);
 
-        auto mxfp4_lm_pf = wcache_.cutlass_mxfp4.find(model_->output_proj().data);
-        auto nvfp4_lm_pf = wcache_.nvfp4.find(model_->output_proj().data);
-        if (mxfp4_lm_pf != wcache_.cutlass_mxfp4.end() && mxfp4_lm_pf->second.linear_scales) {
+        if (lm_tier == StorageTier::MXFP4 && lm_h->payload.mxfp4.linear_scales) {
             Tensor no_last = view_tokens(norm_out_, 1);
             rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
-            int hbs = mxfp4_lm_pf->second.hadamard_bs;
+            int hbs = lm_h->payload.mxfp4.hadamard_bs;
             if (hbs > 0 && hadamard_block_size_valid(hbs))
                 hadamard_transform_fp16(static_cast<const half*>(no_last.data),
                                         static_cast<half*>(no_last.data), 1, cfg.d_model, hbs, stream);
-            gemv_mxfp4_kpar_fp32(mxfp4_lm_pf->second,
+            CutlassMxFP4Weight mxfp4_lm_w{};
+            mxfp4_lm_w.data          = lm_h->payload.mxfp4.weight;
+            mxfp4_lm_w.scale_factors = lm_h->payload.mxfp4.scales;
+            mxfp4_lm_w.linear_scales = lm_h->payload.mxfp4.linear_scales;
+            mxfp4_lm_w.hadamard_bs   = lm_h->payload.mxfp4.hadamard_bs;
+            gemv_mxfp4_kpar_fp32(mxfp4_lm_w,
                                   static_cast<const half*>(no_last.data),
                                   static_cast<float*>(lg.data),
                                   cfg.vocab_size, cfg.d_model, stream);
-        } else if (nvfp4_lm_pf != wcache_.nvfp4.end()) {
+        } else if (lm_tier == StorageTier::NVFP4) {
             Tensor no_last = view_tokens(norm_out_, 1);
             rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
             debug_tensor_stats("after_final_rmsnorm", no_last, stream);
-            gemv_nvfp4_kpar_fp32(nvfp4_lm_pf->second,
+            NvFP4QuantResult nvfp4_lm_r;
+            nvfp4_lm_r.packed_data  = lm_h->payload.nvfp4.data;
+            nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
+            nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
+                ? [&]{ float s; cudaMemcpy(&s, lm_h->payload.nvfp4.tensor_scale, sizeof(float), cudaMemcpyDeviceToHost); return s; }()
+                : 1.0f;
+            nvfp4_lm_r.N = cfg.vocab_size;
+            nvfp4_lm_r.K = cfg.d_model;
+            gemv_nvfp4_kpar_fp32(nvfp4_lm_r,
                                   static_cast<const half*>(no_last.data),
                                   static_cast<float*>(lg.data),
                                   cfg.vocab_size, cfg.d_model, stream);
@@ -603,24 +620,35 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         Tensor h_final = view_tokens(hidden_, n);
         Tensor lg = view_tokens(logits_, n);
 
-        auto mxfp4_lm = wcache_.cutlass_mxfp4.find(model_->output_proj().data);
-        auto nvfp4_lm = wcache_.nvfp4.find(model_->output_proj().data);
-        if (n == 1 && mxfp4_lm != wcache_.cutlass_mxfp4.end() && mxfp4_lm->second.linear_scales) {
+        if (n == 1 && lm_tier == StorageTier::MXFP4 && lm_h->payload.mxfp4.linear_scales) {
             Tensor no_final = view_tokens(norm_out_, 1);
             rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
-            int hbs = mxfp4_lm->second.hadamard_bs;
+            int hbs = lm_h->payload.mxfp4.hadamard_bs;
             if (hbs > 0 && hadamard_block_size_valid(hbs))
                 hadamard_transform_fp16(static_cast<const half*>(no_final.data),
                                         static_cast<half*>(no_final.data), 1, cfg.d_model, hbs, stream);
-            gemv_mxfp4_kpar_fp32(mxfp4_lm->second,
+            CutlassMxFP4Weight mxfp4_lm_w{};
+            mxfp4_lm_w.data          = lm_h->payload.mxfp4.weight;
+            mxfp4_lm_w.scale_factors = lm_h->payload.mxfp4.scales;
+            mxfp4_lm_w.linear_scales = lm_h->payload.mxfp4.linear_scales;
+            mxfp4_lm_w.hadamard_bs   = lm_h->payload.mxfp4.hadamard_bs;
+            gemv_mxfp4_kpar_fp32(mxfp4_lm_w,
                                   static_cast<const half*>(no_final.data),
                                   static_cast<float*>(lg.data),
                                   cfg.vocab_size, cfg.d_model, stream);
-        } else if (n == 1 && nvfp4_lm != wcache_.nvfp4.end()) {
+        } else if (n == 1 && lm_tier == StorageTier::NVFP4) {
             Tensor no_final = view_tokens(norm_out_, 1);
             rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
             debug_tensor_stats("after_final_rmsnorm", no_final, stream);
-            gemv_nvfp4_kpar_fp32(nvfp4_lm->second,
+            NvFP4QuantResult nvfp4_lm_r;
+            nvfp4_lm_r.packed_data  = lm_h->payload.nvfp4.data;
+            nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
+            nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
+                ? [&]{ float s; cudaMemcpy(&s, lm_h->payload.nvfp4.tensor_scale, sizeof(float), cudaMemcpyDeviceToHost); return s; }()
+                : 1.0f;
+            nvfp4_lm_r.N = cfg.vocab_size;
+            nvfp4_lm_r.K = cfg.d_model;
+            gemv_nvfp4_kpar_fp32(nvfp4_lm_r,
                                   static_cast<const half*>(no_final.data),
                                   static_cast<float*>(lg.data),
                                   cfg.vocab_size, cfg.d_model, stream);
@@ -637,15 +665,23 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 q8, qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
             dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
-        } else if (n > 1 && nvfp4_lm != wcache_.nvfp4.end()) {
+        } else if (n > 1 && lm_tier == StorageTier::NVFP4) {
             // Per-row NVFP4 GEMV LM head for batched decode.
             // NVFP4 GEMV is M=1 only — loop over rows.
+            NvFP4QuantResult nvfp4_lm_r;
+            nvfp4_lm_r.packed_data  = lm_h->payload.nvfp4.data;
+            nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
+            nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
+                ? [&]{ float s; cudaMemcpy(&s, lm_h->payload.nvfp4.tensor_scale, sizeof(float), cudaMemcpyDeviceToHost); return s; }()
+                : 1.0f;
+            nvfp4_lm_r.N = cfg.vocab_size;
+            nvfp4_lm_r.K = cfg.d_model;
             Tensor no_row = view_tokens(norm_out_, 1);
             for (int row = 0; row < n; ++row) {
                 Tensor h_row = h_final.slice(row, row + 1);
                 Tensor lg_row = lg.slice(row, row + 1);
                 rmsnorm(h_row, model_->output_norm(), no_row, cfg.rms_norm_eps, stream, norm_w_off_);
-                gemv_nvfp4_kpar_fp32(nvfp4_lm->second,
+                gemv_nvfp4_kpar_fp32(nvfp4_lm_r,
                                       static_cast<const half*>(no_row.data),
                                       static_cast<float*>(lg_row.data),
                                       cfg.vocab_size, cfg.d_model, stream);
@@ -654,7 +690,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             // Per-row Q8_1 GEMV LM head for batched decode.
             // Quantized weights (Q8_0/Q6_K) can't be passed to cuBLAS directly.
             // Check if FP16 cache has the output projection — use cuBLAS GEMM if so.
-            if (wcache_.fp16.count(model_->output_proj().data)) {
+            if (lm_tier == StorageTier::FP16) {
                 Tensor no_final = view_tokens(norm_out_, n);
                 rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
                 gemm_dispatch(no_final, model_->output_proj(), model_->out_proj_qtype_, lg, ctx);
@@ -683,13 +719,14 @@ void GraphExecutor::forward_logits(const InferenceState& state,
 
             // For n>1 decode with quantized output weights, use FP8 GEMM or FP16 cache.
             // Raw gemm() can't handle Q8_0/Q6_K weights with cuBLAS.
-            auto fp8_lm = wcache_.fp8.find(model_->output_proj().data);
-            if (fp8_lm != wcache_.fp8.end() && qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
+            if (lm_tier == StorageTier::FP8 && qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
+                int64_t wshape[2] = {lm_h->shape[0], lm_h->shape[1]};
+                Tensor fp8_lm_w(lm_h->payload.fp8.data, DType::FP8_E4M3, 2, wshape, true);
                 Tensor fp8_no(qscratch_.fp8_act, DType::FP8_E4M3, no_final.ndim, no_final.shape, true);
                 quantize_fp16_to_fp8_e4m3(no_final, fp8_no, qscratch_.d_act_scale, stream,
                                           qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
-                gemm_cublaslt(fp8_no, fp8_lm->second.weight, lg, 1.0f, 0.0f,
-                              qscratch_.d_act_scale, fp8_lm->second.d_scale, stream);
+                gemm_cublaslt(fp8_no, fp8_lm_w, lg, 1.0f, 0.0f,
+                              qscratch_.d_act_scale, lm_h->payload.fp8.d_scale, stream);
             } else {
                 // Fallback: gemm_dispatch handles FP16 cache, MXFP4, quantized, etc.
                 gemm_dispatch(no_final, model_->output_proj(), model_->out_proj_qtype_, lg, ctx);

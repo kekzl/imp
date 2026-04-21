@@ -1553,6 +1553,9 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             L.fp16_packed_down_cache = (it != wcache_.fp16.end()) ? &it->second : nullptr;
         }
     }
+    // Register model-level (non-layer) tensors.
+    const_cast<Model*>(model_)->out_proj_id = register_tensor(model_->output_proj());
+
     IMP_LOG_INFO("WeightRegistry populated with %zu handles (phase-2 shim)",
                  registry_.size());
 }
