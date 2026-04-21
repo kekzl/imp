@@ -11,6 +11,9 @@ namespace imp {
 // block_tables: [batch, max_blocks] int32
 // context_lens: [batch] int32
 // sliding_window: 0 = disabled, >0 = only attend to last N KV positions
+// n_sinks: 0 = disabled, >0 = StreamingLLM — also attend to tokens [0, n_sinks).
+//          Requires sliding_window > 0 and ctx_len > n_sinks + sliding_window to
+//          activate; otherwise behaves as plain sliding-window / full attention.
 // softcap: 0 = disabled, >0 = apply tanh(score/cap)*cap (Gemma-2/3)
 void paged_attention_decode(
     const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache,
@@ -18,7 +21,8 @@ void paged_attention_decode(
     int block_size, float scale, int max_context_len,
     int sliding_window = 0, float softcap = 0.0f,
     cudaStream_t stream = nullptr,
-    int max_blocks_per_seq = 0);
+    int max_blocks_per_seq = 0,
+    int n_sinks = 0);
 
 // Set split-K scratch buffer for paged attention. Must be called before
 // paged_attention_decode if split-K is desired. The scratch buffer holds
@@ -37,7 +41,8 @@ void paged_attention_decode_fp8(
     int block_size, float scale, float kv_scale,
     int max_context_len, int sliding_window = 0,
     float softcap = 0.0f, cudaStream_t stream = nullptr,
-    int max_blocks_per_seq = 0);
+    int max_blocks_per_seq = 0,
+    int n_sinks = 0);
 
 // INT8 dp4a Paged attention for decode: KV cache stored in INT8 with per-head scales.
 // Q: [batch, 1, n_heads, head_dim] FP16
@@ -52,7 +57,8 @@ void paged_attention_decode_int8(
     int block_size, float scale,
     int max_context_len, int sliding_window = 0,
     float softcap = 0.0f, cudaStream_t stream = nullptr,
-    int max_blocks_per_seq = 0);
+    int max_blocks_per_seq = 0,
+    int n_sinks = 0);
 
 // INT4 Paged attention for decode: KV cache stored in packed INT4 with per-head scales.
 // Q: [batch, 1, n_heads, head_dim] FP16
@@ -67,7 +73,8 @@ void paged_attention_decode_int4(
     int block_size, float scale,
     int max_context_len, int sliding_window = 0,
     float softcap = 0.0f, cudaStream_t stream = nullptr,
-    int max_blocks_per_seq = 0);
+    int max_blocks_per_seq = 0,
+    int n_sinks = 0);
 
 // TurboQuant Paged attention for decode: PolarQuant K + QJL sketch + INT4 V.
 // K_dir_cache: packed directions — INT4 uniform (K_mscales=nullptr) or FP4 E2M1 (K_mscales!=nullptr)
@@ -82,7 +89,8 @@ void paged_attention_decode_turboquant(
     int max_context_len, int sliding_window = 0,
     float softcap = 0.0f, cudaStream_t stream = nullptr,
     int max_blocks_per_seq = 0,
-    const uint8_t* K_mscales = nullptr);
+    const uint8_t* K_mscales = nullptr,
+    int n_sinks = 0);
 
 // TurboQuant Lite Paged attention for decode: QJL sketch-only K + INT4 V.
 // K is represented only by QJL sketches + FP16 norms (no INT4 directions in pool).
@@ -97,7 +105,8 @@ void paged_attention_decode_turboquant_lite(
     int block_size, float scale, int sketch_dim,
     int max_context_len, int sliding_window = 0,
     float softcap = 0.0f, cudaStream_t stream = nullptr,
-    int max_blocks_per_seq = 0);
+    int max_blocks_per_seq = 0,
+    int n_sinks = 0);
 
 // Split-K scratch buffer accessor (for use by FP8/INT8 launcher TUs).
 // Returns pointer + size. Either can be nullptr/0 if unset.

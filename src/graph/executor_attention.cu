@@ -414,6 +414,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     float layer_rope_theta = cfg.rope_theta;
     float layer_rope_freq_scale = cfg.rope_freq_scale;
     int layer_sliding_window = cfg.sliding_window;
+    // StreamingLLM: only meaningful when this layer also has a sliding window
+    // (otherwise full attention covers the full context anyway). Resolved
+    // again per-layer below in case Gemma-3 disables SWA on this layer.
+    int layer_n_sinks = streaming_n_sinks_;
     if (cfg.arch == ModelArch::GEMMA4 && !cfg.swa_layers.empty()) {
         // Gemma 4: per-layer SWA pattern stored in cfg.swa_layers (1=SWA, 0=global).
         bool is_swa = (layer < (int)cfg.swa_layers.size() && cfg.swa_layers[layer]);
@@ -437,6 +441,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             layer_rope_freq_scale = 1.0f;  // no scaling for local layers
         }
     }
+    // Apply caller-provided streaming window override and gate sinks on SWA-only layers.
+    if (streaming_window_ > 0) layer_sliding_window = streaming_window_;
+    if (layer_sliding_window <= 0) layer_n_sinks = 0;
 
     // Select LongRoPE frequency table based on context length (nullptr if not longrope)
     const float* longrope_freqs = nullptr;
@@ -851,7 +858,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                     state.block_tables, state.context_lens,
                                     kv_bs, scale, state.max_context_len,
                                     layer_sliding_window, cfg.attn_logit_softcap, stream,
-                                    state.max_blocks_per_seq);
+                                    state.max_blocks_per_seq, layer_n_sinks);
         }
 
         // Clear L2 persistence hint (weights loaded next need L2 space)

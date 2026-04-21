@@ -555,6 +555,44 @@ bool Engine::init_weights() {
             executor_->set_dual_path_quant(true);
             IMP_LOG_INFO("Dual-path quant: attention weights → FP8, FFN weights → NVFP4");
         }
+
+        if (config_.streaming_kv_enabled) {
+            // Streaming is only safe for the FP16 GQA decode kernel — the
+            // quantized variants don't yet skip -1 sentinels in their block
+            // tables. Refuse to enable streaming with non-FP16 KV caches so
+            // we never call evict_middle_blocks for an unsupported path.
+            if (config_.kv_cache_dtype != DType::FP16) {
+                IMP_LOG_WARN("StreamingLLM smart KV cache requires FP16 KV cache "
+                             "(requested %d) — disabling streaming.",
+                             static_cast<int>(config_.kv_cache_dtype));
+                config_.streaming_kv_enabled = false;
+            } else {
+                int n_sinks = (config_.streaming_kv_n_sinks > 0)
+                              ? config_.streaming_kv_n_sinks : 4;
+                int win = (config_.streaming_kv_window > 0)
+                          ? config_.streaming_kv_window
+                          : model_->config().sliding_window;
+                executor_->set_streaming_kv(n_sinks, win);
+                if (n_sinks > 0 && win > 0) {
+                    IMP_LOG_INFO("StreamingLLM smart KV cache enabled: %d sinks + %d-token window",
+                                 n_sinks, win);
+                    // Block-table contents change every step once eviction
+                    // begins; a CUDA graph captured against an old table
+                    // would replay stale pointers. Re-capturing per step
+                    // negates the graph's win, so disable graphs entirely.
+                    if (config_.use_cuda_graphs) {
+                        IMP_LOG_INFO("Disabling CUDA Graphs while StreamingLLM is active "
+                                     "(block table mutates per decode step).");
+                        config_.use_cuda_graphs = false;
+                    }
+                } else {
+                    IMP_LOG_WARN("StreamingLLM enabled but no sliding window configured "
+                                 "(n_sinks=%d, window=%d) — disabling streaming.",
+                                 n_sinks, win);
+                    config_.streaming_kv_enabled = false;
+                }
+            }
+        }
     }
 
     // Reserve L2 persisting cache for decode GEMV
@@ -1684,6 +1722,25 @@ void Engine::step_decode(cudaStream_t dec_stream) {
                     kv_manager_->free_sequence(req->id);
                     req->status = RequestStatus::CANCELLED;
                     continue;
+                }
+            }
+        }
+
+        // StreamingLLM smart KV cache: once context exceeds the threshold,
+        // free middle blocks while keeping sinks + window. The decode kernel
+        // skips the freed (-1 sentinel) slots via its own n_sinks logic.
+        if (config_.streaming_kv_enabled) {
+            int n_sinks = (config_.streaming_kv_n_sinks > 0)
+                          ? config_.streaming_kv_n_sinks : 4;
+            int win = (config_.streaming_kv_window > 0)
+                      ? config_.streaming_kv_window
+                      : model_->config().sliding_window;
+            if (n_sinks > 0 && win > 0) {
+                int threshold = (config_.streaming_kv_threshold > 0)
+                                ? config_.streaming_kv_threshold
+                                : (n_sinks + win + 2 * kv_bs);
+                if (req->context_len() > threshold) {
+                    kv_manager_->evict_middle_blocks(req->id, n_sinks, win);
                 }
             }
         }

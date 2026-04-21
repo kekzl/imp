@@ -586,8 +586,12 @@ void paged_attention_decode_fp8(
     int block_size, float scale, float kv_scale,
     int max_context_len, int sliding_window,
     float softcap, cudaStream_t stream,
-    int max_blocks_per_seq)
+    int max_blocks_per_seq, int n_sinks)
 {
+    // StreamingLLM (n_sinks > 0) is not yet wired into FP8 kernels; this launcher
+    // silently falls back to classical sliding-window. See attention_paged.cu
+    // (GQA FP16 path) for the reference streaming implementation.
+    (void)n_sinks;
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads    = static_cast<int>(Q.shape[2]);
     const int head_dim   = static_cast<int>(Q.shape[3]);

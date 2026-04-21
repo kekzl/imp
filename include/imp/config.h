@@ -90,6 +90,16 @@ typedef struct {
     int use_prefix_caching;        // 0 = off (default), 1 = on — reuse KV blocks for shared prefixes
     char prefix_cache_path[512];   // path to save/load prefix cache (empty = disabled)
 
+    // StreamingLLM smart KV cache (Xiao et al., 2023):
+    // attention sinks + sliding window. Reduces decode KV bandwidth and frees
+    // middle KV blocks for long generations. Currently active only for the FP16
+    // GQA decode path; other quantized variants ignore these settings.
+    int streaming_kv_enabled;      // 0 = off (default), 1 = on
+    int streaming_kv_n_sinks;      // # of initial tokens to always keep (default 4)
+    int streaming_kv_window;       // sliding window size (0 = use ModelConfig::sliding_window)
+    int streaming_kv_threshold;    // ctx_len at which streaming activates
+                                   // (0 = auto: n_sinks + window + 2*kKVBlockSize)
+
     // Threading
     int num_cpu_threads;           // 0 = auto (hardware_concurrency)
 

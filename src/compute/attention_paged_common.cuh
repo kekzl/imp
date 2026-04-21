@@ -65,6 +65,109 @@ __device__ __forceinline__ void cp_async_wait_group() {
     asm volatile("cp.async.wait_group %0;\n" :: "n"(N));
 }
 
+// ---------------------------------------------------------------------------
+// StreamingLLM context range: sink tokens + sliding window.
+//
+// When n_sinks == 0 this collapses to the classical sliding-window (or full)
+// attention range: tokens [effective_start, ctx_len) are attended.
+// When n_sinks > 0 and sliding_window > 0 and ctx_len > n_sinks + sliding_window,
+// two disjoint ranges are attended: [0, sink_end) ∪ [window_start, ctx_len).
+// The block range in between [sink_end_block, window_start_block) contains no
+// attended tokens and must be skipped by the decode loop.
+// ---------------------------------------------------------------------------
+struct ContextRange {
+    int effective_start;      // legacy: start of contiguous range when streaming disabled
+    int first_block;          // first block to iterate
+    int num_ctx_blocks;       // end (exclusive) of block iteration
+
+    // StreamingLLM fields (all zero when streaming not active).
+    int sink_end;             // exclusive token boundary: tokens [0, sink_end) are sinks
+    int sink_end_block;       // exclusive block boundary for sinks
+    int window_start;         // inclusive first token of sliding window
+    int window_start_block;   // block containing window_start
+};
+
+__device__ __forceinline__ ContextRange compute_context_range(
+    int ctx_len, int block_size, int sliding_window, int n_sinks = 0) {
+    ContextRange r{};
+    r.num_ctx_blocks = (ctx_len + block_size - 1) / block_size;
+
+    const bool window_active = (sliding_window > 0 && ctx_len > sliding_window);
+    if (!window_active) {
+        r.effective_start = 0;
+        r.first_block = 0;
+        return r;
+    }
+
+    int window_start = ctx_len - sliding_window;
+    // Only enable true streaming when sinks are fully before the window.
+    if (n_sinks > 0 && n_sinks < window_start) {
+        r.effective_start = 0;
+        r.first_block = 0;
+        r.sink_end = n_sinks;
+        r.sink_end_block = (n_sinks + block_size - 1) / block_size;
+        r.window_start = window_start;
+        r.window_start_block = window_start / block_size;
+        return r;
+    }
+
+    // Plain sliding-window fallback.
+    r.effective_start = window_start;
+    r.first_block = window_start / block_size;
+    return r;
+}
+
+// Return true if streaming is active (sinks + window with a gap).
+__device__ __host__ __forceinline__ bool streaming_active(const ContextRange& r) {
+    return r.sink_end > 0;
+}
+
+// Advance to the next block that actually contains attended tokens. When
+// streaming is active, this jumps across the [sink_end_block, window_start_block)
+// gap so that the middle blocks' KV data is not loaded.
+__device__ __forceinline__ int next_valid_block(const ContextRange& r, int cur_blk) {
+    int next = cur_blk + 1;
+    if (streaming_active(r) && next >= r.sink_end_block && next < r.window_start_block) {
+        next = r.window_start_block;
+    }
+    return next;
+}
+
+// Compute the [first_tok, last_tok) slice of the current block that should be
+// attended. For streaming-disabled paths this matches the legacy
+// `first_tok = max(0, effective_start - tok_start)` convention.
+//
+// Returns false if the entire block is outside the attention range (caller
+// should `continue` past it).
+__device__ __forceinline__ bool block_token_range(
+    const ContextRange& r, int blk, int block_size, int ctx_len,
+    int& first_tok, int& last_tok) {
+    int tok_start = blk * block_size;
+    int tok_end   = tok_start + block_size;
+    if (tok_end > ctx_len) tok_end = ctx_len;
+    last_tok = tok_end - tok_start;
+    first_tok = 0;
+
+    if (streaming_active(r)) {
+        // Skip middle blocks entirely.
+        if (blk >= r.sink_end_block && blk < r.window_start_block) {
+            return false;
+        }
+        if (blk < r.sink_end_block) {
+            // Sink region: clamp to [0, sink_end).
+            int rel_end = r.sink_end - tok_start;
+            if (rel_end < last_tok) last_tok = rel_end;
+        } else {
+            // Window region: clamp to [window_start, ctx_len).
+            int rel_start = r.window_start - tok_start;
+            if (rel_start > first_tok) first_tok = rel_start;
+        }
+    } else if (tok_start < r.effective_start) {
+        first_tok = r.effective_start - tok_start;
+    }
+    return last_tok > first_tok;
+}
+
 // Detect GPU SM count for split-K occupancy decisions. Cached after first call.
 static inline int kpar_n_sms() {
     static int n_sms = 0;

@@ -73,6 +73,10 @@ ImpConfig imp_config_default(void) {
     config.ngram_spec_k = 5;            // default draft tokens
     config.mmproj_path = NULL;          // no vision model
     config.turboquant_sketch_multiplier = 2; // sketch_dim = 2 * head_dim
+    config.streaming_kv_enabled = 0;          // off by default (opt-in)
+    config.streaming_kv_n_sinks = 4;          // StreamingLLM paper default
+    config.streaming_kv_window = 0;           // 0 = derive from ModelConfig::sliding_window
+    config.streaming_kv_threshold = 0;        // 0 = auto
     return config;
 }
 
@@ -265,6 +269,10 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
         ecfg.ngram_spec_k = config->ngram_spec_k;
         if (config->mmproj_path)
             ecfg.mmproj_path = config->mmproj_path;
+        ecfg.streaming_kv_enabled = (config->streaming_kv_enabled != 0);
+        ecfg.streaming_kv_n_sinks = config->streaming_kv_n_sinks;
+        ecfg.streaming_kv_window = config->streaming_kv_window;
+        ecfg.streaming_kv_threshold = config->streaming_kv_threshold;
 
         // Create and initialize the engine
         auto engine = std::make_unique<imp::Engine>();

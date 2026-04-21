@@ -341,6 +341,18 @@ public:
     // For single sequence: pass vocab_size. For batched logprobs: pass vocab_size * n_sequences.
     void ensure_logits_pinned(int total_floats);
 
+    // Configure StreamingLLM smart KV cache: keeps the first `n_sinks` tokens
+    // and the last `window` tokens of every attended sequence, dropping the
+    // rest. Set n_sinks=0 to disable. Currently honoured only by the FP16 GQA
+    // decode kernel; quantized variants ignore this and fall back to plain
+    // sliding-window attention.
+    void set_streaming_kv(int n_sinks, int window) {
+        streaming_n_sinks_ = (n_sinks > 0) ? n_sinks : 0;
+        streaming_window_  = (window  > 0) ? window  : 0;
+    }
+    int streaming_n_sinks() const { return streaming_n_sinks_; }
+    int streaming_window()  const { return streaming_window_; }
+
     // Access the hidden state buffer after forward_logits().
     // Returns [max_tokens, d_model] FP16 on device. Use view_tokens() to get [n, d_model].
     const Tensor& hidden_state() const { return hidden_; }
@@ -349,6 +361,10 @@ public:
     Tensor view_hidden(int n_tokens) const { return view_tokens(hidden_, n_tokens); }
 
 private:
+    // StreamingLLM (sinks + window). 0 = disabled.
+    int streaming_n_sinks_ = 0;
+    int streaming_window_  = 0;
+
     class VRAMAllocator* vram_alloc_ = nullptr;
     const Model* model_ = nullptr;
     DType compute_dtype_ = DType::FP16;

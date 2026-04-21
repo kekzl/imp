@@ -110,6 +110,9 @@ void KVCacheManager::free_sequence(int seq_id) {
     if (it == seq_blocks_.end()) return;
 
     for (int block_id : it->second) {
+        // -1 sentinel marks a slot whose physical block was freed by
+        // evict_middle_blocks (StreamingLLM). Skip — nothing to free.
+        if (block_id < 0) continue;
         // Pinned blocks survive free_sequence: keep ref_count=1, add to
         // cached LRU for reuse. They remain in pinned_blocks_ and cannot
         // be evicted until unpin_prefix() is called.
@@ -521,6 +524,92 @@ int KVCacheManager::num_pinned_blocks() const {
 
 // ─── Speculative decoding rollback ───────────────────────────────────
 
+int KVCacheManager::evict_middle_blocks(int seq_id,
+                                        int n_sink_tokens,
+                                        int n_window_tokens) {
+    auto it = seq_blocks_.find(seq_id);
+    if (it == seq_blocks_.end()) return 0;
+    if (n_sink_tokens <= 0 || n_window_tokens <= 0) return 0;
+
+    auto& blocks = it->second;
+    const int block_size = cache_->block_size();
+    const int total_blocks = static_cast<int>(blocks.size());
+    if (total_blocks == 0) return 0;
+
+    const int sink_end_block = (n_sink_tokens + block_size - 1) / block_size;
+    const int window_block_count =
+        (n_window_tokens + block_size - 1) / block_size;
+    const int window_start_block =
+        std::max(0, total_blocks - window_block_count);
+
+    if (sink_end_block >= window_start_block) {
+        // Sinks and window overlap (sequence too short) — nothing to free.
+        return 0;
+    }
+
+    // Pin sink blocks idempotently so LRU / cached-block eviction never
+    // touches them while the sequence is alive.
+    for (int i = 0; i < sink_end_block; ++i) {
+        int bid = blocks[i];
+        if (bid >= 0 && pinned_blocks_.insert(bid).second) {
+            // Newly pinned: if it sits in the cached LRU list (ref_count==1
+            // on a freed sequence) we must remove it so reclaim_cached_block
+            // never picks it.
+            auto cit = cached_blocks_map_.find(bid);
+            if (cit != cached_blocks_map_.end()) {
+                cached_blocks_lru_.erase(cit->second);
+                cached_blocks_map_.erase(cit);
+                if (reclaimable_cached_count_ > 0) reclaimable_cached_count_--;
+            }
+        }
+    }
+    // Track per-sequence pin count so unpin_prefix removes the right blocks
+    // (use max in case the user pinned a smaller prefix earlier).
+    auto pit = pinned_seqs_.find(seq_id);
+    if (pit == pinned_seqs_.end() || pit->second < sink_end_block) {
+        pinned_seqs_[seq_id] = sink_end_block;
+    }
+
+    // Free middle blocks and replace with sentinel.
+    int freed = 0;
+    for (int i = sink_end_block; i < window_start_block; ++i) {
+        int bid = blocks[i];
+        if (bid < 0) continue;  // already evicted
+        // Drop from prefix-hash table — chain is broken anyway.
+        auto hit = block_id_to_hash_.find(bid);
+        if (hit != block_id_to_hash_.end()) {
+            block_hash_to_id_.erase(hit->second);
+            block_id_to_hash_.erase(hit);
+        }
+        cache_->free_block(bid);
+        blocks[i] = -1;
+        ++freed;
+    }
+
+    // Invalidate the prefix-hash chain for window blocks too — once a gap
+    // exists, downstream blocks can no longer be reused as a prefix.
+    auto hash_it = seq_block_hashes_.find(seq_id);
+    if (hash_it != seq_block_hashes_.end()) {
+        auto& hashes = hash_it->second;
+        for (int i = sink_end_block;
+             i < total_blocks && i < static_cast<int>(hashes.size()); ++i) {
+            // Clear hash entry for window blocks too: their original hash
+            // chained through the now-freed middle.
+            int bid = (i < static_cast<int>(blocks.size())) ? blocks[i] : -1;
+            if (bid >= 0) {
+                auto hit = block_id_to_hash_.find(bid);
+                if (hit != block_id_to_hash_.end()) {
+                    block_hash_to_id_.erase(hit->second);
+                    block_id_to_hash_.erase(hit);
+                }
+            }
+            hashes[i] = 0;
+        }
+    }
+
+    return freed;
+}
+
 void KVCacheManager::rollback(int seq_id, int new_seq_len) {
     auto it = seq_blocks_.find(seq_id);
     if (it == seq_blocks_.end()) return;
@@ -533,7 +622,8 @@ void KVCacheManager::rollback(int seq_id, int new_seq_len) {
     // will be overwritten on subsequent writes).
     int blocks_needed = (new_seq_len + cache_->block_size() - 1) / cache_->block_size();
     while (static_cast<int>(blocks.size()) > blocks_needed) {
-        cache_->free_block(blocks.back());
+        // -1 sentinels (StreamingLLM evicted middle slots) need no free.
+        if (blocks.back() >= 0) cache_->free_block(blocks.back());
         blocks.pop_back();
     }
 

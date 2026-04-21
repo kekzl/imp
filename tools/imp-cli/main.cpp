@@ -92,6 +92,11 @@ int main(int argc, char** argv) {
     if (args.mxfp4_prefill) config.use_mxfp4_prefill = 1;
     if (args.dual_path_quant) config.dual_path_quant = 1;
     if (args.prefix_caching) config.use_prefix_caching = 1;
+    if (args.streaming_kv) {
+        config.streaming_kv_enabled = 1;
+        config.streaming_kv_n_sinks = args.streaming_sinks;
+        config.streaming_kv_window = args.streaming_window;
+    }
     config.use_nvfp4_decode = args.decode_nvfp4;
     if (!args.mmproj_path.empty())
         config.mmproj_path = args.mmproj_path.c_str();
