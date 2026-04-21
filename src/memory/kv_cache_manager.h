@@ -122,6 +122,25 @@ public:
     // new length, keeping the last partially-filled block).
     void rollback(int seq_id, int new_seq_len);
 
+    // ── StreamingLLM middle eviction ─────────────────────────────────
+
+    // Free the "middle" blocks of a sequence, keeping the first
+    // `n_sink_tokens` tokens (attention sinks) and the last
+    // `n_window_tokens` tokens (sliding window). Sink blocks become
+    // pinned to prevent later eviction. Freed slots in the block table
+    // are replaced with sentinel `-1` so the block table length (and
+    // therefore positional alignment in attention kernels) is unchanged.
+    //
+    // The caller must use a streaming-aware decode kernel (`n_sinks > 0`
+    // passed to paged_attention_decode) so that the sentinel `-1` slots
+    // are skipped during attention.
+    //
+    // This is idempotent: calling repeatedly with the same parameters
+    // is a no-op once the sequence has been streamed.
+    //
+    // Returns the number of physical blocks freed (0 if nothing to evict).
+    int evict_middle_blocks(int seq_id, int n_sink_tokens, int n_window_tokens);
+
     // ── Stats ────────────────────────────────────────────────────────
 
     // Snapshot of all cache statistics.

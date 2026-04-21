@@ -10,27 +10,10 @@
 namespace imp {
 
 // ---------------------------------------------------------------------------
-// Device helpers — apply_softcap, write_empty_split_sentinel, and
-// online_softmax_step are now in attention_paged_common.cuh.
-// ContextRange remains file-local (only used in this TU).
+// Device helpers — apply_softcap, write_empty_split_sentinel,
+// online_softmax_step, ContextRange, compute_context_range, and
+// block_token_range live in attention_paged_common.cuh.
 // ---------------------------------------------------------------------------
-namespace {
-
-struct ContextRange {
-    int effective_start;
-    int first_block;
-    int num_ctx_blocks;
-};
-
-__device__ __forceinline__ ContextRange compute_context_range(
-    int ctx_len, int block_size, int sliding_window) {
-    int effective_start = (sliding_window > 0 && ctx_len > sliding_window)
-                          ? (ctx_len - sliding_window) : 0;
-    return {effective_start, effective_start / block_size,
-            (ctx_len + block_size - 1) / block_size};
-}
-
-} // anonymous namespace
 
 // ---------------------------------------------------------------------------
 // Paged Attention -- Decode Kernel (single-query per sequence)
@@ -123,6 +106,7 @@ paged_attention_gqa_kernel(
     int n_q_per_kv,
     int warps_per_q,
     int sliding_window,
+    int n_sinks,
     float softcap)
 {
     const int batch_idx = blockIdx.x;
@@ -183,8 +167,10 @@ paged_attention_gqa_kernel(
     // s_v(buf) = s_kv_h + buf * 2 * tile_elems + tile_elems
 
     // ---- Context range ----
-    const auto [effective_start, first_block, num_ctx_blocks] =
-        compute_context_range(ctx_len, block_size, sliding_window);
+    const ContextRange range =
+        compute_context_range(ctx_len, block_size, sliding_window, n_sinks);
+    const int first_block = range.first_block;
+    const int num_ctx_blocks = range.num_ctx_blocks;
 
     // ---- Double-buffered KV block iteration ----
     int buf = 0;
@@ -208,15 +194,17 @@ paged_attention_gqa_kernel(
     }
     __syncthreads();
 
-    for (int blk = first_block; blk < num_ctx_blocks; blk++) {
+    for (int blk = first_block; blk < num_ctx_blocks; blk = next_valid_block(range, blk)) {
         // Current data is in buffer `buf`
         const half* s_k_cur = s_kv_h + buf * 2 * tile_elems;
         const half* s_v_cur = s_k_cur + tile_elems;
 
-        // Start loading next block into the other buffer (overlaps with compute)
+        // Start loading next block into the other buffer (overlaps with compute).
+        // When streaming is active, skip across the [sink_end_block, window_start_block) gap.
         int next_buf = 1 - buf;
-        if (blk + 1 < num_ctx_blocks) {
-            int next_phys = bt[blk + 1];
+        int next_blk = next_valid_block(range, blk);
+        if (next_blk < num_ctx_blocks) {
+            int next_phys = bt[next_blk];
             const half* K_next = K_cache + (int64_t)next_phys * kv_block_stride
                                  + kv_head * head_dim;
             const half* V_next = V_cache + (int64_t)next_phys * kv_block_stride
@@ -233,15 +221,12 @@ paged_attention_gqa_kernel(
         }
 
         // === Per-Q-head attention computation (on current buffer) ===
-        int tok_start = blk * block_size;
-        int tok_end   = tok_start + block_size;
-        if (tok_end > ctx_len) tok_end = ctx_len;
+        int first_tok = 0, last_tok = 0;
+        const bool have_toks = block_token_range(range, blk, block_size, ctx_len,
+                                                 first_tok, last_tok);
 
-        int first_tok = 0;
-        if (tok_start < effective_start) first_tok = effective_start - tok_start;
-
-        if (active) {
-            for (int ti = warp_in_q + first_tok; ti < (tok_end - tok_start); ti += warps_per_q) {
+        if (active && have_toks) {
+            for (int ti = warp_in_q + first_tok; ti < last_tok; ti += warps_per_q) {
                 float dot = 0.0f;
                 for (int i = 0; i < elems_per_thread; i++) {
                     int d = lane_id + i * WARP_SIZE;
@@ -336,6 +321,7 @@ __global__ void paged_attention_decode_kernel(
     int max_context_len,
     int max_num_blocks,
     int sliding_window,
+    int n_sinks,
     float softcap)
 {
     static_assert(HEAD_DIM % WARP_SIZE == 0, "HEAD_DIM must be divisible by WARP_SIZE");
@@ -377,8 +363,15 @@ __global__ void paged_attention_decode_kernel(
     #pragma unroll
     for (int i = 0; i < ELEMS; i++) o_reg[i] = 0.0f;
 
-    const auto [effective_start, first_block, num_ctx_blocks] =
-        compute_context_range(ctx_len, block_size, sliding_window);
+    // NOTE: n_sinks is threaded into the kernel signature for API parity but
+    // streaming (sinks+window) is only implemented in the GQA kernel variant.
+    // This path falls back to classical sliding-window by passing n_sinks=0.
+    const ContextRange range_ =
+        compute_context_range(ctx_len, block_size, sliding_window, 0);
+    const int effective_start = range_.effective_start;
+    const int first_block = range_.first_block;
+    const int num_ctx_blocks = range_.num_ctx_blocks;
+    (void)n_sinks;
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
@@ -496,6 +489,7 @@ __global__ void paged_attention_decode_kernel_generic(
     int max_context_len,
     int max_num_blocks,
     int sliding_window,
+    int n_sinks,
     float softcap)
 {
     const int batch_idx = blockIdx.x;
@@ -528,8 +522,15 @@ __global__ void paged_attention_decode_kernel_generic(
     float o_reg[16];  // max head_dim=512 → 16 elems/lane
     for (int i = 0; i < elems_per_thread; i++) o_reg[i] = 0.0f;
 
-    const auto [effective_start, first_block, num_ctx_blocks] =
-        compute_context_range(ctx_len, block_size, sliding_window);
+    // NOTE: n_sinks is threaded into the kernel signature for API parity but
+    // streaming (sinks+window) is only implemented in the GQA kernel variant.
+    // This path falls back to classical sliding-window by passing n_sinks=0.
+    const ContextRange range_ =
+        compute_context_range(ctx_len, block_size, sliding_window, 0);
+    const int effective_start = range_.effective_start;
+    const int first_block = range_.first_block;
+    const int num_ctx_blocks = range_.num_ctx_blocks;
+    (void)n_sinks;
 
     for (int blk = first_block + warp_id; blk < num_ctx_blocks; blk += NUM_WARPS) {
         int phys_block = bt[blk];
@@ -650,6 +651,7 @@ __global__ void paged_attention_splitk_kernel(
     int max_num_blocks,
     int num_splits,
     int sliding_window,
+    int n_sinks,
     float softcap)
 {
     static_assert(HEAD_DIM % WARP_SIZE == 0, "HEAD_DIM must be divisible by WARP_SIZE");
@@ -688,8 +690,15 @@ __global__ void paged_attention_splitk_kernel(
     }
 
     // ---- Determine KV block range for this split ----
-    const auto [effective_start, first_block, num_ctx_blocks] =
-        compute_context_range(ctx_len, block_size, sliding_window);
+    // NOTE: n_sinks is threaded into the kernel signature for API parity but
+    // streaming (sinks+window) is only implemented in the GQA kernel variant.
+    // This path falls back to classical sliding-window by passing n_sinks=0.
+    const ContextRange range_ =
+        compute_context_range(ctx_len, block_size, sliding_window, 0);
+    const int effective_start = range_.effective_start;
+    const int first_block = range_.first_block;
+    const int num_ctx_blocks = range_.num_ctx_blocks;
+    (void)n_sinks;
     const int total_blocks = num_ctx_blocks - first_block;
 
     // Divide blocks among splits
@@ -871,6 +880,7 @@ __global__ void paged_attention_splitk_pipeline_kernel(
     int max_num_blocks,
     int num_splits,
     int sliding_window,
+    int n_sinks,
     float softcap)
 {
     static_assert(HEAD_DIM % WARP_SIZE == 0, "HEAD_DIM must be divisible by WARP_SIZE");
@@ -904,8 +914,15 @@ __global__ void paged_attention_splitk_pipeline_kernel(
     }
 
     // ---- Determine KV block range for this split ----
-    const auto [effective_start, first_block, num_ctx_blocks] =
-        compute_context_range(ctx_len, block_size, sliding_window);
+    // NOTE: n_sinks is threaded into the kernel signature for API parity but
+    // streaming (sinks+window) is only implemented in the GQA kernel variant.
+    // This path falls back to classical sliding-window by passing n_sinks=0.
+    const ContextRange range_ =
+        compute_context_range(ctx_len, block_size, sliding_window, 0);
+    const int effective_start = range_.effective_start;
+    const int first_block = range_.first_block;
+    const int num_ctx_blocks = range_.num_ctx_blocks;
+    (void)n_sinks;
     const int total_blocks = num_ctx_blocks - first_block;
 
     int blocks_per_split = (total_blocks + num_splits - 1) / num_splits;
@@ -1178,6 +1195,7 @@ __global__ void paged_attention_cluster_kernel(
     int max_num_blocks,
     int n_q_per_kv,
     int sliding_window,
+    int n_sinks,
     float softcap)
 {
     namespace cg = cooperative_groups;
@@ -1251,8 +1269,15 @@ __global__ void paged_attention_cluster_kernel(
     for (int i = 0; i < ELEMS; i++) o_reg[i] = 0.0f;
 
     // ---- Context range ----
-    const auto [effective_start, first_block, num_ctx_blocks] =
-        compute_context_range(ctx_len, block_size, sliding_window);
+    // NOTE: n_sinks is threaded into the kernel signature for API parity but
+    // streaming (sinks+window) is only implemented in the GQA kernel variant.
+    // This path falls back to classical sliding-window by passing n_sinks=0.
+    const ContextRange range_ =
+        compute_context_range(ctx_len, block_size, sliding_window, 0);
+    const int effective_start = range_.effective_start;
+    const int first_block = range_.first_block;
+    const int num_ctx_blocks = range_.num_ctx_blocks;
+    (void)n_sinks;
 
     // ---- Prefetch first KV block into buffer 0 (block 0 only) ----
     int cur_buf = 0;
@@ -1353,7 +1378,7 @@ void paged_attention_decode(
     Tensor& O, const int* block_tables, const int* context_lens,
     int block_size, float scale, int max_context_len,
     int sliding_window, float softcap, cudaStream_t stream,
-    int max_blocks_per_seq)
+    int max_blocks_per_seq, int n_sinks)
 {
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads    = static_cast<int>(Q.shape[2]);
@@ -1442,7 +1467,7 @@ void paged_attention_decode(
                     block_tables, context_lens, \
                     batch_size, n_heads, n_kv_heads, \
                     block_size, scale, max_num_blocks, num_splits, \
-                    sliding_window, softcap)
+                    sliding_window, n_sinks, softcap)
 
             switch (head_dim) {
                 case 64:  LAUNCH_SPLITK_PIPE(64);  break;
@@ -1465,7 +1490,7 @@ void paged_attention_decode(
                     block_tables, context_lens, \
                     batch_size, n_heads, n_kv_heads, \
                     block_size, scale, max_num_blocks, num_splits, \
-                    sliding_window, softcap)
+                    sliding_window, n_sinks, softcap)
 
             switch (head_dim) {
                 case 64:  LAUNCH_SPLITK(64);  break;
@@ -1534,7 +1559,7 @@ void paged_attention_decode(
                     block_tables, context_lens, \
                     batch_size, n_heads, n_kv_heads, \
                     block_size, scale, max_context_len, max_num_blocks, \
-                    n_q_per_kv, sliding_window, softcap)
+                    n_q_per_kv, sliding_window, n_sinks, softcap)
 
             switch (head_dim) {
                 case 64:  LAUNCH_CLUSTER(64);  used_cluster = true; break;
@@ -1582,7 +1607,7 @@ void paged_attention_decode(
                 block_tables, context_lens,
                 batch_size, n_heads, n_kv_heads, head_dim,
                 block_size, scale, max_context_len, max_num_blocks,
-                n_q_per_kv, warps_per_q, sliding_window, softcap);
+                n_q_per_kv, warps_per_q, sliding_window, n_sinks, softcap);
         } else if (!used_cluster) {
             // MHA fallback for n_q_per_kv > MAX_Q_PER_KV without cluster
             goto mha_fallback;
@@ -1602,7 +1627,7 @@ void paged_attention_decode(
                 block_tables, context_lens, \
                 batch_size, n_heads, n_kv_heads, \
                 block_size, scale, max_context_len, max_num_blocks, \
-                sliding_window, softcap)
+                sliding_window, n_sinks, softcap)
 
         switch (head_dim) {
             case 64:  LAUNCH_MHA(64);  break;
@@ -1620,7 +1645,7 @@ void paged_attention_decode(
                     block_tables, context_lens,
                     batch_size, n_heads, n_kv_heads, head_dim,
                     block_size, scale, max_context_len, max_num_blocks,
-                    sliding_window, softcap);
+                    sliding_window, n_sinks, softcap);
                 break;
         }
         #undef LAUNCH_MHA

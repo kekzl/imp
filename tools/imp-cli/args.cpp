@@ -49,6 +49,9 @@ void print_usage(const char* prog) {
         "  --decode-nvfp4        NVFP4 decode cache (additive: FP16 prefill + NVFP4 decode)\n"
         "  --decode-nvfp4-only   NVFP4 decode cache (replacement: saves VRAM, slower prefill)\n"
         "  --prefix-caching      Reuse KV cache blocks for shared token prefixes\n"
+        "  --streaming-kv        Enable StreamingLLM smart KV cache (attention sinks + window)\n"
+        "  --stream-sinks <n>    Number of attention-sink tokens to always keep (default: 4)\n"
+        "  --stream-window <n>   Sliding-window size (default: model's sliding_window)\n"
         "  --mxfp4-prefill       Use CUTLASS MXFP4 GEMM for prefill (sm_120, requires NVFP4)\n"
         "  --dual-path-quant     FP8 attention + NVFP4 FFN (higher quality attention, faster FFN)\n"
         "  --no-nvfp4            Disable NVFP4 decode cache (override auto-detection)\n"
@@ -163,6 +166,12 @@ CliArgs parse_args(int argc, char** argv) {
             args.decode_nvfp4 = 2;
         } else if (std::strcmp(arg, "--prefix-caching") == 0) {
             args.prefix_caching = true;
+        } else if (std::strcmp(arg, "--streaming-kv") == 0) {
+            args.streaming_kv = true;
+        } else if (std::strcmp(arg, "--stream-sinks") == 0 && i + 1 < argc) {
+            args.streaming_sinks = std::atoi(argv[++i]);
+        } else if (std::strcmp(arg, "--stream-window") == 0 && i + 1 < argc) {
+            args.streaming_window = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--mxfp4-prefill") == 0) {
             args.mxfp4_prefill = true;
         } else if (std::strcmp(arg, "--dual-path-quant") == 0) {

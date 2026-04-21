@@ -554,8 +554,12 @@ void paged_attention_decode_turboquant(
     int max_context_len, int sliding_window,
     float softcap, cudaStream_t stream,
     int max_blocks_per_seq,
-    const uint8_t* K_mscales)
+    const uint8_t* K_mscales,
+    int n_sinks)
 {
+    // StreamingLLM (n_sinks > 0) not yet wired into TurboQuant decode; falls
+    // back to sliding-window when n_sinks is non-zero.
+    (void)n_sinks;
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads    = static_cast<int>(Q.shape[2]);
     const int head_dim   = static_cast<int>(Q.shape[3]);
@@ -1072,8 +1076,11 @@ void paged_attention_decode_turboquant_lite(
     int block_size, float scale, int sketch_dim,
     int max_context_len, int sliding_window,
     float softcap, cudaStream_t stream,
-    int max_blocks_per_seq)
+    int max_blocks_per_seq, int n_sinks)
 {
+    // StreamingLLM (n_sinks > 0) not yet wired into TurboQuant Lite decode;
+    // falls back to sliding-window when n_sinks is non-zero.
+    (void)n_sinks;
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int n_heads    = static_cast<int>(Q.shape[2]);
     const int head_dim   = static_cast<int>(Q.shape[3]);
