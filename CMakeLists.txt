@@ -378,6 +378,7 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e_models.cpp
         tests/test_degeneration.cpp
         tests/test_tokenizer_compat.cpp
+        tests/test_weight_dispatch.cu
         tests/gguf_stub.cpp
     )
 
