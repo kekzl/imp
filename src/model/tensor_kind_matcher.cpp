@@ -17,17 +17,58 @@ bool contains(std::string_view s, std::string_view needle) {
 
 TensorKind match_tensor_kind(std::string_view name) {
     // Top-level embeddings / head / final norm
-    if (name == "token_embd.weight" || name == "tok_embeddings.weight")
+    if (name == "token_embd.weight" || name == "tok_embeddings.weight" ||
+        name == "model.embed_tokens.weight")
         return TensorKind::TOK_EMBED;
     if (name == "output.weight" || name == "lm_head.weight")
         return TensorKind::LM_HEAD;
-    if (name == "output_norm.weight" || name == "norm.weight")
+    if (name == "output_norm.weight" || name == "norm.weight" ||
+        name == "model.norm.weight")
         return TensorKind::FFN_NORM;
 
-    // Per-layer tensors: "blk.N." prefix or "layers.N." prefix
+    // Per-layer tensors: "blk.N." prefix, "layers.N." prefix, or "model.layers.N." prefix
     const bool is_layer = (name.substr(0, 4) == "blk." ||
-                           name.substr(0, 7) == "layers.");
+                           name.substr(0, 7) == "layers." ||
+                           name.substr(0, 13) == "model.layers.");
     if (!is_layer) return TensorKind::UNKNOWN;
+
+    // SafeTensors (HuggingFace) naming convention
+    // model.layers.N.self_attn.{q,k,v,o}_proj.weight
+    if (contains(name, ".self_attn.")) {
+        if (contains(name, ".q_proj."))  return TensorKind::WQ;
+        if (contains(name, ".k_proj."))  return TensorKind::WK;
+        if (contains(name, ".v_proj."))  return TensorKind::WV;
+        if (contains(name, ".o_proj."))  return TensorKind::WO;
+        if (contains(name, ".q_norm."))  return TensorKind::QK_NORM_Q;
+        if (contains(name, ".k_norm."))  return TensorKind::QK_NORM_K;
+    }
+    // model.layers.N.input_layernorm.weight / post_attention_layernorm.weight
+    if (contains(name, ".input_layernorm."))         return TensorKind::ATTN_NORM;
+    if (contains(name, ".post_attention_layernorm.")) return TensorKind::POST_ATTN_NORM;
+    if (contains(name, ".pre_feedforward_layernorm."))  return TensorKind::FFN_NORM;
+    if (contains(name, ".post_feedforward_layernorm.")) return TensorKind::POST_FFN_NORM;
+    // model.layers.N.mlp.{gate,up,down}_proj.weight
+    if (contains(name, ".mlp.")) {
+        if (contains(name, ".gate_proj.")) return TensorKind::W_GATE;
+        if (contains(name, ".up_proj."))   return TensorKind::W_UP;
+        if (contains(name, ".down_proj.")) return TensorKind::W_DOWN;
+    }
+    // GDN (Qwen3.5 SafeTensors): temporal_block.gate_proj / alpha / beta
+    if (contains(name, ".temporal_block.")) {
+        if (contains(name, ".gate_proj.")) return TensorKind::GDN_GATE;
+        if (contains(name, ".alpha."))     return TensorKind::ALPHA;
+        if (contains(name, ".beta."))      return TensorKind::BETA;
+    }
+    // Mamba2 (Nemotron-H SafeTensors): mamba.{in_proj,out_proj,conv1d,...}
+    if (contains(name, ".mamba.")) {
+        if (contains(name, ".in_proj."))  return TensorKind::SSM_IN;
+        if (contains(name, ".out_proj.")) return TensorKind::SSM_OUT;
+        if (contains(name, ".conv1d.weight")) return TensorKind::CONV1D_W;
+        if (contains(name, ".conv1d.bias"))   return TensorKind::CONV1D_B;
+        if (contains(name, ".dt_bias"))   return TensorKind::DT_BIAS;
+        if (contains(name, ".A_log"))     return TensorKind::A_LOG;
+        if (contains(name, ".norm."))     return TensorKind::SSM_GROUP_NORM;
+    }
 
     // Attention projections
     if (contains(name, ".attn_q.") || contains(name, ".wq."))   return TensorKind::WQ;
