@@ -22,13 +22,12 @@
 namespace imp {
 
 // ---------------------------------------------------------------------------
-// Phase-2 shim: helpers to infer StorageTier from wcache_ and borrow handles.
+// Helpers to infer StorageTier from wcache_ maps and populate handles.
 // ---------------------------------------------------------------------------
 namespace {
 
-// Infer StorageTier from which legacy wcache_ map the source pointer landed in.
-// Phase-2 shim — replaced by StoragePlanner output in Phase 4.
-StorageTier infer_tier_from_wcache(const WeightCacheManager& wc, const void* src_ptr) {
+// Infer StorageTier from which wcache_ map the source pointer landed in.
+StorageTier infer_tier_from_wcache(const WeightCaches& wc, const void* src_ptr) {
     if (wc.cutlass_nvfp4.count(src_ptr)) return StorageTier::CUTLASS_NVFP4;
     if (wc.cutlass_mxfp4.count(src_ptr)) return StorageTier::MXFP4;
     if (wc.nvfp4.count(src_ptr))         return StorageTier::NVFP4;
@@ -37,8 +36,8 @@ StorageTier infer_tier_from_wcache(const WeightCacheManager& wc, const void* src
     return StorageTier::Undefined;
 }
 
-// Fill a handle's payload from the legacy wcache_ entry (borrowed pointers).
-void borrow_payload_from_wcache(WeightHandle& h, const WeightCacheManager& wc,
+// Fill a handle's payload by borrowing pointers from wcache_ entries.
+void borrow_payload_from_wcache(WeightHandle& h, const WeightCaches& wc,
                                 const void* src_ptr) {
     switch (h.primary_tier) {
         case StorageTier::FP16: {
@@ -59,11 +58,9 @@ void borrow_payload_from_wcache(WeightHandle& h, const WeightCacheManager& wc,
         case StorageTier::NVFP4: {
             auto it = wc.nvfp4.find(src_ptr);
             if (it != wc.nvfp4.end()) {
-                // NvFP4QuantResult uses packed_data/micro_scales.
-                // tensor_scale is a host float — no device ptr available for phase-2 shim.
                 h.payload.nvfp4.data         = static_cast<uint8_t*>(it->second.packed_data);
                 h.payload.nvfp4.block_scales = static_cast<uint8_t*>(it->second.micro_scales);
-                h.payload.nvfp4.tensor_scale  = nullptr;  // no device ptr in phase-2 shim
+                h.payload.nvfp4.tensor_scale  = nullptr;  // host float only, no device ptr
                 h.payload.nvfp4.tensor_scale_2 = nullptr;
             }
             break;
@@ -71,7 +68,6 @@ void borrow_payload_from_wcache(WeightHandle& h, const WeightCacheManager& wc,
         case StorageTier::CUTLASS_NVFP4: {
             auto it = wc.cutlass_nvfp4.find(src_ptr);
             if (it != wc.cutlass_nvfp4.end()) {
-                // data and tensor_scale are const in CutlassNvFP4Weight; cast for borrowed handle.
                 h.payload.cutlass_nvfp4.weight       = const_cast<void*>(it->second.data);
                 h.payload.cutlass_nvfp4.sf           = it->second.scale_factors;
                 h.payload.cutlass_nvfp4.global_scale = const_cast<float*>(&it->second.tensor_scale);
@@ -81,7 +77,6 @@ void borrow_payload_from_wcache(WeightHandle& h, const WeightCacheManager& wc,
         case StorageTier::MXFP4: {
             auto it = wc.cutlass_mxfp4.find(src_ptr);
             if (it != wc.cutlass_mxfp4.end()) {
-                // data is const in CutlassMxFP4Weight; cast for borrowed handle.
                 h.payload.mxfp4.weight        = const_cast<void*>(it->second.data);
                 h.payload.mxfp4.scales        = it->second.scale_factors;
                 h.payload.mxfp4.linear_scales = it->second.linear_scales;

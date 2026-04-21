@@ -408,8 +408,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                               qscratch_.d_act_scale, fp8_hwv->payload.fp8.d_scale, stream);
             } else {
                 // Try fused K+V path: single strided batched GEMM for both projections.
-                // PHASE-3-TODO: wcache_.fused_kv is indexed by layer number (not tensor
-                // pointer) and has no WeightHandle equivalent. Kept as wcache_ probe.
+                // fused_kv is indexed by layer number; no WeightHandle equivalent yet.
                 auto fused_kv_it = wcache_.fused_kv.find(layer);
                 // Gemma 4 per-layer shapes break strided-batched K+V layout assumptions.
                 if (n > 1 && fused_kv_it != wcache_.fused_kv.end() && !per_layer_shapes) {

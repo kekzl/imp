@@ -12,7 +12,6 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "core/tensor.h"
-#include "graph/weight_cache_manager.h"
 #include "graph/weight_handle.h"
 #include "graph/moe_workspace.h"
 #include "graph/quant_scratch.h"
@@ -222,6 +221,72 @@ struct InferenceState {
     bool per_row_lm_head = false;
 };
 
+// ---------------------------------------------------------------------------
+// FP8 weight cache entry (used by WeightCaches::fp8).
+// ---------------------------------------------------------------------------
+struct FP8CacheEntry {
+    Tensor weight;       // [N, K] FP8_E4M3 on device
+    float host_scale;    // absmax / 448
+    float* d_scale;      // device-side scale (1 float)
+};
+
+// ---------------------------------------------------------------------------
+// WeightCaches: all pre-quantized weight maps for the inference engine.
+//
+// Replaces the former WeightCacheManager type (Phase 5 cleanup).
+// All members are public for zero-overhead access in the forward pass.
+// Lifecycle: allocated during pre_dequant_weights(), freed in free_buffers().
+// ---------------------------------------------------------------------------
+struct WeightCaches {
+    // --- FP16 weight cache ---
+    std::unordered_map<const void*, Tensor> fp16;
+    size_t fp16_bytes = 0;
+
+    // Fused KV: [wk; wv] per layer for strided batched prefill GEMM.
+    std::unordered_map<int, Tensor> fused_kv;
+    // Fused gate+up: [w_gate; w_up] per layer.
+    std::unordered_map<int, Tensor> fused_gate_up;
+
+    // --- FP8 E4M3 weight cache ---
+    std::unordered_map<const void*, FP8CacheEntry> fp8;
+    size_t fp8_bytes = 0;
+    bool use_fp8 = false;
+
+    // Bulk-allocated buffers for FP16→FP8 migration
+    float* fp8_migrated_scales = nullptr;
+    int fp8_migrated_count = 0;
+    void* fp8_migrated_data = nullptr;
+    size_t fp8_migrated_data_size = 0;
+
+    // Overflow FP8 cache
+    float* fp8_overflow_scales = nullptr;
+    int fp8_overflow_count = 0;
+    void* fp8_overflow_data = nullptr;
+    size_t fp8_overflow_data_size = 0;
+
+    // --- NVFP4 decode weight cache ---
+    // Mode: 0=off, 1=additive, 2=only
+    std::unordered_map<const void*, NvFP4QuantResult> nvfp4;
+    size_t nvfp4_bytes = 0;
+    int nvfp4_decode_mode = 0;
+
+    // Per-expert NVFP4
+    std::unordered_map<const void*, NvFP4MoEQuantResult> nvfp4_moe;
+    size_t nvfp4_moe_bytes = 0;
+
+    // --- CUTLASS sm_120 block-scaled NVFP4 ---
+    std::unordered_map<const void*, CutlassNvFP4Weight> cutlass_nvfp4;
+    size_t cutlass_nvfp4_bytes = 0;
+
+    // --- CUTLASS sm_120 MXFP4 ---
+    std::unordered_map<const void*, CutlassMxFP4Weight> cutlass_mxfp4;
+    size_t cutlass_mxfp4_bytes = 0;
+    bool use_mxfp4 = false;
+
+    // Dual-path mode: FP8 attention + NVFP4 FFN
+    bool dual_path_quant = false;
+};
+
 // Imperative executor for the transformer forward pass.
 //
 // The Graph class provides a DAG representation for visualization and debugging,
@@ -239,12 +304,10 @@ public:
                             int use_nvfp4_decode = 0, bool use_mxfp4_prefill = false);
 
     // Disable FP8 weight cache (must be called before pre_dequant_weights).
-    // Phase 4.2: also mirror into hints_ so Phase 5 can remove wcache_ write.
     void disable_fp8_prefill() { wcache_.use_fp8 = false; hints_.prefer_fp8 = false; }
 
     // Enable dual-path quantization: attention weights stay FP8, FFN weights get NVFP4.
     // Must be called before pre_dequant_weights().
-    // Phase 4.2: also mirror into hints_ so Phase 5 can remove wcache_ write.
     void set_dual_path_quant(bool enable) { wcache_.dual_path_quant = enable; hints_.dual_path_attn_fp8_ffn_nvfp4 = enable; }
 
     // Phase 2: Allocate all GPU workspace buffers.
@@ -453,11 +516,9 @@ private:
     ExpertLRUCache expert_cache_;
 
     // Weight caches (FP16, FP8, NVFP4, CUTLASS NVFP4/MXFP4, fused KV/gate+up)
-    WeightCacheManager wcache_;
+    WeightCaches wcache_;
 
-    // Phase 4.2: parallel mode-flag state mirroring wcache_ mode flags.
-    // wcache_ is still the authoritative source during Phase 4; Phase 5 will
-    // delete wcache_ and make hints_ the single source of truth.
+    // Mode flags mirrored from wcache_ for PlanHints (hints_ is the Phase 5 source of truth).
     PlanHints hints_;
 
     // WeightRegistry: parallel handle store (Phase 2+ shim, populated alongside wcache_)

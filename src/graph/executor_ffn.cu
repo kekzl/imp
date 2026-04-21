@@ -214,8 +214,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 gemm_cublaslt(fp8_no, fp8_tu, uo, 1.0f, 0.0f,
                               qscratch_.d_act_scale, hwu->payload.fp8.d_scale, stream);
             } else {
-                // PHASE-3-TODO: wcache_.fused_gate_up is indexed by layer number (not tensor
-                // pointer) and has no WeightHandle equivalent. Kept as wcache_ probe.
+                // fused_gate_up is indexed by layer number; no WeightHandle equivalent yet.
                 auto fused_gu_it = wcache_.fused_gate_up.find(layer);
                 if (n > 1 && fused_gu_it != wcache_.fused_gate_up.end()) {
                     // Batched gate+up: single cuBLAS call for both projections
