@@ -206,7 +206,7 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w,
             mw.K = K;
             mw.sf_bytes = cutlass_mxfp4_sf_size(N, K);
             mw.owns_data = false;
-            mw.hadamard_bs = 0;
+            mw.hadamard_bs = w.payload.mxfp4.hadamard_bs;
 
             if (M == 1) {
                 // Decode: MXFP4 GEMV using linear_scales.
@@ -348,7 +348,7 @@ void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y,
             mw.sf_bytes = cutlass_mxfp4_sf_size(static_cast<int>(w.shape[0]),
                                                  static_cast<int>(w.shape[1]));
             mw.owns_data = false;
-            mw.hadamard_bs = 0;
+            mw.hadamard_bs = w.payload.mxfp4.hadamard_bs;
 
             if (mw.linear_scales == nullptr) {
                 IMP_LOG_ERROR("gemv_dispatch MXFP4: linear_scales is null");

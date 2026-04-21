@@ -84,6 +84,7 @@ void borrow_payload_from_wcache(WeightHandle& h, const WeightCacheManager& wc,
                 h.payload.mxfp4.weight        = const_cast<void*>(it->second.data);
                 h.payload.mxfp4.scales        = it->second.scale_factors;
                 h.payload.mxfp4.linear_scales = it->second.linear_scales;
+                h.payload.mxfp4.hadamard_bs   = it->second.hadamard_bs;
             }
             break;
         }

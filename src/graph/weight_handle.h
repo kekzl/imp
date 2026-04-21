@@ -30,7 +30,7 @@ struct WeightHandle {
         struct { uint8_t* data; uint8_t* block_scales;
                  float* tensor_scale; float* tensor_scale_2; } nvfp4;
         struct { void* weight; void* sf; float* global_scale; } cutlass_nvfp4;
-        struct { void* weight; void* scales; void* linear_scales; } mxfp4;
+        struct { void* weight; void* scales; void* linear_scales; int hadamard_bs; } mxfp4;
     } payload;
 
     bool is_populated() const { return primary_tier != StorageTier::Undefined; }
