@@ -66,9 +66,9 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
         }
     }
     use_pdl_ = use_pdl;
-    wcache_.use_fp8 = use_fp8_prefill;
-    wcache_.nvfp4_decode_mode = use_nvfp4_decode;
-    wcache_.use_mxfp4 = use_mxfp4_prefill;
+    wcache_.use_fp8 = use_fp8_prefill;           // PHASE-3-TODO: mode flag, not weight probe — defer to Phase 4
+    wcache_.nvfp4_decode_mode = use_nvfp4_decode; // PHASE-3-TODO: mode flag, not weight probe — defer to Phase 4
+    wcache_.use_mxfp4 = use_mxfp4_prefill;       // PHASE-3-TODO: mode flag, not weight probe — defer to Phase 4
     // dual_path_quant is set separately by the engine after init
 
     const auto& cfg = model.config();

@@ -378,7 +378,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     }
 
     // FP8 activation scratch buffers (for FP8 prefill weight cache)
-    if (wcache_.use_fp8) {
+    if (wcache_.use_fp8) {  // PHASE-3-TODO: mode flag set at init, not weight probe — defer to Phase 4
         int max_dim = cfg.d_model;
         if (cfg.d_ff > 0) max_dim = std::max(max_dim, cfg.d_ff);
         max_dim = std::max(max_dim, cfg.n_heads * (cfg.head_dim > 0 ? cfg.head_dim : (cfg.d_model / cfg.n_heads)));
@@ -424,7 +424,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
 
     // CUTLASS sm_120 NVFP4 activation buffers: pre-allocate for max prefill dimensions.
     // Only needed when NVFP4 decode is active and sm_120 is available.
-    if (wcache_.nvfp4_decode_mode > 0 && cutlass_sm120_nvfp4_available()) {
+    if (wcache_.nvfp4_decode_mode > 0 && cutlass_sm120_nvfp4_available()) {  // PHASE-3-TODO: mode flag, not weight probe — defer to Phase 4
         int max_k = 0;
         int max_n = 0;
         for (int i = 0; i < cfg.n_layers; i++) {
@@ -522,7 +522,7 @@ void GraphExecutor::free_buffers() {
     longrope_orig_max_pos_ = 0;
 
     // Free all weight caches (FP16, FP8, NVFP4, CUTLASS, fused KV/gate+up, migrated/overflow)
-    wcache_.free(vram_alloc_);
+    wcache_.free(vram_alloc_);  // PHASE-3-TODO: lifecycle management, not weight probe — belongs in wcache_
 
     qscratch_.free(vram_alloc_);
 

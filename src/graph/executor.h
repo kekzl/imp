@@ -238,11 +238,11 @@ public:
                             int use_nvfp4_decode = 0, bool use_mxfp4_prefill = false);
 
     // Disable FP8 weight cache (must be called before pre_dequant_weights).
-    void disable_fp8_prefill() { wcache_.use_fp8 = false; }
+    void disable_fp8_prefill() { wcache_.use_fp8 = false; }  // PHASE-3-TODO: mode flag — defer to Phase 4
 
     // Enable dual-path quantization: attention weights stay FP8, FFN weights get NVFP4.
     // Must be called before pre_dequant_weights().
-    void set_dual_path_quant(bool enable) { wcache_.dual_path_quant = enable; }
+    void set_dual_path_quant(bool enable) { wcache_.dual_path_quant = enable; }  // PHASE-3-TODO: mode flag — defer to Phase 4
 
     // Phase 2: Allocate all GPU workspace buffers.
     // Call AFTER weight upload to maximize VRAM available for expert layers.
