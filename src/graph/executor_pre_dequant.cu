@@ -20,6 +20,79 @@
 
 namespace imp {
 
+// ---------------------------------------------------------------------------
+// Phase-2 shim: helpers to infer StorageTier from wcache_ and borrow handles.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Infer StorageTier from which legacy wcache_ map the source pointer landed in.
+// Phase-2 shim — replaced by StoragePlanner output in Phase 4.
+StorageTier infer_tier_from_wcache(const WeightCacheManager& wc, const void* src_ptr) {
+    if (wc.cutlass_nvfp4.count(src_ptr)) return StorageTier::CUTLASS_NVFP4;
+    if (wc.cutlass_mxfp4.count(src_ptr)) return StorageTier::MXFP4;
+    if (wc.nvfp4.count(src_ptr))         return StorageTier::NVFP4;
+    if (wc.fp8.count(src_ptr))           return StorageTier::FP8;
+    if (wc.fp16.count(src_ptr))          return StorageTier::FP16;
+    return StorageTier::Undefined;
+}
+
+// Fill a handle's payload from the legacy wcache_ entry (borrowed pointers).
+void borrow_payload_from_wcache(WeightHandle& h, const WeightCacheManager& wc,
+                                const void* src_ptr) {
+    switch (h.primary_tier) {
+        case StorageTier::FP16: {
+            auto it = wc.fp16.find(src_ptr);
+            if (it != wc.fp16.end()) {
+                h.payload.fp16.data = static_cast<half*>(it->second.data);
+            }
+            break;
+        }
+        case StorageTier::FP8: {
+            auto it = wc.fp8.find(src_ptr);
+            if (it != wc.fp8.end()) {
+                h.payload.fp8.data    = static_cast<__nv_fp8_e4m3*>(it->second.weight.data);
+                h.payload.fp8.d_scale = it->second.d_scale;
+            }
+            break;
+        }
+        case StorageTier::NVFP4: {
+            auto it = wc.nvfp4.find(src_ptr);
+            if (it != wc.nvfp4.end()) {
+                // NvFP4QuantResult uses packed_data/micro_scales.
+                // tensor_scale is a host float — no device ptr available for phase-2 shim.
+                h.payload.nvfp4.data         = static_cast<uint8_t*>(it->second.packed_data);
+                h.payload.nvfp4.block_scales = static_cast<uint8_t*>(it->second.micro_scales);
+                h.payload.nvfp4.tensor_scale  = nullptr;  // no device ptr in phase-2 shim
+                h.payload.nvfp4.tensor_scale_2 = nullptr;
+            }
+            break;
+        }
+        case StorageTier::CUTLASS_NVFP4: {
+            auto it = wc.cutlass_nvfp4.find(src_ptr);
+            if (it != wc.cutlass_nvfp4.end()) {
+                // data and tensor_scale are const in CutlassNvFP4Weight; cast for borrowed handle.
+                h.payload.cutlass_nvfp4.weight       = const_cast<void*>(it->second.data);
+                h.payload.cutlass_nvfp4.sf           = it->second.scale_factors;
+                h.payload.cutlass_nvfp4.global_scale = const_cast<float*>(&it->second.tensor_scale);
+            }
+            break;
+        }
+        case StorageTier::MXFP4: {
+            auto it = wc.cutlass_mxfp4.find(src_ptr);
+            if (it != wc.cutlass_mxfp4.end()) {
+                // data is const in CutlassMxFP4Weight; cast for borrowed handle.
+                h.payload.mxfp4.weight        = const_cast<void*>(it->second.data);
+                h.payload.mxfp4.scales        = it->second.scale_factors;
+                h.payload.mxfp4.linear_scales = it->second.linear_scales;
+            }
+            break;
+        }
+        default: break;
+    }
+}
+
+} // anonymous namespace
+
 // Shared helpers from executor_helpers.h (vram_alloc, vram_free)
 
 static inline void deduct_budget(size_t& budget, size_t amount) {
@@ -1410,6 +1483,28 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             }
         }
     }
+
+    // Build WeightRegistry from wcache_ contents (phase-2 shim).
+    registry_.clear();
+    auto register_tensor = [&](const Tensor& t) {
+        if (!t.data) return;
+        StorageTier tier = infer_tier_from_wcache(wcache_, t.data);
+        if (tier == StorageTier::Undefined) return;
+        TensorID id = registry_.reserve(t.kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
+        auto& h = registry_.handle(id);
+        h.primary_tier = tier;
+        borrow_payload_from_wcache(h, wcache_, t.data);
+    };
+
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        const auto& L = model_->layer(i);
+        register_tensor(L.wq);    register_tensor(L.wk);
+        register_tensor(L.wv);    register_tensor(L.wo);
+        register_tensor(L.w_gate); register_tensor(L.w_up); register_tensor(L.w_down);
+        register_tensor(L.ssm_in); register_tensor(L.ssm_out);
+    }
+    IMP_LOG_INFO("WeightRegistry populated with %zu handles (phase-2 shim)",
+                 registry_.size());
 }
 
 } // namespace imp
