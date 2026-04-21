@@ -73,18 +73,24 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                 (ly.post_attn_norm.data != nullptr) ? ly.post_attn_norm : ly.attn_norm;
     const bool has_post_ffn_norm = (ly.post_ffn_norm.data != nullptr);
     const bool using_fp32_accum = (fp32_accum_buf_ != nullptr && has_post_ffn_norm);
+
+    // Fetch handles for w_down (used in multiple fuse-flag decisions below).
+    const WeightHandle* hwd = (ly.w_down_id != kInvalidTensorID)
+                               ? &registry_.handle(ly.w_down_id) : nullptr;
+    const StorageTier wd_tier = hwd ? hwd->primary_tier : StorageTier::Undefined;
+
     bool will_fuse_down_mxfp4 = (!has_post_ffn_norm && n == 1 && h.dtype == DType::FP16 &&
-                                  wcache_.cutlass_mxfp4.count(ly.w_down.data) &&
-                                  wcache_.cutlass_mxfp4.at(ly.w_down.data).linear_scales != nullptr);
+                                  wd_tier == StorageTier::MXFP4 &&
+                                  hwd->payload.mxfp4.linear_scales != nullptr);
     bool will_fuse_down_nvfp4 = (!has_post_ffn_norm && !will_fuse_down_mxfp4 &&
                                   n == 1 && h.dtype == DType::FP16 &&
-                                  wcache_.nvfp4.count(ly.w_down.data));
+                                  wd_tier == StorageTier::NVFP4);
     bool will_fuse_down_residual = (!has_post_ffn_norm && !will_fuse_down_nvfp4 &&
                                      n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
                                      h.dtype == DType::FP16 && is_dp4a_qtype(ly.w_down_qtype));
     bool will_fuse_down_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual &&
                                   !will_fuse_down_nvfp4 && n > 1 &&
-                                  (wcache_.fp16.count(ly.w_down.data) || wcache_.fp8.count(ly.w_down.data)));
+                                  (wd_tier == StorageTier::FP16 || wd_tier == StorageTier::FP8));
     bool will_fuse_down_dequant_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual &&
                                           !will_fuse_down_nvfp4 &&
                                           !will_fuse_down_beta1 && n > 1 &&
@@ -105,17 +111,20 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
     {
         auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
         int d = static_cast<int>(h.shape[1]);
+        // Fetch handles for w_gate and w_up
+        const WeightHandle* hwg = (ly.w_gate_id != kInvalidTensorID)
+                                   ? &registry_.handle(ly.w_gate_id) : nullptr;
+        const WeightHandle* hwu = (ly.w_up_id != kInvalidTensorID)
+                                   ? &registry_.handle(ly.w_up_id) : nullptr;
+
         // MXFP4 gate+up decode path
-        auto mxfp4_wg = wcache_.cutlass_mxfp4.find(ly.w_gate.data);
-        auto mxfp4_wu = wcache_.cutlass_mxfp4.find(ly.w_up.data);
         bool mxfp4_ffn = (n == 1 &&
-                          mxfp4_wg != wcache_.cutlass_mxfp4.end() && mxfp4_wg->second.linear_scales &&
-                          mxfp4_wu != wcache_.cutlass_mxfp4.end() && mxfp4_wu->second.linear_scales);
+                          hwg && hwg->primary_tier == StorageTier::MXFP4 && hwg->payload.mxfp4.linear_scales &&
+                          hwu && hwu->primary_tier == StorageTier::MXFP4 && hwu->payload.mxfp4.linear_scales);
         // NVFP4 gate+up decode path
-        auto nvfp4_wg = wcache_.nvfp4.find(ly.w_gate.data);
-        auto nvfp4_wu = wcache_.nvfp4.find(ly.w_up.data);
-        bool nvfp4_ffn = (n == 1 && nvfp4_wg != wcache_.nvfp4.end() &&
-                          nvfp4_wu != wcache_.nvfp4.end());
+        bool nvfp4_ffn = (n == 1 &&
+                          hwg && hwg->primary_tier == StorageTier::NVFP4 &&
+                          hwu && hwu->primary_tier == StorageTier::NVFP4);
         bool fused_ffn_norm = (n == 1 && q8 != nullptr && qscratch_.d8_buf != nullptr &&
                                h.dtype == DType::FP16 && is_dp4a_qtype(ly.w_gate_qtype));
         if (mxfp4_ffn) {
@@ -123,11 +132,22 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             rmsnorm(h, ffn_norm_w, no, eps, stream, norm_w_off_);
             int ffn_rows = static_cast<int>(ly.w_gate.shape[0]);
             int d = static_cast<int>(h.shape[1]);
-            int hbs = mxfp4_wg->second.hadamard_bs;
+            int hbs = hwg->payload.mxfp4.hadamard_bs;
             if (hbs > 0 && hadamard_block_size_valid(hbs))
                 hadamard_transform_fp16(static_cast<const half*>(no.data),
                                         static_cast<half*>(no.data), 1, d, hbs, stream);
-            gemv_mxfp4_gate_up_fused(mxfp4_wg->second, mxfp4_wu->second,
+            // Reconstruct CutlassMxFP4Weight structs from handle payloads.
+            auto make_mxfp4 = [](const WeightHandle* hw) {
+                CutlassMxFP4Weight mw{};
+                mw.data          = hw->payload.mxfp4.weight;
+                mw.scale_factors = hw->payload.mxfp4.scales;
+                mw.linear_scales = hw->payload.mxfp4.linear_scales;
+                mw.hadamard_bs   = hw->payload.mxfp4.hadamard_bs;
+                return mw;
+            };
+            auto mw_g = make_mxfp4(hwg);
+            auto mw_u = make_mxfp4(hwu);
+            gemv_mxfp4_gate_up_fused(mw_g, mw_u,
                                       static_cast<const half*>(no.data),
                                       static_cast<half*>(go.data),
                                       static_cast<half*>(uo.data),
@@ -136,7 +156,24 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             // NVFP4 gate+up: RMSNorm to FP16, then NVFP4 fused GEMV
             rmsnorm(h, ffn_norm_w, no, eps, stream, norm_w_off_);
             int ffn_rows = static_cast<int>(ly.w_gate.shape[0]);
-            gemv_nvfp4_gate_up_fused(nvfp4_wg->second, nvfp4_wu->second,
+            // Reconstruct NvFP4QuantResult structs from handle payloads.
+            auto make_nvfp4 = [](const WeightHandle* hw) {
+                NvFP4QuantResult tmp;
+                tmp.packed_data  = hw->payload.nvfp4.data;
+                tmp.micro_scales = hw->payload.nvfp4.block_scales;
+                if (hw->payload.nvfp4.tensor_scale != nullptr) {
+                    cudaMemcpy(&tmp.tensor_scale, hw->payload.nvfp4.tensor_scale,
+                               sizeof(float), cudaMemcpyDeviceToHost);
+                } else {
+                    tmp.tensor_scale = 1.0f;
+                }
+                tmp.N = static_cast<int>(hw->shape[0]);
+                tmp.K = static_cast<int>(hw->shape[1]);
+                return tmp;
+            };
+            auto nv_g = make_nvfp4(hwg);
+            auto nv_u = make_nvfp4(hwu);
+            gemv_nvfp4_gate_up_fused(nv_g, nv_u,
                                       static_cast<const half*>(no.data),
                                       static_cast<half*>(go.data),
                                       static_cast<half*>(uo.data),
@@ -157,19 +194,28 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             rmsnorm(h, ffn_norm_w, no, eps, stream, norm_w_off_);
 
             // FP8 prefill path: quantize norm_out→FP8 once, 2 separate FP8 GEMMs
-            auto fp8_wg = wcache_.fp8.find(ly.w_gate.data);
-            auto fp8_wu = wcache_.fp8.find(ly.w_up.data);
-            if (n > 1 && !cur_force_fp16_ &&
-                fp8_wg != wcache_.fp8.end() && fp8_wu != wcache_.fp8.end() &&
-                qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
+            bool fp8_ffn = (n > 1 && !cur_force_fp16_ &&
+                            hwg && hwg->primary_tier == StorageTier::FP8 &&
+                            hwu && hwu->primary_tier == StorageTier::FP8 &&
+                            qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr);
+            if (fp8_ffn) {
+                // Reconstruct FP8 weight tensors from handle payloads.
+                auto make_fp8_tensor = [](const WeightHandle* hw) {
+                    int64_t wshape[2] = {hw->shape[0], hw->shape[1]};
+                    return Tensor(hw->payload.fp8.data, DType::FP8_E4M3, 2, wshape, true);
+                };
                 Tensor fp8_no(qscratch_.fp8_act, DType::FP8_E4M3, no.ndim, no.shape, true);
                 quantize_fp16_to_fp8_e4m3(no, fp8_no, qscratch_.d_act_scale, stream,
                                           qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
-                gemm_cublaslt(fp8_no, fp8_wg->second.weight, go, 1.0f, 0.0f,
-                              qscratch_.d_act_scale, fp8_wg->second.d_scale, stream);
-                gemm_cublaslt(fp8_no, fp8_wu->second.weight, uo, 1.0f, 0.0f,
-                              qscratch_.d_act_scale, fp8_wu->second.d_scale, stream);
+                Tensor fp8_tg = make_fp8_tensor(hwg);
+                Tensor fp8_tu = make_fp8_tensor(hwu);
+                gemm_cublaslt(fp8_no, fp8_tg, go, 1.0f, 0.0f,
+                              qscratch_.d_act_scale, hwg->payload.fp8.d_scale, stream);
+                gemm_cublaslt(fp8_no, fp8_tu, uo, 1.0f, 0.0f,
+                              qscratch_.d_act_scale, hwu->payload.fp8.d_scale, stream);
             } else {
+                // PHASE-3-TODO: wcache_.fused_gate_up is indexed by layer number (not tensor
+                // pointer) and has no WeightHandle equivalent. Kept as wcache_ probe.
                 auto fused_gu_it = wcache_.fused_gate_up.find(layer);
                 if (n > 1 && fused_gu_it != wcache_.fused_gate_up.end()) {
                     // Batched gate+up: single cuBLAS call for both projections
@@ -194,7 +240,12 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         if (will_fuse_down_mxfp4) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
-            auto& wd_mxfp4 = wcache_.cutlass_mxfp4.at(ly.w_down.data);
+            // Reconstruct CutlassMxFP4Weight from handle payload.
+            CutlassMxFP4Weight wd_mxfp4{};
+            wd_mxfp4.data          = hwd->payload.mxfp4.weight;
+            wd_mxfp4.scale_factors = hwd->payload.mxfp4.scales;
+            wd_mxfp4.linear_scales = hwd->payload.mxfp4.linear_scales;
+            wd_mxfp4.hadamard_bs   = hwd->payload.mxfp4.hadamard_bs;
             // MXFP4 fused SwiGLU/GeGLU + GEMV + residual
             int hbs = wd_mxfp4.hadamard_bs;
             if (hbs > 0 && hadamard_block_size_valid(hbs)) {
@@ -227,9 +278,20 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                            M_d, K_d, stream);
             }
         } else if (will_fuse_down_nvfp4) {
-            auto& wd_nvfp4 = wcache_.nvfp4.at(ly.w_down.data);
-            int K_d = static_cast<int>(wd_nvfp4.K);
-            int M_d = static_cast<int>(wd_nvfp4.N);
+            // Reconstruct NvFP4QuantResult from handle payload.
+            NvFP4QuantResult wd_nvfp4;
+            wd_nvfp4.packed_data  = hwd->payload.nvfp4.data;
+            wd_nvfp4.micro_scales = hwd->payload.nvfp4.block_scales;
+            if (hwd->payload.nvfp4.tensor_scale != nullptr) {
+                cudaMemcpy(&wd_nvfp4.tensor_scale, hwd->payload.nvfp4.tensor_scale,
+                           sizeof(float), cudaMemcpyDeviceToHost);
+            } else {
+                wd_nvfp4.tensor_scale = 1.0f;
+            }
+            wd_nvfp4.N = static_cast<int>(hwd->shape[0]);
+            wd_nvfp4.K = static_cast<int>(hwd->shape[1]);
+            int K_d = wd_nvfp4.K;
+            int M_d = wd_nvfp4.N;
             int n_mb_d = K_d / 16;
             if (n_mb_d <= 512) {
                 // Small K: fused SwiGLU/GeGLU + NVFP4 GEMV + residual (MR path)
@@ -288,12 +350,22 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                    static_cast<half*>(h.data), residual_ptr,
                                    M_d, K_d, stream);
         } else if (has_post_ffn_norm && using_fp32_accum && n == 1 &&
-                   wcache_.nvfp4.count(ly.w_down.data) && h.dtype == DType::FP16) {
+                   wd_tier == StorageTier::NVFP4 && h.dtype == DType::FP16) {
             // NVFP4 post-norm FP32 accum decode: activation → NVFP4 GEMV → post-norm.
             // ~40% less weight traffic than dp4a Q8_0 path.
-            int K_d = static_cast<int>(ly.w_down.shape[1]);
-            int M_d = static_cast<int>(ly.w_down.shape[0]);
-            auto& wd_nvfp4 = wcache_.nvfp4.at(ly.w_down.data);
+            NvFP4QuantResult wd_nvfp4;
+            wd_nvfp4.packed_data  = hwd->payload.nvfp4.data;
+            wd_nvfp4.micro_scales = hwd->payload.nvfp4.block_scales;
+            if (hwd->payload.nvfp4.tensor_scale != nullptr) {
+                cudaMemcpy(&wd_nvfp4.tensor_scale, hwd->payload.nvfp4.tensor_scale,
+                           sizeof(float), cudaMemcpyDeviceToHost);
+            } else {
+                wd_nvfp4.tensor_scale = 1.0f;
+            }
+            wd_nvfp4.N = static_cast<int>(hwd->shape[0]);
+            wd_nvfp4.K = static_cast<int>(hwd->shape[1]);
+            int K_d = wd_nvfp4.K;
+            int M_d = wd_nvfp4.N;
             if (cfg.ffn_activation != FFNActivation::GEGLU)
                 swiglu(go, uo, so, stream);
             else
@@ -339,15 +411,16 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 default:                    swiglu(go, uo, so, stream);  break;
             }
             if (will_fuse_down_beta1 && !cur_force_fp16_ &&
-                wcache_.fp8.count(ly.w_down.data) &&
+                wd_tier == StorageTier::FP8 &&
                 qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
                 // FP8 beta=1: hidden = fp8(swiglu_out) @ fp8(w_down)^T + hidden
-                auto& e = wcache_.fp8.at(ly.w_down.data);
                 Tensor fp8_so(qscratch_.fp8_act, DType::FP8_E4M3, so.ndim, so.shape, true);
                 quantize_fp16_to_fp8_e4m3(so, fp8_so, qscratch_.d_act_scale, stream,
                                           qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
-                gemm_cublaslt(fp8_so, e.weight, h, 1.0f, 1.0f, qscratch_.d_act_scale, e.d_scale, stream);
-            } else if (will_fuse_down_beta1 && wcache_.fp16.count(ly.w_down.data)) {
+                int64_t wshape[2] = {hwd->shape[0], hwd->shape[1]};
+                Tensor fp8_wd(hwd->payload.fp8.data, DType::FP8_E4M3, 2, wshape, true);
+                gemm_cublaslt(fp8_so, fp8_wd, h, 1.0f, 1.0f, qscratch_.d_act_scale, hwd->payload.fp8.d_scale, stream);
+            } else if (will_fuse_down_beta1 && wd_tier == StorageTier::FP16) {
                 // Fused: hidden = swiglu_out @ w_down^T + hidden (cuBLAS beta=1).
                 gemm_dispatch(so, ly.w_down, ly.w_down_qtype, h, ctx.with_beta(1.0f));
             } else if ((will_fuse_down_beta1 || will_fuse_down_dequant_beta1) &&
