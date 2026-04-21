@@ -100,6 +100,7 @@ set(IMP_MODEL_SOURCES
     src/model/weight_map.cpp
     src/model/weight_upload.cu
     src/model/tokenizer.cpp
+    src/model/tensor_kind_name.cpp
     src/model/chat_template.cpp
     src/model/jinja.cpp
 )
