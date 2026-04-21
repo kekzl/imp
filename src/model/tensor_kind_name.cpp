@@ -31,6 +31,7 @@ const char* tensor_kind_name(TensorKind k) {
         case TensorKind::BETA:             return "BETA";
         case TensorKind::ALPHA:            return "ALPHA";
         case TensorKind::SSM_GROUP_NORM:   return "SSM_GROUP_NORM";
+        case TensorKind::GDN_GATE:         return "GDN_GATE";
         case TensorKind::ATTN_NORM:        return "ATTN_NORM";
         case TensorKind::FFN_NORM:         return "FFN_NORM";
         case TensorKind::POST_ATTN_NORM:   return "POST_ATTN_NORM";
@@ -42,7 +43,6 @@ const char* tensor_kind_name(TensorKind k) {
         case TensorKind::SIGLIP_FFN:       return "SIGLIP_FFN";
         case TensorKind::SIGLIP_NORM:      return "SIGLIP_NORM";
         case TensorKind::MM_PROJ:          return "MM_PROJ";
-        case TensorKind::_COUNT:           return "_COUNT";
     }
     return "UNKNOWN";
 }

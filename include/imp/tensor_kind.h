@@ -29,7 +29,7 @@ enum class TensorKind : uint8_t {
 
     // GDN / Mamba2 (no quantized path today)
     SSM_IN, SSM_OUT, CONV1D_W, CONV1D_B, A_LOG, DT_BIAS, BETA, ALPHA,
-    SSM_GROUP_NORM,
+    SSM_GROUP_NORM, GDN_GATE,
 
     // Norms (always FP32)
     ATTN_NORM, FFN_NORM, POST_ATTN_NORM, POST_FFN_NORM,

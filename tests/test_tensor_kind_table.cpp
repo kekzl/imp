@@ -27,7 +27,8 @@ TEST(TensorKindTable, RequiredFloorIsInSupported) {
 TEST(TensorKindTable, GDNTensorsAreFP16Only) {
     for (auto k : {TensorKind::SSM_IN, TensorKind::SSM_OUT,
                    TensorKind::CONV1D_W, TensorKind::CONV1D_B,
-                   TensorKind::BETA, TensorKind::ALPHA}) {
+                   TensorKind::BETA, TensorKind::ALPHA,
+                   TensorKind::SSM_GROUP_NORM}) {
         const auto& cap = capabilities_of(k);
         EXPECT_EQ(cap.supported, mask(StorageTier::FP16))
             << "GDN kind " << tensor_kind_name(k)
@@ -47,12 +48,14 @@ TEST(TensorKindTable, NormsAreFP32Only) {
 }
 
 TEST(TensorKindTable, AttentionProjectionsSupportAllQuantTiers) {
-    for (auto k : {TensorKind::WQ, TensorKind::WO,
+    for (auto k : {TensorKind::WQ, TensorKind::WK, TensorKind::WV, TensorKind::WO,
                    TensorKind::W_GATE, TensorKind::W_UP, TensorKind::W_DOWN}) {
         const auto& cap = capabilities_of(k);
         EXPECT_TRUE(mask_contains(cap.supported, StorageTier::FP16));
         EXPECT_TRUE(mask_contains(cap.supported, StorageTier::FP8));
         EXPECT_TRUE(mask_contains(cap.supported, StorageTier::NVFP4));
         EXPECT_TRUE(mask_contains(cap.supported, StorageTier::CUTLASS_NVFP4));
+        EXPECT_TRUE(mask_contains(cap.supported, StorageTier::MXFP4))
+            << "kind " << tensor_kind_name(k) << " must support MXFP4 for fused QKV path";
     }
 }

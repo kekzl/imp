@@ -15,7 +15,13 @@ struct WeightHandle {
     TensorKind  kind           = TensorKind::UNKNOWN;
     StorageTier primary_tier   = StorageTier::Undefined;
     int64_t     shape[2]       = {0, 0};
-    int64_t     owned_bytes    = 0;     // zero if storage is borrowed from legacy cache
+    // Size in bytes of VRAM owned by this handle. Zero means storage is
+    // BORROWED (e.g. via the Phase-2 shim that points handles at wcache_
+    // entries). A non-zero value means this handle's PlanExecutor (Phase 4+)
+    // allocated the storage and is responsible for freeing it in the
+    // registry destructor. Never mix borrowed and owned storage on the same
+    // handle — the freer would double-free or leak.
+    int64_t     owned_bytes    = 0;
 
     union {
         struct { float* data; }                                fp32;

@@ -1,6 +1,7 @@
 #include "model/tensor_kind_table.h"
 
 #include <array>
+#include <cassert>
 
 namespace imp {
 
@@ -28,8 +29,8 @@ kKindTable = [] {
     std::array<KindCapabilities, static_cast<size_t>(TensorKind::_COUNT)> t{};
     t[(size_t)TensorKind::UNKNOWN]             = build(FP16_ONLY,   StorageTier::FP16);
     t[(size_t)TensorKind::WQ]                  = build(ALL_QUANT,   StorageTier::NVFP4);
-    t[(size_t)TensorKind::WK]                  = build(NO_MXFP4,    StorageTier::FP8,  true);
-    t[(size_t)TensorKind::WV]                  = build(NO_MXFP4,    StorageTier::FP8,  true);
+    t[(size_t)TensorKind::WK]                  = build(ALL_QUANT,   StorageTier::FP8,  true);
+    t[(size_t)TensorKind::WV]                  = build(ALL_QUANT,   StorageTier::FP8,  true);
     t[(size_t)TensorKind::WO]                  = build(ALL_QUANT,   StorageTier::NVFP4);
     t[(size_t)TensorKind::QKV_FUSED]           = build(NO_MXFP4,    StorageTier::FP8);
     t[(size_t)TensorKind::W_GATE]              = build(ALL_QUANT,   StorageTier::NVFP4, true);
@@ -52,7 +53,8 @@ kKindTable = [] {
     t[(size_t)TensorKind::DT_BIAS]             = build(FP32_ONLY,   StorageTier::FP32);
     t[(size_t)TensorKind::BETA]                = build(FP16_ONLY,   StorageTier::FP16);
     t[(size_t)TensorKind::ALPHA]               = build(FP16_ONLY,   StorageTier::FP16);
-    t[(size_t)TensorKind::SSM_GROUP_NORM]      = build(FP32_ONLY,   StorageTier::FP32);
+    t[(size_t)TensorKind::SSM_GROUP_NORM]      = build(FP16_ONLY,   StorageTier::FP16);
+    t[(size_t)TensorKind::GDN_GATE]            = build(ALL_QUANT,   StorageTier::NVFP4);
     t[(size_t)TensorKind::ATTN_NORM]           = build(FP32_ONLY,   StorageTier::FP32);
     t[(size_t)TensorKind::FFN_NORM]            = build(FP32_ONLY,   StorageTier::FP32);
     t[(size_t)TensorKind::POST_ATTN_NORM]      = build(FP32_ONLY,   StorageTier::FP32);
@@ -70,6 +72,7 @@ kKindTable = [] {
 } // namespace
 
 const KindCapabilities& capabilities_of(TensorKind k) {
+    assert(k != TensorKind::_COUNT && static_cast<size_t>(k) < kKindTable.size());
     return kKindTable[static_cast<size_t>(k)];
 }
 
