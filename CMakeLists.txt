@@ -185,6 +185,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/self_speculative.cpp
     src/runtime/ngram_spec.cpp
     src/runtime/presets.cpp
+    src/runtime/storage_planner.cpp
 )
 
 set(IMP_GRAPH_SOURCES
