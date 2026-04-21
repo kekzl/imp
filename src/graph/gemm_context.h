@@ -1,10 +1,11 @@
 #pragma once
 
-#include "graph/weight_cache_manager.h"
 #include "graph/quant_scratch.h"
 #include <cuda_runtime.h>
 
 namespace imp {
+
+struct WeightCaches;  // defined in executor.h
 
 // ---------------------------------------------------------------------------
 // GemmContext: bundles all state needed by gemm_dispatch into a single struct.
@@ -20,14 +21,14 @@ struct GemmContext {
     float beta = 0.0f;
 
     // Weight caches (non-owning)
-    const WeightCacheManager* wcache = nullptr;
+    const WeightCaches* wcache = nullptr;
     bool force_fp16 = false;
 
     // Quantization scratch buffers (non-owning)
     const QuantScratch* qscratch = nullptr;
 
     // Helper: create from executor state
-    static GemmContext make(cudaStream_t s, const WeightCacheManager& wc,
+    static GemmContext make(cudaStream_t s, const WeightCaches& wc,
                             const QuantScratch& qs, bool force_fp16 = false) {
         GemmContext ctx;
         ctx.stream = s;

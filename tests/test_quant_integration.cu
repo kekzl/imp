@@ -4,7 +4,6 @@
 #include "model/model.h"
 #include "model/gguf_loader.h"
 #include "graph/executor.h"
-#include "graph/weight_cache_manager.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
 #include "compute/gemm.h"
@@ -1864,10 +1863,10 @@ TEST(DualPathQuant, AttentionWeightsExcludedFromNvfp4) {
     EXPECT_EQ(attn_weight_ptrs.size(), 4u);
 }
 
-// Verifies that the WeightCacheManager dual_path_quant flag defaults to false
+// Verifies that the WeightCaches dual_path_quant flag defaults to false
 // and can be toggled.
-TEST(DualPathQuant, WeightCacheManagerFlag) {
-    imp::WeightCacheManager wcache;
+TEST(DualPathQuant, WeightCachesFlag) {
+    imp::WeightCaches wcache;
     EXPECT_FALSE(wcache.dual_path_quant);
 
     wcache.dual_path_quant = true;

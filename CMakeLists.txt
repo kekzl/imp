@@ -100,6 +100,9 @@ set(IMP_MODEL_SOURCES
     src/model/weight_map.cpp
     src/model/weight_upload.cu
     src/model/tokenizer.cpp
+    src/model/tensor_kind_name.cpp
+    src/model/tensor_kind_table.cu
+    src/model/tensor_kind_matcher.cpp
     src/model/chat_template.cpp
     src/model/jinja.cpp
 )
@@ -120,6 +123,7 @@ set(IMP_QUANT_SOURCES
 
 set(IMP_COMPUTE_SOURCES
     src/compute/gemm.cu
+    src/compute/weight_dispatch.cu
     src/compute/gemm_dp4a.cu
     src/compute/gemm_grouped.cu
     src/compute/gemv_ggml_compat.cu
@@ -181,6 +185,7 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/self_speculative.cpp
     src/runtime/ngram_spec.cpp
     src/runtime/presets.cpp
+    src/runtime/storage_planner.cpp
 )
 
 set(IMP_GRAPH_SOURCES
@@ -199,7 +204,7 @@ set(IMP_GRAPH_SOURCES
     src/graph/executor_ssm_gdn.cu
     src/graph/executor_forward_moe.cu
     src/graph/expert_cache.cu
-    src/graph/weight_cache_manager.cu
+    src/graph/weight_handle.cu
     src/graph/moe_workspace.cu
     src/graph/quant_scratch.cu
 )
@@ -326,6 +331,9 @@ if(IMP_BUILD_TESTS)
     set(IMP_TEST_SOURCES
         tests/test_tensor.cpp
         tests/test_gguf_loader.cpp
+        tests/test_tensor_kind_table.cpp
+        tests/test_tensor_kind_matcher.cpp
+        tests/test_tensor_kind_coverage.cpp
         tests/test_kv_cache.cpp
         tests/test_rope.cu
         tests/test_layernorm.cu
@@ -370,6 +378,8 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e_models.cpp
         tests/test_degeneration.cpp
         tests/test_tokenizer_compat.cpp
+        tests/test_weight_dispatch.cu
+        tests/test_weight_registry_preservation.cpp
         tests/gguf_stub.cpp
     )
 

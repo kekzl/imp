@@ -1,5 +1,6 @@
 #pragma once
 
+#include "imp/tensor_kind.h"
 #include <cstdint>
 #include <cstddef>
 #include <cassert>
@@ -34,6 +35,7 @@ struct Tensor {
     int64_t shape[kMaxDims]  = {};
     int64_t stride[kMaxDims] = {};
     bool on_device   = false;
+    TensorKind kind  = TensorKind::UNKNOWN;
 
     Tensor() = default;
 

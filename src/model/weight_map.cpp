@@ -1,4 +1,5 @@
 #include "model/weight_map.h"
+#include "model/tensor_kind_matcher.h"
 #include "core/logging.h"
 #include <string>
 #include <vector>
@@ -264,42 +265,47 @@ bool WeightMap::apply_weights(
         }
         auto parts = split(name, '.');
 
+        // Stamped copy of the tensor with its semantic kind filled in.
+        // All field assignments below use `t` so that kind is preserved.
+        Tensor t = tensor;
+        t.kind = match_tensor_kind(name);
+
         // -----------------------------------------------------------------
         // Top-level (non-layer) weights
         // -----------------------------------------------------------------
         if (name == "model.embed_tokens.weight") {
-            model.tok_emb_ = tensor;
+            model.tok_emb_ = t;
             IMP_LOG_DEBUG("  assigned: %s -> tok_emb", name.c_str());
             ++assigned;
             continue;
         }
         if (name == "model.norm.weight") {
-            model.out_norm_ = tensor;
+            model.out_norm_ = t;
             IMP_LOG_DEBUG("  assigned: %s -> out_norm", name.c_str());
             ++assigned;
             continue;
         }
         if (name == "lm_head.weight") {
-            model.out_proj_ = tensor;
+            model.out_proj_ = t;
             IMP_LOG_DEBUG("  assigned: %s -> out_proj", name.c_str());
             ++assigned;
             continue;
         }
         // NVFP4 prequant LM head scales (Model Optimizer)
         if (name == "lm_head.weight_scale") {
-            model.nvfp4_out_proj_.weight_scale = tensor;
+            model.nvfp4_out_proj_.weight_scale = t;
             IMP_LOG_DEBUG("  assigned: %s -> nvfp4_out_proj.weight_scale", name.c_str());
             ++assigned;
             continue;
         }
         if (name == "lm_head.weight_scale_2") {
-            model.nvfp4_out_proj_.weight_scale_2 = tensor;
+            model.nvfp4_out_proj_.weight_scale_2 = t;
             IMP_LOG_DEBUG("  assigned: %s -> nvfp4_out_proj.weight_scale_2", name.c_str());
             ++assigned;
             continue;
         }
         if (name == "lm_head.input_scale") {
-            model.nvfp4_out_proj_.input_scale = tensor;
+            model.nvfp4_out_proj_.input_scale = t;
             IMP_LOG_DEBUG("  assigned: %s -> nvfp4_out_proj.input_scale", name.c_str());
             ++assigned;
             continue;
@@ -328,16 +334,16 @@ bool WeightMap::apply_weights(
         // -- Attention: self_attn.{q,k,v,o}_proj.weight --
         if (parts.size() >= 6 && parts[3] == "self_attn" && parts[5] == "weight") {
             const std::string& proj = parts[4];
-            if (proj == "q_proj") { layer.wq = tensor; matched = true; }
-            else if (proj == "k_proj") { layer.wk = tensor; matched = true; }
-            else if (proj == "v_proj") { layer.wv = tensor; matched = true; }
-            else if (proj == "o_proj") { layer.wo = tensor; matched = true; }
+            if (proj == "q_proj") { layer.wq = t; matched = true; }
+            else if (proj == "k_proj") { layer.wk = t; matched = true; }
+            else if (proj == "v_proj") { layer.wv = t; matched = true; }
+            else if (proj == "o_proj") { layer.wo = t; matched = true; }
         }
 
         // -- Attention norm: input_layernorm.weight --
         if (!matched && parts.size() >= 5 &&
             parts[3] == "input_layernorm" && parts[4] == "weight") {
-            layer.attn_norm = tensor;
+            layer.attn_norm = t;
             matched = true;
         }
 
@@ -347,7 +353,7 @@ bool WeightMap::apply_weights(
         //    applied AFTER attention output. Routed below in the Gemma-4 block.
         if (!matched && !is_gemma4 && parts.size() >= 5 &&
             parts[3] == "post_attention_layernorm" && parts[4] == "weight") {
-            layer.ffn_norm = tensor;
+            layer.ffn_norm = t;
             matched = true;
         }
 
@@ -357,9 +363,9 @@ bool WeightMap::apply_weights(
         if (!matched && is_gemma4 && parts.size() >= 6 &&
             parts[3] == "mlp" && parts[5] == "weight") {
             const std::string& proj = parts[4];
-            if (proj == "gate_proj") { layer.w_gate_shared = tensor; matched = true; }
-            else if (proj == "up_proj") { layer.w_up_shared = tensor; matched = true; }
-            else if (proj == "down_proj") { layer.w_down_shared = tensor; matched = true; }
+            if (proj == "gate_proj") { layer.w_gate_shared = t; matched = true; }
+            else if (proj == "up_proj") { layer.w_up_shared = t; matched = true; }
+            else if (proj == "down_proj") { layer.w_down_shared = t; matched = true; }
         }
 
         // -- Gemma 4: router + packed MoE experts + per-layer extras --
@@ -372,48 +378,48 @@ bool WeightMap::apply_weights(
             // experts.gate_up_proj / experts.down_proj
             if (parts.size() >= 5 && parts[3] == "experts") {
                 if (parts[4] == "gate_up_proj") {
-                    layer.expert_gate_packed = tensor;
+                    layer.expert_gate_packed = t;
                     // expert_up_packed left null → weight_upload splits the fused tensor
                     matched = true;
                 } else if (parts[4] == "down_proj") {
-                    layer.expert_down_packed = tensor;
+                    layer.expert_down_packed = t;
                     matched = true;
                 }
             }
             // router.proj.weight (the gating matrix)
             else if (parts.size() >= 6 && parts[3] == "router" &&
                      parts[4] == "proj" && parts[5] == "weight") {
-                layer.moe_gate = tensor;
+                layer.moe_gate = t;
                 matched = true;
             }
             // router.scale  (per-channel router input scale == ffn_gate_inp.scale)
             else if (parts.size() >= 5 && parts[3] == "router" &&
                      parts[4] == "scale") {
-                layer.ffn_gate_inp_scale = tensor;
+                layer.ffn_gate_inp_scale = t;
                 matched = true;
             }
             // router.per_expert_scale  (per-expert down output scale)
             else if (parts.size() >= 5 && parts[3] == "router" &&
                      parts[4] == "per_expert_scale") {
-                layer.expert_down_scale = tensor;
+                layer.expert_down_scale = t;
                 matched = true;
             }
             // layer_scalar  (per-layer output scalar)
             else if (parts.size() >= 4 && parts[3] == "layer_scalar") {
-                layer.layer_out_scale = tensor;
+                layer.layer_out_scale = t;
                 matched = true;
             }
             // Gemma 4 FFN norm variants (parallel shared-MLP + MoE branches)
             else if (parts.size() >= 5 && parts[4] == "weight") {
                 if (parts[3] == "pre_feedforward_layernorm_2") {
-                    layer.ffn_pre_norm_2 = tensor; matched = true;
+                    layer.ffn_pre_norm_2 = t; matched = true;
                 } else if (parts[3] == "post_feedforward_layernorm_1") {
-                    layer.ffn_post_norm_1 = tensor; matched = true;
+                    layer.ffn_post_norm_1 = t; matched = true;
                 } else if (parts[3] == "post_feedforward_layernorm_2") {
-                    layer.ffn_post_norm_2 = tensor; matched = true;
+                    layer.ffn_post_norm_2 = t; matched = true;
                 } else if (parts[3] == "post_attention_layernorm") {
                     // Gemma 3/4 sandwich norm — distinct from Llama's FFN norm.
-                    layer.post_attn_norm = tensor; matched = true;
+                    layer.post_attn_norm = t; matched = true;
                 }
             }
         }
@@ -421,9 +427,9 @@ bool WeightMap::apply_weights(
         // -- Dense MLP (Llama / Mistral / DeepSeek dense layers) --
         if (!matched && parts.size() >= 6 && parts[3] == "mlp" && parts[5] == "weight") {
             const std::string& proj = parts[4];
-            if (proj == "gate_proj") { layer.w_gate = tensor; matched = true; }
-            else if (proj == "up_proj") { layer.w_up = tensor; matched = true; }
-            else if (proj == "down_proj") { layer.w_down = tensor; matched = true; }
+            if (proj == "gate_proj") { layer.w_gate = t; matched = true; }
+            else if (proj == "up_proj") { layer.w_up = t; matched = true; }
+            else if (proj == "down_proj") { layer.w_down = t; matched = true; }
         }
 
         // -- NVFP4 scale tensors (ModelOpt pre-quantized) --
@@ -433,9 +439,9 @@ bool WeightMap::apply_weights(
             const std::string& proj = parts[4];
             const std::string& kind = parts[5];
             auto assign = [&](TransformerLayer::NvFP4PreQuantWeight& nw) {
-                if (kind == "weight_scale")   nw.weight_scale = tensor;
-                else if (kind == "weight_scale_2") nw.weight_scale_2 = tensor;
-                else if (kind == "input_scale")    nw.input_scale = tensor;
+                if (kind == "weight_scale")   nw.weight_scale = t;
+                else if (kind == "weight_scale_2") nw.weight_scale_2 = t;
+                else if (kind == "input_scale")    nw.input_scale = t;
             };
             if (proj == "q_proj") { assign(layer.nvfp4_q); matched = true; }
             else if (proj == "k_proj") { assign(layer.nvfp4_k); matched = true; }
@@ -448,9 +454,9 @@ bool WeightMap::apply_weights(
             const std::string& proj = parts[4];
             const std::string& kind = parts[5];
             auto assign = [&](TransformerLayer::NvFP4PreQuantWeight& nw) {
-                if (kind == "weight_scale")   nw.weight_scale = tensor;
-                else if (kind == "weight_scale_2") nw.weight_scale_2 = tensor;
-                else if (kind == "input_scale")    nw.input_scale = tensor;
+                if (kind == "weight_scale")   nw.weight_scale = t;
+                else if (kind == "weight_scale_2") nw.weight_scale_2 = t;
+                else if (kind == "input_scale")    nw.input_scale = t;
             };
             if (proj == "gate_proj") { assign(layer.nvfp4_gate); matched = true; }
             else if (proj == "up_proj") { assign(layer.nvfp4_up); matched = true; }
@@ -466,16 +472,16 @@ bool WeightMap::apply_weights(
         // -----------------------------------------------------------------
         if (!matched && parts[3] == "block_sparse_moe") {
             if (parts.size() >= 6 && parts[4] == "gate" && parts[5] == "weight") {
-                layer.moe_gate = tensor;
+                layer.moe_gate = t;
                 matched = true;
             } else if (parts.size() >= 8 && parts[4] == "experts" && parts[7] == "weight") {
                 int expert_idx = parse_int(parts[5]);
                 if (expert_idx >= 0) {
                     ensure_expert(layer, expert_idx);
                     const std::string& wname = parts[6];
-                    if (wname == "w1") { layer.expert_w_gate[expert_idx] = tensor; matched = true; }
-                    else if (wname == "w3") { layer.expert_w_up[expert_idx] = tensor; matched = true; }
-                    else if (wname == "w2") { layer.expert_w_down[expert_idx] = tensor; matched = true; }
+                    if (wname == "w1") { layer.expert_w_gate[expert_idx] = t; matched = true; }
+                    else if (wname == "w3") { layer.expert_w_up[expert_idx] = t; matched = true; }
+                    else if (wname == "w2") { layer.expert_w_down[expert_idx] = t; matched = true; }
                 }
             }
         }
@@ -495,12 +501,12 @@ bool WeightMap::apply_weights(
             // distinguishes from dense mlp.gate_proj.weight (which has
             // parts[4]=="gate_proj").
             if (parts.size() >= 6 && parts[4] == "gate" && parts[5] == "weight") {
-                layer.moe_gate = tensor;
+                layer.moe_gate = t;
                 matched = true;
             }
             // MoE router bias: mlp.gate.bias
             else if (parts.size() >= 6 && parts[4] == "gate" && parts[5] == "bias") {
-                layer.moe_router_bias = tensor;
+                layer.moe_router_bias = t;
                 matched = true;
             }
             // MoE experts: mlp.experts.{e}.{gate_proj,up_proj,down_proj}.weight
@@ -509,9 +515,9 @@ bool WeightMap::apply_weights(
                 if (expert_idx >= 0) {
                     ensure_expert(layer, expert_idx);
                     const std::string& proj = parts[6];
-                    if (proj == "gate_proj") { layer.expert_w_gate[expert_idx] = tensor; matched = true; }
-                    else if (proj == "up_proj") { layer.expert_w_up[expert_idx] = tensor; matched = true; }
-                    else if (proj == "down_proj") { layer.expert_w_down[expert_idx] = tensor; matched = true; }
+                    if (proj == "gate_proj") { layer.expert_w_gate[expert_idx] = t; matched = true; }
+                    else if (proj == "up_proj") { layer.expert_w_up[expert_idx] = t; matched = true; }
+                    else if (proj == "down_proj") { layer.expert_w_down[expert_idx] = t; matched = true; }
                 }
             }
             // MoE expert NVFP4 scales: mlp.experts.{e}.{proj}.{weight_scale,weight_scale_2,input_scale}
@@ -523,9 +529,9 @@ bool WeightMap::apply_weights(
                     const std::string& proj = parts[6];
                     const std::string& kind = parts[7];
                     auto assign = [&](TransformerLayer::NvFP4PreQuantWeight& nw) {
-                        if (kind == "weight_scale")   nw.weight_scale = tensor;
-                        else if (kind == "weight_scale_2") nw.weight_scale_2 = tensor;
-                        else if (kind == "input_scale")    nw.input_scale = tensor;
+                        if (kind == "weight_scale")   nw.weight_scale = t;
+                        else if (kind == "weight_scale_2") nw.weight_scale_2 = t;
+                        else if (kind == "input_scale")    nw.input_scale = t;
                     };
                     if (proj == "gate_proj") { assign(layer.expert_nvfp4_gate[expert_idx]); matched = true; }
                     else if (proj == "up_proj") { assign(layer.expert_nvfp4_up[expert_idx]); matched = true; }
@@ -535,9 +541,9 @@ bool WeightMap::apply_weights(
             // Shared expert: mlp.shared_expert.{gate,up,down}_proj.weight
             else if (parts.size() >= 7 && parts[4] == "shared_expert" && parts[6] == "weight") {
                 const std::string& proj = parts[5];
-                if (proj == "gate_proj") { layer.w_gate_shared = tensor; matched = true; }
-                else if (proj == "up_proj") { layer.w_up_shared = tensor; matched = true; }
-                else if (proj == "down_proj") { layer.w_down_shared = tensor; matched = true; }
+                if (proj == "gate_proj") { layer.w_gate_shared = t; matched = true; }
+                else if (proj == "up_proj") { layer.w_up_shared = t; matched = true; }
+                else if (proj == "down_proj") { layer.w_down_shared = t; matched = true; }
             }
         }
 
@@ -546,7 +552,7 @@ bool WeightMap::apply_weights(
         // -----------------------------------------------------------------
         if (!matched && parts[3] == "block_sparse_moe" &&
             parts.size() >= 6 && parts[4] == "gate" && parts[5] == "bias") {
-            layer.moe_router_bias = tensor;
+            layer.moe_router_bias = t;
             matched = true;
         }
 
@@ -555,9 +561,9 @@ bool WeightMap::apply_weights(
         // -----------------------------------------------------------------
         if (!matched && parts.size() >= 6 && parts[3] == "self_attn" && parts[5] == "bias") {
             const std::string& proj = parts[4];
-            if (proj == "q_proj") { layer.q_bias = tensor; matched = true; }
-            else if (proj == "k_proj") { layer.k_bias = tensor; matched = true; }
-            else if (proj == "v_proj") { layer.v_bias = tensor; matched = true; }
+            if (proj == "q_proj") { layer.q_bias = t; matched = true; }
+            else if (proj == "k_proj") { layer.k_bias = t; matched = true; }
+            else if (proj == "v_proj") { layer.v_bias = t; matched = true; }
         }
 
         // -----------------------------------------------------------------
@@ -565,8 +571,8 @@ bool WeightMap::apply_weights(
         // -----------------------------------------------------------------
         if (!matched && parts.size() >= 6 && parts[3] == "self_attn" && parts[5] == "weight") {
             const std::string& proj = parts[4];
-            if (proj == "q_norm") { layer.attn_q_norm = tensor; matched = true; }
-            else if (proj == "k_norm") { layer.attn_k_norm = tensor; matched = true; }
+            if (proj == "q_norm") { layer.attn_q_norm = t; matched = true; }
+            else if (proj == "k_norm") { layer.attn_k_norm = t; matched = true; }
         }
 
         // -----------------------------------------------------------------
@@ -577,10 +583,10 @@ bool WeightMap::apply_weights(
         // -----------------------------------------------------------------
         if (!matched && parts.size() >= 5 && parts[4] == "weight") {
             if (parts[3] == "post_feedforward_layernorm") {
-                layer.post_ffn_norm = tensor;
+                layer.post_ffn_norm = t;
                 matched = true;
             } else if (parts[3] == "pre_feedforward_layernorm") {
-                layer.ffn_norm = tensor;
+                layer.ffn_norm = t;
                 matched = true;
             }
         }
@@ -599,10 +605,10 @@ bool WeightMap::apply_weights(
             else if (proj == "o_proj") gptq = &layer.gptq_o;
 
             if (gptq) {
-                if (field == "qweight") { gptq->qweight = tensor; matched = true; }
-                else if (field == "qzeros") { gptq->qzeros = tensor; matched = true; }
-                else if (field == "scales") { gptq->scales = tensor; matched = true; }
-                else if (field == "g_idx") { gptq->g_idx = tensor; matched = true; }
+                if (field == "qweight") { gptq->qweight = t; matched = true; }
+                else if (field == "qzeros") { gptq->qzeros = t; matched = true; }
+                else if (field == "scales") { gptq->scales = t; matched = true; }
+                else if (field == "g_idx") { gptq->g_idx = t; matched = true; }
             }
         }
 
@@ -615,10 +621,10 @@ bool WeightMap::apply_weights(
             else if (proj == "down_proj") gptq = &layer.gptq_down;
 
             if (gptq) {
-                if (field == "qweight") { gptq->qweight = tensor; matched = true; }
-                else if (field == "qzeros") { gptq->qzeros = tensor; matched = true; }
-                else if (field == "scales") { gptq->scales = tensor; matched = true; }
-                else if (field == "g_idx") { gptq->g_idx = tensor; matched = true; }
+                if (field == "qweight") { gptq->qweight = t; matched = true; }
+                else if (field == "qzeros") { gptq->qzeros = t; matched = true; }
+                else if (field == "scales") { gptq->scales = t; matched = true; }
+                else if (field == "g_idx") { gptq->g_idx = t; matched = true; }
             }
         }
 
@@ -630,9 +636,9 @@ bool WeightMap::apply_weights(
         // -----------------------------------------------------------------
         if (!matched && parts.size() >= 6 && parts[3] == "temporal_block" && parts[5] == "weight") {
             const std::string& proj = parts[4];
-            if (proj == "gate_proj") { layer.gdn_gate = tensor; matched = true; }
-            else if (proj == "alpha") { layer.gdn_alpha = tensor; matched = true; }
-            else if (proj == "beta") { layer.gdn_beta = tensor; matched = true; }
+            if (proj == "gate_proj") { layer.gdn_gate = t; matched = true; }
+            else if (proj == "alpha") { layer.gdn_alpha = t; matched = true; }
+            else if (proj == "beta") { layer.gdn_beta = t; matched = true; }
         }
 
         // -----------------------------------------------------------------
@@ -649,21 +655,21 @@ bool WeightMap::apply_weights(
         if (!matched && parts[3] == "mamba") {
             if (parts.size() >= 6 && parts[5] == "weight") {
                 const std::string& proj = parts[4];
-                if (proj == "in_proj") { layer.ssm_in = tensor; matched = true; }
-                else if (proj == "out_proj") { layer.ssm_out = tensor; matched = true; }
-                else if (proj == "conv1d") { layer.ssm_conv1d_w = tensor; matched = true; }
-                else if (proj == "norm") { layer.ssm_norm_w = tensor; matched = true; }
+                if (proj == "in_proj") { layer.ssm_in = t; matched = true; }
+                else if (proj == "out_proj") { layer.ssm_out = t; matched = true; }
+                else if (proj == "conv1d") { layer.ssm_conv1d_w = t; matched = true; }
+                else if (proj == "norm") { layer.ssm_norm_w = t; matched = true; }
             } else if (parts.size() >= 6 && parts[4] == "conv1d" && parts[5] == "bias") {
-                layer.ssm_conv1d_b = tensor;
+                layer.ssm_conv1d_b = t;
                 matched = true;
             } else if (parts.size() >= 5 && parts[4] == "dt_bias") {
-                layer.ssm_dt_b = tensor;
+                layer.ssm_dt_b = t;
                 matched = true;
             } else if (parts.size() >= 5 && parts[4] == "A_log") {
-                layer.ssm_a = tensor;
+                layer.ssm_a = t;
                 matched = true;
             } else if (parts.size() >= 5 && parts[4] == "D") {
-                layer.ssm_d = tensor;
+                layer.ssm_d = t;
                 matched = true;
             }
         }
