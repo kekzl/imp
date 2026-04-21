@@ -84,6 +84,10 @@ struct ModelConfig {
     int nvfp4_group_size = 16;
 };
 
+// Forward declaration — full definition in quant/nvfp4_quant.h.
+// Used by nvfp4_moe_*_ptr borrowed pointers below.
+struct NvFP4MoEQuantResult;
+
 struct TransformerLayer {
     Tensor wq, wk, wv, wo, attn_norm;
     Tensor q_bias, k_bias, v_bias;    // Attention biases (Qwen2)
@@ -146,6 +150,29 @@ struct TransformerLayer {
     TensorID ssm_in_id   = kInvalidTensorID;
     TensorID ssm_out_id  = kInvalidTensorID;
     TensorID gdn_gate_id = kInvalidTensorID;
+
+    // Per-expert WeightRegistry indices (populated by pre_dequant_weights, Task 3.4).
+    // Parallel to expert_w_gate / expert_w_up / expert_w_down vectors.
+    std::vector<TensorID> expert_gate_ids;
+    std::vector<TensorID> expert_up_ids;
+    std::vector<TensorID> expert_down_ids;
+    // Router and shared-expert gate projections
+    TensorID moe_gate_id            = kInvalidTensorID;
+    TensorID shared_expert_gate_id  = kInvalidTensorID;
+
+    // Borrowed pointers into wcache_.nvfp4_moe (packed 3D expert NVFP4 cache).
+    // Set by pre_dequant_weights when the packed expert tensors are NVFP4-cached.
+    // Null means the nvfp4_moe path is unavailable for this layer.
+    const NvFP4MoEQuantResult* nvfp4_moe_gate_ptr = nullptr;
+    const NvFP4MoEQuantResult* nvfp4_moe_up_ptr   = nullptr;
+    const NvFP4MoEQuantResult* nvfp4_moe_down_ptr = nullptr;
+
+    // Borrowed pointers into wcache_.fp16 for packed expert tensors.
+    // Set by pre_dequant_weights when the entire packed expert tensor has a
+    // pre-dequantised FP16 entry (contiguous [n_experts*rows, cols] layout).
+    const Tensor* fp16_packed_gate_cache = nullptr;
+    const Tensor* fp16_packed_up_cache   = nullptr;
+    const Tensor* fp16_packed_down_cache = nullptr;
 
     // Mamba2 SSM weights
     Tensor ssm_in, ssm_out;              // Projections

@@ -1512,6 +1512,46 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         L.ssm_in_id   = register_tensor(L.ssm_in);
         L.ssm_out_id  = register_tensor(L.ssm_out);
         L.gdn_gate_id = register_tensor(L.gdn_gate);
+
+        // Per-expert TensorIDs (Task 3.4)
+        const int ne_layer = static_cast<int>(L.expert_w_gate.size());
+        const int ne_up    = static_cast<int>(L.expert_w_up.size());
+        const int ne_down  = static_cast<int>(L.expert_w_down.size());
+        L.expert_gate_ids.assign(ne_layer, kInvalidTensorID);
+        L.expert_up_ids.assign(ne_up,    kInvalidTensorID);
+        L.expert_down_ids.assign(ne_down, kInvalidTensorID);
+        for (int e = 0; e < ne_layer; ++e) L.expert_gate_ids[e] = register_tensor(L.expert_w_gate[e]);
+        for (int e = 0; e < ne_up;    ++e) L.expert_up_ids[e]   = register_tensor(L.expert_w_up[e]);
+        for (int e = 0; e < ne_down;  ++e) L.expert_down_ids[e] = register_tensor(L.expert_w_down[e]);
+        L.moe_gate_id           = register_tensor(L.moe_gate);
+        L.shared_expert_gate_id = register_tensor(L.shared_expert_gate_inp);
+
+        // Borrow nvfp4_moe pointers for packed 3D expert NVFP4 cache (Task 3.4)
+        {
+            auto it = wcache_.nvfp4_moe.find(L.expert_gate_packed.data);
+            L.nvfp4_moe_gate_ptr = (it != wcache_.nvfp4_moe.end()) ? &it->second : nullptr;
+        }
+        {
+            auto it = wcache_.nvfp4_moe.find(L.expert_up_packed.data);
+            L.nvfp4_moe_up_ptr = (it != wcache_.nvfp4_moe.end()) ? &it->second : nullptr;
+        }
+        {
+            auto it = wcache_.nvfp4_moe.find(L.expert_down_packed.data);
+            L.nvfp4_moe_down_ptr = (it != wcache_.nvfp4_moe.end()) ? &it->second : nullptr;
+        }
+        // Borrow fp16 pointers for packed expert tensors (Task 3.4)
+        {
+            auto it = wcache_.fp16.find(L.expert_gate_packed.data);
+            L.fp16_packed_gate_cache = (it != wcache_.fp16.end()) ? &it->second : nullptr;
+        }
+        {
+            auto it = wcache_.fp16.find(L.expert_up_packed.data);
+            L.fp16_packed_up_cache = (it != wcache_.fp16.end()) ? &it->second : nullptr;
+        }
+        {
+            auto it = wcache_.fp16.find(L.expert_down_packed.data);
+            L.fp16_packed_down_cache = (it != wcache_.fp16.end()) ? &it->second : nullptr;
+        }
     }
     IMP_LOG_INFO("WeightRegistry populated with %zu handles (phase-2 shim)",
                  registry_.size());

@@ -1,5 +1,6 @@
 #include "compute/weight_dispatch.h"
 #include "compute/gemm.h"
+#include "compute/gemm_grouped.h"
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "quant/nvfp4_gemm.h"
@@ -9,6 +10,7 @@
 
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
+#include <vector>
 
 namespace imp {
 
@@ -369,11 +371,86 @@ void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y,
     }
 }
 
-void gemm_grouped_dispatch(cublasLtHandle_t,
-                           std::span<const WeightHandle* const>,
-                           const Tensor&, Tensor&,
-                           const int*, void*, size_t, cudaStream_t) {
-    IMP_LOG_FATAL("gemm_grouped_dispatch: not yet implemented (Task 3.4)");
+// ---------------------------------------------------------------------------
+// gemm_grouped_dispatch — MoE grouped GEMM proxy.
+//
+// Supported tiers (Task 3.4):
+//   FP16: Reconstruct Tensor views from handles, call gemm_moe_batched.
+//         expert_counts[e] is the token count for expert e; offsets are
+//         computed here as a prefix-sum.
+//
+// Unsupported tiers (FATAL — MoE models that reach these use specialised
+// paths in executor_forward_moe.cu that call lower-level helpers directly):
+//   FP8, NVFP4, CUTLASS_NVFP4, MXFP4
+// ---------------------------------------------------------------------------
+void gemm_grouped_dispatch(cublasLtHandle_t /*lt*/,
+                           std::span<const WeightHandle* const> experts,
+                           const Tensor& x_flat, Tensor& y_flat,
+                           const int* expert_counts,
+                           void* /*workspace*/, size_t /*workspace_bytes*/,
+                           cudaStream_t stream) {
+    if (experts.empty()) return;
+    const int ne = static_cast<int>(experts.size());
+
+    // Validate: all handles must have the same primary_tier.
+    StorageTier tier = experts[0]->primary_tier;
+    for (int e = 1; e < ne; ++e) {
+        if (experts[e]->primary_tier != tier) {
+            IMP_LOG_FATAL("gemm_grouped_dispatch: mixed tiers in expert set (%d vs %d)",
+                          static_cast<int>(experts[0]->primary_tier),
+                          static_cast<int>(experts[e]->primary_tier));
+            return;
+        }
+    }
+
+    switch (tier) {
+        case StorageTier::FP16: {
+            // Build prefix-sum offsets from expert_counts.
+            std::vector<int32_t> offsets(ne + 1, 0);
+            for (int e = 0; e < ne; ++e)
+                offsets[e + 1] = offsets[e] + expert_counts[e];
+
+            int K = static_cast<int>(x_flat.shape[1]);
+            int N = static_cast<int>(y_flat.shape[1]);
+
+            // Build per-expert weight pointer array.
+            std::vector<const void*> b_ptrs(ne);
+            for (int e = 0; e < ne; ++e) {
+                b_ptrs[e] = experts[e]->payload.fp16.data;
+            }
+
+            gemm_moe_batched(x_flat.data, y_flat.data,
+                             offsets.data(), b_ptrs.data(),
+                             K, N, DType::FP16, ne, stream,
+                             /*d_work_ptrs=*/nullptr);
+            return;
+        }
+
+        case StorageTier::FP8:
+            IMP_LOG_FATAL("gemm_grouped_dispatch: FP8 tier not implemented "
+                          "(executor_forward_moe uses specialised FP8 batch path)");
+            return;
+
+        case StorageTier::NVFP4:
+            IMP_LOG_FATAL("gemm_grouped_dispatch: NVFP4 tier not implemented "
+                          "(executor_forward_moe uses gemv_nvfp4_moe_* directly)");
+            return;
+
+        case StorageTier::CUTLASS_NVFP4:
+            IMP_LOG_FATAL("gemm_grouped_dispatch: CUTLASS_NVFP4 tier not implemented "
+                          "(executor_forward_moe uses gemm_grouped_cutlass_3x_nvfp4 directly)");
+            return;
+
+        case StorageTier::MXFP4:
+            IMP_LOG_FATAL("gemm_grouped_dispatch: MXFP4 tier not implemented "
+                          "(no MXFP4 MoE path in current runtime)");
+            return;
+
+        default:
+            IMP_LOG_FATAL("gemm_grouped_dispatch: undefined tier %d",
+                          static_cast<int>(tier));
+            return;
+    }
 }
 
 } // namespace imp
