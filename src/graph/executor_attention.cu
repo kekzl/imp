@@ -229,14 +229,17 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                 layer, (int)has_post_attn_norm, (int)using_fp32_accum,
                 ly.post_attn_norm.data, ly.ffn_norm.data);
     }
+    const StorageTier wo_tier = (ly.wo_id != kInvalidTensorID)
+                                    ? registry_.handle(ly.wo_id).primary_tier
+                                    : StorageTier::Undefined;
     bool will_fuse_o_nvfp4 = (!has_post_attn_norm && n == 1 && h.dtype == DType::FP16 &&
-                               wcache_.nvfp4.count(ly.wo.data));
+                               wo_tier == StorageTier::NVFP4);
     bool will_fuse_o_residual = (!has_post_attn_norm && !will_fuse_o_nvfp4 &&
                                   n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
                                   h.dtype == DType::FP16 && is_dp4a_qtype(ly.wo_qtype));
     bool will_fuse_o_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 &&
                                n > 1 &&
-                               (wcache_.fp16.count(ly.wo.data) || wcache_.fp8.count(ly.wo.data)));
+                               (wo_tier == StorageTier::FP16 || wo_tier == StorageTier::FP8));
     // Dequant beta=1 path: when force_fp16_gemm bypasses FP8, dequant weights on-the-fly
     bool will_fuse_o_dequant_beta1 = (!has_post_attn_norm && !will_fuse_o_residual &&
                                       !will_fuse_o_nvfp4 && !will_fuse_o_beta1 &&
@@ -261,19 +264,19 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     {
         auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
         // MXFP4 decode path: native MXFP4 GEMV with UE8M0 scales
-        auto mxfp4_wq = wcache_.cutlass_mxfp4.find(ly.wq.data);
-        auto mxfp4_wk = wcache_.cutlass_mxfp4.find(ly.wk.data);
-        auto mxfp4_wv = wcache_.cutlass_mxfp4.find(ly.wv.data);
+        const WeightHandle* mxfp4_hwq = (ly.wq_id != kInvalidTensorID) ? &registry_.handle(ly.wq_id) : nullptr;
+        const WeightHandle* mxfp4_hwk = (ly.wk_id != kInvalidTensorID) ? &registry_.handle(ly.wk_id) : nullptr;
+        const WeightHandle* mxfp4_hwv = (ly.wv_id != kInvalidTensorID) ? &registry_.handle(ly.wv_id) : nullptr;
         bool mxfp4_qkv = (!has_attn_output_gate && n == 1 &&
-                          mxfp4_wq != wcache_.cutlass_mxfp4.end() && mxfp4_wq->second.linear_scales &&
-                          mxfp4_wk != wcache_.cutlass_mxfp4.end() && mxfp4_wk->second.linear_scales &&
-                          mxfp4_wv != wcache_.cutlass_mxfp4.end() && mxfp4_wv->second.linear_scales);
+                          mxfp4_hwq && mxfp4_hwq->primary_tier == StorageTier::MXFP4 && mxfp4_hwq->payload.mxfp4.linear_scales &&
+                          mxfp4_hwk && mxfp4_hwk->primary_tier == StorageTier::MXFP4 && mxfp4_hwk->payload.mxfp4.linear_scales &&
+                          mxfp4_hwv && mxfp4_hwv->primary_tier == StorageTier::MXFP4 && mxfp4_hwv->payload.mxfp4.linear_scales);
         // NVFP4 decode path: uses FP16 input (no Q8_1 quantization needed)
-        auto nvfp4_wq = wcache_.nvfp4.find(ly.wq.data);
-        auto nvfp4_wk = wcache_.nvfp4.find(ly.wk.data);
-        auto nvfp4_wv = wcache_.nvfp4.find(ly.wv.data);
-        bool nvfp4_qkv = (!has_attn_output_gate && n == 1 && nvfp4_wq != wcache_.nvfp4.end() &&
-                          nvfp4_wk != wcache_.nvfp4.end() && nvfp4_wv != wcache_.nvfp4.end());
+        // Reuse handle pointers already fetched above (same wq_id/wk_id/wv_id).
+        bool nvfp4_qkv = (!has_attn_output_gate && n == 1 &&
+                          mxfp4_hwq && mxfp4_hwq->primary_tier == StorageTier::NVFP4 &&
+                          mxfp4_hwk && mxfp4_hwk->primary_tier == StorageTier::NVFP4 &&
+                          mxfp4_hwv && mxfp4_hwv->primary_tier == StorageTier::NVFP4);
         // Gemma-4: disable fused QKV when FP32 accum is active — the fused kernel
         // reads FP16 h instead of fp32_hidden_, losing precision through 128-expert routing.
         bool fused_qkv = (!has_attn_output_gate && n == 1 && q8 != nullptr && qscratch_.d8_buf != nullptr &&
@@ -284,15 +287,32 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         if (mxfp4_qkv) {
             // MXFP4 fused QKV: RMSNorm, optional Hadamard, then MXFP4 GEMV
             rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
-            int q_rows = static_cast<int>(ly.wq.shape[0]);
-            int k_rows = static_cast<int>(ly.wk.shape[0]);
-            int v_rows = static_cast<int>(ly.wv.shape[0]);
-            int K = static_cast<int>(ly.wq.shape[1]);
-            int hbs = mxfp4_wq->second.hadamard_bs;
+            int q_rows = static_cast<int>(mxfp4_hwq->shape[0]);
+            int k_rows = static_cast<int>(mxfp4_hwk->shape[0]);
+            int v_rows = static_cast<int>(mxfp4_hwv->shape[0]);
+            int K = static_cast<int>(mxfp4_hwq->shape[1]);
+            int hbs = mxfp4_hwq->payload.mxfp4.hadamard_bs;
             if (hbs > 0 && hadamard_block_size_valid(hbs))
                 hadamard_transform_fp16(static_cast<const half*>(no.data),
                                         static_cast<half*>(no.data), 1, K, hbs, stream);
-            gemv_mxfp4_qkv_fused(mxfp4_wq->second, mxfp4_wk->second, mxfp4_wv->second,
+            // Reconstruct CutlassMxFP4Weight structs from handle payloads.
+            auto make_mxfp4 = [](const WeightHandle* h) {
+                CutlassMxFP4Weight mw;
+                mw.data          = h->payload.mxfp4.weight;
+                mw.scale_factors = h->payload.mxfp4.scales;
+                mw.linear_scales = h->payload.mxfp4.linear_scales;
+                mw.hadamard_bs   = h->payload.mxfp4.hadamard_bs;
+                mw.tensor_scale  = 1.0f;
+                mw.N = static_cast<int>(h->shape[0]);
+                mw.K = static_cast<int>(h->shape[1]);
+                mw.sf_bytes = cutlass_mxfp4_sf_size(mw.N, mw.K);
+                mw.owns_data = false;
+                return mw;
+            };
+            auto mw_q = make_mxfp4(mxfp4_hwq);
+            auto mw_k = make_mxfp4(mxfp4_hwk);
+            auto mw_v = make_mxfp4(mxfp4_hwv);
+            gemv_mxfp4_qkv_fused(mw_q, mw_k, mw_v,
                                   static_cast<const half*>(no.data),
                                   static_cast<half*>(qv.data),
                                   static_cast<half*>(kk.data),
@@ -301,11 +321,29 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         } else if (nvfp4_qkv) {
             // NVFP4 fused QKV: RMSNorm to FP16, then NVFP4 GEMV (no Q8_1 needed)
             rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
-            int q_rows = static_cast<int>(nvfp4_wq->second.N);
-            int k_rows = static_cast<int>(nvfp4_wk->second.N);
-            int v_rows = static_cast<int>(nvfp4_wv->second.N);
-            int K = static_cast<int>(nvfp4_wq->second.K);
-            gemv_nvfp4_qkv_fused(nvfp4_wq->second, nvfp4_wk->second, nvfp4_wv->second,
+            // Reconstruct NvFP4QuantResult structs from handle payloads.
+            auto make_nvfp4 = [](const WeightHandle* hw) {
+                NvFP4QuantResult tmp;
+                tmp.packed_data  = hw->payload.nvfp4.data;
+                tmp.micro_scales = hw->payload.nvfp4.block_scales;
+                if (hw->payload.nvfp4.tensor_scale != nullptr) {
+                    cudaMemcpy(&tmp.tensor_scale, hw->payload.nvfp4.tensor_scale,
+                               sizeof(float), cudaMemcpyDeviceToHost);
+                } else {
+                    tmp.tensor_scale = 1.0f;
+                }
+                tmp.N = static_cast<int>(hw->shape[0]);
+                tmp.K = static_cast<int>(hw->shape[1]);
+                return tmp;
+            };
+            auto nv_q = make_nvfp4(mxfp4_hwq);
+            auto nv_k = make_nvfp4(mxfp4_hwk);
+            auto nv_v = make_nvfp4(mxfp4_hwv);
+            int q_rows = nv_q.N;
+            int k_rows = nv_k.N;
+            int v_rows = nv_v.N;
+            int K = nv_q.K;
+            gemv_nvfp4_qkv_fused(nv_q, nv_k, nv_v,
                                   static_cast<const half*>(no.data),
                                   static_cast<half*>(qv.data),
                                   static_cast<half*>(kk.data),
@@ -341,24 +379,36 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             }
 
             // FP8 prefill path: quantize norm_out→FP8 once, 3 separate FP8 GEMMs
-            auto fp8_wq = wcache_.fp8.find(ly.wq.data);
-            auto fp8_wk = wcache_.fp8.find(ly.wk.data);
-            auto fp8_wv = wcache_.fp8.find(ly.wv.data);
-            if (wcache_.use_fp8 && n > 1 && !state.force_fp16_gemm &&
-                fp8_wq != wcache_.fp8.end() &&
-                fp8_wk != wcache_.fp8.end() && fp8_wv != wcache_.fp8.end() &&
+            // Use handle tier checks instead of wcache_ probes.
+            const WeightHandle* fp8_hwq = (ly.wq_id != kInvalidTensorID) ? &registry_.handle(ly.wq_id) : nullptr;
+            const WeightHandle* fp8_hwk = (ly.wk_id != kInvalidTensorID) ? &registry_.handle(ly.wk_id) : nullptr;
+            const WeightHandle* fp8_hwv = (ly.wv_id != kInvalidTensorID) ? &registry_.handle(ly.wv_id) : nullptr;
+            bool fp8_qkv_available = (fp8_hwq && fp8_hwq->primary_tier == StorageTier::FP8 &&
+                                      fp8_hwk && fp8_hwk->primary_tier == StorageTier::FP8 &&
+                                      fp8_hwv && fp8_hwv->primary_tier == StorageTier::FP8);
+            if (n > 1 && !state.force_fp16_gemm &&
+                fp8_qkv_available &&
                 qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
                 Tensor fp8_no(qscratch_.fp8_act, DType::FP8_E4M3, no.ndim, no.shape, true);
                 quantize_fp16_to_fp8_e4m3(no, fp8_no, qscratch_.d_act_scale, stream,
                                           qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
-                gemm_cublaslt(fp8_no, fp8_wq->second.weight, q_target, 1.0f, 0.0f,
-                              qscratch_.d_act_scale, fp8_wq->second.d_scale, stream);
-                gemm_cublaslt(fp8_no, fp8_wk->second.weight, kk, 1.0f, 0.0f,
-                              qscratch_.d_act_scale, fp8_wk->second.d_scale, stream);
-                gemm_cublaslt(fp8_no, fp8_wv->second.weight, vv, 1.0f, 0.0f,
-                              qscratch_.d_act_scale, fp8_wv->second.d_scale, stream);
+                // Reconstruct FP8 weight tensors from handle payloads.
+                auto make_fp8_tensor = [](const WeightHandle* hw) {
+                    int64_t wshape[2] = {hw->shape[0], hw->shape[1]};
+                    return Tensor(hw->payload.fp8.data, DType::FP8_E4M3, 2, wshape, true);
+                };
+                Tensor fp8_tq = make_fp8_tensor(fp8_hwq);
+                Tensor fp8_tk = make_fp8_tensor(fp8_hwk);
+                Tensor fp8_tv = make_fp8_tensor(fp8_hwv);
+                gemm_cublaslt(fp8_no, fp8_tq, q_target, 1.0f, 0.0f,
+                              qscratch_.d_act_scale, fp8_hwq->payload.fp8.d_scale, stream);
+                gemm_cublaslt(fp8_no, fp8_tk, kk, 1.0f, 0.0f,
+                              qscratch_.d_act_scale, fp8_hwk->payload.fp8.d_scale, stream);
+                gemm_cublaslt(fp8_no, fp8_tv, vv, 1.0f, 0.0f,
+                              qscratch_.d_act_scale, fp8_hwv->payload.fp8.d_scale, stream);
             } else {
-                // Try fused K+V path: single strided batched GEMM for both projections
+                // Try fused K+V path: single strided batched GEMM for both projections.
+                // fused_kv is indexed by layer number; no WeightHandle equivalent yet.
                 auto fused_kv_it = wcache_.fused_kv.find(layer);
                 // Gemma 4 per-layer shapes break strided-batched K+V layout assumptions.
                 if (n > 1 && fused_kv_it != wcache_.fused_kv.end() && !per_layer_shapes) {
@@ -903,9 +953,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     //    start of run_attention and this point.
     if (will_fuse_o_nvfp4) {
         // NVFP4 Wo + residual: attn_out (FP16) @ wo_nvfp4^T + residual → hidden
-        auto& wo_nvfp4 = wcache_.nvfp4.at(ly.wo.data);
-        int M_o = static_cast<int>(wo_nvfp4.N);
-        int K_o = static_cast<int>(wo_nvfp4.K);
+        const WeightHandle& wo_h = registry_.handle(ly.wo_id);
+        NvFP4QuantResult wo_nvfp4;
+        wo_nvfp4.packed_data  = wo_h.payload.nvfp4.data;
+        wo_nvfp4.micro_scales = wo_h.payload.nvfp4.block_scales;
+        if (wo_h.payload.nvfp4.tensor_scale != nullptr) {
+            cudaMemcpy(&wo_nvfp4.tensor_scale, wo_h.payload.nvfp4.tensor_scale,
+                       sizeof(float), cudaMemcpyDeviceToHost);
+        } else {
+            wo_nvfp4.tensor_scale = 1.0f;
+        }
+        wo_nvfp4.N = static_cast<int>(wo_h.shape[0]);
+        wo_nvfp4.K = static_cast<int>(wo_h.shape[1]);
+        int M_o = wo_nvfp4.N;
+        int K_o = wo_nvfp4.K;
         gemv_nvfp4_residual(wo_nvfp4,
                              static_cast<const half*>(ao.data),
                              static_cast<half*>(h.data),
@@ -926,15 +987,17 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                qscratch_.d8_buf, static_cast<half*>(h.data), residual_ptr,
                                M_o, K_o, stream);
     } else if (will_fuse_o_beta1 && !cur_force_fp16_ &&
-               wcache_.fp8.count(ly.wo.data) &&
+               wo_tier == StorageTier::FP8 &&
                qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
         // FP8 beta=1: hidden = fp8(attn_out) @ fp8(wo)^T + hidden
-        auto& e = wcache_.fp8.at(ly.wo.data);
+        const WeightHandle& wo_h = registry_.handle(ly.wo_id);
+        int64_t wshape[2] = {wo_h.shape[0], wo_h.shape[1]};
+        Tensor fp8_wo(wo_h.payload.fp8.data, DType::FP8_E4M3, 2, wshape, true);
         Tensor fp8_ao(qscratch_.fp8_act, DType::FP8_E4M3, ao.ndim, ao.shape, true);
         quantize_fp16_to_fp8_e4m3(ao, fp8_ao, qscratch_.d_act_scale, stream,
                                   qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
-        gemm_cublaslt(fp8_ao, e.weight, h, 1.0f, 1.0f, qscratch_.d_act_scale, e.d_scale, stream);
-    } else if (will_fuse_o_beta1 && wcache_.fp16.count(ly.wo.data)) {
+        gemm_cublaslt(fp8_ao, fp8_wo, h, 1.0f, 1.0f, qscratch_.d_act_scale, wo_h.payload.fp8.d_scale, stream);
+    } else if (will_fuse_o_beta1 && wo_tier == StorageTier::FP16) {
         // Fused: hidden = attn_out @ wo^T + hidden (cuBLAS beta=1).
         // Safe: hidden is only READ (never written) between attn_norm and here.
         gemm_dispatch(ao, ly.wo, ly.wo_qtype, h, ctx.with_beta(1.0f));

@@ -8,6 +8,7 @@
 #include "quant/nvfp4_gemm.h"
 #include "core/logging.h"
 #include "memory/vram_allocator.h"
+#include "runtime/storage_planner.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -19,6 +20,75 @@
 #include <unordered_set>
 
 namespace imp {
+
+// ---------------------------------------------------------------------------
+// Helpers to infer StorageTier from wcache_ maps and populate handles.
+// ---------------------------------------------------------------------------
+namespace {
+
+// Infer StorageTier from which wcache_ map the source pointer landed in.
+StorageTier infer_tier_from_wcache(const WeightCaches& wc, const void* src_ptr) {
+    if (wc.cutlass_nvfp4.count(src_ptr)) return StorageTier::CUTLASS_NVFP4;
+    if (wc.cutlass_mxfp4.count(src_ptr)) return StorageTier::MXFP4;
+    if (wc.nvfp4.count(src_ptr))         return StorageTier::NVFP4;
+    if (wc.fp8.count(src_ptr))           return StorageTier::FP8;
+    if (wc.fp16.count(src_ptr))          return StorageTier::FP16;
+    return StorageTier::Undefined;
+}
+
+// Fill a handle's payload by borrowing pointers from wcache_ entries.
+void borrow_payload_from_wcache(WeightHandle& h, const WeightCaches& wc,
+                                const void* src_ptr) {
+    switch (h.primary_tier) {
+        case StorageTier::FP16: {
+            auto it = wc.fp16.find(src_ptr);
+            if (it != wc.fp16.end()) {
+                h.payload.fp16.data = static_cast<half*>(it->second.data);
+            }
+            break;
+        }
+        case StorageTier::FP8: {
+            auto it = wc.fp8.find(src_ptr);
+            if (it != wc.fp8.end()) {
+                h.payload.fp8.data    = static_cast<__nv_fp8_e4m3*>(it->second.weight.data);
+                h.payload.fp8.d_scale = it->second.d_scale;
+            }
+            break;
+        }
+        case StorageTier::NVFP4: {
+            auto it = wc.nvfp4.find(src_ptr);
+            if (it != wc.nvfp4.end()) {
+                h.payload.nvfp4.data         = static_cast<uint8_t*>(it->second.packed_data);
+                h.payload.nvfp4.block_scales = static_cast<uint8_t*>(it->second.micro_scales);
+                h.payload.nvfp4.tensor_scale  = nullptr;  // host float only, no device ptr
+                h.payload.nvfp4.tensor_scale_2 = nullptr;
+            }
+            break;
+        }
+        case StorageTier::CUTLASS_NVFP4: {
+            auto it = wc.cutlass_nvfp4.find(src_ptr);
+            if (it != wc.cutlass_nvfp4.end()) {
+                h.payload.cutlass_nvfp4.weight       = const_cast<void*>(it->second.data);
+                h.payload.cutlass_nvfp4.sf           = it->second.scale_factors;
+                h.payload.cutlass_nvfp4.global_scale = const_cast<float*>(&it->second.tensor_scale);
+            }
+            break;
+        }
+        case StorageTier::MXFP4: {
+            auto it = wc.cutlass_mxfp4.find(src_ptr);
+            if (it != wc.cutlass_mxfp4.end()) {
+                h.payload.mxfp4.weight        = const_cast<void*>(it->second.data);
+                h.payload.mxfp4.scales        = it->second.scale_factors;
+                h.payload.mxfp4.linear_scales = it->second.linear_scales;
+                h.payload.mxfp4.hadamard_bs   = it->second.hadamard_bs;
+            }
+            break;
+        }
+        default: break;
+    }
+}
+
+} // anonymous namespace
 
 // Shared helpers from executor_helpers.h (vram_alloc, vram_free)
 
@@ -113,6 +183,24 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     size_t min_reserve = std::max(budget.reserve_bytes, total_vram / 10);
     size_t remaining_budget = (free_vram > min_reserve)
                               ? (free_vram - min_reserve) : 0;
+
+    // Phase 4.2: run StoragePlanner for diagnostic purposes.
+    // The plan output is NOT used to drive allocation yet — the existing legacy code
+    // path still decides what to allocate. Log discrepancies between the plan and
+    // the legacy decisions so we can catch bugs before Phase 4.4+ flips to
+    // plan-driven allocation. Actual storage ownership flip happens in Phase 5.
+    {
+        hints_.vram_budget_bytes = remaining_budget;
+        StoragePlan diag_plan = plan_storage(*model_, cfg, hints_);
+        if (diag_plan.failed) {
+            IMP_LOG_WARN("StoragePlanner (diagnostic): plan failed — %s",
+                         diag_plan.failure_reason.c_str());
+        } else {
+            IMP_LOG_INFO("StoragePlanner (diagnostic): %zu entries, projected VRAM %.2f MiB",
+                         diag_plan.entries.size(),
+                         diag_plan.projected_vram_bytes / (1024.0 * 1024.0));
+        }
+    }
 
     // --- Phase 0: Register NVFP4 pre-quantized weights directly (no quantization needed) ---
     if (cfg.is_nvfp4_prequant) {
@@ -1410,6 +1498,84 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             }
         }
     }
+
+    // Build WeightRegistry from wcache_ contents (phase-2 shim).
+    registry_.clear();
+    // Explicit kind overrides t.kind which is UNKNOWN after weight_upload.cu
+    // creates fresh Tensor descriptors (TensorKind is not preserved through
+    // the upload code paths). Phase 5 plan-driven allocation requires kind to
+    // be correct, so we pass it explicitly from the field position.
+    auto register_tensor = [&](const Tensor& t, TensorKind kind) -> TensorID {
+        if (!t.data) return kInvalidTensorID;
+        StorageTier tier = infer_tier_from_wcache(wcache_, t.data);
+        if (tier == StorageTier::Undefined) return kInvalidTensorID;
+        TensorID id = registry_.reserve(kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
+        auto& h = registry_.handle(id);
+        h.primary_tier = tier;
+        borrow_payload_from_wcache(h, wcache_, t.data);
+        return id;
+    };
+
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        // const_cast: model_ is const Model* but the *_id fields are metadata
+        // stamped exactly once here during load — safe to mutate.
+        auto& L = const_cast<Model*>(model_)->layer(i);
+        L.wq_id       = register_tensor(L.wq,       TensorKind::WQ);
+        L.wk_id       = register_tensor(L.wk,       TensorKind::WK);
+        L.wv_id       = register_tensor(L.wv,       TensorKind::WV);
+        L.wo_id       = register_tensor(L.wo,       TensorKind::WO);
+        L.w_gate_id   = register_tensor(L.w_gate,   TensorKind::W_GATE);
+        L.w_up_id     = register_tensor(L.w_up,     TensorKind::W_UP);
+        L.w_down_id   = register_tensor(L.w_down,   TensorKind::W_DOWN);
+        L.ssm_in_id   = register_tensor(L.ssm_in,   TensorKind::SSM_IN);
+        L.ssm_out_id  = register_tensor(L.ssm_out,  TensorKind::SSM_OUT);
+        L.gdn_gate_id = register_tensor(L.gdn_gate, TensorKind::GDN_GATE);
+
+        // Per-expert TensorIDs (Task 3.4)
+        const int ne_layer = static_cast<int>(L.expert_w_gate.size());
+        const int ne_up    = static_cast<int>(L.expert_w_up.size());
+        const int ne_down  = static_cast<int>(L.expert_w_down.size());
+        L.expert_gate_ids.assign(ne_layer, kInvalidTensorID);
+        L.expert_up_ids.assign(ne_up,    kInvalidTensorID);
+        L.expert_down_ids.assign(ne_down, kInvalidTensorID);
+        for (int e = 0; e < ne_layer; ++e) L.expert_gate_ids[e] = register_tensor(L.expert_w_gate[e], TensorKind::EXPERT_GATE);
+        for (int e = 0; e < ne_up;    ++e) L.expert_up_ids[e]   = register_tensor(L.expert_w_up[e],   TensorKind::EXPERT_UP);
+        for (int e = 0; e < ne_down;  ++e) L.expert_down_ids[e] = register_tensor(L.expert_w_down[e], TensorKind::EXPERT_DOWN);
+        L.moe_gate_id           = register_tensor(L.moe_gate,             TensorKind::ROUTER);
+        L.shared_expert_gate_id = register_tensor(L.shared_expert_gate_inp, TensorKind::SHARED_EXPERT_GATE);
+
+        // Borrow nvfp4_moe pointers for packed 3D expert NVFP4 cache (Task 3.4)
+        {
+            auto it = wcache_.nvfp4_moe.find(L.expert_gate_packed.data);
+            L.nvfp4_moe_gate_ptr = (it != wcache_.nvfp4_moe.end()) ? &it->second : nullptr;
+        }
+        {
+            auto it = wcache_.nvfp4_moe.find(L.expert_up_packed.data);
+            L.nvfp4_moe_up_ptr = (it != wcache_.nvfp4_moe.end()) ? &it->second : nullptr;
+        }
+        {
+            auto it = wcache_.nvfp4_moe.find(L.expert_down_packed.data);
+            L.nvfp4_moe_down_ptr = (it != wcache_.nvfp4_moe.end()) ? &it->second : nullptr;
+        }
+        // Borrow fp16 pointers for packed expert tensors (Task 3.4)
+        {
+            auto it = wcache_.fp16.find(L.expert_gate_packed.data);
+            L.fp16_packed_gate_cache = (it != wcache_.fp16.end()) ? &it->second : nullptr;
+        }
+        {
+            auto it = wcache_.fp16.find(L.expert_up_packed.data);
+            L.fp16_packed_up_cache = (it != wcache_.fp16.end()) ? &it->second : nullptr;
+        }
+        {
+            auto it = wcache_.fp16.find(L.expert_down_packed.data);
+            L.fp16_packed_down_cache = (it != wcache_.fp16.end()) ? &it->second : nullptr;
+        }
+    }
+    // Register model-level (non-layer) tensors.
+    const_cast<Model*>(model_)->out_proj_id = register_tensor(model_->output_proj(), TensorKind::LM_HEAD);
+
+    IMP_LOG_INFO("WeightRegistry populated with %zu handles (phase-2 shim)",
+                 registry_.size());
 }
 
 } // namespace imp

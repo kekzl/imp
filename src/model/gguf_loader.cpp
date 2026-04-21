@@ -1,5 +1,6 @@
 #include "model/gguf_loader.h"
 #include "model/model_arch.h"
+#include "model/tensor_kind_matcher.h"
 #include "quant/dequant_gpu.h"
 #include "core/logging.h"
 
@@ -1087,6 +1088,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         }
 
         Tensor t(tensor_data, ggml_type_to_dtype(info.type), ndim, shape, /*on_device=*/false);
+        t.kind = match_tensor_kind(info.name);
 
         if (assign_tensor(*model, info.name, t, info.type)) {
             assigned++;

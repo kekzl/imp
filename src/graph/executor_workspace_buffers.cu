@@ -6,6 +6,7 @@
 #include "graph/executor_kernels.h"
 #include "graph/executor_helpers.h"
 #include "compute/gemm_cutlass_sm120.h"
+#include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "compute/sampling.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
@@ -522,7 +523,81 @@ void GraphExecutor::free_buffers() {
     longrope_orig_max_pos_ = 0;
 
     // Free all weight caches (FP16, FP8, NVFP4, CUTLASS, fused KV/gate+up, migrated/overflow)
-    wcache_.free(vram_alloc_);
+    {
+        // Fused KV
+        for (auto& [idx, tensor] : wcache_.fused_kv)
+            if (tensor.data) vram_free(vram_alloc_, tensor.data);
+        wcache_.fused_kv.clear();
+        // Fused gate+up
+        for (auto& [idx, tensor] : wcache_.fused_gate_up)
+            if (tensor.data) vram_free(vram_alloc_, tensor.data);
+        wcache_.fused_gate_up.clear();
+        // FP16 cache
+        for (auto& [ptr, tensor] : wcache_.fp16)
+            vram_free(vram_alloc_, tensor.data);
+        wcache_.fp16.clear();
+        wcache_.fp16_bytes = 0;
+        // NVFP4 decode cache
+        for (auto& [ptr, result] : wcache_.nvfp4) free_nvfp4_result(result);
+        wcache_.nvfp4.clear();
+        wcache_.nvfp4_bytes = 0;
+        // NVFP4 MoE expert cache
+        for (auto& [ptr, result] : wcache_.nvfp4_moe) free_nvfp4_moe_result(result);
+        wcache_.nvfp4_moe.clear();
+        wcache_.nvfp4_moe_bytes = 0;
+        // CUTLASS NVFP4 cache
+        for (auto& [ptr, cw] : wcache_.cutlass_nvfp4) free_cutlass_nvfp4_weight(cw);
+        wcache_.cutlass_nvfp4.clear();
+        wcache_.cutlass_nvfp4_bytes = 0;
+        // CUTLASS MXFP4 cache
+        for (auto& [ptr, mw] : wcache_.cutlass_mxfp4) free_cutlass_mxfp4_weight(mw);
+        wcache_.cutlass_mxfp4.clear();
+        wcache_.cutlass_mxfp4_bytes = 0;
+        // FP8 cache (entries may point into bulk buffers — free entry data only if not in bulk)
+        for (auto& [ptr, entry] : wcache_.fp8) {
+            if (entry.weight.data) {
+                bool in_migrated = wcache_.fp8_migrated_data &&
+                    reinterpret_cast<uintptr_t>(entry.weight.data) >= reinterpret_cast<uintptr_t>(wcache_.fp8_migrated_data) &&
+                    reinterpret_cast<uintptr_t>(entry.weight.data) < reinterpret_cast<uintptr_t>(wcache_.fp8_migrated_data) + wcache_.fp8_migrated_data_size;
+                bool in_overflow = wcache_.fp8_overflow_data &&
+                    reinterpret_cast<uintptr_t>(entry.weight.data) >= reinterpret_cast<uintptr_t>(wcache_.fp8_overflow_data) &&
+                    reinterpret_cast<uintptr_t>(entry.weight.data) < reinterpret_cast<uintptr_t>(wcache_.fp8_overflow_data) + wcache_.fp8_overflow_data_size;
+                if (!in_migrated && !in_overflow) cudaFree(entry.weight.data);
+            }
+            if (entry.d_scale) {
+                bool in_migrated = wcache_.fp8_migrated_scales &&
+                    entry.d_scale >= wcache_.fp8_migrated_scales &&
+                    entry.d_scale < wcache_.fp8_migrated_scales + wcache_.fp8_migrated_count;
+                bool in_overflow = wcache_.fp8_overflow_scales &&
+                    entry.d_scale >= wcache_.fp8_overflow_scales &&
+                    entry.d_scale < wcache_.fp8_overflow_scales + wcache_.fp8_overflow_count;
+                if (!in_migrated && !in_overflow) cudaFree(entry.d_scale);
+            }
+        }
+        wcache_.fp8.clear();
+        wcache_.fp8_bytes = 0;
+        // FP8 bulk buffers
+        if (wcache_.fp8_migrated_scales) {
+            IMP_CUDA_CHECK_LOG(cudaFree(wcache_.fp8_migrated_scales));
+            wcache_.fp8_migrated_scales = nullptr;
+            wcache_.fp8_migrated_count = 0;
+        }
+        if (wcache_.fp8_migrated_data) {
+            vram_free(vram_alloc_, wcache_.fp8_migrated_data);
+            wcache_.fp8_migrated_data = nullptr;
+            wcache_.fp8_migrated_data_size = 0;
+        }
+        if (wcache_.fp8_overflow_scales) {
+            IMP_CUDA_CHECK_LOG(cudaFree(wcache_.fp8_overflow_scales));
+            wcache_.fp8_overflow_scales = nullptr;
+            wcache_.fp8_overflow_count = 0;
+        }
+        if (wcache_.fp8_overflow_data) {
+            vram_free(vram_alloc_, wcache_.fp8_overflow_data);
+            wcache_.fp8_overflow_data = nullptr;
+            wcache_.fp8_overflow_data_size = 0;
+        }
+    }
 
     qscratch_.free(vram_alloc_);
 

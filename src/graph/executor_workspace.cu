@@ -70,6 +70,8 @@ bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
     wcache_.nvfp4_decode_mode = use_nvfp4_decode;
     wcache_.use_mxfp4 = use_mxfp4_prefill;
     // dual_path_quant is set separately by the engine after init
+    hints_.prefer_fp8          = use_fp8_prefill;
+    hints_.prefer_nvfp4_decode = (use_nvfp4_decode > 0);
 
     const auto& cfg = model.config();
 
