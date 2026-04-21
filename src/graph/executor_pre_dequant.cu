@@ -1486,22 +1486,31 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
     // Build WeightRegistry from wcache_ contents (phase-2 shim).
     registry_.clear();
-    auto register_tensor = [&](const Tensor& t) {
-        if (!t.data) return;
+    auto register_tensor = [&](const Tensor& t) -> TensorID {
+        if (!t.data) return kInvalidTensorID;
         StorageTier tier = infer_tier_from_wcache(wcache_, t.data);
-        if (tier == StorageTier::Undefined) return;
+        if (tier == StorageTier::Undefined) return kInvalidTensorID;
         TensorID id = registry_.reserve(t.kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
         auto& h = registry_.handle(id);
         h.primary_tier = tier;
         borrow_payload_from_wcache(h, wcache_, t.data);
+        return id;
     };
 
     for (int i = 0; i < cfg.n_layers; ++i) {
-        const auto& L = model_->layer(i);
-        register_tensor(L.wq);    register_tensor(L.wk);
-        register_tensor(L.wv);    register_tensor(L.wo);
-        register_tensor(L.w_gate); register_tensor(L.w_up); register_tensor(L.w_down);
-        register_tensor(L.ssm_in); register_tensor(L.ssm_out);
+        // const_cast: model_ is const Model* but the *_id fields are metadata
+        // stamped exactly once here during load — safe to mutate.
+        auto& L = const_cast<Model*>(model_)->layer(i);
+        L.wq_id       = register_tensor(L.wq);
+        L.wk_id       = register_tensor(L.wk);
+        L.wv_id       = register_tensor(L.wv);
+        L.wo_id       = register_tensor(L.wo);
+        L.w_gate_id   = register_tensor(L.w_gate);
+        L.w_up_id     = register_tensor(L.w_up);
+        L.w_down_id   = register_tensor(L.w_down);
+        L.ssm_in_id   = register_tensor(L.ssm_in);
+        L.ssm_out_id  = register_tensor(L.ssm_out);
+        L.gdn_gate_id = register_tensor(L.gdn_gate);
     }
     IMP_LOG_INFO("WeightRegistry populated with %zu handles (phase-2 shim)",
                  registry_.size());

@@ -133,6 +133,20 @@ struct TransformerLayer {
     GGMLQuantType w_up_qtype = GGMLQuantType::NONE;
     GGMLQuantType w_down_qtype = GGMLQuantType::NONE;
 
+    // WeightRegistry indices (populated by pre_dequant_weights, Phase 2+).
+    // kInvalidTensorID means the corresponding Tensor is absent on this layer
+    // (e.g. ssm_in_id is kInvalidTensorID on attention-only layers).
+    TensorID wq_id       = kInvalidTensorID;
+    TensorID wk_id       = kInvalidTensorID;
+    TensorID wv_id       = kInvalidTensorID;
+    TensorID wo_id       = kInvalidTensorID;
+    TensorID w_gate_id   = kInvalidTensorID;
+    TensorID w_up_id     = kInvalidTensorID;
+    TensorID w_down_id   = kInvalidTensorID;
+    TensorID ssm_in_id   = kInvalidTensorID;
+    TensorID ssm_out_id  = kInvalidTensorID;
+    TensorID gdn_gate_id = kInvalidTensorID;
+
     // Mamba2 SSM weights
     Tensor ssm_in, ssm_out;              // Projections
     Tensor ssm_conv1d_w, ssm_conv1d_b;   // Conv1d weight + bias
