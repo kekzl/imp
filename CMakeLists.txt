@@ -333,6 +333,7 @@ if(IMP_BUILD_TESTS)
         tests/test_gguf_loader.cpp
         tests/test_tensor_kind_table.cpp
         tests/test_tensor_kind_matcher.cpp
+        tests/test_tensor_kind_coverage.cpp
         tests/test_kv_cache.cpp
         tests/test_rope.cu
         tests/test_layernorm.cu
