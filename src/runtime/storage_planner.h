@@ -15,6 +15,9 @@ struct ModelConfig;
 struct PlanHints {
     bool   prefer_nvfp4_decode = false;
     bool   dual_path_attn_fp8_ffn_nvfp4 = false;
+    // When true, prefer FP8 over FP16 for weight cache (maps 1:1 to
+    // WeightCacheManager::use_fp8; mirrored here so Phase 5 can remove wcache_).
+    bool   prefer_fp8 = false;
     size_t vram_budget_bytes = 0;
 };
 

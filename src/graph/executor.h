@@ -16,6 +16,7 @@
 #include "graph/weight_handle.h"
 #include "graph/moe_workspace.h"
 #include "graph/quant_scratch.h"
+#include "runtime/storage_planner.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <vector>
@@ -238,11 +239,13 @@ public:
                             int use_nvfp4_decode = 0, bool use_mxfp4_prefill = false);
 
     // Disable FP8 weight cache (must be called before pre_dequant_weights).
-    void disable_fp8_prefill() { wcache_.use_fp8 = false; }  // PHASE-3-TODO: mode flag — defer to Phase 4
+    // Phase 4.2: also mirror into hints_ so Phase 5 can remove wcache_ write.
+    void disable_fp8_prefill() { wcache_.use_fp8 = false; hints_.prefer_fp8 = false; }
 
     // Enable dual-path quantization: attention weights stay FP8, FFN weights get NVFP4.
     // Must be called before pre_dequant_weights().
-    void set_dual_path_quant(bool enable) { wcache_.dual_path_quant = enable; }  // PHASE-3-TODO: mode flag — defer to Phase 4
+    // Phase 4.2: also mirror into hints_ so Phase 5 can remove wcache_ write.
+    void set_dual_path_quant(bool enable) { wcache_.dual_path_quant = enable; hints_.dual_path_attn_fp8_ffn_nvfp4 = enable; }
 
     // Phase 2: Allocate all GPU workspace buffers.
     // Call AFTER weight upload to maximize VRAM available for expert layers.
@@ -451,6 +454,11 @@ private:
 
     // Weight caches (FP16, FP8, NVFP4, CUTLASS NVFP4/MXFP4, fused KV/gate+up)
     WeightCacheManager wcache_;
+
+    // Phase 4.2: parallel mode-flag state mirroring wcache_ mode flags.
+    // wcache_ is still the authoritative source during Phase 4; Phase 5 will
+    // delete wcache_ and make hints_ the single source of truth.
+    PlanHints hints_;
 
     // WeightRegistry: parallel handle store (Phase 2+ shim, populated alongside wcache_)
     WeightRegistry registry_;
