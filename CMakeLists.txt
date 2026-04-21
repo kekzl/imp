@@ -202,6 +202,7 @@ set(IMP_GRAPH_SOURCES
     src/graph/executor_forward_moe.cu
     src/graph/expert_cache.cu
     src/graph/weight_cache_manager.cu
+    src/graph/weight_handle.cu
     src/graph/moe_workspace.cu
     src/graph/quant_scratch.cu
 )
