@@ -13,6 +13,7 @@
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "core/tensor.h"
 #include "graph/weight_cache_manager.h"
+#include "graph/weight_handle.h"
 #include "graph/moe_workspace.h"
 #include "graph/quant_scratch.h"
 #include <cuda_runtime.h>
@@ -450,6 +451,9 @@ private:
 
     // Weight caches (FP16, FP8, NVFP4, CUTLASS NVFP4/MXFP4, fused KV/gate+up)
     WeightCacheManager wcache_;
+
+    // WeightRegistry: parallel handle store (Phase 2+ shim, populated alongside wcache_)
+    WeightRegistry registry_;
 
     // Quantization scratch buffers (FP8 act, CUTLASS act, dp4a, dequant, split-K)
     QuantScratch qscratch_;
