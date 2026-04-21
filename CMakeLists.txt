@@ -102,6 +102,7 @@ set(IMP_MODEL_SOURCES
     src/model/tokenizer.cpp
     src/model/tensor_kind_name.cpp
     src/model/tensor_kind_table.cu
+    src/model/tensor_kind_matcher.cpp
     src/model/chat_template.cpp
     src/model/jinja.cpp
 )
@@ -331,6 +332,7 @@ if(IMP_BUILD_TESTS)
         tests/test_tensor.cpp
         tests/test_gguf_loader.cpp
         tests/test_tensor_kind_table.cpp
+        tests/test_tensor_kind_matcher.cpp
         tests/test_kv_cache.cpp
         tests/test_rope.cu
         tests/test_layernorm.cu
