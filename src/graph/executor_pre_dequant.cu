@@ -1506,11 +1506,15 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
     // Build WeightRegistry from wcache_ contents (phase-2 shim).
     registry_.clear();
-    auto register_tensor = [&](const Tensor& t) -> TensorID {
+    // Explicit kind overrides t.kind which is UNKNOWN after weight_upload.cu
+    // creates fresh Tensor descriptors (TensorKind is not preserved through
+    // the upload code paths). Phase 5 plan-driven allocation requires kind to
+    // be correct, so we pass it explicitly from the field position.
+    auto register_tensor = [&](const Tensor& t, TensorKind kind) -> TensorID {
         if (!t.data) return kInvalidTensorID;
         StorageTier tier = infer_tier_from_wcache(wcache_, t.data);
         if (tier == StorageTier::Undefined) return kInvalidTensorID;
-        TensorID id = registry_.reserve(t.kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
+        TensorID id = registry_.reserve(kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
         auto& h = registry_.handle(id);
         h.primary_tier = tier;
         borrow_payload_from_wcache(h, wcache_, t.data);
@@ -1521,16 +1525,16 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         // const_cast: model_ is const Model* but the *_id fields are metadata
         // stamped exactly once here during load — safe to mutate.
         auto& L = const_cast<Model*>(model_)->layer(i);
-        L.wq_id       = register_tensor(L.wq);
-        L.wk_id       = register_tensor(L.wk);
-        L.wv_id       = register_tensor(L.wv);
-        L.wo_id       = register_tensor(L.wo);
-        L.w_gate_id   = register_tensor(L.w_gate);
-        L.w_up_id     = register_tensor(L.w_up);
-        L.w_down_id   = register_tensor(L.w_down);
-        L.ssm_in_id   = register_tensor(L.ssm_in);
-        L.ssm_out_id  = register_tensor(L.ssm_out);
-        L.gdn_gate_id = register_tensor(L.gdn_gate);
+        L.wq_id       = register_tensor(L.wq,       TensorKind::WQ);
+        L.wk_id       = register_tensor(L.wk,       TensorKind::WK);
+        L.wv_id       = register_tensor(L.wv,       TensorKind::WV);
+        L.wo_id       = register_tensor(L.wo,       TensorKind::WO);
+        L.w_gate_id   = register_tensor(L.w_gate,   TensorKind::W_GATE);
+        L.w_up_id     = register_tensor(L.w_up,     TensorKind::W_UP);
+        L.w_down_id   = register_tensor(L.w_down,   TensorKind::W_DOWN);
+        L.ssm_in_id   = register_tensor(L.ssm_in,   TensorKind::SSM_IN);
+        L.ssm_out_id  = register_tensor(L.ssm_out,  TensorKind::SSM_OUT);
+        L.gdn_gate_id = register_tensor(L.gdn_gate, TensorKind::GDN_GATE);
 
         // Per-expert TensorIDs (Task 3.4)
         const int ne_layer = static_cast<int>(L.expert_w_gate.size());
@@ -1539,11 +1543,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         L.expert_gate_ids.assign(ne_layer, kInvalidTensorID);
         L.expert_up_ids.assign(ne_up,    kInvalidTensorID);
         L.expert_down_ids.assign(ne_down, kInvalidTensorID);
-        for (int e = 0; e < ne_layer; ++e) L.expert_gate_ids[e] = register_tensor(L.expert_w_gate[e]);
-        for (int e = 0; e < ne_up;    ++e) L.expert_up_ids[e]   = register_tensor(L.expert_w_up[e]);
-        for (int e = 0; e < ne_down;  ++e) L.expert_down_ids[e] = register_tensor(L.expert_w_down[e]);
-        L.moe_gate_id           = register_tensor(L.moe_gate);
-        L.shared_expert_gate_id = register_tensor(L.shared_expert_gate_inp);
+        for (int e = 0; e < ne_layer; ++e) L.expert_gate_ids[e] = register_tensor(L.expert_w_gate[e], TensorKind::EXPERT_GATE);
+        for (int e = 0; e < ne_up;    ++e) L.expert_up_ids[e]   = register_tensor(L.expert_w_up[e],   TensorKind::EXPERT_UP);
+        for (int e = 0; e < ne_down;  ++e) L.expert_down_ids[e] = register_tensor(L.expert_w_down[e], TensorKind::EXPERT_DOWN);
+        L.moe_gate_id           = register_tensor(L.moe_gate,             TensorKind::ROUTER);
+        L.shared_expert_gate_id = register_tensor(L.shared_expert_gate_inp, TensorKind::SHARED_EXPERT_GATE);
 
         // Borrow nvfp4_moe pointers for packed 3D expert NVFP4 cache (Task 3.4)
         {
@@ -1573,7 +1577,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         }
     }
     // Register model-level (non-layer) tensors.
-    const_cast<Model*>(model_)->out_proj_id = register_tensor(model_->output_proj());
+    const_cast<Model*>(model_)->out_proj_id = register_tensor(model_->output_proj(), TensorKind::LM_HEAD);
 
     IMP_LOG_INFO("WeightRegistry populated with %zu handles (phase-2 shim)",
                  registry_.size());

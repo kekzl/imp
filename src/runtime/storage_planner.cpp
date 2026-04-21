@@ -73,13 +73,18 @@ StorageTier downgrade_one(StorageTier current, StorageTier floor,
     return current;
 }
 
-void add_tensor(const Tensor& t, StoragePlan& plan, TensorID& next_id,
-                size_t& total, const PlanHints& hints) {
+// Explicit kind overrides t.kind, which is UNKNOWN after weight_upload.cu
+// creates fresh Tensor descriptors. The planner uses the field position
+// (L.wq → WQ, L.wk → WK, …) rather than the stored kind so that Phase 5
+// plan-driven allocation works correctly even before kind preservation is
+// added to every upload code path.
+void add_tensor(const Tensor& t, TensorKind kind, StoragePlan& plan,
+                TensorID& next_id, size_t& total, const PlanHints& hints) {
     if (!t.data) return;
-    if (t.kind == TensorKind::UNKNOWN) return;  // skip unclassified tensors
+    if (kind == TensorKind::UNKNOWN) return;  // skip unclassified tensors
 
-    const auto& cap = capabilities_of(t.kind);
-    StorageTier tier = pick_initial_tier(t.kind, cap, hints);
+    const auto& cap = capabilities_of(kind);
+    StorageTier tier = pick_initial_tier(kind, cap, hints);
     // Clamp to supported: if pick_initial_tier returned something unsupported,
     // fall back to required_floor.
     if (!mask_contains(cap.supported, tier)) tier = cap.required_floor;
@@ -88,7 +93,7 @@ void add_tensor(const Tensor& t, StoragePlan& plan, TensorID& next_id,
     int64_t cols = (t.ndim > 1 ? t.shape[1] : 1);
     int64_t bytes = bytes_for_tier(rows, cols, tier);
 
-    plan.entries.push_back({next_id++, t.kind, tier, bytes, rows, cols});
+    plan.entries.push_back({next_id++, kind, tier, bytes, rows, cols});
     total += static_cast<size_t>(bytes);
 }
 
@@ -108,19 +113,19 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg,
 
     for (int i = 0; i < n_layers; ++i) {
         const auto& L = model.layer(i);
-        add_tensor(L.wq,       plan, next_id, total, hints);
-        add_tensor(L.wk,       plan, next_id, total, hints);
-        add_tensor(L.wv,       plan, next_id, total, hints);
-        add_tensor(L.wo,       plan, next_id, total, hints);
-        add_tensor(L.w_gate,   plan, next_id, total, hints);
-        add_tensor(L.w_up,     plan, next_id, total, hints);
-        add_tensor(L.w_down,   plan, next_id, total, hints);
-        add_tensor(L.ssm_in,   plan, next_id, total, hints);
-        add_tensor(L.ssm_out,  plan, next_id, total, hints);
-        add_tensor(L.gdn_gate, plan, next_id, total, hints);
-        for (const auto& e : L.expert_w_gate) add_tensor(e, plan, next_id, total, hints);
-        for (const auto& e : L.expert_w_up)   add_tensor(e, plan, next_id, total, hints);
-        for (const auto& e : L.expert_w_down) add_tensor(e, plan, next_id, total, hints);
+        add_tensor(L.wq,       TensorKind::WQ,       plan, next_id, total, hints);
+        add_tensor(L.wk,       TensorKind::WK,       plan, next_id, total, hints);
+        add_tensor(L.wv,       TensorKind::WV,       plan, next_id, total, hints);
+        add_tensor(L.wo,       TensorKind::WO,       plan, next_id, total, hints);
+        add_tensor(L.w_gate,   TensorKind::W_GATE,   plan, next_id, total, hints);
+        add_tensor(L.w_up,     TensorKind::W_UP,     plan, next_id, total, hints);
+        add_tensor(L.w_down,   TensorKind::W_DOWN,   plan, next_id, total, hints);
+        add_tensor(L.ssm_in,   TensorKind::SSM_IN,   plan, next_id, total, hints);
+        add_tensor(L.ssm_out,  TensorKind::SSM_OUT,  plan, next_id, total, hints);
+        add_tensor(L.gdn_gate, TensorKind::GDN_GATE, plan, next_id, total, hints);
+        for (const auto& e : L.expert_w_gate) add_tensor(e, TensorKind::EXPERT_GATE, plan, next_id, total, hints);
+        for (const auto& e : L.expert_w_up)   add_tensor(e, TensorKind::EXPERT_UP,   plan, next_id, total, hints);
+        for (const auto& e : L.expert_w_down) add_tensor(e, TensorKind::EXPERT_DOWN, plan, next_id, total, hints);
     }
 
     // Budget satisfaction: iteratively downgrade the entry with the highest
