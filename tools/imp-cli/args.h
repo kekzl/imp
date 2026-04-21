@@ -51,6 +51,9 @@ struct CliArgs {
     bool mxfp4_prefill = false;  // --mxfp4-prefill: CUTLASS MXFP4 GEMM for prefill
     bool dual_path_quant = false; // --dual-path-quant: FP8 attention + NVFP4 FFN
     bool prefix_caching = false;  // --prefix-caching: reuse KV blocks for shared prefixes
+    bool streaming_kv = false;    // --streaming-kv: StreamingLLM smart KV cache (sinks + window)
+    int  streaming_sinks = 4;     // --stream-sinks: # of sink tokens to keep
+    int  streaming_window = 0;    // --stream-window: window size (0 = use ModelConfig::sliding_window)
     std::vector<std::string> stop_sequences;  // --stop: text-level stop strings
     bool bench = false;        // --bench: synthetic benchmark mode
     int bench_pp = 512;        // --bench-pp: synthetic prompt token count

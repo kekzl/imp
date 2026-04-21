@@ -1206,5 +1206,84 @@ TEST(KVCacheManagerTest, SequenceIdReuse) {
     mgr->free_sequence(0);
 }
 
+// 44. EvictMiddleBlocksKeepsSinksAndWindow — StreamingLLM smart KV cache.
+TEST(KVCacheManagerTest, EvictMiddleBlocksKeepsSinksAndWindow) {
+    SKIP_IF_NO_CUDA();
+
+    // 32 total blocks, default block_size = 16 tokens => 512-token capacity.
+    auto mgr = MakeManager(32);
+
+    // Allocate 20 blocks for one sequence (320 tokens).
+    ASSERT_TRUE(mgr->allocate_blocks(0, 20));
+    EXPECT_EQ(static_cast<int>(mgr->block_table(0).size()), 20);
+    EXPECT_EQ(mgr->num_free_blocks(), 12);
+
+    // Snapshot the original block IDs so we can verify which survive.
+    auto bt_before = mgr->block_table(0);
+
+    // Keep first 4 sink tokens (=> 1 sink block) and last 64 window tokens
+    // (=> 4 window blocks). Middle = 20 - 1 - 4 = 15 blocks should be freed.
+    int freed = mgr->evict_middle_blocks(/*seq_id=*/0,
+                                          /*n_sink_tokens=*/4,
+                                          /*n_window_tokens=*/64);
+    EXPECT_EQ(freed, 15);
+
+    const auto& bt_after = mgr->block_table(0);
+    ASSERT_EQ(static_cast<int>(bt_after.size()), 20);  // unchanged length
+    EXPECT_EQ(bt_after[0], bt_before[0]);              // sink survives
+    EXPECT_EQ(bt_after[1], -1);                        // first middle slot freed
+    EXPECT_EQ(bt_after[15], -1);                       // last middle slot freed
+    EXPECT_EQ(bt_after[16], bt_before[16]);            // window survives
+    EXPECT_EQ(bt_after[19], bt_before[19]);            // last block survives
+
+    // 15 freed back into the pool.
+    EXPECT_EQ(mgr->num_free_blocks(), 12 + 15);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 1);  // sink block was pinned
+
+    // Idempotent: calling again must not crash and not free more.
+    int freed2 = mgr->evict_middle_blocks(0, 4, 64);
+    EXPECT_EQ(freed2, 0);
+    EXPECT_EQ(mgr->num_free_blocks(), 12 + 15);
+
+    // free_sequence keeps the pinned sink block alive (pin_prefix semantics).
+    mgr->free_sequence(0);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 1);
+    mgr->unpin_prefix(0);  // explicitly drop the pin
+}
+
+// 45. EvictMiddleBlocksNoOpWhenSinksExceedSequence — short sequences untouched.
+TEST(KVCacheManagerTest, EvictMiddleBlocksNoOpWhenShort) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(16);
+    ASSERT_TRUE(mgr->allocate_blocks(0, 3));  // only 48 tokens
+    int free_before = mgr->num_free_blocks();
+
+    // Sinks (1 block) + Window (3 blocks) >= total 3 blocks → nothing to free.
+    int freed = mgr->evict_middle_blocks(0, /*n_sink_tokens=*/4,
+                                            /*n_window_tokens=*/48);
+    EXPECT_EQ(freed, 0);
+    EXPECT_EQ(mgr->num_free_blocks(), free_before);
+    EXPECT_EQ(mgr->num_pinned_blocks(), 0);
+
+    mgr->free_sequence(0);
+}
+
+// 46. EvictMiddleBlocksRejectsZeroOrNegativeArgs.
+TEST(KVCacheManagerTest, EvictMiddleBlocksZeroArgsAreNoOp) {
+    SKIP_IF_NO_CUDA();
+
+    auto mgr = MakeManager(16);
+    ASSERT_TRUE(mgr->allocate_blocks(0, 8));
+
+    EXPECT_EQ(mgr->evict_middle_blocks(0, /*sink=*/0, /*win=*/16), 0);
+    EXPECT_EQ(mgr->evict_middle_blocks(0, /*sink=*/4, /*win=*/0),  0);
+    EXPECT_EQ(mgr->evict_middle_blocks(0, /*sink=*/-1, /*win=*/-1), 0);
+    EXPECT_EQ(mgr->evict_middle_blocks(/*missing_seq=*/99, 4, 16),  0);
+
+    EXPECT_EQ(static_cast<int>(mgr->block_table(0).size()), 8);
+    mgr->free_sequence(0);
+}
+
 } // namespace
 } // namespace imp
