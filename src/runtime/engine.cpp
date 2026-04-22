@@ -367,8 +367,19 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
 
     // --- Auto-detect SSM state dtype for hybrid models ---
-    // Nemotron-H and similar: use FP16 for SSM h_state (~50% VRAM savings)
-    if (config_.ssm_state_dtype == DType::FP32 && mcfg.ssm_state_size > 0) {
+    // Nemotron-H and similar Mamba models: use FP16 for SSM h_state (~50% VRAM savings).
+    // GDN models (Qwen3.5 / Qwen3.6) MUST keep FP32: the delta-rule scan kernel
+    // writes FP32 (float) into h_state and assumes 4 bytes/element. FP16 allocation
+    // would be half the size, so each layer's scan overflows into the next layer's
+    // state region — shipped bug that corrupted L1+ GDN state on every Qwen 3.6
+    // forward, producing 37% scan-output divergence vs llama.cpp.
+    bool has_gdn_for_dtype = false;
+    if (mcfg.ssm_state_size > 0) {
+        for (int i = 0; i < mcfg.n_layers; i++) {
+            if (model_->layer(i).gdn_gate.data != nullptr) { has_gdn_for_dtype = true; break; }
+        }
+    }
+    if (config_.ssm_state_dtype == DType::FP32 && mcfg.ssm_state_size > 0 && !has_gdn_for_dtype) {
         config_.ssm_state_dtype = DType::FP16;
         IMP_LOG_INFO("SSM state dtype: auto → FP16 (hybrid SSM model, state_size=%d)",
                      mcfg.ssm_state_size);
