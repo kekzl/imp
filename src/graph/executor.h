@@ -441,6 +441,7 @@ private:
     int max_tokens_ = 0;
     int max_logit_tokens_ = 0;  // max tokens needing LM head projection (= max_batch_size)
     int cur_n_tokens_ = 0;  // set by forward_logits for use by run_ffn
+    int cur_decode_step_ = 0;  // set by forward_logits for debug dump tagging
     bool cur_force_fp16_ = false;  // set by forward_logits, bypasses FP8 GEMM paths
     bool cur_per_row_lm_ = false;  // set by forward_logits, per-row Q8_1 LM head
 
