@@ -19,6 +19,15 @@ inline bool debug_forward_enabled() {
     return enabled;
 }
 
+// Decode-step counter shared between executor_forward.cu (writer) and
+// executor_ssm_gdn.cu (reader). Prefill passes use step=0; each single-token
+// decode pass increments it. Used for IMP_DUMP_HIDDEN filename tagging so
+// GDN-internal dumps correlate with per-layer snapshots.
+inline int& debug_decode_step() {
+    static int s = 0;
+    return s;
+}
+
 // Hidden-state npy dump for layer-diff analysis against llama.cpp.
 // Returns the directory if IMP_DUMP_HIDDEN is set to a non-empty string, else nullptr.
 // Accepts IMP_DUMP_HIDDEN=1 or "all" for backwards compat (mapped to /tmp).

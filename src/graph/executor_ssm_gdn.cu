@@ -301,6 +301,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     int64_t proj_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(conv_channels)};
     Tensor proj(ssm_proj_buf_.data, compute_dtype_, 2, proj_shape, true);
     gemm_dispatch(no, ly.ssm_in, ly.ssm_in_qtype, proj, ctx);
+    dump_tensor_npy("gdn_ssm_in_out", proj, stream, layer, cur_decode_step_);
 
     // 3. Conv1d on full projection output [n, conv_channels]
     int64_t conv_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(conv_channels)};
@@ -345,6 +346,14 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         int blocks = static_cast<int>((total + threads - 1) / threads);
         fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(
             static_cast<const half*>(xBC_out.data), conv_f32, total);
+    }
+
+    // Per-element dump: post-conv1d post-SiLU FP32 scan input.
+    // Compare to llama's `conv_output_silu-{layer}` tensor.
+    {
+        int64_t cf_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(conv_channels)};
+        Tensor conv_f32_t(conv_f32, DType::FP32, 2, cf_shape, true);
+        dump_tensor_npy("gdn_conv_f32", conv_f32_t, stream, layer, cur_decode_step_);
     }
 
     // 4b. V-head reorder (tiled → grouped) for asymmetric-head GDN models.
@@ -411,6 +420,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
             // Alpha/beta: through gemm_dispatch for consistent MXFP4/FP16/quantized handling.
             gemm_dispatch(no, ly.gdn_alpha, ly.gdn_alpha_qtype, alpha_proj_out, ctx);
             gemm_dispatch(no, ly.gdn_beta, ly.gdn_beta_qtype, beta_proj_out, ctx);
+            // Per-element dump: pre-softplus alpha and pre-sigmoid beta projections.
+            // Compare to llama's `alpha-{layer}` and `beta-{layer}`.
+            dump_tensor_npy("gdn_alpha", alpha_proj_out, stream, layer, cur_decode_step_);
+            dump_tensor_npy("gdn_beta",  beta_proj_out,  stream, layer, cur_decode_step_);
         }
 
         // 5b. Multi-token delta rule scan.
@@ -478,6 +491,14 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     debug_tensor_stats("gdn_after_scan_y", y_buf, stream);
     debug_tensor_stats("gdn_gate_out", gate_out, stream);
 
+    // Per-element dump: raw scan output (FP16), pre-rmsnorm_gated_silu.
+    // Only populated in the default path — FP32_SCAN writes to y_fp32 and only
+    // copies back to y_buf when IMP_DEBUG_FORWARD is set. Compare to llama's
+    // `attn_output-{layer}` from common-eval-callback.
+    if (!use_fp32_scan) {
+        dump_tensor_npy("gdn_y_post_scan", y_buf, stream, layer, cur_decode_step_);
+    }
+
     // 6. Fused RMSNormGated + SiLU: y = rmsnorm(y) * silu(gate)
     // Single kernel launch for all tokens × heads (replaces n×32×2 launches).
     // When IMP_GDN_FP32_SCAN is active, this was already done inline with the
@@ -493,6 +514,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                                 static_cast<const half*>(ly.ssm_norm_w.data),
                                 norm_eps, n, n_heads, head_dim_ssm, stream);
     }
+
+    // Per-element dump: post-rmsnorm-gated scan output (FP16), pre-ssm_out GEMM.
+    // Compare to llama's final_output tensor before build_lora_mm(ssm_out, ...).
+    dump_tensor_npy("gdn_y_post_norm", y_buf, stream, layer, cur_decode_step_);
 
     // 7. ssm_out projection: [n, inner] → [n, d_model]
     // IMP_GDN_FP32_OUT=1: compute the ssm_out GEMM with FP32 output and add the
@@ -527,6 +552,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(fp32_out, stream));
     } else {
         gemm_dispatch(y_buf, ly.ssm_out, ly.ssm_out_qtype, out_buf, ctx);
+        // Per-element dump: linear_attn_out post-ssm_out GEMM, pre-residual.
+        // Compare to llama's `linear_attn_out-{layer}` from eval-callback.
+        dump_tensor_npy("gdn_linear_attn_out", out_buf, stream, layer, cur_decode_step_);
         elementwise_add(out_buf, r, stream);
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h.data, out_buf.data, h.nbytes(),
                         cudaMemcpyDeviceToDevice, stream));

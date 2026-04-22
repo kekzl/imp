@@ -166,10 +166,12 @@ void GraphExecutor::forward_logits(const InferenceState& state,
 
     // Store for use by run_ffn (which doesn't receive the InferenceState).
     cur_n_tokens_ = n;
-    // Decode step counter for debug dump tagging
-    static int s_decode_step = 0;
+    // Decode step counter for debug dump tagging. Shared with GDN path via
+    // debug_decode_step() so run_gdn can tag its dumps with the same step.
+    int& s_decode_step = debug_decode_step();
     if (n == 1) s_decode_step++;
     const int decode_step = (n == 1) ? s_decode_step : 0;
+    cur_decode_step_ = decode_step;
     cur_force_fp16_ = state.force_fp16_gemm;
     cur_per_row_lm_ = state.per_row_lm_head;
 

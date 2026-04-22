@@ -113,7 +113,11 @@ gdn_scan_fused_kernel(
                 if (d < stride) s_reduce[d] += s_reduce[d + stride];
                 __syncthreads();
             }
-            float k_inv = rsqrtf(s_reduce[0] + 1e-6f);
+            // PyTorch-style L2 norm (matches llama's ggml_l2_norm): rsqrtf(max(sum_sq, eps^2)).
+            // Additive eps (sum + eps) over-clamps near-zero heads and produces
+            // 100-1000x too-small normalization scale vs llama, which breaks Qwen 3.6 scan
+            // outputs at layers where some heads have near-zero K (e.g. L1 h19/20/22/25/29).
+            float k_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
 
             s_reduce[d] = q_sq;
             __syncthreads();
@@ -121,7 +125,7 @@ gdn_scan_fused_kernel(
                 if (d < stride) s_reduce[d] += s_reduce[d + stride];
                 __syncthreads();
             }
-            float q_inv = rsqrtf(s_reduce[0] + 1e-6f);
+            float q_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
 
             // Normalize in-place
             if (d < SS) {
@@ -474,7 +478,8 @@ __global__ void gdn_scan_reference_kernel(
             if (d < stride) s_reduce[d] += s_reduce[d + stride];
             __syncthreads();
         }
-        float k_inv = rsqrtf(s_reduce[0] + 1e-6f);
+        // PyTorch-style L2 norm (see note in fused kernel above).
+        float k_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
 
         s_reduce[d] = q_sq;
         __syncthreads();
@@ -482,7 +487,7 @@ __global__ void gdn_scan_reference_kernel(
             if (d < stride) s_reduce[d] += s_reduce[d + stride];
             __syncthreads();
         }
-        float q_inv = rsqrtf(s_reduce[0] + 1e-6f);
+        float q_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
 
         if (d < SS) {
             s_k[d] *= k_inv;
@@ -701,8 +706,9 @@ __global__ void gdn_scan_decode_kernel(
             s_k[s] = ks; s_q[s] = qs;
             k_sq += ks * ks; q_sq += qs * qs;
         }
-        s_k_inv = rsqrtf(k_sq + 1e-6f);
-        s_q_inv = rsqrtf(q_sq + 1e-6f);
+        // PyTorch-style L2 norm: rsqrtf(max(sum_sq, eps^2)), matches llama's ggml_l2_norm.
+        s_k_inv = rsqrtf(fmaxf(k_sq, 1e-12f));
+        s_q_inv = rsqrtf(fmaxf(q_sq, 1e-12f));
         for (int s = 0; s < state_size; s++) {
             s_k[s] *= s_k_inv; s_q[s] *= s_q_inv;
         }
