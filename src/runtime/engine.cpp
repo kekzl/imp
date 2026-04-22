@@ -334,10 +334,42 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     const auto& mcfg = model_->config();
 
+    // --- IMP_DEBUG_RAW: disable all optimization/cache/approximation paths ---
+    // Meta-flag for debugging: forces the engine into a "naked" FP16 forward pass
+    // for reproducible byte-level comparison against a reference implementation
+    // (e.g. llama.cpp). Sets downstream env vars before the auto-detect logic so
+    // that FP8/NVFP4/warmup/graphs are all forced off and cuBLAS is deterministic.
+    // User can still override individual knobs by setting the specific env before.
+    const bool debug_raw_ = (std::getenv("IMP_DEBUG_RAW") != nullptr);
+    if (debug_raw_) {
+        IMP_LOG_INFO("IMP_DEBUG_RAW=1: naked FP16 path (FP8/NVFP4/graphs/warmup/FP8-KV off; deterministic cuBLAS)");
+        // Weight storage: keep FP16 (skip the lossy cache paths)
+        config_.use_fp8_prefill  = 0;
+        config_.use_nvfp4_decode = 0;
+        config_.dual_path_quant  = false;
+        // CUDA graphs off (graph capture can mask state bugs)
+        config_.use_cuda_graphs = 0;
+        setenv("IMP_NO_CUDA_GRAPH",     "1", 0);
+        // No warmup (warmup can leak state into first request)
+        setenv("IMP_NO_WARMUP",         "1", 0);
+        // Deterministic cuBLAS (bit-exact across runs, no algo jitter)
+        setenv("IMP_DETERMINISTIC_GEMM","1", 0);
+        setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 0);
+        // MoE: no expert LRU cache (state-carrying)
+        setenv("IMP_NO_EXPERT_CACHE",   "1", 0);
+        // GDN: use reference unfused scan (no register-state reordering)
+        setenv("IMP_GDN_REF",           "1", 0);
+        // NOTE: intentionally NOT forcing IMP_FORCE_CUBLAS_DECODE / IMP_NO_FMHA_SM120 /
+        // IMP_NO_MMVQ — those trigger incompatible kernel paths that produce IMAs on
+        // some combinations. The RAW flag is about disabling *caches and approximations*,
+        // not about swapping kernel variants.
+    }
+
     // --- Auto-detect KV cache dtype ---
     // Default to FP8 E4M3 for ~50% KV VRAM savings.
     // Model-specific overrides (e.g. Gemma-4 → FP16) run later and may revert this.
-    if (config_.kv_cache_dtype == DType::FP16) {
+    // Under IMP_DEBUG_RAW, keep FP16 for byte-identical comparison.
+    if (config_.kv_cache_dtype == DType::FP16 && !debug_raw_) {
         config_.kv_cache_dtype = DType::FP8_E4M3;
         IMP_LOG_INFO("KV cache dtype: auto → FP8_E4M3");
     }
@@ -386,7 +418,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
 
     // --- Auto-detect FP8 prefill ---
-    if (!config_.use_fp8_prefill) {
+    // Under IMP_DEBUG_RAW, leave explicitly disabled for FP16 parity.
+    if (!config_.use_fp8_prefill && !debug_raw_) {
         config_.use_fp8_prefill = true;
         IMP_LOG_INFO("FP8 prefill: auto → enabled");
     }
