@@ -317,6 +317,7 @@ if(IMP_BUILD_SERVER)
         tools/imp-server/args.cpp
         tools/imp-server/utils.cpp
         tools/imp-server/tool_call.cpp
+        tools/imp-server/anthropic.cpp
         tools/imp-server/handlers.cpp
         tools/imp-server/batching_engine.cpp
     )

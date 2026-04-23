@@ -1,6 +1,7 @@
 #include "handlers.h"
 #include "utils.h"
 #include "tool_call.h"
+#include "anthropic.h"
 
 #include "api/imp_internal.h"
 #include "model/hf_hub.h"
@@ -2942,3 +2943,116 @@ void handle_embeddings(const httplib::Request& req, httplib::Response& res,
     };
     res.set_content(response.dump(), "application/json");
 }
+
+// ===========================================================================
+// Anthropic /v1/messages — Phase 1: non-streaming shim
+// ===========================================================================
+//
+// The generation path is identical to /v1/chat/completions. We only need
+// to transform the JSON envelope on the way in (Anthropic → OpenAI) and on
+// the way out (OpenAI → Anthropic), then delegate to handle_chat_completions.
+//
+// Streaming is intentionally rejected here; Phase 2 will add a parallel
+// handler that emits native Anthropic SSE events.
+// ---------------------------------------------------------------------------
+
+void handle_messages(const httplib::Request& req, httplib::Response& res, ServerState& state) {
+    namespace anth = imp_server::anthropic;
+
+    json anth_body;
+    try {
+        anth_body = json::parse(req.body);
+    } catch (const std::exception& e) {
+        res.status = 400;
+        json err = {{"type", "error"},
+                    {"error", {{"type", "invalid_request_error"},
+                               {"message", std::string("Invalid JSON: ") + e.what()}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
+    if (!anth_body.is_object()) {
+        res.status = 400;
+        json err = {{"type", "error"},
+                    {"error", {{"type", "invalid_request_error"},
+                               {"message", "Request body must be a JSON object"}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
+    // Phase 1: reject streaming requests with a clear 501.
+    if (anth_body.value("stream", false)) {
+        res.status = 501;
+        json err = {{"type", "error"},
+                    {"error", {{"type", "not_implemented"},
+                               {"message", "Streaming /v1/messages is not yet implemented; "
+                                           "use stream=false or /v1/chat/completions for streaming."}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
+    // Anthropic requires max_tokens — if it's missing, supply a sane default
+    // matching the server's chat-completions default (handled downstream).
+    std::string anth_model = anth_body.value("model", "");
+
+    // Transform -> OpenAI body.
+    json oai_body;
+    try {
+        oai_body = anth::anthropic_to_openai_body(anth_body);
+    } catch (const std::exception& e) {
+        res.status = 400;
+        json err = {{"type", "error"},
+                    {"error", {{"type", "invalid_request_error"},
+                               {"message", std::string("Failed to transform Anthropic body: ") + e.what()}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
+    // Shim: reuse the OpenAI handler with a cloned request carrying the
+    // transformed body. httplib::Request is a plain struct, safe to copy.
+    httplib::Request shim_req = req;
+    shim_req.body = oai_body.dump();
+    // Drop any cached content-length header so httplib recomputes if needed.
+    shim_req.headers.erase("Content-Length");
+    shim_req.headers.erase("content-length");
+
+    httplib::Response shim_res;
+    handle_chat_completions(shim_req, shim_res, state);
+
+    // Propagate error envelopes (transform them to Anthropic error shape).
+    // httplib::Response defaults status to -1 and auto-promotes to 200 only
+    // at send time; any other non-200 code set by handle_chat_completions is
+    // a real error we should forward.
+    const bool is_error = shim_res.status >= 400;
+    if (is_error) {
+        res.status = shim_res.status;
+        json parsed;
+        try {
+            parsed = json::parse(shim_res.body);
+        } catch (...) {
+            parsed = {{"error", {{"message", shim_res.body}, {"type", "server_error"}}}};
+        }
+        json out = {{"type", "error"},
+                    {"error", parsed.value("error",
+                                           json{{"type", "server_error"}, {"message", "unknown"}})}};
+        res.set_content(out.dump(), "application/json");
+        return;
+    }
+
+    json oai_response;
+    try {
+        oai_response = json::parse(shim_res.body);
+    } catch (const std::exception& e) {
+        res.status = 500;
+        json err = {{"type", "error"},
+                    {"error", {{"type", "server_error"},
+                               {"message", std::string("Upstream returned non-JSON: ") + e.what()}}}};
+        res.set_content(err.dump(), "application/json");
+        return;
+    }
+
+    json anth_response = anth::openai_to_anthropic_response(oai_response, anth_model);
+    res.status = 200;
+    res.set_content(anth_response.dump(), "application/json");
+}
+

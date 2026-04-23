@@ -111,6 +111,9 @@ void handle_health(const httplib::Request& req, httplib::Response& res, ServerSt
 void handle_models(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_chat_completions(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_completions(const httplib::Request& req, httplib::Response& res, ServerState& state);
+// Anthropic-compatible Messages API. For non-streaming requests this is a
+// thin shim over handle_chat_completions; streaming reserved for Phase 2.
+void handle_messages(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_tokenize(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_detokenize(const httplib::Request& req, httplib::Response& res, ServerState& state);
 void handle_metrics(const httplib::Request& req, httplib::Response& res, ServerState& state);
