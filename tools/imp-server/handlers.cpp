@@ -1218,8 +1218,12 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     }
                     std::string piece = snap_tok->decode_token(token);
 
-                    // Gemma-4 channel filter: strip "<|channel>NAME\n" / "<channel|>\n"
-                    // structural headers from the content stream.
+                    // Gemma-4 channel filter: strip "<|channel>NAME\n" structural
+                    // headers from the content stream. `<channel|>` is the
+                    // channel-switch marker — strip the token but do NOT enter
+                    // the scan-until-newline mode, because Q5_K_M sometimes
+                    // emits the final answer directly after it with no newline
+                    // (observed: "<|channel>thought\n<channel|>5 + 3 = 8").
                     if (snap_channel_open_id >= 0) {
                         if (channel_header_active) {
                             if (token == snap_channel_newline_id ||
@@ -1228,9 +1232,12 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                             }
                             continue;
                         }
-                        if (token == snap_channel_open_id ||
-                            token == snap_channel_close_id) {
+                        if (token == snap_channel_open_id) {
                             channel_header_active = true;
+                            continue;
+                        }
+                        if (token == snap_channel_close_id) {
+                            // Drop just the marker; the next token is body.
                             continue;
                         }
                     }
