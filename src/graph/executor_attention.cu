@@ -408,14 +408,29 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                               qscratch_.d_act_scale, fp8_hwv->payload.fp8.d_scale, stream);
             } else {
                 // Try fused K+V path: single strided batched GEMM for both projections.
-                // fused_kv is indexed by layer number; no WeightHandle equivalent yet.
-                auto fused_kv_it = wcache_.fused_kv.find(layer);
+                // Prefer registry handle (Phase 4 path); fall back to wcache_
+                // lookup if the handle is invalid (e.g., new layer added but
+                // not yet registered, or registry not yet populated).
                 // Gemma 4 per-layer shapes break strided-batched K+V layout assumptions.
-                if (n > 1 && fused_kv_it != wcache_.fused_kv.end() && !per_layer_shapes) {
+                const Tensor* fused_kv = nullptr;
+                Tensor fused_from_handle;
+                if (ly.fused_kv_id != kInvalidTensorID) {
+                    const auto& h = registry_.handle(ly.fused_kv_id);
+                    if (h.payload.fp16.data) {
+                        fused_from_handle = Tensor(h.payload.fp16.data, DType::FP16,
+                                                   2, h.shape, true);
+                        fused_kv = &fused_from_handle;
+                    }
+                }
+                if (!fused_kv) {
+                    auto it = wcache_.fused_kv.find(layer);
+                    if (it != wcache_.fused_kv.end()) fused_kv = &it->second;
+                }
+                if (n > 1 && fused_kv && !per_layer_shapes) {
                     // Q: still separate (different output dim with GQA)
                     gemm_dispatch(no, ly.wq, ly.wq_qtype, q_target, ctx);
                     // K+V: one batched cuBLAS call
-                    gemm_kv_batched(no, fused_kv_it->second, kk, vv, stream);
+                    gemm_kv_batched(no, *fused_kv, kk, vv, stream);
                 } else {
                     gemm_dispatch(no, ly.wq, ly.wq_qtype, q_target, ctx);
                     gemm_dispatch(no, ly.wk, ly.wk_qtype, kk, ctx);

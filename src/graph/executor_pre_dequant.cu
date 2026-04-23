@@ -1579,6 +1579,27 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     const_cast<Model*>(model_)->out_proj_id = register_tensor(model_->output_proj(), TensorKind::LM_HEAD);
     const_cast<Model*>(model_)->tok_emb_id  = register_tensor(model_->token_embedding(), TensorKind::TOK_EMBED);
 
+    // Register fused KV / gate+up overlays. Layer-keyed (not pointer-keyed)
+    // because a fused tensor is built fresh — the source pointers (wk, wv) are
+    // the *unfused* weights and don't appear in any per-tensor wcache_ map.
+    auto register_fused = [&](TensorKind kind, const Tensor& t) -> TensorID {
+        if (!t.data) return kInvalidTensorID;
+        TensorID id = registry_.reserve(kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
+        auto& h = registry_.handle(id);
+        h.primary_tier = StorageTier::FP16;
+        h.payload.fp16.data = static_cast<half*>(t.data);
+        return id;
+    };
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        auto& L = const_cast<Model*>(model_)->layer(i);
+        if (auto it = wcache_.fused_kv.find(i); it != wcache_.fused_kv.end()) {
+            L.fused_kv_id = register_fused(TensorKind::FUSED_KV, it->second);
+        }
+        if (auto it = wcache_.fused_gate_up.find(i); it != wcache_.fused_gate_up.end()) {
+            L.fused_gate_up_id = register_fused(TensorKind::FUSED_GATE_UP, it->second);
+        }
+    }
+
     IMP_LOG_INFO("WeightRegistry populated with %zu handles (phase-2 shim)",
                  registry_.size());
 

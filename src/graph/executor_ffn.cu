@@ -214,11 +214,25 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 gemm_cublaslt(fp8_no, fp8_tu, uo, 1.0f, 0.0f,
                               qscratch_.d_act_scale, hwu->payload.fp8.d_scale, stream);
             } else {
-                // fused_gate_up is indexed by layer number; no WeightHandle equivalent yet.
-                auto fused_gu_it = wcache_.fused_gate_up.find(layer);
-                if (n > 1 && fused_gu_it != wcache_.fused_gate_up.end()) {
+                // Prefer registry handle (Phase 4 path); fall back to wcache_
+                // lookup if the handle is invalid.
+                const Tensor* fused_gu = nullptr;
+                Tensor fused_from_handle;
+                if (ly.fused_gate_up_id != kInvalidTensorID) {
+                    const auto& h = registry_.handle(ly.fused_gate_up_id);
+                    if (h.payload.fp16.data) {
+                        fused_from_handle = Tensor(h.payload.fp16.data, DType::FP16,
+                                                   2, h.shape, true);
+                        fused_gu = &fused_from_handle;
+                    }
+                }
+                if (!fused_gu) {
+                    auto it = wcache_.fused_gate_up.find(layer);
+                    if (it != wcache_.fused_gate_up.end()) fused_gu = &it->second;
+                }
+                if (n > 1 && fused_gu) {
                     // Batched gate+up: single cuBLAS call for both projections
-                    gemm_pair_batched(no, fused_gu_it->second, go, uo, stream);
+                    gemm_pair_batched(no, *fused_gu, go, uo, stream);
                 } else {
                     gemm_dispatch(no, ly.w_gate, ly.w_gate_qtype, go, ctx);
                     gemm_dispatch(no, ly.w_up,   ly.w_up_qtype,   uo, ctx);
