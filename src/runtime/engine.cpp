@@ -740,6 +740,9 @@ bool Engine::init_weights() {
         }
         if (experts_on_host_ && config_.use_cuda_graphs) {
             IMP_LOG_INFO("Disabling CUDA graphs: expert weights on host");
+            IMP_LOG_INFO("  Tip: if model+KV fits in VRAM, set IMP_EXPERT_OVERHEAD_PCT=10 "
+                         "(default 30) to upload ALL experts and re-enable CUDA graphs "
+                         "(+~180%% decode on Qwen 3.6 35B Q4_K_M).");
             config_.use_cuda_graphs = false;
         }
         if (getenv("IMP_NO_CUDA_GRAPH") && config_.use_cuda_graphs) {
