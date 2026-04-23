@@ -49,6 +49,7 @@ public:
     GGMLQuantType out_proj_qtype_ = GGMLQuantType::NONE;
     TransformerLayer::NvFP4PreQuantWeight nvfp4_out_proj_;  // prequant LM head scales
     TensorID out_proj_id = kInvalidTensorID;  // registry handle for LM head (Task 3.5)
+    TensorID tok_emb_id  = kInvalidTensorID;  // registry handle for token embedding
     std::vector<TransformerLayer> layers_;
     std::unique_ptr<Tokenizer> tokenizer_;
 

@@ -147,6 +147,11 @@ struct TransformerLayer {
     TensorID w_gate_id   = kInvalidTensorID;
     TensorID w_up_id     = kInvalidTensorID;
     TensorID w_down_id   = kInvalidTensorID;
+    // Shared-expert FFN (Nemotron / DeepSeek / Qwen3.5-MoE). kInvalidTensorID
+    // when the layer has no shared expert branch.
+    TensorID w_gate_shared_id = kInvalidTensorID;
+    TensorID w_up_shared_id   = kInvalidTensorID;
+    TensorID w_down_shared_id = kInvalidTensorID;
     TensorID ssm_in_id   = kInvalidTensorID;
     TensorID ssm_out_id  = kInvalidTensorID;
     TensorID gdn_gate_id = kInvalidTensorID;
