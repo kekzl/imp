@@ -163,14 +163,20 @@ void strip_channel_headers(std::string& text) {
         const bool is_close = (!is_open &&
                                i + kCloseLen <= text.size() &&
                                text.compare(i, kCloseLen, kClose) == 0);
-        if (is_open || is_close) {
-            size_t marker_len = is_open ? kOpenLen : kCloseLen;
-            size_t nl = text.find('\n', i + marker_len);
-            if (nl == std::string::npos) {
-                // No closing newline — drop the rest of the text (it's all header).
-                break;
-            }
-            i = nl + 1;
+        if (is_open) {
+            // Open marker: "<|channel>NAME\n" — strip the whole header.
+            // If no newline follows the name, the header is malformed/
+            // truncated; drop just the marker so we don't swallow body text.
+            size_t nl = text.find('\n', i + kOpenLen);
+            i = (nl == std::string::npos) ? (i + kOpenLen) : (nl + 1);
+            continue;
+        }
+        if (is_close) {
+            // Close / channel-switch marker: just drop the marker token itself.
+            // Gemma-4 Q5_K_M emits "<channel|>answer body" directly without a
+            // trailing newline, so we must NOT wait for one here — otherwise
+            // the answer body gets eaten (observed on "What is 5+3?").
+            i += kCloseLen;
             continue;
         }
         out.push_back(text[i++]);
