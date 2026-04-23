@@ -120,6 +120,11 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg,
         add_tensor(L.w_gate,   TensorKind::W_GATE,   plan, next_id, total, hints);
         add_tensor(L.w_up,     TensorKind::W_UP,     plan, next_id, total, hints);
         add_tensor(L.w_down,   TensorKind::W_DOWN,   plan, next_id, total, hints);
+        // Shared-expert FFN (Nemotron / DeepSeek / Qwen3.5-MoE). Same kinds as
+        // the regular FFN projections — capabilities and tier choice mirror.
+        add_tensor(L.w_gate_shared, TensorKind::W_GATE, plan, next_id, total, hints);
+        add_tensor(L.w_up_shared,   TensorKind::W_UP,   plan, next_id, total, hints);
+        add_tensor(L.w_down_shared, TensorKind::W_DOWN, plan, next_id, total, hints);
         add_tensor(L.ssm_in,   TensorKind::SSM_IN,   plan, next_id, total, hints);
         add_tensor(L.ssm_out,  TensorKind::SSM_OUT,  plan, next_id, total, hints);
         add_tensor(L.gdn_gate, TensorKind::GDN_GATE, plan, next_id, total, hints);
@@ -127,6 +132,13 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg,
         for (const auto& e : L.expert_w_up)   add_tensor(e, TensorKind::EXPERT_UP,   plan, next_id, total, hints);
         for (const auto& e : L.expert_w_down) add_tensor(e, TensorKind::EXPERT_DOWN, plan, next_id, total, hints);
     }
+
+    // Top-level (model-global) tensors. Embeddings and LM head have their own
+    // tier choices (LM head is NVFP4-prequant on Qwen3-Coder-30B-FP4) and must
+    // not be omitted from the plan — the future PlanExecutor owns their GPU
+    // storage allocation too.
+    add_tensor(model.token_embedding(), TensorKind::TOK_EMBED, plan, next_id, total, hints);
+    add_tensor(model.output_proj(),     TensorKind::LM_HEAD,   plan, next_id, total, hints);
 
     // Budget satisfaction: iteratively downgrade the entry with the highest
     // bytes-saved potential until we fit or everything is at required_floor.
