@@ -29,7 +29,7 @@ __global__ void gdn_scan_decode_kernel(
 // Shared memory: K_norm[state_size] + Q_norm[state_size] + reduce[block_dim]
 // ---------------------------------------------------------------------------
 template <int HD, int SS, typename YOut>
-__global__ void __launch_bounds__(HD, 2)
+__global__ void __launch_bounds__(HD, 1)
 gdn_scan_fused_kernel(
     const float* __restrict__ conv_f32,   // [n_tokens, conv_channels] FP32
     const half*  __restrict__ alpha_all,  // [n_tokens, n_heads] FP16
