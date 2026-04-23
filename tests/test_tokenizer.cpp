@@ -415,5 +415,123 @@ TEST(TokenizerDispatchTest, MaxLength) {
     }
 }
 
+// ---- Gemma-4 Tokenizer Tests ----
+
+// Synthetic Gemma-4 tokenizer reproducing the byte-fallback bug on "Linus".
+// merge_ranks contains "Lin u" → "Linu" as an intermediate rule whose output
+// is NOT in the vocabulary. Buggy code applies the merge unconditionally,
+// producing an unknown symbol that byte-falls-back the entire word.
+//
+// Layout:
+//   0: <unk>  1: <s>  2: </s>
+//   3: ▁
+//   4-14: individual ASCII chars (L, i, n, u, s, ...)
+//   15: "Li"  16: "Lin"  17: "us"
+//   18-273: byte fallback <0x00>..<0xFF>
+static Tokenizer make_gemma4_tokenizer() {
+    std::vector<std::string> tokens = {
+        "<unk>", "<s>", "</s>",
+        "\xe2\x96\x81",  // ▁ (id 3)
+        "L", "i", "n", "u", "s",   // 4-8
+        " ", "\t", "\n",           // 9-11 (raw whitespace, rarely used)
+    };
+    std::vector<float> scores(tokens.size(), 0.0f);
+
+    int Li_id = static_cast<int>(tokens.size());
+    tokens.push_back("Li"); scores.push_back(0.0f);
+
+    int Lin_id = static_cast<int>(tokens.size());
+    tokens.push_back("Lin"); scores.push_back(0.0f);
+
+    int us_id = static_cast<int>(tokens.size());
+    tokens.push_back("us"); scores.push_back(0.0f);
+    (void)Li_id;
+
+    // Byte fallback <0x00>..<0xFF>
+    int byte_base = static_cast<int>(tokens.size());
+    for (int b = 0; b < 256; b++) {
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "<0x%02X>", b);
+        tokens.push_back(buf);
+        scores.push_back(0.0f);
+    }
+
+    Tokenizer tok;
+    tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2);
+    tok.set_type("gemma4");
+    tok.set_add_bos(false);
+    tok.set_add_space_prefix(false);  // Gemma handles ▁ internally
+
+    // Merge rules (lower rank = higher priority). Key format: "a b".
+    // "Lin u" → "Linu" is an intermediate merge; "Linu" is NOT in vocab.
+    // A correct BPE implementation (like llama.cpp) skips this merge.
+    std::vector<std::string> merges = {
+        "L i",     // rank 0 → Li   (in vocab)
+        "Li n",    // rank 1 → Lin  (in vocab)
+        "Lin u",   // rank 2 → Linu (NOT in vocab — trigger for bug)
+        "u s",     // rank 3 → us   (in vocab)
+    };
+    tok.load_merges(merges);
+    (void)Lin_id; (void)us_id; (void)byte_base;
+    return tok;
+}
+
+TEST(TokenizerGemma4Test, MergeSkippedWhenResultNotInVocab) {
+    Tokenizer tok = make_gemma4_tokenizer();
+    int Lin_id = tok.find_token("Lin");
+    int us_id = tok.find_token("us");
+    ASSERT_GE(Lin_id, 0);
+    ASSERT_GE(us_id, 0);
+    ASSERT_LT(tok.find_token("Linu"), 0);  // sanity: "Linu" must NOT be in vocab
+
+    // "Linus": buggy code merges all the way to "Linu" (intermediate) then
+    // byte-fallbacks the unknown symbol, producing 5 byte-fallback tokens.
+    // Correct behavior: skip the "Lin u" merge, apply "u s → us" instead,
+    // yielding [Lin, us] — 2 tokens.
+    auto ids = tok.encode("Linus");
+    ASSERT_EQ(ids.size(), 2u) << "expected [Lin, us], got byte-fallback";
+    EXPECT_EQ(ids[0], Lin_id);
+    EXPECT_EQ(ids[1], us_id);
+}
+
+TEST(TokenizerGemma4Test, KnownSingleTokenMergesStillWork) {
+    // Regression guard: even with the merge-guard in place, a string whose
+    // full merge chain stays in-vocab must still produce a single token.
+    Tokenizer tok = make_gemma4_tokenizer();
+    auto ids = tok.encode("Lin");
+    ASSERT_EQ(ids.size(), 1u);
+    EXPECT_EQ(ids[0], tok.find_token("Lin"));
+}
+
+TEST(TokenizerGemma4Test, TruncatedUTF8AtEndDoesNotCrash) {
+    // Regression: nfc_decode_utf8 used to advance pos past end-of-string
+    // on a truncated multi-byte sequence, producing a partial codepoint.
+    // Ensure encoding a truncated UTF-8 tail terminates cleanly.
+    Tokenizer tok = make_gemma4_tokenizer();
+    std::string truncated = "Lin\xe2\x96";   // UTF-8 ▁ missing its 3rd byte
+    auto ids = tok.encode(truncated);
+    EXPECT_GT(ids.size(), 0u);
+}
+
+TEST(TokenizerGemma4Test, DecodeByteFallbackFormsValidUTF8) {
+    // Bytes 0xE2 0x96 0x81 in sequence form the UTF-8 of ▁ (U+2581). After
+    // Gemma-4 decode, ▁ must be replaced by ASCII space — even when the
+    // three bytes arrive as three separate byte-fallback tokens.
+    //
+    // Before fix: decode_spm_token runs SPIECE_SPACE replacement per-token,
+    // fails to stitch the 3 bytes together, returns literal "▁Linus".
+    Tokenizer tok = make_gemma4_tokenizer();
+    int byte_base = tok.find_token("<0x00>");
+    ASSERT_GE(byte_base, 0);
+
+    std::vector<int32_t> ids = {
+        byte_base + 0xE2, byte_base + 0x96, byte_base + 0x81,  // ▁
+        byte_base + 'L', byte_base + 'i', byte_base + 'n',
+        byte_base + 'u', byte_base + 's',
+    };
+    std::string decoded = tok.decode(ids);
+    EXPECT_EQ(decoded, " Linus");
+}
+
 } // namespace
 } // namespace imp
