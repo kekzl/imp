@@ -27,17 +27,18 @@ This is not a wrapper. imp implements its own GGUF parser, Jinja2 template engin
 
 ## Performance
 
-**RTX 5090** (Blackwell, sm_120, 32 GB GDDR7) &mdash; CUDA 13.2, NVFP4 decode + FP8 prefill.
+**RTX 5090** (Blackwell, sm_120, 32 GB GDDR7) &mdash; CUDA 13.2.1, NVFP4 decode + FP8 prefill.
 
 ### Decode Throughput (tok/s, higher = better)
 
-| Model | Quant | imp v0.6 | llama.cpp | Speedup |
+| Model | Quant | imp v0.7 | llama.cpp | Speedup |
 |---|---|---:|---:|---:|
 | Qwen3-4B | Q8_0 | **377** | 244 | **+55%** |
 | Qwen3-8B | Q8_0 | **255** | 157 | **+62%** |
 | Qwen3.5-4B (GDN) | Q8_0 | **306** | 180 | **+70%** |
 | Qwen3.5-9B (GDN) | Q8_0 | **134** | &mdash; | &mdash; |
 | Llama-3.2-3B | Q8_0 | **208** | &mdash; | &mdash; |
+| Gemma-4-26B-A4B-it | Q4_K_M | **183** | 151 | **+21%** |
 
 ### Prefill Throughput (tok/s)
 
@@ -49,7 +50,19 @@ This is not a wrapper. imp implements its own GGUF parser, Jinja2 template engin
 | Qwen3.5-9B (GDN) | Q8_0 | **8,520** |
 | Llama-3.2-3B | Q8_0 | **22,544** |
 
-<sub>All numbers: single RTX 5090, greedy sampling (temp=0), 256 output tokens, 3 repetitions average. Full results: **[BENCHMARKS.md](BENCHMARKS.md)**</sub>
+### Long-Context Prefill (pp=8192, new in v0.7)
+
+Previously broken at `n>1024` due to an FP8 FMHA shared-memory bug (PR #33).
+
+| Model | imp v0.7 | llama.cpp | Speedup |
+|---|---:|---:|---:|
+| Qwen3-4B Q8_0 | **13,566** | 7,978 | **×1.70** |
+| Qwen3-8B Q8_0 | **11,050** | 6,749 | **×1.64** |
+| Qwen3.5-4B GDN Q8_0 | **13,090** | &mdash; | &mdash; |
+| Mistral-24B Q6_K | **3,595** | 3,058 | ×1.18 |
+| Qwen3-32B Q4_K_M | **2,040** | 1,802 | ×1.13 |
+
+<sub>All numbers: single RTX 5090, greedy sampling (temp=0), 256 output tokens, 3 repetitions average. Full results: **[BENCHMARKS.md](BENCHMARKS.md)** &middot; Changelog: **[CHANGELOG.md](CHANGELOG.md)**</sub>
 
 ## Quickstart
 
