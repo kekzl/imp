@@ -151,6 +151,13 @@ int main(int argc, char** argv) {
             handle_completions(req, res, state);
         });
 
+    // Anthropic-compatible Messages API. Non-streaming only in Phase 1;
+    // streaming requests are rejected with 501 until Phase 2 ships.
+    svr.Post("/v1/messages",
+        [&state](const httplib::Request& req, httplib::Response& res) {
+            handle_messages(req, res, state);
+        });
+
     svr.Post("/v1/embeddings",
         [&state](const httplib::Request& req, httplib::Response& res) {
             handle_embeddings(req, res, state);
@@ -192,6 +199,7 @@ int main(int argc, char** argv) {
     printf("  GET    /v1/models\n");
     printf("  POST   /v1/chat/completions\n");
     printf("  POST   /v1/completions\n");
+    printf("  POST   /v1/messages          Anthropic-compatible (non-streaming)\n");
     printf("  POST   /v1/embeddings\n");
     printf("  POST   /tokenize\n");
     printf("  POST   /detokenize\n");
