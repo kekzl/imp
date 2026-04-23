@@ -924,7 +924,11 @@ bool Engine::init_kv_cache() {
         for (int i = 0; i < mcfg.n_layers; i++)
             if (model_->layer(i).gdn_gate.data != nullptr) n_gdn++;
         if (n_gdn > 0) {
-            IMP_LOG_INFO("GDN model: %d layers, CUDA graphs enabled (recurrent state in-place)", n_gdn);
+            if (config_.use_cuda_graphs) {
+                IMP_LOG_INFO("GDN model: %d layers, CUDA graphs enabled (recurrent state in-place)", n_gdn);
+            } else {
+                IMP_LOG_INFO("GDN model: %d layers, CUDA graphs disabled (disabled earlier by caller or expert offload)", n_gdn);
+            }
             // GDN recurrent state accumulates small precision errors per token.
             // FP8 E4M3 (3-bit mantissa) amplifies these through the delta rule
             // scan, causing degenerate output after ~50 special tokens in
