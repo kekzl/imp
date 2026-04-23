@@ -2980,20 +2980,10 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
         return;
     }
 
-    // Phase 1: reject streaming requests with a clear 501.
-    if (anth_body.value("stream", false)) {
-        res.status = 501;
-        json err = {{"type", "error"},
-                    {"error", {{"type", "not_implemented"},
-                               {"message", "Streaming /v1/messages is not yet implemented; "
-                                           "use stream=false or /v1/chat/completions for streaming."}}}};
-        res.set_content(err.dump(), "application/json");
-        return;
-    }
-
     // Anthropic requires max_tokens — if it's missing, supply a sane default
     // matching the server's chat-completions default (handled downstream).
     std::string anth_model = anth_body.value("model", "");
+    const bool want_stream = anth_body.value("stream", false);
 
     // Transform -> OpenAI body.
     json oai_body;
@@ -3010,9 +3000,13 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
 
     // Shim: reuse the OpenAI handler with a cloned request carrying the
     // transformed body. httplib::Request is a plain struct, safe to copy.
+    // Force stream=false on the inner OpenAI call — we re-serialize the
+    // response as native Anthropic SSE events below (Phase 2 "synthetic
+    // streaming"). Full event-by-event streaming is tracked as Phase 3.
     httplib::Request shim_req = req;
-    shim_req.body = oai_body.dump();
-    // Drop any cached content-length header so httplib recomputes if needed.
+    json shim_body = oai_body;
+    shim_body["stream"] = false;
+    shim_req.body = shim_body.dump();
     shim_req.headers.erase("Content-Length");
     shim_req.headers.erase("content-length");
 
@@ -3052,7 +3046,150 @@ void handle_messages(const httplib::Request& req, httplib::Response& res, Server
     }
 
     json anth_response = anth::openai_to_anthropic_response(oai_response, anth_model);
+
+    if (!want_stream) {
+        res.status = 200;
+        res.set_content(anth_response.dump(), "application/json");
+        return;
+    }
+
+    // ---- Phase 2 synthetic streaming -----------------------------------
+    // The full response is already computed above; we replay it as a
+    // well-formed Anthropic SSE stream so clients that set `stream: true`
+    // get the events they expect. TTFT is the full-generation latency for
+    // now — Phase 3 will plumb this through a real event-loop emitter.
     res.status = 200;
-    res.set_content(anth_response.dump(), "application/json");
+    res.set_header("Cache-Control", "no-cache");
+    res.set_header("Connection", "keep-alive");
+
+    // Capture everything needed by value (lambda outlives this function).
+    auto stream_data = std::make_shared<json>(std::move(anth_response));
+    res.set_chunked_content_provider(
+        "text/event-stream",
+        [stream_data](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+            auto emit = [&](const char* event_name, const json& payload) -> bool {
+                std::string buf = "event: ";
+                buf += event_name;
+                buf += "\ndata: ";
+                buf += payload.dump();
+                buf += "\n\n";
+                return sink.write(buf.data(), buf.size());
+            };
+
+            const json& anth = *stream_data;
+
+            // 1) message_start — mirrors the assembled message envelope but
+            //    with empty content[] and output_tokens=0 (per Anthropic spec).
+            {
+                json msg_start_msg = anth;  // copy
+                msg_start_msg["content"] = json::array();
+                msg_start_msg["stop_reason"] = nullptr;
+                if (msg_start_msg.contains("usage")) {
+                    msg_start_msg["usage"]["output_tokens"] = 0;
+                }
+                json ev = {
+                    {"type", "message_start"},
+                    {"message", std::move(msg_start_msg)},
+                };
+                if (!emit("message_start", ev)) { sink.done(); return true; }
+            }
+
+            // 2) Content blocks — one pair of content_block_start/stop per
+            //    block, with deltas in between. Text blocks are split into
+            //    modest chunks so progressive-UI clients render nicely; tool
+            //    input is sent as a single input_json_delta.
+            int block_index = 0;
+            if (anth.contains("content") && anth["content"].is_array()) {
+                for (const auto& block : anth["content"]) {
+                    std::string type = block.value("type", "");
+
+                    if (type == "text") {
+                        json cb = {
+                            {"type", "content_block_start"},
+                            {"index", block_index},
+                            {"content_block", {{"type", "text"}, {"text", ""}}},
+                        };
+                        if (!emit("content_block_start", cb)) { sink.done(); return true; }
+
+                        const std::string text = block.value("text", "");
+                        // Split into ~32-char deltas — arbitrary but gives
+                        // progressive-rendering UIs something to do.
+                        constexpr size_t kChunk = 32;
+                        for (size_t off = 0; off < text.size(); off += kChunk) {
+                            size_t n = std::min(kChunk, text.size() - off);
+                            json d = {
+                                {"type", "content_block_delta"},
+                                {"index", block_index},
+                                {"delta", {
+                                    {"type", "text_delta"},
+                                    {"text", text.substr(off, n)},
+                                }},
+                            };
+                            if (!emit("content_block_delta", d)) { sink.done(); return true; }
+                        }
+                    } else if (type == "tool_use") {
+                        json cb_start = {
+                            {"type", "content_block_start"},
+                            {"index", block_index},
+                            {"content_block", {
+                                {"type", "tool_use"},
+                                {"id", block.value("id", "")},
+                                {"name", block.value("name", "")},
+                                {"input", json::object()},
+                            }},
+                        };
+                        if (!emit("content_block_start", cb_start)) { sink.done(); return true; }
+
+                        // Emit the full input JSON as a single input_json_delta.
+                        std::string partial = block.value("input", json::object()).dump();
+                        json d = {
+                            {"type", "content_block_delta"},
+                            {"index", block_index},
+                            {"delta", {
+                                {"type", "input_json_delta"},
+                                {"partial_json", std::move(partial)},
+                            }},
+                        };
+                        if (!emit("content_block_delta", d)) { sink.done(); return true; }
+                    } else {
+                        // Unknown block type — start+stop with no deltas.
+                        json cb = {
+                            {"type", "content_block_start"},
+                            {"index", block_index},
+                            {"content_block", block},
+                        };
+                        if (!emit("content_block_start", cb)) { sink.done(); return true; }
+                    }
+
+                    json cb_stop = {
+                        {"type", "content_block_stop"},
+                        {"index", block_index},
+                    };
+                    if (!emit("content_block_stop", cb_stop)) { sink.done(); return true; }
+                    ++block_index;
+                }
+            }
+
+            // 3) message_delta — final stop_reason + per-spec output_tokens.
+            {
+                json delta = {{"stop_reason", anth.value("stop_reason", "end_turn")},
+                              {"stop_sequence", anth.value("stop_sequence", json(nullptr))}};
+                int output_tokens = 0;
+                if (anth.contains("usage")) {
+                    output_tokens = anth["usage"].value("output_tokens", 0);
+                }
+                json ev = {
+                    {"type", "message_delta"},
+                    {"delta", std::move(delta)},
+                    {"usage", {{"output_tokens", output_tokens}}},
+                };
+                if (!emit("message_delta", ev)) { sink.done(); return true; }
+            }
+
+            // 4) message_stop — terminator.
+            emit("message_stop", json{{"type", "message_stop"}});
+            sink.done();
+            return true;
+        });
 }
 
