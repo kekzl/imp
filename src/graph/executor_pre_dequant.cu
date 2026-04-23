@@ -1527,6 +1527,10 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         L.w_gate_id   = register_tensor(L.w_gate,   TensorKind::W_GATE);
         L.w_up_id     = register_tensor(L.w_up,     TensorKind::W_UP);
         L.w_down_id   = register_tensor(L.w_down,   TensorKind::W_DOWN);
+        // Shared-expert FFN — matches StoragePlanner enumeration from PR #38.
+        L.w_gate_shared_id = register_tensor(L.w_gate_shared, TensorKind::W_GATE);
+        L.w_up_shared_id   = register_tensor(L.w_up_shared,   TensorKind::W_UP);
+        L.w_down_shared_id = register_tensor(L.w_down_shared, TensorKind::W_DOWN);
         L.ssm_in_id   = register_tensor(L.ssm_in,   TensorKind::SSM_IN);
         L.ssm_out_id  = register_tensor(L.ssm_out,  TensorKind::SSM_OUT);
         L.gdn_gate_id = register_tensor(L.gdn_gate, TensorKind::GDN_GATE);
@@ -1573,9 +1577,44 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     }
     // Register model-level (non-layer) tensors.
     const_cast<Model*>(model_)->out_proj_id = register_tensor(model_->output_proj(), TensorKind::LM_HEAD);
+    const_cast<Model*>(model_)->tok_emb_id  = register_tensor(model_->token_embedding(), TensorKind::TOK_EMBED);
 
     IMP_LOG_INFO("WeightRegistry populated with %zu handles (phase-2 shim)",
                  registry_.size());
+
+    // Phase 4 parity diagnostic: compare registry vs plan. The registry only
+    // carries tensors whose source pointer landed in a wcache_ map (quantize-
+    // able projections). The plan enumerates every TransformerLayer field with
+    // data, which includes some always-FP16/FP32 tensors (norms, rope_freqs)
+    // that bypass wcache_ entirely. To make the comparison apples-to-apples,
+    // count only plan entries whose kind can live in wcache_ (FP16/FP8/NVFP4/
+    // MXFP4 tiers).
+    {
+        StoragePlan parity_plan = plan_storage(*model_, cfg, hints_);
+        size_t plan_registerable = 0;
+        for (const auto& e : parity_plan.entries) {
+            switch (e.tier) {
+                case StorageTier::FP16:
+                case StorageTier::FP8:
+                case StorageTier::NVFP4:
+                case StorageTier::CUTLASS_NVFP4:
+                case StorageTier::MXFP4:
+                    ++plan_registerable; break;
+                default: break;
+            }
+        }
+        size_t registry_count = registry_.size();
+        if (plan_registerable != registry_count) {
+            IMP_LOG_WARN("Phase-4 parity: registry=%zu handles, plan=%zu wcache-tier "
+                         "entries (diff=%zd). Expected to converge by Phase 5.",
+                         registry_count, plan_registerable,
+                         static_cast<ssize_t>(plan_registerable) -
+                             static_cast<ssize_t>(registry_count));
+        } else {
+            IMP_LOG_INFO("Phase-4 parity: registry=%zu handles match plan "
+                         "wcache-tier count", registry_count);
+        }
+    }
 }
 
 } // namespace imp
