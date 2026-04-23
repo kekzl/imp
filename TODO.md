@@ -2,25 +2,19 @@
 
 ## Open Work
 
-### GDN / Qwen3.5 Output Quality — FIXED
-Root cause: Jinja2 engine lacked macro support. Qwen3.5's chat template uses
-`{% macro render_content() %}` — without macro support, user content rendered
-as "None", causing the model to ignore prompts entirely.
-
-Fix: Jinja2 macro support (MacroNode, parse_macro, call_macro). GDN kernels
-were correct all along. Both Qwen3.5-4B and 9B now produce coherent output.
-
 ### MXFP4 Native GGUF Weight Format
 Plan documented in `docs/MXFP4_GGUF_PLAN.md`. Native MXFP4 weights would feed directly into Blackwell tensor cores via CUTLASS — zero dequant overhead, expected 2-4x prefill speedup vs Q4_K_M.
 
 **Status:** CUTLASS MXFP4 GEMM path is fully implemented (`--mxfp4-prefill`), but only works when NVFP4 cache exists as source data. Native MXFP4 GGUF eliminates this dependency.
+
+**Quality caveat (measured 2026-04-23):** Qwen3-4B wikitext-2 PPL shows Q8_0 = 8.48, Q4_K_M = 8.67 (+2.2 %). MXFP4 round-to-nearest literature sits at +5–15 % — **worse than Q4_K_M** unless MR-GPTQ calibrated. The "Optional" calibration step (item 5 below) is effectively **required** for this project to be worth shipping.
 
 **Remaining:**
 1. GGUF type extension + loader (~50 lines)
 2. Python converter: SafeTensors → block-Hadamard → MXFP4 → GGUF (~200 lines)
 3. Weight upload: mmap → GPU-ready format (~30 lines)
 4. MXFP4 GEMV for decode (~100 lines CUDA)
-5. Optional: MR-GPTQ calibration for better quality (~150 lines Python)
+5. **Required** for competitive quality: MR-GPTQ calibration (~150 lines Python)
 
 ### TurboQuant Optimization
 Current gap vs FP8 baseline: -23% decode (191 vs 248 tok/s). This is algorithm-inherent — QJL sketch computation adds per-token overhead.
@@ -40,6 +34,48 @@ Current gap vs FP8 baseline: -23% decode (191 vs 248 tok/s). This is algorithm-i
 - **N-gram speculation**: Implemented (`src/runtime/ngram_spec.cpp`), uses multi-sequence decode verify. +10% on repetitive content, ~0% overhead on non-repetitive. CLI: `--ngram-spec`.
 - **TurboDraft (PPM + Classifier)**: Dead end. PPM 0% acceptance on real text; SVD classifier too lossy.
 - **Pseudo-prefill verify bug**: Fixed in NgramSpec — now uses multi-sequence decode verify.
+
+---
+
+## Completed (v0.7) — 2026-04-23
+
+### Long-context correctness
+- [x] FP8 FMHA S_tile smem overlap fix (PR #33) — pp>1024 now coherent across all tested models; up to ×1.70 vs llama.cpp at pp=8192
+- [x] Regression test `FmhaFP8Test.Qwen35LikeHD256_GQA41_SeqMultiTile` catches the bug class
+- [x] Audited MXFP4 / FP16 / WMMA FMHA kernels for the same pointer-vs-slot mismatch — only FP8 was affected
+- [x] Verified all FMHA variants on Qwen3-4B/8B, Qwen3.5-4B/9B GDN, Llama-3.2-3B, Qwen3-32B, Mistral-24B at pp=512/1024/2048/4096/8192
+
+### Qwen 3.5 / Qwen 3.6 GDN
+- [x] `gdn_scan_fused_kernel` launch_bounds fix (HD=128 miscompile) — PR #30
+- [x] Partial-RoPE pair-offset fix — PR #30
+- [x] `ssm_state_dtype` never auto-downgraded for GDN architectures — PR #28
+- [x] GDN L2-norm PyTorch-style `rsqrtf(fmaxf(sum_sq, 1e-12))`
+- [x] L2-window CUDA errors (clamped to `cudaDevAttrMaxAccessPolicyWindowSize`)
+- [x] GDN reference infrastructure + Qwen 3.6 cache preservation (PR #25)
+- [x] Qwen 3.6 `ModelArch::QWEN36_MOE` scaffold (PR #23)
+
+### Gemma-4
+- [x] SWA long-context degeneration (>1024 prompt tokens) — PR #21
+- [x] rope_freqs on global layers — PR #20
+- [x] Host-resident MoE fused gate_up split (e879bcd)
+- [x] CUDA graphs for decode fast-path (PRs #11–#14)
+- [x] Q4_K_M split-K pipeline cp.async loop (head_dim=512) — 55 → 183 tok/s
+- [x] 3120-token KV ceiling fix — now 11 242 tok with `--min-kv-tokens 14000`
+- [x] FP32 router + half rope_dim on global layers (5a1e844)
+
+### Platform
+- [x] CUDA 13.2.1 base images (PR #16)
+- [x] Stream priorities, mem-sync domains, cluster spread (PR #17)
+- [x] CUTLASS 3.x NVFP4 Grouped GEMM scaffold (PR #22)
+- [x] StreamingLLM smart KV cache — attention sinks + sliding window (PR #26)
+- [x] Weight-storage refactor: `TensorKind` + `StoragePlanner` + `gemm_dispatch` (PR #27)
+- [x] `IMP_DEBUG_RAW` meta-flag (PR #29), `IMP_EXPERT_OVERHEAD_PCT` hint (PR #32)
+- [x] `tools/analysis/layer_diff.py` for per-layer tensor diff vs llama.cpp
+- [x] `Gemma4GraphsTest` e2e regression
+
+### Known deferred
+- 1024→2048 throughput cliff on small dense models (Qwen3-4B: 27k → 19k tok/s at dispatch switch). Correct but unoptimized. Options: raise cuBLAS cap past 1024, or tune FP8 FMHA occupancy / Bq.
+- pp=512 on large dense models (Qwen3-32B, Mistral-24B): ~0.5–0.6× llama.cpp. Suspected cuBLAS autotuning variance + launch-overhead-bound regime.
 
 ---
 
