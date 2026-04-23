@@ -283,6 +283,11 @@ static std::string codepoint_to_utf8(uint32_t cp) {
         s += static_cast<char>(0xE0 | (cp >> 12));
         s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
         s += static_cast<char>(0x80 | (cp & 0x3F));
+    } else if (cp <= 0x10FFFF) {
+        s += static_cast<char>(0xF0 | (cp >> 18));
+        s += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+        s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        s += static_cast<char>(0x80 | (cp & 0x3F));
     }
     return s;
 }
@@ -977,7 +982,25 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
             int right = snext[pos];
             if (right >= ns || sdel[right]) continue;
 
-            symbols[pos] = symbols[pos] + symbols[right];
+            // Re-validate: the pair at this position may have changed since
+            // the merge was enqueued (the right neighbor may have merged
+            // with ITS neighbor). Check that the current pair still has
+            // the popped rank.
+            std::string merged = symbols[pos] + symbols[right];
+            {
+                std::string cur_key = symbols[pos] + " " + symbols[right];
+                auto vit = merge_ranks_.find(cur_key);
+                if (vit == merge_ranks_.end() || vit->second != rank) continue;
+            }
+            // Vocab-existence guard: merge_ranks_ contains rules whose output
+            // is not in the final vocab (intermediate merge steps, e.g.
+            // "Lin u → Linu" where "Linu" is not a token). Applying such a
+            // merge produces a symbol that fails vocab lookup and byte-
+            // falls back the entire word. Skipping these keeps sub-parts
+            // that ARE tokens intact. Matches llama.cpp behavior.
+            if (token_to_id_.find(merged) == token_to_id_.end()) continue;
+
+            symbols[pos] = merged;
             sdel[right] = true;
             sseq[pos]++;
             snext[pos] = snext[right];
@@ -1007,14 +1030,31 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
             if (it != token_to_id_.end()) {
                 all_ids.push_back(it->second);
             } else {
-                // Byte fallback: encode each byte as <0xNN>
-                for (unsigned char c : symbols[i]) {
-                    char buf[8];
-                    snprintf(buf, sizeof(buf), "<0x%02X>", c);
-                    auto bit = token_to_id_.find(buf);
-                    if (bit != token_to_id_.end()) {
-                        all_ids.push_back(bit->second);
+                // Fallback: the merge-guard above prevents producing symbols
+                // that aren't in vocab via merging, so we only land here for
+                // initial UTF-8 characters that the vocab doesn't cover. Try
+                // per-character vocab lookup first, then byte fallback.
+                const std::string& sym = symbols[i];
+                for (size_t ci = 0; ci < sym.size(); ) {
+                    int clen = utf8_char_len(static_cast<uint8_t>(sym[ci]));
+                    if (ci + clen > sym.size()) clen = 1;
+                    std::string ch = sym.substr(ci, clen);
+                    auto ch_it = token_to_id_.find(ch);
+                    if (ch_it != token_to_id_.end()) {
+                        all_ids.push_back(ch_it->second);
+                    } else {
+                        for (int bi = 0; bi < clen; bi++) {
+                            char buf[8];
+                            snprintf(buf, sizeof(buf),
+                                     "<0x%02X>",
+                                     static_cast<unsigned char>(sym[ci + bi]));
+                            auto bit = token_to_id_.find(buf);
+                            if (bit != token_to_id_.end()) {
+                                all_ids.push_back(bit->second);
+                            }
+                        }
                     }
+                    ci += clen;
                 }
             }
         }
@@ -1294,7 +1334,10 @@ static const NfcEntry kNfcTable[] = {
 
 static constexpr int kNfcTableSize = sizeof(kNfcTable) / sizeof(kNfcTable[0]);
 
-// Decode one UTF-8 codepoint from text at position pos, advance pos
+// Decode one UTF-8 codepoint from text at position pos, advance pos.
+// On truncated input (multi-byte sequence cut short at end of string),
+// returns U+FFFD and advances pos to end-of-string, rather than returning
+// a partial codepoint and advancing past the end.
 static uint32_t nfc_decode_utf8(const std::string& s, size_t& pos) {
     uint8_t c = static_cast<uint8_t>(s[pos]);
     uint32_t cp;
@@ -1304,7 +1347,11 @@ static uint32_t nfc_decode_utf8(const std::string& s, size_t& pos) {
     else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; len = 3; }
     else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; len = 4; }
     else { pos++; return 0xFFFD; }
-    for (int i = 1; i < len && pos + i < s.size(); i++) {
+    if (pos + static_cast<size_t>(len) > s.size()) {
+        pos = s.size();
+        return 0xFFFD;
+    }
+    for (int i = 1; i < len; i++) {
         cp = (cp << 6) | (static_cast<uint8_t>(s[pos + i]) & 0x3F);
     }
     pos += len;
@@ -1415,6 +1462,15 @@ std::string Tokenizer::decode_spm(const std::vector<int32_t>& tokens) const {
     std::string result;
     for (int32_t tok : tokens) {
         result += decode_spm_token(tok);
+    }
+    // Second pass: byte-fallback tokens contribute single raw bytes that
+    // together may form ▁ (U+2581 = 0xE2 0x96 0x81). The per-token replace
+    // in decode_spm_token can't see across token boundaries, so catch any
+    // remaining ▁ here and convert to ASCII space.
+    size_t pos = 0;
+    while ((pos = result.find(SPIECE_SPACE, pos)) != std::string::npos) {
+        result.replace(pos, SPIECE_SPACE.size(), " ");
+        pos += 1;
     }
     return result;
 }
