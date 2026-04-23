@@ -178,5 +178,13 @@ TEST_F(FmhaFP8Test, HD256) {
     run_test(1, 32, 32, 4, 4, 256, true);
 }
 
+// Mimic Qwen3.5-4B attention prefill shape: 16 Q heads, 4 KV heads (GQA 4:1),
+// head_dim=256, 128-token sequence. Multi-tile on both axes with non-zero V
+// throughout — catches the S_tile smem overlap bug that the HD256 test
+// (Sq=Skv=32, zero-padded V) masked by having the reference also near zero.
+TEST_F(FmhaFP8Test, Qwen35LikeHD256_GQA41_SeqMultiTile) {
+    run_test(1, 128, 128, 16, 4, 256, true);
+}
+
 } // namespace
 } // namespace imp

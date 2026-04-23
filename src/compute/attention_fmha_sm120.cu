@@ -610,9 +610,14 @@ fmha_sm120_fp8_kernel(
     extern __shared__ char smem[];
 
     uint8_t* Q_fp8   = reinterpret_cast<uint8_t*>(smem);
-    uint8_t* KV_fp8  = Q_fp8 + Bq * head_dim;          // K as FP8
-    half*    KV_fp16 = reinterpret_cast<half*>(KV_fp8); // V as FP16 (reuse same slot)
-    float*   S_tile  = reinterpret_cast<float*>(KV_fp8 + Bkv * head_dim);
+    uint8_t* KV_fp8  = Q_fp8 + Bq * head_dim;          // K as FP8 (first half of KV region)
+    half*    KV_fp16 = reinterpret_cast<half*>(KV_fp8); // V as FP16 (reuses full KV region)
+    // S_tile must live AFTER the full V-as-half region, not after just the
+    // FP8 K region. V writes Bkv * head_dim halves = 2 * Bkv * head_dim bytes,
+    // so advancing only Bkv * head_dim bytes (as the code originally did)
+    // places S_tile inside the V area — V row Bkv/2+ overwrites P values
+    // and poisons the PV MMA output with garbage/NaN.
+    float*   S_tile  = reinterpret_cast<float*>(KV_fp8 + Bkv * head_dim * sizeof(half));
     float*   O_acc   = S_tile + Bq * Bkv;
     float*   row_m   = O_acc + Bq * head_dim;
     float*   row_l   = row_m + Bq;
