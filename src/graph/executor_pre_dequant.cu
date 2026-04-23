@@ -1592,15 +1592,19 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     {
         StoragePlan parity_plan = plan_storage(*model_, cfg, hints_);
         size_t plan_registerable = 0;
+        // Per-tier plan breakdown so we can see which tiers account for the
+        // gap between the plan and the registry. `Undefined` is excluded.
+        size_t plan_fp16 = 0, plan_fp8 = 0, plan_nvfp4 = 0;
+        size_t plan_cutlass_nvfp4 = 0, plan_mxfp4 = 0, plan_fp32 = 0;
         for (const auto& e : parity_plan.entries) {
             switch (e.tier) {
-                case StorageTier::FP16:
-                case StorageTier::FP8:
-                case StorageTier::NVFP4:
-                case StorageTier::CUTLASS_NVFP4:
-                case StorageTier::MXFP4:
-                    ++plan_registerable; break;
-                default: break;
+                case StorageTier::FP16:          ++plan_fp16; ++plan_registerable; break;
+                case StorageTier::FP8:           ++plan_fp8; ++plan_registerable; break;
+                case StorageTier::NVFP4:         ++plan_nvfp4; ++plan_registerable; break;
+                case StorageTier::CUTLASS_NVFP4: ++plan_cutlass_nvfp4; ++plan_registerable; break;
+                case StorageTier::MXFP4:         ++plan_mxfp4; ++plan_registerable; break;
+                case StorageTier::FP32:          ++plan_fp32; break;
+                case StorageTier::Undefined:     break;
             }
         }
         size_t registry_count = registry_.size();
@@ -1614,6 +1618,17 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             IMP_LOG_INFO("Phase-4 parity: registry=%zu handles match plan "
                          "wcache-tier count", registry_count);
         }
+        // Detailed breakdowns to turn the gap into an actionable punch list.
+        IMP_LOG_INFO("Phase-4 plan tiers: fp16=%zu fp8=%zu nvfp4=%zu cutlass_nvfp4=%zu "
+                     "mxfp4=%zu fp32=%zu",
+                     plan_fp16, plan_fp8, plan_nvfp4, plan_cutlass_nvfp4,
+                     plan_mxfp4, plan_fp32);
+        IMP_LOG_INFO("Phase-4 wcache: fp16=%zu fp8=%zu nvfp4=%zu cutlass_nvfp4=%zu "
+                     "cutlass_mxfp4=%zu nvfp4_moe=%zu fused_kv=%zu fused_gate_up=%zu",
+                     wcache_.fp16.size(), wcache_.fp8.size(), wcache_.nvfp4.size(),
+                     wcache_.cutlass_nvfp4.size(), wcache_.cutlass_mxfp4.size(),
+                     wcache_.nvfp4_moe.size(), wcache_.fused_kv.size(),
+                     wcache_.fused_gate_up.size());
     }
 }
 
