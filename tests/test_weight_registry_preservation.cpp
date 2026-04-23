@@ -198,6 +198,73 @@ TEST(StoragePlanner, DualPathHintRoutesCorrectly) {
 // Byte accounting: projected_vram_bytes matches sum of entry bytes
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Shared-expert FFN enumeration (Nemotron / DeepSeek / Qwen3.5-MoE style).
+// A layer with BOTH regular FFN and a shared-expert FFN must produce plan
+// entries for BOTH — otherwise the storage flip silently drops the shared
+// projection and inference produces garbage.
+// ---------------------------------------------------------------------------
+
+TEST(StoragePlanner, EnumeratesSharedExpertFFN) {
+    Model m;
+    m.config_.n_layers = 1;
+
+    TransformerLayer L;
+    // Regular FFN (3 tensors)
+    L.w_gate = make_tensor_stub(TensorKind::W_GATE, 1024, 1024, 0x1000);
+    L.w_up   = make_tensor_stub(TensorKind::W_UP,   1024, 1024, 0x2000);
+    L.w_down = make_tensor_stub(TensorKind::W_DOWN, 1024, 1024, 0x3000);
+    // Shared-expert FFN (3 additional tensors)
+    L.w_gate_shared = make_tensor_stub(TensorKind::W_GATE, 1024, 1024, 0x4000);
+    L.w_up_shared   = make_tensor_stub(TensorKind::W_UP,   1024, 1024, 0x5000);
+    L.w_down_shared = make_tensor_stub(TensorKind::W_DOWN, 1024, 1024, 0x6000);
+    m.layers_.push_back(std::move(L));
+
+    PlanHints hints;
+    hints.vram_budget_bytes = size_t{10} * 1024 * 1024 * 1024;
+
+    StoragePlan plan = plan_storage(m, m.config_, hints);
+    ASSERT_FALSE(plan.failed) << plan.failure_reason;
+
+    int gate_count = 0, up_count = 0, down_count = 0;
+    for (const auto& e : plan.entries) {
+        if (e.kind == TensorKind::W_GATE) gate_count++;
+        if (e.kind == TensorKind::W_UP)   up_count++;
+        if (e.kind == TensorKind::W_DOWN) down_count++;
+    }
+    EXPECT_EQ(gate_count, 2) << "expected 2 W_GATE entries (regular + shared)";
+    EXPECT_EQ(up_count,   2) << "expected 2 W_UP entries (regular + shared)";
+    EXPECT_EQ(down_count, 2) << "expected 2 W_DOWN entries (regular + shared)";
+}
+
+// ---------------------------------------------------------------------------
+// Top-level tensors (tok_emb, out_proj / LM head) must be enumerated.
+// For NVFP4-prequant models (Qwen3-Coder-30B), out_proj has a choice of tier
+// and would silently vanish from the plan if not enumerated.
+// ---------------------------------------------------------------------------
+
+TEST(StoragePlanner, EnumeratesTopLevelEmbeddingsAndLMHead) {
+    Model m;
+    m.config_.n_layers = 0;  // no layers — only top-level tensors
+
+    m.tok_emb_  = make_tensor_stub(TensorKind::TOK_EMBED, 128256, 4096, 0x1000);
+    m.out_proj_ = make_tensor_stub(TensorKind::LM_HEAD,   128256, 4096, 0x2000);
+
+    PlanHints hints;
+    hints.vram_budget_bytes = size_t{10} * 1024 * 1024 * 1024;
+
+    StoragePlan plan = plan_storage(m, m.config_, hints);
+    ASSERT_FALSE(plan.failed) << plan.failure_reason;
+
+    int tok_count = 0, lm_count = 0;
+    for (const auto& e : plan.entries) {
+        if (e.kind == TensorKind::TOK_EMBED) tok_count++;
+        if (e.kind == TensorKind::LM_HEAD)   lm_count++;
+    }
+    EXPECT_EQ(tok_count, 1) << "expected 1 TOK_EMBED entry";
+    EXPECT_EQ(lm_count,  1) << "expected 1 LM_HEAD entry";
+}
+
 TEST(StoragePlanner, ProjectedVRAMMatchesEntrySum) {
     Model m;
     m.config_.n_layers = 3;
