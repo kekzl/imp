@@ -1582,49 +1582,42 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     IMP_LOG_INFO("WeightRegistry populated with %zu handles (phase-2 shim)",
                  registry_.size());
 
-    // Phase 4 parity diagnostic: compare registry vs plan. The registry only
-    // carries tensors whose source pointer landed in a wcache_ map (quantize-
-    // able projections). The plan enumerates every TransformerLayer field with
-    // data, which includes some always-FP16/FP32 tensors (norms, rope_freqs)
-    // that bypass wcache_ entirely. To make the comparison apples-to-apples,
-    // count only plan entries whose kind can live in wcache_ (FP16/FP8/NVFP4/
-    // MXFP4 tiers).
+    // Phase 4 (Option C) overlay diagnostic: report ideal vs actual overlay
+    // population. The plan enumerates every quantize-able tensor at its
+    // preferred tier ("ideal overlay"). The registry tracks tensors actually
+    // cached by the runtime ("actual overlay"). Native GGUF blocks (Q4_K_M,
+    // Q5_K_M, Q6_K, Q8_0, MXFP4) stay as mmap'd `Model::gpu_allocations_`
+    // and are dequantized per kernel call — they bypass the overlay layer
+    // entirely, so the diff between plan and registry is informational, not
+    // an error.
     {
-        StoragePlan parity_plan = plan_storage(*model_, cfg, hints_);
-        size_t plan_registerable = 0;
-        // Per-tier plan breakdown so we can see which tiers account for the
-        // gap between the plan and the registry. `Undefined` is excluded.
+        StoragePlan ideal_plan = plan_storage(*model_, cfg, hints_);
+        size_t plan_overlay = 0;
         size_t plan_fp16 = 0, plan_fp8 = 0, plan_nvfp4 = 0;
         size_t plan_cutlass_nvfp4 = 0, plan_mxfp4 = 0, plan_fp32 = 0;
-        for (const auto& e : parity_plan.entries) {
+        for (const auto& e : ideal_plan.entries) {
             switch (e.tier) {
-                case StorageTier::FP16:          ++plan_fp16; ++plan_registerable; break;
-                case StorageTier::FP8:           ++plan_fp8; ++plan_registerable; break;
-                case StorageTier::NVFP4:         ++plan_nvfp4; ++plan_registerable; break;
-                case StorageTier::CUTLASS_NVFP4: ++plan_cutlass_nvfp4; ++plan_registerable; break;
-                case StorageTier::MXFP4:         ++plan_mxfp4; ++plan_registerable; break;
+                case StorageTier::FP16:          ++plan_fp16; ++plan_overlay; break;
+                case StorageTier::FP8:           ++plan_fp8; ++plan_overlay; break;
+                case StorageTier::NVFP4:         ++plan_nvfp4; ++plan_overlay; break;
+                case StorageTier::CUTLASS_NVFP4: ++plan_cutlass_nvfp4; ++plan_overlay; break;
+                case StorageTier::MXFP4:         ++plan_mxfp4; ++plan_overlay; break;
                 case StorageTier::FP32:          ++plan_fp32; break;
                 case StorageTier::Undefined:     break;
             }
         }
         size_t registry_count = registry_.size();
-        if (plan_registerable != registry_count) {
-            IMP_LOG_WARN("Phase-4 parity: registry=%zu handles, plan=%zu wcache-tier "
-                         "entries (diff=%zd). Expected to converge by Phase 5.",
-                         registry_count, plan_registerable,
-                         static_cast<ssize_t>(plan_registerable) -
-                             static_cast<ssize_t>(registry_count));
-        } else {
-            IMP_LOG_INFO("Phase-4 parity: registry=%zu handles match plan "
-                         "wcache-tier count", registry_count);
-        }
-        // Detailed breakdowns to turn the gap into an actionable punch list.
-        IMP_LOG_INFO("Phase-4 plan tiers: fp16=%zu fp8=%zu nvfp4=%zu cutlass_nvfp4=%zu "
-                     "mxfp4=%zu fp32=%zu",
+        IMP_LOG_INFO("Phase-4 overlay: registry=%zu cached / plan-ideal=%zu "
+                     "(uncached %zu remain as native GGUF blocks)",
+                     registry_count, plan_overlay,
+                     plan_overlay > registry_count ? plan_overlay - registry_count : 0);
+        IMP_LOG_INFO("Phase-4 plan-ideal tiers: fp16=%zu fp8=%zu nvfp4=%zu "
+                     "cutlass_nvfp4=%zu mxfp4=%zu fp32=%zu",
                      plan_fp16, plan_fp8, plan_nvfp4, plan_cutlass_nvfp4,
                      plan_mxfp4, plan_fp32);
-        IMP_LOG_INFO("Phase-4 wcache: fp16=%zu fp8=%zu nvfp4=%zu cutlass_nvfp4=%zu "
-                     "cutlass_mxfp4=%zu nvfp4_moe=%zu fused_kv=%zu fused_gate_up=%zu",
+        IMP_LOG_INFO("Phase-4 wcache actual: fp16=%zu fp8=%zu nvfp4=%zu "
+                     "cutlass_nvfp4=%zu cutlass_mxfp4=%zu nvfp4_moe=%zu "
+                     "fused_kv=%zu fused_gate_up=%zu",
                      wcache_.fp16.size(), wcache_.fp8.size(), wcache_.nvfp4.size(),
                      wcache_.cutlass_nvfp4.size(), wcache_.cutlass_mxfp4.size(),
                      wcache_.nvfp4_moe.size(), wcache_.fused_kv.size(),
