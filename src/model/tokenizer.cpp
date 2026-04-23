@@ -283,6 +283,11 @@ static std::string codepoint_to_utf8(uint32_t cp) {
         s += static_cast<char>(0xE0 | (cp >> 12));
         s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
         s += static_cast<char>(0x80 | (cp & 0x3F));
+    } else if (cp <= 0x10FFFF) {
+        s += static_cast<char>(0xF0 | (cp >> 18));
+        s += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+        s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        s += static_cast<char>(0x80 | (cp & 0x3F));
     }
     return s;
 }
@@ -1329,7 +1334,10 @@ static const NfcEntry kNfcTable[] = {
 
 static constexpr int kNfcTableSize = sizeof(kNfcTable) / sizeof(kNfcTable[0]);
 
-// Decode one UTF-8 codepoint from text at position pos, advance pos
+// Decode one UTF-8 codepoint from text at position pos, advance pos.
+// On truncated input (multi-byte sequence cut short at end of string),
+// returns U+FFFD and advances pos to end-of-string, rather than returning
+// a partial codepoint and advancing past the end.
 static uint32_t nfc_decode_utf8(const std::string& s, size_t& pos) {
     uint8_t c = static_cast<uint8_t>(s[pos]);
     uint32_t cp;
@@ -1339,7 +1347,11 @@ static uint32_t nfc_decode_utf8(const std::string& s, size_t& pos) {
     else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; len = 3; }
     else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; len = 4; }
     else { pos++; return 0xFFFD; }
-    for (int i = 1; i < len && pos + i < s.size(); i++) {
+    if (pos + static_cast<size_t>(len) > s.size()) {
+        pos = s.size();
+        return 0xFFFD;
+    }
+    for (int i = 1; i < len; i++) {
         cp = (cp << 6) | (static_cast<uint8_t>(s[pos + i]) & 0x3F);
     }
     pos += len;

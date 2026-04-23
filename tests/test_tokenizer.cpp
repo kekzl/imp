@@ -503,6 +503,16 @@ TEST(TokenizerGemma4Test, KnownSingleTokenMergesStillWork) {
     EXPECT_EQ(ids[0], tok.find_token("Lin"));
 }
 
+TEST(TokenizerGemma4Test, TruncatedUTF8AtEndDoesNotCrash) {
+    // Regression: nfc_decode_utf8 used to advance pos past end-of-string
+    // on a truncated multi-byte sequence, producing a partial codepoint.
+    // Ensure encoding a truncated UTF-8 tail terminates cleanly.
+    Tokenizer tok = make_gemma4_tokenizer();
+    std::string truncated = "Lin\xe2\x96";   // UTF-8 ▁ missing its 3rd byte
+    auto ids = tok.encode(truncated);
+    EXPECT_GT(ids.size(), 0u);
+}
+
 TEST(TokenizerGemma4Test, DecodeByteFallbackFormsValidUTF8) {
     // Bytes 0xE2 0x96 0x81 in sequence form the UTF-8 of ▁ (U+2581). After
     // Gemma-4 decode, ▁ must be replaced by ASCII space — even when the
