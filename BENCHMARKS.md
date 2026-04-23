@@ -3,8 +3,8 @@
 All benchmarks on a single **NVIDIA RTX 5090** (32 GB GDDR7, Blackwell sm_120).
 Models loaded from GGUF or SafeTensors (NVFP4 prequant). Each test runs 3 repetitions; averages reported.
 
-- **imp v0.6** — NVFP4 decode + FP8 prefill, CUDA 13.2, CUTLASS v4.4.2, SafeTensors + NVFP4 prequant support
-- **llama.cpp** b8445 — flash attention enabled, full GPU offload (`-ngl 99`)
+- **imp v0.7** — NVFP4 decode + FP8 prefill, CUDA 13.2.1, CUTLASS v4.4.2, SafeTensors + NVFP4 prequant, FP8 FMHA long-context path
+- **llama.cpp** b8445+ — flash attention enabled, full GPU offload (`-ngl 99`)
 
 ## Decode Throughput (tg256)
 
@@ -51,6 +51,48 @@ Tokens processed per second during the prompt ingestion phase.
 **v0.5.1 root cause**: FP8 weight precision + chunked prefill state management.
 
 **v0.6 root cause (Qwen3.5 "broken" output)**: The Jinja2 engine lacked `{% macro %}` support. Qwen3.5's chat template uses a `render_content` macro for multimodal content handling — without macro support, user content rendered as `"None"`, causing the model to ignore prompts. Fixed in v0.6 with full Jinja2 macro support.
+
+## Long-Context Prefill (v0.7)
+
+Before v0.7 the FP8 FMHA prefill path at `n > 1024` emitted NaN on every
+attention layer due to a shared-memory S_tile overlap (fixed in PR #33). The
+cliff was invisible to all `pp512` / `pp1024` benches because those lengths
+dispatch to cuBLAS attention. Post-fix numbers below verify the path is not
+only correct but also competitive with llama.cpp across the 2K–8K range.
+
+All measurements: RTX 5090, greedy, 2-rep average, tokens/sec.
+
+| Model | pp512 | pp1024 | pp2048 | pp4096 | pp8192 |
+|---|---:|---:|---:|---:|---:|
+| **Qwen3-4B Q8_0** — imp v0.7 | 22 984 | 27 115 | 18 880 | 13 568 | 13 566 |
+| llama.cpp | 15 786 | 12 437 | 13 083 | 11 009 | 7 978 |
+| _speedup_ | ×1.46 | ×2.18 | ×1.44 | ×1.23 | **×1.70** |
+| **Qwen3-8B Q8_0** — imp v0.7 | 13 849 | 17 428 | 13 999 | 11 105 | 11 050 |
+| llama.cpp | 11 349 | 11 172 | 10 079 | 8 755 | 6 749 |
+| _speedup_ | ×1.22 | ×1.56 | ×1.39 | ×1.27 | **×1.64** |
+| **Qwen3-32B Q4_K_M** — imp v0.7 | 1 932 | 2 316 | 2 301 | 2 040 | 2 040 |
+| llama.cpp | 3 094 | 2 929 | 2 684 | 2 302 | 1 802 |
+| _speedup_ | ×0.62 | ×0.79 | ×0.86 | ×0.89 | **×1.13** |
+| **Mistral-24B Q6_K** — imp v0.7 | 2 092 | 2 906 | 3 312 | 3 591 | 3 595 |
+| llama.cpp | 3 914 | 3 855 | 3 683 | 3 469 | 3 058 |
+| _speedup_ | ×0.53 | ×0.75 | ×0.90 | ×1.04 | **×1.18** |
+| **Qwen3.5-4B GDN Q8_0** — imp v0.7 | 13 494 | 14 778 | 13 487 | 13 016 | 13 090 |
+
+**Observations:**
+
+- **pp=8192 is imp's strongest point** — ×1.13 to ×1.70 faster than llama.cpp on
+  every model tested. Pre-v0.7 this range was garbage.
+- **Qwen3-4B/8B show a 1024→2048 throughput dip** (27 k → 19 k tok/s on 4B) because
+  the dispatcher switches from cuBLAS attention to FP8 FMHA at n=1024. Output
+  remains correct; smoothing the cliff is future work (raise the cuBLAS cap or
+  tune the FP8-FMHA kernel).
+- **Qwen3-32B Q4_K_M is weight-bound** — throughput is flat across lengths
+  because the dense GEMMs dominate over attention cost.
+- **GDN (Qwen3.5-4B) is flat by design** — O(n) prefill, not O(n²); only 8 of 32
+  layers are attention, so the FMHA fix barely shows up in these numbers but is
+  still required for correct output.
+- **pp=512 on large dense models** (Qwen3-32B, Mistral-24B) is ~0.5–0.6× llama.cpp —
+  a known cuBLAS autotuning / launch-overhead issue unrelated to this release.
 
 ## KV Cache Quantization (Qwen3-8B Q8_0)
 
