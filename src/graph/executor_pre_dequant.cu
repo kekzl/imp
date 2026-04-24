@@ -1669,6 +1669,15 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                      wcache_.cutlass_nvfp4.size(), wcache_.cutlass_mxfp4.size(),
                      wcache_.nvfp4_moe.size(), wcache_.fused_kv.size(),
                      wcache_.fused_gate_up.size());
+        // Native layer counterpart to the overlay diagnostic: tensors uploaded
+        // as their on-disk format and dispatched through qtype-specific kernels
+        // (no tier choice, no cascade-bug class). gpu_allocations_ tracks every
+        // GPU pointer the Model owns — Q4_K_M / Q5_K_M / Q6_K / Q8_0 / MXFP4
+        // blocks, norms, embeddings, scratch buffers. Together with the overlay
+        // counts above this gives the full Option-C two-layer storage picture.
+        IMP_LOG_INFO("Phase-4 native: %zu Model::gpu_allocations_ pointers "
+                     "(GGUF blocks + norms + scratch — bypass the overlay layer)",
+                     model_->gpu_allocations_.size());
     }
 }
 
