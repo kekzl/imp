@@ -1580,14 +1580,21 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     const_cast<Model*>(model_)->tok_emb_id  = register_tensor(model_->token_embedding(), TensorKind::TOK_EMBED);
 
     // Register fused KV / gate+up overlays. Layer-keyed (not pointer-keyed)
-    // because a fused tensor is built fresh — the source pointers (wk, wv) are
-    // the *unfused* weights and don't appear in any per-tensor wcache_ map.
+    // because a fused tensor is built fresh — the source pointers (wk, wv)
+    // are the *unfused* weights and don't appear in any per-tensor wcache_ map.
+    //
+    // Ownership transfer (Phase 4.2): the registry handle takes ownership of
+    // the GPU pointer. `h.owned_bytes` is set to the allocation size so the
+    // registry destructor (`free_owned_storage`) will free it. The wcache_
+    // map entry is erased after transfer so that the workspace cleanup's
+    // wcache_.fused_kv loop becomes a no-op — no double-free.
     auto register_fused = [&](TensorKind kind, const Tensor& t) -> TensorID {
         if (!t.data) return kInvalidTensorID;
         TensorID id = registry_.reserve(kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
         auto& h = registry_.handle(id);
         h.primary_tier = StorageTier::FP16;
         h.payload.fp16.data = static_cast<half*>(t.data);
+        h.owned_bytes = static_cast<int64_t>(t.nbytes());
         return id;
     };
     for (int i = 0; i < cfg.n_layers; ++i) {
@@ -1599,6 +1606,12 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             L.fused_gate_up_id = register_fused(TensorKind::FUSED_GATE_UP, it->second);
         }
     }
+    // Transfer storage ownership: clear the wcache_.fused_kv / fused_gate_up
+    // maps so the legacy cleanup loops in executor_workspace_buffers.cu find
+    // them empty. The underlying pointers live on in the registry handles
+    // and are freed by `registry_.free_owned_storage()` in workspace cleanup.
+    wcache_.fused_kv.clear();
+    wcache_.fused_gate_up.clear();
 
     IMP_LOG_INFO("WeightRegistry populated with %zu handles (phase-2 shim)",
                  registry_.size());
