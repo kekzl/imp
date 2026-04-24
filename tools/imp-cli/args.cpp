@@ -38,6 +38,9 @@ void print_usage(const char* prog) {
         "  --kv-fp16             Force FP16 KV cache (overrides auto-FP8 — use if\n"
         "                        decode emits NaN after first token, e.g.\n"
         "                        Mistral-Small-3.1 Q6_K). Sets IMP_KV_FP16=1.\n"
+        "  --no-fp8-prefill      Disable auto FP8 weight cache for prefill.\n"
+        "                        Use with --kv-fp16 --no-nvfp4 for full FP16\n"
+        "                        path (fixes DeepSeek-R1 Q6_K garbage output).\n"
         "  --kv-int8             Use INT8 KV cache with dp4a attention (halves KV memory)\n"
         "  --kv-int4             Use INT4 KV cache (quarters KV memory)\n"
         "  --kv-turboquant       Use TurboQuant KV cache (PolarQuant + QJL, ~3x K reduction)\n"
@@ -144,6 +147,8 @@ CliArgs parse_args(int argc, char** argv) {
         } else if (std::strcmp(arg, "--kv-fp16") == 0) {
             // Force FP16 KV cache via the same IMP_KV_FP16 env var the engine reads.
             setenv("IMP_KV_FP16", "1", 1);
+        } else if (std::strcmp(arg, "--no-fp8-prefill") == 0) {
+            setenv("IMP_NO_FP8_PREFILL", "1", 1);
         } else if (std::strcmp(arg, "--kv-int8") == 0) {
             args.kv_int8 = true;
         } else if (std::strcmp(arg, "--kv-int4") == 0) {

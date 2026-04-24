@@ -425,10 +425,17 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
 
     // --- Auto-detect FP8 prefill ---
-    // Under IMP_DEBUG_RAW, leave explicitly disabled for FP16 parity.
-    if (!config_.use_fp8_prefill && !debug_raw_) {
+    // Under IMP_DEBUG_RAW or explicit IMP_NO_FP8_PREFILL, keep disabled.
+    // IMP_NO_FP8_PREFILL=1 is the user-facing escape hatch: some models
+    // (e.g. DeepSeek-R1-Distill-Qwen-14B Q6_K) produce garbage decode with
+    // FP8 weight cache active — accumulated dequant error through deep
+    // narrow-GQA stacks.
+    const bool no_fp8_prefill = (std::getenv("IMP_NO_FP8_PREFILL") != nullptr);
+    if (!config_.use_fp8_prefill && !debug_raw_ && !no_fp8_prefill) {
         config_.use_fp8_prefill = true;
         IMP_LOG_INFO("FP8 prefill: auto → enabled");
+    } else if (no_fp8_prefill) {
+        IMP_LOG_INFO("FP8 prefill: disabled (IMP_NO_FP8_PREFILL=1)");
     }
 
     // --- Resolve auto-detection flags ---
