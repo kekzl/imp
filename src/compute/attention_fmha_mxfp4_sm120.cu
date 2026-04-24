@@ -57,22 +57,40 @@ static constexpr int MX_WMMA_K = 16;
 // Device helpers: FP4 E2M1 quantization
 // =============================================================================
 
-// Branchless quantize: |val| → 3-bit E2M1 magnitude code (0..7).
-// Midpoint thresholds: 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0
-__device__ __forceinline__ uint8_t fp4_quantize_abs(float abs_val) {
-    return (abs_val >= 0.25f) + (abs_val >= 0.75f) + (abs_val >= 1.25f)
-         + (abs_val >= 1.75f) + (abs_val >= 2.5f)  + (abs_val >= 3.5f)
-         + (abs_val >= 5.0f);
-}
-
-// Pack two FP32 values into one FP4 E2M1 byte (low nibble = first, high = second).
-// Values must already be scaled to [-6, 6] range.
+// Pack two FP32 values into one FP4 E2M1 byte via hardware instruction.
+// Layout: low nibble = v0, high nibble = v1. Values must already be scaled
+// so that |v| ≤ 6 (values outside saturate to ±6).
+//
+// Uses the PTX hardware conversion on sm_120+ (works on CUDA 13.2+; the
+// `f16x2` variant is broken per dead_ends.md, but the `f32` variant is
+// correct — see sageattention3_study_2026_04_24 memory). Single PTX
+// instruction replaces the former branchless cascade (14 compares +
+// sign handling per call). Rounding is RNE (IEEE round-to-nearest-even)
+// vs the software midpoint cascade — tiny output divergence on boundary
+// values is acceptable (validated via A/B test against legacy path).
 __device__ __forceinline__ uint8_t pack_fp4_pair(float v0, float v1) {
+#if __CUDA_ARCH__ >= 1200
+    uint32_t out;
+    asm volatile(
+        "{ .reg .b8 b;\n"
+        "  cvt.rn.satfinite.e2m1x2.f32 b, %2, %1;\n"
+        "  cvt.u32.u8 %0, b; }\n"
+        : "=r"(out)
+        : "f"(v0), "f"(v1));
+    return static_cast<uint8_t>(out);
+#else
+    // Software fallback: branchless compare cascade (E2M1 magnitudes
+    // {0, 0.5, 1, 1.5, 2, 3, 4, 6} with midpoint thresholds).
+    auto quant_abs = [](float a) -> uint8_t {
+        return (a >= 0.25f) + (a >= 0.75f) + (a >= 1.25f) + (a >= 1.75f)
+             + (a >= 2.5f)  + (a >= 3.5f)  + (a >= 5.0f);
+    };
     uint8_t sign0 = (v0 < 0.0f) ? 1u : 0u;
-    uint8_t code0 = (sign0 << 3) | fp4_quantize_abs(fabsf(v0));
+    uint8_t code0 = (sign0 << 3) | quant_abs(fabsf(v0));
     uint8_t sign1 = (v1 < 0.0f) ? 1u : 0u;
-    uint8_t code1 = (sign1 << 3) | fp4_quantize_abs(fabsf(v1));
+    uint8_t code1 = (sign1 << 3) | quant_abs(fabsf(v1));
     return (code1 << 4) | code0;
+#endif
 }
 
 // =============================================================================
