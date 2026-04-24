@@ -75,6 +75,28 @@ __device__ __forceinline__ uint8_t mxfp4_quantize_abs(float abs_val) {
     return code;  // 0..7
 }
 
+// HW FP4 conversion: two scaled FP32 values → one byte of packed E2M1
+// nibbles (low = v0, high = v1). Replaces the SW cascade above for
+// sm_120+. Rounding is IEEE RNE (differs from SW midpoint on boundary).
+__device__ __forceinline__ uint8_t mxfp4_pack_pair_hw(float v0, float v1) {
+#if __CUDA_ARCH__ >= 1200
+    uint32_t out;
+    asm volatile(
+        "{ .reg .b8 b;\n"
+        "  cvt.rn.satfinite.e2m1x2.f32 b, %2, %1;\n"
+        "  cvt.u32.u8 %0, b; }\n"
+        : "=r"(out)
+        : "f"(v0), "f"(v1));
+    return static_cast<uint8_t>(out);
+#else
+    uint8_t sign0 = (v0 < 0.0f) ? 1u : 0u;
+    uint8_t code0 = (sign0 << 3) | mxfp4_quantize_abs(fabsf(v0));
+    uint8_t sign1 = (v1 < 0.0f) ? 1u : 0u;
+    uint8_t code1 = (sign1 << 3) | mxfp4_quantize_abs(fabsf(v1));
+    return (code1 << 4) | code0;
+#endif
+}
+
 __device__ __forceinline__
 int mxfp4_sfatom_offset(int row, int k_group, int n_k_tiles) {
     int tile_row  = row / kAtomRows;
@@ -137,15 +159,9 @@ __global__ void quantize_fp16_mxfp4_strided_kernel(
     int packed_base = row * (K / 2) + k_group * (kMxGroupSize / 2);
     #pragma unroll
     for (int i = 0; i < 32; i += 2) {
-        float s0 = vals[i] * inv_scale;
-        uint8_t sign0 = (s0 < 0.0f) ? 1u : 0u;
-        uint8_t fp4_0 = (sign0 << 3) | mxfp4_quantize_abs(fabsf(s0));
-
+        float s0 = vals[i]     * inv_scale;
         float s1 = vals[i + 1] * inv_scale;
-        uint8_t sign1 = (s1 < 0.0f) ? 1u : 0u;
-        uint8_t fp4_1 = (sign1 << 3) | mxfp4_quantize_abs(fabsf(s1));
-
-        packed_out[packed_base + i / 2] = (fp4_1 << 4) | fp4_0;
+        packed_out[packed_base + i / 2] = mxfp4_pack_pair_hw(s0, s1);
     }
 }
 

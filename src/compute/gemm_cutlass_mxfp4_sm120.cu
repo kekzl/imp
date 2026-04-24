@@ -467,6 +467,27 @@ __device__ __forceinline__ uint8_t quantize_abs_to_fp4_mx(float abs_val) {
     return code;  // 0..7
 }
 
+// HW FP4 conversion: two scaled FP32 → packed byte (low=v0, high=v1).
+// IEEE RNE rounding; sm_120+ only.
+__device__ __forceinline__ uint8_t pack_fp4_pair_hw_mx(float v0, float v1) {
+#if __CUDA_ARCH__ >= 1200
+    uint32_t out;
+    asm volatile(
+        "{ .reg .b8 b;\n"
+        "  cvt.rn.satfinite.e2m1x2.f32 b, %2, %1;\n"
+        "  cvt.u32.u8 %0, b; }\n"
+        : "=r"(out)
+        : "f"(v0), "f"(v1));
+    return static_cast<uint8_t>(out);
+#else
+    uint8_t sign0 = (v0 < 0.0f) ? 1u : 0u;
+    uint8_t sign1 = (v1 < 0.0f) ? 1u : 0u;
+    uint8_t c0 = (sign0 << 3) | quantize_abs_to_fp4_mx(fabsf(v0));
+    uint8_t c1 = (sign1 << 3) | quantize_abs_to_fp4_mx(fabsf(v1));
+    return (c1 << 4) | c0;
+#endif
+}
+
 __device__ __forceinline__ float ue8m0_to_float(uint8_t bits) {
     // UE8M0: value = 2^(bits - 127)
     if (bits == 0) return 5.877472e-39f;  // 2^-127
@@ -513,21 +534,13 @@ __global__ void quantize_fp16_mxfp4_cutlass_kernel(
     int sf_idx = mx_sfatom_offset(row, k_group, n_k_tiles);
     sf_out[sf_idx] = ue8m0;
 
-    // Quantize and pack FP4 values (2 per byte)
+    // Quantize and pack FP4 values (2 per byte) via HW conversion
     int packed_base = row * (K / 2) + k_group * (kMxSFVecSize / 2);
     #pragma unroll
     for (int i = 0; i < 32; i += 2) {
-        float s0 = vals[i] * inv_scale;
-        uint8_t sign0 = (s0 < 0.0f) ? 1u : 0u;
-        uint8_t code0 = quantize_abs_to_fp4_mx(fabsf(s0));
-        uint8_t fp4_0 = (sign0 << 3) | code0;
-
+        float s0 = vals[i]     * inv_scale;
         float s1 = vals[i + 1] * inv_scale;
-        uint8_t sign1 = (s1 < 0.0f) ? 1u : 0u;
-        uint8_t code1 = quantize_abs_to_fp4_mx(fabsf(s1));
-        uint8_t fp4_1 = (sign1 << 3) | code1;
-
-        packed_out[packed_base + i / 2] = (fp4_1 << 4) | fp4_0;
+        packed_out[packed_base + i / 2] = pack_fp4_pair_hw_mx(s0, s1);
     }
 }
 
