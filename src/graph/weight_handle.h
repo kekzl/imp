@@ -36,6 +36,8 @@ struct WeightHandle {
     bool is_populated() const { return primary_tier != StorageTier::Undefined; }
 };
 
+class VRAMAllocator;
+
 class WeightRegistry {
 public:
     TensorID reserve(TensorKind kind, int64_t rows, int64_t cols);
@@ -44,6 +46,13 @@ public:
     size_t size() const { return handles_.size(); }
 
     void clear();
+
+    // Free VRAM for any handle whose `owned_bytes > 0`. Borrowed handles
+    // (owned_bytes == 0) are left alone — their storage is managed by the
+    // original allocator (e.g. wcache_ maps or Model::gpu_allocations_).
+    // Idempotent: each freed handle's `owned_bytes` is reset to 0 and the
+    // payload pointer to nullptr, so a second call is a no-op.
+    size_t free_owned_storage(VRAMAllocator* alloc);
 
 private:
     std::vector<WeightHandle> handles_;
