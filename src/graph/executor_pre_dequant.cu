@@ -1632,6 +1632,32 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                      "(uncached %zu remain as native GGUF blocks)",
                      registry_count, plan_overlay,
                      plan_overlay > registry_count ? plan_overlay - registry_count : 0);
+
+        // When there is a registry/plan gap, surface the by-kind delta so the
+        // missing TensorKinds are immediately visible. Helps when adding a new
+        // model that has tensor kinds the runtime caches but plan_storage
+        // doesn't yet enumerate (or vice versa).
+        if (registry_count < plan_overlay) {
+            int plan_per_kind[static_cast<int>(TensorKind::_COUNT)]     = {0};
+            int registry_per_kind[static_cast<int>(TensorKind::_COUNT)] = {0};
+            for (const auto& e : ideal_plan.entries) {
+                bool overlay = (e.tier == StorageTier::FP16  || e.tier == StorageTier::FP8 ||
+                                e.tier == StorageTier::NVFP4 || e.tier == StorageTier::CUTLASS_NVFP4 ||
+                                e.tier == StorageTier::MXFP4);
+                if (overlay) ++plan_per_kind[static_cast<int>(e.kind)];
+            }
+            for (TensorID id = 0; id < static_cast<TensorID>(registry_.size()); ++id) {
+                ++registry_per_kind[static_cast<int>(registry_.handle(id).kind)];
+            }
+            for (int k = 0; k < static_cast<int>(TensorKind::_COUNT); ++k) {
+                int diff = plan_per_kind[k] - registry_per_kind[k];
+                if (diff > 0) {
+                    IMP_LOG_INFO("Phase-4 gap by kind: %s plan=%d registry=%d (uncached=%d)",
+                                 tensor_kind_name(static_cast<TensorKind>(k)),
+                                 plan_per_kind[k], registry_per_kind[k], diff);
+                }
+            }
+        }
         IMP_LOG_INFO("Phase-4 plan-ideal tiers: fp16=%zu fp8=%zu nvfp4=%zu "
                      "cutlass_nvfp4=%zu mxfp4=%zu fp32=%zu",
                      plan_fp16, plan_fp8, plan_nvfp4, plan_cutlass_nvfp4,
