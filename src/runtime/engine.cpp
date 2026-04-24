@@ -652,6 +652,25 @@ bool Engine::init_weights() {
         }
     }
 
+    // Tune the default cudaMallocAsync pool so it retains freed memory instead
+    // of returning it to the driver. Many paths (prefill metadata, MoE scratch,
+    // spec decoder block tables, vision staging) use cudaMallocAsync with the
+    // default pool; the default threshold is 0, which calls cuMemUnmap on every
+    // free. Setting UINT64_MAX keeps allocations for re-use — the KV cache and
+    // workspaces already own their memory through the DeviceAllocator, so the
+    // default-pool footprint stays small.
+    {
+        cudaMemPool_t default_pool = nullptr;
+        int dev = 0;
+        cudaGetDevice(&dev);
+        if (cudaDeviceGetDefaultMemPool(&default_pool, dev) == cudaSuccess &&
+            default_pool != nullptr) {
+            uint64_t threshold = UINT64_MAX;
+            cudaMemPoolSetAttribute(default_pool,
+                                    cudaMemPoolAttrReleaseThreshold, &threshold);
+        }
+    }
+
     // Compute VRAM reserve for expert weight upload
     size_t expert_reserve = executor_->workspace_estimate();
     {
