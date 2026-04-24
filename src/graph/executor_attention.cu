@@ -407,10 +407,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                 gemm_cublaslt(fp8_no, fp8_tv, vv, 1.0f, 0.0f,
                               qscratch_.d_act_scale, fp8_hwv->payload.fp8.d_scale, stream);
             } else {
-                // Try fused K+V path: single strided batched GEMM for both projections.
-                // Prefer registry handle (Phase 4 path); fall back to wcache_
-                // lookup if the handle is invalid (e.g., new layer added but
-                // not yet registered, or registry not yet populated).
+                // Try fused K+V path: single strided batched GEMM for both
+                // projections. Read via WeightRegistry handle — the wcache_
+                // map is no longer the lookup mechanism (it remains the
+                // storage owner; cleanup happens via wcache_.clear()).
                 // Gemma 4 per-layer shapes break strided-batched K+V layout assumptions.
                 const Tensor* fused_kv = nullptr;
                 Tensor fused_from_handle;
@@ -421,10 +421,6 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                                    2, h.shape, true);
                         fused_kv = &fused_from_handle;
                     }
-                }
-                if (!fused_kv) {
-                    auto it = wcache_.fused_kv.find(layer);
-                    if (it != wcache_.fused_kv.end()) fused_kv = &it->second;
                 }
                 if (n > 1 && fused_kv && !per_layer_shapes) {
                     // Q: still separate (different output dim with GQA)
