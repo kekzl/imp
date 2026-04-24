@@ -131,16 +131,20 @@ fmha_sm120_kernel(
     float* row_m    = O_acc + Bq * head_dim;
     float* row_l    = row_m + Bq;
 
-    // ---- load Q tile --------------------------------------------------------
+    // ---- load Q tile (vectorized float4 = 8 halves per iter) ---------------
     {
-        const int total = Bq * head_dim;
-        for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
+        const int total_vec8 = (Bq * head_dim) / 8;
+        for (int vi = tid; vi < total_vec8; vi += SM120_BLOCK_THREADS) {
+            int i = vi * 8;
             int r = i / head_dim;
             int d = i % head_dim;
+            float4* dst = reinterpret_cast<float4*>(&Q_tile[i]);
             if (q_start + r < seq_q) {
-                Q_tile[i] = Q_ptr[(int64_t)r * q_row_stride + d];
+                const float4* src = reinterpret_cast<const float4*>(
+                    &Q_ptr[(int64_t)r * q_row_stride + d]);
+                *dst = *src;
             } else {
-                Q_tile[i] = __float2half(0.0f);
+                *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             }
         }
     }
@@ -179,16 +183,20 @@ fmha_sm120_kernel(
     for (int j = first_kv_tile; j < num_kv_tiles; j++) {
         const int kv_start = j * Bkv;
 
-        // ---- Load K tile ----
+        // ---- Load K tile (vectorized float4 = 8 halves per iter) ----
         {
-            const int total = Bkv * head_dim;
-            for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
+            const int total_vec8 = (Bkv * head_dim) / 8;
+            for (int vi = tid; vi < total_vec8; vi += SM120_BLOCK_THREADS) {
+                int i = vi * 8;
                 int r = i / head_dim;
                 int d = i % head_dim;
+                float4* dst = reinterpret_cast<float4*>(&KV_tile[i]);
                 if (kv_start + r < seq_kv) {
-                    KV_tile[i] = K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d];
+                    const float4* src = reinterpret_cast<const float4*>(
+                        &K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
+                    *dst = *src;
                 } else {
-                    KV_tile[i] = __float2half(0.0f);
+                    *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
                 }
             }
         }
@@ -317,16 +325,22 @@ fmha_sm120_kernel(
         }
         __syncthreads();
 
-        // ---- Load V tile ----
+        // ---- Load V tile (vectorized: float4 = 8 halves per iter) ----
         {
-            const int total = Bkv * head_dim;
-            for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
+            // All supported head_dims (64, 96, 128, 256) are multiples of 8,
+            // so float4 loads are always aligned and in-bounds per row.
+            const int total_vec8 = (Bkv * head_dim) / 8;
+            for (int vi = tid; vi < total_vec8; vi += SM120_BLOCK_THREADS) {
+                int i = vi * 8;
                 int r = i / head_dim;
                 int d = i % head_dim;
+                float4* dst = reinterpret_cast<float4*>(&KV_tile[i]);
                 if (kv_start + r < seq_kv) {
-                    KV_tile[i] = V_ptr[(int64_t)(kv_start + r) * kv_row_stride + d];
+                    const float4* src = reinterpret_cast<const float4*>(
+                        &V_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
+                    *dst = *src;
                 } else {
-                    KV_tile[i] = __float2half(0.0f);
+                    *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
                 }
             }
         }
@@ -829,16 +843,21 @@ fmha_sm120_fp8_kernel(
         }
         __syncthreads();
 
-        // Load V tile as FP16 (PV stays in FP16 for value precision)
+        // Load V tile as FP16 (vectorized float4 = 8 halves per iter)
         {
-            const int total = Bkv * head_dim;
-            for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
+            const int total_vec8 = (Bkv * head_dim) / 8;
+            for (int vi = tid; vi < total_vec8; vi += SM120_BLOCK_THREADS) {
+                int i = vi * 8;
                 int r = i / head_dim;
                 int d = i % head_dim;
-                if (kv_start + r < seq_kv)
-                    KV_fp16[i] = V_ptr[(int64_t)(kv_start + r) * kv_row_stride + d];
-                else
-                    KV_fp16[i] = __float2half(0.0f);
+                float4* dst = reinterpret_cast<float4*>(&KV_fp16[i]);
+                if (kv_start + r < seq_kv) {
+                    const float4* src = reinterpret_cast<const float4*>(
+                        &V_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
+                    *dst = *src;
+                } else {
+                    *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                }
             }
         }
         __syncthreads();
