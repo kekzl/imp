@@ -365,20 +365,27 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // not about swapping kernel variants.
     }
 
-    // --- Auto-detect KV cache dtype ---
-    // Default to FP8 E4M3 for ~50% KV VRAM savings.
-    // Model-specific overrides (e.g. Gemma-4 → FP16) run later and may revert this.
-    // Under IMP_DEBUG_RAW or explicit IMP_KV_FP16, keep FP16.
-    // IMP_KV_FP16=1 is the user-facing escape hatch: some models (e.g. Mistral-
-    // Small-3.1 Q6_K, tekken-tokenizer GQA layouts) produce NaN logits after
-    // the first decode token when FP8 KV is active — same pattern that affects
-    // Gemma-4 (see line ~492). User sets IMP_KV_FP16=1 to skip the upgrade.
-    const bool force_kv_fp16 = (std::getenv("IMP_KV_FP16") != nullptr);
-    if (config_.kv_cache_dtype == DType::FP16 && !debug_raw_ && !force_kv_fp16) {
+    // --- KV cache dtype policy ---
+    // Default: FP16 (safe). FP8 E4M3 is opt-in via --kv-fp8 / IMP_KV_FP8=1.
+    //
+    // Rationale: the auto-upgrade to FP8 was found (2026-04-24) to produce
+    // NaN logits on several model families (Mistral-Small-3.1, DeepSeek-R1,
+    // Qwen3.5-4B/9B GDN, Gemma-4) due to a KV-write stride bug that has not
+    // been root-caused yet. Correctness-first: users who want the 50% KV VRAM
+    // savings explicitly ask for FP8 via the existing flag.
+    //
+    // Legacy escape hatches kept for compatibility:
+    // - IMP_KV_FP16=1   forces FP16 (no-op under the new default; useful when
+    //                   something else re-enables FP8 downstream).
+    // - IMP_KV_FP8_AUTO=1 restores the old opt-out auto-upgrade behavior for
+    //                   users who rely on it for batch-serving VRAM budgets.
+    const bool force_kv_fp16  = (std::getenv("IMP_KV_FP16") != nullptr);
+    const bool fp8_auto_legacy = (std::getenv("IMP_KV_FP8_AUTO") != nullptr);
+    if (fp8_auto_legacy && config_.kv_cache_dtype == DType::FP16 && !debug_raw_ && !force_kv_fp16) {
         config_.kv_cache_dtype = DType::FP8_E4M3;
-        IMP_LOG_INFO("KV cache dtype: auto → FP8_E4M3");
-    } else if (force_kv_fp16 && config_.kv_cache_dtype == DType::FP16) {
-        IMP_LOG_INFO("KV cache dtype: FP16 (IMP_KV_FP16=1 set — skipping auto FP8 upgrade)");
+        IMP_LOG_INFO("KV cache dtype: IMP_KV_FP8_AUTO=1 → FP8_E4M3 (legacy opt-out)");
+    } else if (config_.kv_cache_dtype == DType::FP16) {
+        IMP_LOG_INFO("KV cache dtype: FP16 (default — pass --kv-fp8 for FP8 E4M3 memory savings)");
     }
 
     if (config_.max_batch_size <= 0) {
