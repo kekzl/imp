@@ -1,5 +1,6 @@
 #pragma once
 
+#include "runtime/cuda_graph.h"
 #include "vision/vision_model.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -38,6 +39,16 @@ private:
     half* d_attn_scores_ = nullptr;  // [num_heads, num_patches, num_patches]
     half* d_ffn_ = nullptr;          // [num_patches, intermediate_size]
     half* d_pooled_ = nullptr;       // [num_image_tokens, hidden_size]
+
+    // CUDA graph for the full encoder forward. Topology is fixed once model
+    // and workspace sizes are known; only the input/output pointers change
+    // across calls. The graph is invalidated when those pointers differ from
+    // the ones baked in at capture time.
+    CudaGraphRunner encode_graph_;
+    const half* graph_d_pixels_ = nullptr;
+    half* graph_d_output_ = nullptr;
+
+    bool encode_impl(const half* d_pixels, half* d_output, cudaStream_t stream);
 
     void free_buffers();
 };
