@@ -37,6 +37,19 @@ struct StoragePlan {
 
 // Pure function — no GPU allocations, no side effects. Determines per-tensor
 // storage tier based on capabilities + budget + hints.
+//
+// SCOPE (Phase 4 Option C, decided 2026-04-24): the plan describes the
+// **overlay layer** — tensors whose storage tier is a runtime decision
+// (NVFP4 decode cache, FP8 prefill cache, CUTLASS layouts). Native GGUF
+// block formats (Q4_K_M, Q5_K_M, Q6_K, Q8_0, MXFP4) stay as mmap'd blocks
+// owned by `Model::gpu_allocations_` and are dequantized per-kernel call.
+// They bypass the plan/registry entirely.
+//
+// Today the plan enumerates the **ideal** overlay (every quantize-able
+// tensor at its preferred tier). The runtime caching policy in
+// `pre_dequant_weights` is VRAM-budget-aware and may decide not to cache
+// some entries. The Phase-4 parity diagnostic surfaces the resulting
+// gap as informational; it is not an error.
 StoragePlan plan_storage(const Model& model, const ModelConfig& cfg,
                          const PlanHints& hints);
 

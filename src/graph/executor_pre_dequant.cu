@@ -1579,41 +1579,118 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     const_cast<Model*>(model_)->out_proj_id = register_tensor(model_->output_proj(), TensorKind::LM_HEAD);
     const_cast<Model*>(model_)->tok_emb_id  = register_tensor(model_->token_embedding(), TensorKind::TOK_EMBED);
 
+    // Register fused KV / gate+up overlays. Layer-keyed (not pointer-keyed)
+    // because a fused tensor is built fresh — the source pointers (wk, wv)
+    // are the *unfused* weights and don't appear in any per-tensor wcache_ map.
+    //
+    // Ownership transfer (Phase 4.2): the registry handle takes ownership of
+    // the GPU pointer. `h.owned_bytes` is set to the allocation size so the
+    // registry destructor (`free_owned_storage`) will free it. The wcache_
+    // map entry is erased after transfer so that the workspace cleanup's
+    // wcache_.fused_kv loop becomes a no-op — no double-free.
+    auto register_fused = [&](TensorKind kind, const Tensor& t) -> TensorID {
+        if (!t.data) return kInvalidTensorID;
+        TensorID id = registry_.reserve(kind, t.shape[0], t.ndim > 1 ? t.shape[1] : 1);
+        auto& h = registry_.handle(id);
+        h.primary_tier = StorageTier::FP16;
+        h.payload.fp16.data = static_cast<half*>(t.data);
+        h.owned_bytes = static_cast<int64_t>(t.nbytes());
+        return id;
+    };
+    for (int i = 0; i < cfg.n_layers; ++i) {
+        auto& L = const_cast<Model*>(model_)->layer(i);
+        if (auto it = wcache_.fused_kv.find(i); it != wcache_.fused_kv.end()) {
+            L.fused_kv_id = register_fused(TensorKind::FUSED_KV, it->second);
+        }
+        if (auto it = wcache_.fused_gate_up.find(i); it != wcache_.fused_gate_up.end()) {
+            L.fused_gate_up_id = register_fused(TensorKind::FUSED_GATE_UP, it->second);
+        }
+    }
+    // Transfer storage ownership: clear the wcache_.fused_kv / fused_gate_up
+    // maps so the legacy cleanup loops in executor_workspace_buffers.cu find
+    // them empty. The underlying pointers live on in the registry handles
+    // and are freed by `registry_.free_owned_storage()` in workspace cleanup.
+    wcache_.fused_kv.clear();
+    wcache_.fused_gate_up.clear();
+
     IMP_LOG_INFO("WeightRegistry populated with %zu handles (phase-2 shim)",
                  registry_.size());
 
-    // Phase 4 parity diagnostic: compare registry vs plan. The registry only
-    // carries tensors whose source pointer landed in a wcache_ map (quantize-
-    // able projections). The plan enumerates every TransformerLayer field with
-    // data, which includes some always-FP16/FP32 tensors (norms, rope_freqs)
-    // that bypass wcache_ entirely. To make the comparison apples-to-apples,
-    // count only plan entries whose kind can live in wcache_ (FP16/FP8/NVFP4/
-    // MXFP4 tiers).
+    // Phase 4 (Option C) overlay diagnostic: report ideal vs actual overlay
+    // population. The plan enumerates every quantize-able tensor at its
+    // preferred tier ("ideal overlay"). The registry tracks tensors actually
+    // cached by the runtime ("actual overlay"). Native GGUF blocks (Q4_K_M,
+    // Q5_K_M, Q6_K, Q8_0, MXFP4) stay as mmap'd `Model::gpu_allocations_`
+    // and are dequantized per kernel call — they bypass the overlay layer
+    // entirely, so the diff between plan and registry is informational, not
+    // an error.
     {
-        StoragePlan parity_plan = plan_storage(*model_, cfg, hints_);
-        size_t plan_registerable = 0;
-        for (const auto& e : parity_plan.entries) {
+        StoragePlan ideal_plan = plan_storage(*model_, cfg, hints_);
+        size_t plan_overlay = 0;
+        size_t plan_fp16 = 0, plan_fp8 = 0, plan_nvfp4 = 0;
+        size_t plan_cutlass_nvfp4 = 0, plan_mxfp4 = 0, plan_fp32 = 0;
+        for (const auto& e : ideal_plan.entries) {
             switch (e.tier) {
-                case StorageTier::FP16:
-                case StorageTier::FP8:
-                case StorageTier::NVFP4:
-                case StorageTier::CUTLASS_NVFP4:
-                case StorageTier::MXFP4:
-                    ++plan_registerable; break;
-                default: break;
+                case StorageTier::FP16:          ++plan_fp16; ++plan_overlay; break;
+                case StorageTier::FP8:           ++plan_fp8; ++plan_overlay; break;
+                case StorageTier::NVFP4:         ++plan_nvfp4; ++plan_overlay; break;
+                case StorageTier::CUTLASS_NVFP4: ++plan_cutlass_nvfp4; ++plan_overlay; break;
+                case StorageTier::MXFP4:         ++plan_mxfp4; ++plan_overlay; break;
+                case StorageTier::FP32:          ++plan_fp32; break;
+                case StorageTier::Undefined:     break;
             }
         }
         size_t registry_count = registry_.size();
-        if (plan_registerable != registry_count) {
-            IMP_LOG_WARN("Phase-4 parity: registry=%zu handles, plan=%zu wcache-tier "
-                         "entries (diff=%zd). Expected to converge by Phase 5.",
-                         registry_count, plan_registerable,
-                         static_cast<ssize_t>(plan_registerable) -
-                             static_cast<ssize_t>(registry_count));
-        } else {
-            IMP_LOG_INFO("Phase-4 parity: registry=%zu handles match plan "
-                         "wcache-tier count", registry_count);
+        IMP_LOG_INFO("Phase-4 overlay: registry=%zu cached / plan-ideal=%zu "
+                     "(uncached %zu remain as native GGUF blocks)",
+                     registry_count, plan_overlay,
+                     plan_overlay > registry_count ? plan_overlay - registry_count : 0);
+
+        // When there is a registry/plan gap, surface the by-kind delta so the
+        // missing TensorKinds are immediately visible. Helps when adding a new
+        // model that has tensor kinds the runtime caches but plan_storage
+        // doesn't yet enumerate (or vice versa).
+        if (registry_count < plan_overlay) {
+            int plan_per_kind[static_cast<int>(TensorKind::_COUNT)]     = {0};
+            int registry_per_kind[static_cast<int>(TensorKind::_COUNT)] = {0};
+            for (const auto& e : ideal_plan.entries) {
+                bool overlay = (e.tier == StorageTier::FP16  || e.tier == StorageTier::FP8 ||
+                                e.tier == StorageTier::NVFP4 || e.tier == StorageTier::CUTLASS_NVFP4 ||
+                                e.tier == StorageTier::MXFP4);
+                if (overlay) ++plan_per_kind[static_cast<int>(e.kind)];
+            }
+            for (TensorID id = 0; id < static_cast<TensorID>(registry_.size()); ++id) {
+                ++registry_per_kind[static_cast<int>(registry_.handle(id).kind)];
+            }
+            for (int k = 0; k < static_cast<int>(TensorKind::_COUNT); ++k) {
+                int diff = plan_per_kind[k] - registry_per_kind[k];
+                if (diff > 0) {
+                    IMP_LOG_INFO("Phase-4 gap by kind: %s plan=%d registry=%d (uncached=%d)",
+                                 tensor_kind_name(static_cast<TensorKind>(k)),
+                                 plan_per_kind[k], registry_per_kind[k], diff);
+                }
+            }
         }
+        IMP_LOG_INFO("Phase-4 plan-ideal tiers: fp16=%zu fp8=%zu nvfp4=%zu "
+                     "cutlass_nvfp4=%zu mxfp4=%zu fp32=%zu",
+                     plan_fp16, plan_fp8, plan_nvfp4, plan_cutlass_nvfp4,
+                     plan_mxfp4, plan_fp32);
+        IMP_LOG_INFO("Phase-4 wcache actual: fp16=%zu fp8=%zu nvfp4=%zu "
+                     "cutlass_nvfp4=%zu cutlass_mxfp4=%zu nvfp4_moe=%zu "
+                     "fused_kv=%zu fused_gate_up=%zu",
+                     wcache_.fp16.size(), wcache_.fp8.size(), wcache_.nvfp4.size(),
+                     wcache_.cutlass_nvfp4.size(), wcache_.cutlass_mxfp4.size(),
+                     wcache_.nvfp4_moe.size(), wcache_.fused_kv.size(),
+                     wcache_.fused_gate_up.size());
+        // Native layer counterpart to the overlay diagnostic: tensors uploaded
+        // as their on-disk format and dispatched through qtype-specific kernels
+        // (no tier choice, no cascade-bug class). gpu_allocations_ tracks every
+        // GPU pointer the Model owns — Q4_K_M / Q5_K_M / Q6_K / Q8_0 / MXFP4
+        // blocks, norms, embeddings, scratch buffers. Together with the overlay
+        // counts above this gives the full Option-C two-layer storage picture.
+        IMP_LOG_INFO("Phase-4 native: %zu Model::gpu_allocations_ pointers "
+                     "(GGUF blocks + norms + scratch — bypass the overlay layer)",
+                     model_->gpu_allocations_.size());
     }
 }
 

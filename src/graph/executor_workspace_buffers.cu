@@ -524,11 +524,17 @@ void GraphExecutor::free_buffers() {
 
     // Free all weight caches (FP16, FP8, NVFP4, CUTLASS, fused KV/gate+up, migrated/overflow)
     {
-        // Fused KV
+        // Registry-owned overlays (Phase 4.2): fused_kv / fused_gate_up
+        // storage is now owned by the WeightRegistry handles, not wcache_.
+        // The maps below are kept empty by `pre_dequant_weights`. This helper
+        // frees any handle whose `owned_bytes > 0`.
+        registry_.free_owned_storage(vram_alloc_);
+        // Legacy loops — both maps must be empty now. Kept as a defensive
+        // fallback in case a code path writes to them without going through
+        // the Phase-4 registration helper.
         for (auto& [idx, tensor] : wcache_.fused_kv)
             if (tensor.data) vram_free(vram_alloc_, tensor.data);
         wcache_.fused_kv.clear();
-        // Fused gate+up
         for (auto& [idx, tensor] : wcache_.fused_gate_up)
             if (tensor.data) vram_free(vram_alloc_, tensor.data);
         wcache_.fused_gate_up.clear();

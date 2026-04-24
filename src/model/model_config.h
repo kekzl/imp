@@ -155,6 +155,11 @@ struct TransformerLayer {
     TensorID ssm_in_id   = kInvalidTensorID;
     TensorID ssm_out_id  = kInvalidTensorID;
     TensorID gdn_gate_id = kInvalidTensorID;
+    // Fused KV / gate+up handles. Populated when the runtime decides to build
+    // a fused weight pair for strided batched prefill GEMM. kInvalidTensorID
+    // means no fused weight was built for this layer (per-layer dispatch path).
+    TensorID fused_kv_id      = kInvalidTensorID;
+    TensorID fused_gate_up_id = kInvalidTensorID;
 
     // Per-expert WeightRegistry indices (populated by pre_dequant_weights, Task 3.4).
     // Parallel to expert_w_gate / expert_w_up / expert_w_down vectors.
