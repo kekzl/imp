@@ -110,6 +110,19 @@ effektive Wartezeit auf Traffic.
 - MoE Persistent Work-Queue: -38% TC kernel time
 - CUDA Graphs (Verify + Vision + ExecUpdate): Launch-Overhead-Reduktion
 
+## Counterintuitive finding: Q6_K beats NVFP4 on decode at 30B
+
+Verified 2026-04-24 on Qwen3-Coder-30B-A3B (same model, same HW):
+
+| Quant | pp512 tok/s | tg256 tok/s |
+|---|---|---|
+| Q6_K | 1893 | **87** |
+| NVFP4 | **13471** | 43 |
+
+NVFP4 wins prefill 7×, Q6_K wins decode 2×. Workload-dependent — NVFP4
+only default for RAG/long-ctx, Q6_K better for chat/code/agentic.
+See `memory/nvfp4_vs_q6k_moe_2026_04_24.md`.
+
 ## Referenzen
 
 - `docs/SM120_OPTIMIZATION_STATUS.md` — Bottleneck-Analyse Decode/Prefill
