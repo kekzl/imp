@@ -365,13 +365,27 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // not about swapping kernel variants.
     }
 
-    // --- Auto-detect KV cache dtype ---
-    // Default to FP8 E4M3 for ~50% KV VRAM savings.
-    // Model-specific overrides (e.g. Gemma-4 → FP16) run later and may revert this.
-    // Under IMP_DEBUG_RAW, keep FP16 for byte-identical comparison.
-    if (config_.kv_cache_dtype == DType::FP16 && !debug_raw_) {
+    // --- KV cache dtype policy ---
+    // Default: FP16 (safe). FP8 E4M3 is opt-in via --kv-fp8 / IMP_KV_FP8=1.
+    //
+    // Rationale: the auto-upgrade to FP8 was found (2026-04-24) to produce
+    // NaN logits on several model families (Mistral-Small-3.1, DeepSeek-R1,
+    // Qwen3.5-4B/9B GDN, Gemma-4) due to a KV-write stride bug that has not
+    // been root-caused yet. Correctness-first: users who want the 50% KV VRAM
+    // savings explicitly ask for FP8 via the existing flag.
+    //
+    // Legacy escape hatches kept for compatibility:
+    // - IMP_KV_FP16=1   forces FP16 (no-op under the new default; useful when
+    //                   something else re-enables FP8 downstream).
+    // - IMP_KV_FP8_AUTO=1 restores the old opt-out auto-upgrade behavior for
+    //                   users who rely on it for batch-serving VRAM budgets.
+    const bool force_kv_fp16  = (std::getenv("IMP_KV_FP16") != nullptr);
+    const bool fp8_auto_legacy = (std::getenv("IMP_KV_FP8_AUTO") != nullptr);
+    if (fp8_auto_legacy && config_.kv_cache_dtype == DType::FP16 && !debug_raw_ && !force_kv_fp16) {
         config_.kv_cache_dtype = DType::FP8_E4M3;
-        IMP_LOG_INFO("KV cache dtype: auto → FP8_E4M3");
+        IMP_LOG_INFO("KV cache dtype: IMP_KV_FP8_AUTO=1 → FP8_E4M3 (legacy opt-out)");
+    } else if (config_.kv_cache_dtype == DType::FP16) {
+        IMP_LOG_INFO("KV cache dtype: FP16 (default — pass --kv-fp8 for FP8 E4M3 memory savings)");
     }
 
     // ROOT CAUSE of FP8-KV NaN bug (found 2026-04-24): non-deterministic
@@ -448,10 +462,17 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
 
     // --- Auto-detect FP8 prefill ---
-    // Under IMP_DEBUG_RAW, leave explicitly disabled for FP16 parity.
-    if (!config_.use_fp8_prefill && !debug_raw_) {
+    // Under IMP_DEBUG_RAW or explicit IMP_NO_FP8_PREFILL, keep disabled.
+    // IMP_NO_FP8_PREFILL=1 is the user-facing escape hatch: some models
+    // (e.g. DeepSeek-R1-Distill-Qwen-14B Q6_K) produce garbage decode with
+    // FP8 weight cache active — accumulated dequant error through deep
+    // narrow-GQA stacks.
+    const bool no_fp8_prefill = (std::getenv("IMP_NO_FP8_PREFILL") != nullptr);
+    if (!config_.use_fp8_prefill && !debug_raw_ && !no_fp8_prefill) {
         config_.use_fp8_prefill = true;
         IMP_LOG_INFO("FP8 prefill: auto → enabled");
+    } else if (no_fp8_prefill) {
+        IMP_LOG_INFO("FP8 prefill: disabled (IMP_NO_FP8_PREFILL=1)");
     }
 
     // --- Resolve auto-detection flags ---

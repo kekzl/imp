@@ -34,7 +34,15 @@ void print_usage(const char* prog) {
         "  --interactive         Run in interactive chat mode\n"
         "  --device <n>          CUDA device ID (default: 0)\n"
         "  --gpu-layers <n>      Layers to keep on GPU (-1 = all) (default: -1)\n"
-        "  --kv-fp8              Use FP8 E4M3 KV cache (halves KV memory)\n"
+        "  --kv-fp8              Opt in to FP8 E4M3 KV cache (halves KV memory).\n"
+        "                        Default is FP16 KV — FP8 is not safe on every\n"
+        "                        model (Mistral-Small-3.1 Q6_K, DeepSeek-R1,\n"
+        "                        Qwen3.5-GDN Q8_0, Gemma-4 all hit a stride bug).\n"
+        "  --kv-fp16             (default, no-op) — was an escape hatch under\n"
+        "                        the old auto-FP8 default.\n"
+        "  --no-fp8-prefill      Disable auto FP8 weight cache for prefill.\n"
+        "                        Use with --kv-fp16 --no-nvfp4 for full FP16\n"
+        "                        path (fixes DeepSeek-R1 Q6_K garbage output).\n"
         "  --kv-int8             Use INT8 KV cache with dp4a attention (halves KV memory)\n"
         "  --kv-int4             Use INT4 KV cache (quarters KV memory)\n"
         "  --kv-turboquant       Use TurboQuant KV cache (PolarQuant + QJL, ~3x K reduction)\n"
@@ -138,6 +146,11 @@ CliArgs parse_args(int argc, char** argv) {
             args.gpu_layers = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--kv-fp8") == 0) {
             args.kv_fp8 = true;
+        } else if (std::strcmp(arg, "--kv-fp16") == 0) {
+            // Force FP16 KV cache via the same IMP_KV_FP16 env var the engine reads.
+            setenv("IMP_KV_FP16", "1", 1);
+        } else if (std::strcmp(arg, "--no-fp8-prefill") == 0) {
+            setenv("IMP_NO_FP8_PREFILL", "1", 1);
         } else if (std::strcmp(arg, "--kv-int8") == 0) {
             args.kv_int8 = true;
         } else if (std::strcmp(arg, "--kv-int4") == 0) {
