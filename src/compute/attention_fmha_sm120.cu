@@ -151,9 +151,12 @@ fmha_sm120_kernel(
 
     // ---- zero output accumulator + init running softmax state ---------------
     {
-        const int total = Bq * head_dim;
-        for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
-            O_acc[i] = 0.0f;
+        // float4 = 4 FP32 zeros per store. Bq*HD is always a multiple of 4
+        // (HD ∈ {64,96,128,256}, Bq ∈ {32,64,128}).
+        const int total_vec4 = (Bq * head_dim) / 4;
+        const float4 zero = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
+            reinterpret_cast<float4*>(O_acc)[vi] = zero;
         }
     }
     if (tid < Bq) {
@@ -384,15 +387,22 @@ fmha_sm120_kernel(
         __syncthreads();
     }
 
-    // ---- write final output to global memory ----
+    // ---- write final output to global memory (vectorized: 4 FP32 → 4 FP16 per iter) ----
     {
-        const int total = Bq * head_dim;
-        for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
+        const int total_vec4 = (Bq * head_dim) / 4;
+        for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
+            int i = vi * 4;
             int r = i / head_dim;
-            if (q_start + r < seq_q) {
-                O_ptr[(int64_t)r * q_row_stride + (i % head_dim)] =
-                    __float2half(O_acc[i]);
-            }
+            if (q_start + r >= seq_q) continue;
+            // 4 FP32 → 2 half2 via __float22half2_rn → store as float (= 4 halves packed)
+            float4 v = reinterpret_cast<const float4*>(O_acc)[vi];
+            half2 lo = __float22half2_rn(make_float2(v.x, v.y));
+            half2 hi = __float22half2_rn(make_float2(v.z, v.w));
+            uint2 packed;
+            packed.x = *reinterpret_cast<const uint32_t*>(&lo);
+            packed.y = *reinterpret_cast<const uint32_t*>(&hi);
+            *reinterpret_cast<uint2*>(
+                &O_ptr[(int64_t)r * q_row_stride + (i % head_dim)]) = packed;
         }
     }
 }
@@ -657,10 +667,13 @@ fmha_sm120_fp8_kernel(
         // supported HDs: 64,96,128,256 × Bq divisible configs all hit the vec4 fast path).
     }
 
-    // Zero O_acc + init softmax
+    // Zero O_acc (vectorized float4 = 4 FP32 zeros/iter) + init softmax
     {
-        const int total = Bq * head_dim;
-        for (int i = tid; i < total; i += SM120_BLOCK_THREADS) O_acc[i] = 0.0f;
+        const int total_vec4 = (Bq * head_dim) / 4;
+        const float4 zero = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
+            reinterpret_cast<float4*>(O_acc)[vi] = zero;
+        }
     }
     if (tid < Bq) { row_m[tid] = -FLT_MAX; row_l[tid] = 0.0f; }
     __syncthreads();
@@ -896,13 +909,21 @@ fmha_sm120_fp8_kernel(
         __syncthreads();
     }
 
-    // Write output
+    // Write output (vectorized: 4 FP32 → 4 FP16 per iter)
     {
-        const int total = Bq * head_dim;
-        for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
+        const int total_vec4 = (Bq * head_dim) / 4;
+        for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
+            int i = vi * 4;
             int r = i / head_dim;
-            if (q_start + r < seq_q)
-                O_ptr[(int64_t)r * q_row_stride + (i % head_dim)] = __float2half(O_acc[i]);
+            if (q_start + r >= seq_q) continue;
+            float4 v = reinterpret_cast<const float4*>(O_acc)[vi];
+            half2 lo = __float22half2_rn(make_float2(v.x, v.y));
+            half2 hi = __float22half2_rn(make_float2(v.z, v.w));
+            uint2 packed;
+            packed.x = *reinterpret_cast<const uint32_t*>(&lo);
+            packed.y = *reinterpret_cast<const uint32_t*>(&hi);
+            *reinterpret_cast<uint2*>(
+                &O_ptr[(int64_t)r * q_row_stride + (i % head_dim)]) = packed;
         }
     }
 }
