@@ -1125,16 +1125,48 @@ static bool upload_expert_weights(
         // CUDA driver overhead on WSL2/WDDM: cudaMalloc alignment, page tables,
         // and WDDM shared memory management consume ~30% beyond the requested size.
         // Empirical on RTX 5090 WSL2: 22 GiB expert alloc leaves 0 MiB from 28.7 GiB free.
-        // IMP_EXPERT_OVERHEAD_PCT: override default 30% (integer 0..50). Useful for
-        // debugging: lowering forces more experts onto GPU, tests host-resident path.
-        int overhead_pct = 30;
+        //
+        // Auto-pick default: use 10% (aggressive) if ALL experts would fit with
+        // that overhead, else 30% (conservative). This saves users from a
+        // silent 3× perf penalty on Qwen3-Coder-30B / Qwen3.6-35B-class MoE
+        // models where the conservative default unnecessarily offloads experts
+        // to host (measured: 77 → 237 tok/s with 10% vs 30% on Qwen3-Coder-30B
+        // Q6_K, RTX 5090 native Linux).
+        //
+        // IMP_EXPERT_OVERHEAD_PCT: explicit override (integer 0..50). Required
+        // on WSL2/WDDM where the 10% auto-aggressive path may OOM at alloc time.
+        int overhead_pct;
+        bool user_set_overhead = false;
         if (const char* s = getenv("IMP_EXPERT_OVERHEAD_PCT")) {
             int v = atoi(s);
-            if (v >= 0 && v <= 50) overhead_pct = v;
+            if (v >= 0 && v <= 50) {
+                overhead_pct = v;
+                user_set_overhead = true;
+            } else {
+                overhead_pct = 30;
+            }
+        } else {
+            // Auto-pick: probe with aggressive 10%. If all experts fit, use it.
+            // Else fall back to conservative 30%.
+            size_t aggressive_overhead = static_cast<size_t>(free_mem * 10 / 100);
+            size_t aggressive_reserve  = expert_reserve_bytes + aggressive_overhead;
+            size_t aggressive_budget   = (free_mem > aggressive_reserve)
+                                         ? (free_mem - aggressive_reserve) : 0;
+            if (aggressive_budget >= total_expert_bytes) {
+                overhead_pct = 10;
+                IMP_LOG_INFO("Expert offload: all experts fit with 10%% overhead "
+                             "(%.2f GiB experts, %.2f GiB free) — picking aggressive. "
+                             "Set IMP_EXPERT_OVERHEAD_PCT=30 to force conservative.",
+                             total_expert_bytes / (1024.0*1024.0*1024.0),
+                             free_mem / (1024.0*1024.0*1024.0));
+            } else {
+                overhead_pct = 30;
+            }
         }
         size_t overhead = static_cast<size_t>(free_mem * overhead_pct / 100);
         size_t total_reserve = expert_reserve_bytes + overhead;
         size_t budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
+        (void)user_set_overhead;
 
         // IMP_FORCE_HOST_EXPERTS=N: debug flag to force the last N MoE layers
         // off-GPU regardless of budget. Use for reproducing host-resident path
