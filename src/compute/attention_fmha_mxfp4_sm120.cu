@@ -205,14 +205,20 @@ fmha_sm120_mxfp4_kernel(
         // Opt 4: Load Q FP16 → S_tile (as staging), then read from shared for both passes.
         half* Q_stage = reinterpret_cast<half*>(S_tile);
         {
-            const int total = Bq * head_dim;
-            for (int i = tid; i < total; i += MX_BLOCK_THREADS) {
+            // float4 = 8 halves per iter (all supported HDs are multiples of 8)
+            const int total_vec8 = (Bq * head_dim) / 8;
+            for (int vi = tid; vi < total_vec8; vi += MX_BLOCK_THREADS) {
+                int i = vi * 8;
                 int r = i / head_dim;
                 int d = i % head_dim;
-                if (q_start + r < seq_q)
-                    Q_stage[i] = Q_ptr[(int64_t)r * q_row_stride + d];
-                else
-                    Q_stage[i] = __float2half(0.0f);
+                float4* dst = reinterpret_cast<float4*>(&Q_stage[i]);
+                if (q_start + r < seq_q) {
+                    const float4* src = reinterpret_cast<const float4*>(
+                        &Q_ptr[(int64_t)r * q_row_stride + d]);
+                    *dst = *src;
+                } else {
+                    *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                }
             }
         }
         __syncthreads();
@@ -283,8 +289,12 @@ fmha_sm120_mxfp4_kernel(
 
     // Zero O accumulator + init softmax state
     {
-        const int total = Bq * head_dim;
-        for (int i = tid; i < total; i += MX_BLOCK_THREADS) O_acc[i] = 0.0f;
+        // float4 = 4 FP32 zeros per iter
+        const int total_vec4 = (Bq * head_dim) / 4;
+        const float4 zero = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        for (int vi = tid; vi < total_vec4; vi += MX_BLOCK_THREADS) {
+            reinterpret_cast<float4*>(O_acc)[vi] = zero;
+        }
     }
     if (tid < Bq) { row_m[tid] = -FLT_MAX; row_l[tid] = 0.0f; }
     bool first_kv_iter = true;  // skip O_acc rescale on first tile (l_old=0 → rescale=0)
@@ -318,16 +328,22 @@ fmha_sm120_mxfp4_kernel(
         // ---- Quantize K tile to FP4 (Opt 1: shared-memory staging) ----
         if constexpr (can_stage_in_stile) {
             // Load K FP16 → S_tile (as staging buffer), then read from shared
+            // float4 = 8 halves per iter
             half* K_stage = reinterpret_cast<half*>(S_tile);
             {
-                const int total = Bkv * head_dim;
-                for (int i = tid; i < total; i += MX_BLOCK_THREADS) {
+                const int total_vec8 = (Bkv * head_dim) / 8;
+                for (int vi = tid; vi < total_vec8; vi += MX_BLOCK_THREADS) {
+                    int i = vi * 8;
                     int r = i / head_dim;
                     int d = i % head_dim;
-                    if (kv_start + r < seq_kv)
-                        K_stage[i] = K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d];
-                    else
-                        K_stage[i] = __float2half(0.0f);
+                    float4* dst = reinterpret_cast<float4*>(&K_stage[i]);
+                    if (kv_start + r < seq_kv) {
+                        const float4* src = reinterpret_cast<const float4*>(
+                            &K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
+                        *dst = *src;
+                    } else {
+                        *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                    }
                 }
             }
             __syncthreads();
@@ -684,13 +700,21 @@ fmha_sm120_mxfp4_kernel(
         __syncthreads();
     }
 
-    // ---- Write final output to global memory ----
+    // ---- Write final output (vectorized: 4 FP32 → 4 FP16 per iter) ----
     {
-        const int total = Bq * head_dim;
-        for (int i = tid; i < total; i += MX_BLOCK_THREADS) {
+        const int total_vec4 = (Bq * head_dim) / 4;
+        for (int vi = tid; vi < total_vec4; vi += MX_BLOCK_THREADS) {
+            int i = vi * 4;
             int r = i / head_dim;
-            if (q_start + r < seq_q)
-                O_ptr[(int64_t)r * q_row_stride + (i % head_dim)] = __float2half(O_acc[i]);
+            if (q_start + r >= seq_q) continue;
+            float4 v = reinterpret_cast<const float4*>(O_acc)[vi];
+            half2 lo = __float22half2_rn(make_float2(v.x, v.y));
+            half2 hi = __float22half2_rn(make_float2(v.z, v.w));
+            uint2 packed;
+            packed.x = *reinterpret_cast<const uint32_t*>(&lo);
+            packed.y = *reinterpret_cast<const uint32_t*>(&hi);
+            *reinterpret_cast<uint2*>(
+                &O_ptr[(int64_t)r * q_row_stride + (i % head_dim)]) = packed;
         }
     }
 }
