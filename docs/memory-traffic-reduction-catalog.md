@@ -35,7 +35,7 @@ entirely.
 
 | # | Option | Gain | VRAM | Qualität | Aufwand | Status |
 |---|---|---|---|---|---|---|
-| K1 | INT4 KV-Cache | 50% KV-Traffic | -50% KV | -0.1 bis -0.3 PPL | mittel | teilweise (Stubs) |
+| K1 | INT4 KV-Cache | **-22% decode @ 20K ctx** (!) | -75% KV | coherent (tested) | mittel | **shipped aber Perf-Regression — siehe [int4_kv_validation_2026_04_24.md](../memory/int4_kv_validation_2026_04_24.md)** |
 | K2 | Multi-Head Latent Attention (MLA, DeepSeek) | -90% KV-VRAM | -90% | gleich per model | hoch (per-model impl) | nicht da |
 | K3 | YOCO / Cross-Layer KV-Sharing | -50% KV traffic | -50% | per model unterschiedlich | hoch | nicht da |
 | K4 | Attention Sinks + Sliding Window (StreamingLLM) | konstanter KV, unbounded ctx | fix | minimal (long-range weg) | klein | vorhanden |
@@ -86,15 +86,18 @@ effektive Wartezeit auf Traffic.
 
 ## Top-Kandidaten — ROI-sortiert, noch nicht geshippt
 
-1. **K1 INT4 KV-Cache fertigstellen** — Stubs existieren, größter
-   einzelner ROI für lange Kontexte, ~2-3 Tage. Ohne Per-Model-Arbeit.
+1. **K1-fix INT4 KV Decode-Kernel** — KV-Cache bereits geshippt aber **Perf-Regression**:
+   -4% @ short ctx, -22% @ 20K ctx (Validation 2026-04-24). Kernel-Investigation
+   nötig — Dequant-Overhead + Scale-Traffic überwiegen Bandwidth-Ersparnis.
+   Wenn fixbar: echter 2× Win @ langer ctx.
 2. **W2 EAGLE-3 Revisit** — dead_ends.md markiert alte Version gescheitert,
    aber active development bei EAGLE-Repo. Bei Accept-Rate >70%: 1.5-2×
    decode.
 3. **K5 Token-Eviction (H2O)** — lange Kontexte, moderate Qualitätsverluste,
    ~1 Woche Arbeit. Orthogonal zu K4/K6.
 4. **M1 Expert-Prefetch** — MoE-Modelle mit Host-Experts. Pipeline-Parallelism
-   zwischen Router-Output und Expert-Load.
+   zwischen Router-Output und Expert-Load. Braucht separaten Copy-Stream
+   + Events für Cross-Layer-Overlap.
 5. **W3 Medusa Heads** — lossless, orthogonal zu EAGLE, kleinere VRAM-Kosten.
 
 ## Was bereits gewonnen wurde (Referenz)
