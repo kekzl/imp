@@ -622,23 +622,25 @@ fmha_sm120_fp8_kernel(
     float*   row_m   = O_acc + Bq * head_dim;
     float*   row_l   = row_m + Bq;
 
-    // Load Q tile and convert to FP8 E4M3
+    // Load Q tile and convert to FP8 E4M3 (vectorized: 4 halves → 4 FP8 bytes per cvt pair).
+    // HW cvt.rn.satfinite.e4m3x2.f16x2 already clamps to ±448 — no manual saturate.
     {
-        const int total = Bq * head_dim;
-        for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
+        const int total_vec4 = (Bq * head_dim) / 4;
+        for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
+            int i = vi * 4;
             int r = i / head_dim;
             int d = i % head_dim;
-            if (q_start + r < seq_q) {
-                half val = Q_ptr[(int64_t)r * q_row_stride + d];
-                // Saturate FP16 → FP8 E4M3 (range [-448, 448])
-                float fv = __half2float(val);
-                fv = fminf(fmaxf(fv, -448.0f), 448.0f);
-                // Simple scalar FP16→FP8: use hardware cvt if available
-                Q_fp8[i] = static_cast<uint8_t>(__nv_fp8_e4m3(fv).__x);
-            } else {
-                Q_fp8[i] = 0;
+            // Out-of-range rows zero-fill as u32 (4 bytes)
+            if (q_start + r >= seq_q) {
+                reinterpret_cast<uint32_t*>(Q_fp8)[vi] = 0;
+                continue;
             }
+            // 4 consecutive halves are always within head_dim (HD % 4 == 0 for Bq multiples).
+            const half* src = &Q_ptr[(int64_t)r * q_row_stride + d];
+            reinterpret_cast<uint32_t*>(Q_fp8)[vi] = cvt_4xfp16_to_4xe4m3(src);
         }
+        // Scalar tail if Bq*head_dim isn't a multiple of 4 (shouldn't happen on
+        // supported HDs: 64,96,128,256 × Bq divisible configs all hit the vec4 fast path).
     }
 
     // Zero O_acc + init softmax
@@ -673,20 +675,19 @@ fmha_sm120_fp8_kernel(
     for (int j = first_kv_tile; j < num_kv_tiles; j++) {
         const int kv_start = j * Bkv;
 
-        // Load K tile and convert to FP8
+        // Load K tile and convert to FP8 (vectorized: 4 halves → 4 FP8 bytes).
         {
-            const int total = Bkv * head_dim;
-            for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
+            const int total_vec4 = (Bkv * head_dim) / 4;
+            for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
+                int i = vi * 4;
                 int r = i / head_dim;
                 int d = i % head_dim;
-                if (kv_start + r < seq_kv) {
-                    half val = K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d];
-                    float fv = __half2float(val);
-                    fv = fminf(fmaxf(fv, -448.0f), 448.0f);
-                    KV_fp8[i] = static_cast<uint8_t>(__nv_fp8_e4m3(fv).__x);
-                } else {
-                    KV_fp8[i] = 0;
+                if (kv_start + r >= seq_kv) {
+                    reinterpret_cast<uint32_t*>(KV_fp8)[vi] = 0;
+                    continue;
                 }
+                const half* src = &K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d];
+                reinterpret_cast<uint32_t*>(KV_fp8)[vi] = cvt_4xfp16_to_4xe4m3(src);
             }
         }
         __syncthreads();
