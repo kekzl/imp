@@ -203,6 +203,71 @@ bool CudaGraphCapture::try_update(cudaGraph_t new_graph) {
     return true;
 }
 
+void CudaGraphCapture::drop_graph_keep_exec() {
+    if (graph_) {
+        cudaGraphDestroy(graph_);
+        graph_ = nullptr;
+    }
+    capture_stream_ = nullptr;
+    // graph_exec_ stays valid; captured_ stays true since the exec is usable.
+}
+
+bool CudaGraphCapture::end_capture_and_update() {
+    if (!capture_stream_) {
+        return false;
+    }
+
+    cudaGraph_t new_graph = nullptr;
+    cudaError_t err = cudaStreamEndCapture(capture_stream_, &new_graph);
+    graph_diag::g_phase = graph_diag::Phase::NORMAL;
+    if (err != cudaSuccess) {
+        IMP_LOG_ERROR("CudaGraphCapture: end_capture failed: %s",
+                      cudaGetErrorString(err));
+        capture_stream_ = nullptr;
+        return false;
+    }
+
+    // PDL edge conversion before update/instantiate so both paths have it.
+    if (pdl::is_available()) {
+        int converted = apply_pdl_edges(new_graph);
+        if (converted > 0)
+            IMP_LOG_DEBUG("CudaGraphCapture: %d edges converted to PDL", converted);
+    }
+
+    // Fast path: try to update existing exec in place. Avoids destroying and
+    // re-allocating the graph mem pool.
+    if (graph_exec_ != nullptr) {
+        cudaGraphExecUpdateResultInfo info;
+        cudaError_t ue = cudaGraphExecUpdate(graph_exec_, new_graph, &info);
+        if (ue == cudaSuccess && info.result == cudaGraphExecUpdateSuccess) {
+            if (graph_) cudaGraphDestroy(graph_);
+            graph_ = new_graph;
+            captured_ = true;
+            capture_stream_ = nullptr;
+            return true;
+        }
+        // Update failed (topology changed) — fall through to reinstantiate.
+        cudaGraphExecDestroy(graph_exec_);
+        graph_exec_ = nullptr;
+    }
+
+    if (graph_) cudaGraphDestroy(graph_);
+    graph_ = new_graph;
+    err = cudaGraphInstantiate(&graph_exec_, graph_, 0);
+    if (err != cudaSuccess) {
+        IMP_LOG_ERROR("CudaGraphCapture: instantiate failed: %s",
+                      cudaGetErrorString(err));
+        cudaGraphDestroy(graph_);
+        graph_ = nullptr;
+        capture_stream_ = nullptr;
+        return false;
+    }
+
+    captured_ = true;
+    capture_stream_ = nullptr;
+    return true;
+}
+
 void CudaGraphCapture::reset() {
     bool had_exec = (graph_exec_ != nullptr);
     if (graph_exec_) {
@@ -267,7 +332,10 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
 
         decode_fn_(stream);
 
-        if (!graph_.end_capture()) {
+        // Prefer the update path so re-captures (after invalidate_for_update)
+        // reuse the existing exec via cudaGraphExecUpdate. On first capture
+        // (no prior exec) this degrades cleanly to instantiate.
+        if (!graph_.end_capture_and_update()) {
             IMP_LOG_ERROR("CudaGraphRunner: capture failed — falling back to per-step decode "
                           "(up to 15x slower). Check for unsupported CUDA operations in the "
                           "forward pass.");
@@ -315,6 +383,16 @@ void CudaGraphRunner::invalidate() {
     capture_failed_ = false;
     last_batch_size_ = -1;
     last_max_blocks_ = -1;
+}
+
+void CudaGraphRunner::invalidate_for_update() {
+    // Keep graph_exec_ alive so the next capture can run cudaGraphExecUpdate
+    // in-place. Skip warmup on the next execute() by leaving step_count_ at
+    // warmup_steps_ — cuBLAS autotuning already ran during the prior capture.
+    graph_.drop_graph_keep_exec();
+    graph_.mark_needs_recapture();
+    step_count_ = warmup_steps_;
+    capture_failed_ = false;
 }
 
 // ---------------------------------------------------------------------------

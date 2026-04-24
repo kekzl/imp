@@ -207,7 +207,7 @@ NgramSpecDecoder::VerifyResult NgramSpecDecoder::verify(
                       verify_graphs_[n_verify]);
     if (use_graph) {
         if (verify_graph_max_blocks_[n_verify] != n_blocks) {
-            verify_graphs_[n_verify]->invalidate();
+            verify_graphs_[n_verify]->invalidate_for_update();
             verify_graph_max_blocks_[n_verify] = n_blocks;
         }
         verify_graphs_[n_verify]->set_decode_fn(

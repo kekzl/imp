@@ -1991,7 +1991,10 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         auto& graph_runner = decode_graph_pool_[graph_idx];
 
         if (gpu_batch.max_blocks_per_seq != last_decode_max_blocks_per_graph_[graph_idx]) {
-            graph_runner.invalidate();
+            // Topology stable across max_blocks growth (same kernels, only
+            // grid dims / params differ) — cudaGraphExecUpdate handles this
+            // without tearing down the exec + graph mem pool.
+            graph_runner.invalidate_for_update();
             last_decode_max_blocks_per_graph_[graph_idx] = gpu_batch.max_blocks_per_seq;
         }
 

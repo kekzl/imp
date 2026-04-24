@@ -171,9 +171,11 @@ std::vector<int32_t> SelfSpeculativeDecoder::draft_tokens(
     int max_blocks_per_seq = (n_blocks + 7) & ~7;
     if (max_blocks_per_seq < 8) max_blocks_per_seq = 8;
 
-    // Invalidate graph if padded block count changed (grid size depends on it)
+    // Invalidate graph if padded block count changed (grid size depends on it).
+    // Topology stays stable — only grid dims / params differ — so use the
+    // update path which reuses the exec via cudaGraphExecUpdate.
     if (max_blocks_per_seq != draft_graph_max_blocks_) {
-        draft_graph_.invalidate();
+        draft_graph_.invalidate_for_update();
         draft_graph_max_blocks_ = max_blocks_per_seq;
     }
 
@@ -346,7 +348,7 @@ SelfSpeculativeDecoder::verify(const std::vector<int32_t>& draft,
                       verify_graphs_[n_verify]);
     if (use_graph) {
         if (verify_graph_max_blocks_[n_verify] != max_blocks_per_seq) {
-            verify_graphs_[n_verify]->invalidate();
+            verify_graphs_[n_verify]->invalidate_for_update();
             verify_graph_max_blocks_[n_verify] = max_blocks_per_seq;
         }
         verify_graphs_[n_verify]->set_decode_fn(

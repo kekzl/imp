@@ -26,6 +26,21 @@ public:
     // Returns true if the update succeeded (topology unchanged).
     bool try_update(cudaGraph_t new_graph);
 
+    // End capture and update the existing exec in-place if possible.
+    // Falls back to full re-instantiate if topology changed or no exec
+    // exists. Skips cudaDeviceGraphMemTrim on fast path to avoid churn
+    // during frequent re-captures (e.g. KV block table growth).
+    bool end_capture_and_update();
+
+    // Release graph_ only (keep graph_exec_ alive for in-place update).
+    // Called between a successful try_update and the next capture.
+    void drop_graph_keep_exec();
+
+    // Mark captured_ as false (but keep exec / graph alive if held).
+    // Used by CudaGraphRunner to force a re-capture pass while still
+    // enabling cudaGraphExecUpdate against the retained exec.
+    void mark_needs_recapture() { captured_ = false; }
+
 private:
     cudaGraph_t graph_ = nullptr;
     cudaGraphExec_t graph_exec_ = nullptr;
@@ -57,8 +72,14 @@ public:
     bool execute(cudaStream_t stream);
 
     // Mark the current graph as invalid (e.g., batch size changed).
-    // Next execute() will re-capture.
+    // Next execute() will re-capture. Fully destroys exec_ and graph_.
     void invalidate();
+
+    // Soft invalidate: keep graph_exec_ alive so the next capture can try
+    // cudaGraphExecUpdate in-place. Use when topology is unchanged (e.g.
+    // only kernel params / grid dims differ). Skips the warmup step on the
+    // next execute() since cuBLAS algorithms are already tuned.
+    void invalidate_for_update();
 
     // Check if graph is ready for replay
     bool is_ready() const { return graph_.is_captured(); }
