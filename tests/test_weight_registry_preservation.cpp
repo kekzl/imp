@@ -195,6 +195,37 @@ TEST(StoragePlanner, DualPathHintRoutesCorrectly) {
 }
 
 // ---------------------------------------------------------------------------
+// GDN_GATE is intentionally excluded from overlay enumeration: the GDN scan
+// kernel consumes the raw weight pointer, never through gemm_dispatch, so an
+// overlay copy would burn VRAM without a consumer. Locking this decision
+// against accidental re-introduction.
+// ---------------------------------------------------------------------------
+
+TEST(StoragePlanner, GDNGateIsNotEnumeratedForOverlay) {
+    Model m;
+    m.config_.n_layers = 2;
+
+    for (int i = 0; i < 2; ++i) {
+        TransformerLayer L;
+        L.gdn_gate = make_tensor_stub(TensorKind::GDN_GATE,
+                                      4096, 4096,
+                                      static_cast<uintptr_t>(i * 100 + 1));
+        m.layers_.push_back(std::move(L));
+    }
+
+    PlanHints hints;
+    hints.vram_budget_bytes = size_t{10} * 1024 * 1024 * 1024;
+
+    StoragePlan plan = plan_storage(m, m.config_, hints);
+    ASSERT_FALSE(plan.failed) << plan.failure_reason;
+
+    for (const auto& e : plan.entries) {
+        EXPECT_NE(e.kind, TensorKind::GDN_GATE)
+            << "GDN_GATE must not appear in overlay plan — see storage_planner.cpp";
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Byte accounting: projected_vram_bytes matches sum of entry bytes
 // ---------------------------------------------------------------------------
 

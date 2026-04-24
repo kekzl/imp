@@ -127,7 +127,13 @@ StoragePlan plan_storage(const Model& model, const ModelConfig& cfg,
         add_tensor(L.w_down_shared, TensorKind::W_DOWN, plan, next_id, total, hints);
         add_tensor(L.ssm_in,   TensorKind::SSM_IN,   plan, next_id, total, hints);
         add_tensor(L.ssm_out,  TensorKind::SSM_OUT,  plan, next_id, total, hints);
-        add_tensor(L.gdn_gate, TensorKind::GDN_GATE, plan, next_id, total, hints);
+        // gdn_gate is intentionally NOT enumerated for overlay caching: it is
+        // consumed only by the specialized GDN scan kernel (gdn_kernel.cu) via
+        // the raw `L.gdn_gate.data` pointer, never through `gemm_dispatch`. An
+        // overlay copy would burn VRAM with no consumer. The diagnostic in
+        // pre_dequant_weights would otherwise (correctly) flag a 24-handle
+        // "gap" on every GDN model — see commit 3c7803a for the discovery and
+        // PR #43 for the per-kind gap diagnostic that surfaced this.
         for (const auto& e : L.expert_w_gate) add_tensor(e, TensorKind::EXPERT_GATE, plan, next_id, total, hints);
         for (const auto& e : L.expert_w_up)   add_tensor(e, TensorKind::EXPERT_UP,   plan, next_id, total, hints);
         for (const auto& e : L.expert_w_down) add_tensor(e, TensorKind::EXPERT_DOWN, plan, next_id, total, hints);
