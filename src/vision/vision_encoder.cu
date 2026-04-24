@@ -7,6 +7,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cfloat>
 #include <cmath>
 
@@ -430,6 +431,33 @@ bool VisionEncoder::init(const VisionModel& model, int lm_d_model, cudaStream_t 
 }
 
 bool VisionEncoder::encode(const half* d_pixels, half* d_output, cudaStream_t stream) {
+    // Capture/replay the full encoder forward as a CUDA graph. The 27-layer
+    // SigLIP ViT launches ~200+ kernels per image — graph replay eliminates
+    // the per-kernel launch overhead. The graph is keyed on (d_pixels,
+    // d_output); any pointer change invalidates the captured slot.
+    //
+    // Env override: IMP_NO_VISION_GRAPH=1 forces the eager path (debugging).
+    static const bool disable_graph = (std::getenv("IMP_NO_VISION_GRAPH") != nullptr);
+    if (disable_graph) {
+        return encode_impl(d_pixels, d_output, stream);
+    }
+
+    if (d_pixels != graph_d_pixels_ || d_output != graph_d_output_) {
+        encode_graph_.invalidate();
+        graph_d_pixels_ = d_pixels;
+        graph_d_output_ = d_output;
+    }
+
+    bool ok = true;
+    encode_graph_.set_decode_fn(
+        [this, d_pixels, d_output, &ok](cudaStream_t s) {
+            ok = encode_impl(d_pixels, d_output, s);
+        });
+    encode_graph_.execute(stream);
+    return ok;
+}
+
+bool VisionEncoder::encode_impl(const half* d_pixels, half* d_output, cudaStream_t stream) {
     const auto& cfg = model_->config;
     int np = cfg.num_patches;
     int hd = cfg.hidden_size;

@@ -4,6 +4,7 @@
 #include "runtime/cuda_graph.h"
 #include "memory/kv_cache.h"
 #include "memory/kv_cache_manager.h"
+#include <memory>
 #include <vector>
 #include <cstdint>
 
@@ -68,6 +69,13 @@ private:
     int* d_position_array_ = nullptr;     // [max_k] pre-computed positions for K iterations
     int* d_ctx_len_array_ = nullptr;      // [max_k] pre-computed ctx_lens for K iterations
     int draft_graph_max_blocks_ = -1;     // max_blocks_per_seq used for current graph
+
+    // CUDA graph pool for verify forward pass, indexed by n_verify (2..spec_k+1).
+    // The verify pass has variable batch size (fewer draft tokens than spec_k is
+    // possible), so one graph per n_verify avoids padding compute. Graphs are
+    // invalidated when max_blocks_per_seq changes (block table grew).
+    std::vector<std::unique_ptr<CudaGraphRunner>> verify_graphs_;
+    std::vector<int> verify_graph_max_blocks_;  // per-graph last max_blocks_per_seq
 
     // Stats
     int64_t total_drafted_ = 0;

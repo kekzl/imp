@@ -2,6 +2,7 @@
 
 #include "graph/executor.h"
 #include "memory/kv_cache_manager.h"
+#include "runtime/cuda_graph.h"
 #include "runtime/request.h"
 #include <vector>
 #include <memory>
@@ -61,6 +62,11 @@ private:
     int* d_block_table_ = nullptr;
     int* d_ctx_len_ = nullptr;
     int d_block_table_cap_ = 0;
+
+    // CUDA graph pool for verify forward pass, indexed by n_verify (2..spec_k+1).
+    // See self_speculative.h for invalidation strategy — same here.
+    std::vector<std::unique_ptr<CudaGraphRunner>> verify_graphs_;
+    std::vector<int> verify_graph_max_blocks_;
 
     // Stats
     int64_t total_drafted_ = 0;

@@ -652,6 +652,25 @@ bool Engine::init_weights() {
         }
     }
 
+    // Tune the default cudaMallocAsync pool so it retains freed memory instead
+    // of returning it to the driver. Many paths (prefill metadata, MoE scratch,
+    // spec decoder block tables, vision staging) use cudaMallocAsync with the
+    // default pool; the default threshold is 0, which calls cuMemUnmap on every
+    // free. Setting UINT64_MAX keeps allocations for re-use — the KV cache and
+    // workspaces already own their memory through the DeviceAllocator, so the
+    // default-pool footprint stays small.
+    {
+        cudaMemPool_t default_pool = nullptr;
+        int dev = 0;
+        cudaGetDevice(&dev);
+        if (cudaDeviceGetDefaultMemPool(&default_pool, dev) == cudaSuccess &&
+            default_pool != nullptr) {
+            uint64_t threshold = UINT64_MAX;
+            cudaMemPoolSetAttribute(default_pool,
+                                    cudaMemPoolAttrReleaseThreshold, &threshold);
+        }
+    }
+
     // Compute VRAM reserve for expert weight upload
     size_t expert_reserve = executor_->workspace_estimate();
     {
@@ -1047,10 +1066,9 @@ bool Engine::init_features() {
         }
     }
     if (config_.enable_self_speculative) {
-        if (config_.use_cuda_graphs) {
-            IMP_LOG_INFO("Disabling CUDA graphs: self-speculative decoding active");
-            config_.use_cuda_graphs = false;
-        }
+        // CUDA graphs stay ON: draft has its own draft_graph_, verify uses a
+        // per-n_verify verify_graphs_ pool, and fallback decode uses the regular
+        // decode_graph_pool_. All three are independent.
         self_spec_decoder_ = std::make_unique<SelfSpeculativeDecoder>();
         SelfSpecConfig ssc;
         ssc.spec_k = config_.self_spec_k;
@@ -1068,10 +1086,8 @@ bool Engine::init_features() {
         }
     }
     if (config_.enable_ngram_spec && !config_.enable_speculative && !config_.enable_self_speculative) {
-        if (config_.use_cuda_graphs) {
-            IMP_LOG_INFO("Disabling CUDA graphs: n-gram speculative decoding active");
-            config_.use_cuda_graphs = false;
-        }
+        // CUDA graphs stay ON: verify uses a per-n_verify verify_graphs_ pool,
+        // fallback decode uses decode_graph_pool_.
         int n_kv = 0;
         for (int i = 0; i < mcfg.n_layers; i++)
             if (model_->layer(i).wq.data && !model_->layer(i).gdn_gate.data) n_kv++;
@@ -1975,7 +1991,10 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
         auto& graph_runner = decode_graph_pool_[graph_idx];
 
         if (gpu_batch.max_blocks_per_seq != last_decode_max_blocks_per_graph_[graph_idx]) {
-            graph_runner.invalidate();
+            // Topology stable across max_blocks growth (same kernels, only
+            // grid dims / params differ) — cudaGraphExecUpdate handles this
+            // without tearing down the exec + graph mem pool.
+            graph_runner.invalidate_for_update();
             last_decode_max_blocks_per_graph_[graph_idx] = gpu_batch.max_blocks_per_seq;
         }
 

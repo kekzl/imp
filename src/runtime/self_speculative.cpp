@@ -70,6 +70,18 @@ bool SelfSpeculativeDecoder::init(GraphExecutor* executor,
     IMP_CUDA_CHECK_LOG(cudaMalloc(&d_position_array_, K * sizeof(int)));
     IMP_CUDA_CHECK_LOG(cudaMalloc(&d_ctx_len_array_, K * sizeof(int)));
 
+    // Pre-size verify graph pool for n_verify ∈ [2, spec_k+1]. One graph per
+    // batch size avoids padding compute when draft shorter than K. Honors
+    // IMP_NO_CUDA_GRAPH — leaving the pool empty forces the eager forward
+    // path inside verify().
+    if (!getenv("IMP_NO_CUDA_GRAPH")) {
+        verify_graphs_.resize(max_n + 1);  // slot 0..1 unused, slots 2..max_n active
+        verify_graph_max_blocks_.assign(max_n + 1, -1);
+        for (int i = 2; i <= max_n; ++i) {
+            verify_graphs_[i] = std::make_unique<CudaGraphRunner>();
+        }
+    }
+
     initialized_ = true;
     if (config.layer_skip) {
         IMP_LOG_INFO("self_spec: layer-skip mode, spec_k=%d, skip layers [%d,%d) of %d (runs %d/%d layers)",
@@ -92,6 +104,7 @@ void SelfSpeculativeDecoder::upload_block_table(int seq_id, cudaStream_t stream)
         d_block_table_cap_ = n_blocks + 16;
         IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_table_, d_block_table_cap_ * sizeof(int)));
         draft_graph_.invalidate();  // device pointer changed
+        for (auto& g : verify_graphs_) if (g) g->invalidate();
     }
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_table_, bt.data(),
                n_blocks * sizeof(int), cudaMemcpyHostToDevice, stream));
@@ -110,6 +123,7 @@ void SelfSpeculativeDecoder::upload_block_table_replicated(
         d_block_table_cap_ = total_entries + 16;
         IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_table_, d_block_table_cap_ * sizeof(int)));
         draft_graph_.invalidate();  // device pointer changed
+        for (auto& g : verify_graphs_) if (g) g->invalidate();
     }
 
     // Build replicated layout on host
@@ -157,9 +171,11 @@ std::vector<int32_t> SelfSpeculativeDecoder::draft_tokens(
     int max_blocks_per_seq = (n_blocks + 7) & ~7;
     if (max_blocks_per_seq < 8) max_blocks_per_seq = 8;
 
-    // Invalidate graph if padded block count changed (grid size depends on it)
+    // Invalidate graph if padded block count changed (grid size depends on it).
+    // Topology stays stable — only grid dims / params differ — so use the
+    // update path which reuses the exec via cudaGraphExecUpdate.
     if (max_blocks_per_seq != draft_graph_max_blocks_) {
-        draft_graph_.invalidate();
+        draft_graph_.invalidate_for_update();
         draft_graph_max_blocks_ = max_blocks_per_seq;
     }
 
@@ -295,7 +311,8 @@ SelfSpeculativeDecoder::verify(const std::vector<int32_t>& draft,
     for (int i = 0; i < n_verify; ++i)
         ctx_lens[i] = position + i + 1;
 
-    // Upload to device
+    // Upload to device (happens BEFORE graph execute — graph does not capture
+    // these memcpys; they stage fresh data into stable device buffers each call)
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_tokens_, verify_tokens.data(),
                n_verify * sizeof(int32_t), cudaMemcpyHostToDevice, stream));
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_positions_, positions.data(),
@@ -303,8 +320,9 @@ SelfSpeculativeDecoder::verify(const std::vector<int32_t>& draft,
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_ctx_len_, ctx_lens.data(),
                n_verify * sizeof(int), cudaMemcpyHostToDevice, stream));
 
-    // Resize workspace for K+1 tokens BEFORE the batched forward
-    (void)executor_->resize_workspace(n_verify, stream);
+    // Workspace is pre-sized to spec_k+1 by step(); no resize here. Using the
+    // larger workspace for an n_verify < spec_k+1 is harmless because kernels
+    // take n_tokens from InferenceState, not from the workspace bound.
 
     // Build inference state for batched decode
     InferenceState state;
@@ -323,11 +341,29 @@ SelfSpeculativeDecoder::verify(const std::vector<int32_t>& draft,
     state.exit_layer = -1;  // full model
     state.per_row_lm_head = true;  // per-row Q8_1 GEMV avoids FP8 per-tensor quantization artifacts
 
-    // forward_batch returns one sampled token per sequence
-    std::vector<int32_t> targets = executor_->forward_batch(state, stream);
+    // Run forward (graph-captured if pool slot available). Sampling stays eager
+    // so per-row argmax + D2H readback runs after the graph replay.
+    Tensor logits;
+    bool use_graph = (n_verify >= 2 && n_verify < static_cast<int>(verify_graphs_.size()) &&
+                      verify_graphs_[n_verify]);
+    if (use_graph) {
+        if (verify_graph_max_blocks_[n_verify] != max_blocks_per_seq) {
+            verify_graphs_[n_verify]->invalidate_for_update();
+            verify_graph_max_blocks_[n_verify] = max_blocks_per_seq;
+        }
+        verify_graphs_[n_verify]->set_decode_fn(
+            [this, &state, &logits](cudaStream_t s) {
+                executor_->forward_logits(state, logits, s);
+            });
+        verify_graphs_[n_verify]->execute(stream);
+        if (logits.data == nullptr) {
+            logits = executor_->get_logits_view(n_verify);
+        }
+    } else {
+        executor_->forward_logits(state, logits, stream);
+    }
 
-    // Resize workspace back to 1 for subsequent draft passes
-    (void)executor_->resize_workspace(1, stream);
+    std::vector<int32_t> targets = executor_->sample_from_logits(logits, state, stream);
 
     // Acceptance: compare target[i] with draft[i]
     int n_accepted = 0;
@@ -359,10 +395,14 @@ std::vector<int32_t> SelfSpeculativeDecoder::step(
         return {};
     }
 
-    // Resize workspace for single-token draft passes
-    (void)executor_->resize_workspace(1, stream);
-
     // 1. Draft K tokens with layer skip/early exit
+    // Ensure workspace fits K+1 tokens (sized once, kept for the engine's
+    // lifetime). Draft uses only 1 token but runs against the larger workspace,
+    // which is harmless — kernels use n_tokens from state, not the workspace max.
+    // Pinning the size stabilises graph capture (both draft_graph_ and
+    // verify_graphs_ require a fixed workspace layout across replays).
+    (void)executor_->resize_workspace(config_.spec_k + 1, stream);
+
     std::vector<int32_t> draft = draft_tokens(last_token, position, seq_id, stream);
     total_drafted_ += draft.size();
 
