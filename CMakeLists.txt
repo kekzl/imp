@@ -165,6 +165,7 @@ if(IMP_USE_CUTLASS)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_mxfp4_sm120.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxfp4_prefill.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_mxf4nvf4_probe.cu)
+    list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_ref.cu)
 endif()
 
 # Note: TurboQuant paged attention previously required a fast-math override
@@ -372,6 +373,7 @@ if(IMP_BUILD_TESTS)
         tests/test_attention_mxfp4.cu
         tests/test_attention_fmha_mxfp4.cu
         tests/test_mxf4nvf4_probe.cu
+        tests/test_nvfp4_quant_ref.cu
         tests/test_softmax.cu
         tests/test_ssm.cu
         tests/test_json_constrain.cu
