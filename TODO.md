@@ -2,35 +2,31 @@
 
 ## Open Work
 
-### Qwen 3.5 GDN Recurrent-State Collapse (REGRESSED from v0.6)
-**Severity: high — blocks production on all Qwen3.5 Q8_0 models.**
+### Qwen 3.5 GDN "Regression" — ROOT CAUSE FOUND: FP8-KV stride bug (2026-04-24)
+**Workaround available via `--kv-fp16` (PR #51).**
 
-Raw-completion and chatml generation both collapse into token repetition after 3–8 tokens on Qwen3.5-4B and Qwen3.5-9B Q8_0:
+Originally reported as a GDN recurrent-state collapse: `" my my my my..."` / `"write a a a a..."` on Qwen3.5-4B and -9B Q8_0 regardless of `IMP_GDN_REF` or `IMP_DEBUG_RAW`. Same afternoon discovered that the bug is the same class that affects Mistral-Small-3.1 Q6_K and DeepSeek-R1-Distill-14B Q6_K: **FP8-E4M3 KV cache produces NaN logits** after the first decode token.
 
+Verified 2026-04-24:
 ```
-prompt: "Hello world, my name is"
-output: " my my my my my my my..."
+# broken (default auto-FP8 KV)
+--model Qwen3.5-4B-Q8_0.gguf --prompt "What is 5+3?" --max-tokens 15
+→ tok=-1 tok=-1 tok=-1 ... / token repetition
 
-prompt: "Once upon a time in a faraway kingdom..."
-output: " journeyed a time who whoed a time."
+# fixed (--kv-fp16, from PR #51)
+... --kv-fp16
+→ "<think> The user is asking for a question"
 ```
 
-Verified on clean main build (2026-04-24): `imp:main` (no Phase 4 changes) reproduces the bug on both Qwen3.5-4B-Q8_0 and Qwen3.5-9B-Q8_0. Qwen3-4B-Q8_0 (dense, non-GDN) does NOT reproduce — isolates bug to GDN scan path.
+Same fix works on Qwen3.5-9B:
+```
+--model Qwen3.5-9B-Q8_0.gguf ... --kv-fp16
+→ "1. **Analyze the question: What is 5+3"
+```
 
-Attempted workarounds (all fail):
-- `--temperature 0.8 --top-p 0.9 --seed 42` → still repetition (distribution is peaked)
-- `IMP_GDN_REF=1` (reference unfused scan) → same collapse pattern ruling out the fused-scan-register-cache
-- `IMP_DEBUG_RAW=1` (all caches off) → same collapse
+Qwen3.5-27B-Q4_K_M (same arch, different quant) never exhibited the bug — confirming it's a quant+KV-cache interaction, not an architectural GDN issue. PR #30's `launch_bounds` and partial-RoPE fixes remain valid; they just weren't the root cause of the symptom users saw in recent weeks.
 
-Root cause unknown. Likely one of:
-- Recurrent state `H[n_heads, state_size, head_dim]` accumulating toward fixed point
-- Output-gate / RMSNormGated+SiLU applying in a state-erasing way
-- Pre-fill vs. decode state-handoff mismatch
-- Sampling-input logit collapse (layer-diff vs llama.cpp would isolate)
-
-Memory note from 2026-04-23 claimed coherence post PR #30 (launch_bounds + partial-RoPE fixes); that claim does not hold on main today. Likely latent under specific prompts / seeds that the benchmark harness happens to not exercise.
-
-**Next steps:** per-layer tensor diff vs llama.cpp on a 20-token decode run; dump `h_state` across tokens to see if state is actually updating; compare against Qwen3.6-A3B (same GDN architecture, was working).
+Underlying FP8-KV stride bug (same one that forces Gemma-4 onto FP16 KV via the hard-coded override at `engine.cpp:492`) is still a separate root-cause work item. The existing Gemma-4 override would need to be generalized; for now PR #51 exposes `--kv-fp16` / `IMP_KV_FP16=1` as user-facing escape hatches.
 
 ### MXFP4 Native GGUF Weight Format
 Plan documented in `docs/MXFP4_GGUF_PLAN.md`. Native MXFP4 weights would feed directly into Blackwell tensor cores via CUTLASS — zero dequant overhead, expected 2-4x prefill speedup vs Q4_K_M.
