@@ -3,6 +3,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -172,20 +173,49 @@ protected:
 
 TEST_F(GDNModelTest, GenerateCoherentOutput) {
     ImpGenerateParams params = imp_generate_params_default();
-    params.max_tokens = 32;
+    params.max_tokens = 64;   // need ≥10 words to exercise the unique-ratio check
     params.temperature = 0.0f;
     params.apply_chat_template = 1;
 
     char output[4096];
     size_t len = 0;
-    ASSERT_EQ(imp_generate(ctx_, "What is the largest planet in our solar system? One word answer.", &params,
+    // A prompt that forces a longer natural answer — "one word" prompts exit
+    // after 2-3 tokens and never stress the recurrent scan past token 3.
+    ASSERT_EQ(imp_generate(ctx_,
+                           "Write a short paragraph about the planet Jupiter.", &params,
                            output, sizeof(output), &len), IMP_SUCCESS);
     EXPECT_GT(len, 0u);
 
-    // GDN model may not follow instructions well at small sizes.
-    // Verify generation is non-degenerate (not all repetition of a single token).
     std::string text(output, len);
     EXPECT_GT(text.size(), 5u) << "Output too short: " << text;
+
+    // Recurrent-state collapse detector: split on whitespace, count unique
+    // words. A degenerate output like " my my my my my..." has many tokens
+    // but very few unique words. This catches the 2026-04-24 GDN regression
+    // that the length-only check above missed.
+    std::vector<std::string> words;
+    {
+        std::string cur;
+        for (char c : text) {
+            if (c == ' ' || c == '\n' || c == '\t') {
+                if (!cur.empty()) { words.push_back(cur); cur.clear(); }
+            } else {
+                cur.push_back(c);
+            }
+        }
+        if (!cur.empty()) words.push_back(cur);
+    }
+    if (words.size() >= 10) {
+        std::set<std::string> unique(words.begin(), words.end());
+        // Require at least 30 % unique words once we have ≥10 words.
+        // Degenerate " my my my my..." × 30 = 30 words, 1 unique = 3 %.
+        const double unique_ratio = static_cast<double>(unique.size()) / words.size();
+        EXPECT_GE(unique_ratio, 0.30)
+            << "Recurrent-state collapse detected: "
+            << unique.size() << " unique / " << words.size()
+            << " total words (" << (unique_ratio * 100.0) << "%)\n"
+            << "Full output: " << text;
+    }
 }
 
 TEST_F(GDNModelTest, MultiTurnGDNState) {

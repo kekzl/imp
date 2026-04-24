@@ -2,6 +2,36 @@
 
 ## Open Work
 
+### Qwen 3.5 GDN Recurrent-State Collapse (REGRESSED from v0.6)
+**Severity: high — blocks production on all Qwen3.5 Q8_0 models.**
+
+Raw-completion and chatml generation both collapse into token repetition after 3–8 tokens on Qwen3.5-4B and Qwen3.5-9B Q8_0:
+
+```
+prompt: "Hello world, my name is"
+output: " my my my my my my my..."
+
+prompt: "Once upon a time in a faraway kingdom..."
+output: " journeyed a time who whoed a time."
+```
+
+Verified on clean main build (2026-04-24): `imp:main` (no Phase 4 changes) reproduces the bug on both Qwen3.5-4B-Q8_0 and Qwen3.5-9B-Q8_0. Qwen3-4B-Q8_0 (dense, non-GDN) does NOT reproduce — isolates bug to GDN scan path.
+
+Attempted workarounds (all fail):
+- `--temperature 0.8 --top-p 0.9 --seed 42` → still repetition (distribution is peaked)
+- `IMP_GDN_REF=1` (reference unfused scan) → same collapse pattern ruling out the fused-scan-register-cache
+- `IMP_DEBUG_RAW=1` (all caches off) → same collapse
+
+Root cause unknown. Likely one of:
+- Recurrent state `H[n_heads, state_size, head_dim]` accumulating toward fixed point
+- Output-gate / RMSNormGated+SiLU applying in a state-erasing way
+- Pre-fill vs. decode state-handoff mismatch
+- Sampling-input logit collapse (layer-diff vs llama.cpp would isolate)
+
+Memory note from 2026-04-23 claimed coherence post PR #30 (launch_bounds + partial-RoPE fixes); that claim does not hold on main today. Likely latent under specific prompts / seeds that the benchmark harness happens to not exercise.
+
+**Next steps:** per-layer tensor diff vs llama.cpp on a 20-token decode run; dump `h_state` across tokens to see if state is actually updating; compare against Qwen3.6-A3B (same GDN architecture, was working).
+
 ### MXFP4 Native GGUF Weight Format
 Plan documented in `docs/MXFP4_GGUF_PLAN.md`. Native MXFP4 weights would feed directly into Blackwell tensor cores via CUTLASS — zero dequant overhead, expected 2-4x prefill speedup vs Q4_K_M.
 
