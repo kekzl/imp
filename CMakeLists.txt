@@ -168,6 +168,7 @@ if(IMP_USE_CUTLASS)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_ref.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/mxf4nvf4_mma_bench.cu)
     list(APPEND IMP_COMPUTE_SOURCES src/compute/nvfp4_quant_hw.cu)
+    list(APPEND IMP_COMPUTE_SOURCES src/compute/attention_fmha_mxf4nvf4_sm120.cu)
 endif()
 
 # Note: TurboQuant paged attention previously required a fast-math override
