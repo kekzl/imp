@@ -1047,10 +1047,9 @@ bool Engine::init_features() {
         }
     }
     if (config_.enable_self_speculative) {
-        if (config_.use_cuda_graphs) {
-            IMP_LOG_INFO("Disabling CUDA graphs: self-speculative decoding active");
-            config_.use_cuda_graphs = false;
-        }
+        // CUDA graphs stay ON: draft has its own draft_graph_, verify uses a
+        // per-n_verify verify_graphs_ pool, and fallback decode uses the regular
+        // decode_graph_pool_. All three are independent.
         self_spec_decoder_ = std::make_unique<SelfSpeculativeDecoder>();
         SelfSpecConfig ssc;
         ssc.spec_k = config_.self_spec_k;
@@ -1068,10 +1067,8 @@ bool Engine::init_features() {
         }
     }
     if (config_.enable_ngram_spec && !config_.enable_speculative && !config_.enable_self_speculative) {
-        if (config_.use_cuda_graphs) {
-            IMP_LOG_INFO("Disabling CUDA graphs: n-gram speculative decoding active");
-            config_.use_cuda_graphs = false;
-        }
+        // CUDA graphs stay ON: verify uses a per-n_verify verify_graphs_ pool,
+        // fallback decode uses decode_graph_pool_.
         int n_kv = 0;
         for (int i = 0; i < mcfg.n_layers; i++)
             if (model_->layer(i).wq.data && !model_->layer(i).gdn_gate.data) n_kv++;

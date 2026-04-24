@@ -33,6 +33,17 @@ bool NgramSpecDecoder::init(GraphExecutor* executor, KVCacheManager* kv_manager,
         return false;
     }
 
+    // Graph pool for verify forward pass (one per n_verify ∈ [2, spec_k+1]).
+    // Sampling stays eager after replay — same pattern as self_speculative.
+    // Honors IMP_NO_CUDA_GRAPH: empty pool forces eager forward in verify().
+    if (!getenv("IMP_NO_CUDA_GRAPH")) {
+        verify_graphs_.resize(max_tokens + 1);
+        verify_graph_max_blocks_.assign(max_tokens + 1, -1);
+        for (int i = 2; i <= max_tokens; ++i) {
+            verify_graphs_[i] = std::make_unique<CudaGraphRunner>();
+        }
+    }
+
     IMP_LOG_INFO("N-gram speculative decoder: k=%d, n=%d", config_.spec_k, config_.ngram_n);
     return true;
 }
@@ -160,6 +171,8 @@ NgramSpecDecoder::VerifyResult NgramSpecDecoder::verify(
         if (d_block_table_) IMP_CUDA_CHECK_LOG(cudaFree(d_block_table_));
         d_block_table_cap_ = bt_total * 2;
         IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_table_, d_block_table_cap_ * sizeof(int)));
+        // Pointer changed → captured graphs hold stale addresses
+        for (auto& g : verify_graphs_) if (g) g->invalidate();
     }
     std::vector<int> h_bt(bt_total, 0);
     for (int c = 0; c < n_verify; c++)
@@ -168,7 +181,9 @@ NgramSpecDecoder::VerifyResult NgramSpecDecoder::verify(
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_table_, h_bt.data(), bt_total * sizeof(int),
                     cudaMemcpyHostToDevice, stream));
 
-    (void)executor_->resize_workspace(n_verify, stream);
+    // Pre-size workspace to spec_k+1 once and keep it — toggling back to 1
+    // between verify steps breaks graph capture (host-side offset recompute).
+    (void)executor_->resize_workspace(config_.spec_k + 1, stream);
 
     InferenceState state;
     state.token_ids = d_tokens_;
@@ -185,9 +200,29 @@ NgramSpecDecoder::VerifyResult NgramSpecDecoder::verify(
     state.temperature = 0.0f;
     state.top_k = 1;
 
-    std::vector<int32_t> targets = executor_->forward_batch(state, stream);
+    // Forward is graph-captured; sampling stays eager so per-row argmax + D2H
+    // readback runs after replay.
+    Tensor logits;
+    bool use_graph = (n_verify >= 2 && n_verify < static_cast<int>(verify_graphs_.size()) &&
+                      verify_graphs_[n_verify]);
+    if (use_graph) {
+        if (verify_graph_max_blocks_[n_verify] != n_blocks) {
+            verify_graphs_[n_verify]->invalidate();
+            verify_graph_max_blocks_[n_verify] = n_blocks;
+        }
+        verify_graphs_[n_verify]->set_decode_fn(
+            [this, &state, &logits](cudaStream_t s) {
+                executor_->forward_logits(state, logits, s);
+            });
+        verify_graphs_[n_verify]->execute(stream);
+        if (logits.data == nullptr) {
+            logits = executor_->get_logits_view(n_verify);
+        }
+    } else {
+        executor_->forward_logits(state, logits, stream);
+    }
 
-    (void)executor_->resize_workspace(1, stream);
+    std::vector<int32_t> targets = executor_->sample_from_logits(logits, state, stream);
 
     // Acceptance: targets[i] vs draft[i]
     VerifyResult result;
