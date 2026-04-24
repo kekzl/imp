@@ -79,7 +79,12 @@ __device__ __forceinline__ uint8_t pack_fp4_pair(float v0, float v1) {
 // Kernel template
 // =============================================================================
 
-template <int Bq, int HD>
+// UseBlockScaleMma=false: legacy kind::f8f6f4.m16n8k32 (2× K-chunks, padded regs).
+// UseBlockScaleMma=true:  new kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64
+//                         (merges 2 legacy K-chunks per issue, half the MMA count).
+// Scale=1.0 uniform (sfa=sfb=0x38383838) keeps the post-MMA manual per-row scaling
+// path identical to the legacy kernel — only the MMA instruction changes.
+template <int Bq, int HD, bool UseBlockScaleMma = false>
 __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1)
 fmha_sm120_mxfp4_kernel(
     const half* __restrict__ Q,
@@ -394,6 +399,65 @@ fmha_sm120_mxfp4_kernel(
             const int thread_in_group = lane_id % 4;
             const int byte_offset = thread_in_group * 4;  // 4 bytes = 8 FP4 nibbles
 
+            if constexpr (UseBlockScaleMma) {
+                // New path: kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64
+                // Each issue consumes 64 K-elements (2× legacy). With uniform
+                // scale=1.0 (sfa=sfb=0x38383838), the block-scale MMA reduces
+                // to a plain E2M1 × E2M1 dot product — output is bit-equivalent
+                // to two legacy m16n8k32 issues summed.
+                // Register distribution (per CUTLASS ALayout/BLayout in
+                // mma_traits_sm120.hpp:136, column-major (M,K) / (N,K)):
+                //   a0: row[group_id],   k-stripe 2k
+                //   a1: row[group_id+8], k-stripe 2k
+                //   a2: row[group_id],   k-stripe 2k+1
+                //   a3: row[group_id+8], k-stripe 2k+1
+                //   b0: col[group_id],   k-stripe 2k
+                //   b1: col[group_id],   k-stripe 2k+1
+                const int k_pairs = hd_chunks_fp4 / 2;
+                for (int k = 0; k < k_pairs; k++) {
+                    const int k0 = 2 * k;
+                    const int k1 = k0 + 1;
+                    const uint8_t* q_base0 = Q_fp4 + ri * MX_MMA_M * hd_half_padded + k0 * FP4_K_BYTES;
+                    const uint8_t* q_base1 = Q_fp4 + ri * MX_MMA_M * hd_half_padded + k1 * FP4_K_BYTES;
+                    uint32_t a0 = *reinterpret_cast<const uint32_t*>(
+                        q_base0 + group_id * hd_half_padded + byte_offset);
+                    uint32_t a1 = *reinterpret_cast<const uint32_t*>(
+                        q_base0 + (group_id + 8) * hd_half_padded + byte_offset);
+                    uint32_t a2 = *reinterpret_cast<const uint32_t*>(
+                        q_base1 + group_id * hd_half_padded + byte_offset);
+                    uint32_t a3 = *reinterpret_cast<const uint32_t*>(
+                        q_base1 + (group_id + 8) * hd_half_padded + byte_offset);
+
+                    const uint8_t* k_base0 = KV_fp4 + ci * MX_MMA_N * hd_half_padded + k0 * FP4_K_BYTES;
+                    const uint8_t* k_base1 = KV_fp4 + ci * MX_MMA_N * hd_half_padded + k1 * FP4_K_BYTES;
+                    uint32_t b0 = *reinterpret_cast<const uint32_t*>(
+                        k_base0 + group_id * hd_half_padded + byte_offset);
+                    uint32_t b1 = *reinterpret_cast<const uint32_t*>(
+                        k_base1 + group_id * hd_half_padded + byte_offset);
+
+                    constexpr uint32_t sfa = 0x38383838u;  // FP8 UE4M3 = 1.0 × 4
+                    constexpr uint32_t sfb = 0x38383838u;
+                    constexpr uint16_t bidA = 0, tidA = 0, bidB = 0, tidB = 0;
+#if __CUDA_ARCH__ >= 1200
+                    asm volatile(
+                        "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 "
+                        "{%0, %1, %2, %3},"
+                        "{%4, %5, %6, %7},"
+                        "{%8, %9},"
+                        "{%10, %11, %12, %13},"
+                        "{%14},"
+                        "{%15, %16},"
+                        "{%17},"
+                        "{%18, %19};\n"
+                        : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
+                        : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
+                          "r"(b0), "r"(b1),
+                          "f"(d0), "f"(d1), "f"(d2), "f"(d3),
+                          "r"(sfa), "h"(bidA), "h"(tidA),
+                          "r"(sfb), "h"(bidB), "h"(tidB));
+#endif
+                }
+            } else {
             for (int k = 0; k < hd_chunks_fp4; k++) {
                 // Load A fragment: a0=row[groupID], a1=row[groupID+8], a2=a3=0
                 uint32_t a0, a1;
@@ -428,6 +492,7 @@ fmha_sm120_mxfp4_kernel(
                       "r"(b0), "r"(b1),
                       "f"(d0), "f"(d1), "f"(d2), "f"(d3));
 #endif
+            }
             }
 
             // Store 16×8 result to S_tile with fused scale + mask (Opt 2).
@@ -635,9 +700,15 @@ static size_t compute_smem_mxfp4(int Bq, int Bkv, int head_dim) {
 bool fmha_sm120_mxfp4_prefill(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
     float scale, bool causal, int sliding_window, float softcap,
-    cudaStream_t stream)
+    cudaStream_t stream,
+    bool use_blockscale)
 {
     if (Q.dtype != DType::FP16) return false;
+    // Blockscale MMA operates on K=64 per issue; head_dim must be a multiple of 64.
+    // head_dim=96 (Gemma-class) is a multiple of 32 but NOT 64 → fall back to legacy.
+    if (use_blockscale && (static_cast<int>(Q.shape[3]) % 64 != 0)) {
+        use_blockscale = false;
+    }
 
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int seq_q      = static_cast<int>(Q.shape[1]);
@@ -685,20 +756,20 @@ bool fmha_sm120_mxfp4_prefill(
                   batch_size, seq_q, seq_kv, n_heads, n_kv_heads, head_dim,
                   Bq, MX_Bkv, smem, causal, sliding_window, softcap);
 
-    #define LAUNCH_FMHA_MXFP4(BQ, HD) do { \
+    #define LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, BS) do { \
         cudaError_t attr_err = cudaFuncSetAttribute( \
-            fmha_sm120_mxfp4_kernel<BQ, HD>, \
+            fmha_sm120_mxfp4_kernel<BQ, HD, BS>, \
             cudaFuncAttributeMaxDynamicSharedMemorySize, \
             static_cast<int>(smem)); \
         if (attr_err != cudaSuccess) { \
-            IMP_LOG_WARN("FMHA MXFP4: cudaFuncSetAttribute failed Bq=%d HD=%d smem=%zu: %s", \
-                         BQ, HD, smem, cudaGetErrorString(attr_err)); \
+            IMP_LOG_WARN("FMHA MXFP4: cudaFuncSetAttribute failed Bq=%d HD=%d bs=%d smem=%zu: %s", \
+                         BQ, HD, (int)BS, smem, cudaGetErrorString(attr_err)); \
             return false; \
         } \
-        cudaFuncSetAttribute(fmha_sm120_mxfp4_kernel<BQ, HD>, \
+        cudaFuncSetAttribute(fmha_sm120_mxfp4_kernel<BQ, HD, BS>, \
             cudaFuncAttributePreferredSharedMemoryCarveout, \
             cudaSharedmemCarveoutMaxShared); \
-        fmha_sm120_mxfp4_kernel<BQ, HD><<<grid, block, smem, stream>>>( \
+        fmha_sm120_mxfp4_kernel<BQ, HD, BS><<<grid, block, smem, stream>>>( \
             reinterpret_cast<const half*>(Q.data), \
             reinterpret_cast<const half*>(K.data), \
             reinterpret_cast<const half*>(V.data), \
@@ -706,6 +777,11 @@ bool fmha_sm120_mxfp4_prefill(
             batch_size, seq_q, seq_kv, \
             n_heads, n_kv_heads, \
             scale, causal, sliding_window, softcap); \
+    } while (0)
+
+    #define LAUNCH_FMHA_MXFP4(BQ, HD) do { \
+        if (use_blockscale) LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, true); \
+        else                LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, false); \
     } while (0)
 
     if (Bq == 128) {
@@ -735,6 +811,7 @@ bool fmha_sm120_mxfp4_prefill(
     }
 
     #undef LAUNCH_FMHA_MXFP4
+    #undef LAUNCH_FMHA_MXFP4_IMPL
     return false;
 }
 

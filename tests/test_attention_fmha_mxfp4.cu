@@ -211,6 +211,110 @@ TEST_F(FhmaMxFP4Test, HD64_LongSeq) {
                      0.5f, 0.1f, stream_, sm_);
 }
 
+// Compare legacy vs blockscale paths. Both paths share the same Q/K quant
+// and post-MMA scale application; only the MMA instruction differs.
+// kind::mxf4nvf4.m16n8k64 internally sums 64 FP4 products per issue in FP32,
+// whereas legacy f8f6f4.m16n8k32 sums 32 products per issue and then adds
+// the partials. FP32 is not associative, so per-element differences at the
+// ULP × sqrt(K) level are expected. After the softmax+PV pipeline, those
+// tiny score deltas can propagate into a few-percent output outliers
+// (max_err ~0.1), while mean_err stays at noise level (~1e-3).
+static void run_blockscale_ab_test(int B, int SQ, int SKV, int NH, int NKV,
+                                    int HD, bool causal, int sliding_window,
+                                    float softcap, float max_err_limit,
+                                    float mean_err_limit,
+                                    cudaStream_t stream, int sm) {
+    ASSERT_EQ(HD % 64, 0) << "Blockscale requires HD % 64 == 0";
+    size_t qo_elems = (size_t)B * SQ * NH * HD;
+    size_t kv_elems = (size_t)B * SKV * NKV * HD;
+
+    void *d_q, *d_k, *d_v, *d_o_leg, *d_o_bs;
+    cudaMalloc(&d_q, qo_elems * sizeof(half));
+    cudaMalloc(&d_k, kv_elems * sizeof(half));
+    cudaMalloc(&d_v, kv_elems * sizeof(half));
+    cudaMalloc(&d_o_leg, qo_elems * sizeof(half));
+    cudaMalloc(&d_o_bs, qo_elems * sizeof(half));
+
+    fill_random_fp16(d_q, qo_elems, 0.3f, 42 + HD);
+    fill_random_fp16(d_k, kv_elems, 0.3f, 123 + HD);
+    fill_random_fp16(d_v, kv_elems, 0.3f, 456 + HD);
+
+    int64_t qo_shape[] = {B, SQ, NH, HD};
+    int64_t kv_shape[] = {B, SKV, NKV, HD};
+    float scale = 1.0f / std::sqrt(static_cast<float>(HD));
+
+    Tensor Q(d_q, DType::FP16, 4, qo_shape, true);
+    Tensor K(d_k, DType::FP16, 4, kv_shape, true);
+    Tensor V(d_v, DType::FP16, 4, kv_shape, true);
+
+    {
+        cudaMemset(d_o_leg, 0, qo_elems * sizeof(half));
+        Tensor O(d_o_leg, DType::FP16, 4, qo_shape, true);
+        bool ok = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal,
+                                             sliding_window, softcap, stream,
+                                             /*use_blockscale=*/false);
+        ASSERT_TRUE(ok);
+    }
+    {
+        cudaMemset(d_o_bs, 0, qo_elems * sizeof(half));
+        Tensor O(d_o_bs, DType::FP16, 4, qo_shape, true);
+        bool ok = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal,
+                                             sliding_window, softcap, stream,
+                                             /*use_blockscale=*/true);
+        ASSERT_TRUE(ok);
+    }
+
+    cudaStreamSynchronize(stream);
+    ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+
+    std::vector<half> h_leg(qo_elems), h_bs(qo_elems);
+    cudaMemcpy(h_leg.data(), d_o_leg, qo_elems * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_bs.data(), d_o_bs, qo_elems * sizeof(half), cudaMemcpyDeviceToHost);
+
+    float max_err, mean_err;
+    compute_errors(h_leg.data(), h_bs.data(), qo_elems, max_err, mean_err);
+
+    std::printf("  [AB] HD=%d SQ=%d SKV=%d causal=%d sw=%d softcap=%.1f: "
+                "max_err=%.4f mean_err=%.6f\n",
+                HD, SQ, SKV, causal, sliding_window, softcap, max_err, mean_err);
+
+    EXPECT_LT(mean_err, mean_err_limit);
+    EXPECT_LT(max_err, max_err_limit);
+
+    cudaFree(d_q); cudaFree(d_k); cudaFree(d_v);
+    cudaFree(d_o_leg); cudaFree(d_o_bs);
+}
+
+TEST_F(FhmaMxFP4Test, Blockscale_MatchesLegacy_HD64) {
+    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
+    run_blockscale_ab_test(1, 256, 256, 4, 2, 64, true, 0, 0.0f,
+                           0.25f, 0.01f, stream_, sm_);
+}
+
+TEST_F(FhmaMxFP4Test, Blockscale_MatchesLegacy_HD128) {
+    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
+    run_blockscale_ab_test(1, 256, 256, 4, 2, 128, true, 0, 0.0f,
+                           0.25f, 0.01f, stream_, sm_);
+}
+
+TEST_F(FhmaMxFP4Test, Blockscale_MatchesLegacy_HD128_LongSeq) {
+    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
+    run_blockscale_ab_test(1, 1024, 1024, 4, 2, 128, true, 0, 0.0f,
+                           0.25f, 0.01f, stream_, sm_);
+}
+
+TEST_F(FhmaMxFP4Test, Blockscale_MatchesLegacy_Softcap) {
+    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
+    run_blockscale_ab_test(1, 256, 256, 4, 2, 128, true, 0, 50.0f,
+                           0.25f, 0.01f, stream_, sm_);
+}
+
+TEST_F(FhmaMxFP4Test, Blockscale_MatchesLegacy_SlidingWindow) {
+    if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
+    run_blockscale_ab_test(1, 512, 512, 4, 2, 128, true, 64, 0.0f,
+                           0.25f, 0.01f, stream_, sm_);
+}
+
 TEST_F(FhmaMxFP4Test, RejectsHD48) {
     if (!can_run()) GTEST_SKIP() << "Requires sm_120+";
     // HD=48 is not a multiple of 32
