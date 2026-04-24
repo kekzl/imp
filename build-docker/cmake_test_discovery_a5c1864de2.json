@@ -1,0 +1,3569 @@
+{
+  "tests": 607,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "TensorTest",
+      "tests": 10,
+      "testsuite": [
+        {
+          "name": "DefaultConstruction",
+          "file": "\/src\/tests\/test_tensor.cpp",
+          "line": 7
+        },
+        {
+          "name": "Numel",
+          "file": "\/src\/tests\/test_tensor.cpp",
+          "line": 15
+        },
+        {
+          "name": "Nbytes",
+          "file": "\/src\/tests\/test_tensor.cpp",
+          "line": 21
+        },
+        {
+          "name": "NbytesFP16",
+          "file": "\/src\/tests\/test_tensor.cpp",
+          "line": 27
+        },
+        {
+          "name": "Strides",
+          "file": "\/src\/tests\/test_tensor.cpp",
+          "line": 33
+        },
+        {
+          "name": "IsContiguous",
+          "file": "\/src\/tests\/test_tensor.cpp",
+          "line": 42
+        },
+        {
+          "name": "Reshape",
+          "file": "\/src\/tests\/test_tensor.cpp",
+          "line": 49
+        },
+        {
+          "name": "ToString",
+          "file": "\/src\/tests\/test_tensor.cpp",
+          "line": 62
+        },
+        {
+          "name": "DTypeSizeAndName",
+          "file": "\/src\/tests\/test_tensor.cpp",
+          "line": 72
+        },
+        {
+          "name": "ScalarTensor",
+          "file": "\/src\/tests\/test_tensor.cpp",
+          "line": 83
+        }
+      ]
+    },
+    {
+      "name": "GgufLoaderTest",
+      "tests": 7,
+      "testsuite": [
+        {
+          "name": "LoadNonexistentFile",
+          "file": "\/src\/tests\/test_gguf_loader.cpp",
+          "line": 34
+        },
+        {
+          "name": "GGMLTypeHelpers",
+          "file": "\/src\/tests\/test_gguf_loader.cpp",
+          "line": 39
+        },
+        {
+          "name": "InvalidMagic",
+          "file": "\/src\/tests\/test_gguf_loader.cpp",
+          "line": 71
+        },
+        {
+          "name": "TruncatedFile",
+          "file": "\/src\/tests\/test_gguf_loader.cpp",
+          "line": 79
+        },
+        {
+          "name": "UnsupportedVersion",
+          "file": "\/src\/tests\/test_gguf_loader.cpp",
+          "line": 97
+        },
+        {
+          "name": "ZeroTensors",
+          "file": "\/src\/tests\/test_gguf_loader.cpp",
+          "line": 110
+        },
+        {
+          "name": "LargeMetadataCount",
+          "file": "\/src\/tests\/test_gguf_loader.cpp",
+          "line": 129
+        }
+      ]
+    },
+    {
+      "name": "TensorKindTable",
+      "tests": 5,
+      "testsuite": [
+        {
+          "name": "EveryKindHasEntry",
+          "file": "\/src\/tests\/test_tensor_kind_table.cpp",
+          "line": 8
+        },
+        {
+          "name": "RequiredFloorIsInSupported",
+          "file": "\/src\/tests\/test_tensor_kind_table.cpp",
+          "line": 17
+        },
+        {
+          "name": "GDNTensorsAreFP16Only",
+          "file": "\/src\/tests\/test_tensor_kind_table.cpp",
+          "line": 27
+        },
+        {
+          "name": "NormsAreFP32Only",
+          "file": "\/src\/tests\/test_tensor_kind_table.cpp",
+          "line": 40
+        },
+        {
+          "name": "AttentionProjectionsSupportAllQuantTiers",
+          "file": "\/src\/tests\/test_tensor_kind_table.cpp",
+          "line": 50
+        }
+      ]
+    },
+    {
+      "name": "TensorKindMatcher",
+      "tests": 8,
+      "testsuite": [
+        {
+          "name": "AttentionProjections",
+          "file": "\/src\/tests\/test_tensor_kind_matcher.cpp",
+          "line": 7
+        },
+        {
+          "name": "FFN",
+          "file": "\/src\/tests\/test_tensor_kind_matcher.cpp",
+          "line": 14
+        },
+        {
+          "name": "MoEExperts",
+          "file": "\/src\/tests\/test_tensor_kind_matcher.cpp",
+          "line": 20
+        },
+        {
+          "name": "GDNAndMamba",
+          "file": "\/src\/tests\/test_tensor_kind_matcher.cpp",
+          "line": 29
+        },
+        {
+          "name": "GDNGate",
+          "file": "\/src\/tests\/test_tensor_kind_matcher.cpp",
+          "line": 38
+        },
+        {
+          "name": "Norms",
+          "file": "\/src\/tests\/test_tensor_kind_matcher.cpp",
+          "line": 47
+        },
+        {
+          "name": "Embeddings",
+          "file": "\/src\/tests\/test_tensor_kind_matcher.cpp",
+          "line": 56
+        },
+        {
+          "name": "UnknownReturnsUnknown",
+          "file": "\/src\/tests\/test_tensor_kind_matcher.cpp",
+          "line": 61
+        }
+      ]
+    },
+    {
+      "name": "TensorKindCoverage",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "NoUnknownKindsInSmallQwen",
+          "file": "\/src\/tests\/test_tensor_kind_coverage.cpp",
+          "line": 18
+        }
+      ]
+    },
+    {
+      "name": "DeviceAllocatorTest",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "DeviceAllocBasic",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 41
+        },
+        {
+          "name": "DeviceAllocPeakTracking",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 59
+        },
+        {
+          "name": "DeviceAllocZeroBytes",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 91
+        }
+      ]
+    },
+    {
+      "name": "PinnedAllocatorTest",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "PinnedAllocBasic",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 105
+        },
+        {
+          "name": "PinnedAllocPoolReuse",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 126
+        },
+        {
+          "name": "PinnedAllocZeroBytes",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 152
+        }
+      ]
+    },
+    {
+      "name": "KVCacheTest",
+      "tests": 6,
+      "testsuite": [
+        {
+          "name": "KVCacheConstruction",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 166
+        },
+        {
+          "name": "KVCacheBlockAllocation",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 192
+        },
+        {
+          "name": "KVCacheBlockFree",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 217
+        },
+        {
+          "name": "KVCacheRefCounting",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 242
+        },
+        {
+          "name": "KVCachePointers",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 270
+        },
+        {
+          "name": "KVCacheReadWriteData",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 340
+        }
+      ]
+    },
+    {
+      "name": "KVCacheManagerTest",
+      "tests": 33,
+      "testsuite": [
+        {
+          "name": "ManagerAllocateBlocks",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 417
+        },
+        {
+          "name": "ManagerAllocateRollback",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 433
+        },
+        {
+          "name": "ManagerAppendBlock",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 461
+        },
+        {
+          "name": "ManagerFreeSequence",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 478
+        },
+        {
+          "name": "ManagerLRUEviction",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 494
+        },
+        {
+          "name": "ManagerCanAllocate",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 523
+        },
+        {
+          "name": "BlockHashDeterministic",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 555
+        },
+        {
+          "name": "BlockHashChaining",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 569
+        },
+        {
+          "name": "ContentAddressedPrefixCaching",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 578
+        },
+        {
+          "name": "PrefixCachingPartialMatch",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 618
+        },
+        {
+          "name": "CachedBlockEviction",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 653
+        },
+        {
+          "name": "PrefixCachingDisabled",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 684
+        },
+        {
+          "name": "PrefixCachingWithPartialLastBlock",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 706
+        },
+        {
+          "name": "PinnedBlocksSurviveEviction",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 740
+        },
+        {
+          "name": "PinnedBlocksSurviveFreeSequence",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 778
+        },
+        {
+          "name": "UnpinAllowsEviction",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 811
+        },
+        {
+          "name": "PinPrefixCanAllocateAccuracy",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 847
+        },
+        {
+          "name": "HashCollisionResistance",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 874
+        },
+        {
+          "name": "HashChainingDistinguishesPosition",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 889
+        },
+        {
+          "name": "CachedBlockLRUEvictionOrder",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 902
+        },
+        {
+          "name": "ThreeSequencesOverlappingPrefixes",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 943
+        },
+        {
+          "name": "PrefixAllocPoolExhaustion",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 983
+        },
+        {
+          "name": "RollbackThenReusePrefix",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 1002
+        },
+        {
+          "name": "DoubleRegisterBlockHashes",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 1033
+        },
+        {
+          "name": "EvictAllCachedBlocksPoolIntegrity",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 1059
+        },
+        {
+          "name": "AllocateAtCapacity",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 1095
+        },
+        {
+          "name": "AllocateFreeAllocate",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 1117
+        },
+        {
+          "name": "EvictionUnderPressure",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 1141
+        },
+        {
+          "name": "ZeroBlocks",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 1172
+        },
+        {
+          "name": "SequenceIdReuse",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 1184
+        },
+        {
+          "name": "EvictMiddleBlocksKeepsSinksAndWindow",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 1210
+        },
+        {
+          "name": "EvictMiddleBlocksNoOpWhenShort",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 1255
+        },
+        {
+          "name": "EvictMiddleBlocksZeroArgsAreNoOp",
+          "file": "\/src\/tests\/test_kv_cache.cpp",
+          "line": 1273
+        }
+      ]
+    },
+    {
+      "name": "RoPETest",
+      "tests": 6,
+      "testsuite": [
+        {
+          "name": "RopeBasicFP32",
+          "file": "\/src\/tests\/test_rope.cu",
+          "line": 107
+        },
+        {
+          "name": "RopeBasicFP16",
+          "file": "\/src\/tests\/test_rope.cu",
+          "line": 167
+        },
+        {
+          "name": "RopePositionInvariance",
+          "file": "\/src\/tests\/test_rope.cu",
+          "line": 236
+        },
+        {
+          "name": "RopeThetaScaling",
+          "file": "\/src\/tests\/test_rope.cu",
+          "line": 292
+        },
+        {
+          "name": "RopeLargerDim",
+          "file": "\/src\/tests\/test_rope.cu",
+          "line": 364
+        },
+        {
+          "name": "PartialRoPE",
+          "file": "\/src\/tests\/test_rope.cu",
+          "line": 425
+        }
+      ]
+    },
+    {
+      "name": "LayerNormTest",
+      "tests": 5,
+      "testsuite": [
+        {
+          "name": "RMSNormBasic",
+          "file": "\/src\/tests\/test_layernorm.cu",
+          "line": 128
+        },
+        {
+          "name": "RMSNormResidual",
+          "file": "\/src\/tests\/test_layernorm.cu",
+          "line": 168
+        },
+        {
+          "name": "RMSNormFP16",
+          "file": "\/src\/tests\/test_layernorm.cu",
+          "line": 224
+        },
+        {
+          "name": "RMSNormLargeRow",
+          "file": "\/src\/tests\/test_layernorm.cu",
+          "line": 273
+        },
+        {
+          "name": "EpsilonEffect",
+          "file": "\/src\/tests\/test_layernorm.cu",
+          "line": 318
+        }
+      ]
+    },
+    {
+      "name": "MoERoutingTest",
+      "tests": 5,
+      "testsuite": [
+        {
+          "name": "TopKSelection",
+          "file": "\/src\/tests\/test_moe.cu",
+          "line": 163
+        },
+        {
+          "name": "WeightNormalization",
+          "file": "\/src\/tests\/test_moe.cu",
+          "line": 224
+        },
+        {
+          "name": "ExpertOffsets",
+          "file": "\/src\/tests\/test_moe.cu",
+          "line": 246
+        },
+        {
+          "name": "SortedTokenIds",
+          "file": "\/src\/tests\/test_moe.cu",
+          "line": 278
+        },
+        {
+          "name": "GatherScatter",
+          "file": "\/src\/tests\/test_moe.cu",
+          "line": 321
+        }
+      ]
+    },
+    {
+      "name": "MoERoutingEdgeTest",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "EmptyExpert",
+          "file": "\/src\/tests\/test_moe.cu",
+          "line": 424
+        },
+        {
+          "name": "AllTokensSameExpert",
+          "file": "\/src\/tests\/test_moe.cu",
+          "line": 471
+        }
+      ]
+    },
+    {
+      "name": "QuantTest",
+      "tests": 7,
+      "testsuite": [
+        {
+          "name": "QuantConfigDefaults",
+          "file": "\/src\/tests\/test_quant.cu",
+          "line": 127
+        },
+        {
+          "name": "DequantINT4Basic",
+          "file": "\/src\/tests\/test_quant.cu",
+          "line": 138
+        },
+        {
+          "name": "DequantINT4GroupSize",
+          "file": "\/src\/tests\/test_quant.cu",
+          "line": 202
+        },
+        {
+          "name": "DequantINT8Basic",
+          "file": "\/src\/tests\/test_quant.cu",
+          "line": 272
+        },
+        {
+          "name": "FP8RoundTrip",
+          "file": "\/src\/tests\/test_quant.cu",
+          "line": 335
+        },
+        {
+          "name": "FP8Saturation",
+          "file": "\/src\/tests\/test_quant.cu",
+          "line": 415
+        },
+        {
+          "name": "QuantGemmINT4Basic",
+          "file": "\/src\/tests\/test_quant.cu",
+          "line": 485
+        }
+      ]
+    },
+    {
+      "name": "GreenCtxTest",
+      "tests": 6,
+      "testsuite": [
+        {
+          "name": "DefaultState",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 42
+        },
+        {
+          "name": "InitCreatesStreams",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 54
+        },
+        {
+          "name": "SMRatioCorrectness",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 76
+        },
+        {
+          "name": "Reconfigure",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 94
+        },
+        {
+          "name": "DoubleDestroy",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 118
+        },
+        {
+          "name": "StreamsAreUsable",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 133
+        }
+      ]
+    },
+    {
+      "name": "CudaGraphTest",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "CaptureAndReplay",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 169
+        },
+        {
+          "name": "ReplayWithoutCapture",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 209
+        },
+        {
+          "name": "NullStreamCapture",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 216
+        },
+        {
+          "name": "ResetAfterCapture",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 222
+        }
+      ]
+    },
+    {
+      "name": "CudaGraphRunnerTest",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "FullLifecycle",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 263
+        },
+        {
+          "name": "Invalidate",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 319
+        },
+        {
+          "name": "NoDecodeFn",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 358
+        }
+      ]
+    },
+    {
+      "name": "PDLTest",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "IsAvailableCheck",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 368
+        },
+        {
+          "name": "EnableDisableKernel",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 376
+        },
+        {
+          "name": "EnableNullSafe",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 404
+        },
+        {
+          "name": "ScopedPDL",
+          "file": "\/src\/tests\/test_green_ctx.cu",
+          "line": 411
+        }
+      ]
+    },
+    {
+      "name": "MoEExecutorTest",
+      "tests": 10,
+      "testsuite": [
+        {
+          "name": "InitSucceeds",
+          "file": "\/src\/tests\/test_moe_executor.cu",
+          "line": 25
+        },
+        {
+          "name": "ForwardProducesValidOutput",
+          "file": "\/src\/tests\/test_moe_executor.cu",
+          "line": 42
+        },
+        {
+          "name": "ForwardSamplesToken",
+          "file": "\/src\/tests\/test_moe_executor.cu",
+          "line": 107
+        },
+        {
+          "name": "Deterministic",
+          "file": "\/src\/tests\/test_moe_executor.cu",
+          "line": 154
+        },
+        {
+          "name": "MultiLayer",
+          "file": "\/src\/tests\/test_moe_executor.cu",
+          "line": 202
+        },
+        {
+          "name": "EightExperts",
+          "file": "\/src\/tests\/test_moe_executor.cu",
+          "line": 248
+        },
+        {
+          "name": "SingleToken",
+          "file": "\/src\/tests\/test_moe_executor.cu",
+          "line": 294
+        },
+        {
+          "name": "MoEVsDenseDiffer",
+          "file": "\/src\/tests\/test_moe_executor.cu",
+          "line": 339
+        },
+        {
+          "name": "LogitsShape",
+          "file": "\/src\/tests\/test_moe_executor.cu",
+          "line": 433
+        },
+        {
+          "name": "MixedMoEDense",
+          "file": "\/src\/tests\/test_moe_executor.cu",
+          "line": 486
+        }
+      ]
+    },
+    {
+      "name": "QuantIntegrationTest",
+      "tests": 21,
+      "testsuite": [
+        {
+          "name": "Q4_0WeightUpload",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 369
+        },
+        {
+          "name": "Q8_0WeightUpload",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 425
+        },
+        {
+          "name": "F32WeightUpload",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 532
+        },
+        {
+          "name": "UploadIdempotent",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 612
+        },
+        {
+          "name": "FP16ForwardPass",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 628
+        },
+        {
+          "name": "Q4_0ForwardPass",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 673
+        },
+        {
+          "name": "Q4_0Deterministic",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 744
+        },
+        {
+          "name": "Q4_0LogitsShape",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 785
+        },
+        {
+          "name": "Q4_0MultiLayer",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 832
+        },
+        {
+          "name": "Q8_0ForwardPass",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 874
+        },
+        {
+          "name": "Q8_0MultiLayer",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 939
+        },
+        {
+          "name": "QuantGemmInt4LargerMatrix",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 980
+        },
+        {
+          "name": "Q4_KWeightUpload",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 1395
+        },
+        {
+          "name": "Q4_KForwardPass",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 1429
+        },
+        {
+          "name": "Q4_KDeterministic",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 1491
+        },
+        {
+          "name": "Q4_KMultiLayer",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 1534
+        },
+        {
+          "name": "Q5_KWeightUpload",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 1577
+        },
+        {
+          "name": "Q5_KForwardPass",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 1604
+        },
+        {
+          "name": "Q5_KMultiLayer",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 1666
+        },
+        {
+          "name": "Q4_KDequantCorrectness",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 1709
+        },
+        {
+          "name": "Q5_KDequantCorrectness",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 1759
+        }
+      ]
+    },
+    {
+      "name": "DualPathQuant",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "AttentionWeightsExcludedFromNvfp4",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 1838
+        },
+        {
+          "name": "WeightCachesFlag",
+          "file": "\/src\/tests\/test_quant_integration.cu",
+          "line": 1868
+        }
+      ]
+    },
+    {
+      "name": "EndToEndTest",
+      "tests": 6,
+      "testsuite": [
+        {
+          "name": "VersionString",
+          "file": "\/src\/tests\/test_e2e.cpp",
+          "line": 22
+        },
+        {
+          "name": "ConfigDefault",
+          "file": "\/src\/tests\/test_e2e.cpp",
+          "line": 28
+        },
+        {
+          "name": "GenerateParamsDefault",
+          "file": "\/src\/tests\/test_e2e.cpp",
+          "line": 38
+        },
+        {
+          "name": "ErrorStrings",
+          "file": "\/src\/tests\/test_e2e.cpp",
+          "line": 48
+        },
+        {
+          "name": "LoadNonexistentModel",
+          "file": "\/src\/tests\/test_e2e.cpp",
+          "line": 57
+        },
+        {
+          "name": "NullArguments",
+          "file": "\/src\/tests\/test_e2e.cpp",
+          "line": 64
+        }
+      ]
+    },
+    {
+      "name": "EndToEndModelTest",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "LoadModel",
+          "file": "\/src\/tests\/test_e2e.cpp",
+          "line": 98
+        },
+        {
+          "name": "Tokenize",
+          "file": "\/src\/tests\/test_e2e.cpp",
+          "line": 114
+        },
+        {
+          "name": "CreateContextAndGenerate",
+          "file": "\/src\/tests\/test_e2e.cpp",
+          "line": 135
+        },
+        {
+          "name": "PrefillDecodeStep",
+          "file": "\/src\/tests\/test_e2e.cpp",
+          "line": 168
+        }
+      ]
+    },
+    {
+      "name": "StubModelTest",
+      "tests": 5,
+      "testsuite": [
+        {
+          "name": "LoadStubModel",
+          "file": "\/src\/tests\/test_e2e.cpp",
+          "line": 228
+        },
+        {
+          "name": "TokenizeStub",
+          "file": "\/src\/tests\/test_e2e.cpp",
+          "line": 241
+        },
+        {
+          "name": "CreateContextAndInfer",
+          "file": "\/src\/tests\/test_e2e.cpp",
+          "line": 257
+        },
+        {
+          "name": "PrefillDecodeStub",
+          "file": "\/src\/tests\/test_e2e.cpp",
+          "line": 295
+        },
+        {
+          "name": "VRAMLeakDetection",
+          "file": "\/src\/tests\/test_e2e.cpp",
+          "line": 343
+        }
+      ]
+    },
+    {
+      "name": "BatchBuilderTest",
+      "tests": 7,
+      "testsuite": [
+        {
+          "name": "SingleDecodeSequence",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 38
+        },
+        {
+          "name": "MultipleDecodeSequences",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 76
+        },
+        {
+          "name": "PrefillSequence",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 136
+        },
+        {
+          "name": "ResetClearsPreviousData",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 166
+        },
+        {
+          "name": "SixteenDecodeSequences",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 447
+        },
+        {
+          "name": "PrefillWithStartPos",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 638
+        },
+        {
+          "name": "SingleToken",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 1152
+        }
+      ]
+    },
+    {
+      "name": "GPUBatchTest",
+      "tests": 6,
+      "testsuite": [
+        {
+          "name": "UploadAndFree",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 191
+        },
+        {
+          "name": "SingleSequenceNoSeqOffsets",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 262
+        },
+        {
+          "name": "SixteenSequenceUpload",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 494
+        },
+        {
+          "name": "DoubleFree",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 658
+        },
+        {
+          "name": "EmptyBatch",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 681
+        },
+        {
+          "name": "BatchedDecodeVaryingContextLens",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 746
+        }
+      ]
+    },
+    {
+      "name": "SchedulerTest",
+      "tests": 19,
+      "testsuite": [
+        {
+          "name": "BasicPrefillThenDecode",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 288
+        },
+        {
+          "name": "MaxBatchSizeLimit",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 319
+        },
+        {
+          "name": "RemovesFinishedRequests",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 338
+        },
+        {
+          "name": "MemoryAwareScheduling",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 362
+        },
+        {
+          "name": "PrefillPriorityOverDecode",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 391
+        },
+        {
+          "name": "HandlesCancel",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 420
+        },
+        {
+          "name": "FullLifecycle",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 575
+        },
+        {
+          "name": "BatchedDecodeWithMidBatchCompletion",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 699
+        },
+        {
+          "name": "DecodeBatchSizeLimit",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 821
+        },
+        {
+          "name": "ShortestInputFirst",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 863
+        },
+        {
+          "name": "ChunkedPrefillRescheduling",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 894
+        },
+        {
+          "name": "ChunkedPrefillCompleteThenDecode",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 920
+        },
+        {
+          "name": "EmptyScheduler",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 941
+        },
+        {
+          "name": "MemoryAwareSkipsLargeAdmitsSmall",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 954
+        },
+        {
+          "name": "AllRequestsTooLargeForMemory",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 988
+        },
+        {
+          "name": "NewPrefillWhileDecoding",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 1015
+        },
+        {
+          "name": "AddRemoveRapidly",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 1057
+        },
+        {
+          "name": "EmptyBatch",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 1102
+        },
+        {
+          "name": "MaxBatchSize",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 1118
+        }
+      ]
+    },
+    {
+      "name": "RequestTest",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "ContextLen",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 546
+        },
+        {
+          "name": "StatusTransitions",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 560
+        },
+        {
+          "name": "DefaultState",
+          "file": "\/src\/tests\/test_continuous_batching.cpp",
+          "line": 1184
+        }
+      ]
+    },
+    {
+      "name": "FP8GemmTest",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "GemmCublasLtFP16",
+          "file": "\/src\/tests\/test_fp8_gemm.cu",
+          "line": 24
+        },
+        {
+          "name": "GemvFP8Basic",
+          "file": "\/src\/tests\/test_fp8_gemm.cu",
+          "line": 63
+        }
+      ]
+    },
+    {
+      "name": "AttentionTCTest",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "AvailabilityCheck",
+          "file": "\/src\/tests\/test_attention_tc.cu",
+          "line": 24
+        },
+        {
+          "name": "SmallPrefill",
+          "file": "\/src\/tests\/test_attention_tc.cu",
+          "line": 38
+        },
+        {
+          "name": "DispatchSelectsCorrectKernel",
+          "file": "\/src\/tests\/test_attention_tc.cu",
+          "line": 97
+        }
+      ]
+    },
+    {
+      "name": "AttentionBlackwellTest",
+      "tests": 7,
+      "testsuite": [
+        {
+          "name": "NonCausal",
+          "file": "\/src\/tests\/test_attention_tc.cu",
+          "line": 282
+        },
+        {
+          "name": "Causal",
+          "file": "\/src\/tests\/test_attention_tc.cu",
+          "line": 288
+        },
+        {
+          "name": "CausalMultiTile",
+          "file": "\/src\/tests\/test_attention_tc.cu",
+          "line": 294
+        },
+        {
+          "name": "GQA",
+          "file": "\/src\/tests\/test_attention_tc.cu",
+          "line": 300
+        },
+        {
+          "name": "HeadDim64",
+          "file": "\/src\/tests\/test_attention_tc.cu",
+          "line": 306
+        },
+        {
+          "name": "NonAlignedSeqLen",
+          "file": "\/src\/tests\/test_attention_tc.cu",
+          "line": 312
+        },
+        {
+          "name": "SlidingWindow",
+          "file": "\/src\/tests\/test_attention_tc.cu",
+          "line": 318
+        }
+      ]
+    },
+    {
+      "name": "NVFP4QuantTest",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "QuantDequantRoundtrip",
+          "file": "\/src\/tests\/test_nvfp4_quant.cu",
+          "line": 24
+        },
+        {
+          "name": "GemvNVFP4Basic",
+          "file": "\/src\/tests\/test_nvfp4_quant.cu",
+          "line": 58
+        }
+      ]
+    },
+    {
+      "name": "CutlassGrouped3xNvfp4Test",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "GroupedMatchesPerExpertSingle",
+          "file": "\/src\/tests\/test_cutlass_grouped_3x_nvfp4.cu",
+          "line": 72
+        }
+      ]
+    },
+    {
+      "name": "TurboQuantTest",
+      "tests": 7,
+      "testsuite": [
+        {
+          "name": "CacheConstruction",
+          "file": "\/src\/tests\/test_turboquant.cu",
+          "line": 33
+        },
+        {
+          "name": "QJLInit",
+          "file": "\/src\/tests\/test_turboquant.cu",
+          "line": 76
+        },
+        {
+          "name": "QJLInitInvalid",
+          "file": "\/src\/tests\/test_turboquant.cu",
+          "line": 122
+        },
+        {
+          "name": "SketchPointers",
+          "file": "\/src\/tests\/test_turboquant.cu",
+          "line": 136
+        },
+        {
+          "name": "PolarQuantAccuracy",
+          "file": "\/src\/tests\/test_turboquant.cu",
+          "line": 168
+        },
+        {
+          "name": "QJLDotProductEstimate",
+          "file": "\/src\/tests\/test_turboquant.cu",
+          "line": 236
+        },
+        {
+          "name": "MemoryReduction",
+          "file": "\/src\/tests\/test_turboquant.cu",
+          "line": 303
+        }
+      ]
+    },
+    {
+      "name": "TurboQuantLiteTest",
+      "tests": 5,
+      "testsuite": [
+        {
+          "name": "CacheConstruction",
+          "file": "\/src\/tests\/test_turboquant.cu",
+          "line": 333
+        },
+        {
+          "name": "VPointerOffsets",
+          "file": "\/src\/tests\/test_turboquant.cu",
+          "line": 380
+        },
+        {
+          "name": "MemorySavings",
+          "file": "\/src\/tests\/test_turboquant.cu",
+          "line": 414
+        },
+        {
+          "name": "QJLLargeSketchDim",
+          "file": "\/src\/tests\/test_turboquant.cu",
+          "line": 466
+        },
+        {
+          "name": "QJLAccuracyVsSketchDim",
+          "file": "\/src\/tests\/test_turboquant.cu",
+          "line": 501
+        }
+      ]
+    },
+    {
+      "name": "FP8KVCache",
+      "tests": 8,
+      "testsuite": [
+        {
+          "name": "Construction",
+          "file": "\/src\/tests\/test_fp8_kv_cache.cu",
+          "line": 33
+        },
+        {
+          "name": "ScaleCalibration",
+          "file": "\/src\/tests\/test_fp8_kv_cache.cu",
+          "line": 74
+        },
+        {
+          "name": "ScaleCalibrationZeros",
+          "file": "\/src\/tests\/test_fp8_kv_cache.cu",
+          "line": 112
+        },
+        {
+          "name": "BlockBytesMatchesDTypeSize",
+          "file": "\/src\/tests\/test_fp8_kv_cache.cu",
+          "line": 139
+        },
+        {
+          "name": "SplitKConsistency",
+          "file": "\/src\/tests\/test_fp8_kv_cache.cu",
+          "line": 164
+        },
+        {
+          "name": "QuantDequantRoundtrip",
+          "file": "\/src\/tests\/test_fp8_kv_cache.cu",
+          "line": 563
+        },
+        {
+          "name": "PagedAttentionDecodeFP8vsFP16",
+          "file": "\/src\/tests\/test_fp8_kv_cache.cu",
+          "line": 636
+        },
+        {
+          "name": "SplitKHD256",
+          "file": "\/src\/tests\/test_fp8_kv_cache.cu",
+          "line": 790
+        }
+      ]
+    },
+    {
+      "name": "INT8KVCache",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "Construction",
+          "file": "\/src\/tests\/test_fp8_kv_cache.cu",
+          "line": 319
+        },
+        {
+          "name": "SplitKConsistency",
+          "file": "\/src\/tests\/test_fp8_kv_cache.cu",
+          "line": 413
+        }
+      ]
+    },
+    {
+      "name": "SpeculativeConfigTest",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "DefaultValues",
+          "file": "\/src\/tests\/test_speculative.cpp",
+          "line": 7
+        },
+        {
+          "name": "CustomValues",
+          "file": "\/src\/tests\/test_speculative.cpp",
+          "line": 13
+        }
+      ]
+    },
+    {
+      "name": "SpeculativeDecoderTest",
+      "tests": 5,
+      "testsuite": [
+        {
+          "name": "UninitializedState",
+          "file": "\/src\/tests\/test_speculative.cpp",
+          "line": 21
+        },
+        {
+          "name": "InitWithNullTarget",
+          "file": "\/src\/tests\/test_speculative.cpp",
+          "line": 26
+        },
+        {
+          "name": "DraftWithoutInit",
+          "file": "\/src\/tests\/test_speculative.cpp",
+          "line": 34
+        },
+        {
+          "name": "StepWithoutInit",
+          "file": "\/src\/tests\/test_speculative.cpp",
+          "line": 41
+        },
+        {
+          "name": "VerifyWithoutInit",
+          "file": "\/src\/tests\/test_speculative.cpp",
+          "line": 48
+        }
+      ]
+    },
+    {
+      "name": "SamplingTest",
+      "tests": 14,
+      "testsuite": [
+        {
+          "name": "GreedyBasic",
+          "file": "\/src\/tests\/test_sampling.cu",
+          "line": 37
+        },
+        {
+          "name": "GreedyTieBreak",
+          "file": "\/src\/tests\/test_sampling.cu",
+          "line": 48
+        },
+        {
+          "name": "GreedyNegativeLogits",
+          "file": "\/src\/tests\/test_sampling.cu",
+          "line": 59
+        },
+        {
+          "name": "GreedySingleToken",
+          "file": "\/src\/tests\/test_sampling.cu",
+          "line": 70
+        },
+        {
+          "name": "GreedyLargeVocab",
+          "file": "\/src\/tests\/test_sampling.cu",
+          "line": 80
+        },
+        {
+          "name": "GreedyPreallocated",
+          "file": "\/src\/tests\/test_sampling.cu",
+          "line": 93
+        },
+        {
+          "name": "TopKDeterministic",
+          "file": "\/src\/tests\/test_sampling.cu",
+          "line": 111
+        },
+        {
+          "name": "TopKRespectsK",
+          "file": "\/src\/tests\/test_sampling.cu",
+          "line": 125
+        },
+        {
+          "name": "TemperatureZeroIsGreedy",
+          "file": "\/src\/tests\/test_sampling.cu",
+          "line": 143
+        },
+        {
+          "name": "TopPFiltering",
+          "file": "\/src\/tests\/test_sampling.cu",
+          "line": 157
+        },
+        {
+          "name": "SamplingDistribution",
+          "file": "\/src\/tests\/test_sampling.cu",
+          "line": 177
+        },
+        {
+          "name": "NaNLogits",
+          "file": "\/src\/tests\/test_sampling.cu",
+          "line": 206
+        },
+        {
+          "name": "AllIdenticalLogits",
+          "file": "\/src\/tests\/test_sampling.cu",
+          "line": 220
+        },
+        {
+          "name": "SingleNonNegInf",
+          "file": "\/src\/tests\/test_sampling.cu",
+          "line": 241
+        }
+      ]
+    },
+    {
+      "name": "ActivationTest",
+      "tests": 12,
+      "testsuite": [
+        {
+          "name": "SwiGLUBasicFP32",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 83
+        },
+        {
+          "name": "SwiGLUZeroGate",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 111
+        },
+        {
+          "name": "SwiGLUFP16",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 134
+        },
+        {
+          "name": "SwiGLULargeVector",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 165
+        },
+        {
+          "name": "SwiGLUNonAligned",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 193
+        },
+        {
+          "name": "GELUBasicFP32",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 225
+        },
+        {
+          "name": "GELUZero",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 249
+        },
+        {
+          "name": "GELUSymmetry",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 265
+        },
+        {
+          "name": "GELUFP16",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 283
+        },
+        {
+          "name": "GeGLUBasicFP16",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 313
+        },
+        {
+          "name": "GeGLUBasicFP32",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 344
+        },
+        {
+          "name": "GeluInfInput",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 371
+        }
+      ]
+    },
+    {
+      "name": "SoftmaxTest",
+      "tests": 10,
+      "testsuite": [
+        {
+          "name": "BasicFP32",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 398
+        },
+        {
+          "name": "NumericalStability",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 433
+        },
+        {
+          "name": "SingleElement",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 466
+        },
+        {
+          "name": "FP16",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 481
+        },
+        {
+          "name": "LargeRow",
+          "file": "\/src\/tests\/test_activation.cu",
+          "line": 506
+        },
+        {
+          "name": "OutputSumsToOne",
+          "file": "\/src\/tests\/test_softmax.cu",
+          "line": 74
+        },
+        {
+          "name": "OutputSumsToOneFP32",
+          "file": "\/src\/tests\/test_softmax.cu",
+          "line": 103
+        },
+        {
+          "name": "AllEqualInput",
+          "file": "\/src\/tests\/test_softmax.cu",
+          "line": 132
+        },
+        {
+          "name": "SingleElement",
+          "file": "\/src\/tests\/test_softmax.cu",
+          "line": 157
+        },
+        {
+          "name": "NegativeInfMasking",
+          "file": "\/src\/tests\/test_softmax.cu",
+          "line": 177
+        }
+      ]
+    },
+    {
+      "name": "EmbeddingTest",
+      "tests": 9,
+      "testsuite": [
+        {
+          "name": "BasicFP32",
+          "file": "\/src\/tests\/test_embedding.cu",
+          "line": 76
+        },
+        {
+          "name": "SingleToken",
+          "file": "\/src\/tests\/test_embedding.cu",
+          "line": 118
+        },
+        {
+          "name": "RepeatedTokens",
+          "file": "\/src\/tests\/test_embedding.cu",
+          "line": 147
+        },
+        {
+          "name": "FP16Lookup",
+          "file": "\/src\/tests\/test_embedding.cu",
+          "line": 181
+        },
+        {
+          "name": "LargeDModel",
+          "file": "\/src\/tests\/test_embedding.cu",
+          "line": 222
+        },
+        {
+          "name": "NonAlignedDModel",
+          "file": "\/src\/tests\/test_embedding.cu",
+          "line": 253
+        },
+        {
+          "name": "DeviceSideLookup",
+          "file": "\/src\/tests\/test_embedding.cu",
+          "line": 287
+        },
+        {
+          "name": "BoundaryTokenIds",
+          "file": "\/src\/tests\/test_embedding.cu",
+          "line": 322
+        },
+        {
+          "name": "LargeVocab",
+          "file": "\/src\/tests\/test_embedding.cu",
+          "line": 361
+        }
+      ]
+    },
+    {
+      "name": "GemmTest",
+      "tests": 11,
+      "testsuite": [
+        {
+          "name": "FP32_Square",
+          "file": "\/src\/tests\/test_gemm.cu",
+          "line": 95
+        },
+        {
+          "name": "FP32_NonSquare",
+          "file": "\/src\/tests\/test_gemm.cu",
+          "line": 122
+        },
+        {
+          "name": "FP32_AlphaBeta",
+          "file": "\/src\/tests\/test_gemm.cu",
+          "line": 146
+        },
+        {
+          "name": "FP32_Identity",
+          "file": "\/src\/tests\/test_gemm.cu",
+          "line": 171
+        },
+        {
+          "name": "FP16_Square",
+          "file": "\/src\/tests\/test_gemm.cu",
+          "line": 198
+        },
+        {
+          "name": "FP16_Large",
+          "file": "\/src\/tests\/test_gemm.cu",
+          "line": 224
+        },
+        {
+          "name": "GEMV_FP16",
+          "file": "\/src\/tests\/test_gemm.cu",
+          "line": 252
+        },
+        {
+          "name": "GEMV_FP32",
+          "file": "\/src\/tests\/test_gemm.cu",
+          "line": 279
+        },
+        {
+          "name": "GemmDispatchToGEMV",
+          "file": "\/src\/tests\/test_gemm.cu",
+          "line": 309
+        },
+        {
+          "name": "GemvGateFP32",
+          "file": "\/src\/tests\/test_gemm.cu",
+          "line": 338
+        },
+        {
+          "name": "ZeroMatrix",
+          "file": "\/src\/tests\/test_gemm.cu",
+          "line": 381
+        }
+      ]
+    },
+    {
+      "name": "PagedAttentionTest",
+      "tests": 10,
+      "testsuite": [
+        {
+          "name": "SingleHeadShortContext",
+          "file": "\/src\/tests\/test_paged_attention.cu",
+          "line": 124
+        },
+        {
+          "name": "MultiBlock",
+          "file": "\/src\/tests\/test_paged_attention.cu",
+          "line": 188
+        },
+        {
+          "name": "MultiHead",
+          "file": "\/src\/tests\/test_paged_attention.cu",
+          "line": 248
+        },
+        {
+          "name": "GQA",
+          "file": "\/src\/tests\/test_paged_attention.cu",
+          "line": 338
+        },
+        {
+          "name": "BatchDifferentLengths",
+          "file": "\/src\/tests\/test_paged_attention.cu",
+          "line": 426
+        },
+        {
+          "name": "SingleTokenContext",
+          "file": "\/src\/tests\/test_paged_attention.cu",
+          "line": 524
+        },
+        {
+          "name": "GQALongContext",
+          "file": "\/src\/tests\/test_paged_attention.cu",
+          "line": 579
+        },
+        {
+          "name": "GQA_HD256",
+          "file": "\/src\/tests\/test_paged_attention.cu",
+          "line": 666
+        },
+        {
+          "name": "GQA_HD512_Gemma4Global",
+          "file": "\/src\/tests\/test_paged_attention.cu",
+          "line": 758
+        },
+        {
+          "name": "GQA_HD256_Gemma4SWA",
+          "file": "\/src\/tests\/test_paged_attention.cu",
+          "line": 852
+        }
+      ]
+    },
+    {
+      "name": "INT4QuantTest",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "PackUnpackRoundtrip",
+          "file": "\/src\/tests\/test_paged_attention.cu",
+          "line": 943
+        }
+      ]
+    },
+    {
+      "name": "PagedAttentionINT4Test",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "DecodeSingleHead",
+          "file": "\/src\/tests\/test_paged_attention.cu",
+          "line": 969
+        }
+      ]
+    },
+    {
+      "name": "ReduceTest",
+      "tests": 12,
+      "testsuite": [
+        {
+          "name": "SumLastDimFP32",
+          "file": "\/src\/tests\/test_reduce.cu",
+          "line": 64
+        },
+        {
+          "name": "SumLastDimFP16",
+          "file": "\/src\/tests\/test_reduce.cu",
+          "line": 91
+        },
+        {
+          "name": "SumFirstDim",
+          "file": "\/src\/tests\/test_reduce.cu",
+          "line": 119
+        },
+        {
+          "name": "SumSingleElement",
+          "file": "\/src\/tests\/test_reduce.cu",
+          "line": 146
+        },
+        {
+          "name": "SumLargeRow",
+          "file": "\/src\/tests\/test_reduce.cu",
+          "line": 162
+        },
+        {
+          "name": "SumNegativeDim",
+          "file": "\/src\/tests\/test_reduce.cu",
+          "line": 190
+        },
+        {
+          "name": "Sum3DMiddleDim",
+          "file": "\/src\/tests\/test_reduce.cu",
+          "line": 217
+        },
+        {
+          "name": "MaxLastDimFP32",
+          "file": "\/src\/tests\/test_reduce.cu",
+          "line": 252
+        },
+        {
+          "name": "MaxFirstDim",
+          "file": "\/src\/tests\/test_reduce.cu",
+          "line": 278
+        },
+        {
+          "name": "MaxNegativeValues",
+          "file": "\/src\/tests\/test_reduce.cu",
+          "line": 304
+        },
+        {
+          "name": "MaxFP16",
+          "file": "\/src\/tests\/test_reduce.cu",
+          "line": 326
+        },
+        {
+          "name": "MaxLargeRow",
+          "file": "\/src\/tests\/test_reduce.cu",
+          "line": 357
+        }
+      ]
+    },
+    {
+      "name": "TokenizerSPMTest",
+      "tests": 16,
+      "testsuite": [
+        {
+          "name": "LoadVocab",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 177
+        },
+        {
+          "name": "EmptyVocabFails",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 184
+        },
+        {
+          "name": "EmptyTextReturnsEmpty",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 190
+        },
+        {
+          "name": "EncodeWholeWord",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 196
+        },
+        {
+          "name": "EncodeNoPrefix",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 204
+        },
+        {
+          "name": "EncodeMultipleWords",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 212
+        },
+        {
+          "name": "EncodeSubwordMerge",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 221
+        },
+        {
+          "name": "SpacePrefixDisabled",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 230
+        },
+        {
+          "name": "ByteFallback",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 239
+        },
+        {
+          "name": "DecodeRoundtrip",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 249
+        },
+        {
+          "name": "DecodeByteToken",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 258
+        },
+        {
+          "name": "DecodeOutOfRange",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 266
+        },
+        {
+          "name": "FindToken",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 272
+        },
+        {
+          "name": "EncodeUTF8Multibyte",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 337
+        },
+        {
+          "name": "EncodeEmoji",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 348
+        },
+        {
+          "name": "EncodeCJK",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 357
+        }
+      ]
+    },
+    {
+      "name": "TokenizerGPT2Test",
+      "tests": 9,
+      "testsuite": [
+        {
+          "name": "EncodeSimple",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 281
+        },
+        {
+          "name": "EncodeMerge",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 291
+        },
+        {
+          "name": "DecodeRoundtrip",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 299
+        },
+        {
+          "name": "DecodeRoundtripASCII",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 307
+        },
+        {
+          "name": "EmptyText",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 315
+        },
+        {
+          "name": "PreTokenizeDigits",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 321
+        },
+        {
+          "name": "PreTokenizeSpaces",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 328
+        },
+        {
+          "name": "EncodeUTF8",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 368
+        },
+        {
+          "name": "LongString",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 377
+        }
+      ]
+    },
+    {
+      "name": "TokenizerDispatchTest",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "SPMDefault",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 389
+        },
+        {
+          "name": "SetType",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 394
+        },
+        {
+          "name": "MaxLength",
+          "file": "\/src\/tests\/test_tokenizer.cpp",
+          "line": 400
+        }
+      ]
+    },
+    {
+      "name": "ChatTemplateDetectTest",
+      "tests": 10,
+      "testsuite": [
+        {
+          "name": "EmptyReturnsRaw",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 102
+        },
+        {
+          "name": "ChatML",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 106
+        },
+        {
+          "name": "Llama3",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 111
+        },
+        {
+          "name": "Gemma",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 116
+        },
+        {
+          "name": "Llama2",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 121
+        },
+        {
+          "name": "Nemotron",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 126
+        },
+        {
+          "name": "DeepSeekR1",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 131
+        },
+        {
+          "name": "Phi",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 137
+        },
+        {
+          "name": "UnknownReturnsRaw",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 142
+        },
+        {
+          "name": "ChatMLTakesPriorityOverPhi",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 147
+        }
+      ]
+    },
+    {
+      "name": "ChatTemplateParseFamilyTest",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "AllNames",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 155
+        }
+      ]
+    },
+    {
+      "name": "ChatTemplateArchDefaultTest",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "KnownArchitectures",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 171
+        }
+      ]
+    },
+    {
+      "name": "ChatTemplateFamilyNameTest",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "AllFamilies",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 185
+        }
+      ]
+    },
+    {
+      "name": "ChatTemplateInitTest",
+      "tests": 9,
+      "testsuite": [
+        {
+          "name": "RawAlwaysSucceeds",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 198
+        },
+        {
+          "name": "ChatMLSuccess",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 206
+        },
+        {
+          "name": "ChatMLMissingTokensFallsBack",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 215
+        },
+        {
+          "name": "Llama3Success",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 228
+        },
+        {
+          "name": "Llama2Success",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 237
+        },
+        {
+          "name": "NemotronSuccess",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 246
+        },
+        {
+          "name": "GemmaSuccess",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 255
+        },
+        {
+          "name": "DeepSeekR1Success",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 266
+        },
+        {
+          "name": "PhiSuccess",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 275
+        }
+      ]
+    },
+    {
+      "name": "ChatTemplateApplyTest",
+      "tests": 17,
+      "testsuite": [
+        {
+          "name": "ChatMLBasicStructure",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 286
+        },
+        {
+          "name": "ChatMLNoBOSWhenDisabled",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 310
+        },
+        {
+          "name": "ChatMLMultiTurn",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 325
+        },
+        {
+          "name": "Llama3BasicStructure",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 348
+        },
+        {
+          "name": "Llama2BasicStructure",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 368
+        },
+        {
+          "name": "Llama2SystemMessage",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 382
+        },
+        {
+          "name": "NemotronBasicStructure",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 401
+        },
+        {
+          "name": "GemmaBasicStructure",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 422
+        },
+        {
+          "name": "GemmaAssistantRoleMappedToModel",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 440
+        },
+        {
+          "name": "DeepSeekR1BasicStructure",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 456
+        },
+        {
+          "name": "PhiBasicStructure",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 474
+        },
+        {
+          "name": "RawReturnsEmpty",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 492
+        },
+        {
+          "name": "ChatMLSuppressThinking",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 618
+        },
+        {
+          "name": "ChatMLNoSuppressThinking",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 635
+        },
+        {
+          "name": "EmptyUserMessage",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 655
+        },
+        {
+          "name": "VeryLongSystemMessage",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 669
+        },
+        {
+          "name": "MultipleSystemMessages",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 683
+        }
+      ]
+    },
+    {
+      "name": "ChatTemplateDefaultSysTest",
+      "tests": 5,
+      "testsuite": [
+        {
+          "name": "ExtractFromJinja",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 504
+        },
+        {
+          "name": "SkipsJinjaVariables",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 519
+        },
+        {
+          "name": "NoTemplateNoDefault",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 531
+        },
+        {
+          "name": "InjectDefaultWhenNoUserSystem",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 540
+        },
+        {
+          "name": "NoInjectionWhenUserProvidesSystem",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 559
+        }
+      ]
+    },
+    {
+      "name": "ChatTemplateVisionTest",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "GemmaImageTokens",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 582
+        },
+        {
+          "name": "NonGemmaFallsBackToTextOnly",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 603
+        }
+      ]
+    },
+    {
+      "name": "HFChatTemplateTest",
+      "tests": 5,
+      "testsuite": [
+        {
+          "name": "StringFormat",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 727
+        },
+        {
+          "name": "ArrayDefaultSelected",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 733
+        },
+        {
+          "name": "ArrayFallbackToFirst",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 744
+        },
+        {
+          "name": "ArrayEmpty",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 754
+        },
+        {
+          "name": "MissingField",
+          "file": "\/src\/tests\/test_chat_template.cpp",
+          "line": 760
+        }
+      ]
+    },
+    {
+      "name": "JinjaValueTest",
+      "tests": 6,
+      "testsuite": [
+        {
+          "name": "None",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 15
+        },
+        {
+          "name": "Bool",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 23
+        },
+        {
+          "name": "Int",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 30
+        },
+        {
+          "name": "String",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 38
+        },
+        {
+          "name": "Array",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 46
+        },
+        {
+          "name": "Object",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 53
+        }
+      ]
+    },
+    {
+      "name": "JinjaTest",
+      "tests": 44,
+      "testsuite": [
+        {
+          "name": "PlainText",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 64
+        },
+        {
+          "name": "VariableSubstitution",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 70
+        },
+        {
+          "name": "ExpressionConcat",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 76
+        },
+        {
+          "name": "TildeConcat",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 82
+        },
+        {
+          "name": "IntArithmetic",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 88
+        },
+        {
+          "name": "IfTrue",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 98
+        },
+        {
+          "name": "IfElse",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 105
+        },
+        {
+          "name": "IfElif",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 112
+        },
+        {
+          "name": "ForLoop",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 120
+        },
+        {
+          "name": "ForLoopVariables",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 127
+        },
+        {
+          "name": "ForLoopFirst",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 134
+        },
+        {
+          "name": "TrimFilter",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 145
+        },
+        {
+          "name": "LengthFilter",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 151
+        },
+        {
+          "name": "DefaultFilter",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 158
+        },
+        {
+          "name": "Comparisons",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 169
+        },
+        {
+          "name": "NotOperator",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 176
+        },
+        {
+          "name": "InOperator",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 183
+        },
+        {
+          "name": "TernaryExpr",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 190
+        },
+        {
+          "name": "DotAccess",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 201
+        },
+        {
+          "name": "BracketAccess",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 208
+        },
+        {
+          "name": "NegativeIndex",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 215
+        },
+        {
+          "name": "WhitespaceStripLeft",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 226
+        },
+        {
+          "name": "SetVariable",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 236
+        },
+        {
+          "name": "NamespaceSet",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 242
+        },
+        {
+          "name": "SliceFromStart",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 342
+        },
+        {
+          "name": "SliceToEnd",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 349
+        },
+        {
+          "name": "SliceStartStop",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 356
+        },
+        {
+          "name": "SliceNegativeIndex",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 363
+        },
+        {
+          "name": "SliceReverse",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 370
+        },
+        {
+          "name": "SliceString",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 377
+        },
+        {
+          "name": "SliceInExpr",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 383
+        },
+        {
+          "name": "IsString",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 395
+        },
+        {
+          "name": "IsNotString",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 403
+        },
+        {
+          "name": "IsIterable",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 410
+        },
+        {
+          "name": "IsMapping",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 418
+        },
+        {
+          "name": "IsNumber",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 425
+        },
+        {
+          "name": "StripWithChars",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 437
+        },
+        {
+          "name": "LstripWithChars",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 443
+        },
+        {
+          "name": "RstripWithChars",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 449
+        },
+        {
+          "name": "TojsonString",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 459
+        },
+        {
+          "name": "TojsonNumber",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 465
+        },
+        {
+          "name": "TojsonArray",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 471
+        },
+        {
+          "name": "TojsonNone",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 478
+        },
+        {
+          "name": "TojsonBool",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 484
+        }
+      ]
+    },
+    {
+      "name": "JinjaChatTest",
+      "tests": 7,
+      "testsuite": [
+        {
+          "name": "ChatML",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 254
+        },
+        {
+          "name": "Gemma",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 281
+        },
+        {
+          "name": "MultiTurnWithTrim",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 309
+        },
+        {
+          "name": "Qwen3RealTemplate",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 495
+        },
+        {
+          "name": "Qwen3IsStringWithNonStringContent",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 533
+        },
+        {
+          "name": "GemmaRealTemplate",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 559
+        },
+        {
+          "name": "GemmaRealTemplateNoSystem",
+          "file": "\/src\/tests\/test_jinja.cpp",
+          "line": 611
+        }
+      ]
+    },
+    {
+      "name": "ExecutorKernelsTest",
+      "tests": 13,
+      "testsuite": [
+        {
+          "name": "ElementwiseAddFP16",
+          "file": "\/src\/tests\/test_executor_kernels.cu",
+          "line": 81
+        },
+        {
+          "name": "ElementwiseAddFP32",
+          "file": "\/src\/tests\/test_executor_kernels.cu",
+          "line": 110
+        },
+        {
+          "name": "ElementwiseAddStoreFP16",
+          "file": "\/src\/tests\/test_executor_kernels.cu",
+          "line": 139
+        },
+        {
+          "name": "AddBiasFP16",
+          "file": "\/src\/tests\/test_executor_kernels.cu",
+          "line": 170
+        },
+        {
+          "name": "ScaleFP16",
+          "file": "\/src\/tests\/test_executor_kernels.cu",
+          "line": 199
+        },
+        {
+          "name": "FP16ToFP32Roundtrip",
+          "file": "\/src\/tests\/test_executor_kernels.cu",
+          "line": 227
+        },
+        {
+          "name": "FP32AccumAddFP16",
+          "file": "\/src\/tests\/test_executor_kernels.cu",
+          "line": 266
+        },
+        {
+          "name": "ElementwiseAddOddLength",
+          "file": "\/src\/tests\/test_executor_kernels.cu",
+          "line": 299
+        },
+        {
+          "name": "SliceRows",
+          "file": "\/src\/tests\/test_executor_kernels.cu",
+          "line": 323
+        },
+        {
+          "name": "AddBias3Way",
+          "file": "\/src\/tests\/test_executor_kernels.cu",
+          "line": 342
+        },
+        {
+          "name": "ResidualAddRMSNorm",
+          "file": "\/src\/tests\/test_executor_kernels.cu",
+          "line": 379
+        },
+        {
+          "name": "AddRMSNormInplace",
+          "file": "\/src\/tests\/test_executor_kernels.cu",
+          "line": 414
+        },
+        {
+          "name": "RMSNormAddResidual",
+          "file": "\/src\/tests\/test_executor_kernels.cu",
+          "line": 440
+        }
+      ]
+    },
+    {
+      "name": "KVCacheWriteTest",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "BasicPagedWrite",
+          "file": "\/src\/tests\/test_kv_cache_write.cu",
+          "line": 58
+        },
+        {
+          "name": "FusedKVWrite",
+          "file": "\/src\/tests\/test_kv_cache_write.cu",
+          "line": 125
+        },
+        {
+          "name": "BatchedBlockTable",
+          "file": "\/src\/tests\/test_kv_cache_write.cu",
+          "line": 186
+        },
+        {
+          "name": "Int8PerHeadScale",
+          "file": "\/src\/tests\/test_kv_cache_write.cu",
+          "line": 250
+        }
+      ]
+    },
+    {
+      "name": "ForwardPassTest",
+      "tests": 7,
+      "testsuite": [
+        {
+          "name": "SyntheticModelForwardLogits",
+          "file": "\/src\/tests\/test_forward_pass.cu",
+          "line": 119
+        },
+        {
+          "name": "SyntheticModelDecodeAfterPrefill",
+          "file": "\/src\/tests\/test_forward_pass.cu",
+          "line": 142
+        },
+        {
+          "name": "MultiLayerPrefill",
+          "file": "\/src\/tests\/test_forward_pass.cu",
+          "line": 168
+        },
+        {
+          "name": "GQAForwardPass",
+          "file": "\/src\/tests\/test_forward_pass.cu",
+          "line": 191
+        },
+        {
+          "name": "MultiStepDecode",
+          "file": "\/src\/tests\/test_forward_pass.cu",
+          "line": 220
+        },
+        {
+          "name": "DeterministicLogits",
+          "file": "\/src\/tests\/test_forward_pass.cu",
+          "line": 257
+        },
+        {
+          "name": "LongSequencePrefill",
+          "file": "\/src\/tests\/test_forward_pass.cu",
+          "line": 292
+        }
+      ]
+    },
+    {
+      "name": "EngineIntegrationTest",
+      "tests": 7,
+      "testsuite": [
+        {
+          "name": "InitSucceeds",
+          "file": "\/src\/tests\/test_engine_integration.cu",
+          "line": 42
+        },
+        {
+          "name": "StepPrefillDecode",
+          "file": "\/src\/tests\/test_engine_integration.cu",
+          "line": 62
+        },
+        {
+          "name": "MultipleRequestsSequential",
+          "file": "\/src\/tests\/test_engine_integration.cu",
+          "line": 107
+        },
+        {
+          "name": "MoEInitSucceeds",
+          "file": "\/src\/tests\/test_engine_integration.cu",
+          "line": 148
+        },
+        {
+          "name": "FP8PrefillWithQ8Weights",
+          "file": "\/src\/tests\/test_engine_integration.cu",
+          "line": 216
+        },
+        {
+          "name": "NVFP4DecodeWithQ8Weights",
+          "file": "\/src\/tests\/test_engine_integration.cu",
+          "line": 238
+        },
+        {
+          "name": "FP8PrefillNVFP4Decode",
+          "file": "\/src\/tests\/test_engine_integration.cu",
+          "line": 258
+        }
+      ]
+    },
+    {
+      "name": "FmhaSm120Test",
+      "tests": 14,
+      "testsuite": [
+        {
+          "name": "NonCausalHD128",
+          "file": "\/src\/tests\/test_attention_fmha_sm120.cu",
+          "line": 173
+        },
+        {
+          "name": "CausalHD128",
+          "file": "\/src\/tests\/test_attention_fmha_sm120.cu",
+          "line": 177
+        },
+        {
+          "name": "CausalMultiTile",
+          "file": "\/src\/tests\/test_attention_fmha_sm120.cu",
+          "line": 181
+        },
+        {
+          "name": "GQA",
+          "file": "\/src\/tests\/test_attention_fmha_sm120.cu",
+          "line": 186
+        },
+        {
+          "name": "HeadDim64",
+          "file": "\/src\/tests\/test_attention_fmha_sm120.cu",
+          "line": 193
+        },
+        {
+          "name": "HeadDim96",
+          "file": "\/src\/tests\/test_attention_fmha_sm120.cu",
+          "line": 197
+        },
+        {
+          "name": "HeadDim256",
+          "file": "\/src\/tests\/test_attention_fmha_sm120.cu",
+          "line": 201
+        },
+        {
+          "name": "NonAlignedSeqLen",
+          "file": "\/src\/tests\/test_attention_fmha_sm120.cu",
+          "line": 207
+        },
+        {
+          "name": "SlidingWindow",
+          "file": "\/src\/tests\/test_attention_fmha_sm120.cu",
+          "line": 213
+        },
+        {
+          "name": "SlidingWindowMultiTile",
+          "file": "\/src\/tests\/test_attention_fmha_sm120.cu",
+          "line": 217
+        },
+        {
+          "name": "Softcap",
+          "file": "\/src\/tests\/test_attention_fmha_sm120.cu",
+          "line": 223
+        },
+        {
+          "name": "SoftcapCausalSlidingWindow",
+          "file": "\/src\/tests\/test_attention_fmha_sm120.cu",
+          "line": 229
+        },
+        {
+          "name": "DispatchSelectsSm120FMHA",
+          "file": "\/src\/tests\/test_attention_fmha_sm120.cu",
+          "line": 235
+        },
+        {
+          "name": "DISABLED_DispatchManual",
+          "file": "\/src\/tests\/test_attention_fmha_sm120.cu",
+          "line": 242
+        }
+      ]
+    },
+    {
+      "name": "FmhaFP8Test",
+      "tests": 9,
+      "testsuite": [
+        {
+          "name": "CausalHD128",
+          "file": "\/src\/tests\/test_fmha_fp8.cu",
+          "line": 149
+        },
+        {
+          "name": "NonCausalHD128",
+          "file": "\/src\/tests\/test_fmha_fp8.cu",
+          "line": 153
+        },
+        {
+          "name": "GQA",
+          "file": "\/src\/tests\/test_fmha_fp8.cu",
+          "line": 157
+        },
+        {
+          "name": "CausalMultiTile",
+          "file": "\/src\/tests\/test_fmha_fp8.cu",
+          "line": 161
+        },
+        {
+          "name": "SlidingWindow",
+          "file": "\/src\/tests\/test_fmha_fp8.cu",
+          "line": 165
+        },
+        {
+          "name": "Softcap",
+          "file": "\/src\/tests\/test_fmha_fp8.cu",
+          "line": 169
+        },
+        {
+          "name": "HD64",
+          "file": "\/src\/tests\/test_fmha_fp8.cu",
+          "line": 173
+        },
+        {
+          "name": "HD256",
+          "file": "\/src\/tests\/test_fmha_fp8.cu",
+          "line": 177
+        },
+        {
+          "name": "Qwen35LikeHD256_GQA41_SeqMultiTile",
+          "file": "\/src\/tests\/test_fmha_fp8.cu",
+          "line": 185
+        }
+      ]
+    },
+    {
+      "name": "AttentionMxFP4Test",
+      "tests": 7,
+      "testsuite": [
+        {
+          "name": "AvailabilityReflectsSM",
+          "file": "\/src\/tests\/test_attention_mxfp4.cu",
+          "line": 74
+        },
+        {
+          "name": "BasicPrefill",
+          "file": "\/src\/tests\/test_attention_mxfp4.cu",
+          "line": 83
+        },
+        {
+          "name": "CompareWithFP16Reference",
+          "file": "\/src\/tests\/test_attention_mxfp4.cu",
+          "line": 137
+        },
+        {
+          "name": "GQASupport",
+          "file": "\/src\/tests\/test_attention_mxfp4.cu",
+          "line": 211
+        },
+        {
+          "name": "HeadDim128",
+          "file": "\/src\/tests\/test_attention_mxfp4.cu",
+          "line": 256
+        },
+        {
+          "name": "RejectsInvalidHeadDim",
+          "file": "\/src\/tests\/test_attention_mxfp4.cu",
+          "line": 293
+        },
+        {
+          "name": "SoftcapSupport",
+          "file": "\/src\/tests\/test_attention_mxfp4.cu",
+          "line": 324
+        }
+      ]
+    },
+    {
+      "name": "FhmaMxFP4Test",
+      "tests": 14,
+      "testsuite": [
+        {
+          "name": "BasicHD64",
+          "file": "\/src\/tests\/test_attention_fmha_mxfp4.cu",
+          "line": 129
+        },
+        {
+          "name": "BasicHD128",
+          "file": "\/src\/tests\/test_attention_fmha_mxfp4.cu",
+          "line": 135
+        },
+        {
+          "name": "DISABLED_BasicHD256",
+          "file": "\/src\/tests\/test_attention_fmha_mxfp4.cu",
+          "line": 141
+        },
+        {
+          "name": "NonCausal",
+          "file": "\/src\/tests\/test_attention_fmha_mxfp4.cu",
+          "line": 148
+        },
+        {
+          "name": "SlidingWindow",
+          "file": "\/src\/tests\/test_attention_fmha_mxfp4.cu",
+          "line": 154
+        },
+        {
+          "name": "Softcap",
+          "file": "\/src\/tests\/test_attention_fmha_mxfp4.cu",
+          "line": 160
+        },
+        {
+          "name": "LongSequence",
+          "file": "\/src\/tests\/test_attention_fmha_mxfp4.cu",
+          "line": 166
+        },
+        {
+          "name": "AsymmetricSeqLens",
+          "file": "\/src\/tests\/test_attention_fmha_mxfp4.cu",
+          "line": 173
+        },
+        {
+          "name": "BasicHD96",
+          "file": "\/src\/tests\/test_attention_fmha_mxfp4.cu",
+          "line": 180
+        },
+        {
+          "name": "LongSequence2K",
+          "file": "\/src\/tests\/test_attention_fmha_mxfp4.cu",
+          "line": 187
+        },
+        {
+          "name": "MHA_1to1",
+          "file": "\/src\/tests\/test_attention_fmha_mxfp4.cu",
+          "line": 194
+        },
+        {
+          "name": "GQA_8x",
+          "file": "\/src\/tests\/test_attention_fmha_mxfp4.cu",
+          "line": 201
+        },
+        {
+          "name": "HD64_LongSeq",
+          "file": "\/src\/tests\/test_attention_fmha_mxfp4.cu",
+          "line": 208
+        },
+        {
+          "name": "RejectsHD48",
+          "file": "\/src\/tests\/test_attention_fmha_mxfp4.cu",
+          "line": 214
+        }
+      ]
+    },
+    {
+      "name": "SSMConv1dTest",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "DecodeShiftAndConvolve",
+          "file": "\/src\/tests\/test_ssm.cu",
+          "line": 71
+        },
+        {
+          "name": "PrefillCausal",
+          "file": "\/src\/tests\/test_ssm.cu",
+          "line": 133
+        },
+        {
+          "name": "StateConsistency",
+          "file": "\/src\/tests\/test_ssm.cu",
+          "line": 192
+        },
+        {
+          "name": "FP32SiLUFused",
+          "file": "\/src\/tests\/test_ssm.cu",
+          "line": 259
+        }
+      ]
+    },
+    {
+      "name": "JsonConstrainTest",
+      "tests": 9,
+      "testsuite": [
+        {
+          "name": "ClassifyDigit",
+          "file": "\/src\/tests\/test_json_constrain.cu",
+          "line": 17
+        },
+        {
+          "name": "ClassifyBrace",
+          "file": "\/src\/tests\/test_json_constrain.cu",
+          "line": 28
+        },
+        {
+          "name": "ClassifyQuote",
+          "file": "\/src\/tests\/test_json_constrain.cu",
+          "line": 43
+        },
+        {
+          "name": "ClassifyStringContent",
+          "file": "\/src\/tests\/test_json_constrain.cu",
+          "line": 51
+        },
+        {
+          "name": "ClassifyStructural",
+          "file": "\/src\/tests\/test_json_constrain.cu",
+          "line": 64
+        },
+        {
+          "name": "ClassifyLiteralStarts",
+          "file": "\/src\/tests\/test_json_constrain.cu",
+          "line": 74
+        },
+        {
+          "name": "ClassifyWhitespace",
+          "file": "\/src\/tests\/test_json_constrain.cu",
+          "line": 86
+        },
+        {
+          "name": "ClassifyNumbers",
+          "file": "\/src\/tests\/test_json_constrain.cu",
+          "line": 95
+        },
+        {
+          "name": "MaskAllowsValidTokens",
+          "file": "\/src\/tests\/test_json_constrain.cu",
+          "line": 105
+        }
+      ]
+    },
+    {
+      "name": "GDNScanTest",
+      "tests": 5,
+      "testsuite": [
+        {
+          "name": "SingleTokenCPUvsGPU",
+          "file": "\/src\/tests\/test_gdn.cu",
+          "line": 57
+        },
+        {
+          "name": "MultiTokenSequential",
+          "file": "\/src\/tests\/test_gdn.cu",
+          "line": 138
+        },
+        {
+          "name": "FusedKernelMatchesLegacy",
+          "file": "\/src\/tests\/test_gdn.cu",
+          "line": 219
+        },
+        {
+          "name": "ZeroState",
+          "file": "\/src\/tests\/test_gdn.cu",
+          "line": 314
+        },
+        {
+          "name": "RMSNormGatedSiLU",
+          "file": "\/src\/tests\/test_gdn.cu",
+          "line": 373
+        }
+      ]
+    },
+    {
+      "name": "GemmDP4ATest",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "Q8_0_Q8_1_Basic",
+          "file": "\/src\/tests\/test_gemm_dp4a.cu",
+          "line": 67
+        },
+        {
+          "name": "Q6K_Q8_1_Basic",
+          "file": "\/src\/tests\/test_gemm_dp4a.cu",
+          "line": 124
+        },
+        {
+          "name": "FusedSwiGLUQuantize",
+          "file": "\/src\/tests\/test_gemm_dp4a.cu",
+          "line": 196
+        }
+      ]
+    },
+    {
+      "name": "MMVQ",
+      "tests": 6,
+      "testsuite": [
+        {
+          "name": "Q4_K_MatchesDp4a",
+          "file": "\/src\/tests\/test_mmvq.cu",
+          "line": 135
+        },
+        {
+          "name": "Q5_K_MatchesDp4a",
+          "file": "\/src\/tests\/test_mmvq.cu",
+          "line": 143
+        },
+        {
+          "name": "Q8_0_MatchesDp4a",
+          "file": "\/src\/tests\/test_mmvq.cu",
+          "line": 151
+        },
+        {
+          "name": "Q4_K_LargerDims",
+          "file": "\/src\/tests\/test_mmvq.cu",
+          "line": 159
+        },
+        {
+          "name": "Q5_K_LargerDims",
+          "file": "\/src\/tests\/test_mmvq.cu",
+          "line": 167
+        },
+        {
+          "name": "Q8_0_LargerDims",
+          "file": "\/src\/tests\/test_mmvq.cu",
+          "line": 175
+        }
+      ]
+    },
+    {
+      "name": "PrimaryModelTest",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "GenerateCoherentOutput",
+          "file": "\/src\/tests\/test_e2e_models.cpp",
+          "line": 61
+        },
+        {
+          "name": "MultiTurnConversation",
+          "file": "\/src\/tests\/test_e2e_models.cpp",
+          "line": 79
+        },
+        {
+          "name": "TokenizeRoundtrip",
+          "file": "\/src\/tests\/test_e2e_models.cpp",
+          "line": 107
+        },
+        {
+          "name": "PrefillThenDecodeMultipleTokens",
+          "file": "\/src\/tests\/test_e2e_models.cpp",
+          "line": 120
+        }
+      ]
+    },
+    {
+      "name": "GDNModelTest",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "GenerateCoherentOutput",
+          "file": "\/src\/tests\/test_e2e_models.cpp",
+          "line": 173
+        },
+        {
+          "name": "MultiTurnGDNState",
+          "file": "\/src\/tests\/test_e2e_models.cpp",
+          "line": 191
+        }
+      ]
+    },
+    {
+      "name": "Gemma4ModelTest",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "AnswersCapitalOfFrance",
+          "file": "\/src\/tests\/test_e2e_models.cpp",
+          "line": 257
+        },
+        {
+          "name": "RawCompletionProducesOutput",
+          "file": "\/src\/tests\/test_e2e_models.cpp",
+          "line": 276
+        },
+        {
+          "name": "NoRepetitionDegeneration",
+          "file": "\/src\/tests\/test_e2e_models.cpp",
+          "line": 295
+        }
+      ]
+    },
+    {
+      "name": "Gemma4GraphsTest",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "AnswersCapitalOfFranceWithGraphs",
+          "file": "\/src\/tests\/test_e2e_models.cpp",
+          "line": 365
+        },
+        {
+          "name": "LongDecodeStaysCoherent",
+          "file": "\/src\/tests\/test_e2e_models.cpp",
+          "line": 385
+        }
+      ]
+    },
+    {
+      "name": "DegenerationTest",
+      "tests": 5,
+      "testsuite": [
+        {
+          "name": "ShortPromptNoRepetition",
+          "file": "\/src\/tests\/test_degeneration.cpp",
+          "line": 123
+        },
+        {
+          "name": "SecondRequestNotCorrupt",
+          "file": "\/src\/tests\/test_degeneration.cpp",
+          "line": 133
+        },
+        {
+          "name": "LongGenerationStability",
+          "file": "\/src\/tests\/test_degeneration.cpp",
+          "line": 155
+        },
+        {
+          "name": "DISABLED_GreedyDeterminism",
+          "file": "\/src\/tests\/test_degeneration.cpp",
+          "line": 178
+        },
+        {
+          "name": "NoLeakedSpecialTokens",
+          "file": "\/src\/tests\/test_degeneration.cpp",
+          "line": 200
+        }
+      ]
+    },
+    {
+      "name": "TokenizerCompatTest",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "MatchesHuggingFace",
+          "file": "\/src\/tests\/test_tokenizer_compat.cpp",
+          "line": 90
+        }
+      ]
+    },
+    {
+      "name": "WeightDispatchTest",
+      "tests": 10,
+      "testsuite": [
+        {
+          "name": "FP16_GemmMatchesDirect",
+          "file": "\/src\/tests\/test_weight_dispatch.cu",
+          "line": 71
+        },
+        {
+          "name": "FP16_GemvMatchesDirect",
+          "file": "\/src\/tests\/test_weight_dispatch.cu",
+          "line": 113
+        },
+        {
+          "name": "FP8_GemmMatchesDirect",
+          "file": "\/src\/tests\/test_weight_dispatch.cu",
+          "line": 165
+        },
+        {
+          "name": "FP8_GemvMatchesDirect",
+          "file": "\/src\/tests\/test_weight_dispatch.cu",
+          "line": 238
+        },
+        {
+          "name": "NVFP4_GemmMatchesDirect",
+          "file": "\/src\/tests\/test_weight_dispatch.cu",
+          "line": 304
+        },
+        {
+          "name": "NVFP4_GemvMatchesDirect",
+          "file": "\/src\/tests\/test_weight_dispatch.cu",
+          "line": 372
+        },
+        {
+          "name": "CUTLASS_NVFP4_GemmMatchesDirect",
+          "file": "\/src\/tests\/test_weight_dispatch.cu",
+          "line": 443
+        },
+        {
+          "name": "CUTLASS_NVFP4_GemvIsStub",
+          "file": "\/src\/tests\/test_weight_dispatch.cu",
+          "line": 538
+        },
+        {
+          "name": "MXFP4_GemmMatchesDirect",
+          "file": "\/src\/tests\/test_weight_dispatch.cu",
+          "line": 581
+        },
+        {
+          "name": "MXFP4_GemvMatchesDirect",
+          "file": "\/src\/tests\/test_weight_dispatch.cu",
+          "line": 671
+        }
+      ]
+    },
+    {
+      "name": "WeightRegistryPreservation",
+      "tests": 1,
+      "testsuite": [
+        {
+          "name": "NVFP4ModeDoesNotDowngradeSSMInOut",
+          "file": "\/src\/tests\/test_weight_registry_preservation.cpp",
+          "line": 35
+        }
+      ]
+    },
+    {
+      "name": "StoragePlanner",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "TinyBudgetReturnsFailure",
+          "file": "\/src\/tests\/test_weight_registry_preservation.cpp",
+          "line": 84
+        },
+        {
+          "name": "GenerousBudgetPreservesInitialTiers",
+          "file": "\/src\/tests\/test_weight_registry_preservation.cpp",
+          "line": 118
+        },
+        {
+          "name": "DualPathHintRoutesCorrectly",
+          "file": "\/src\/tests\/test_weight_registry_preservation.cpp",
+          "line": 158
+        },
+        {
+          "name": "ProjectedVRAMMatchesEntrySum",
+          "file": "\/src\/tests\/test_weight_registry_preservation.cpp",
+          "line": 201
+        }
+      ]
+    },
+    {
+      "name": "BlockSizes\/HadamardTest",
+      "tests": 12,
+      "testsuite": [
+        {
+          "name": "MatchesCPUReference\/0",
+          "value_param": "16",
+          "file": "\/src\/tests\/test_hadamard.cu",
+          "line": 60
+        },
+        {
+          "name": "MatchesCPUReference\/1",
+          "value_param": "32",
+          "file": "\/src\/tests\/test_hadamard.cu",
+          "line": 60
+        },
+        {
+          "name": "MatchesCPUReference\/2",
+          "value_param": "64",
+          "file": "\/src\/tests\/test_hadamard.cu",
+          "line": 60
+        },
+        {
+          "name": "MatchesCPUReference\/3",
+          "value_param": "128",
+          "file": "\/src\/tests\/test_hadamard.cu",
+          "line": 60
+        },
+        {
+          "name": "InPlaceWorks\/0",
+          "value_param": "16",
+          "file": "\/src\/tests\/test_hadamard.cu",
+          "line": 117
+        },
+        {
+          "name": "InPlaceWorks\/1",
+          "value_param": "32",
+          "file": "\/src\/tests\/test_hadamard.cu",
+          "line": 117
+        },
+        {
+          "name": "InPlaceWorks\/2",
+          "value_param": "64",
+          "file": "\/src\/tests\/test_hadamard.cu",
+          "line": 117
+        },
+        {
+          "name": "InPlaceWorks\/3",
+          "value_param": "128",
+          "file": "\/src\/tests\/test_hadamard.cu",
+          "line": 117
+        },
+        {
+          "name": "InvolutionProperty\/0",
+          "value_param": "16",
+          "file": "\/src\/tests\/test_hadamard.cu",
+          "line": 166
+        },
+        {
+          "name": "InvolutionProperty\/1",
+          "value_param": "32",
+          "file": "\/src\/tests\/test_hadamard.cu",
+          "line": 166
+        },
+        {
+          "name": "InvolutionProperty\/2",
+          "value_param": "64",
+          "file": "\/src\/tests\/test_hadamard.cu",
+          "line": 166
+        },
+        {
+          "name": "InvolutionProperty\/3",
+          "value_param": "128",
+          "file": "\/src\/tests\/test_hadamard.cu",
+          "line": 166
+        }
+      ]
+    }
+  ]
+}

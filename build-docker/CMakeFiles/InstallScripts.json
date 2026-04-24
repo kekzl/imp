@@ -1,0 +1,13 @@
+{
+	"InstallScripts" : 
+	[
+		"/src/build-docker/cmake_install.cmake",
+		"/src/build-docker/_deps/googletest-build/cmake_install.cmake",
+		"/src/build-docker/_deps/googletest-build/googlemock/cmake_install.cmake",
+		"/src/build-docker/_deps/googletest-build/googletest/cmake_install.cmake",
+		"/src/build-docker/_deps/cutlass-build/cmake_install.cmake",
+		"/src/build-docker/_deps/httplib-build/cmake_install.cmake",
+		"/src/build-docker/_deps/nlohmann_json-build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
