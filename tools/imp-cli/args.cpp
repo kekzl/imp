@@ -35,6 +35,9 @@ void print_usage(const char* prog) {
         "  --device <n>          CUDA device ID (default: 0)\n"
         "  --gpu-layers <n>      Layers to keep on GPU (-1 = all) (default: -1)\n"
         "  --kv-fp8              Use FP8 E4M3 KV cache (halves KV memory)\n"
+        "  --kv-fp16             Force FP16 KV cache (overrides auto-FP8 — use if\n"
+        "                        decode emits NaN after first token, e.g.\n"
+        "                        Mistral-Small-3.1 Q6_K). Sets IMP_KV_FP16=1.\n"
         "  --kv-int8             Use INT8 KV cache with dp4a attention (halves KV memory)\n"
         "  --kv-int4             Use INT4 KV cache (quarters KV memory)\n"
         "  --kv-turboquant       Use TurboQuant KV cache (PolarQuant + QJL, ~3x K reduction)\n"
@@ -138,6 +141,9 @@ CliArgs parse_args(int argc, char** argv) {
             args.gpu_layers = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--kv-fp8") == 0) {
             args.kv_fp8 = true;
+        } else if (std::strcmp(arg, "--kv-fp16") == 0) {
+            // Force FP16 KV cache via the same IMP_KV_FP16 env var the engine reads.
+            setenv("IMP_KV_FP16", "1", 1);
         } else if (std::strcmp(arg, "--kv-int8") == 0) {
             args.kv_int8 = true;
         } else if (std::strcmp(arg, "--kv-int4") == 0) {

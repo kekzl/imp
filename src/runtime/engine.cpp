@@ -368,10 +368,17 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // --- Auto-detect KV cache dtype ---
     // Default to FP8 E4M3 for ~50% KV VRAM savings.
     // Model-specific overrides (e.g. Gemma-4 → FP16) run later and may revert this.
-    // Under IMP_DEBUG_RAW, keep FP16 for byte-identical comparison.
-    if (config_.kv_cache_dtype == DType::FP16 && !debug_raw_) {
+    // Under IMP_DEBUG_RAW or explicit IMP_KV_FP16, keep FP16.
+    // IMP_KV_FP16=1 is the user-facing escape hatch: some models (e.g. Mistral-
+    // Small-3.1 Q6_K, tekken-tokenizer GQA layouts) produce NaN logits after
+    // the first decode token when FP8 KV is active — same pattern that affects
+    // Gemma-4 (see line ~492). User sets IMP_KV_FP16=1 to skip the upgrade.
+    const bool force_kv_fp16 = (std::getenv("IMP_KV_FP16") != nullptr);
+    if (config_.kv_cache_dtype == DType::FP16 && !debug_raw_ && !force_kv_fp16) {
         config_.kv_cache_dtype = DType::FP8_E4M3;
         IMP_LOG_INFO("KV cache dtype: auto → FP8_E4M3");
+    } else if (force_kv_fp16 && config_.kv_cache_dtype == DType::FP16) {
+        IMP_LOG_INFO("KV cache dtype: FP16 (IMP_KV_FP16=1 set — skipping auto FP8 upgrade)");
     }
 
     if (config_.max_batch_size <= 0) {
