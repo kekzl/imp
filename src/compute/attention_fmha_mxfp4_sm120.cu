@@ -239,17 +239,33 @@ fmha_sm120_mxfp4_kernel(
         }
         __syncthreads();
 
-        // Quantize from shared → Q_fp4 (padded stride for bank conflict avoidance)
+        // Quantize from shared → Q_fp4 (vectorized: 8 halves = 4 bytes/iter, uint32 store)
         {
-            const int total_packed = Bq * hd_half;
-            for (int idx = tid; idx < total_packed; idx += MX_BLOCK_THREADS) {
-                int r = idx / hd_half;
-                int d_byte = idx % hd_half;
-                int d = d_byte * 2;
+            // hd_half ≥ 4 for all supported HDs (32, 48, 64, 128). Stride hd_half_padded
+            // is always 4-byte aligned (hd_half + 4 bytes pad).
+            const int total_packed_u32 = (Bq * hd_half) / 4;
+            for (int idx = tid; idx < total_packed_u32; idx += MX_BLOCK_THREADS) {
+                int r = idx / (hd_half / 4);
+                int b4 = idx % (hd_half / 4);     // which 4-byte chunk in this row
+                int d = b4 * 8;                   // starting half index
                 float inv_scale = (q_scales[r] > 0.0f) ? (sqrt_scale / q_scales[r]) : 0.0f;
-                float v0 = __half2float(Q_stage[r * head_dim + d]) * inv_scale;
-                float v1 = __half2float(Q_stage[r * head_dim + d + 1]) * inv_scale;
-                Q_fp4[r * hd_half_padded + d_byte] = pack_fp4_pair(v0, v1);
+                const half* src = &Q_stage[r * head_dim + d];
+                // Load 8 halves via 2× half2 (4 bytes each)
+                half2 h01 = reinterpret_cast<const half2*>(src)[0];
+                half2 h23 = reinterpret_cast<const half2*>(src)[1];
+                half2 h45 = reinterpret_cast<const half2*>(src)[2];
+                half2 h67 = reinterpret_cast<const half2*>(src)[3];
+                uint32_t b0 = pack_fp4_pair(__half2float(h01.x) * inv_scale,
+                                             __half2float(h01.y) * inv_scale);
+                uint32_t b1 = pack_fp4_pair(__half2float(h23.x) * inv_scale,
+                                             __half2float(h23.y) * inv_scale);
+                uint32_t b2 = pack_fp4_pair(__half2float(h45.x) * inv_scale,
+                                             __half2float(h45.y) * inv_scale);
+                uint32_t b3 = pack_fp4_pair(__half2float(h67.x) * inv_scale,
+                                             __half2float(h67.y) * inv_scale);
+                uint32_t packed = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+                *reinterpret_cast<uint32_t*>(
+                    &Q_fp4[r * hd_half_padded + b4 * 4]) = packed;
             }
         }
     } else {
@@ -364,17 +380,30 @@ fmha_sm120_mxfp4_kernel(
             }
             __syncthreads();
 
-            // Quantize from shared → KV_fp4 (padded stride)
+            // Quantize from shared → KV_fp4 (vectorized: 8 halves = 4 bytes/iter)
             {
-                const int total_packed = Bkv * hd_half;
-                for (int idx = tid; idx < total_packed; idx += MX_BLOCK_THREADS) {
-                    int r = idx / hd_half;
-                    int d_byte = idx % hd_half;
-                    int d = d_byte * 2;
+                const int total_packed_u32 = (Bkv * hd_half) / 4;
+                for (int idx = tid; idx < total_packed_u32; idx += MX_BLOCK_THREADS) {
+                    int r = idx / (hd_half / 4);
+                    int b4 = idx % (hd_half / 4);
+                    int d = b4 * 8;
                     float inv_scale = (k_scales[r] > 0.0f) ? (sqrt_scale / k_scales[r]) : 0.0f;
-                    float v0 = __half2float(K_stage[r * head_dim + d]) * inv_scale;
-                    float v1 = __half2float(K_stage[r * head_dim + d + 1]) * inv_scale;
-                    KV_fp4[r * hd_half_padded + d_byte] = pack_fp4_pair(v0, v1);
+                    const half* src = &K_stage[r * head_dim + d];
+                    half2 h01 = reinterpret_cast<const half2*>(src)[0];
+                    half2 h23 = reinterpret_cast<const half2*>(src)[1];
+                    half2 h45 = reinterpret_cast<const half2*>(src)[2];
+                    half2 h67 = reinterpret_cast<const half2*>(src)[3];
+                    uint32_t b0 = pack_fp4_pair(__half2float(h01.x) * inv_scale,
+                                                 __half2float(h01.y) * inv_scale);
+                    uint32_t b1 = pack_fp4_pair(__half2float(h23.x) * inv_scale,
+                                                 __half2float(h23.y) * inv_scale);
+                    uint32_t b2 = pack_fp4_pair(__half2float(h45.x) * inv_scale,
+                                                 __half2float(h45.y) * inv_scale);
+                    uint32_t b3 = pack_fp4_pair(__half2float(h67.x) * inv_scale,
+                                                 __half2float(h67.y) * inv_scale);
+                    uint32_t packed = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+                    *reinterpret_cast<uint32_t*>(
+                        &KV_fp4[r * hd_half_padded + b4 * 4]) = packed;
                 }
             }
             __syncthreads();
