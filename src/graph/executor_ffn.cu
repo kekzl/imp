@@ -214,8 +214,9 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 gemm_cublaslt(fp8_no, fp8_tu, uo, 1.0f, 0.0f,
                               qscratch_.d_act_scale, hwu->payload.fp8.d_scale, stream);
             } else {
-                // Prefer registry handle (Phase 4 path); fall back to wcache_
-                // lookup if the handle is invalid.
+                // Read fused gate+up via WeightRegistry handle — the wcache_
+                // map is no longer the lookup mechanism (it remains the
+                // storage owner; cleanup happens via wcache_.clear()).
                 const Tensor* fused_gu = nullptr;
                 Tensor fused_from_handle;
                 if (ly.fused_gate_up_id != kInvalidTensorID) {
@@ -225,10 +226,6 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                                    2, h.shape, true);
                         fused_gu = &fused_from_handle;
                     }
-                }
-                if (!fused_gu) {
-                    auto it = wcache_.fused_gate_up.find(layer);
-                    if (it != wcache_.fused_gate_up.end()) fused_gu = &it->second;
                 }
                 if (n > 1 && fused_gu) {
                     // Batched gate+up: single cuBLAS call for both projections
