@@ -374,6 +374,36 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         IMP_LOG_INFO("KV cache dtype: auto → FP8_E4M3");
     }
 
+    // ROOT CAUSE of FP8-KV NaN bug (found 2026-04-24): non-deterministic
+    // cuBLAS GEMM algo selection produces run-to-run numerical noise in
+    // Q/K/V projections. When the KV cache is FP8-E4M3, the quantize-
+    // dequantize round-trip amplifies that noise enough to push softmax
+    // inputs into NaN after the first 1-3 decode tokens. Reproduced on
+    // Mistral-Small-3.1 Q6_K, DeepSeek-R1-Distill-14B Q6_K, Qwen3.5-4B/9B
+    // GDN Q8_0, Gemma-4 (the existing hard-coded arch override at
+    // line ~492 was working around the same root cause).
+    //
+    // Fix: when FP8 KV cache is active, force deterministic cuBLAS. Near-
+    // zero perf cost on sm_120 (deterministic mode only pins the algo
+    // choice, does not disable tensor cores). Users who've verified their
+    // model is fine with non-deterministic FP8 KV can opt out via
+    // IMP_ALLOW_NONDETERMINISTIC_FP8_KV=1.
+    if (config_.kv_cache_dtype == DType::FP8_E4M3 &&
+        !getenv("IMP_ALLOW_NONDETERMINISTIC_FP8_KV") &&
+        !getenv("IMP_DETERMINISTIC_GEMM")) {
+        setenv("IMP_DETERMINISTIC_GEMM", "1", 1);
+        setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 0);
+        IMP_LOG_INFO("FP8 KV cache: forcing IMP_DETERMINISTIC_GEMM=1 "
+                     "(non-deterministic cuBLAS + FP8 round-trip → NaN). "
+                     "Set IMP_ALLOW_NONDETERMINISTIC_FP8_KV=1 to opt out.");
+    }
+    // NOTE: compound FP8 precision loss (stacking FP8 KV on top of FP8
+    // prefill + NVFP4 decode) is model-dependent. Mistral-Small-3.1 and
+    // DeepSeek-R1-Distill need the secondary caches OFF (--no-fp8-prefill
+    // --no-nvfp4) for coherent output, but Llama-3.2-3B and others break
+    // DIFFERENTLY when NVFP4 is forced off on --kv-fp8. No one-size-fits-all
+    // auto-toggle — users with affected models use the explicit flags.
+
     if (config_.max_batch_size <= 0) {
         // Estimate model weight size from config to determine batch capacity.
         // Rough heuristic: 2 bytes/param for FP16. d_model * d_model * n_layers * ~12 gives
