@@ -300,7 +300,24 @@ fmha_sm120_mxfp4_kernel(
         }
     } else {
         // Fallback: 2-pass global reads (for Bq=32, HD>64)
-        {
+        if constexpr (UseBlockScaleMma) {
+            // Per-(row, k_group) absmax from global. Each thread owns one or
+            // more (r, kg) pairs via a stride loop. No cross-thread reduction.
+            const int total_groups = Bq * n_k_groups;
+            for (int idx = tid; idx < total_groups; idx += MX_BLOCK_THREADS) {
+                int r = idx / n_k_groups;
+                int kg = idx % n_k_groups;
+                float absmax = 0.0f;
+                if (q_start + r < seq_q) {
+                    const half* row = &Q_ptr[(int64_t)r * q_row_stride + kg * 16];
+                    #pragma unroll
+                    for (int i = 0; i < 16; i++)
+                        absmax = fmaxf(absmax, fabsf(__half2float(row[i])));
+                }
+                float raw = absmax / 6.0f;
+                q_scales_fp8[r * n_k_groups + kg] = float_to_fp8_e4m3(raw * sqrt_scale);
+            }
+        } else {
             const int r = sm_row;
             float local_max = 0.0f;
             if (r < Bq && q_start + r < seq_q) {
@@ -310,20 +327,8 @@ fmha_sm120_mxfp4_kernel(
             #pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1)
                 local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
-            if (sm_lane == 0 && r < Bq) {
-                if constexpr (UseBlockScaleMma) {
-                    // Fallback path: use per-row absmax, replicate across all k_groups
-                    // (loses the per-16 granularity benefit, but the fallback is only
-                    // for Bq=32 + HD>64 which is rarely hit).
-                    float raw = local_max / 6.0f;
-                    uint8_t ue4m3 = float_to_fp8_e4m3(raw * sqrt_scale);
-                    #pragma unroll
-                    for (int kg = 0; kg < n_k_groups; kg++)
-                        q_scales_fp8[r * n_k_groups + kg] = ue4m3;
-                } else {
-                    q_scales[r] = local_max / 6.0f * sqrt_scale;
-                }
-            }
+            if (sm_lane == 0 && r < Bq)
+                q_scales[r] = local_max / 6.0f * sqrt_scale;
         }
         __syncthreads();
 
@@ -480,7 +485,23 @@ fmha_sm120_mxfp4_kernel(
             __syncthreads();
         } else {
             // Fallback: 2-pass global reads
-            {
+            if constexpr (UseBlockScaleMma) {
+                // Per-(row, k_group) absmax from global
+                const int total_groups = Bkv * n_k_groups;
+                for (int idx = tid; idx < total_groups; idx += MX_BLOCK_THREADS) {
+                    int r = idx / n_k_groups;
+                    int kg = idx % n_k_groups;
+                    float absmax = 0.0f;
+                    if (kv_start + r < seq_kv) {
+                        const half* row = &K_ptr[(int64_t)(kv_start + r) * kv_row_stride + kg * 16];
+                        #pragma unroll
+                        for (int i = 0; i < 16; i++)
+                            absmax = fmaxf(absmax, fabsf(__half2float(row[i])));
+                    }
+                    float raw = absmax / 6.0f;
+                    k_scales_fp8[r * n_k_groups + kg] = float_to_fp8_e4m3(raw * sqrt_scale);
+                }
+            } else {
                 const int r = sm_row;
                 float local_max = 0.0f;
                 if (r < Bkv && kv_start + r < seq_kv) {
@@ -490,17 +511,8 @@ fmha_sm120_mxfp4_kernel(
                 #pragma unroll
                 for (int offset = TPR / 2; offset >= 1; offset >>= 1)
                     local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
-                if (sm_lane == 0 && r < Bkv) {
-                    if constexpr (UseBlockScaleMma) {
-                        float raw = local_max / 6.0f;
-                        uint8_t ue4m3 = float_to_fp8_e4m3(raw * sqrt_scale);
-                        #pragma unroll
-                        for (int kg = 0; kg < n_k_groups; kg++)
-                            k_scales_fp8[r * n_k_groups + kg] = ue4m3;
-                    } else {
-                        k_scales[r] = local_max / 6.0f * sqrt_scale;
-                    }
-                }
+                if (sm_lane == 0 && r < Bkv)
+                    k_scales[r] = local_max / 6.0f * sqrt_scale;
             }
             __syncthreads();
 
@@ -886,16 +898,7 @@ bool fmha_sm120_mxfp4_prefill(
     if (Q.dtype != DType::FP16) return false;
     // Blockscale MMA operates on K=64 per issue; head_dim must be a multiple of 64.
     // head_dim=96 (Gemma-class) is a multiple of 32 but NOT 64 → fall back to legacy.
-    const int hd_check = static_cast<int>(Q.shape[3]);
-    if (use_blockscale && (hd_check % 64 != 0)) {
-        use_blockscale = false;
-    }
-    // Blockscale is only beneficial when the Q/K FP16-staging fast path fits
-    // (HD ≤ 2*Bq). At HD=256, Bq must drop to 32 → can_stage_in_stile=false,
-    // which forces the scalar global-read fallback where the per-16-element
-    // granularity benefit is lost but the per-k_group dequant overhead remains.
-    // Measured -2.7% on Gemma-4 HD=256 Q4_K_M; route such configs to legacy.
-    if (use_blockscale && hd_check > 128) {
+    if (use_blockscale && (static_cast<int>(Q.shape[3]) % 64 != 0)) {
         use_blockscale = false;
     }
 
