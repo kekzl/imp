@@ -333,96 +333,165 @@ if(IMP_BUILD_SERVER)
 endif()
 
 # --- Tests ---
+# Tests are split into per-module binaries so a kernel change only relinks the
+# affected binary instead of one monolithic 60-file imp-tests target.
+# A wrapper shell script `imp-tests` is generated for backwards-compat with
+# Makefile, CI, and smoke_test.sh (forwards args to every binary in sequence;
+# gtest_filter mismatches return success, so only matching tests run).
 if(IMP_BUILD_TESTS)
     enable_testing()
+    include(GoogleTest)
 
-    set(IMP_TEST_SOURCES
+    function(imp_add_test_module target)
+        cmake_parse_arguments(ARG "WITH_STUB" "" "SOURCES" ${ARGN})
+        set(_sources ${ARG_SOURCES})
+        if(ARG_WITH_STUB)
+            list(APPEND _sources tests/gguf_stub.cpp)
+        endif()
+        add_executable(${target} ${_sources})
+        target_link_libraries(${target} PRIVATE imp GTest::gtest GTest::gtest_main)
+        target_include_directories(${target} PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests
+        )
+        set_target_properties(${target} PROPERTIES
+            CUDA_SEPARABLE_COMPILATION ON
+            CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        )
+        gtest_discover_tests(${target})
+    endfunction()
+
+    imp_add_test_module(test-core SOURCES
         tests/test_tensor.cpp
-        tests/test_gguf_loader.cpp
         tests/test_tensor_kind_table.cpp
         tests/test_tensor_kind_matcher.cpp
         tests/test_tensor_kind_coverage.cpp
         tests/test_kv_cache.cpp
+        tests/test_gguf_loader.cpp
+    )
+
+    imp_add_test_module(test-text SOURCES
+        tests/test_tokenizer.cpp
+        tests/test_tokenizer_compat.cpp
+        tests/test_chat_template.cpp
+        tests/test_jinja.cpp
+    )
+
+    imp_add_test_module(test-compute SOURCES
         tests/test_rope.cu
         tests/test_layernorm.cu
-        tests/test_moe.cu
-        tests/test_quant.cu
-        tests/test_green_ctx.cu
-        tests/test_moe_executor.cu
-        tests/test_quant_integration.cu
-        tests/test_e2e.cpp
-        tests/test_continuous_batching.cpp
-        tests/test_fp8_gemm.cu
-        tests/test_attention_tc.cu
-        tests/test_nvfp4_quant.cu
-        tests/test_cutlass_grouped_3x_nvfp4.cu
-        tests/test_turboquant.cu
-        tests/test_fp8_kv_cache.cu
-        tests/test_speculative.cpp
-        tests/test_sampling.cu
         tests/test_activation.cu
         tests/test_embedding.cu
         tests/test_gemm.cu
-        tests/test_paged_attention.cu
+        tests/test_gemm_dp4a.cu
+        tests/test_fp8_gemm.cu
+        tests/test_mmvq.cu
         tests/test_reduce.cu
-        tests/test_tokenizer.cpp
-        tests/test_chat_template.cpp
-        tests/test_jinja.cpp
+        tests/test_softmax.cu
+        tests/test_sampling.cu
         tests/test_executor_kernels.cu
-        tests/test_kv_cache_write.cu
-        tests/test_forward_pass.cu
-        tests/test_engine_integration.cu
         tests/test_hadamard.cu
+    )
+
+    imp_add_test_module(test-attention SOURCES
+        tests/test_attention_tc.cu
         tests/test_attention_fmha_sm120.cu
         tests/test_fmha_fp8.cu
         tests/test_attention_mxfp4.cu
         tests/test_attention_fmha_mxfp4.cu
-        tests/test_mxf4nvf4_probe.cu
+        tests/test_paged_attention.cu
+    )
+
+    imp_add_test_module(test-quant SOURCES
+        tests/test_quant.cu
+        tests/test_quant_integration.cu
+        tests/test_nvfp4_quant.cu
         tests/test_nvfp4_quant_ref.cu
+        tests/test_nvfp4_quant_hw.cu
+        tests/test_turboquant.cu
+        tests/test_cutlass_grouped_3x_nvfp4.cu
+        tests/test_mxf4nvf4_probe.cu
         tests/test_mxf4nvf4_mma_bench.cu
         tests/test_mxf4nvf4_mma_variants_bench.cu
-        tests/test_nvfp4_quant_hw.cu
         tests/test_mxf4nvf4_qkt_validate.cu
-        tests/test_softmax.cu
+        tests/test_weight_dispatch.cu
+    )
+
+    imp_add_test_module(test-kv SOURCES
+        tests/test_fp8_kv_cache.cu
+        tests/test_kv_cache_write.cu
+        tests/test_green_ctx.cu
+    )
+
+    imp_add_test_module(test-moe-gdn SOURCES
+        tests/test_moe.cu
+        tests/test_moe_executor.cu
+        tests/test_gdn.cu
         tests/test_ssm.cu
         tests/test_json_constrain.cu
-        tests/test_gdn.cu
-        tests/test_gemm_dp4a.cu
-        tests/test_mmvq.cu
+    )
+
+    imp_add_test_module(test-e2e WITH_STUB SOURCES
+        tests/test_forward_pass.cu
+        tests/test_engine_integration.cu
+        tests/test_e2e.cpp
         tests/test_e2e_models.cpp
+        tests/test_continuous_batching.cpp
+        tests/test_speculative.cpp
         tests/test_degeneration.cpp
-        tests/test_tokenizer_compat.cpp
-        tests/test_weight_dispatch.cu
         tests/test_weight_registry_preservation.cpp
-        tests/gguf_stub.cpp
     )
 
-    add_executable(imp-tests ${IMP_TEST_SOURCES})
-    target_link_libraries(imp-tests PRIVATE imp GTest::gtest GTest::gtest_main)
-    target_include_directories(imp-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
-    set_target_properties(imp-tests PROPERTIES
-        CUDA_SEPARABLE_COMPILATION ON
-        CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    set(IMP_TEST_BINARIES
+        test-core test-text test-compute test-attention
+        test-quant test-kv test-moe-gdn test-e2e
     )
 
-    include(GoogleTest)
-    gtest_discover_tests(imp-tests)
+    # Backwards-compat wrapper. Used by Makefile, CI artifacts, smoke_test.sh.
+    set(_wrapper ${CMAKE_BINARY_DIR}/imp-tests)
+    file(WRITE ${_wrapper}
+"#!/bin/sh
+DIR=$(cd \"$(dirname \"$0\")\" && pwd)
+status=0
+for bin in test-core test-text test-compute test-attention test-quant test-kv test-moe-gdn test-e2e; do
+    if [ -x \"$DIR/$bin\" ]; then
+        \"$DIR/$bin\" \"$@\" || status=$?
+    fi
+done
+exit $status
+")
+    file(CHMOD ${_wrapper}
+        PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                    GROUP_READ GROUP_EXECUTE
+                    WORLD_READ WORLD_EXECUTE)
 
-    # --- CTest label infrastructure ---
+    # --- CTest label aggregates ---
     # ctest -L unit  — CPU-only tests (no GPU required)
     # ctest -L gpu   — GPU tests (require NVIDIA GPU)
     # ctest -L perf  — Performance regression tests
-    add_test(NAME unit_tests COMMAND imp-tests
-        "--gtest_filter=TensorTest.*:GgufLoaderTest.*:TokenizerSPMTest.*:TokenizerGPT2Test.*:TokenizerDispatchTest.*:ChatTemplate*:BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub")
-    set_tests_properties(unit_tests PROPERTIES LABELS "unit")
+    set(_unit_e2e_filter "BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub")
 
-    add_test(NAME gpu_tests COMMAND imp-tests
-        "--gtest_filter=-TensorTest.*:GgufLoaderTest.*:TokenizerSPMTest.*:TokenizerGPT2Test.*:TokenizerDispatchTest.*:ChatTemplate*:BatchBuilderTest.*:SchedulerTest.*:RequestTest.*:EndToEndTest.*")
-    set_tests_properties(gpu_tests PROPERTIES LABELS "gpu")
+    add_test(NAME unit_core       COMMAND test-core)
+    add_test(NAME unit_text       COMMAND test-text)
+    add_test(NAME unit_e2e_subset COMMAND test-e2e "--gtest_filter=${_unit_e2e_filter}")
+    set_tests_properties(unit_core unit_text unit_e2e_subset PROPERTIES LABELS "unit")
 
-    add_test(NAME perf_tests COMMAND imp-tests
-        "--gtest_filter=*Perf*:*Bench*:*Throughput*")
-    set_tests_properties(perf_tests PROPERTIES LABELS "perf")
+    add_test(NAME gpu_compute   COMMAND test-compute)
+    add_test(NAME gpu_attention COMMAND test-attention)
+    add_test(NAME gpu_quant     COMMAND test-quant)
+    add_test(NAME gpu_kv        COMMAND test-kv)
+    add_test(NAME gpu_moe_gdn   COMMAND test-moe-gdn)
+    add_test(NAME gpu_e2e       COMMAND test-e2e "--gtest_filter=-${_unit_e2e_filter}")
+    set_tests_properties(gpu_compute gpu_attention gpu_quant gpu_kv gpu_moe_gdn gpu_e2e
+        PROPERTIES LABELS "gpu")
+
+    set(_perf_filter "*Perf*:*Bench*:*Throughput*")
+    add_test(NAME perf_compute   COMMAND test-compute   "--gtest_filter=${_perf_filter}")
+    add_test(NAME perf_attention COMMAND test-attention "--gtest_filter=${_perf_filter}")
+    add_test(NAME perf_quant     COMMAND test-quant     "--gtest_filter=${_perf_filter}")
+    add_test(NAME perf_e2e       COMMAND test-e2e       "--gtest_filter=${_perf_filter}")
+    set_tests_properties(perf_compute perf_attention perf_quant perf_e2e
+        PROPERTIES LABELS "perf")
 endif()
 
 # --- Install ---
