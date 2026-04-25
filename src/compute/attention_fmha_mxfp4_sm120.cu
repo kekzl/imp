@@ -886,7 +886,16 @@ bool fmha_sm120_mxfp4_prefill(
     if (Q.dtype != DType::FP16) return false;
     // Blockscale MMA operates on K=64 per issue; head_dim must be a multiple of 64.
     // head_dim=96 (Gemma-class) is a multiple of 32 but NOT 64 → fall back to legacy.
-    if (use_blockscale && (static_cast<int>(Q.shape[3]) % 64 != 0)) {
+    const int hd_check = static_cast<int>(Q.shape[3]);
+    if (use_blockscale && (hd_check % 64 != 0)) {
+        use_blockscale = false;
+    }
+    // Blockscale is only beneficial when the Q/K FP16-staging fast path fits
+    // (HD ≤ 2*Bq). At HD=256, Bq must drop to 32 → can_stage_in_stile=false,
+    // which forces the scalar global-read fallback where the per-16-element
+    // granularity benefit is lost but the per-k_group dequant overhead remains.
+    // Measured -2.7% on Gemma-4 HD=256 Q4_K_M; route such configs to legacy.
+    if (use_blockscale && hd_check > 128) {
         use_blockscale = false;
     }
 
