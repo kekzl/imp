@@ -99,10 +99,11 @@ __device__ __forceinline__ uint8_t pack_fp4_pair(float v0, float v1) {
 // =============================================================================
 
 // UseBlockScaleMma=false: legacy kind::f8f6f4.m16n8k32 (2× K-chunks, padded regs).
-// UseBlockScaleMma=true:  new kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64
-//                         (merges 2 legacy K-chunks per issue, half the MMA count).
-// Scale=1.0 uniform (sfa=sfb=0x38383838) keeps the post-MMA manual per-row scaling
-// path identical to the legacy kernel — only the MMA instruction changes.
+// UseBlockScaleMma=true:  kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64 with
+//                         per-16-element UE4M3 scales applied in the MMA instruction.
+//                         Quantization uses per-k_group (16 elements) absmax,
+//                         preserving local precision vs per-row. Post-MMA manual
+//                         scaling is dropped — HW scales during the dot product.
 template <int Bq, int HD, bool UseBlockScaleMma = false>
 __global__ void __launch_bounds__(MX_BLOCK_THREADS, 1)
 fmha_sm120_mxfp4_kernel(
@@ -188,10 +189,12 @@ fmha_sm120_mxfp4_kernel(
     float*   O_acc    = S_tile + Bq * Bkv;
     float*   row_m    = O_acc + Bq * head_dim;
     float*   row_l    = row_m + Bq;
-    // Per-row UE4M3 scales for blockscale-MMA sfa/sfb operands (only populated
-    // when UseBlockScaleMma=true; uninitialized otherwise). Placed at the tail.
+    // Per-k_group UE4M3 scales for blockscale-MMA sfa/sfb operands.
+    // Each row has n_k_groups = HD/16 scales (one per 16-K-block).
+    // Only populated when UseBlockScaleMma=true. Placed at the tail.
+    constexpr int n_k_groups = HD / 16;
     uint8_t* q_scales_fp8 = reinterpret_cast<uint8_t*>(row_l + Bq);
-    uint8_t* k_scales_fp8 = q_scales_fp8 + Bq;
+    uint8_t* k_scales_fp8 = q_scales_fp8 + Bq * n_k_groups;
 
     // Pre-compute sqrt(attention_scale) to absorb into Q and K scales (Opt 3).
     // S_true[i,j] = q_scale[i] * k_scale[j] * mma[i,j], and we want the result
@@ -228,8 +231,23 @@ fmha_sm120_mxfp4_kernel(
         }
         __syncthreads();
 
-        // Absmax from shared memory (fast L1 reads)
-        {
+        if constexpr (UseBlockScaleMma) {
+            // Per-k_group absmax + UE4M3 encoding. Each thread owns one (row,
+            // k_group) pair; 16 elements scanned directly.
+            const int total_groups = Bq * n_k_groups;
+            for (int idx = tid; idx < total_groups; idx += MX_BLOCK_THREADS) {
+                int r = idx / n_k_groups;
+                int kg = idx % n_k_groups;
+                float absmax = 0.0f;
+                const half* row_start = &Q_stage[r * head_dim + kg * 16];
+                #pragma unroll
+                for (int i = 0; i < 16; i++)
+                    absmax = fmaxf(absmax, fabsf(__half2float(row_start[i])));
+                float raw = absmax / 6.0f;
+                q_scales_fp8[r * n_k_groups + kg] = float_to_fp8_e4m3(raw * sqrt_scale);
+            }
+        } else {
+            // Absmax from shared memory (fast L1 reads) — per-row (legacy)
             const int r = sm_row;
             float local_max = 0.0f;
             if (r < Bq) {
@@ -239,37 +257,30 @@ fmha_sm120_mxfp4_kernel(
             #pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1)
                 local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
-            if (sm_lane == 0 && r < Bq) {
-                if constexpr (UseBlockScaleMma) {
-                    // Blockscale path: encode per-row scale × sqrt(attention_scale) as
-                    // UE4M3, store both the dequanted float (for self-consistent quant)
-                    // and the byte (for sfa operand).
-                    float raw = local_max / 6.0f;
-                    uint8_t ue4m3 = float_to_fp8_e4m3(raw * sqrt_scale);
-                    q_scales_fp8[r] = ue4m3;
-                    // Use dequanted value divided by sqrt_scale (so that inv_scale =
-                    // sqrt_scale / q_scales[r] = 1/dequanted_raw_scale).
-                    float dequant = fp8_e4m3_to_float_fast(ue4m3);
-                    q_scales[r] = dequant;  // store sqrt_scale*raw_dq (MMA sfa quantity)
-                } else {
-                    q_scales[r] = local_max / 6.0f * sqrt_scale;  // legacy
-                }
-            }
+            if (sm_lane == 0 && r < Bq)
+                q_scales[r] = local_max / 6.0f * sqrt_scale;
         }
         __syncthreads();
 
         // Quantize from shared → Q_fp4 (vectorized: 8 halves = 4 bytes/iter, uint32 store)
+        // In blockscale mode: each 8-halves chunk (b4) falls in exactly one k_group
+        // (kg = b4/2), so we dequant one UE4M3 byte per chunk and apply the resulting
+        // inverse scale to all 8 values.
         {
-            // hd_half ≥ 4 for all supported HDs (32, 48, 64, 128). Stride hd_half_padded
-            // is always 4-byte aligned (hd_half + 4 bytes pad).
             const int total_packed_u32 = (Bq * hd_half) / 4;
             for (int idx = tid; idx < total_packed_u32; idx += MX_BLOCK_THREADS) {
                 int r = idx / (hd_half / 4);
-                int b4 = idx % (hd_half / 4);     // which 4-byte chunk in this row
-                int d = b4 * 8;                   // starting half index
-                float inv_scale = (q_scales[r] > 0.0f) ? (sqrt_scale / q_scales[r]) : 0.0f;
+                int b4 = idx % (hd_half / 4);
+                int d = b4 * 8;
+                float inv_scale;
+                if constexpr (UseBlockScaleMma) {
+                    int kg = b4 / 2;  // 8 halves fit inside a 16-half k_group
+                    float dequant = fp8_e4m3_to_float_fast(q_scales_fp8[r * n_k_groups + kg]);
+                    inv_scale = (dequant > 0.0f) ? (sqrt_scale / dequant) : 0.0f;
+                } else {
+                    inv_scale = (q_scales[r] > 0.0f) ? (sqrt_scale / q_scales[r]) : 0.0f;
+                }
                 const half* src = &Q_stage[r * head_dim + d];
-                // Load 8 halves via 2× half2 (4 bytes each)
                 half2 h01 = reinterpret_cast<const half2*>(src)[0];
                 half2 h23 = reinterpret_cast<const half2*>(src)[1];
                 half2 h45 = reinterpret_cast<const half2*>(src)[2];
@@ -301,10 +312,14 @@ fmha_sm120_mxfp4_kernel(
                 local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
             if (sm_lane == 0 && r < Bq) {
                 if constexpr (UseBlockScaleMma) {
+                    // Fallback path: use per-row absmax, replicate across all k_groups
+                    // (loses the per-16 granularity benefit, but the fallback is only
+                    // for Bq=32 + HD>64 which is rarely hit).
                     float raw = local_max / 6.0f;
                     uint8_t ue4m3 = float_to_fp8_e4m3(raw * sqrt_scale);
-                    q_scales_fp8[r] = ue4m3;
-                    q_scales[r] = fp8_e4m3_to_float_fast(ue4m3);
+                    #pragma unroll
+                    for (int kg = 0; kg < n_k_groups; kg++)
+                        q_scales_fp8[r * n_k_groups + kg] = ue4m3;
                 } else {
                     q_scales[r] = local_max / 6.0f * sqrt_scale;
                 }
@@ -319,7 +334,15 @@ fmha_sm120_mxfp4_kernel(
                 int d_byte = idx % hd_half;
                 int d = d_byte * 2;
                 if (q_start + r < seq_q) {
-                    float inv_scale = (q_scales[r] > 0.0f) ? (sqrt_scale / q_scales[r]) : 0.0f;
+                    float inv_scale;
+                    if constexpr (UseBlockScaleMma) {
+                        int kg = d / 16;
+                        float dequant = fp8_e4m3_to_float_fast(
+                            q_scales_fp8[r * n_k_groups + kg]);
+                        inv_scale = (dequant > 0.0f) ? (sqrt_scale / dequant) : 0.0f;
+                    } else {
+                        inv_scale = (q_scales[r] > 0.0f) ? (sqrt_scale / q_scales[r]) : 0.0f;
+                    }
                     float v0 = __half2float(Q_ptr[(int64_t)r * q_row_stride + d]) * inv_scale;
                     float v1 = __half2float(Q_ptr[(int64_t)r * q_row_stride + d + 1]) * inv_scale;
                     Q_fp4[r * hd_half_padded + d_byte] = pack_fp4_pair(v0, v1);
@@ -391,8 +414,22 @@ fmha_sm120_mxfp4_kernel(
             }
             __syncthreads();
 
-            // Absmax from shared (fast L1 reads)
-            {
+            if constexpr (UseBlockScaleMma) {
+                // Per-k_group absmax for K tile
+                const int total_groups = Bkv * n_k_groups;
+                for (int idx = tid; idx < total_groups; idx += MX_BLOCK_THREADS) {
+                    int r = idx / n_k_groups;
+                    int kg = idx % n_k_groups;
+                    float absmax = 0.0f;
+                    const half* row_start = &K_stage[r * head_dim + kg * 16];
+                    #pragma unroll
+                    for (int i = 0; i < 16; i++)
+                        absmax = fmaxf(absmax, fabsf(__half2float(row_start[i])));
+                    float raw = absmax / 6.0f;
+                    k_scales_fp8[r * n_k_groups + kg] = float_to_fp8_e4m3(raw * sqrt_scale);
+                }
+            } else {
+                // Per-row absmax (legacy)
                 const int r = sm_row;
                 float local_max = 0.0f;
                 if (r < Bkv) {
@@ -402,16 +439,8 @@ fmha_sm120_mxfp4_kernel(
                 #pragma unroll
                 for (int offset = TPR / 2; offset >= 1; offset >>= 1)
                     local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
-                if (sm_lane == 0 && r < Bkv) {
-                    if constexpr (UseBlockScaleMma) {
-                        float raw = local_max / 6.0f;
-                        uint8_t ue4m3 = float_to_fp8_e4m3(raw * sqrt_scale);
-                        k_scales_fp8[r] = ue4m3;
-                        k_scales[r] = fp8_e4m3_to_float_fast(ue4m3);
-                    } else {
-                        k_scales[r] = local_max / 6.0f * sqrt_scale;
-                    }
-                }
+                if (sm_lane == 0 && r < Bkv)
+                    k_scales[r] = local_max / 6.0f * sqrt_scale;
             }
             __syncthreads();
 
@@ -422,7 +451,14 @@ fmha_sm120_mxfp4_kernel(
                     int r = idx / (hd_half / 4);
                     int b4 = idx % (hd_half / 4);
                     int d = b4 * 8;
-                    float inv_scale = (k_scales[r] > 0.0f) ? (sqrt_scale / k_scales[r]) : 0.0f;
+                    float inv_scale;
+                    if constexpr (UseBlockScaleMma) {
+                        int kg = b4 / 2;
+                        float dequant = fp8_e4m3_to_float_fast(k_scales_fp8[r * n_k_groups + kg]);
+                        inv_scale = (dequant > 0.0f) ? (sqrt_scale / dequant) : 0.0f;
+                    } else {
+                        inv_scale = (k_scales[r] > 0.0f) ? (sqrt_scale / k_scales[r]) : 0.0f;
+                    }
                     const half* src = &K_stage[r * head_dim + d];
                     half2 h01 = reinterpret_cast<const half2*>(src)[0];
                     half2 h23 = reinterpret_cast<const half2*>(src)[1];
@@ -458,8 +494,9 @@ fmha_sm120_mxfp4_kernel(
                     if constexpr (UseBlockScaleMma) {
                         float raw = local_max / 6.0f;
                         uint8_t ue4m3 = float_to_fp8_e4m3(raw * sqrt_scale);
-                        k_scales_fp8[r] = ue4m3;
-                        k_scales[r] = fp8_e4m3_to_float_fast(ue4m3);
+                        #pragma unroll
+                        for (int kg = 0; kg < n_k_groups; kg++)
+                            k_scales_fp8[r * n_k_groups + kg] = ue4m3;
                     } else {
                         k_scales[r] = local_max / 6.0f * sqrt_scale;
                     }
@@ -474,7 +511,15 @@ fmha_sm120_mxfp4_kernel(
                     int d_byte = idx % hd_half;
                     int d = d_byte * 2;
                     if (kv_start + r < seq_kv) {
-                        float inv_scale = (k_scales[r] > 0.0f) ? (sqrt_scale / k_scales[r]) : 0.0f;
+                        float inv_scale;
+                        if constexpr (UseBlockScaleMma) {
+                            int kg = d / 16;
+                            float dequant = fp8_e4m3_to_float_fast(
+                                k_scales_fp8[r * n_k_groups + kg]);
+                            inv_scale = (dequant > 0.0f) ? (sqrt_scale / dequant) : 0.0f;
+                        } else {
+                            inv_scale = (k_scales[r] > 0.0f) ? (sqrt_scale / k_scales[r]) : 0.0f;
+                        }
                         float v0 = __half2float(K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]) * inv_scale;
                         float v1 = __half2float(K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d + 1]) * inv_scale;
                         KV_fp4[r * hd_half_padded + d_byte] = pack_fp4_pair(v0, v1);
@@ -541,22 +586,20 @@ fmha_sm120_mxfp4_kernel(
                     uint32_t b1 = *reinterpret_cast<const uint32_t*>(
                         k_base1 + group_id * hd_half_padded + byte_offset);
 
-                    // Real block-scale: load per-row UE4M3 scales from SMEM and replicate
-                    // to uint32 (all 4 scales per thread cover the same row's k-groups).
-                    // SFA layout: thread T's sfa → row m_sfa = (T/4) + (T%2)*8.
-                    // SFB layout: thread T's sfb → col n_sfb = T/4.
+                    // Real block-scale with per-k_group UE4M3 scales. For this MMA
+                    // issue covering K-range [k*64, k*64+64), each thread needs 4
+                    // scales (for 4 k-groups of 16 elements each).
+                    // SFA layout: thread T's sfa → row m_sfa = (T/4) + (T%2)*8,
+                    //            4 bytes covering k_group indices k*4..k*4+3.
+                    // SFB layout: thread T's sfb → col n_sfb = T/4,
+                    //            same k_group positions.
                     const int m_sfa = (lane_id / 4) + (lane_id % 2) * 8;
                     const int n_sfb = lane_id / 4;
-                    uint8_t qs_byte = q_scales_fp8[ri * MX_MMA_M + m_sfa];
-                    uint8_t ks_byte = k_scales_fp8[ci * MX_MMA_N + n_sfb];
-                    uint32_t sfa = (uint32_t)qs_byte
-                                 | ((uint32_t)qs_byte << 8)
-                                 | ((uint32_t)qs_byte << 16)
-                                 | ((uint32_t)qs_byte << 24);
-                    uint32_t sfb = (uint32_t)ks_byte
-                                 | ((uint32_t)ks_byte << 8)
-                                 | ((uint32_t)ks_byte << 16)
-                                 | ((uint32_t)ks_byte << 24);
+                    const int kg_base = k * 4;  // 4 k_groups per m16n8k64 issue
+                    uint32_t sfa = *reinterpret_cast<const uint32_t*>(
+                        &q_scales_fp8[(ri * MX_MMA_M + m_sfa) * n_k_groups + kg_base]);
+                    uint32_t sfb = *reinterpret_cast<const uint32_t*>(
+                        &k_scales_fp8[(ci * MX_MMA_N + n_sfb) * n_k_groups + kg_base]);
                     constexpr uint16_t bidA = 0, tidA = 0, bidB = 0, tidB = 0;
 #if __CUDA_ARCH__ >= 1200
                     asm volatile(
@@ -825,7 +868,8 @@ static size_t compute_smem_mxfp4(int Bq, int Bkv, int head_dim) {
     size_t s_tile   = (size_t)Bq * Bkv * sizeof(float);          // S_tile
     size_t o_acc    = (size_t)Bq * head_dim * sizeof(float);     // O_acc
     size_t softmax  = 2 * (size_t)Bq * sizeof(float);            // row_m + row_l
-    size_t scales_fp8 = (size_t)(Bq + Bkv);                      // UE4M3 per-row scales (blockscale)
+    int n_k_groups = head_dim / 16;
+    size_t scales_fp8 = (size_t)(Bq + Bkv) * n_k_groups;          // UE4M3 per-16-K scales (blockscale)
     return q_fp4 + q_scales + align + kv_buf + k_scales + s_tile + o_acc + softmax + scales_fp8;
 }
 
