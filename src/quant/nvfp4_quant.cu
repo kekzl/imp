@@ -69,6 +69,28 @@ __device__ __forceinline__ uint8_t float_abs_to_fp4_e2m1(float abs_val)
     return code;  // 0..7
 }
 
+// HW FP32 pair → packed E2M1 byte (low = v0, high = v1). IEEE RNE rounding,
+// saturates to ±6. Single PTX instruction on sm_120+.
+__device__ __forceinline__ uint8_t nvfp4_pack_pair_hw(float v0, float v1)
+{
+#if __CUDA_ARCH__ >= 1200
+    uint32_t out;
+    asm volatile(
+        "{ .reg .b8 b;\n"
+        "  cvt.rn.satfinite.e2m1x2.f32 b, %2, %1;\n"
+        "  cvt.u32.u8 %0, b; }\n"
+        : "=r"(out)
+        : "f"(v0), "f"(v1));
+    return static_cast<uint8_t>(out);
+#else
+    uint8_t sign0 = (v0 < 0.0f) ? 1u : 0u;
+    uint8_t sign1 = (v1 < 0.0f) ? 1u : 0u;
+    uint8_t c0 = (sign0 << 3) | float_abs_to_fp4_e2m1(fabsf(v0));
+    uint8_t c1 = (sign1 << 3) | float_abs_to_fp4_e2m1(fabsf(v1));
+    return (c1 << 4) | c0;
+#endif
+}
+
 // float_to_fp8_e4m3() and fp8_e4m3_to_float() are provided by fp8_utils.cuh.
 
 // ---------------------------------------------------------------------------
@@ -125,20 +147,9 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4(
 
     #pragma unroll
     for (int i = 0; i < kMicroBlockSize; i += 2) {
-        // Quantize even element (low nibble).
-        float scaled0 = vals[i] * inv_combined_scale;
-        uint8_t sign0 = (scaled0 < 0.0f) ? 1u : 0u;
-        uint8_t code0 = float_abs_to_fp4_e2m1(fabsf(scaled0));
-        uint8_t fp4_0 = (sign0 << 3) | code0;
-
-        // Quantize odd element (high nibble).
-        float scaled1 = vals[i + 1] * inv_combined_scale;
-        uint8_t sign1 = (scaled1 < 0.0f) ? 1u : 0u;
-        uint8_t code1 = float_abs_to_fp4_e2m1(fabsf(scaled1));
-        uint8_t fp4_1 = (sign1 << 3) | code1;
-
-        // Pack: low nibble = even, high nibble = odd.
-        packed_out[packed_base + i / 2] = (fp4_1 << 4) | fp4_0;
+        float s0 = vals[i]     * inv_combined_scale;
+        float s1 = vals[i + 1] * inv_combined_scale;
+        packed_out[packed_base + i / 2] = nvfp4_pack_pair_hw(s0, s1);
     }
 }
 

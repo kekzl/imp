@@ -34,9 +34,22 @@ __device__ __forceinline__ uint8_t tq_fp4_quantize_signed(float val) {
     return (sign << 3) | code;
 }
 
-// Pack two signed FP4 nibbles into one byte (lo=even, hi=odd)
+// Pack two signed FP4 nibbles into one byte (lo=even, hi=odd).
+// Uses HW cvt.rn.satfinite.e2m1x2.f32 on sm_120+ (single PTX instruction,
+// IEEE RNE rounding, saturates to ±6). SW fallback for older archs.
 __device__ __forceinline__ uint8_t tq_fp4_pack_pair(float v0, float v1) {
+#if __CUDA_ARCH__ >= 1200
+    uint32_t out;
+    asm volatile(
+        "{ .reg .b8 b;\n"
+        "  cvt.rn.satfinite.e2m1x2.f32 b, %2, %1;\n"
+        "  cvt.u32.u8 %0, b; }\n"
+        : "=r"(out)
+        : "f"(v0), "f"(v1));
+    return static_cast<uint8_t>(out);
+#else
     return tq_fp4_quantize_signed(v0) | (tq_fp4_quantize_signed(v1) << 4);
+#endif
 }
 
 // Float → UE8M0 (pure-exponent, value = 2^(bits-127), rounds up to next pow2)
