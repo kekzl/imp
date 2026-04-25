@@ -552,11 +552,31 @@ fmha_sm120_mxfp4_kernel(
         // Thread mapping: groupID = lane/4 (0-7), threadID = lane%4 (0-3).
         //   A: row = groupID (+8 for a1), k_offset = threadID * 4 bytes (8 FP4)
         //   B: col = groupID (0-7 for n=8), k_offset = threadID * 4 bytes
-        for (int tile_idx = warp_id; tile_idx < s_total_tiles; tile_idx += MX_NUM_WARPS) {
-            int ri = tile_idx / s_col_tiles_half;
-            int ci = tile_idx % s_col_tiles_half;
+        // Iteration strategy:
+        //   UseBlockScaleMma=true:  outer iterates over (ri, ci_pair) where each
+        //     pair covers 2 consecutive ci values (16x16 output via 2 MMAs).
+        //     A operand loaded once per k-pair iteration and reused across the
+        //     2 MMAs (one per ci). Halves Q_fp4 SMEM-A bandwidth in Phase 1.
+        //   UseBlockScaleMma=false: original single-tile distribution.
+        const int s_col_tile_pairs = s_col_tiles_half / 2;  // groups of 2 ci's
+        const int s_pair_total_tiles = s_row_tiles * s_col_tile_pairs;
+        const int outer_total = UseBlockScaleMma ? s_pair_total_tiles : s_total_tiles;
+
+        for (int tile_idx = warp_id; tile_idx < outer_total; tile_idx += MX_NUM_WARPS) {
+            int ri, ci;
+            int ci_pair_base = 0;
+            if constexpr (UseBlockScaleMma) {
+                ri = tile_idx / s_col_tile_pairs;
+                ci_pair_base = (tile_idx % s_col_tile_pairs) * 2;
+                ci = ci_pair_base;  // first ci in pair (used for legacy-shared globals)
+            } else {
+                ri = tile_idx / s_col_tiles_half;
+                ci = tile_idx % s_col_tiles_half;
+            }
 
             float d0 = 0.0f, d1 = 0.0f, d2 = 0.0f, d3 = 0.0f;
+            // Second-ci accumulators (only used in blockscale 2-issue path)
+            float d4 = 0.0f, d5 = 0.0f, d6 = 0.0f, d7 = 0.0f;
 
             const int group_id = lane_id / 4;
             const int thread_in_group = lane_id % 4;
@@ -577,11 +597,16 @@ fmha_sm120_mxfp4_kernel(
                 //   b0: col[group_id],   k-stripe 2k
                 //   b1: col[group_id],   k-stripe 2k+1
                 const int k_pairs = hd_chunks_fp4 / 2;
+                const int m_sfa = (lane_id / 4) + (lane_id % 2) * 8;
+                const int n_sfb = lane_id / 4;
+                const int ci_a = ci_pair_base;
+                const int ci_b = ci_pair_base + 1;
                 for (int k = 0; k < k_pairs; k++) {
                     const int k0 = 2 * k;
                     const int k1 = k0 + 1;
                     const uint8_t* q_base0 = Q_fp4 + ri * MX_MMA_M * hd_half_padded + k0 * FP4_K_BYTES;
                     const uint8_t* q_base1 = Q_fp4 + ri * MX_MMA_M * hd_half_padded + k1 * FP4_K_BYTES;
+                    // A loaded once, reused for both ci's
                     uint32_t a0 = *reinterpret_cast<const uint32_t*>(
                         q_base0 + group_id * hd_half_padded + byte_offset);
                     uint32_t a1 = *reinterpret_cast<const uint32_t*>(
@@ -591,46 +616,71 @@ fmha_sm120_mxfp4_kernel(
                     uint32_t a3 = *reinterpret_cast<const uint32_t*>(
                         q_base1 + (group_id + 8) * hd_half_padded + byte_offset);
 
-                    const uint8_t* k_base0 = KV_fp4 + ci * MX_MMA_N * hd_half_padded + k0 * FP4_K_BYTES;
-                    const uint8_t* k_base1 = KV_fp4 + ci * MX_MMA_N * hd_half_padded + k1 * FP4_K_BYTES;
-                    uint32_t b0 = *reinterpret_cast<const uint32_t*>(
-                        k_base0 + group_id * hd_half_padded + byte_offset);
-                    uint32_t b1 = *reinterpret_cast<const uint32_t*>(
-                        k_base1 + group_id * hd_half_padded + byte_offset);
-
-                    // Real block-scale with per-k_group UE4M3 scales. For this MMA
-                    // issue covering K-range [k*64, k*64+64), each thread needs 4
-                    // scales (for 4 k-groups of 16 elements each).
-                    // SFA layout: thread T's sfa → row m_sfa = (T/4) + (T%2)*8,
-                    //            4 bytes covering k_group indices k*4..k*4+3.
-                    // SFB layout: thread T's sfb → col n_sfb = T/4,
-                    //            same k_group positions.
-                    const int m_sfa = (lane_id / 4) + (lane_id % 2) * 8;
-                    const int n_sfb = lane_id / 4;
-                    const int kg_base = k * 4;  // 4 k_groups per m16n8k64 issue
+                    // sfa shared across both ci's (depends only on row + k_group)
+                    const int kg_base = k * 4;
                     uint32_t sfa = *reinterpret_cast<const uint32_t*>(
                         &q_scales_fp8[(ri * MX_MMA_M + m_sfa) * n_k_groups + kg_base]);
-                    uint32_t sfb = *reinterpret_cast<const uint32_t*>(
-                        &k_scales_fp8[(ci * MX_MMA_N + n_sfb) * n_k_groups + kg_base]);
                     constexpr uint16_t bidA = 0, tidA = 0, bidB = 0, tidB = 0;
+
+                    // ---- ci_a ----
+                    {
+                        const uint8_t* k_base0 = KV_fp4 + ci_a * MX_MMA_N * hd_half_padded + k0 * FP4_K_BYTES;
+                        const uint8_t* k_base1 = KV_fp4 + ci_a * MX_MMA_N * hd_half_padded + k1 * FP4_K_BYTES;
+                        uint32_t b0 = *reinterpret_cast<const uint32_t*>(
+                            k_base0 + group_id * hd_half_padded + byte_offset);
+                        uint32_t b1 = *reinterpret_cast<const uint32_t*>(
+                            k_base1 + group_id * hd_half_padded + byte_offset);
+                        uint32_t sfb = *reinterpret_cast<const uint32_t*>(
+                            &k_scales_fp8[(ci_a * MX_MMA_N + n_sfb) * n_k_groups + kg_base]);
 #if __CUDA_ARCH__ >= 1200
-                    asm volatile(
-                        "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 "
-                        "{%0, %1, %2, %3},"
-                        "{%4, %5, %6, %7},"
-                        "{%8, %9},"
-                        "{%10, %11, %12, %13},"
-                        "{%14},"
-                        "{%15, %16},"
-                        "{%17},"
-                        "{%18, %19};\n"
-                        : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-                        : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-                          "r"(b0), "r"(b1),
-                          "f"(d0), "f"(d1), "f"(d2), "f"(d3),
-                          "r"(sfa), "h"(bidA), "h"(tidA),
-                          "r"(sfb), "h"(bidB), "h"(tidB));
+                        asm volatile(
+                            "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 "
+                            "{%0, %1, %2, %3},"
+                            "{%4, %5, %6, %7},"
+                            "{%8, %9},"
+                            "{%10, %11, %12, %13},"
+                            "{%14},"
+                            "{%15, %16},"
+                            "{%17},"
+                            "{%18, %19};\n"
+                            : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
+                            : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
+                              "r"(b0), "r"(b1),
+                              "f"(d0), "f"(d1), "f"(d2), "f"(d3),
+                              "r"(sfa), "h"(bidA), "h"(tidA),
+                              "r"(sfb), "h"(bidB), "h"(tidB));
 #endif
+                    }
+
+                    // ---- ci_b (same A, different B + sfb) ----
+                    {
+                        const uint8_t* k_base0 = KV_fp4 + ci_b * MX_MMA_N * hd_half_padded + k0 * FP4_K_BYTES;
+                        const uint8_t* k_base1 = KV_fp4 + ci_b * MX_MMA_N * hd_half_padded + k1 * FP4_K_BYTES;
+                        uint32_t b0 = *reinterpret_cast<const uint32_t*>(
+                            k_base0 + group_id * hd_half_padded + byte_offset);
+                        uint32_t b1 = *reinterpret_cast<const uint32_t*>(
+                            k_base1 + group_id * hd_half_padded + byte_offset);
+                        uint32_t sfb = *reinterpret_cast<const uint32_t*>(
+                            &k_scales_fp8[(ci_b * MX_MMA_N + n_sfb) * n_k_groups + kg_base]);
+#if __CUDA_ARCH__ >= 1200
+                        asm volatile(
+                            "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 "
+                            "{%0, %1, %2, %3},"
+                            "{%4, %5, %6, %7},"
+                            "{%8, %9},"
+                            "{%10, %11, %12, %13},"
+                            "{%14},"
+                            "{%15, %16},"
+                            "{%17},"
+                            "{%18, %19};\n"
+                            : "=f"(d4), "=f"(d5), "=f"(d6), "=f"(d7)
+                            : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
+                              "r"(b0), "r"(b1),
+                              "f"(d4), "f"(d5), "f"(d6), "f"(d7),
+                              "r"(sfa), "h"(bidA), "h"(tidA),
+                              "r"(sfb), "h"(bidB), "h"(tidB));
+#endif
+                    }
                 }
             } else {
             for (int k = 0; k < hd_chunks_fp4; k++) {
@@ -670,37 +720,13 @@ fmha_sm120_mxfp4_kernel(
             }
             }
 
-            // Store 16×8 result to S_tile with fused scale + mask (Opt 2).
-            // Fuses: per-row scale correction, attention_scale (pre-absorbed via
-            // sqrt_scale in q/k_scales), softcap, causal mask, sliding window.
-            // Eliminates the separate apply_score_masks pass + __syncthreads.
+            // Store 16×8 (or 16×16 for 2-issue blockscale) result to S_tile.
+            // Fuses scale, softcap, causal mask, sliding window.
             {
                 int base_row = ri * MX_MMA_M;
-                int base_col = ci * MX_MMA_N;
                 int r0 = (lane_id / 4) % 8;
                 int c0 = (lane_id % 4) * 2;
 
-                // Scale correction: in legacy mode, q_scales/k_scales include
-                // sqrt(attention_scale), and their product applies the full scale
-                // factor. In real blockscale mode, HW already applied per-row
-                // sfa/sfb during MMA, so val is already the attention score.
-                float qs0, qs1, ks0, ks1;
-                if constexpr (UseBlockScaleMma) {
-                    qs0 = qs1 = ks0 = ks1 = 1.0f;  // HW already scaled
-                } else {
-                    qs0 = q_scales[base_row + r0];
-                    qs1 = q_scales[base_row + r0 + 8];
-                    ks0 = k_scales[base_col + c0];
-                    ks1 = k_scales[base_col + c0 + 1];
-                }
-
-                // Compute global Q/K positions for masking
-                int gq0 = q_start + base_row + r0;
-                int gq1 = q_start + base_row + r0 + 8;
-                int gk0 = kv_start + base_col + c0;
-                int gk1 = kv_start + base_col + c0 + 1;
-
-                // Inline score computation + masking for all 4 output elements
                 #define FUSED_STORE(val, gq, gk, qs, ks, idx) do { \
                     float s = (val) * (qs) * (ks); \
                     if (softcap > 0.0f) s = softcap * tanhf(s / softcap); \
@@ -710,10 +736,39 @@ fmha_sm120_mxfp4_kernel(
                     S_tile[idx] = s; \
                 } while (0)
 
-                FUSED_STORE(d0, gq0, gk0, qs0, ks0, (base_row + r0) * Bkv + base_col + c0);
-                FUSED_STORE(d1, gq0, gk1, qs0, ks1, (base_row + r0) * Bkv + base_col + c0 + 1);
-                FUSED_STORE(d2, gq1, gk0, qs1, ks0, (base_row + r0 + 8) * Bkv + base_col + c0);
-                FUSED_STORE(d3, gq1, gk1, qs1, ks1, (base_row + r0 + 8) * Bkv + base_col + c0 + 1);
+                int gq0 = q_start + base_row + r0;
+                int gq1 = q_start + base_row + r0 + 8;
+
+                if constexpr (UseBlockScaleMma) {
+                    // 2-issue path: store both ci's, scales already HW-applied
+                    int base_col_a = ci_pair_base * MX_MMA_N;
+                    int base_col_b = (ci_pair_base + 1) * MX_MMA_N;
+                    int gk0_a = kv_start + base_col_a + c0;
+                    int gk1_a = kv_start + base_col_a + c0 + 1;
+                    int gk0_b = kv_start + base_col_b + c0;
+                    int gk1_b = kv_start + base_col_b + c0 + 1;
+                    FUSED_STORE(d0, gq0, gk0_a, 1.0f, 1.0f, (base_row + r0) * Bkv + base_col_a + c0);
+                    FUSED_STORE(d1, gq0, gk1_a, 1.0f, 1.0f, (base_row + r0) * Bkv + base_col_a + c0 + 1);
+                    FUSED_STORE(d2, gq1, gk0_a, 1.0f, 1.0f, (base_row + r0 + 8) * Bkv + base_col_a + c0);
+                    FUSED_STORE(d3, gq1, gk1_a, 1.0f, 1.0f, (base_row + r0 + 8) * Bkv + base_col_a + c0 + 1);
+                    FUSED_STORE(d4, gq0, gk0_b, 1.0f, 1.0f, (base_row + r0) * Bkv + base_col_b + c0);
+                    FUSED_STORE(d5, gq0, gk1_b, 1.0f, 1.0f, (base_row + r0) * Bkv + base_col_b + c0 + 1);
+                    FUSED_STORE(d6, gq1, gk0_b, 1.0f, 1.0f, (base_row + r0 + 8) * Bkv + base_col_b + c0);
+                    FUSED_STORE(d7, gq1, gk1_b, 1.0f, 1.0f, (base_row + r0 + 8) * Bkv + base_col_b + c0 + 1);
+                } else {
+                    // Legacy single-tile path
+                    int base_col = ci * MX_MMA_N;
+                    float qs0 = q_scales[base_row + r0];
+                    float qs1 = q_scales[base_row + r0 + 8];
+                    float ks0 = k_scales[base_col + c0];
+                    float ks1 = k_scales[base_col + c0 + 1];
+                    int gk0 = kv_start + base_col + c0;
+                    int gk1 = kv_start + base_col + c0 + 1;
+                    FUSED_STORE(d0, gq0, gk0, qs0, ks0, (base_row + r0) * Bkv + base_col + c0);
+                    FUSED_STORE(d1, gq0, gk1, qs0, ks1, (base_row + r0) * Bkv + base_col + c0 + 1);
+                    FUSED_STORE(d2, gq1, gk0, qs1, ks0, (base_row + r0 + 8) * Bkv + base_col + c0);
+                    FUSED_STORE(d3, gq1, gk1, qs1, ks1, (base_row + r0 + 8) * Bkv + base_col + c0 + 1);
+                }
                 #undef FUSED_STORE
             }
         }
