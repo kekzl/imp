@@ -1066,23 +1066,25 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i,
         }
     }
 
-    // Gated DeltaNet (GDN) weights (Qwen3.5)
+    // Gated DeltaNet (GDN) weights (Qwen3.5).
+    // GDN alpha/beta: dispatched via gemm_dispatch like every other quantized
+    // weight. Earlier code used raw_quant=false to pre-dequant to FP16 on host,
+    // but upload_weight() does not update L.gdn_*_qtype after conversion, so
+    // gemm_dispatch still saw qtype=Q8_0 and re-interpreted the FP16 bytes as
+    // Q8_0 blocks → ~80× too-large alpha/beta and immediate state collapse.
+    // Uploading raw Q8_0 keeps the qtype consistent with the bytes on device.
+    Tensor gdn_dummy_scales;
     if (L.gdn_gate.data && !L.gdn_gate.on_device) {
-        Tensor dummy_scales;
-        UPLOAD_OR_FAIL(L.gdn_gate, L.gdn_gate_qtype, dummy_scales,
+        UPLOAD_OR_FAIL(L.gdn_gate, L.gdn_gate_qtype, gdn_dummy_scales,
                        "gdn_gate", i, ctx);
     }
-    // GDN alpha/beta: used in direct gemm() for small projections.
-    // Must be FP16 on device (NOT raw quantized) for cuBLAS GEMM.
     if (L.gdn_alpha.data && !L.gdn_alpha.on_device) {
-        Tensor dummy_scales;
-        UPLOAD_OR_FAIL_RAW(L.gdn_alpha, L.gdn_alpha_qtype, dummy_scales,
-                           /*raw_quant=*/false, "gdn_alpha", i, ctx);
+        UPLOAD_OR_FAIL(L.gdn_alpha, L.gdn_alpha_qtype, gdn_dummy_scales,
+                       "gdn_alpha", i, ctx);
     }
     if (L.gdn_beta.data && !L.gdn_beta.on_device) {
-        Tensor dummy_scales;
-        UPLOAD_OR_FAIL_RAW(L.gdn_beta, L.gdn_beta_qtype, dummy_scales,
-                           /*raw_quant=*/false, "gdn_beta", i, ctx);
+        UPLOAD_OR_FAIL(L.gdn_beta, L.gdn_beta_qtype, gdn_dummy_scales,
+                       "gdn_beta", i, ctx);
     }
 
     return true;
