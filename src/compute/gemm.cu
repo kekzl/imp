@@ -596,7 +596,7 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C,
                 }
                 cublasHandle_t fb_handle = get_cublas_handle();
                 cublasSetStream(fb_handle, stream);
-                cublasGemmEx(fb_handle,
+                cublasStatus_t fb_st = cublasGemmEx(fb_handle,
                     CUBLAS_OP_T, CUBLAS_OP_N,
                     (int)N, (int)M, (int)K,
                     &alpha,
@@ -605,6 +605,17 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C,
                     &beta,
                     C.data, cuda_dtype_C, (int)N,
                     CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+                if (fb_st != CUBLAS_STATUS_SUCCESS) {
+                    // Both cublasLt and cublasGemmEx failed. Output buffer holds
+                    // garbage; downstream kernels will likely IMA on its values
+                    // or produce silent NaN. Surface the failure here instead.
+                    IMP_LOG_ERROR("gemm: cublasGemmEx fallback also failed (status %d) "
+                                  "M=%ld K=%ld N=%ld dtA=%d dtB=%d dtC=%d. Output "
+                                  "buffer is garbage; expect downstream IMA.",
+                                  (int)fb_st, (long)M, (long)K, (long)N,
+                                  (int)cuda_dtype_A, (int)cuda_dtype_B,
+                                  (int)cuda_dtype_C);
+                }
             }
         }
     }

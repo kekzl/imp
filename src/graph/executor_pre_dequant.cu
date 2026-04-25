@@ -1203,6 +1203,45 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
                 void* d_fp16_bulk = nullptr;
                 if (fp16_total > 0) {
+                    // Pre-flight VRAM check: WSL2/WDDM cudaMalloc happily pages over
+                    // the device boundary into host RAM. cuBLASLt then fails at
+                    // runtime when it can't allocate its internal workspace → status
+                    // 14 (INVALID_VALUE) followed by a confusing downstream illegal
+                    // memory access (observed on Qwen3.5-27B-mxfp4 GDN where the
+                    // 12 GiB MXFP4 raw + 48 GiB FP16 fallback exceed 32 GiB VRAM).
+                    // Refuse the alloc instead of paging — keeps the failure mode
+                    // legible.
+                    size_t free_mem = 0, total_mem = 0;
+                    cudaMemGetInfo(&free_mem, &total_mem);
+                    constexpr size_t kRuntimeHeadroom =
+                        static_cast<size_t>(2) * 1024 * 1024 * 1024;
+                    bool oversubscribe = (free_mem <= kRuntimeHeadroom ||
+                                           fp16_total + kRuntimeHeadroom > free_mem);
+                    const char* force = std::getenv("IMP_MXFP4_FP16_FALLBACK");
+                    bool allow_force = (force && std::string(force) == "force");
+                    if (oversubscribe && !allow_force) {
+                        IMP_LOG_ERROR(
+                            "MXFP4 FP16 fallback would oversubscribe VRAM "
+                            "(need %.1f GiB + %.1f GiB runtime headroom, %.1f GiB free). "
+                            "Model is too large for this GPU with the FP16 decode "
+                            "fallback. Use a smaller quant or a smaller model. "
+                            "Set IMP_MXFP4_FP16_FALLBACK=force to attempt anyway "
+                            "(may IMA at first decode forward).",
+                            fp16_total / (1024.0 * 1024.0 * 1024.0),
+                            kRuntimeHeadroom / (1024.0 * 1024.0 * 1024.0),
+                            free_mem / (1024.0 * 1024.0 * 1024.0));
+                        // Skip the alloc — wcache_.fp16 stays empty for these weights.
+                        // Downstream code will detect the missing entries and bail
+                        // with its own diagnostic instead of silently corrupting state.
+                        fp16_total = 0;
+                    } else if (oversubscribe) {
+                        IMP_LOG_WARN("MXFP4 FP16 fallback: forcing oversubscribed alloc "
+                                     "(IMP_MXFP4_FP16_FALLBACK=force, %.1f GiB > %.1f GiB free)",
+                                     fp16_total / (1024.0 * 1024.0 * 1024.0),
+                                     free_mem / (1024.0 * 1024.0 * 1024.0));
+                    }
+                }
+                if (fp16_total > 0) {
                     cudaError_t ae = cudaMalloc(&d_fp16_bulk, fp16_total);
                     if (ae != cudaSuccess) {
                         IMP_LOG_ERROR("MXFP4 FP16 bulk alloc failed: %s (%.1f MiB)",
