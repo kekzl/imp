@@ -489,7 +489,17 @@ static bool assign_tensor(Model& model, const std::string& name,
         // SSM weights (Mamba2)
         else if (field == "ssm_in")   { layer.ssm_in = tensor; layer.ssm_in_qtype = qtype; }
         else if (field == "ssm_out")  { layer.ssm_out = tensor; layer.ssm_out_qtype = qtype; }
-        else if (field == "ssm_dt")     layer.ssm_dt_b = tensor;  // dt bias
+        else if (field == "ssm_dt") {
+            // Some converters (Qwen3.5-27B-mxfp4) emit A_log under the name
+            // "ssm_dt.weight" — a 1D vector of shape [n_heads]. Differentiate
+            // bias vs weight: bias → ssm_dt_b (per-head dt bias),
+            // weight → ssm_a (per-head A_log). Without this branch the weight
+            // silently overwrites the bias and ssm_a stays null, causing the
+            // GDN scan kernel to NULL-deref A_log[h] on first launch.
+            if (suffix == "bias")        layer.ssm_dt_b = tensor;
+            else if (suffix == "weight") layer.ssm_a = tensor;
+            else return false;
+        }
         else if (field == "ssm_norm")   layer.ssm_norm_w = tensor;
         // SSM conv1d: "blk.{i}.ssm_conv1d.weight" / "blk.{i}.ssm_conv1d.bias"
         else if (field == "ssm_conv1d") {
