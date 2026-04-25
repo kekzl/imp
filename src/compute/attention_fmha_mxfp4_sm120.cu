@@ -553,30 +553,33 @@ fmha_sm120_mxfp4_kernel(
         //   A: row = groupID (+8 for a1), k_offset = threadID * 4 bytes (8 FP4)
         //   B: col = groupID (0-7 for n=8), k_offset = threadID * 4 bytes
         // Iteration strategy:
-        //   UseBlockScaleMma=true:  outer iterates over (ri, ci_pair) where each
-        //     pair covers 2 consecutive ci values (16x16 output via 2 MMAs).
-        //     A operand loaded once per k-pair iteration and reused across the
-        //     2 MMAs (one per ci). Halves Q_fp4 SMEM-A bandwidth in Phase 1.
+        //   UseBlockScaleMma=true:  outer iterates over (ri, ci_meta) where each
+        //     meta covers 4 consecutive ci values (16x32 output via 4 MMAs).
+        //     A operand + sfa loaded once per k iteration and reused across the
+        //     4 MMAs. Quarters Q_fp4 SMEM-A bandwidth in Phase 1.
         //   UseBlockScaleMma=false: original single-tile distribution.
-        const int s_col_tile_pairs = s_col_tiles_half / 2;  // groups of 2 ci's
-        const int s_pair_total_tiles = s_row_tiles * s_col_tile_pairs;
-        const int outer_total = UseBlockScaleMma ? s_pair_total_tiles : s_total_tiles;
+        constexpr int CI_PER_META = 4;
+        const int s_col_tile_metas = s_col_tiles_half / CI_PER_META;
+        const int s_meta_total_tiles = s_row_tiles * s_col_tile_metas;
+        const int outer_total = UseBlockScaleMma ? s_meta_total_tiles : s_total_tiles;
 
         for (int tile_idx = warp_id; tile_idx < outer_total; tile_idx += MX_NUM_WARPS) {
             int ri, ci;
-            int ci_pair_base = 0;
+            int ci_meta_base = 0;
             if constexpr (UseBlockScaleMma) {
-                ri = tile_idx / s_col_tile_pairs;
-                ci_pair_base = (tile_idx % s_col_tile_pairs) * 2;
-                ci = ci_pair_base;  // first ci in pair (used for legacy-shared globals)
+                ri = tile_idx / s_col_tile_metas;
+                ci_meta_base = (tile_idx % s_col_tile_metas) * CI_PER_META;
+                ci = ci_meta_base;  // first ci (used by code shared with legacy)
             } else {
                 ri = tile_idx / s_col_tiles_half;
                 ci = tile_idx % s_col_tiles_half;
             }
 
             float d0 = 0.0f, d1 = 0.0f, d2 = 0.0f, d3 = 0.0f;
-            // Second-ci accumulators (only used in blockscale 2-issue path)
+            // Extra accumulators for ci_meta_base + 1..3 (4-issue blockscale only)
             float d4 = 0.0f, d5 = 0.0f, d6 = 0.0f, d7 = 0.0f;
+            float d8 = 0.0f, d9 = 0.0f, dA = 0.0f, dB = 0.0f;
+            float dC = 0.0f, dD = 0.0f, dE = 0.0f, dF = 0.0f;
 
             const int group_id = lane_id / 4;
             const int thread_in_group = lane_id % 4;
@@ -599,14 +602,31 @@ fmha_sm120_mxfp4_kernel(
                 const int k_pairs = hd_chunks_fp4 / 2;
                 const int m_sfa = (lane_id / 4) + (lane_id % 2) * 8;
                 const int n_sfb = lane_id / 4;
-                const int ci_a = ci_pair_base;
-                const int ci_b = ci_pair_base + 1;
+                constexpr uint16_t bidA = 0, tidA = 0, bidB = 0, tidB = 0;
+                #define MXF4_MMA(d_a, d_b, d_c, d_d, b_lo, b_hi, sfb_) \
+                    asm volatile( \
+                        "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 " \
+                        "{%0, %1, %2, %3}," \
+                        "{%4, %5, %6, %7}," \
+                        "{%8, %9}," \
+                        "{%10, %11, %12, %13}," \
+                        "{%14}," \
+                        "{%15, %16}," \
+                        "{%17}," \
+                        "{%18, %19};\n" \
+                        : "=f"(d_a), "=f"(d_b), "=f"(d_c), "=f"(d_d) \
+                        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), \
+                          "r"(b_lo), "r"(b_hi), \
+                          "f"(d_a), "f"(d_b), "f"(d_c), "f"(d_d), \
+                          "r"(sfa), "h"(bidA), "h"(tidA), \
+                          "r"(sfb_), "h"(bidB), "h"(tidB))
+
                 for (int k = 0; k < k_pairs; k++) {
                     const int k0 = 2 * k;
                     const int k1 = k0 + 1;
                     const uint8_t* q_base0 = Q_fp4 + ri * MX_MMA_M * hd_half_padded + k0 * FP4_K_BYTES;
                     const uint8_t* q_base1 = Q_fp4 + ri * MX_MMA_M * hd_half_padded + k1 * FP4_K_BYTES;
-                    // A loaded once, reused for both ci's
+                    // A loaded once, reused for all 4 ci's
                     uint32_t a0 = *reinterpret_cast<const uint32_t*>(
                         q_base0 + group_id * hd_half_padded + byte_offset);
                     uint32_t a1 = *reinterpret_cast<const uint32_t*>(
@@ -616,72 +636,32 @@ fmha_sm120_mxfp4_kernel(
                     uint32_t a3 = *reinterpret_cast<const uint32_t*>(
                         q_base1 + (group_id + 8) * hd_half_padded + byte_offset);
 
-                    // sfa shared across both ci's (depends only on row + k_group)
+                    // sfa shared across all 4 ci's
                     const int kg_base = k * 4;
                     uint32_t sfa = *reinterpret_cast<const uint32_t*>(
                         &q_scales_fp8[(ri * MX_MMA_M + m_sfa) * n_k_groups + kg_base]);
-                    constexpr uint16_t bidA = 0, tidA = 0, bidB = 0, tidB = 0;
 
-                    // ---- ci_a ----
-                    {
-                        const uint8_t* k_base0 = KV_fp4 + ci_a * MX_MMA_N * hd_half_padded + k0 * FP4_K_BYTES;
-                        const uint8_t* k_base1 = KV_fp4 + ci_a * MX_MMA_N * hd_half_padded + k1 * FP4_K_BYTES;
+                    // 4 MMAs for ci_meta_base + 0..3, all sharing A and sfa
+                    #pragma unroll
+                    for (int co = 0; co < CI_PER_META; co++) {
+                        int ci_local = ci_meta_base + co;
+                        const uint8_t* k_base0 = KV_fp4 + ci_local * MX_MMA_N * hd_half_padded + k0 * FP4_K_BYTES;
+                        const uint8_t* k_base1 = KV_fp4 + ci_local * MX_MMA_N * hd_half_padded + k1 * FP4_K_BYTES;
                         uint32_t b0 = *reinterpret_cast<const uint32_t*>(
                             k_base0 + group_id * hd_half_padded + byte_offset);
                         uint32_t b1 = *reinterpret_cast<const uint32_t*>(
                             k_base1 + group_id * hd_half_padded + byte_offset);
                         uint32_t sfb = *reinterpret_cast<const uint32_t*>(
-                            &k_scales_fp8[(ci_a * MX_MMA_N + n_sfb) * n_k_groups + kg_base]);
+                            &k_scales_fp8[(ci_local * MX_MMA_N + n_sfb) * n_k_groups + kg_base]);
 #if __CUDA_ARCH__ >= 1200
-                        asm volatile(
-                            "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 "
-                            "{%0, %1, %2, %3},"
-                            "{%4, %5, %6, %7},"
-                            "{%8, %9},"
-                            "{%10, %11, %12, %13},"
-                            "{%14},"
-                            "{%15, %16},"
-                            "{%17},"
-                            "{%18, %19};\n"
-                            : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-                            : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-                              "r"(b0), "r"(b1),
-                              "f"(d0), "f"(d1), "f"(d2), "f"(d3),
-                              "r"(sfa), "h"(bidA), "h"(tidA),
-                              "r"(sfb), "h"(bidB), "h"(tidB));
-#endif
-                    }
-
-                    // ---- ci_b (same A, different B + sfb) ----
-                    {
-                        const uint8_t* k_base0 = KV_fp4 + ci_b * MX_MMA_N * hd_half_padded + k0 * FP4_K_BYTES;
-                        const uint8_t* k_base1 = KV_fp4 + ci_b * MX_MMA_N * hd_half_padded + k1 * FP4_K_BYTES;
-                        uint32_t b0 = *reinterpret_cast<const uint32_t*>(
-                            k_base0 + group_id * hd_half_padded + byte_offset);
-                        uint32_t b1 = *reinterpret_cast<const uint32_t*>(
-                            k_base1 + group_id * hd_half_padded + byte_offset);
-                        uint32_t sfb = *reinterpret_cast<const uint32_t*>(
-                            &k_scales_fp8[(ci_b * MX_MMA_N + n_sfb) * n_k_groups + kg_base]);
-#if __CUDA_ARCH__ >= 1200
-                        asm volatile(
-                            "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 "
-                            "{%0, %1, %2, %3},"
-                            "{%4, %5, %6, %7},"
-                            "{%8, %9},"
-                            "{%10, %11, %12, %13},"
-                            "{%14},"
-                            "{%15, %16},"
-                            "{%17},"
-                            "{%18, %19};\n"
-                            : "=f"(d4), "=f"(d5), "=f"(d6), "=f"(d7)
-                            : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-                              "r"(b0), "r"(b1),
-                              "f"(d4), "f"(d5), "f"(d6), "f"(d7),
-                              "r"(sfa), "h"(bidA), "h"(tidA),
-                              "r"(sfb), "h"(bidB), "h"(tidB));
+                        if (co == 0)      { MXF4_MMA(d0, d1, d2, d3, b0, b1, sfb); }
+                        else if (co == 1) { MXF4_MMA(d4, d5, d6, d7, b0, b1, sfb); }
+                        else if (co == 2) { MXF4_MMA(d8, d9, dA, dB, b0, b1, sfb); }
+                        else              { MXF4_MMA(dC, dD, dE, dF, b0, b1, sfb); }
 #endif
                     }
                 }
+                #undef MXF4_MMA
             } else {
             for (int k = 0; k < hd_chunks_fp4; k++) {
                 // Load A fragment: a0=row[groupID], a1=row[groupID+8], a2=a3=0
@@ -740,21 +720,21 @@ fmha_sm120_mxfp4_kernel(
                 int gq1 = q_start + base_row + r0 + 8;
 
                 if constexpr (UseBlockScaleMma) {
-                    // 2-issue path: store both ci's, scales already HW-applied
-                    int base_col_a = ci_pair_base * MX_MMA_N;
-                    int base_col_b = (ci_pair_base + 1) * MX_MMA_N;
-                    int gk0_a = kv_start + base_col_a + c0;
-                    int gk1_a = kv_start + base_col_a + c0 + 1;
-                    int gk0_b = kv_start + base_col_b + c0;
-                    int gk1_b = kv_start + base_col_b + c0 + 1;
-                    FUSED_STORE(d0, gq0, gk0_a, 1.0f, 1.0f, (base_row + r0) * Bkv + base_col_a + c0);
-                    FUSED_STORE(d1, gq0, gk1_a, 1.0f, 1.0f, (base_row + r0) * Bkv + base_col_a + c0 + 1);
-                    FUSED_STORE(d2, gq1, gk0_a, 1.0f, 1.0f, (base_row + r0 + 8) * Bkv + base_col_a + c0);
-                    FUSED_STORE(d3, gq1, gk1_a, 1.0f, 1.0f, (base_row + r0 + 8) * Bkv + base_col_a + c0 + 1);
-                    FUSED_STORE(d4, gq0, gk0_b, 1.0f, 1.0f, (base_row + r0) * Bkv + base_col_b + c0);
-                    FUSED_STORE(d5, gq0, gk1_b, 1.0f, 1.0f, (base_row + r0) * Bkv + base_col_b + c0 + 1);
-                    FUSED_STORE(d6, gq1, gk0_b, 1.0f, 1.0f, (base_row + r0 + 8) * Bkv + base_col_b + c0);
-                    FUSED_STORE(d7, gq1, gk1_b, 1.0f, 1.0f, (base_row + r0 + 8) * Bkv + base_col_b + c0 + 1);
+                    // 4-issue path: store 4 ci's, scales already HW-applied
+                    #define STORE_CI(d_a, d_b, d_c, d_d, ci_off) do { \
+                        int base_col_x = (ci_meta_base + ci_off) * MX_MMA_N; \
+                        int gk0_x = kv_start + base_col_x + c0; \
+                        int gk1_x = kv_start + base_col_x + c0 + 1; \
+                        FUSED_STORE(d_a, gq0, gk0_x, 1.0f, 1.0f, (base_row + r0)     * Bkv + base_col_x + c0); \
+                        FUSED_STORE(d_b, gq0, gk1_x, 1.0f, 1.0f, (base_row + r0)     * Bkv + base_col_x + c0 + 1); \
+                        FUSED_STORE(d_c, gq1, gk0_x, 1.0f, 1.0f, (base_row + r0 + 8) * Bkv + base_col_x + c0); \
+                        FUSED_STORE(d_d, gq1, gk1_x, 1.0f, 1.0f, (base_row + r0 + 8) * Bkv + base_col_x + c0 + 1); \
+                    } while (0)
+                    STORE_CI(d0, d1, d2, d3, 0);
+                    STORE_CI(d4, d5, d6, d7, 1);
+                    STORE_CI(d8, d9, dA, dB, 2);
+                    STORE_CI(dC, dD, dE, dF, 3);
+                    #undef STORE_CI
                 } else {
                     // Legacy single-tile path
                     int base_col = ci * MX_MMA_N;
