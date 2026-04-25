@@ -46,6 +46,14 @@ jobs:
             build/imp-cli
             build/imp-bench
             build/imp-tests
+            build/test-core
+            build/test-text
+            build/test-compute
+            build/test-attention
+            build/test-quant
+            build/test-kv
+            build/test-moe-gdn
+            build/test-e2e
             build/libimp.a
 
   test:
