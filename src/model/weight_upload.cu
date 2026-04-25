@@ -724,7 +724,7 @@ struct UploadCtx {
 static bool upload_embeddings_and_output(
         Tensor& tok_emb, GGMLQuantType& tok_emb_qtype,
         Tensor& out_norm, GGMLQuantType out_norm_qtype,
-        Tensor& out_proj, GGMLQuantType out_proj_qtype,
+        Tensor& out_proj, GGMLQuantType& out_proj_qtype,
         const UploadCtx& ctx) {
     // Upload token embedding
     // Embedding lookup only supports Q8_0/Q6_K natively; other quant types
@@ -777,6 +777,12 @@ static bool upload_embeddings_and_output(
                                            /*raw_quant=*/raw_ok)) {
                 IMP_LOG_ERROR("Failed to upload output projection");
                 return false;
+            }
+            // Mirror tok_emb: if upload host-dequanted to FP16, update the qtype
+            // so downstream LM-head dispatch uses the FP16 path instead of
+            // re-interpreting the FP16 bytes as the original quant block format.
+            if (!raw_ok && out_proj.dtype == DType::FP16) {
+                out_proj_qtype = GGMLQuantType::F16;
             }
         }
     }
