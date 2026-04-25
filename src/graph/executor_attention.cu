@@ -625,15 +625,31 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                 longrope_freqs);
             rope_k_deferred = true;
         } else {
-            // Separate path: QK-norm (if present) + RoPE on both Q and K
+            // Separate path: QK-norm (if present) + RoPE on both Q and K.
+            //
+            // Some architectures (Qwen3.5-27B-mxfp4) ship `attn_q_norm` /
+            // `attn_k_norm` with a smaller dim than `head_dim` — the weight
+            // is meant to be applied per (norm_dim)-sized chunk along the
+            // head, so a 512-dim head with a 256-dim norm splits into two
+            // 256-dim sub-heads sharing the same scale. Detect that by
+            // looking at the norm weight's element count and reshape the
+            // Q/K view accordingly. When norm_dim == hd (the common case)
+            // this is a no-op.
+            auto split_norm_dim = [hd](const Tensor& w) -> int {
+                int wd = (w.data != nullptr) ? static_cast<int>(w.shape[0]) : hd;
+                return (wd > 0 && wd < hd && hd % wd == 0) ? wd : hd;
+            };
             if (ly.attn_q_norm.data != nullptr) {
-
-                int64_t q_flat[2] = {static_cast<int64_t>(n) * nh, static_cast<int64_t>(hd)};
+                int q_norm_dim = split_norm_dim(ly.attn_q_norm);
+                int64_t q_flat[2] = {static_cast<int64_t>(n) * nh * (hd / q_norm_dim),
+                                     static_cast<int64_t>(q_norm_dim)};
                 Tensor q_flat_view = qv.reshape(2, q_flat);
                 rmsnorm(q_flat_view, ly.attn_q_norm, q_flat_view, eps, stream, norm_w_off_);
             }
             if (ly.attn_k_norm.data != nullptr) {
-                int64_t k_flat[2] = {static_cast<int64_t>(n) * nkv, static_cast<int64_t>(hd)};
+                int k_norm_dim = split_norm_dim(ly.attn_k_norm);
+                int64_t k_flat[2] = {static_cast<int64_t>(n) * nkv * (hd / k_norm_dim),
+                                     static_cast<int64_t>(k_norm_dim)};
                 Tensor k_flat_view = kk.reshape(2, k_flat);
                 rmsnorm(k_flat_view, ly.attn_k_norm, k_flat_view, eps, stream, norm_w_off_);
             }
@@ -731,12 +747,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             // sm_120's 100 KB opt-in dynamic smem, poisoning the stream with
             // cudaErrorInvalidValue. force_cublas_attn (set on per-layer shapes)
             // therefore overrides the n<=1024 heuristic.
-            int64_t s_shape[3] = {static_cast<int64_t>(nh),
-                                  static_cast<int64_t>(n),
-                                  static_cast<int64_t>(n)};
-            Tensor s_view(attn_scores_buf_, DType::FP16, 3, s_shape, true);
-
-            attention_cublas_prefill(qv, kk, vv, ao, s_view,
+            // Pass the FULL attn_scores_ tensor (capacity = max seq_len^2) so
+            // attention_cublas_prefill can decide whether the FP32 S-matrix
+            // fits. Constructing a sub-view with shape=[nh, n, n] hides the
+            // real capacity from the FP32-fits check.
+            attention_cublas_prefill(qv, kk, vv, ao, attn_scores_,
                                      nh, nkv, hd, scale, /*causal=*/true,
                                      cfg.attn_logit_softcap, stream);
         } else {
