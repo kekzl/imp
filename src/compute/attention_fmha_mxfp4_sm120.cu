@@ -23,6 +23,7 @@
 #include "compute/attention_fmha_mxfp4_sm120.h"
 #include "compute/attention_paged_common.cuh"
 #include "core/logging.h"
+#include "quant/fp8_utils.cuh"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <float.h>
@@ -187,6 +188,10 @@ fmha_sm120_mxfp4_kernel(
     float*   O_acc    = S_tile + Bq * Bkv;
     float*   row_m    = O_acc + Bq * head_dim;
     float*   row_l    = row_m + Bq;
+    // Per-row UE4M3 scales for blockscale-MMA sfa/sfb operands (only populated
+    // when UseBlockScaleMma=true; uninitialized otherwise). Placed at the tail.
+    uint8_t* q_scales_fp8 = reinterpret_cast<uint8_t*>(row_l + Bq);
+    uint8_t* k_scales_fp8 = q_scales_fp8 + Bq;
 
     // Pre-compute sqrt(attention_scale) to absorb into Q and K scales (Opt 3).
     // S_true[i,j] = q_scale[i] * k_scale[j] * mma[i,j], and we want the result
@@ -234,8 +239,22 @@ fmha_sm120_mxfp4_kernel(
             #pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1)
                 local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
-            if (sm_lane == 0 && r < Bq)
-                q_scales[r] = local_max / 6.0f * sqrt_scale;  // Opt 3: absorb sqrt(scale)
+            if (sm_lane == 0 && r < Bq) {
+                if constexpr (UseBlockScaleMma) {
+                    // Blockscale path: encode per-row scale × sqrt(attention_scale) as
+                    // UE4M3, store both the dequanted float (for self-consistent quant)
+                    // and the byte (for sfa operand).
+                    float raw = local_max / 6.0f;
+                    uint8_t ue4m3 = float_to_fp8_e4m3(raw * sqrt_scale);
+                    q_scales_fp8[r] = ue4m3;
+                    // Use dequanted value divided by sqrt_scale (so that inv_scale =
+                    // sqrt_scale / q_scales[r] = 1/dequanted_raw_scale).
+                    float dequant = fp8_e4m3_to_float_fast(ue4m3);
+                    q_scales[r] = dequant;  // store sqrt_scale*raw_dq (MMA sfa quantity)
+                } else {
+                    q_scales[r] = local_max / 6.0f * sqrt_scale;  // legacy
+                }
+            }
         }
         __syncthreads();
 
@@ -280,8 +299,16 @@ fmha_sm120_mxfp4_kernel(
             #pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1)
                 local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
-            if (sm_lane == 0 && r < Bq)
-                q_scales[r] = local_max / 6.0f * sqrt_scale;  // Opt 3
+            if (sm_lane == 0 && r < Bq) {
+                if constexpr (UseBlockScaleMma) {
+                    float raw = local_max / 6.0f;
+                    uint8_t ue4m3 = float_to_fp8_e4m3(raw * sqrt_scale);
+                    q_scales_fp8[r] = ue4m3;
+                    q_scales[r] = fp8_e4m3_to_float_fast(ue4m3);
+                } else {
+                    q_scales[r] = local_max / 6.0f * sqrt_scale;
+                }
+            }
         }
         __syncthreads();
 
@@ -375,8 +402,16 @@ fmha_sm120_mxfp4_kernel(
                 #pragma unroll
                 for (int offset = TPR / 2; offset >= 1; offset >>= 1)
                     local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
-                if (sm_lane == 0 && r < Bkv)
-                    k_scales[r] = local_max / 6.0f * sqrt_scale;  // Opt 3: absorb sqrt(scale)
+                if (sm_lane == 0 && r < Bkv) {
+                    if constexpr (UseBlockScaleMma) {
+                        float raw = local_max / 6.0f;
+                        uint8_t ue4m3 = float_to_fp8_e4m3(raw * sqrt_scale);
+                        k_scales_fp8[r] = ue4m3;
+                        k_scales[r] = fp8_e4m3_to_float_fast(ue4m3);
+                    } else {
+                        k_scales[r] = local_max / 6.0f * sqrt_scale;
+                    }
+                }
             }
             __syncthreads();
 
@@ -419,8 +454,16 @@ fmha_sm120_mxfp4_kernel(
                 #pragma unroll
                 for (int offset = TPR / 2; offset >= 1; offset >>= 1)
                     local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
-                if (sm_lane == 0 && r < Bkv)
-                    k_scales[r] = local_max / 6.0f * sqrt_scale;  // Opt 3
+                if (sm_lane == 0 && r < Bkv) {
+                    if constexpr (UseBlockScaleMma) {
+                        float raw = local_max / 6.0f;
+                        uint8_t ue4m3 = float_to_fp8_e4m3(raw * sqrt_scale);
+                        k_scales_fp8[r] = ue4m3;
+                        k_scales[r] = fp8_e4m3_to_float_fast(ue4m3);
+                    } else {
+                        k_scales[r] = local_max / 6.0f * sqrt_scale;
+                    }
+                }
             }
             __syncthreads();
 
@@ -498,8 +541,22 @@ fmha_sm120_mxfp4_kernel(
                     uint32_t b1 = *reinterpret_cast<const uint32_t*>(
                         k_base1 + group_id * hd_half_padded + byte_offset);
 
-                    constexpr uint32_t sfa = 0x38383838u;  // FP8 UE4M3 = 1.0 × 4
-                    constexpr uint32_t sfb = 0x38383838u;
+                    // Real block-scale: load per-row UE4M3 scales from SMEM and replicate
+                    // to uint32 (all 4 scales per thread cover the same row's k-groups).
+                    // SFA layout: thread T's sfa → row m_sfa = (T/4) + (T%2)*8.
+                    // SFB layout: thread T's sfb → col n_sfb = T/4.
+                    const int m_sfa = (lane_id / 4) + (lane_id % 2) * 8;
+                    const int n_sfb = lane_id / 4;
+                    uint8_t qs_byte = q_scales_fp8[ri * MX_MMA_M + m_sfa];
+                    uint8_t ks_byte = k_scales_fp8[ci * MX_MMA_N + n_sfb];
+                    uint32_t sfa = (uint32_t)qs_byte
+                                 | ((uint32_t)qs_byte << 8)
+                                 | ((uint32_t)qs_byte << 16)
+                                 | ((uint32_t)qs_byte << 24);
+                    uint32_t sfb = (uint32_t)ks_byte
+                                 | ((uint32_t)ks_byte << 8)
+                                 | ((uint32_t)ks_byte << 16)
+                                 | ((uint32_t)ks_byte << 24);
                     constexpr uint16_t bidA = 0, tidA = 0, bidB = 0, tidB = 0;
 #if __CUDA_ARCH__ >= 1200
                     asm volatile(
@@ -568,12 +625,19 @@ fmha_sm120_mxfp4_kernel(
                 int r0 = (lane_id / 4) % 8;
                 int c0 = (lane_id % 4) * 2;
 
-                // Scale correction: q_scales already includes sqrt(attention_scale),
-                // k_scales also includes sqrt(attention_scale), so product = full scale.
-                float qs0 = q_scales[base_row + r0];
-                float qs1 = q_scales[base_row + r0 + 8];
-                float ks0 = k_scales[base_col + c0];
-                float ks1 = k_scales[base_col + c0 + 1];
+                // Scale correction: in legacy mode, q_scales/k_scales include
+                // sqrt(attention_scale), and their product applies the full scale
+                // factor. In real blockscale mode, HW already applied per-row
+                // sfa/sfb during MMA, so val is already the attention score.
+                float qs0, qs1, ks0, ks1;
+                if constexpr (UseBlockScaleMma) {
+                    qs0 = qs1 = ks0 = ks1 = 1.0f;  // HW already scaled
+                } else {
+                    qs0 = q_scales[base_row + r0];
+                    qs1 = q_scales[base_row + r0 + 8];
+                    ks0 = k_scales[base_col + c0];
+                    ks1 = k_scales[base_col + c0 + 1];
+                }
 
                 // Compute global Q/K positions for masking
                 int gq0 = q_start + base_row + r0;
@@ -761,7 +825,8 @@ static size_t compute_smem_mxfp4(int Bq, int Bkv, int head_dim) {
     size_t s_tile   = (size_t)Bq * Bkv * sizeof(float);          // S_tile
     size_t o_acc    = (size_t)Bq * head_dim * sizeof(float);     // O_acc
     size_t softmax  = 2 * (size_t)Bq * sizeof(float);            // row_m + row_l
-    return q_fp4 + q_scales + align + kv_buf + k_scales + s_tile + o_acc + softmax;
+    size_t scales_fp8 = (size_t)(Bq + Bkv);                      // UE4M3 per-row scales (blockscale)
+    return q_fp4 + q_scales + align + kv_buf + k_scales + s_tile + o_acc + softmax + scales_fp8;
 }
 
 // =============================================================================
