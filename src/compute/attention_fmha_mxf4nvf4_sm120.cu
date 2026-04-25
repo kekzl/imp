@@ -32,19 +32,24 @@
 
 namespace imp {
 
-bool mxf4nvf4_blockscale_enabled() {
+bool mxf4nvf4_blockscale_disabled() {
     static int cached = -1;
     if (cached < 0) {
         const char* v = std::getenv("IMP_FMHA_BLOCKSCALE");
-        cached = (v != nullptr && std::strcmp(v, "0") != 0) ? 1 : 0;
+        cached = (v != nullptr && std::strcmp(v, "0") == 0) ? 1 : 0;
         if (cached) {
-            IMP_LOG_INFO("IMP_FMHA_BLOCKSCALE=1: Phase 1 MMA routed through "
-                         "kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64 "
-                         "(halves MMA issue count on head_dim%%64==0 configs; "
-                         "head_dim=96 falls back to legacy).");
+            IMP_LOG_INFO("IMP_FMHA_BLOCKSCALE=0: MXFP4 attention forced to "
+                         "legacy kind::f8f6f4.m16n8k32 path (A/B debug only).");
         }
     }
     return cached == 1;
+}
+
+bool mxf4nvf4_blockscale_enabled() {
+    // Default ON — the per-16-element block_scale path is +1.8% vs legacy
+    // at HD=128 and functionally equivalent. Can be disabled via
+    // IMP_FMHA_BLOCKSCALE=0 for A/B testing.
+    return !mxf4nvf4_blockscale_disabled();
 }
 
 bool fmha_sm120_mxf4nvf4_prefill(

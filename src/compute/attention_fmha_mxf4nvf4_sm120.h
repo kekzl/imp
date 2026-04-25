@@ -20,18 +20,21 @@ namespace imp {
 //   - Scale layout matches SageAttention3 HW-consumption formula (see
 //     nvfp4_quant_hw.cu for the layout details)
 //
-// Activated via IMP_FMHA_BLOCKSCALE=1 env var. Falls back to the legacy
-// kernel when not set. Returns false if config is unsupported (caller
-// falls through to next fallback in the dispatcher).
+// Default path for MXFP4 attention prefill since 2026-04-25 (+1.8% vs
+// legacy at HD=128). Set IMP_FMHA_BLOCKSCALE=0 to force the legacy path
+// (A/B debug). Returns false if config is unsupported (caller falls
+// through to next fallback in the dispatcher).
 //
-// Requirements: sm_120+, head_dim ∈ {64, 128}.
+// Requirements: sm_120+, head_dim ∈ {64, 128, 256} (HD=96 falls through
+// internally to legacy kind::f8f6f4 because 96 % 64 != 0).
 bool fmha_sm120_mxf4nvf4_prefill(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
     float scale, bool causal, int sliding_window, float softcap,
     cudaStream_t stream);
 
-// Reports whether the mxf4nvf4 blockscale path is enabled for this
-// session (IMP_FMHA_BLOCKSCALE=1 env var). Cheap cached lookup.
+// Reports whether the blockscale path is active (default ON; false only
+// when IMP_FMHA_BLOCKSCALE=0 explicitly disables it).
 bool mxf4nvf4_blockscale_enabled();
+bool mxf4nvf4_blockscale_disabled();
 
 } // namespace imp
