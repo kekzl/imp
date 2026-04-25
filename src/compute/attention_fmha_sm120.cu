@@ -131,25 +131,32 @@ fmha_sm120_kernel(
     float* row_m    = O_acc + Bq * head_dim;
     float* row_l    = row_m + Bq;
 
-    // ---- load Q tile --------------------------------------------------------
+    // ---- load Q tile (vectorized float4 = 8 halves per iter) ---------------
     {
-        const int total = Bq * head_dim;
-        for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
+        const int total_vec8 = (Bq * head_dim) / 8;
+        for (int vi = tid; vi < total_vec8; vi += SM120_BLOCK_THREADS) {
+            int i = vi * 8;
             int r = i / head_dim;
             int d = i % head_dim;
+            float4* dst = reinterpret_cast<float4*>(&Q_tile[i]);
             if (q_start + r < seq_q) {
-                Q_tile[i] = Q_ptr[(int64_t)r * q_row_stride + d];
+                const float4* src = reinterpret_cast<const float4*>(
+                    &Q_ptr[(int64_t)r * q_row_stride + d]);
+                *dst = *src;
             } else {
-                Q_tile[i] = __float2half(0.0f);
+                *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             }
         }
     }
 
     // ---- zero output accumulator + init running softmax state ---------------
     {
-        const int total = Bq * head_dim;
-        for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
-            O_acc[i] = 0.0f;
+        // float4 = 4 FP32 zeros per store. Bq*HD is always a multiple of 4
+        // (HD ∈ {64,96,128,256}, Bq ∈ {32,64,128}).
+        const int total_vec4 = (Bq * head_dim) / 4;
+        const float4 zero = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
+            reinterpret_cast<float4*>(O_acc)[vi] = zero;
         }
     }
     if (tid < Bq) {
@@ -179,16 +186,20 @@ fmha_sm120_kernel(
     for (int j = first_kv_tile; j < num_kv_tiles; j++) {
         const int kv_start = j * Bkv;
 
-        // ---- Load K tile ----
+        // ---- Load K tile (vectorized float4 = 8 halves per iter) ----
         {
-            const int total = Bkv * head_dim;
-            for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
+            const int total_vec8 = (Bkv * head_dim) / 8;
+            for (int vi = tid; vi < total_vec8; vi += SM120_BLOCK_THREADS) {
+                int i = vi * 8;
                 int r = i / head_dim;
                 int d = i % head_dim;
+                float4* dst = reinterpret_cast<float4*>(&KV_tile[i]);
                 if (kv_start + r < seq_kv) {
-                    KV_tile[i] = K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d];
+                    const float4* src = reinterpret_cast<const float4*>(
+                        &K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
+                    *dst = *src;
                 } else {
-                    KV_tile[i] = __float2half(0.0f);
+                    *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
                 }
             }
         }
@@ -317,16 +328,22 @@ fmha_sm120_kernel(
         }
         __syncthreads();
 
-        // ---- Load V tile ----
+        // ---- Load V tile (vectorized: float4 = 8 halves per iter) ----
         {
-            const int total = Bkv * head_dim;
-            for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
+            // All supported head_dims (64, 96, 128, 256) are multiples of 8,
+            // so float4 loads are always aligned and in-bounds per row.
+            const int total_vec8 = (Bkv * head_dim) / 8;
+            for (int vi = tid; vi < total_vec8; vi += SM120_BLOCK_THREADS) {
+                int i = vi * 8;
                 int r = i / head_dim;
                 int d = i % head_dim;
+                float4* dst = reinterpret_cast<float4*>(&KV_tile[i]);
                 if (kv_start + r < seq_kv) {
-                    KV_tile[i] = V_ptr[(int64_t)(kv_start + r) * kv_row_stride + d];
+                    const float4* src = reinterpret_cast<const float4*>(
+                        &V_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
+                    *dst = *src;
                 } else {
-                    KV_tile[i] = __float2half(0.0f);
+                    *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
                 }
             }
         }
@@ -370,15 +387,22 @@ fmha_sm120_kernel(
         __syncthreads();
     }
 
-    // ---- write final output to global memory ----
+    // ---- write final output to global memory (vectorized: 4 FP32 → 4 FP16 per iter) ----
     {
-        const int total = Bq * head_dim;
-        for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
+        const int total_vec4 = (Bq * head_dim) / 4;
+        for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
+            int i = vi * 4;
             int r = i / head_dim;
-            if (q_start + r < seq_q) {
-                O_ptr[(int64_t)r * q_row_stride + (i % head_dim)] =
-                    __float2half(O_acc[i]);
-            }
+            if (q_start + r >= seq_q) continue;
+            // 4 FP32 → 2 half2 via __float22half2_rn → store as float (= 4 halves packed)
+            float4 v = reinterpret_cast<const float4*>(O_acc)[vi];
+            half2 lo = __float22half2_rn(make_float2(v.x, v.y));
+            half2 hi = __float22half2_rn(make_float2(v.z, v.w));
+            uint2 packed;
+            packed.x = *reinterpret_cast<const uint32_t*>(&lo);
+            packed.y = *reinterpret_cast<const uint32_t*>(&hi);
+            *reinterpret_cast<uint2*>(
+                &O_ptr[(int64_t)r * q_row_stride + (i % head_dim)]) = packed;
         }
     }
 }
@@ -622,29 +646,34 @@ fmha_sm120_fp8_kernel(
     float*   row_m   = O_acc + Bq * head_dim;
     float*   row_l   = row_m + Bq;
 
-    // Load Q tile and convert to FP8 E4M3
+    // Load Q tile and convert to FP8 E4M3 (vectorized: 4 halves → 4 FP8 bytes per cvt pair).
+    // HW cvt.rn.satfinite.e4m3x2.f16x2 already clamps to ±448 — no manual saturate.
     {
-        const int total = Bq * head_dim;
-        for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
+        const int total_vec4 = (Bq * head_dim) / 4;
+        for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
+            int i = vi * 4;
             int r = i / head_dim;
             int d = i % head_dim;
-            if (q_start + r < seq_q) {
-                half val = Q_ptr[(int64_t)r * q_row_stride + d];
-                // Saturate FP16 → FP8 E4M3 (range [-448, 448])
-                float fv = __half2float(val);
-                fv = fminf(fmaxf(fv, -448.0f), 448.0f);
-                // Simple scalar FP16→FP8: use hardware cvt if available
-                Q_fp8[i] = static_cast<uint8_t>(__nv_fp8_e4m3(fv).__x);
-            } else {
-                Q_fp8[i] = 0;
+            // Out-of-range rows zero-fill as u32 (4 bytes)
+            if (q_start + r >= seq_q) {
+                reinterpret_cast<uint32_t*>(Q_fp8)[vi] = 0;
+                continue;
             }
+            // 4 consecutive halves are always within head_dim (HD % 4 == 0 for Bq multiples).
+            const half* src = &Q_ptr[(int64_t)r * q_row_stride + d];
+            reinterpret_cast<uint32_t*>(Q_fp8)[vi] = cvt_4xfp16_to_4xe4m3(src);
         }
+        // Scalar tail if Bq*head_dim isn't a multiple of 4 (shouldn't happen on
+        // supported HDs: 64,96,128,256 × Bq divisible configs all hit the vec4 fast path).
     }
 
-    // Zero O_acc + init softmax
+    // Zero O_acc (vectorized float4 = 4 FP32 zeros/iter) + init softmax
     {
-        const int total = Bq * head_dim;
-        for (int i = tid; i < total; i += SM120_BLOCK_THREADS) O_acc[i] = 0.0f;
+        const int total_vec4 = (Bq * head_dim) / 4;
+        const float4 zero = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+        for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
+            reinterpret_cast<float4*>(O_acc)[vi] = zero;
+        }
     }
     if (tid < Bq) { row_m[tid] = -FLT_MAX; row_l[tid] = 0.0f; }
     __syncthreads();
@@ -673,20 +702,19 @@ fmha_sm120_fp8_kernel(
     for (int j = first_kv_tile; j < num_kv_tiles; j++) {
         const int kv_start = j * Bkv;
 
-        // Load K tile and convert to FP8
+        // Load K tile and convert to FP8 (vectorized: 4 halves → 4 FP8 bytes).
         {
-            const int total = Bkv * head_dim;
-            for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
+            const int total_vec4 = (Bkv * head_dim) / 4;
+            for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
+                int i = vi * 4;
                 int r = i / head_dim;
                 int d = i % head_dim;
-                if (kv_start + r < seq_kv) {
-                    half val = K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d];
-                    float fv = __half2float(val);
-                    fv = fminf(fmaxf(fv, -448.0f), 448.0f);
-                    KV_fp8[i] = static_cast<uint8_t>(__nv_fp8_e4m3(fv).__x);
-                } else {
-                    KV_fp8[i] = 0;
+                if (kv_start + r >= seq_kv) {
+                    reinterpret_cast<uint32_t*>(KV_fp8)[vi] = 0;
+                    continue;
                 }
+                const half* src = &K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d];
+                reinterpret_cast<uint32_t*>(KV_fp8)[vi] = cvt_4xfp16_to_4xe4m3(src);
             }
         }
         __syncthreads();
@@ -828,16 +856,21 @@ fmha_sm120_fp8_kernel(
         }
         __syncthreads();
 
-        // Load V tile as FP16 (PV stays in FP16 for value precision)
+        // Load V tile as FP16 (vectorized float4 = 8 halves per iter)
         {
-            const int total = Bkv * head_dim;
-            for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
+            const int total_vec8 = (Bkv * head_dim) / 8;
+            for (int vi = tid; vi < total_vec8; vi += SM120_BLOCK_THREADS) {
+                int i = vi * 8;
                 int r = i / head_dim;
                 int d = i % head_dim;
-                if (kv_start + r < seq_kv)
-                    KV_fp16[i] = V_ptr[(int64_t)(kv_start + r) * kv_row_stride + d];
-                else
-                    KV_fp16[i] = __float2half(0.0f);
+                float4* dst = reinterpret_cast<float4*>(&KV_fp16[i]);
+                if (kv_start + r < seq_kv) {
+                    const float4* src = reinterpret_cast<const float4*>(
+                        &V_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
+                    *dst = *src;
+                } else {
+                    *dst = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                }
             }
         }
         __syncthreads();
@@ -876,13 +909,21 @@ fmha_sm120_fp8_kernel(
         __syncthreads();
     }
 
-    // Write output
+    // Write output (vectorized: 4 FP32 → 4 FP16 per iter)
     {
-        const int total = Bq * head_dim;
-        for (int i = tid; i < total; i += SM120_BLOCK_THREADS) {
+        const int total_vec4 = (Bq * head_dim) / 4;
+        for (int vi = tid; vi < total_vec4; vi += SM120_BLOCK_THREADS) {
+            int i = vi * 4;
             int r = i / head_dim;
-            if (q_start + r < seq_q)
-                O_ptr[(int64_t)r * q_row_stride + (i % head_dim)] = __float2half(O_acc[i]);
+            if (q_start + r >= seq_q) continue;
+            float4 v = reinterpret_cast<const float4*>(O_acc)[vi];
+            half2 lo = __float22half2_rn(make_float2(v.x, v.y));
+            half2 hi = __float22half2_rn(make_float2(v.z, v.w));
+            uint2 packed;
+            packed.x = *reinterpret_cast<const uint32_t*>(&lo);
+            packed.y = *reinterpret_cast<const uint32_t*>(&hi);
+            *reinterpret_cast<uint2*>(
+                &O_ptr[(int64_t)r * q_row_stride + (i % head_dim)]) = packed;
         }
     }
 }

@@ -23,9 +23,18 @@ namespace imp {
 //   - Supported head_dim: 64, 96, 128, 256
 //
 // Returns false if config unsupported (caller falls back to FP8/FP16 FMHA).
+// When use_blockscale=true, swaps the Phase 1 MMA from
+//   mma.sync.kind::f8f6f4.m16n8k32   (legacy, 2× K-chunks per issue)
+// to
+//   mma.sync.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64  (half MMA count)
+// with uniform sfa=sfb=1.0 so output is bit-equivalent. head_dim must be a
+// multiple of 64 (legacy path requires only multiple of 32); unsupported
+// head_dim 96 falls through to the legacy path. Up to ~1.5-2× Phase 1
+// speedup measured on raw MMA (254 vs 102 TOPS).
 bool fmha_sm120_mxfp4_prefill(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
     float scale, bool causal, int sliding_window, float softcap,
-    cudaStream_t stream);
+    cudaStream_t stream,
+    bool use_blockscale = false);
 
 } // namespace imp

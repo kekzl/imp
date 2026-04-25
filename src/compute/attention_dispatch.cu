@@ -29,24 +29,28 @@ void attention_prefill_dispatch(
     const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
     float scale, bool causal, int sliding_window, float softcap, cudaStream_t stream) {
 
-    // MXFP4 Flash Attention: tiled FP4 E2M1 Q·K^T (m16n8k64) with online softmax.
+    // MXFP4 Flash Attention: tiled FP4 E2M1 Q·K^T with online softmax.
     // O(n) memory, ~4x score throughput over FP16, ~2x over FP8.
-    // Requires head_dim % 64 == 0. Enabled with IMP_MXFP4_ATTENTION=1.
+    // Enabled with IMP_MXFP4_ATTENTION=1.
+    //
+    // By default uses kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64 with
+    // per-16-element UE4M3 scales (+1.8% vs legacy at HD=128). head_dim=96
+    // internally falls back to legacy kind::f8f6f4.m16n8k32 (not multiple of 64).
+    // Set IMP_FMHA_BLOCKSCALE=0 to force the legacy path entirely (A/B testing).
     if (attention_mxfp4_available()) {
-        // Stage 4 blockscale-MMA path (IMP_FMHA_BLOCKSCALE=1). Currently
-        // delegates to the legacy kernel — kernel body is WIP. Dispatch
-        // preserves the same true/false contract for fallback chaining.
-        if (mxf4nvf4_blockscale_enabled()) {
+        static const bool use_blockscale = !mxf4nvf4_blockscale_disabled();
+        if (use_blockscale) {
             if (fmha_sm120_mxf4nvf4_prefill(Q, K, V, O, scale, causal,
                                              sliding_window, softcap, stream)) {
                 return;
             }
         } else {
-            if (fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream)) {
+            if (fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal,
+                                          sliding_window, softcap, stream)) {
                 return;
             }
         }
-        // Fall through: head_dim not supported (e.g. 96), use FP8/FP16 path
+        // Fall through: head_dim not supported (e.g. < 32), use FP8/FP16 path
     }
 
     // Native sm_120 FP8 FMHA: QK^T in FP8 E4M3 (m16n8k32) for 2x score throughput.

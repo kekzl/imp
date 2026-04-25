@@ -194,6 +194,27 @@ __device__ __forceinline__ uint8_t quantize_abs_to_fp4(float abs_val) {
     return code;  // 0..7
 }
 
+// HW FP4 conversion: two scaled FP32 → packed byte (low=v0, high=v1).
+// IEEE RNE rounding; sm_120+ only.
+__device__ __forceinline__ uint8_t pack_fp4_pair_hw(float v0, float v1) {
+#if __CUDA_ARCH__ >= 1200
+    uint32_t out;
+    asm volatile(
+        "{ .reg .b8 b;\n"
+        "  cvt.rn.satfinite.e2m1x2.f32 b, %2, %1;\n"
+        "  cvt.u32.u8 %0, b; }\n"
+        : "=r"(out)
+        : "f"(v0), "f"(v1));
+    return static_cast<uint8_t>(out);
+#else
+    uint8_t sign0 = (v0 < 0.0f) ? 1u : 0u;
+    uint8_t sign1 = (v1 < 0.0f) ? 1u : 0u;
+    uint8_t c0 = (sign0 << 3) | quantize_abs_to_fp4(fabsf(v0));
+    uint8_t c1 = (sign1 << 3) | quantize_abs_to_fp4(fabsf(v1));
+    return (c1 << 4) | c0;
+#endif
+}
+
 // Given 16 pre-computed float values + their absmax, encode UE4M3 scale and
 // pack FP4 bytes. The caller supplies the values (so this helper is reusable
 // for fused paths like SwiGLU+quantize where values come from a computation
@@ -222,17 +243,9 @@ __device__ __forceinline__ void quantize_micro_block_nvfp4_from_vals(
     uint8_t* packed_at = packed_out_row + k_group * (kSFVecSize / 2);
     #pragma unroll
     for (int i = 0; i < kSFVecSize; i += 2) {
-        float s0 = vals[i] * inv_scale;
-        uint8_t sign0 = (s0 < 0.0f) ? 1u : 0u;
-        uint8_t code0 = quantize_abs_to_fp4(fabsf(s0));
-        uint8_t fp4_0 = (sign0 << 3) | code0;
-
+        float s0 = vals[i]     * inv_scale;
         float s1 = vals[i + 1] * inv_scale;
-        uint8_t sign1 = (s1 < 0.0f) ? 1u : 0u;
-        uint8_t code1 = quantize_abs_to_fp4(fabsf(s1));
-        uint8_t fp4_1 = (sign1 << 3) | code1;
-
-        packed_at[i / 2] = (fp4_1 << 4) | fp4_0;
+        packed_at[i / 2] = pack_fp4_pair_hw(s0, s1);
     }
 }
 

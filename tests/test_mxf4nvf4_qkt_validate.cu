@@ -5,6 +5,7 @@
 #include <vector>
 #include <cmath>
 #include <cstdio>
+#include <random>
 
 namespace imp {
 namespace {
@@ -83,9 +84,8 @@ TEST(Mxf4nvf4QkTest, UniformInputs_AllOnes) {
     for (int n = 0; n < N; ++n) std::printf("%.2f ", h_D[n]);
     std::printf("\n");
 
-    // Don't assert yet — this is exploratory. If it's 100% right, great.
-    // If not, the correct count + max_err tell us how close.
-    SUCCEED();
+    EXPECT_EQ(correct, total);
+    EXPECT_LT(max_err, 1e-3f);
 }
 
 // Row-indicator test: Q[m][:] = m (so row m has values all equal to m).
@@ -144,17 +144,9 @@ TEST(Mxf4nvf4QkTest, RowIndicator) {
     std::printf("[  INFO    ] D[:][0] rows = ");
     for (int m = 0; m < M; ++m) std::printf("%.1f ", h_D[m * N]);
     std::printf("\n");
-    std::printf("[  INFO    ] Expected    = ");
-    for (int m = 0; m < M; ++m) std::printf("%.1f ", expected_per_row[m]);
-    std::printf("\n");
 
-    // Diagnostic only — documenting layout mismatch. Current B/A operand
-    // mapping passes the uniform-sum test but fails position-identifying
-    // tests, indicating per-thread CUTLASS (T32,V32)→(M16,K64) layout
-    // isn't fully matched yet. Tracked as TODO in Stage 4 kernel.
-    SUCCEED() << "RowIndicator correct=" << correct << "/" << (M*N)
-              << " max_err=" << max_err
-              << " (diagnostic — layout work-in-progress)";
+    EXPECT_EQ(correct, M*N);
+    EXPECT_LT(max_err, 1e-3f);
 }
 
 // Col-indicator test: K[n][:] = n-magnitude (representable E2M1). Q = 1.
@@ -186,13 +178,60 @@ TEST(Mxf4nvf4QkTest, ColIndicator) {
     std::printf("[  INFO    ] D[0][:] cols = ");
     for (int n = 0; n < N; ++n) std::printf("%.1f ", h_D[n]);
     std::printf("\n");
-    std::printf("[  INFO    ] Expected     = ");
-    for (int n = 0; n < N; ++n) std::printf("%.1f ", mag[n] * 64.0f);
-    std::printf("\n");
 
-    SUCCEED() << "ColIndicator correct=" << correct << "/" << (M*N)
-              << " max_err=" << max_err
-              << " (diagnostic — layout work-in-progress)";
+    EXPECT_EQ(correct, M*N);
+    EXPECT_LT(max_err, 1e-3f);
+}
+
+// Random E2M1 inputs. Both Q and K are drawn from the E2M1 magnitude set
+// (scaled so that values stay representable). Compute FP32 reference via
+// a plain triple loop with the on-device quant applied to each value.
+TEST(Mxf4nvf4QkTest, RandomE2M1_Regression) {
+    constexpr int M = 16, K = 64, N = 8;
+    std::mt19937 rng(20260424);
+    std::uniform_int_distribution<int> mag_idx(0, 7);
+    std::bernoulli_distribution sign(0.5);
+    const float mags[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+
+    std::vector<half> h_Q(M * K), h_K(N * K);
+    for (auto& q : h_Q) {
+        float v = mags[mag_idx(rng)] * (sign(rng) ? 1.0f : -1.0f);
+        q = __float2half(v);
+    }
+    for (auto& k : h_K) {
+        float v = mags[mag_idx(rng)] * (sign(rng) ? 1.0f : -1.0f);
+        k = __float2half(v);
+    }
+
+    std::vector<float> h_D;
+    run_and_compare(h_Q, h_K, h_D);
+
+    // FP32 reference: each Q/K element is already E2M1-exact, so the reference
+    // is the plain matmul with those values.
+    std::vector<float> ref(M * N, 0.0f);
+    for (int m = 0; m < M; ++m) {
+        for (int n = 0; n < N; ++n) {
+            float acc = 0.0f;
+            for (int k = 0; k < K; ++k) {
+                acc += __half2float(h_Q[m * K + k]) * __half2float(h_K[n * K + k]);
+            }
+            ref[m * N + n] = acc;
+        }
+    }
+
+    int correct = 0;
+    float max_err = 0.0f;
+    for (int i = 0; i < M * N; ++i) {
+        float err = std::fabs(h_D[i] - ref[i]);
+        max_err = std::max(max_err, err);
+        // FP32 accumulator, lossless E2M1 input — exact agreement expected.
+        if (err < 1e-3f) correct++;
+    }
+    std::printf("[  INFO    ] RandomE2M1: correct=%d/%d max_err=%.4f\n",
+                correct, M * N, max_err);
+
+    EXPECT_EQ(correct, M * N);
+    EXPECT_LT(max_err, 1e-3f);
 }
 
 } // namespace
