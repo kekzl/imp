@@ -1179,8 +1179,14 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                   if (e != cudaSuccess) IMP_LOG_ERROR("MXFP4 unpack error: %s", cudaGetErrorString(e)); }
 
                 // Check if MXFP4 GEMV is available (linear_scales populated).
-                // GDN models need FP16 fallback because GDN forward reads weights
-                // directly (ssm_in, ssm_out, gdn_gate, etc.) — not through gemm_dispatch.
+                // GDN models force the FP16 fallback because — although every
+                // linear projection in executor_ssm_gdn.cu *does* now go through
+                // gemm_dispatch — the MXFP4 prefill dispatch path for GDN-shape
+                // weights (notably Qwen3.5-27B's ssm_out at K=6144 N=5120, and
+                // FFN at K=17408 N=5120) hits a cuBLAS-INTERNAL_ERROR (status
+                // 14) cascade we have not yet root-caused. Tracking in
+                // qwen35_27b_mxfp4_ima_2026_04_25.md. Until that's resolved,
+                // honor the historical fallback path.
                 bool force_fallback = (std::getenv("IMP_MXFP4_FP16_FALLBACK") != nullptr);
                 bool has_gdn = (cfg.ssm_inner_size > 0);
                 bool mxfp4_gemv_available = !force_fallback && !has_gdn;
