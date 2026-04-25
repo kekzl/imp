@@ -1219,45 +1219,14 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                         void* d_fp16 = static_cast<char*>(d_fp16_bulk) + offset;
                         offset += fp16_bytes;
 
-                    // CPU-side dequant: download raw, dequant on CPU, upload FP16.
-                    // GPU kernel has mysterious illegal memory access — using CPU as workaround.
-                    {
-                        int64_t N = mw.N, K = mw.K;
-                        int bpr = static_cast<int>(K / 32);
-                        size_t raw_bytes = static_cast<size_t>(N) * bpr * 17;
-                        std::vector<uint8_t> h_raw(raw_bytes);
-                        IMP_CUDA_CHECK_LOG(cudaMemcpy(h_raw.data(), ptr, raw_bytes, cudaMemcpyDeviceToHost));
-
-                        std::vector<uint16_t> h_fp16(static_cast<size_t>(N) * K);  // raw FP16 bits
-                        static const float e2m1[16] = {
-                            0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
-                            -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f};
-
-                        for (int64_t r = 0; r < N; r++) {
-                            for (int b = 0; b < bpr; b++) {
-                                const uint8_t* blk = h_raw.data() + (r * bpr + b) * 17;
-                                uint8_t ue8m0 = blk[16];
-                                // UE8M0 → float
-                                uint32_t fbits = static_cast<uint32_t>(ue8m0) << 23;
-                                float scale;
-                                memcpy(&scale, &fbits, sizeof(float));
-
-                                int64_t base = r * K + b * 32;
-                                for (int i = 0; i < 16; i++) {
-                                    int lo = blk[i] & 0xF;
-                                    int hi = (blk[i] >> 4) & 0xF;
-                                    float v0 = e2m1[lo] * scale;
-                                    float v1 = e2m1[hi] * scale;
-                                    // Float→FP16 bit conversion
-                                    __half h0 = __float2half(v0);
-                                    __half h1 = __float2half(v1);
-                                    memcpy(&h_fp16[base + i*2], &h0, 2);
-                                    memcpy(&h_fp16[base + i*2+1], &h1, 2);
-                                }
-                            }
-                        }
-                        IMP_CUDA_CHECK_LOG(cudaMemcpy(d_fp16, h_fp16.data(), fp16_bytes, cudaMemcpyHostToDevice));
-                    }
+                    // GPU-side dequant via dequant_mxfp4_to_fp16. The previous CPU
+                    // fallback indexed `(r*bpr+b)*17` + `blk[16]`, which assumed
+                    // GGUF interleaved 17-byte block layout — but weight_upload.cu
+                    // splits to [data(N*bpr*16) | scales(N*bpr)] before GPU upload,
+                    // so the CPU path read scale bytes from inside data and produced
+                    // garbage FP16. The GPU kernel below reads the split layout
+                    // correctly (data first, scales at offset N*K/2).
+                    dequant_mxfp4_to_fp16(ptr, mw.N, mw.K, d_fp16, stream);
                     int64_t shape[2] = {mw.N, mw.K};
                     wcache_.fp16[ptr] = Tensor(d_fp16, DType::FP16, 2, shape, true);
                     }
