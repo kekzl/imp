@@ -93,3 +93,85 @@ TEST(LlmCompressorTranslate, DoesNotSkipProjScale) {
     EXPECT_EQ(t.action, NameTranslation::EMIT);  // pass through
     EXPECT_EQ(c.gemma4_extra_skipped, 0);
 }
+
+#include <fstream>
+#include <cstdlib>
+#include <unistd.h>
+
+namespace {
+
+std::string write_temp_recipe(const std::string& content) {
+    std::string path = std::string(std::getenv("TMPDIR") ? std::getenv("TMPDIR") : "/tmp")
+                       + "/recipe_" + std::to_string(::getpid()) + ".yaml";
+    // Create a temp dir and place recipe.yaml inside it.
+    std::string dir = path + ".d";
+    std::string mkdir_cmd = "mkdir -p '" + dir + "'";
+    std::system(mkdir_cmd.c_str());
+    std::ofstream out(dir + "/recipe.yaml");
+    out << content;
+    out.close();
+    return dir;
+}
+
+void cleanup_temp_recipe(const std::string& dir) {
+    std::string rm = "rm -rf '" + dir + "'";
+    std::system(rm.c_str());
+}
+
+} // namespace
+
+TEST(LlmCompressorRecipe, ParsesGemma4Recipe) {
+    std::string dir = write_temp_recipe(R"(default_stage:
+  default_modifiers:
+    QuantizationModifier:
+      targets: [Linear]
+      ignore: [lm_head, 're:.*embed.*', 're:.*router', 're:.*vision_tower.*']
+      scheme: NVFP4
+      bypass_divisibility_checks: false
+)");
+    imp::HFConfigLoader::NvFP4Config cfg;
+    bool ok = imp::llm_compressor::parse_recipe_yaml(dir, cfg);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(cfg.group_size, 16);
+    ASSERT_EQ(cfg.exclude_modules.size(), 4u);
+    EXPECT_EQ(cfg.exclude_modules[0], "lm_head");
+    EXPECT_EQ(cfg.exclude_modules[1], "re:.*embed.*");
+    cleanup_temp_recipe(dir);
+}
+
+TEST(LlmCompressorRecipe, ParsesQwen36Recipe) {
+    std::string dir = write_temp_recipe(R"(default_stage:
+  default_modifiers:
+    QuantizationModifier:
+      targets: [Linear]
+      ignore: ['re:.*lm_head', 're:visual.*', 're:model.visual.*', 're:.*mlp.gate$', 're:.*embed_tokens$', 're:.*shared_expert_gate$', 're:.*linear_attn.*']
+      scheme: NVFP4
+      bypass_divisibility_checks: false
+)");
+    imp::HFConfigLoader::NvFP4Config cfg;
+    bool ok = imp::llm_compressor::parse_recipe_yaml(dir, cfg);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(cfg.exclude_modules.size(), 7u);
+    EXPECT_EQ(cfg.exclude_modules[3], "re:.*mlp.gate$");
+    cleanup_temp_recipe(dir);
+}
+
+TEST(LlmCompressorRecipe, RejectsNonNVFP4Scheme) {
+    std::string dir = write_temp_recipe(R"(default_stage:
+  default_modifiers:
+    QuantizationModifier:
+      targets: [Linear]
+      ignore: [lm_head]
+      scheme: W8A8
+)");
+    imp::HFConfigLoader::NvFP4Config cfg;
+    bool ok = imp::llm_compressor::parse_recipe_yaml(dir, cfg);
+    EXPECT_FALSE(ok);
+    cleanup_temp_recipe(dir);
+}
+
+TEST(LlmCompressorRecipe, ReturnsFalseOnMissingFile) {
+    imp::HFConfigLoader::NvFP4Config cfg;
+    bool ok = imp::llm_compressor::parse_recipe_yaml("/tmp/nonexistent_dir_xyz", cfg);
+    EXPECT_FALSE(ok);
+}

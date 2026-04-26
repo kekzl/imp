@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 #include <string_view>
+#include <vector>
 
 namespace imp::llm_compressor {
 
@@ -38,6 +39,51 @@ bool is_proj_segment(std::string_view name_before_dot_scale) {
     return last == "q_proj" || last == "k_proj" || last == "v_proj" ||
            last == "o_proj" || last == "gate_proj" || last == "up_proj" ||
            last == "down_proj";
+}
+
+// Strip leading/trailing whitespace and optionally a matching pair of quotes.
+std::string trim_value(std::string_view sv) {
+    while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t')) sv.remove_prefix(1);
+    while (!sv.empty() && (sv.back() == ' ' || sv.back() == '\t' ||
+                           sv.back() == '\r' || sv.back() == '\n')) sv.remove_suffix(1);
+    if (sv.size() >= 2 && (sv.front() == '\'' || sv.front() == '"') &&
+        sv.front() == sv.back()) {
+        sv.remove_prefix(1);
+        sv.remove_suffix(1);
+    }
+    return std::string(sv);
+}
+
+// Parse a bracket-array `[a, b, c]` (single-line). Returns vector of values.
+std::vector<std::string> parse_bracket_array(std::string_view body) {
+    std::vector<std::string> out;
+    auto lb = body.find('[');
+    auto rb = body.rfind(']');
+    if (lb == std::string_view::npos || rb == std::string_view::npos || rb <= lb) return out;
+    std::string_view inner = body.substr(lb + 1, rb - lb - 1);
+
+    size_t start = 0;
+    bool in_quote = false;
+    char quote_char = 0;
+    for (size_t i = 0; i <= inner.size(); i++) {
+        bool at_end = (i == inner.size());
+        char c = at_end ? ',' : inner[i];
+        if (!at_end && in_quote) {
+            if (c == quote_char) in_quote = false;
+            continue;
+        }
+        if (!at_end && (c == '\'' || c == '"')) {
+            in_quote = true;
+            quote_char = c;
+            continue;
+        }
+        if (c == ',') {
+            std::string item = trim_value(inner.substr(start, i - start));
+            if (!item.empty()) out.push_back(std::move(item));
+            start = i + 1;
+        }
+    }
+    return out;
 }
 
 } // namespace
@@ -104,10 +150,48 @@ void log_summary(const TranslationCounters& c) {
                  c.passed_through);
 }
 
-bool parse_recipe_yaml(const std::string& /*model_dir*/,
-                       imp::HFConfigLoader::NvFP4Config& /*cfg*/) {
-    // Implemented in a later task.
-    return false;
+bool parse_recipe_yaml(const std::string& model_dir,
+                       imp::HFConfigLoader::NvFP4Config& cfg) {
+    std::ifstream in(model_dir + "/recipe.yaml");
+    if (!in.good()) return false;
+
+    std::string scheme;
+    std::vector<std::string> ignore_list;
+    bool seen_quant_mod = false;
+
+    std::string line;
+    while (std::getline(in, line)) {
+        std::string_view sv(line);
+        while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t')) sv.remove_prefix(1);
+
+        if (sv.find("QuantizationModifier:") == 0) { seen_quant_mod = true; continue; }
+        if (!seen_quant_mod) continue;
+
+        if (sv.find("scheme:") == 0) {
+            scheme = trim_value(sv.substr(7));
+        } else if (sv.find("ignore:") == 0) {
+            ignore_list = parse_bracket_array(sv.substr(7));
+        } else if (sv.find("group_size:") == 0) {
+            try { cfg.group_size = std::stoi(trim_value(sv.substr(11))); }
+            catch (...) { /* keep default */ }
+        }
+    }
+
+    if (!seen_quant_mod) {
+        IMP_LOG_ERROR("recipe.yaml has no QuantizationModifier block");
+        return false;
+    }
+    if (scheme != "NVFP4" && scheme != "NVFP4_W4A16") {
+        IMP_LOG_ERROR("recipe.yaml scheme '%s' not supported (need NVFP4 or NVFP4_W4A16)",
+                      scheme.c_str());
+        return false;
+    }
+
+    cfg.exclude_modules = std::move(ignore_list);
+    cfg.format = imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR;
+    IMP_LOG_INFO("NVFP4 model (llm-compressor): scheme=%s, group_size=%d, exclude=%zu modules",
+                 scheme.c_str(), cfg.group_size, cfg.exclude_modules.size());
+    return true;
 }
 
 } // namespace imp::llm_compressor
