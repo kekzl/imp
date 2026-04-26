@@ -1972,7 +1972,9 @@ moe_after_experts:
     }
 
     // Shared expert: enabled by default. Gemma 4: requires post_ffw_norm_1 to be uploaded.
-    if (ly.w_up_shared.data != nullptr) {
+    // DIAGNOSTIC: IMP_NO_SHARED_MLP=1 skips this branch (Gemma-4 NVFP4 audit).
+    static const bool s_no_shared_mlp = (getenv("IMP_NO_SHARED_MLP") != nullptr);
+    if (ly.w_up_shared.data != nullptr && !s_no_shared_mlp) {
         int eff_shared = static_cast<int>(ly.w_up_shared.shape[0]);
         bool shared_gated = (ly.w_gate_shared.data != nullptr);
 

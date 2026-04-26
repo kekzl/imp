@@ -83,17 +83,18 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w,
             NvFP4QuantResult tmp;
             tmp.packed_data  = w.payload.nvfp4.data;
             tmp.micro_scales = w.payload.nvfp4.block_scales;
-            // tensor_scale: if the payload carries a device ptr read it back;
-            // otherwise fall back to 1.0f (known limitation of phase-2 shim).
-            if (w.payload.nvfp4.tensor_scale != nullptr) {
-                cudaMemcpyAsync(&tmp.tensor_scale, w.payload.nvfp4.tensor_scale,
-                                sizeof(float), cudaMemcpyDeviceToHost, stream);
-                cudaStreamSynchronize(stream);
-            } else {
-                tmp.tensor_scale = 1.0f;
-            }
+            // tensor_scale: payload.nvfp4.tensor_scale is a HOST float pointer
+            // borrowed from the wcache_.nvfp4 entry (stable address). Read it
+            // directly — using cudaMemcpyDeviceToHost on a host pointer is
+            // undefined and silently corrupts the scale.  This was the Phase-1
+            // fix in executor_pre_dequant.cu / executor_ffn.cu / etc.; this
+            // dispatch path was missed.
+            tmp.tensor_scale = (w.payload.nvfp4.tensor_scale != nullptr)
+                              ? *w.payload.nvfp4.tensor_scale : 1.0f;
             tmp.N = w.shape[0];
-            tmp.K = w.shape[1];
+            // shape[1] holds the PACKED column count (K/2 for FP4).  Logical K
+            // is 2x that — the kernel needs the logical dimension.
+            tmp.K = w.shape[1] * 2;
 
             int M = static_cast<int>(x.shape[0]);
             if (M == 1) {
@@ -298,15 +299,13 @@ void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y,
             NvFP4QuantResult tmp;
             tmp.packed_data  = w.payload.nvfp4.data;
             tmp.micro_scales = w.payload.nvfp4.block_scales;
-            if (w.payload.nvfp4.tensor_scale != nullptr) {
-                cudaMemcpyAsync(&tmp.tensor_scale, w.payload.nvfp4.tensor_scale,
-                                sizeof(float), cudaMemcpyDeviceToHost, stream);
-                cudaStreamSynchronize(stream);
-            } else {
-                tmp.tensor_scale = 1.0f;
-            }
+            // tensor_scale: HOST pointer borrowed from wcache_.nvfp4 — read
+            // directly. cudaMemcpyDeviceToHost on a host pointer is undefined.
+            tmp.tensor_scale = (w.payload.nvfp4.tensor_scale != nullptr)
+                              ? *w.payload.nvfp4.tensor_scale : 1.0f;
             tmp.N = w.shape[0];
-            tmp.K = w.shape[1];
+            // shape[1] holds packed K/2 for FP4; kernel needs logical K.
+            tmp.K = w.shape[1] * 2;
             gemv_nvfp4_kpar(tmp,
                             reinterpret_cast<const half*>(x.data),
                             reinterpret_cast<half*>(y.data),
