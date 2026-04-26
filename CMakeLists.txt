@@ -94,6 +94,7 @@ set(IMP_MODEL_SOURCES
     src/model/model.cpp
     src/model/gguf_loader.cpp
     src/model/safetensors_loader.cpp
+    src/model/llm_compressor_loader.cpp
     src/model/json_util.cpp
     src/model/hf_config_loader.cpp
     src/model/hf_hub.cpp
@@ -368,6 +369,7 @@ if(IMP_BUILD_TESTS)
         tests/test_tensor_kind_coverage.cpp
         tests/test_kv_cache.cpp
         tests/test_gguf_loader.cpp
+        tests/test_llm_compressor_loader.cpp
     )
 
     imp_add_test_module(test-text SOURCES
