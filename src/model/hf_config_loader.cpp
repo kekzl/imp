@@ -17,6 +17,7 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
     static const std::unordered_map<std::string, ModelArch> arch_map = {
         {"LlamaForCausalLM",        ModelArch::LLAMA},
         {"MistralForCausalLM",      ModelArch::MISTRAL},
+        {"Mistral3ForConditionalGeneration", ModelArch::MISTRAL},
         {"MixtralForCausalLM",      ModelArch::MIXTRAL},
         {"Qwen2ForCausalLM",        ModelArch::QWEN3},
         {"Qwen2MoeForCausalLM",     ModelArch::QWEN3_MOE},

@@ -77,29 +77,22 @@ TEST_F(LlmCompressorE2E, Gemma4_GeneratesNonEmptyOutput) {
     imp_model_free(model);
 }
 
-// Mistral-Small was intended as the dense coherence gate for Phase 1, but
-// RedHatAI/Mistral-Small-3.2-24B-Instruct-2506-NVFP4 is actually
-// Mistral3ForConditionalGeneration (multimodal Mistral with vision_tower)
-// and uses two format wrinkles outside Phase 1 scope:
-//   1. Tensor prefix `language_model.model.layers.*` (not `model.language_model.*`
-//      like Gemma-4). Phase 1 prefix-strip rule does not match.
-//   2. recipe.yaml uses the elaborate config_groups schema
-//      (`config_groups: group_0: weights: {num_bits: 4, type: float}`) instead of
-//      `scheme: NVFP4`. Phase 1 mini-parser does not recognize this.
-//
-// Both issues are tractable but qualify as Phase 2 work. Test is left in
-// place (skipped) so the regression marker remains for when those fixes land.
-// Real coherence validation in Phase 1 falls back to the Modelopt regression
-// test below (proves we did not regress the existing modelopt path).
-TEST_F(LlmCompressorE2E, DISABLED_MistralSmall_LoadsAndGeneratesCoherent) {
+// Mistral3 dense coherence gate. Mistral-Small-3.2 is multimodal
+// (Mistral3ForConditionalGeneration), but with vision_tower / multi_modal_projector
+// tensors skipped at load time the language model alone runs as a standard
+// dense LLM. Phase 2 added two pieces to make this work:
+//   1. translate_name() now strips the Mistral3-style `language_model.` prefix
+//      (`language_model.model.layers.0.q.weight_packed` →
+//       `model.layers.0.q.weight_packed`), and skips raw `vision_tower.*` /
+//      `multi_modal_projector.*` (no `model.` wrapper) at the top level.
+//   2. parse_recipe_yaml() recognizes the elaborate
+//      `config_groups: group_0: weights: {num_bits: 4, type: float}` schema as
+//      NVFP4, and handles the multi-line bracket-array `ignore: [...]` form.
+TEST_F(LlmCompressorE2E, MistralSmall_LoadsAndGeneratesCoherent) {
     if (!dir_exists(kMistralDir)) {
         GTEST_SKIP() << "Model not present at " << kMistralDir;
     }
-    GTEST_SKIP() << "Phase 2 — Mistral3 multimodal (language_model.model.* prefix + "
-                    "config_groups recipe schema) not handled by Phase 1 loader";
 
-    // Body retained for re-enablement once Phase 2 lands the prefix +
-    // parser extensions:
     ImpModel model = nullptr;
     ASSERT_EQ(imp_model_load(kMistralDir, IMP_FORMAT_SAFETENSORS, &model), IMP_SUCCESS);
     ImpConfig cfg = imp_config_default();
@@ -117,7 +110,8 @@ TEST_F(LlmCompressorE2E, DISABLED_MistralSmall_LoadsAndGeneratesCoherent) {
     ASSERT_EQ(imp_generate(ctx, "The capital of France is", &params,
                            output, sizeof(output), &len), IMP_SUCCESS);
     std::string result(output, len);
-    EXPECT_NE(result.find("Paris"), std::string::npos);
+    EXPECT_NE(result.find("Paris"), std::string::npos)
+        << "Generated text: " << result;
     imp_context_free(ctx);
     imp_model_free(model);
 }

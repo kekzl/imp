@@ -94,6 +94,60 @@ TEST(LlmCompressorTranslate, DoesNotSkipProjScale) {
     EXPECT_EQ(c.gemma4_extra_skipped, 0);
 }
 
+// Mistral3 layout: `language_model.model.layers.*` (no leading `model.`).
+// Strip the `language_model.` wrapper entirely so the rest matches imp's
+// canonical `model.layers.*` naming.
+TEST(LlmCompressorTranslate, StripsMistral3LanguageModelPrefix) {
+    TranslationCounters c{};
+    auto t = translate_name(
+        "language_model.model.layers.0.self_attn.q_proj.weight_packed", c);
+    EXPECT_EQ(t.action, NameTranslation::EMIT);
+    EXPECT_EQ(t.out_name, "model.layers.0.self_attn.q_proj.weight");
+    EXPECT_EQ(c.suffix_renames, 1);
+    EXPECT_EQ(c.prefix_strips, 1);
+}
+
+// Mistral3 stores lm_head directly under `language_model.` (not under
+// `language_model.model.`). After strip → `lm_head.weight` (top-level), which
+// is the canonical name imp expects for the output projection.
+TEST(LlmCompressorTranslate, StripsMistral3LmHead) {
+    TranslationCounters c{};
+    auto t = translate_name("language_model.lm_head.weight", c);
+    EXPECT_EQ(t.action, NameTranslation::EMIT);
+    EXPECT_EQ(t.out_name, "lm_head.weight");
+    EXPECT_EQ(c.prefix_strips, 1);
+    EXPECT_EQ(c.passed_through, 1);
+}
+
+// Gemma-4-style nesting MUST take precedence over the Mistral3-style strip
+// (the Gemma-4 prefix `model.language_model.` is a strict superset of
+// `language_model.`, so order matters).
+TEST(LlmCompressorTranslate, Gemma4PrefixStillWinsOverMistral3) {
+    TranslationCounters c{};
+    auto t = translate_name(
+        "model.language_model.layers.0.self_attn.q_proj.weight_packed", c);
+    EXPECT_EQ(t.action, NameTranslation::EMIT);
+    EXPECT_EQ(t.out_name, "model.layers.0.self_attn.q_proj.weight");
+    EXPECT_EQ(c.prefix_strips, 1);
+}
+
+// Mistral3 vision tower at top level (no `model.` wrapper).
+TEST(LlmCompressorTranslate, SkipsRawVisionTower) {
+    TranslationCounters c{};
+    auto t = translate_name("vision_tower.transformer.layers.0.attention.q.weight", c);
+    EXPECT_EQ(t.action, NameTranslation::SKIP);
+    EXPECT_EQ(c.vision_skipped, 1);
+}
+
+// Multimodal projector tensors connect vision → language; we skip them in
+// Phase 2 (full multimodal support is a separate Phase 3 effort).
+TEST(LlmCompressorTranslate, SkipsMultiModalProjector) {
+    TranslationCounters c{};
+    auto t = translate_name("multi_modal_projector.linear_1.weight", c);
+    EXPECT_EQ(t.action, NameTranslation::SKIP);
+    EXPECT_EQ(c.vision_skipped, 1);
+}
+
 #include <fstream>
 #include <cstdlib>
 #include <unistd.h>
@@ -174,6 +228,67 @@ TEST(LlmCompressorRecipe, ReturnsFalseOnMissingFile) {
     imp::HFConfigLoader::NvFP4Config cfg;
     bool ok = imp::llm_compressor::parse_recipe_yaml("/tmp/nonexistent_dir_xyz", cfg);
     EXPECT_FALSE(ok);
+}
+
+// Mistral3-style recipe: no `scheme:` line; NVFP4 is implicit in the
+// `config_groups.group_0.weights.{num_bits: 4, type: float}` schema. Also
+// exercises multi-line bracket-array `ignore:` parsing.
+TEST(LlmCompressorRecipe, ParsesConfigGroupsSchema) {
+    std::string dir = write_temp_recipe(R"(default_stage:
+  default_modifiers:
+    SmoothQuantModifier:
+      smoothing_strength: 0.9
+      mappings: []
+    QuantizationModifier:
+      config_groups:
+        group_0:
+          targets: [Linear]
+          weights:
+            num_bits: 4
+            type: float
+            symmetric: true
+            group_size: 16
+            strategy: tensor_group
+          input_activations:
+            num_bits: 4
+            type: float
+            group_size: 16
+          output_activations: null
+          format: null
+      targets: [Linear]
+      ignore: ['re:.*lm_head.*', 're:.*multi_modal_projector.*', 're:.*vision_tower.*', 're:.*model.norm.*',
+        're:.*embed_tokens.*']
+)");
+    imp::HFConfigLoader::NvFP4Config cfg;
+    bool ok = imp::llm_compressor::parse_recipe_yaml(dir, cfg);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(cfg.group_size, 16);
+    ASSERT_EQ(cfg.exclude_modules.size(), 5u);
+    EXPECT_EQ(cfg.exclude_modules[0], "re:.*lm_head.*");
+    EXPECT_EQ(cfg.exclude_modules[4], "re:.*embed_tokens.*");
+    cleanup_temp_recipe(dir);
+}
+
+// Make sure config_groups detection doesn't false-positive on non-NVFP4
+// numeric signatures (e.g. W8A8: num_bits=8, type=int).
+TEST(LlmCompressorRecipe, RejectsConfigGroupsW8A8) {
+    std::string dir = write_temp_recipe(R"(default_stage:
+  default_modifiers:
+    QuantizationModifier:
+      config_groups:
+        group_0:
+          targets: [Linear]
+          weights:
+            num_bits: 8
+            type: int
+            group_size: 128
+      targets: [Linear]
+      ignore: [lm_head]
+)");
+    imp::HFConfigLoader::NvFP4Config cfg;
+    bool ok = imp::llm_compressor::parse_recipe_yaml(dir, cfg);
+    EXPECT_FALSE(ok);
+    cleanup_temp_recipe(dir);
 }
 
 TEST(LlmCompressorFormatDetect, PrefersModeloptWhenBothPresent) {
