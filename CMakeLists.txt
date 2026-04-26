@@ -442,6 +442,7 @@ if(IMP_BUILD_TESTS)
         tests/test_speculative.cpp
         tests/test_degeneration.cpp
         tests/test_weight_registry_preservation.cpp
+        tests/test_e2e_llm_compressor.cpp
     )
 
     set(IMP_TEST_BINARIES
