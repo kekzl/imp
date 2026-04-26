@@ -63,49 +63,33 @@ static bool use_multirow(int n_mb, int mr_blocks) {
 
 // Process one micro-block (8 packed bytes = 16 FP4 values).
 // Returns unscaled dot product: sum(dequant(nibble) * activation).
-// Uses PTX prmt.b32 register-based LUT: no shared memory, no __syncthreads.
 //
-// FP4 E2M1 → FP16: all 16 values have low_byte=0x00, only the high byte varies.
-// Two uint32 constants hold the 8 magnitude high-bytes packed:
-//   kLutLo bytes = [0x00, 0x38, 0x3C, 0x3E] → magnitudes 0 (0.0), 1 (0.5), 2 (1.0), 3 (1.5)
-//   kLutHi bytes = [0x40, 0x42, 0x44, 0x46] → magnitudes 4 (2.0), 5 (3.0), 6 (4.0), 7 (6.0)
-// prmt selects one byte by index (the magnitude), then we shift to FP16 high byte + OR sign.
+// HW FP4 decode via `cvt.rn.f16x2.e2m1x2` — single PTX instruction converts
+// one byte (2 packed E2M1 nibbles) to a packed f16x2. Replaces the prior
+// 8-op-per-byte prmt+shift+OR cascade. Verified supported on sm_120f /
+// CUDA 13.2 by tools/analysis/ptx_cvt_survey.sh.
 //
-// NOTE: bfe/bfi PTX was tested as a replacement for AND+SHL+OR — REGRESSED 5%
-// because inline asm prevents the compiler from scheduling across the unrolled loop.
-// The C intrinsics (& << |) give the compiler full freedom to interleave and reorder.
+// Layout: low nibble (bits 0-3) decodes to f16x2.x (lower half),
+//         high nibble (bits 4-7) decodes to f16x2.y (upper half).
 __device__ __forceinline__ float dot_micro_block(
     const uint8_t* __restrict__ pb,
     const half*    __restrict__ x,
     int            elem_base)
 {
-    constexpr uint32_t kLutLo = 0x3E3C3800u;
-    constexpr uint32_t kLutHi = 0x46444240u;
-
     float acc = 0.0f;
     #pragma unroll
     for (int b = 0; b < 8; b++) {
         uint32_t byte_val = pb[b];
+        uint32_t w_fp16x2;
+        asm("{ .reg .b8 t; cvt.u8.u32 t, %1; cvt.rn.f16x2.e2m1x2 %0, t; }"
+            : "=r"(w_fp16x2) : "r"(byte_val));
+
         const half2 xh = *reinterpret_cast<const half2*>(x + elem_base + b * 2);
+        const half2 wh = *reinterpret_cast<const half2*>(&w_fp16x2);
         const float2 xf = __half22float2(xh);
-
-        // Low nibble: magnitude = bits[2:0], sign = bit[3]
-        uint32_t lo_mag = byte_val & 0x07u;
-        uint32_t lo_hi_byte;
-        asm("prmt.b32 %0, %1, %2, %3;" : "=r"(lo_hi_byte) : "r"(kLutLo), "r"(kLutHi), "r"(lo_mag));
-        uint32_t lo_fp16 = (lo_hi_byte & 0xFFu) << 8;
-        lo_fp16 |= ((byte_val & 0x08u) << 12);  // bit 3 → bit 15 (sign)
-        float lo_val = __half2float(*reinterpret_cast<const half*>(&lo_fp16));
-        acc = __fmaf_rn(lo_val, xf.x, acc);
-
-        // High nibble: magnitude = bits[6:4], sign = bit[7]
-        uint32_t hi_mag = (byte_val >> 4) & 0x07u;
-        uint32_t hi_hi_byte;
-        asm("prmt.b32 %0, %1, %2, %3;" : "=r"(hi_hi_byte) : "r"(kLutLo), "r"(kLutHi), "r"(hi_mag));
-        uint32_t hi_fp16 = (hi_hi_byte & 0xFFu) << 8;
-        hi_fp16 |= ((byte_val & 0x80u) << 8);   // bit 7 → bit 15 (sign)
-        float hi_val = __half2float(*reinterpret_cast<const half*>(&hi_fp16));
-        acc = __fmaf_rn(hi_val, xf.y, acc);
+        const float2 wf = __half22float2(wh);
+        acc = __fmaf_rn(wf.x, xf.x, acc);
+        acc = __fmaf_rn(wf.y, xf.y, acc);
     }
     return acc;
 }
