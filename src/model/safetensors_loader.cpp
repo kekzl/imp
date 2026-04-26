@@ -678,6 +678,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     if (is_nvfp4) {
         cfg.is_nvfp4_prequant = true;
         cfg.nvfp4_group_size = nvfp4_cfg.group_size;
+        cfg.is_llm_compressor_nvfp4 = (nvfp4_cfg.format == HFConfigLoader::NvFP4Format::LLM_COMPRESSOR);
         // Link the main weight tensors to nvfp4 structs (they share the same data pointer)
         for (auto& layer : model->layers_) {
             auto link = [](TransformerLayer::NvFP4PreQuantWeight& nw, const Tensor& w) {
@@ -688,9 +689,11 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
             link(layer.nvfp4_k, layer.wk);
             link(layer.nvfp4_v, layer.wv);
             link(layer.nvfp4_o, layer.wo);
-            link(layer.nvfp4_gate, layer.w_gate);
-            link(layer.nvfp4_up, layer.w_up);
-            link(layer.nvfp4_down, layer.w_down);
+            // For Gemma-4, mlp.{gate,up,down}_proj weights land in w_{gate,up,down}_shared
+            // (weight_map.cpp routes them there). Fall back to shared when primary is null.
+            link(layer.nvfp4_gate, layer.w_gate.data ? layer.w_gate : layer.w_gate_shared);
+            link(layer.nvfp4_up,   layer.w_up.data   ? layer.w_up   : layer.w_up_shared);
+            link(layer.nvfp4_down, layer.w_down.data ? layer.w_down : layer.w_down_shared);
             // Expert weights
             for (size_t e = 0; e < layer.expert_nvfp4_gate.size(); e++) {
                 if (e < layer.expert_w_gate.size()) link(layer.expert_nvfp4_gate[e], layer.expert_w_gate[e]);

@@ -562,8 +562,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             nvfp4_lm_r.packed_data  = lm_h->payload.nvfp4.data;
             nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
             nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
-                ? [&]{ float s; cudaMemcpy(&s, lm_h->payload.nvfp4.tensor_scale, sizeof(float), cudaMemcpyDeviceToHost); return s; }()
-                : 1.0f;
+                ? *lm_h->payload.nvfp4.tensor_scale : 1.0f;
             nvfp4_lm_r.N = cfg.vocab_size;
             nvfp4_lm_r.K = cfg.d_model;
             gemv_nvfp4_kpar_fp32(nvfp4_lm_r,
@@ -646,8 +645,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             nvfp4_lm_r.packed_data  = lm_h->payload.nvfp4.data;
             nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
             nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
-                ? [&]{ float s; cudaMemcpy(&s, lm_h->payload.nvfp4.tensor_scale, sizeof(float), cudaMemcpyDeviceToHost); return s; }()
-                : 1.0f;
+                ? *lm_h->payload.nvfp4.tensor_scale : 1.0f;
             nvfp4_lm_r.N = cfg.vocab_size;
             nvfp4_lm_r.K = cfg.d_model;
             gemv_nvfp4_kpar_fp32(nvfp4_lm_r,
@@ -674,8 +672,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             nvfp4_lm_r.packed_data  = lm_h->payload.nvfp4.data;
             nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
             nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
-                ? [&]{ float s; cudaMemcpy(&s, lm_h->payload.nvfp4.tensor_scale, sizeof(float), cudaMemcpyDeviceToHost); return s; }()
-                : 1.0f;
+                ? *lm_h->payload.nvfp4.tensor_scale : 1.0f;
             nvfp4_lm_r.N = cfg.vocab_size;
             nvfp4_lm_r.K = cfg.d_model;
             Tensor no_row = view_tokens(norm_out_, 1);

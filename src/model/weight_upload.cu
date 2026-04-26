@@ -1120,6 +1120,19 @@ static bool upload_expert_weights(
         add_packed(L.expert_gate_packed, L.expert_gate_qtype);
         add_packed(L.expert_up_packed, L.expert_up_qtype);
         add_packed(L.expert_down_packed, L.expert_down_qtype);
+
+        // Also account for per-expert 2D tensors (e.g. NVFP4 llm-compressor format).
+        // These are NOT packed 3D, so add_packed misses them.
+        auto add_2d_expert = [&](const std::vector<Tensor>& vt) {
+            for (const auto& t : vt) {
+                if (!t.data || t.on_device || t.ndim < 2) continue;
+                layer_expert_bytes[i] += t.nbytes();
+                total_expert_bytes    += t.nbytes();
+            }
+        };
+        add_2d_expert(L.expert_w_gate);
+        add_2d_expert(L.expert_w_up);
+        add_2d_expert(L.expert_w_down);
     }
 
     // Decide which expert layers to upload based on actual remaining VRAM
@@ -1503,32 +1516,36 @@ static bool upload_expert_weights(
                                    L.expert_w_down, "expert_down_exps"))
             return false;
 
-        // Path B: per-expert 2D tensors (from per-expert GGUF naming)
-        for (size_t e = 0; e < L.expert_w_gate.size(); ++e) {
-            if (!L.expert_w_gate[e].data || L.expert_w_gate[e].on_device) continue;
-            Tensor dummy_scales;
-            if (!upload_weight(L.expert_w_gate[e], L.expert_gate_qtype, dummy_scales,
-                               ctx.compute_dtype, ctx.stream, ctx.gpu_allocs)) {
-                IMP_LOG_ERROR("Failed to upload expert_w_gate[%zu] for layer %d", e, i);
-                return false;
+        // Path B: per-expert 2D tensors (from per-expert GGUF or llm-compressor NVFP4 format).
+        // Respect the experts_upload_layer budget flag — skip if experts for this layer
+        // don't fit in the remaining VRAM budget.
+        if (experts_upload_layer[i]) {
+            for (size_t e = 0; e < L.expert_w_gate.size(); ++e) {
+                if (!L.expert_w_gate[e].data || L.expert_w_gate[e].on_device) continue;
+                Tensor dummy_scales;
+                if (!upload_weight(L.expert_w_gate[e], L.expert_gate_qtype, dummy_scales,
+                                   ctx.compute_dtype, ctx.stream, ctx.gpu_allocs)) {
+                    IMP_LOG_ERROR("Failed to upload expert_w_gate[%zu] for layer %d", e, i);
+                    return false;
+                }
             }
-        }
-        for (size_t e = 0; e < L.expert_w_up.size(); ++e) {
-            if (!L.expert_w_up[e].data || L.expert_w_up[e].on_device) continue;
-            Tensor dummy_scales;
-            if (!upload_weight(L.expert_w_up[e], L.expert_up_qtype, dummy_scales,
-                               ctx.compute_dtype, ctx.stream, ctx.gpu_allocs)) {
-                IMP_LOG_ERROR("Failed to upload expert_w_up[%zu] for layer %d", e, i);
-                return false;
+            for (size_t e = 0; e < L.expert_w_up.size(); ++e) {
+                if (!L.expert_w_up[e].data || L.expert_w_up[e].on_device) continue;
+                Tensor dummy_scales;
+                if (!upload_weight(L.expert_w_up[e], L.expert_up_qtype, dummy_scales,
+                                   ctx.compute_dtype, ctx.stream, ctx.gpu_allocs)) {
+                    IMP_LOG_ERROR("Failed to upload expert_w_up[%zu] for layer %d", e, i);
+                    return false;
+                }
             }
-        }
-        for (size_t e = 0; e < L.expert_w_down.size(); ++e) {
-            if (!L.expert_w_down[e].data || L.expert_w_down[e].on_device) continue;
-            Tensor dummy_scales;
-            if (!upload_weight(L.expert_w_down[e], L.expert_down_qtype, dummy_scales,
-                               ctx.compute_dtype, ctx.stream, ctx.gpu_allocs)) {
-                IMP_LOG_ERROR("Failed to upload expert_w_down[%zu] for layer %d", e, i);
-                return false;
+            for (size_t e = 0; e < L.expert_w_down.size(); ++e) {
+                if (!L.expert_w_down[e].data || L.expert_w_down[e].on_device) continue;
+                Tensor dummy_scales;
+                if (!upload_weight(L.expert_w_down[e], L.expert_down_qtype, dummy_scales,
+                                   ctx.compute_dtype, ctx.stream, ctx.gpu_allocs)) {
+                    IMP_LOG_ERROR("Failed to upload expert_w_down[%zu] for layer %d", e, i);
+                    return false;
+                }
             }
         }
     }
