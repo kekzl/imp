@@ -244,6 +244,28 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
                     is_swa ? cfg.n_kv_heads
                            : (num_global_kv > 0 ? num_global_kv : cfg.n_kv_heads));
             }
+            // Scalar head_dim = max(per-layer head_dim) so KV-cache buffers and
+            // attention workspace are sized for the *largest* head_dim, not the
+            // SWA-only value. The GGUF loader does the same (gguf_loader.cpp).
+            // Without this, full-attention layers (head_dim=512) write past
+            // their allocated stride into adjacent layer slots → corrupted KV
+            // cache → garbage attention output. Symptom: L0 attention output
+            // diverges from GGUF reference even though Q/K/V projections agree.
+            int max_hd = 0;
+            for (int v : cfg.head_dim_per_layer) max_hd = std::max(max_hd, v);
+            if (max_hd > cfg.head_dim) {
+                IMP_LOG_INFO("Gemma 4 (HF): scalar head_dim %d → %d (max of per-layer)",
+                             cfg.head_dim, max_hd);
+                cfg.head_dim = max_hd;
+            }
+            // Same for n_kv_heads — sizing the cache for the largest layer.
+            int max_nkv = 0;
+            for (int v : cfg.n_kv_heads_per_layer) max_nkv = std::max(max_nkv, v);
+            if (max_nkv > cfg.n_kv_heads) {
+                IMP_LOG_INFO("Gemma 4 (HF): scalar n_kv_heads %d → %d (max of per-layer)",
+                             cfg.n_kv_heads, max_nkv);
+                cfg.n_kv_heads = max_nkv;
+            }
         }
     }
 
