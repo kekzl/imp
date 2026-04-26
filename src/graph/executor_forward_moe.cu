@@ -145,6 +145,17 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // Configure shared workspace for MoE phase
     configure_moe_workspace(shared_workspace_max_tokens_);
 
+    // DIAGNOSTIC (Phase 2 Item 2 follow-up): zero MoE workspace buffers so any
+    // legacy-serial-fallback uninit reads become deterministic zero reads.
+    // Set IMP_MOE_ZERO_WORKSPACE=1 to enable. Cheap (~1 MiB total memset).
+    if (getenv("IMP_MOE_ZERO_WORKSPACE")) {
+        cudaMemsetAsync(moe_.expert_gate.data, 0, moe_.expert_gate.nbytes(), stream);
+        cudaMemsetAsync(moe_.expert_up.data, 0, moe_.expert_up.nbytes(), stream);
+        cudaMemsetAsync(moe_.expert_swiglu.data, 0, moe_.expert_swiglu.nbytes(), stream);
+        cudaMemsetAsync(moe_.expert_down.data, 0, moe_.expert_down.nbytes(), stream);
+        cudaMemsetAsync(moe_.gathered.data, 0, moe_.gathered.nbytes(), stream);
+    }
+
     const auto& cfg = model_->config();
     const auto& ly  = model_->layer(layer);
 
