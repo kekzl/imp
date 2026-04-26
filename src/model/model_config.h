@@ -82,6 +82,10 @@ struct ModelConfig {
     // NVFP4 pre-quantized model (from Model Optimizer SafeTensors)
     bool is_nvfp4_prequant = false;
     int nvfp4_group_size = 16;
+    // llm-compressor NVFP4 format: weight_global_scale is a divisor, not a multiplier.
+    // Reconstruction: val = fp4 * weight_scale_fp8 / weight_global_scale
+    // (Modelopt: val = fp4 * weight_scale_fp8 * weight_scale_2)
+    bool is_llm_compressor_nvfp4 = false;
 };
 
 // Forward declaration — full definition in quant/nvfp4_quant.h.

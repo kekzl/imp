@@ -322,18 +322,17 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             // NVFP4 fused QKV: RMSNorm to FP16, then NVFP4 GEMV (no Q8_1 needed)
             rmsnorm(h, ly.attn_norm, no, eps, stream, norm_w_off_);
             // Reconstruct NvFP4QuantResult structs from handle payloads.
+            // hw->shape[1] is the PACKED column count (K/2 for FP4 packed);
+            // NvFP4QuantResult.K must be the logical K = packed_cols * 2.
             auto make_nvfp4 = [](const WeightHandle* hw) {
                 NvFP4QuantResult tmp;
                 tmp.packed_data  = hw->payload.nvfp4.data;
                 tmp.micro_scales = hw->payload.nvfp4.block_scales;
-                if (hw->payload.nvfp4.tensor_scale != nullptr) {
-                    cudaMemcpy(&tmp.tensor_scale, hw->payload.nvfp4.tensor_scale,
-                               sizeof(float), cudaMemcpyDeviceToHost);
-                } else {
-                    tmp.tensor_scale = 1.0f;
-                }
+                // tensor_scale: host float pointer (borrowed from wcache_.nvfp4 map).
+                tmp.tensor_scale = (hw->payload.nvfp4.tensor_scale != nullptr)
+                                   ? *hw->payload.nvfp4.tensor_scale : 1.0f;
                 tmp.N = static_cast<int>(hw->shape[0]);
-                tmp.K = static_cast<int>(hw->shape[1]);
+                tmp.K = static_cast<int>(hw->shape[1]) * 2;  // packed → logical K
                 return tmp;
             };
             auto nv_q = make_nvfp4(mxfp4_hwq);
@@ -968,14 +967,10 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         NvFP4QuantResult wo_nvfp4;
         wo_nvfp4.packed_data  = wo_h.payload.nvfp4.data;
         wo_nvfp4.micro_scales = wo_h.payload.nvfp4.block_scales;
-        if (wo_h.payload.nvfp4.tensor_scale != nullptr) {
-            cudaMemcpy(&wo_nvfp4.tensor_scale, wo_h.payload.nvfp4.tensor_scale,
-                       sizeof(float), cudaMemcpyDeviceToHost);
-        } else {
-            wo_nvfp4.tensor_scale = 1.0f;
-        }
+        wo_nvfp4.tensor_scale = (wo_h.payload.nvfp4.tensor_scale != nullptr)
+                                 ? *wo_h.payload.nvfp4.tensor_scale : 1.0f;
         wo_nvfp4.N = static_cast<int>(wo_h.shape[0]);
-        wo_nvfp4.K = static_cast<int>(wo_h.shape[1]);
+        wo_nvfp4.K = static_cast<int>(wo_h.shape[1]) * 2;  // packed → logical K
         int M_o = wo_nvfp4.N;
         int K_o = wo_nvfp4.K;
         gemv_nvfp4_residual(wo_nvfp4,

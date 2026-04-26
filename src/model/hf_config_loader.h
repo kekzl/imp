@@ -41,11 +41,19 @@ struct HFConfigLoader {
     };
     static bool load_gptq_config(const std::string& model_dir, GPTQConfig& cfg);
 
-    // NVFP4 quantization config from hf_quant_config.json (Model Optimizer)
+    // Source format of NVFP4 quantization metadata.
+    enum class NvFP4Format {
+        MODELOPT,         // hf_quant_config.json from NVIDIA Model Optimizer
+        LLM_COMPRESSOR,   // recipe.yaml from vllm-project/llm-compressor
+    };
+
+    // NVFP4 quantization config. Sourced from hf_quant_config.json (modelopt)
+    // or recipe.yaml (llm-compressor) — see `format` field for which.
     struct NvFP4Config {
         int group_size = 16;                       // micro-scale group (default: 16 for NVFP4)
-        std::string kv_cache_quant_algo;           // "FP8" or empty
+        std::string kv_cache_quant_algo;           // "FP8" or empty (modelopt only)
         std::vector<std::string> exclude_modules;  // e.g. ["lm_head"]
+        NvFP4Format format = NvFP4Format::MODELOPT;
     };
     static bool load_nvfp4_config(const std::string& model_dir, NvFP4Config& cfg);
 
