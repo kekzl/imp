@@ -175,3 +175,48 @@ TEST(LlmCompressorRecipe, ReturnsFalseOnMissingFile) {
     bool ok = imp::llm_compressor::parse_recipe_yaml("/tmp/nonexistent_dir_xyz", cfg);
     EXPECT_FALSE(ok);
 }
+
+TEST(LlmCompressorFormatDetect, PrefersModeloptWhenBothPresent) {
+    std::string dir = std::string(std::getenv("TMPDIR") ?: "/tmp")
+                      + "/fmt_both_" + std::to_string(::getpid());
+    std::system(("mkdir -p '" + dir + "'").c_str());
+    std::ofstream(dir + "/hf_quant_config.json") << R"({"quantization":{"quant_algo":"NVFP4"}})";
+    std::ofstream(dir + "/recipe.yaml") << "default_stage:\n  default_modifiers:\n    QuantizationModifier:\n      scheme: NVFP4\n";
+
+    imp::HFConfigLoader::NvFP4Config cfg;
+    bool ok = imp::HFConfigLoader::load_nvfp4_config(dir, cfg);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(cfg.format, imp::HFConfigLoader::NvFP4Format::MODELOPT);
+
+    std::system(("rm -rf '" + dir + "'").c_str());
+}
+
+TEST(LlmCompressorFormatDetect, DetectsLlmCompressorByRecipeYaml) {
+    std::string dir = std::string(std::getenv("TMPDIR") ?: "/tmp")
+                      + "/fmt_lc_" + std::to_string(::getpid());
+    std::system(("mkdir -p '" + dir + "'").c_str());
+    std::ofstream(dir + "/recipe.yaml") << R"(default_stage:
+  default_modifiers:
+    QuantizationModifier:
+      targets: [Linear]
+      ignore: [lm_head]
+      scheme: NVFP4
+)";
+    imp::HFConfigLoader::NvFP4Config cfg;
+    bool ok = imp::HFConfigLoader::load_nvfp4_config(dir, cfg);
+    EXPECT_TRUE(ok);
+    EXPECT_EQ(cfg.format, imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR);
+
+    std::system(("rm -rf '" + dir + "'").c_str());
+}
+
+TEST(LlmCompressorFormatDetect, ReturnsFalseWhenNoConfigPresent) {
+    std::string dir = std::string(std::getenv("TMPDIR") ?: "/tmp")
+                      + "/fmt_none_" + std::to_string(::getpid());
+    std::system(("mkdir -p '" + dir + "'").c_str());
+    // Empty dir, no config files.
+    imp::HFConfigLoader::NvFP4Config cfg;
+    bool ok = imp::HFConfigLoader::load_nvfp4_config(dir, cfg);
+    EXPECT_FALSE(ok);
+    std::system(("rm -rf '" + dir + "'").c_str());
+}
