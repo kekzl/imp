@@ -102,19 +102,17 @@ NameTranslation translate_name(const std::string& in, TranslationCounters& count
         return {NameTranslation::SKIP, ""};
     }
 
-    // Step 2: skip Gemma-4 extras.
+    // Step 2: count Gemma-4 extras (still emitted — weight_map routes them to
+    // layer.{ffn_gate_inp_scale, expert_down_scale, layer_out_scale}, which the
+    // forward path applies to make the model coherent). Phase 1 skipped these
+    // because the runtime wiring wasn't validated yet; Phase 2 enables them.
     if (ends_with(out, ".layer_scalar") || ends_with(out, ".per_expert_scale")) {
-        counters.gemma4_extra_skipped++;
-        return {NameTranslation::SKIP, ""};
-    }
-    if (ends_with(out, ".scale")) {
-        // Only skip if the segment immediately before .scale is NOT a known proj.
+        counters.gemma4_extras++;
+    } else if (ends_with(out, ".scale")) {
         std::string_view before_scale(out.data(), out.size() - 6); // strip ".scale"
         if (!is_proj_segment(before_scale)) {
-            counters.gemma4_extra_skipped++;
-            return {NameTranslation::SKIP, ""};
+            counters.gemma4_extras++;
         }
-        // else fall through (pass-through handles it).
     }
 
     // Step 3: prefix strip. Two multimodal wrappers seen in the wild:
@@ -158,10 +156,10 @@ NameTranslation translate_name(const std::string& in, TranslationCounters& count
 
 void log_summary(const TranslationCounters& c) {
     IMP_LOG_INFO("llm-compressor format: %d suffix renames, %d prefix strips, "
-                 "%d vision tensors skipped, %d Gemma-4 extras skipped, "
+                 "%d vision tensors skipped, %d Gemma-4 extras emitted, "
                  "%d pass-through",
                  c.suffix_renames, c.prefix_strips,
-                 c.vision_skipped, c.gemma4_extra_skipped,
+                 c.vision_skipped, c.gemma4_extras,
                  c.passed_through);
 }
 

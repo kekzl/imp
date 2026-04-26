@@ -592,7 +592,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     // emit the summary here. The sharded path (load_sharded) emits its own summary internally
     // with its own counters — tcounters is only populated by the two load_shard calls above.
     if (llm_compressor_format && (tcounters.suffix_renames + tcounters.prefix_strips +
-                                   tcounters.vision_skipped + tcounters.gemma4_extra_skipped +
+                                   tcounters.vision_skipped + tcounters.gemma4_extras +
                                    tcounters.passed_through) > 0) {
         imp::llm_compressor::log_summary(tcounters);
     }
