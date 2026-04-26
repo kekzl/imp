@@ -409,7 +409,12 @@ bool WeightMap::apply_weights(
                 layer.layer_out_scale = t;
                 matched = true;
             }
-            // Gemma 4 FFN norm variants (parallel shared-MLP + MoE branches)
+            // Gemma 4 FFN norm variants (parallel shared-MLP + MoE branches).
+            // GGUF analogue: pre_ffw_norm_2/post_ffw_norm_1/post_ffw_norm_2 are
+            // the parallel-branch norms; pre_feedforward_layernorm (base) and
+            // post_feedforward_layernorm (base) are the standard FFN norms,
+            // routed to layer.ffn_norm and layer.post_ffn_norm to mirror the
+            // GGUF loader (gguf_loader.cpp ffn_norm + post_ffw_norm fields).
             else if (parts.size() >= 5 && parts[4] == "weight") {
                 if (parts[3] == "pre_feedforward_layernorm_2") {
                     layer.ffn_pre_norm_2 = t; matched = true;
@@ -417,6 +422,10 @@ bool WeightMap::apply_weights(
                     layer.ffn_post_norm_1 = t; matched = true;
                 } else if (parts[3] == "post_feedforward_layernorm_2") {
                     layer.ffn_post_norm_2 = t; matched = true;
+                } else if (parts[3] == "pre_feedforward_layernorm") {
+                    layer.ffn_norm = t; matched = true;
+                } else if (parts[3] == "post_feedforward_layernorm") {
+                    layer.post_ffn_norm = t; matched = true;
                 } else if (parts[3] == "post_attention_layernorm") {
                     // Gemma 3/4 sandwich norm — distinct from Llama's FFN norm.
                     layer.post_attn_norm = t; matched = true;
