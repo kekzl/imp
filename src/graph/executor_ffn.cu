@@ -161,14 +161,11 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 NvFP4QuantResult tmp;
                 tmp.packed_data  = hw->payload.nvfp4.data;
                 tmp.micro_scales = hw->payload.nvfp4.block_scales;
-                if (hw->payload.nvfp4.tensor_scale != nullptr) {
-                    cudaMemcpy(&tmp.tensor_scale, hw->payload.nvfp4.tensor_scale,
-                               sizeof(float), cudaMemcpyDeviceToHost);
-                } else {
-                    tmp.tensor_scale = 1.0f;
-                }
+                // tensor_scale: host float pointer borrowed from wcache_.nvfp4 map.
+                tmp.tensor_scale = (hw->payload.nvfp4.tensor_scale != nullptr)
+                                   ? *hw->payload.nvfp4.tensor_scale : 1.0f;
                 tmp.N = static_cast<int>(hw->shape[0]);
-                tmp.K = static_cast<int>(hw->shape[1]);
+                tmp.K = static_cast<int>(hw->shape[1]) * 2;  // packed → logical K
                 return tmp;
             };
             auto nv_g = make_nvfp4(hwg);
@@ -292,14 +289,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             NvFP4QuantResult wd_nvfp4;
             wd_nvfp4.packed_data  = hwd->payload.nvfp4.data;
             wd_nvfp4.micro_scales = hwd->payload.nvfp4.block_scales;
-            if (hwd->payload.nvfp4.tensor_scale != nullptr) {
-                cudaMemcpy(&wd_nvfp4.tensor_scale, hwd->payload.nvfp4.tensor_scale,
-                           sizeof(float), cudaMemcpyDeviceToHost);
-            } else {
-                wd_nvfp4.tensor_scale = 1.0f;
-            }
+            wd_nvfp4.tensor_scale = (hwd->payload.nvfp4.tensor_scale != nullptr)
+                                    ? *hwd->payload.nvfp4.tensor_scale : 1.0f;
             wd_nvfp4.N = static_cast<int>(hwd->shape[0]);
-            wd_nvfp4.K = static_cast<int>(hwd->shape[1]);
+            wd_nvfp4.K = static_cast<int>(hwd->shape[1]) * 2;  // packed → logical K
             int K_d = wd_nvfp4.K;
             int M_d = wd_nvfp4.N;
             int n_mb_d = K_d / 16;
@@ -366,14 +359,10 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             NvFP4QuantResult wd_nvfp4;
             wd_nvfp4.packed_data  = hwd->payload.nvfp4.data;
             wd_nvfp4.micro_scales = hwd->payload.nvfp4.block_scales;
-            if (hwd->payload.nvfp4.tensor_scale != nullptr) {
-                cudaMemcpy(&wd_nvfp4.tensor_scale, hwd->payload.nvfp4.tensor_scale,
-                           sizeof(float), cudaMemcpyDeviceToHost);
-            } else {
-                wd_nvfp4.tensor_scale = 1.0f;
-            }
+            wd_nvfp4.tensor_scale = (hwd->payload.nvfp4.tensor_scale != nullptr)
+                                    ? *hwd->payload.nvfp4.tensor_scale : 1.0f;
             wd_nvfp4.N = static_cast<int>(hwd->shape[0]);
-            wd_nvfp4.K = static_cast<int>(hwd->shape[1]);
+            wd_nvfp4.K = static_cast<int>(hwd->shape[1]) * 2;  // packed → logical K
             int K_d = wd_nvfp4.K;
             int M_d = wd_nvfp4.N;
             if (cfg.ffn_activation != FFNActivation::GEGLU)

@@ -1590,17 +1590,14 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             NvFP4QuantResult nw;
             nw.packed_data  = wh.payload.nvfp4.data;
             nw.micro_scales = wh.payload.nvfp4.block_scales;
-            // tensor_scale: borrow payload stores a device ptr; if available, do D2H.
-            // Phase-2 shim sets tensor_scale ptr to nullptr → fall back to 1.0f.
-            if (wh.payload.nvfp4.tensor_scale != nullptr) {
-                cudaMemcpyAsync(&nw.tensor_scale, wh.payload.nvfp4.tensor_scale,
-                                sizeof(float), cudaMemcpyDeviceToHost, stream);
-                cudaStreamSynchronize(stream);
-            } else {
-                nw.tensor_scale = 1.0f;
-            }
+            // tensor_scale: payload.nvfp4.tensor_scale is a HOST float pointer
+            // (borrowed from wcache_.nvfp4 map entry — stable address). Read directly.
+            nw.tensor_scale = (wh.payload.nvfp4.tensor_scale != nullptr)
+                              ? *wh.payload.nvfp4.tensor_scale : 1.0f;
             nw.N = wh.shape[0];
-            nw.K = wh.shape[1];
+            // wh.shape[1] stores the PACKED column count (K/2 for FP4 packed format).
+            // NvFP4QuantResult.K must be the logical K = packed_cols * 2.
+            nw.K = wh.shape[1] * 2;
             int N_dim = static_cast<int>(nw.N);
             int K_dim = static_cast<int>(nw.K);
             int M = static_cast<int>(a.shape[0]);

@@ -548,6 +548,36 @@ bool WeightMap::apply_weights(
         }
 
         // -----------------------------------------------------------------
+        // MoE experts -- llm-compressor format (Gemma-4 NVFP4):
+        //   experts.{e}.{gate_proj,up_proj,down_proj}.weight         -> expert_w_gate/up/down[e]
+        //   experts.{e}.{proj}.{weight_scale,weight_scale_2,...}     -> expert_nvfp4_*[e]
+        // The standard format has mlp.experts.{e}.*, but llm-compressor omits the mlp. prefix.
+        // -----------------------------------------------------------------
+        if (!matched && parts[3] == "experts" && parts.size() >= 7) {
+            int expert_idx = parse_int(parts[4]);
+            if (expert_idx >= 0) {
+                const std::string& proj = parts[5];
+                const std::string& field = parts[6];
+                if (field == "weight") {
+                    ensure_expert(layer, expert_idx);
+                    if (proj == "gate_proj") { layer.expert_w_gate[expert_idx] = t; matched = true; }
+                    else if (proj == "up_proj") { layer.expert_w_up[expert_idx] = t; matched = true; }
+                    else if (proj == "down_proj") { layer.expert_w_down[expert_idx] = t; matched = true; }
+                } else if (field == "weight_scale" || field == "weight_scale_2" || field == "input_scale") {
+                    ensure_expert(layer, expert_idx);
+                    auto assign = [&](TransformerLayer::NvFP4PreQuantWeight& nw) {
+                        if (field == "weight_scale")        nw.weight_scale = t;
+                        else if (field == "weight_scale_2") nw.weight_scale_2 = t;
+                        else if (field == "input_scale")    nw.input_scale = t;
+                    };
+                    if (proj == "gate_proj") { assign(layer.expert_nvfp4_gate[expert_idx]); matched = true; }
+                    else if (proj == "up_proj") { assign(layer.expert_nvfp4_up[expert_idx]); matched = true; }
+                    else if (proj == "down_proj") { assign(layer.expert_nvfp4_down[expert_idx]); matched = true; }
+                }
+            }
+        }
+
+        // -----------------------------------------------------------------
         // MoE router bias -- Mixtral style: block_sparse_moe.gate.bias
         // -----------------------------------------------------------------
         if (!matched && parts[3] == "block_sparse_moe" &&

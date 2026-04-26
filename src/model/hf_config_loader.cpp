@@ -1,8 +1,10 @@
 #include "model/hf_config_loader.h"
 #include "model/json_util.h"
+#include "model/llm_compressor_loader.h"
 #include "core/logging.h"
 
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -389,36 +391,63 @@ bool HFConfigLoader::load_gptq_config(const std::string& model_dir, GPTQConfig& 
 
 // ---- load_nvfp4_config ----
 
+namespace {
+
+bool file_exists_at(const std::string& path) {
+    std::ifstream f(path);
+    return f.good();
+}
+
+} // namespace
+
 bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config& cfg) {
-    std::string path = model_dir + "/hf_quant_config.json";
-    JValue root;
-    if (!parse_json_file(path, root)) return false;
+    bool has_modelopt = file_exists_at(model_dir + "/hf_quant_config.json");
+    bool has_compressor = file_exists_at(model_dir + "/recipe.yaml");
 
-    const JValue* quant = jobj_find(root, "quantization");
-    if (!quant || quant->type != JType::OBJECT) return false;
-
-    // Check algorithm is NVFP4
-    const JValue* algo = jobj_find(*quant, "quant_algo");
-    if (!algo || algo->type != JType::STRING) return false;
-    if (algo->str_val != "NVFP4" && algo->str_val != "nvfp4") return false;
-
-    jobj_get_int(*quant, "group_size", cfg.group_size);
-
-    const JValue* kv_algo = jobj_find(*quant, "kv_cache_quant_algo");
-    if (kv_algo && kv_algo->type == JType::STRING)
-        cfg.kv_cache_quant_algo = kv_algo->str_val;
-
-    const JValue* exclude = jobj_find(*quant, "exclude_modules");
-    if (exclude && exclude->type == JType::ARRAY) {
-        for (const auto& v : exclude->arr) {
-            if (v.type == JType::STRING)
-                cfg.exclude_modules.push_back(v.str_val);
-        }
+    if (has_modelopt && has_compressor) {
+        IMP_LOG_WARN("Both quant config files present in %s — preferring modelopt",
+                     model_dir.c_str());
     }
 
-    IMP_LOG_INFO("NVFP4 model (Model Optimizer): group_size=%d, kv_cache=%s, exclude=%zu modules",
-                 cfg.group_size, cfg.kv_cache_quant_algo.c_str(), cfg.exclude_modules.size());
-    return true;
+    if (has_modelopt) {
+        // Existing modelopt parsing (unchanged from before).
+        std::string path = model_dir + "/hf_quant_config.json";
+        JValue root;
+        if (!parse_json_file(path, root)) return false;
+
+        const JValue* quant = jobj_find(root, "quantization");
+        if (!quant || quant->type != JType::OBJECT) return false;
+
+        const JValue* algo = jobj_find(*quant, "quant_algo");
+        if (!algo || algo->type != JType::STRING) return false;
+        if (algo->str_val != "NVFP4" && algo->str_val != "nvfp4") return false;
+
+        jobj_get_int(*quant, "group_size", cfg.group_size);
+
+        const JValue* kv_algo = jobj_find(*quant, "kv_cache_quant_algo");
+        if (kv_algo && kv_algo->type == JType::STRING)
+            cfg.kv_cache_quant_algo = kv_algo->str_val;
+
+        const JValue* exclude = jobj_find(*quant, "exclude_modules");
+        if (exclude && exclude->type == JType::ARRAY) {
+            for (const auto& v : exclude->arr) {
+                if (v.type == JType::STRING)
+                    cfg.exclude_modules.push_back(v.str_val);
+            }
+        }
+
+        cfg.format = NvFP4Format::MODELOPT;
+        IMP_LOG_INFO("NVFP4 model (Model Optimizer): group_size=%d, kv_cache=%s, exclude=%zu modules",
+                     cfg.group_size, cfg.kv_cache_quant_algo.c_str(), cfg.exclude_modules.size());
+        return true;
+    }
+
+    if (has_compressor) {
+        return imp::llm_compressor::parse_recipe_yaml(model_dir, cfg);
+    }
+
+    // Neither file present.
+    return false;
 }
 
 } // namespace imp

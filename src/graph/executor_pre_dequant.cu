@@ -60,7 +60,11 @@ void borrow_payload_from_wcache(WeightHandle& h, const WeightCaches& wc,
             if (it != wc.nvfp4.end()) {
                 h.payload.nvfp4.data         = static_cast<uint8_t*>(it->second.packed_data);
                 h.payload.nvfp4.block_scales = static_cast<uint8_t*>(it->second.micro_scales);
-                h.payload.nvfp4.tensor_scale  = nullptr;  // host float only, no device ptr
+                // Borrow a pointer to the host tensor_scale stored in the wcache entry.
+                // The NvFP4QuantResult lives in wcache_.nvfp4 (stable address in unordered_map).
+                // Callers that read tensor_scale must NOT pass this to cudaMemcpyDeviceToHost
+                // (it's a host float, not a device pointer). They should read it as *tensor_scale.
+                h.payload.nvfp4.tensor_scale  = const_cast<float*>(&it->second.tensor_scale);
                 h.payload.nvfp4.tensor_scale_2 = nullptr;
             }
             break;
@@ -214,7 +218,9 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             result.N = weight.shape[0];
             // K is packed: shape[1] stores K/2 for FP4
             result.K = weight.shape[1] * 2;
-            // tensor_scale from weight_scale_2 (scalar FP32, may be on host or device)
+            // tensor_scale from weight_scale_2 (scalar FP32, may be on host or device).
+            // Modelopt: val = fp4 * micro_scale * tensor_scale  (multiply)
+            // llm-compressor: val = fp4 * micro_scale / tensor_scale (divide → store 1/x)
             if (nw.weight_scale_2.data) {
                 float h_scale = 1.0f;
                 if (nw.weight_scale_2.on_device) {
@@ -222,7 +228,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 } else {
                     memcpy(&h_scale, nw.weight_scale_2.data, sizeof(float));
                 }
-                result.tensor_scale = h_scale;
+                result.tensor_scale = cfg.is_llm_compressor_nvfp4 ? (1.0f / h_scale) : h_scale;
             }
             // Only register if both data and scales are on device
             if (weight.on_device && nw.weight_scale.on_device) {
@@ -241,9 +247,12 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             register_prequant(L.nvfp4_k, L.wk);
             register_prequant(L.nvfp4_v, L.wv);
             register_prequant(L.nvfp4_o, L.wo);
-            register_prequant(L.nvfp4_gate, L.w_gate);
-            register_prequant(L.nvfp4_up, L.w_up);
-            register_prequant(L.nvfp4_down, L.w_down);
+            // For Gemma-4, mlp.{gate,up,down}_proj weights are stored in w_{gate,up,down}_shared
+            // (not w_{gate,up,down}) because weight_map.cpp routes them there. Fall back to
+            // shared weights when the primary dense-layer pointers are null.
+            register_prequant(L.nvfp4_gate, L.w_gate.data ? L.w_gate : L.w_gate_shared);
+            register_prequant(L.nvfp4_up,   L.w_up.data   ? L.w_up   : L.w_up_shared);
+            register_prequant(L.nvfp4_down, L.w_down.data ? L.w_down : L.w_down_shared);
             // Expert weights
             for (size_t e = 0; e < L.expert_nvfp4_gate.size(); e++) {
                 if (e < L.expert_w_gate.size()) register_prequant(L.expert_nvfp4_gate[e], L.expert_w_gate[e]);

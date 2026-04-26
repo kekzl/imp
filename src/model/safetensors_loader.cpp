@@ -2,6 +2,7 @@
 #include "model/model_arch.h"
 #include "model/weight_map.h"
 #include "model/hf_config_loader.h"
+#include "model/llm_compressor_loader.h"
 #include "core/logging.h"
 
 #include <fcntl.h>
@@ -385,7 +386,9 @@ struct ShardInfo {
 
 static bool load_shard(const std::string& path,
                        std::unordered_map<std::string, Tensor>& tensor_map,
-                       ShardInfo& shard) {
+                       ShardInfo& shard,
+                       bool llm_compressor_format,
+                       imp::llm_compressor::TranslationCounters& counters) {
     int fd = open(path.c_str(), O_RDONLY);
     if (fd < 0) { IMP_LOG_ERROR("Failed to open: %s", path.c_str()); return false; }
 
@@ -416,11 +419,18 @@ static bool load_shard(const std::string& path,
     uint8_t* tensor_data_base = const_cast<uint8_t*>(data + tensor_data_offset);
 
     for (const auto& kv : root.obj) {
-        const std::string& tensor_name = kv.first;
+        std::string tensor_name = kv.first;  // copy — may be mutated by translation
         const JValue& tensor_meta = kv.second;
 
         if (tensor_name == "__metadata__") continue;
         if (tensor_meta.type != JType::OBJECT) continue;
+
+        // Translate llm-compressor names → modelopt names if applicable.
+        if (llm_compressor_format) {
+            auto translated = imp::llm_compressor::translate_name(tensor_name, counters);
+            if (translated.action == imp::llm_compressor::NameTranslation::SKIP) continue;
+            tensor_name = std::move(translated.out_name);
+        }
 
         const JValue* dtype_val = jobj_find(tensor_meta, "dtype");
         if (!dtype_val || dtype_val->type != JType::STRING) continue;
@@ -500,16 +510,27 @@ static bool load_sharded(const std::string& model_dir,
 
     IMP_LOG_INFO("Sharded SafeTensors: %zu shards", shard_files.size());
 
+    // Detect format ONCE so all shards translate consistently.
+    imp::HFConfigLoader::NvFP4Config probe_cfg;
+    bool probe_ok = imp::HFConfigLoader::load_nvfp4_config(model_dir, probe_cfg);
+    bool llm_compressor_format =
+        probe_ok && probe_cfg.format == imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR;
+    imp::llm_compressor::TranslationCounters tcounters{};
+
     // Load each shard
     for (const auto& filename : shard_files) {
         std::string shard_path = model_dir + "/" + filename;
         ShardInfo shard;
-        if (!load_shard(shard_path, tensor_map, shard)) {
+        if (!load_shard(shard_path, tensor_map, shard, llm_compressor_format, tcounters)) {
             IMP_LOG_ERROR("Failed to load shard: %s", shard_path.c_str());
             return false;
         }
         shards.push_back(shard);
         IMP_LOG_INFO("Loaded shard: %s (%zu tensors total)", filename.c_str(), tensor_map.size());
+    }
+
+    if (llm_compressor_format) {
+        imp::llm_compressor::log_summary(tcounters);
     }
 
     return true;
@@ -536,13 +557,20 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     std::unordered_map<std::string, Tensor> tensor_map;
     std::vector<ShardInfo> shards;
 
+    // Detect format ONCE so all shards translate consistently.
+    imp::HFConfigLoader::NvFP4Config probe_cfg;
+    bool probe_ok = imp::HFConfigLoader::load_nvfp4_config(model_dir, probe_cfg);
+    bool llm_compressor_format =
+        probe_ok && probe_cfg.format == imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR;
+    imp::llm_compressor::TranslationCounters tcounters{};
+
     // Try loading tensors
     bool loaded = false;
 
     if (!single_file.empty()) {
         // Single file mode
         ShardInfo shard;
-        loaded = load_shard(single_file, tensor_map, shard);
+        loaded = load_shard(single_file, tensor_map, shard, llm_compressor_format, tcounters);
         if (loaded) shards.push_back(shard);
     } else {
         // Directory mode: try sharded first, then single
@@ -554,10 +582,19 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
             std::string st_path = model_dir + "/model.safetensors";
             if (fs::exists(st_path)) {
                 ShardInfo shard;
-                loaded = load_shard(st_path, tensor_map, shard);
+                loaded = load_shard(st_path, tensor_map, shard, llm_compressor_format, tcounters);
                 if (loaded) shards.push_back(shard);
             }
         }
+    }
+
+    // For the single-file paths (single_file mode or directory fallback to model.safetensors),
+    // emit the summary here. The sharded path (load_sharded) emits its own summary internally
+    // with its own counters — tcounters is only populated by the two load_shard calls above.
+    if (llm_compressor_format && (tcounters.suffix_renames + tcounters.prefix_strips +
+                                   tcounters.vision_skipped + tcounters.gemma4_extra_skipped +
+                                   tcounters.passed_through) > 0) {
+        imp::llm_compressor::log_summary(tcounters);
     }
 
     if (!loaded || tensor_map.empty()) {
@@ -641,6 +678,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     if (is_nvfp4) {
         cfg.is_nvfp4_prequant = true;
         cfg.nvfp4_group_size = nvfp4_cfg.group_size;
+        cfg.is_llm_compressor_nvfp4 = (nvfp4_cfg.format == HFConfigLoader::NvFP4Format::LLM_COMPRESSOR);
         // Link the main weight tensors to nvfp4 structs (they share the same data pointer)
         for (auto& layer : model->layers_) {
             auto link = [](TransformerLayer::NvFP4PreQuantWeight& nw, const Tensor& w) {
@@ -651,9 +689,11 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
             link(layer.nvfp4_k, layer.wk);
             link(layer.nvfp4_v, layer.wv);
             link(layer.nvfp4_o, layer.wo);
-            link(layer.nvfp4_gate, layer.w_gate);
-            link(layer.nvfp4_up, layer.w_up);
-            link(layer.nvfp4_down, layer.w_down);
+            // For Gemma-4, mlp.{gate,up,down}_proj weights land in w_{gate,up,down}_shared
+            // (weight_map.cpp routes them there). Fall back to shared when primary is null.
+            link(layer.nvfp4_gate, layer.w_gate.data ? layer.w_gate : layer.w_gate_shared);
+            link(layer.nvfp4_up,   layer.w_up.data   ? layer.w_up   : layer.w_up_shared);
+            link(layer.nvfp4_down, layer.w_down.data ? layer.w_down : layer.w_down_shared);
             // Expert weights
             for (size_t e = 0; e < layer.expert_nvfp4_gate.size(); e++) {
                 if (e < layer.expert_w_gate.size()) link(layer.expert_nvfp4_gate[e], layer.expert_w_gate[e]);
