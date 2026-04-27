@@ -1676,7 +1676,9 @@ bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
 
         for (auto& L : layers_) {
             for (auto* nw : {&L.nvfp4_q, &L.nvfp4_k, &L.nvfp4_v, &L.nvfp4_o,
-                             &L.nvfp4_gate, &L.nvfp4_up, &L.nvfp4_down}) {
+                             &L.nvfp4_gate, &L.nvfp4_up, &L.nvfp4_down,
+                             &L.nvfp4_w_gate_shared, &L.nvfp4_w_up_shared,
+                             &L.nvfp4_w_down_shared}) {
                 upload_scale(nw->weight_scale);
                 upload_scale(nw->weight_scale_2);
                 upload_scale(nw->input_scale);

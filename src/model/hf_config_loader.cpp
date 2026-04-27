@@ -208,6 +208,56 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         jobj_get_int(eff, "expert_intermediate_size", cfg.expert_d_ff);
     }
 
+    // Qwen3.5/3.6 GDN: linear-attention layer config. The HF config exposes
+    // these as `linear_*` fields; we map them onto the existing ssm_*
+    // ModelConfig slots that the GDN forward path reads (executor_ssm_gdn.cu).
+    // Without this plumbing, ssm_inner_size stays 0 → conv_channels=0 →
+    // ssm_proj_buf_ allocates 0 bytes → IMA on the first GDN GEMM.
+    //
+    //   linear_value_head_dim × linear_num_value_heads → ssm_inner_size
+    //   linear_key_head_dim                            → ssm_state_size
+    //   linear_num_key_heads                           → ssm_group_count
+    //   linear_num_value_heads                         → ssm_dt_rank (n_heads)
+    //   linear_conv_kernel_dim                         → ssm_conv_kernel
+    if (cfg.arch == ModelArch::QWEN36_MOE || cfg.arch == ModelArch::QWEN35_MOE ||
+        cfg.arch == ModelArch::QWEN35) {
+        int lin_v_heads = 0, lin_v_hdim = 0;
+        int lin_k_heads = 0, lin_k_hdim = 0;
+        int lin_conv = 0;
+        jobj_get_int(eff, "linear_num_value_heads", lin_v_heads);
+        jobj_get_int(eff, "linear_value_head_dim",  lin_v_hdim);
+        jobj_get_int(eff, "linear_num_key_heads",   lin_k_heads);
+        jobj_get_int(eff, "linear_key_head_dim",    lin_k_hdim);
+        jobj_get_int(eff, "linear_conv_kernel_dim", lin_conv);
+
+        if (lin_v_heads > 0 && lin_v_hdim > 0) {
+            cfg.ssm_inner_size = lin_v_heads * lin_v_hdim;
+            cfg.ssm_dt_rank    = lin_v_heads;
+        }
+        if (lin_k_hdim > 0)  cfg.ssm_state_size  = lin_k_hdim;
+        if (lin_k_heads > 0) cfg.ssm_group_count = lin_k_heads;
+        if (lin_conv > 0)    cfg.ssm_conv_kernel = lin_conv;
+
+        // layer_types[] decides per-layer GDN-vs-attention. The GGUF Qwen3.6
+        // loader infers this from tensor presence; on the HF side we surface
+        // it explicitly so executor_workspace + ssm-state sizing can pick the
+        // right layer count.
+        const JValue* lt = jobj_find(eff, "layer_types");
+        if (lt && lt->type == JType::ARRAY) {
+            cfg.n_kv_heads_per_layer.clear();
+            cfg.n_kv_heads_per_layer.reserve(lt->arr.size());
+            for (const auto& v : lt->arr) {
+                // 0 = no attention this layer (GDN), else cfg.n_kv_heads.
+                bool is_linear = (v.str_val == "linear_attention");
+                cfg.n_kv_heads_per_layer.push_back(is_linear ? 0 : cfg.n_kv_heads);
+            }
+        }
+
+        IMP_LOG_INFO("  GDN config: inner=%d state=%d groups=%d n_heads=%d conv_kernel=%d",
+                     cfg.ssm_inner_size, cfg.ssm_state_size,
+                     cfg.ssm_group_count, cfg.ssm_dt_rank, cfg.ssm_conv_kernel);
+    }
+
     // Gemma 4: per-layer geometry. layer_types[] tells SWA vs global, and
     // head_dim / global_head_dim + num_key_value_heads / num_global_key_value_heads
     // define the dual geometry. Build the per-layer vectors so

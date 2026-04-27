@@ -110,18 +110,6 @@ NameTranslation translate_name(const std::string& in, TranslationCounters& count
         return {NameTranslation::SKIP, ""};
     }
 
-    // Qwen3.6 shared-expert NVFP4 — Phase 1 short-circuit.
-    // The shared-expert branch (mlp.shared_expert.{gate,up,down}_proj.* +
-    // mlp.shared_expert_gate.weight) currently has no NVFP4 forward dispatch
-    // (only FP16 GEMM consumes w_*_shared). Loading the NVFP4 packed nibbles
-    // into FP16 slots produces garbage; loading them into a separate
-    // nvfp4_w_*_shared slot needs a runtime path that doesn't exist yet.
-    // Skip until that path lands. Output will degrade (the always-active
-    // shared MLP is missing) but the model loads + runs without IMA.
-    if (auto p = out.find("mlp.shared_expert"); p != std::string::npos) {
-        counters.vision_skipped++;
-        return {NameTranslation::SKIP, ""};
-    }
 
     // Step 2: count Gemma-4 extras (still emitted — weight_map routes them to
     // layer.{ffn_gate_inp_scale, expert_down_scale, layer_out_scale}, which the
