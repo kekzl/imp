@@ -1,0 +1,38 @@
+#!/bin/bash
+# pre-push hook: gate pushes on scripts/verify.sh fast.
+# Skips verification when no source files (src/, include/, tools/, tests/, CMakeLists, *.cmake) changed.
+# Override with: git push --no-verify   (use sparingly — see CLAUDE.md verification rules)
+set -uo pipefail
+
+REMOTE="$1"
+URL="$2"
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+# stdin lines: <local_ref> <local_sha> <remote_ref> <remote_sha>
+NEEDS_VERIFY=0
+while read -r LOCAL_REF LOCAL_SHA REMOTE_REF REMOTE_SHA; do
+    [ "$LOCAL_SHA" = "0000000000000000000000000000000000000000" ] && continue   # delete
+    if [ "$REMOTE_SHA" = "0000000000000000000000000000000000000000" ]; then
+        # New branch — diff against upstream merge-base or main
+        BASE=$(git merge-base "$LOCAL_SHA" origin/main 2>/dev/null || echo "")
+        [ -z "$BASE" ] && BASE=$(git rev-list --max-parents=0 "$LOCAL_SHA" | head -1)
+    else
+        BASE="$REMOTE_SHA"
+    fi
+    CHANGED=$(git diff --name-only "$BASE" "$LOCAL_SHA" 2>/dev/null \
+              | grep -E '^(src/|include/|tools/|tests/|CMakeLists\.txt|cmake/|.*\.cmake$)' \
+              || true)
+    if [ -n "$CHANGED" ]; then
+        NEEDS_VERIFY=1
+        break
+    fi
+done
+
+if [ "$NEEDS_VERIFY" -eq 0 ]; then
+    echo "pre-push: no source changes, skipping verify"
+    exit 0
+fi
+
+echo "pre-push: source changes detected → make verify-fast"
+exec make -s verify-fast
