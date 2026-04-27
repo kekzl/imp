@@ -613,7 +613,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
             debug_tensor_stats("after_final_rmsnorm", no_last, stream);
             // LM head fallback: use gemm_dispatch for consistent MXFP4/FP16 handling
-            gemm_dispatch(no_last, model_->output_proj(), model_->out_proj_qtype_, lg, ctx);
+            gemm_dispatch(no_last, model_->output_proj(), lg, ctx);
         }
         logits_out = lg;
         debug_top_logits(lg, stream);
@@ -692,7 +692,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             if (lm_tier == StorageTier::FP16) {
                 Tensor no_final = view_tokens(norm_out_, n);
                 rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
-                gemm_dispatch(no_final, model_->output_proj(), model_->out_proj_qtype_, lg, ctx);
+                gemm_dispatch(no_final, model_->output_proj(), lg, ctx);
                 goto lm_head_done;
             }
             auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
@@ -728,7 +728,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                               qscratch_.d_act_scale, lm_h->payload.fp8.d_scale, stream);
             } else {
                 // Fallback: gemm_dispatch handles FP16 cache, MXFP4, quantized, etc.
-                gemm_dispatch(no_final, model_->output_proj(), model_->out_proj_qtype_, lg, ctx);
+                gemm_dispatch(no_final, model_->output_proj(), lg, ctx);
             }
         }
     lm_head_done:

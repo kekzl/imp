@@ -151,7 +151,7 @@ static std::unique_ptr<Model> make_test_model(
 
         // Tensor shape is logical: [rows, cols]
         int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
-        Tensor t(buf, QType::INT4, 2, shape, false);
+        Tensor t(buf, QType::Q4_0, 2, shape, false);
         return {buf, t};
     };
 
@@ -381,10 +381,12 @@ TEST(QuantIntegrationTest, Q4_0WeightUpload) {
     ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
     EXPECT_TRUE(model->gpu_weights_ready());
 
-    // Check layer 0 wq: raw upload keeps logical shape [N, K] and FP16 dtype
+    // Check layer 0 wq: raw upload keeps logical shape [N, K] and Q4_0 qtype
+    // (post-Stage-D: weight.qtype carries the source quant type so dispatch
+    //  can read it directly without a separate qtype parameter).
     const auto& ly = model->layer(0);
     EXPECT_TRUE(ly.wq.on_device);
-    EXPECT_EQ(ly.wq.qtype, QType::F16);
+    EXPECT_EQ(ly.wq.qtype, QType::Q4_0);
     EXPECT_EQ(ly.wq.ndim, 2);
     // wq shape: [n_heads * head_dim, d_model] = [32, 32]
     EXPECT_EQ(ly.wq.shape[0], 32);
@@ -491,9 +493,9 @@ TEST(QuantIntegrationTest, Q8_0WeightUpload) {
     ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     // After upload, wq should be on device with logical shape [N, K]
-    // Data is raw Q8_0 bytes (not dequanted FP16)
+    // Data is raw Q8_0 bytes; weight.qtype carries the source qtype now.
     EXPECT_TRUE(ly.wq.on_device);
-    EXPECT_EQ(ly.wq.qtype, QType::F16);
+    EXPECT_EQ(ly.wq.qtype, QType::Q8_0);
     EXPECT_EQ(ly.wq.shape[0], rows);
     EXPECT_EQ(ly.wq.shape[1], cols);
 
@@ -1218,7 +1220,7 @@ static std::unique_ptr<Model> make_q4_k_test_model(
             std::memcpy(buf + i * 144, blk.data(), 144);
         }
         int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
-        Tensor t(buf, QType::INT4, 2, shape, false);
+        Tensor t(buf, QType::Q4_K, 2, shape, false);
         return {buf, t};
     };
 
@@ -1321,7 +1323,7 @@ static std::unique_ptr<Model> make_q5_k_test_model(
             std::memcpy(buf + i * 176, blk.data(), 176);
         }
         int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
-        Tensor t(buf, QType::INT4, 2, shape, false);
+        Tensor t(buf, QType::Q5_K, 2, shape, false);
         return {buf, t};
     };
 

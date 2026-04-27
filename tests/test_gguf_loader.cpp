@@ -61,11 +61,15 @@ TEST(GgufLoaderTest, GGMLTypeHelpers) {
     EXPECT_STREQ(gguf_type_name(GgufWireType::F32), "F32");
     EXPECT_STREQ(gguf_type_name(GgufWireType::Q4_K), "Q4_K");
 
-    // QType conversion
+    // QType conversion: wire-stable values map exactly to QType.
     EXPECT_EQ(gguf_type_to_qtype(GgufWireType::F32), QType::F32);
     EXPECT_EQ(gguf_type_to_qtype(GgufWireType::F16), QType::F16);
     EXPECT_EQ(gguf_type_to_qtype(GgufWireType::BF16), QType::BF16);
-    EXPECT_EQ(gguf_type_to_qtype(GgufWireType::Q4_0), QType::INT4);
+    EXPECT_EQ(gguf_type_to_qtype(GgufWireType::Q4_0), QType::Q4_0);
+    EXPECT_EQ(gguf_type_to_qtype(GgufWireType::Q4_K), QType::Q4_K);
+    EXPECT_EQ(gguf_type_to_qtype(GgufWireType::Q8_0), QType::Q8_0);
+    EXPECT_EQ(gguf_type_to_qtype(GgufWireType::Q6_K), QType::Q6_K);
+    EXPECT_EQ(gguf_type_to_qtype(GgufWireType::MXFP4), QType::MXFP4);
 }
 
 TEST(GgufLoaderTest, InvalidMagic) {

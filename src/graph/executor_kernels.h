@@ -331,12 +331,11 @@ void rmsnorm_add_residual(const Tensor& input, const Tensor& weight,
 
 Tensor slice_rows(const Tensor& buf, int n_tokens);
 
-// GemmContext-based dispatch. The only public gemm_dispatch signature —
-// the legacy 23-parameter overload has been folded into a file-private helper
-// inside executor_kernels.cu.
+// GemmContext-based dispatch. The qtype parameter was dropped — the weight
+// tensor's own .qtype field carries the type. Callers no longer need to
+// pass a separate *_qtype mirror.
 struct GemmContext;  // forward decl — defined in gemm_context.h
 void gemm_dispatch(const Tensor& input, const Tensor& weight,
-                   QType qtype, Tensor& output,
-                   const GemmContext& ctx);
+                   Tensor& output, const GemmContext& ctx);
 
 } // namespace imp

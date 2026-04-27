@@ -72,7 +72,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
     // 2. ssm_in projection: [n, d_model] @ ssm_in^T -> [n, ssm_in_dim]
     //    ssm_in_dim = inner(z) + conv_channels(xBC) + n_heads(dt)
     Tensor proj = view_tokens(ssm_proj_buf_, n);
-    gemm_dispatch(no, ly.ssm_in, ly.ssm_in_qtype, proj, ctx);
+    gemm_dispatch(no, ly.ssm_in, proj, ctx);
 
     // 3. Split projection output [n, total_dim] into z, xBC, dt by column slices.
     //    proj layout: each row has [z(inner) | xBC(conv_channels) | dt(n_heads)].
@@ -252,7 +252,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
 
     // 10. ssm_out projection: [n, inner] @ ssm_out^T -> [n, d_model]
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
-    gemm_dispatch(y_buf, ly.ssm_out, ly.ssm_out_qtype, out_buf, ctx);
+    gemm_dispatch(y_buf, ly.ssm_out, out_buf, ctx);
 
     // 11. Residual add: hidden = output + residual
     elementwise_add(out_buf, r, stream);
@@ -300,7 +300,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     //    ssm_proj_buf_ is [max_tokens, ssm_in_dim] but we only need [n, conv_channels].
     int64_t proj_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(conv_channels)};
     Tensor proj(ssm_proj_buf_.data, compute_dtype_, 2, proj_shape, true);
-    gemm_dispatch(no, ly.ssm_in, ly.ssm_in_qtype, proj, ctx);
+    gemm_dispatch(no, ly.ssm_in, proj, ctx);
     dump_tensor_npy("gdn_ssm_in_out", proj, stream, layer, cur_decode_step_);
 
     // 3. Conv1d on full projection output [n, conv_channels]
@@ -399,7 +399,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     // Gate projection — computed before scan, used after in RMSNormGated
     int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
     Tensor gate_out(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
-    gemm_dispatch(no, ly.gdn_gate, ly.gdn_gate_qtype, gate_out, ctx);
+    gemm_dispatch(no, ly.gdn_gate, gate_out, ctx);
 
     static const bool use_fp32_scan = std::getenv("IMP_GDN_FP32_SCAN") != nullptr;
 
@@ -418,8 +418,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
             beta_proj_out = Tensor(beta_ptr, compute_dtype_, 2, ab_shape, true);
 
             // Alpha/beta: through gemm_dispatch for consistent MXFP4/FP16/quantized handling.
-            gemm_dispatch(no, ly.gdn_alpha, ly.gdn_alpha_qtype, alpha_proj_out, ctx);
-            gemm_dispatch(no, ly.gdn_beta, ly.gdn_beta_qtype, beta_proj_out, ctx);
+            gemm_dispatch(no, ly.gdn_alpha, alpha_proj_out, ctx);
+            gemm_dispatch(no, ly.gdn_beta, beta_proj_out, ctx);
             // Per-element dump: pre-softplus alpha and pre-sigmoid beta projections.
             // Compare to llama's `alpha-{layer}` and `beta-{layer}`.
             dump_tensor_npy("gdn_alpha", alpha_proj_out, stream, layer, cur_decode_step_);
@@ -539,7 +539,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         // cuBLAS FP32-input × FP16-cached-weight path silently produces zeros on
         // sm_120 with CUBLAS_COMPUTE_32F (tested 2026-04-21). Stay on FP16 y_buf
         // input; precision benefit from FP32 scan is limited to the rmsnorm stage.
-        gemm_dispatch(y_buf, ly.ssm_out, ly.ssm_out_qtype, fp32_out_t, ctx);
+        gemm_dispatch(y_buf, ly.ssm_out, fp32_out_t, ctx);
 
         // FP16 residual → FP32 + add + FP16 writeback to h in one kernel.
         int64_t total = static_cast<int64_t>(n) * cfg.d_model;
@@ -551,7 +551,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
             static_cast<__half*>(h.data), total);
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(fp32_out, stream));
     } else {
-        gemm_dispatch(y_buf, ly.ssm_out, ly.ssm_out_qtype, out_buf, ctx);
+        gemm_dispatch(y_buf, ly.ssm_out, out_buf, ctx);
         // Per-element dump: linear_attn_out post-ssm_out GEMM, pre-residual.
         // Compare to llama's `linear_attn_out-{layer}` from eval-callback.
         dump_tensor_npy("gdn_linear_attn_out", out_buf, stream, layer, cur_decode_step_);

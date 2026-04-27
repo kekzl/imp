@@ -2001,12 +2001,12 @@ moe_after_experts:
         // Up projection (dp4a MMVQ for decode)
         {
             auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_);
-            gemm_dispatch(no, ly.w_up_shared, ly.w_up_shared_qtype, sh_up, ctx);
+            gemm_dispatch(no, ly.w_up_shared, sh_up, ctx);
 
             if (shared_gated) {
                 // Gated: gate + SwiGLU
                 Tensor sh_gate(moe_.expert_gate.data, compute_dtype_, 2, sh_shape, true);
-                gemm_dispatch(no, ly.w_gate_shared, ly.w_gate_shared_qtype, sh_gate, ctx);
+                gemm_dispatch(no, ly.w_gate_shared, sh_gate, ctx);
                 if (cfg.ffn_activation == FFNActivation::GEGLU)
                     geglu(sh_gate, sh_up, sh_swiglu, stream);
                 else
@@ -2025,7 +2025,7 @@ moe_after_experts:
             // Down projection (reads from sh_up for non-gated since relu² was in-place)
             Tensor& sh_act = shared_gated ? sh_swiglu : sh_up;
             if (layer == 0) debug_tensor_stats_all("L0_sh_act_preDown", sh_act, stream);
-            gemm_dispatch(sh_act, ly.w_down_shared, ly.w_down_shared_qtype, sh_down, ctx);
+            gemm_dispatch(sh_act, ly.w_down_shared, sh_down, ctx);
         }
 
         if (layer == 0) {

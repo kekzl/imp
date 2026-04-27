@@ -101,19 +101,31 @@ size_t gguf_row_size(GgufWireType type, int64_t n_elements) {
 }
 
 QType gguf_type_to_qtype(GgufWireType type) {
+    // Wire-stable values 0..31 in QType match the GGUF on-disk numbering,
+    // so the cast is exact for every supported block-quant type. Anything
+    // outside the 0..31 range falls through to NONE.
     switch (type) {
-        case GgufWireType::F32:  return QType::F32;
-        case GgufWireType::F16:  return QType::F16;
-        case GgufWireType::BF16: return QType::BF16;
-        case GgufWireType::I8:   return QType::INT8;
-        case GgufWireType::I32:  return QType::INT32;
-        // Quantized types: use INT4 for 4-bit, INT8 as proxy for others
-        case GgufWireType::Q4_0: case GgufWireType::Q4_1:
-        case GgufWireType::Q4_K: case GgufWireType::IQ4_NL: case GgufWireType::IQ4_XS:
-        case GgufWireType::MXFP4:
-            return QType::INT4;
+        case GgufWireType::F32:   return QType::F32;
+        case GgufWireType::F16:   return QType::F16;
+        case GgufWireType::BF16:  return QType::BF16;
+        case GgufWireType::Q4_0:  return QType::Q4_0;
+        case GgufWireType::Q4_1:  return QType::Q4_1;
+        case GgufWireType::Q5_0:  return QType::Q5_0;
+        case GgufWireType::Q5_1:  return QType::Q5_1;
+        case GgufWireType::Q8_0:  return QType::Q8_0;
+        case GgufWireType::Q8_1:  return QType::Q8_1;
+        case GgufWireType::Q2_K:  return QType::Q2_K;
+        case GgufWireType::Q3_K:  return QType::Q3_K;
+        case GgufWireType::Q4_K:  return QType::Q4_K;
+        case GgufWireType::Q5_K:  return QType::Q5_K;
+        case GgufWireType::Q6_K:  return QType::Q6_K;
+        case GgufWireType::Q8_K:  return QType::Q8_K;
+        case GgufWireType::MXFP4: return QType::MXFP4;
+        case GgufWireType::I8:    return QType::INT8;
+        case GgufWireType::I32:   return QType::INT32;
         default:
-            return QType::INT8;  // other quantized types stored as blocks
+            // IQ4_NL/IQ4_XS/etc. — no native QType yet; mark unsupported.
+            return QType::NONE;
     }
 }
 

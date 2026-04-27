@@ -268,7 +268,7 @@ static bool upload_weight(Tensor& weight, QType qtype,
         h2d_copy(d_data, h_buf.data(), total_bytes, stream);
         gpu_allocs.push_back(d_data);
         int64_t new_shape[4] = {N, K, 0, 0};
-        weight = Tensor(d_data, QType::INT4, 2, new_shape, true);
+        weight = Tensor(d_data, qtype, 2, new_shape, true);
         IMP_LOG_DEBUG("  MXFP4 upload: [%lld, %lld] %.2f MiB (data+scales split)",
                      (long long)N, (long long)K, total_bytes / (1024.0 * 1024.0));
         return true;
@@ -296,7 +296,7 @@ static bool upload_weight(Tensor& weight, QType qtype,
 
             // Logical shape [N, K] — qtype tells executor data is raw quantized
             int64_t new_shape[4] = {N, K, 0, 0};
-            weight = Tensor(d_data, QType::F16, 2, new_shape, true);
+            weight = Tensor(d_data, qtype, 2, new_shape, true);
             return true;
         }
 
@@ -347,7 +347,7 @@ static bool upload_weight(Tensor& weight, QType qtype,
 
         // Update weight tensor to point to packed nibbles on GPU
         int64_t new_shape[4] = {N, static_cast<int64_t>(half_K), 0, 0};
-        weight = Tensor(d_nibbles, QType::INT4, 2, new_shape, true);
+        weight = Tensor(d_nibbles, qtype, 2, new_shape, true);
 
         // Set scales output
         int64_t scales_shape[4] = {N, static_cast<int64_t>(num_groups), 0, 0};
@@ -377,7 +377,7 @@ static bool upload_weight(Tensor& weight, QType qtype,
 
             // Logical shape [N, K] — qtype tells executor data is raw quantized
             int64_t new_shape[4] = {N, K, 0, 0};
-            weight = Tensor(d_data, QType::F16, 2, new_shape, true);
+            weight = Tensor(d_data, qtype, 2, new_shape, true);
             return true;
         }
 
@@ -438,7 +438,7 @@ static bool upload_weight(Tensor& weight, QType qtype,
             gpu_allocs.push_back(d_data);
 
             int64_t new_shape[4] = {N, K, 0, 0};
-            weight = Tensor(d_data, QType::F16, 2, new_shape, true);
+            weight = Tensor(d_data, qtype, 2, new_shape, true);
             return true;
         }
 
@@ -515,7 +515,7 @@ static bool upload_weight(Tensor& weight, QType qtype,
             IMP_LOG_DEBUG("Upload raw qtype=%u [%ldx%ld] %zu bytes -> GPU %p",
                           (unsigned)qtype, (long)N, (long)K, raw_bytes, d_data);
             int64_t new_shape[4] = {N, K, 0, 0};
-            weight = Tensor(d_data, QType::F16, 2, new_shape, true);
+            weight = Tensor(d_data, qtype, 2, new_shape, true);
             return true;
         } else {
             // Dequant on GPU: upload raw → dequant to FP16 → free raw

@@ -228,8 +228,8 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                     // Batched gate+up: single cuBLAS call for both projections
                     gemm_pair_batched(no, *fused_gu, go, uo, stream);
                 } else {
-                    gemm_dispatch(no, ly.w_gate, ly.w_gate_qtype, go, ctx);
-                    gemm_dispatch(no, ly.w_up,   ly.w_up_qtype,   uo, ctx);
+                    gemm_dispatch(no, ly.w_gate, go, ctx);
+                    gemm_dispatch(no, ly.w_up,   uo, ctx);
                 }
             }
         }
@@ -421,13 +421,13 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 gemm_cublaslt(fp8_so, fp8_wd, h, 1.0f, 1.0f, qscratch_.d_act_scale, hwd->payload.fp8.d_scale, stream);
             } else if (will_fuse_down_beta1 && wd_tier == StorageTier::FP16) {
                 // Fused: hidden = swiglu_out @ w_down^T + hidden (cuBLAS beta=1).
-                gemm_dispatch(so, ly.w_down, ly.w_down_qtype, h, ctx.with_beta(1.0f));
+                gemm_dispatch(so, ly.w_down, h, ctx.with_beta(1.0f));
             } else if ((will_fuse_down_beta1 || will_fuse_down_dequant_beta1) &&
                        qscratch_.dequant != nullptr && dequant_gpu_supported(ly.w_down_qtype)) {
                 // Dequant into scratch, then beta=1.0 GEMM directly into hidden (which holds residual)
-                gemm_dispatch(so, ly.w_down, ly.w_down_qtype, h, ctx.with_beta(1.0f));
+                gemm_dispatch(so, ly.w_down, h, ctx.with_beta(1.0f));
             } else {
-                gemm_dispatch(so, ly.w_down, ly.w_down_qtype, fo, ctx);
+                gemm_dispatch(so, ly.w_down, fo, ctx);
                 if (has_post_ffn_norm && using_fp32_accum) {
                     // Post-FFN norm → FP32 accumulation (no D2D copy needed)
                     Tensor fp32_h = view_tokens(fp32_hidden_, n);

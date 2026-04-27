@@ -2140,16 +2140,17 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
 }
 
 // ---------------------------------------------------------------------------
-// New GemmContext-based dispatch: delegates to the legacy 23-parameter version.
-// Callers use this simplified interface; the legacy version will be inlined
-// once all call sites are migrated.
+// GemmContext-based dispatch: reads the weight's qtype directly off the
+// tensor (no separate parameter needed) and delegates to the file-private
+// gemm_dispatch_impl helper.
 // ---------------------------------------------------------------------------
 void gemm_dispatch(const Tensor& input, const Tensor& weight,
-                   QType qtype, Tensor& output,
-                   const GemmContext& ctx) {
+                   Tensor& output, const GemmContext& ctx) {
     const auto* wc = ctx.wcache;
     const auto* qs = ctx.qscratch;
     if (!wc || !qs) return;
+
+    const QType qtype = weight.qtype;
 
     // Residual-add fuse (beta != 0): only FP16 weight cache or dequantable-to-FP16
     // is supported. GEMV and block-scaled quant paths don't honor beta — callers
