@@ -8,6 +8,7 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "compute/sampling.h"
+#include "runtime/config.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
 #include "quant/nvfp4_gemm.h"
@@ -249,7 +250,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     break;
                 }
             }
-            if (has_host_experts && !getenv("IMP_NO_EXPERT_CACHE")) {
+            if (has_host_experts && !RuntimeConfig::current().moe.no_expert_cache) {
                 // Budget: proportional to free VRAM (15%) instead of flat cap.
                 // KV cache + weight caches (FP8/NVFP4) need the remaining VRAM,
                 // so expert cache must not over-commit.

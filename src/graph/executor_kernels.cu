@@ -2,6 +2,7 @@
 #include "graph/gemm_context.h"
 #include "graph/executor.h"
 #include "core/logging.h"
+#include "runtime/config.h"
 #include "compute/gemm.h"
 #include "compute/gemm_q6k.h"
 #include "compute/gemm_cutlass_sm120.h"
@@ -2001,7 +2002,7 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
     // with non-standard strides from per-layer narrow tensors).
     bool prefer_fp16_cache = (fp16_cache != nullptr && fp16_cache->count(weight.data) > 0 &&
                                input.stride[0] != weight.shape[1]);  // non-contiguous input
-    if (getenv("IMP_DEBUG_GEMM_DISPATCH") != nullptr) {
+    if (RuntimeConfig::current().diagnostics.debug_gemm_dispatch) {
         fprintf(stderr, "[GEMM_DISP] w=%p qtype=%d M=%lld N=%lld K=%lld prefer_fp16=%d "
                 "in_fp16_cache=%d in_fp8_cache=%d dp4a_ok=%d has_dequant=%d\n",
                 weight.data, (int)qtype,
@@ -2012,18 +2013,18 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
                 (int)(is_dp4a_qtype(qtype) && q8_1_buf && d8_buf),
                 (int)(dequant_scratch != nullptr));
     }
-    static bool no_dp4a_gemv = (getenv("IMP_NO_DP4A_GEMV") != nullptr);
+    const bool no_dp4a_gemv = RuntimeConfig::current().gemm.no_dp4a_gemv;
     // MMVQ: ggml-compatible quantized GEMM for llama.cpp numerical parity.
     // Auto-enabled for Gemma-4 via engine.cpp setenv. Non-static to pick up
     // env var set during engine init (after static init of other flags).
     // IMP_NO_MMVQ_Q8_0 / IMP_NO_MMVQ: debug bypass for suspected Q8_0 MMVQ bug.
-    static const bool no_mmvq_q8_0 = (getenv("IMP_NO_MMVQ_Q8_0") != nullptr);
-    static const bool no_mmvq_all  = (getenv("IMP_NO_MMVQ") != nullptr);
+    const bool no_mmvq_q8_0 = RuntimeConfig::current().gemm.no_mmvq_q8_0;
+    const bool no_mmvq_all  = RuntimeConfig::current().gemm.no_mmvq;
     // FP16-only fast paths (mmvq, dp4a, gemv_q6k, gemv_q8_0) write directly to
     // half* — must skip when caller requested FP32 output, otherwise the FP16
     // bytes get interpreted as FP32 and produce billions-magnitude garbage.
     const bool fp32_output = (output.qtype == QType::F32);
-    bool use_mmvq = (getenv("IMP_GEMMA4_FORCE_MMVQ") != nullptr) &&
+    bool use_mmvq = RuntimeConfig::current().gemma4.force_mmvq &&
                     !prefer_fp16_cache && input.qtype == QType::F16 && !fp32_output &&
                     (qtype == QType::Q4_K || qtype == QType::Q5_K ||
                      qtype == QType::Q5_1 || qtype == QType::Q8_0) &&
@@ -2113,7 +2114,7 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
     } else if (fp16_cache != nullptr && (dequant_gpu_supported(qtype) || qtype == QType::MXFP4)) {
         // Pre-dequantized FP16 cache: zero per-GEMM dequant overhead
         auto it = fp16_cache->find(weight.data);
-        if (getenv("IMP_DEBUG_GEMM_DISPATCH") != nullptr) fprintf(stderr, "[GEMM_DISP]   -> fp16_cache hit=%d\n", (int)(it != fp16_cache->end()));
+        if (RuntimeConfig::current().diagnostics.debug_gemm_dispatch) fprintf(stderr, "[GEMM_DISP]   -> fp16_cache hit=%d\n", (int)(it != fp16_cache->end()));
         if (it != fp16_cache->end()) {
             gemm(input, it->second, output, 1.0f, beta, stream);
         } else if (dequant_scratch != nullptr && qtype != QType::MXFP4) {

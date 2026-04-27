@@ -74,10 +74,13 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     else if (eq("runtime.warmup"))             cfg.runtime.warmup             = parse_bool(val, cfg.runtime.warmup);
     else if (eq("runtime.max_seq_len"))        cfg.runtime.max_seq_len        = parse_int(val, cfg.runtime.max_seq_len);
     else if (eq("runtime.no_pdl"))             cfg.runtime.no_pdl             = parse_bool(val, cfg.runtime.no_pdl);
+    else if (eq("runtime.debug_raw"))          cfg.runtime.debug_raw          = parse_bool(val, cfg.runtime.debug_raw);
+    else if (eq("runtime.no_vision_graph"))    cfg.runtime.no_vision_graph    = parse_bool(val, cfg.runtime.no_vision_graph);
 
     // [kv_cache]
     else if (eq("kv_cache.dtype"))                       cfg.kv_cache.dtype                      = val;
     else if (eq("kv_cache.allow_nondeterministic_fp8"))  cfg.kv_cache.allow_nondeterministic_fp8 = parse_bool(val, cfg.kv_cache.allow_nondeterministic_fp8);
+    else if (eq("kv_cache.fp8_auto_legacy"))             cfg.kv_cache.fp8_auto_legacy            = parse_bool(val, cfg.kv_cache.fp8_auto_legacy);
 
     // [attention]
     else if (eq("attention.fp8_prefill"))         cfg.attention.fp8_prefill         = val;
@@ -96,10 +99,14 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
 
     // [moe]
     else if (eq("moe.expert_overhead_pct")) cfg.moe.expert_overhead_pct = parse_int(val, cfg.moe.expert_overhead_pct);
-    else if (eq("moe.force_host_experts"))  cfg.moe.force_host_experts  = parse_bool(val, cfg.moe.force_host_experts);
+    else if (eq("moe.force_host_experts"))  cfg.moe.force_host_experts  = parse_int(val, cfg.moe.force_host_experts);
     else if (eq("moe.skip"))                cfg.moe.skip                = parse_bool(val, cfg.moe.skip);
     else if (eq("moe.force_fp16_sync"))     cfg.moe.force_fp16_sync     = parse_bool(val, cfg.moe.force_fp16_sync);
     else if (eq("moe.no_expert_cache"))     cfg.moe.no_expert_cache     = parse_bool(val, cfg.moe.no_expert_cache);
+    else if (eq("moe.zero_workspace"))      cfg.moe.zero_workspace      = parse_bool(val, cfg.moe.zero_workspace);
+    else if (eq("moe.no_shared_mlp"))       cfg.moe.no_shared_mlp       = parse_bool(val, cfg.moe.no_shared_mlp);
+    else if (eq("moe.no_shexp_gate"))       cfg.moe.no_shexp_gate       = parse_bool(val, cfg.moe.no_shexp_gate);
+    else if (eq("moe.no_cutlass3x"))        cfg.moe.no_cutlass3x        = parse_bool(val, cfg.moe.no_cutlass3x);
 
     // [gdn]
     else if (eq("gdn.fp32_scan"))         cfg.gdn.fp32_scan         = parse_bool(val, cfg.gdn.fp32_scan);
@@ -116,25 +123,36 @@ void apply_one(RuntimeConfig& cfg, const std::string& dotted_key, const std::str
     else if (eq("gemm.no_mmvq_q8_0")) cfg.gemm.no_mmvq_q8_0 = parse_bool(val, cfg.gemm.no_mmvq_q8_0);
 
     // [gemma4]
-    else if (eq("gemma4.fp32_gemm_out")) cfg.gemma4.fp32_gemm_out = parse_bool(val, cfg.gemma4.fp32_gemm_out);
-    else if (eq("gemma4.no_graphs"))     cfg.gemma4.no_graphs     = parse_bool(val, cfg.gemma4.no_graphs);
-    else if (eq("gemma4.force_mmvq"))    cfg.gemma4.force_mmvq    = parse_bool(val, cfg.gemma4.force_mmvq);
+    else if (eq("gemma4.fp32_gemm_out"))    cfg.gemma4.fp32_gemm_out    = parse_bool(val, cfg.gemma4.fp32_gemm_out);
+    else if (eq("gemma4.no_graphs"))        cfg.gemma4.no_graphs        = parse_bool(val, cfg.gemma4.no_graphs);
+    else if (eq("gemma4.force_mmvq"))       cfg.gemma4.force_mmvq       = parse_bool(val, cfg.gemma4.force_mmvq);
+    else if (eq("gemma4.fp32_expert_down")) cfg.gemma4.fp32_expert_down = parse_bool(val, cfg.gemma4.fp32_expert_down);
+    else if (eq("gemma4.no_decode_fast"))   cfg.gemma4.no_decode_fast   = parse_bool(val, cfg.gemma4.no_decode_fast);
+    else if (eq("gemma4.no_post_ffw_1"))    cfg.gemma4.no_post_ffw_1    = parse_bool(val, cfg.gemma4.no_post_ffw_1);
+    else if (eq("gemma4.ggml_prefill"))     cfg.gemma4.ggml_prefill     = parse_bool(val, cfg.gemma4.ggml_prefill);
 
     // [generation]
     else if (eq("generation.no_logit_softcap")) cfg.generation.no_logit_softcap = parse_bool(val, cfg.generation.no_logit_softcap);
     else if (eq("generation.lm_dequant_fp16"))  cfg.generation.lm_dequant_fp16  = parse_bool(val, cfg.generation.lm_dequant_fp16);
     else if (eq("generation.think_budget"))     cfg.generation.think_budget     = parse_int(val, cfg.generation.think_budget);
+    else if (eq("generation.force_bos"))        cfg.generation.force_bos        = parse_bool(val, cfg.generation.force_bos);
+
+    // [server]
+    else if (eq("server.prefix_cache")) cfg.server.prefix_cache = parse_bool(val, cfg.server.prefix_cache);
+
+    // [bench]
+    else if (eq("bench.generate"))      cfg.bench.generate      = parse_bool(val, cfg.bench.generate);
 
     // [paths]
     else if (eq("paths.mmproj"))                  cfg.paths.mmproj = val;
 
     // [diagnostics]
     else if (eq("diagnostics.debug_forward"))       cfg.diagnostics.debug_forward       = parse_bool(val, cfg.diagnostics.debug_forward);
-    else if (eq("diagnostics.debug_raw"))           cfg.diagnostics.debug_raw           = parse_bool(val, cfg.diagnostics.debug_raw);
     else if (eq("diagnostics.debug_gemm_dispatch")) cfg.diagnostics.debug_gemm_dispatch = parse_bool(val, cfg.diagnostics.debug_gemm_dispatch);
+    else if (eq("diagnostics.debug_template"))      cfg.diagnostics.debug_template      = parse_bool(val, cfg.diagnostics.debug_template);
     else if (eq("diagnostics.dump_hidden_dir"))     cfg.diagnostics.dump_hidden_dir     = val;
-    else if (eq("diagnostics.dump_logits"))         cfg.diagnostics.dump_logits         = parse_bool(val, cfg.diagnostics.dump_logits);
-    else if (eq("diagnostics.dump_routing"))        cfg.diagnostics.dump_routing        = parse_bool(val, cfg.diagnostics.dump_routing);
+    else if (eq("diagnostics.dump_logits_dir"))     cfg.diagnostics.dump_logits_dir     = val;
+    else if (eq("diagnostics.dump_routing_dir"))    cfg.diagnostics.dump_routing_dir    = val;
     else if (eq("diagnostics.dump_tokens"))         cfg.diagnostics.dump_tokens         = parse_bool(val, cfg.diagnostics.dump_tokens);
     else if (eq("diagnostics.exit_layer"))          cfg.diagnostics.exit_layer          = parse_int(val, cfg.diagnostics.exit_layer);
     else if (eq("diagnostics.profile"))             cfg.diagnostics.profile             = parse_bool(val, cfg.diagnostics.profile);
@@ -247,6 +265,23 @@ RuntimeConfig RuntimeConfig::load(const std::string& explicit_path,
     }
     cfg.apply_overrides(overrides);
     return cfg;
+}
+
+// ---- Process-wide singleton ---------------------------------------------
+
+namespace {
+RuntimeConfig& mutable_current() {
+    static RuntimeConfig instance;
+    return instance;
+}
+} // anonymous namespace
+
+const RuntimeConfig& RuntimeConfig::current() {
+    return mutable_current();
+}
+
+void RuntimeConfig::install(const RuntimeConfig& cfg) {
+    mutable_current() = cfg;
 }
 
 } // namespace imp

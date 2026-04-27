@@ -24,6 +24,10 @@ warmup               = true
 max_seq_len          = 0
 # Disable Programmatic Dependent Launch (PDL). Diagnostic; small perf impact.
 no_pdl               = false
+# Naked FP16 path with FP8/NVFP4/graphs/warmup all forced off.
+debug_raw            = false
+# Disable SigLIP vision encoder CUDA-graph capture (debug).
+no_vision_graph      = false
 
 [kv_cache]
 # KV-cache element type: fp16 | fp8 | int8 | int4 | nvfp4
@@ -31,6 +35,8 @@ dtype                       = "fp16"
 # Allow cuBLASLt non-deterministic algorithms with FP8 KV. Slightly faster
 # but reproducibility is lost.
 allow_nondeterministic_fp8  = false
+# Restore the legacy auto-upgrade-to-FP8 behavior (off-by-default since 2026-04).
+fp8_auto_legacy             = false
 
 [attention]
 # Each "auto" key picks the kernel automatically based on weight type +
@@ -51,12 +57,22 @@ gate_concat          = false
 
 [moe]
 # Expected per-expert overhead (% of expert size) before deciding to upload
-# all experts vs. host-fall-back. 10 = aggressive, 30 = conservative.
+# all experts vs. host-fall-back. 10 = aggressive auto-pick, 30 = conservative.
 expert_overhead_pct  = 10
-force_host_experts   = false
+# Force the LAST N MoE layers off-GPU regardless of budget (debug path).
+# 0 = disabled (auto-pick).
+force_host_experts   = 0
 skip                 = false
 force_fp16_sync      = false
 no_expert_cache      = false
+# Zero MoE workspace buffers each layer (memory-safety bisect).
+zero_workspace       = false
+# Skip Gemma-4/Qwen3-Next/3.6 always-active shared MLP branch.
+no_shared_mlp        = false
+# Skip Qwen3-Next/3.6 sigmoid gate on shared expert output.
+no_shexp_gate        = false
+# Force-disable CUTLASS 3.x grouped MoE GEMM path (legacy fallback).
+no_cutlass3x         = false
 
 [gdn]
 # FP32 scan/output for Gated-DeltaNet (Qwen3.5/3.6). Slightly slower but
@@ -81,12 +97,32 @@ no_mmvq_q8_0         = false
 fp32_gemm_out        = false
 no_graphs            = false
 force_mmvq           = false
+# FP32 expert-down GEMM (Gemma-4 numerical-parity diagnostic).
+fp32_expert_down     = false
+# Disable the decode fast-path (debug bisect).
+no_decode_fast       = false
+# Disable post-FFW norm 1 in the parallel-branch path (debug).
+no_post_ffw_1        = false
+# Force ggml-style prefill matmul for Gemma-4 (debug A/B path).
+ggml_prefill         = false
 
 [generation]
 no_logit_softcap     = false
 lm_dequant_fp16      = false
 # Max tokens spent in <think>...</think> blocks (0 = unlimited).
 think_budget         = 0
+# Force-prepend BOS token even when the tokenizer says no.
+force_bos            = false
+
+[server]
+# OpenAI-compatible HTTP server: prefix caching breaks per-request
+# determinism (cached blocks get different physical KV addresses); off
+# by default.
+prefix_cache         = false
+
+[bench]
+# imp-cli --bench: also run Engine::generate() loop for accurate timing.
+generate             = false
 
 [paths]
 # Path to a vision projector .gguf file (Gemma-3, Mistral3 multimodal).
@@ -95,12 +131,17 @@ mmproj               = ""
 [diagnostics]
 # Verbose per-layer forward dumps. Heavy I/O — use only for bisecting bugs.
 debug_forward        = false
-debug_raw            = false
 debug_gemm_dispatch  = false
+# Print intermediate Jinja2 chat-template rendering steps.
+debug_template       = false
 # If non-empty, dump per-layer hidden states as .npy files to this directory.
+# Special values: "1" or "all" → /tmp.
 dump_hidden_dir      = ""
-dump_logits          = false
-dump_routing         = false
+# If non-empty, dump MoE gate logits (pre-topk) and routing weights to file.
+# Special value "all" dumps every layer (default: only last + selected layers).
+dump_logits_dir      = ""
+dump_routing_dir     = ""
+# Print prefill token IDs to stderr (truncated to 20).
 dump_tokens          = false
 # Stop forward pass after layer N (-1 = run full forward).
 exit_layer           = -1

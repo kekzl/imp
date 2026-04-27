@@ -2,6 +2,7 @@
 
 #include "core/tensor.h"
 #include "core/logging.h"
+#include "runtime/config.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdio>
@@ -15,8 +16,7 @@
 namespace imp {
 
 inline bool debug_forward_enabled() {
-    static const bool enabled = (std::getenv("IMP_DEBUG_FORWARD") != nullptr);
-    return enabled;
+    return RuntimeConfig::current().diagnostics.debug_forward;
 }
 
 // Decode-step counter shared between executor_forward.cu (writer) and
@@ -29,16 +29,14 @@ inline int& debug_decode_step() {
 }
 
 // Hidden-state npy dump for layer-diff analysis against llama.cpp.
-// Returns the directory if IMP_DUMP_HIDDEN is set to a non-empty string, else nullptr.
-// Accepts IMP_DUMP_HIDDEN=1 or "all" for backwards compat (mapped to /tmp).
+// Returns the directory if [diagnostics] dump_hidden_dir is non-empty, else
+// nullptr. Accepts "1" or "all" as shorthand for /tmp (matches the legacy
+// IMP_DUMP_HIDDEN=1 behaviour).
 inline const char* dump_hidden_dir() {
-    static const char* dir = []() -> const char* {
-        const char* v = std::getenv("IMP_DUMP_HIDDEN");
-        if (!v || !*v) return nullptr;
-        if (std::strcmp(v, "1") == 0 || std::strcmp(v, "all") == 0) return "/tmp";
-        return v;
-    }();
-    return dir;
+    const std::string& d = RuntimeConfig::current().diagnostics.dump_hidden_dir;
+    if (d.empty()) return nullptr;
+    if (d == "1" || d == "all") return "/tmp";
+    return d.c_str();
 }
 
 // Writes a numpy .npy v1.0 file with a 2D FP32 array.

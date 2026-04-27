@@ -1,4 +1,5 @@
 #include "runtime/engine.h"
+#include "runtime/config.h"
 #include "runtime/vram_budget.h"
 #include "runtime/speculative.h"
 #include "runtime/self_speculative.h"
@@ -337,12 +338,11 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // --- IMP_DEBUG_RAW: disable all optimization/cache/approximation paths ---
     // Meta-flag for debugging: forces the engine into a "naked" FP16 forward pass
     // for reproducible byte-level comparison against a reference implementation
-    // (e.g. llama.cpp). Sets downstream env vars before the auto-detect logic so
-    // that FP8/NVFP4/warmup/graphs are all forced off and cuBLAS is deterministic.
-    // User can still override individual knobs by setting the specific env before.
-    const bool debug_raw_ = (std::getenv("IMP_DEBUG_RAW") != nullptr);
+    // (e.g. llama.cpp). Forces downstream paths off (FP8/NVFP4/warmup/graphs)
+    // and cuBLAS to deterministic. Triggered via [runtime] debug_raw = true.
+    const bool debug_raw_ = RuntimeConfig::current().runtime.debug_raw;
     if (debug_raw_) {
-        IMP_LOG_INFO("IMP_DEBUG_RAW=1: naked FP16 path (FP8/NVFP4/graphs/warmup/FP8-KV off; deterministic cuBLAS)");
+        IMP_LOG_INFO("[runtime] debug_raw=true: naked FP16 path (FP8/NVFP4/graphs/warmup/FP8-KV off; deterministic cuBLAS)");
         // Weight storage: keep FP16 (skip the lossy cache paths)
         config_.use_fp8_prefill  = 0;
         config_.use_nvfp4_decode = 0;
@@ -375,12 +375,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // savings explicitly ask for FP8 via the existing flag.
     //
     // Legacy escape hatches kept for compatibility:
-    // - IMP_KV_FP16=1   forces FP16 (no-op under the new default; useful when
-    //                   something else re-enables FP8 downstream).
-    // - IMP_KV_FP8_AUTO=1 restores the old opt-out auto-upgrade behavior for
-    //                   users who rely on it for batch-serving VRAM budgets.
-    const bool force_kv_fp16  = (std::getenv("IMP_KV_FP16") != nullptr);
-    const bool fp8_auto_legacy = (std::getenv("IMP_KV_FP8_AUTO") != nullptr);
+    // - [kv_cache] dtype = "fp16" forces FP16 (no-op under the new default).
+    // - [kv_cache] fp8_auto_legacy = true restores the old opt-out auto-
+    //              upgrade behavior for users who rely on it for batch-
+    //              serving VRAM budgets.
+    const bool force_kv_fp16   = (RuntimeConfig::current().kv_cache.dtype == "fp16");
+    const bool fp8_auto_legacy = RuntimeConfig::current().kv_cache.fp8_auto_legacy;
     if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !debug_raw_ && !force_kv_fp16) {
         config_.kv_cache_dtype = QType::FP8_E4M3;
         IMP_LOG_INFO("KV cache dtype: IMP_KV_FP8_AUTO=1 → FP8_E4M3 (legacy opt-out)");
@@ -403,13 +403,16 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // model is fine with non-deterministic FP8 KV can opt out via
     // IMP_ALLOW_NONDETERMINISTIC_FP8_KV=1.
     if (config_.kv_cache_dtype == QType::FP8_E4M3 &&
-        !getenv("IMP_ALLOW_NONDETERMINISTIC_FP8_KV") &&
-        !getenv("IMP_DETERMINISTIC_GEMM")) {
-        setenv("IMP_DETERMINISTIC_GEMM", "1", 1);
+        !RuntimeConfig::current().kv_cache.allow_nondeterministic_fp8 &&
+        !RuntimeConfig::current().runtime.deterministic_gemm) {
+        // Promote the runtime config in-place so downstream readers see it.
+        RuntimeConfig promoted = RuntimeConfig::current();
+        promoted.runtime.deterministic_gemm = true;
+        RuntimeConfig::install(promoted);
         setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 0);
-        IMP_LOG_INFO("FP8 KV cache: forcing IMP_DETERMINISTIC_GEMM=1 "
+        IMP_LOG_INFO("FP8 KV cache: forcing runtime.deterministic_gemm=true "
                      "(non-deterministic cuBLAS + FP8 round-trip → NaN). "
-                     "Set IMP_ALLOW_NONDETERMINISTIC_FP8_KV=1 to opt out.");
+                     "Set kv_cache.allow_nondeterministic_fp8=true to opt out.");
     }
     // NOTE: compound FP8 precision loss (stacking FP8 KV on top of FP8
     // prefill + NVFP4 decode) is model-dependent. Mistral-Small-3.1 and
@@ -462,12 +465,12 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     }
 
     // --- Auto-detect FP8 prefill ---
-    // Under IMP_DEBUG_RAW or explicit IMP_NO_FP8_PREFILL, keep disabled.
-    // IMP_NO_FP8_PREFILL=1 is the user-facing escape hatch: some models
-    // (e.g. DeepSeek-R1-Distill-Qwen-14B Q6_K) produce garbage decode with
-    // FP8 weight cache active — accumulated dequant error through deep
-    // narrow-GQA stacks.
-    const bool no_fp8_prefill = (std::getenv("IMP_NO_FP8_PREFILL") != nullptr);
+    // Under runtime.debug_raw or [attention] fp8_prefill = "never", keep
+    // disabled. The "never" escape hatch is for models (e.g. DeepSeek-R1-
+    // Distill-Qwen-14B Q6_K) that produce garbage decode with FP8 weight
+    // cache active — accumulated dequant error through deep narrow-GQA
+    // stacks.
+    const bool no_fp8_prefill = (RuntimeConfig::current().attention.fp8_prefill == "never");
     if (!config_.use_fp8_prefill && !debug_raw_ && !no_fp8_prefill) {
         config_.use_fp8_prefill = true;
         IMP_LOG_INFO("FP8 prefill: auto → enabled");
@@ -549,26 +552,28 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         // from cuBLAS algo autotuning / split-K atomics amplifies into wildly
         // different top-1 picks (coherent " Paris" vs garbage "\n"). Force
         // deterministic GEMM paths so generation is stable run-to-run.
-        if (!getenv("IMP_DETERMINISTIC_GEMM")) {
-            setenv("IMP_DETERMINISTIC_GEMM", "1", 1);
-            IMP_LOG_INFO("Gemma 4: enabling IMP_DETERMINISTIC_GEMM (output_norm outliers amplify algo jitter)");
+        if (!RuntimeConfig::current().runtime.deterministic_gemm) {
+            RuntimeConfig promoted = RuntimeConfig::current();
+            promoted.runtime.deterministic_gemm = true;
+            RuntimeConfig::install(promoted);
+            IMP_LOG_INFO("Gemma 4: enabling runtime.deterministic_gemm (output_norm outliers amplify algo jitter)");
         }
         if (!getenv("CUBLAS_WORKSPACE_CONFIG")) {
             setenv("CUBLAS_WORKSPACE_CONFIG", ":4096:8", 1);
             IMP_LOG_INFO("Gemma 4: setting CUBLAS_WORKSPACE_CONFIG=:4096:8 for deterministic grouped GEMM");
         }
-        // Gemma 4: CUDA graphs are fully enabled. forward_decode_async() now
-        // delegates to forward_logits() (the canonical path), eliminating the
-        // earlier divergence that caused EOS-at-step-0. Override with
-        // IMP_GEMMA4_NO_GRAPHS=1 for bisecting regressions.
-        if (getenv("IMP_GEMMA4_NO_GRAPHS")) {
-            IMP_LOG_INFO("Gemma 4: disabling all CUDA graphs (IMP_GEMMA4_NO_GRAPHS=1)");
+        // Gemma 4: CUDA graphs are fully enabled by default. The user can opt
+        // out via [gemma4] no_graphs = true for bisecting regressions.
+        if (RuntimeConfig::current().gemma4.no_graphs) {
+            IMP_LOG_INFO("Gemma 4: disabling all CUDA graphs (gemma4.no_graphs=true)");
             config_.use_cuda_graphs = false;
         }
         // Enable MMVQ for all weight GEMMs — quantized matmul matching llama.cpp's
         // accumulation behavior, critical for 128-expert MoE precision.
-        if (!getenv("IMP_GEMMA4_FORCE_MMVQ")) {
-            setenv("IMP_GEMMA4_FORCE_MMVQ", "1", 0);
+        if (!RuntimeConfig::current().gemma4.force_mmvq) {
+            RuntimeConfig promoted = RuntimeConfig::current();
+            promoted.gemma4.force_mmvq = true;
+            RuntimeConfig::install(promoted);
             IMP_LOG_INFO("Gemma 4: enabling MMVQ for all weight GEMMs (numerical parity with llama.cpp)");
         }
     }
@@ -576,9 +581,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // --- Auto-detect max_seq_len ---
     // Runs AFTER model-specific overrides (Gemma-4 forces FP16 KV etc.) so the
     // per-token cost reflects the actual dtype that will be allocated.
-    if (const char* env_msl = std::getenv("IMP_MAX_SEQ_LEN")) {
-        int v = std::atoi(env_msl);
-        if (v > 0) { config_.max_seq_len = v; IMP_LOG_INFO("max_seq_len: env IMP_MAX_SEQ_LEN=%d", v); }
+    if (int v = RuntimeConfig::current().runtime.max_seq_len; v > 0) {
+        config_.max_seq_len = v;
+        IMP_LOG_INFO("max_seq_len: runtime.max_seq_len=%d", v);
     }
     if (config_.max_seq_len <= 0) {
         int model_ctx = mcfg.max_seq_len;  // from GGUF metadata
@@ -619,8 +624,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     if (!init_weights()) return false;
     if (!init_kv_cache()) return false;
     if (!init_features()) return false;
-    if (getenv("IMP_NO_WARMUP")) {
-        IMP_LOG_INFO("Warmup SKIPPED (IMP_NO_WARMUP)");
+    if (!RuntimeConfig::current().runtime.warmup) {
+        IMP_LOG_INFO("Warmup SKIPPED (runtime.warmup=false)");
     } else {
         warmup();
     }
@@ -815,8 +820,8 @@ bool Engine::init_weights() {
                          "(+~180%% decode on Qwen 3.6 35B Q4_K_M).");
             config_.use_cuda_graphs = false;
         }
-        if (getenv("IMP_NO_CUDA_GRAPH") && config_.use_cuda_graphs) {
-            IMP_LOG_INFO("Disabling CUDA graphs: IMP_NO_CUDA_GRAPH set");
+        if (RuntimeConfig::current().runtime.cuda_graphs == "never" && config_.use_cuda_graphs) {
+            IMP_LOG_INFO("Disabling CUDA graphs: runtime.cuda_graphs=never");
             config_.use_cuda_graphs = false;
         }
         // MoE decode fast path is fully device-side (no D2H memcpy) — graph-safe.
@@ -2068,7 +2073,7 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
     std::vector<int32_t> tokens;
     Tensor decode_logits_out;
 
-    static const bool profiling = (std::getenv("IMP_PROFILE") != nullptr);
+    const bool profiling = RuntimeConfig::current().diagnostics.profile;
     int graph_idx = gpu_batch.n_sequences - 1;
     if (config_.use_cuda_graphs && !profiling &&
         gpu_batch.n_sequences > 0 &&

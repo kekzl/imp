@@ -3,6 +3,7 @@
 #include "quant/dequant_gpu.h"
 #include "quant/dequant_gptq.h"
 #include "core/logging.h"
+#include "runtime/config.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <algorithm>
@@ -1156,48 +1157,37 @@ static bool upload_expert_weights(
         //
         // IMP_EXPERT_OVERHEAD_PCT: explicit override (integer 0..50). Required
         // on WSL2/WDDM where the 10% auto-aggressive path may OOM at alloc time.
-        int overhead_pct;
-        bool user_set_overhead = false;
-        if (const char* s = getenv("IMP_EXPERT_OVERHEAD_PCT")) {
-            int v = atoi(s);
-            if (v >= 0 && v <= 50) {
-                overhead_pct = v;
-                user_set_overhead = true;
-            } else {
-                overhead_pct = 30;
-            }
-        } else {
+        // [moe] expert_overhead_pct: explicit override (0..50). Default 10
+        // requests aggressive auto-pick; values outside the range fall back
+        // to the conservative 30% reserve.
+        int overhead_pct = RuntimeConfig::current().moe.expert_overhead_pct;
+        if (overhead_pct < 0 || overhead_pct > 50) {
+            overhead_pct = 30;
+        } else if (overhead_pct == 10) {
             // Auto-pick: probe with aggressive 10%. If all experts fit, use it.
             // Else fall back to conservative 30%.
             size_t aggressive_overhead = static_cast<size_t>(free_mem * 10 / 100);
             size_t aggressive_reserve  = expert_reserve_bytes + aggressive_overhead;
             size_t aggressive_budget   = (free_mem > aggressive_reserve)
                                          ? (free_mem - aggressive_reserve) : 0;
-            if (aggressive_budget >= total_expert_bytes) {
-                overhead_pct = 10;
+            if (aggressive_budget < total_expert_bytes) {
+                overhead_pct = 30;
+            } else {
                 IMP_LOG_INFO("Expert offload: all experts fit with 10%% overhead "
-                             "(%.2f GiB experts, %.2f GiB free) — picking aggressive. "
-                             "Set IMP_EXPERT_OVERHEAD_PCT=30 to force conservative.",
+                             "(%.2f GiB experts, %.2f GiB free) — picking aggressive.",
                              total_expert_bytes / (1024.0*1024.0*1024.0),
                              free_mem / (1024.0*1024.0*1024.0));
-            } else {
-                overhead_pct = 30;
             }
         }
         size_t overhead = static_cast<size_t>(free_mem * overhead_pct / 100);
         size_t total_reserve = expert_reserve_bytes + overhead;
         size_t budget = (free_mem > total_reserve) ? (free_mem - total_reserve) : 0;
-        (void)user_set_overhead;
 
-        // IMP_FORCE_HOST_EXPERTS=N: debug flag to force the last N MoE layers
-        // off-GPU regardless of budget. Use for reproducing host-resident path
-        // bugs (Q8_0 Gemma-4 gibberish) on a smaller quant that would normally
-        // fit entirely on GPU.
-        int force_host_n = 0;
-        if (const char* s = getenv("IMP_FORCE_HOST_EXPERTS")) {
-            force_host_n = atoi(s);
-            if (force_host_n < 0) force_host_n = 0;
-        }
+        // [moe] force_host_experts = N: debug flag forcing the last N MoE
+        // layers off-GPU regardless of budget. Use for reproducing host-
+        // resident path bugs on a smaller quant.
+        int force_host_n = RuntimeConfig::current().moe.force_host_experts;
+        if (force_host_n < 0) force_host_n = 0;
 
         if (budget >= total_expert_bytes && force_host_n == 0) {
             // All experts fit

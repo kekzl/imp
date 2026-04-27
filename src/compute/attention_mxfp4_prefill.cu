@@ -19,6 +19,7 @@
 #include "compute/attention_mxfp4_prefill.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "core/logging.h"
+#include "runtime/config.h"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -482,7 +483,11 @@ bool attention_mxfp4_available() {
     static int result = -1;
     if (result >= 0) return result != 0;
 
-    if (!getenv("IMP_MXFP4_ATTENTION")) {
+    // [attention] mxfp4 = "auto" enables when supported; default "auto" is OFF
+    // for FMHA (the legacy IMP_MXFP4_ATTENTION env was opt-in). Set to "always"
+    // to force the MXFP4 prefill path on.
+    const std::string& mode = RuntimeConfig::current().attention.mxfp4;
+    if (mode != "always") {
         result = 0;
         return false;
     }

@@ -2,6 +2,7 @@
 #include "compute/warp_reduce.cuh"
 #include "memory/vram_allocator.h"
 #include "core/logging.h"
+#include "runtime/config.h"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -436,8 +437,8 @@ bool VisionEncoder::encode(const half* d_pixels, half* d_output, cudaStream_t st
     // the per-kernel launch overhead. The graph is keyed on (d_pixels,
     // d_output); any pointer change invalidates the captured slot.
     //
-    // Env override: IMP_NO_VISION_GRAPH=1 forces the eager path (debugging).
-    static const bool disable_graph = (std::getenv("IMP_NO_VISION_GRAPH") != nullptr);
+    // [runtime] no_vision_graph = true forces the eager path (debugging).
+    const bool disable_graph = RuntimeConfig::current().runtime.no_vision_graph;
     if (disable_graph) {
         return encode_impl(d_pixels, d_output, stream);
     }

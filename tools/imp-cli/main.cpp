@@ -5,6 +5,7 @@
 #include "model/tokenizer.h"
 #include <sys/stat.h>
 #include "runtime/presets.h"
+#include "runtime/config.h"
 
 #include <chrono>
 #include <cstdio>
@@ -15,6 +16,12 @@
 
 int main(int argc, char** argv) {
     CliArgs args = parse_args(argc, argv);
+
+    // Load imp.conf (if present) + apply --set overrides; install as the
+    // process-wide RuntimeConfig so all downstream code reads through
+    // RuntimeConfig::current() instead of getenv("IMP_*").
+    imp::RuntimeConfig::install(
+        imp::RuntimeConfig::load(args.config_path, args.config_overrides));
 
     if (args.model_path.empty()) {
         print_usage(argv[0]);
@@ -497,13 +504,13 @@ int main(int argc, char** argv) {
                 tokens = tok->encode(args.prompt);
                 // Prepend BOS when the tokenizer requires it (e.g. Gemma)
                 bool add_bos = tok->add_bos();
-                if (getenv("IMP_FORCE_BOS")) add_bos = true;
+                if (imp::RuntimeConfig::current().generation.force_bos) add_bos = true;
                 if (add_bos) {
                     tokens.insert(tokens.begin(), static_cast<int32_t>(tok->bos_id()));
                 }
             }
             int n_prompt_tokens = static_cast<int>(tokens.size());
-            if (getenv("IMP_DUMP_TOKENS")) {
+            if (imp::RuntimeConfig::current().diagnostics.dump_tokens) {
                 fprintf(stderr, "[DUMP_TOKENS] n=%d:", n_prompt_tokens);
                 for (int ti = 0; ti < n_prompt_tokens && ti < 20; ti++)
                     fprintf(stderr, " %d", tokens[ti]);
@@ -602,7 +609,7 @@ int main(int argc, char** argv) {
 
             // Benchmark using Engine::generate() (conditional graph loop) for comparison.
             // This eliminates per-step host overhead — shows true GPU-limited throughput.
-            if (std::getenv("IMP_BENCH_GENERATE")) {
+            if (imp::RuntimeConfig::current().bench.generate) {
                 // Reset context for fresh generation
                 imp_context_reset(ctx);
 

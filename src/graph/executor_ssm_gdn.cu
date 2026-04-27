@@ -9,6 +9,7 @@
 #include "memory/gdn_state.h"
 #include "core/logging.h"
 #include "runtime/pdl.h"
+#include "runtime/config.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -362,7 +363,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     // layout. Qwen 3.6 uses 16K/32V asymmetric heads and triggers this
     // mismatch. Gated by IMP_GDN_VHEAD_REORDER to avoid regressing symmetric
     // models or models whose converters already emit grouped layout.
-    static const bool vhead_reorder = std::getenv("IMP_GDN_VHEAD_REORDER") != nullptr;
+    const bool vhead_reorder = RuntimeConfig::current().gdn.vhead_reorder;
     if (vhead_reorder && n_groups != n_heads) {
         const int inner_v = n_heads * head_dim_ssm;  // V channels = 32 * 128 = 4096 for Qwen 3.6
         const int BC_size_vh = n_groups * ssize;      // Q/K per-group size = 16 * 128 = 2048
@@ -401,7 +402,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     Tensor gate_out(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
     gemm_dispatch(no, ly.gdn_gate, gate_out, ctx);
 
-    static const bool use_fp32_scan = std::getenv("IMP_GDN_FP32_SCAN") != nullptr;
+    const bool use_fp32_scan = RuntimeConfig::current().gdn.fp32_scan;
 
     if (h_st) {
         size_t es = dtype_size(compute_dtype_);
@@ -435,7 +436,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         // IMP_GDN_FP32_SCAN=1: keep scan output in FP32 through RMSNorm+Gate.
         //   FP16 subnormal truncation (~6e-5) breaks RMS for near-zero heads on
         //   models with sparse scan activations (Qwen 3.6 L1 head 0).
-        static const bool use_ref = std::getenv("IMP_GDN_REF") != nullptr;
+        const bool use_ref = RuntimeConfig::current().gdn.ref_kernel;
         if (use_fp32_scan) {
             // Layout in conv_f32 tail:
             //   [n*conv_channels)                : conv_f32 (done)
@@ -503,10 +504,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     // Single kernel launch for all tokens × heads (replaces n×32×2 launches).
     // When IMP_GDN_FP32_SCAN is active, this was already done inline with the
     // scan above (FP32-input variant). Skip to avoid double-applying.
-    // IMP_GDN_NORM_EPS env can override eps (diagnostic).
+    // [gdn] norm_eps_override > 0 can override eps (diagnostic).
     float norm_eps = eps;
-    if (const char* e = std::getenv("IMP_GDN_NORM_EPS")) {
-        norm_eps = strtof(e, nullptr);
+    if (RuntimeConfig::current().gdn.norm_eps_override > 0.0f) {
+        norm_eps = RuntimeConfig::current().gdn.norm_eps_override;
     }
     if (!use_fp32_scan) {
         gdn_rmsnorm_gated_silu(static_cast<half*>(y_buf.data),
@@ -524,7 +525,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     // residual in FP32 before downcast. FP16 accumulation here drifts ~5% per
     // element vs llama.cpp; that small drift amplifies to sign flips in
     // downstream near-zero projections and breaks Qwen 3.6.
-    static const bool use_fp32_out = std::getenv("IMP_GDN_FP32_OUT") != nullptr;
+    const bool use_fp32_out = RuntimeConfig::current().gdn.fp32_out;
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
     if (use_fp32_out) {
         // Allocate FP32 scratch via cudaMallocAsync (small: n * d_model * 4 bytes)

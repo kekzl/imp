@@ -1,6 +1,7 @@
 #include "compute/gemm.h"
 #include "core/logging.h"
 #include "runtime/pdl.h"
+#include "runtime/config.h"
 
 #include <cublas_v2.h>
 #include <cublasLt.h>
@@ -322,9 +323,9 @@ static void benchmark_and_select_algo(
     cublasLtMatmulPreferenceDestroy(pref);
 
     if (nresults <= 0) { entry.has_algo = false; entry.workspace_size = 0; return; }
-    // IMP_DETERMINISTIC_GEMM=1 skips timing-based selection so repeat runs
-    // produce bitwise-identical prefill outputs (needed for layer-drift A/B).
-    static const bool s_deterministic_gemm = getenv("IMP_DETERMINISTIC_GEMM") != nullptr;
+    // [runtime] deterministic_gemm = true skips timing-based selection so
+    // repeat runs produce bitwise-identical prefill outputs.
+    const bool s_deterministic_gemm = RuntimeConfig::current().runtime.deterministic_gemm;
     if (s_deterministic_gemm || nresults == 1) {
         entry.algo = results[0].algo;
         entry.workspace_size = (results[0].workspaceSize <= s_workspace_size)

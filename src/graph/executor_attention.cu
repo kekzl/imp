@@ -32,6 +32,7 @@
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "runtime/pdl.h"
+#include "runtime/config.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -536,7 +537,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(q_actual_dim)};
         attn_gate_buf = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
 
-        static const bool use_concat = std::getenv("IMP_ATTN_GATE_CONCAT") != nullptr;
+        const bool use_concat = RuntimeConfig::current().attention.gate_concat;
         if (use_concat) {
             // Feature-dim concat: Q = src[:, :q_actual_dim]; gate = src[:, q_actual_dim:]
             // One 2D copy each, width = q_actual_dim bytes per row.
@@ -598,7 +599,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         } else if (fused_rope_dim > hd || fused_rope_dim <= 0) {
             fused_rope_dim = hd;
         }
-        static bool no_qknorm_fused = getenv("IMP_NO_QKNORM_FUSED") != nullptr;
+        const bool no_qknorm_fused = RuntimeConfig::current().attention.no_qknorm_fused;
         if (has_qk_norm && n == 1 && qv.qtype == QType::F16 && !no_qknorm_fused) {
             // Fused: QK-norm + RoPE in one kernel launch (decode only, n=1).
             // Keeps norm intermediate values in FP32 shared memory.
@@ -697,8 +698,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // Set IMP_NO_CUBLAS_ATTN=1 to force flash attention (for benchmarking).
         // Gemma 4: flash attention kernels don't support head_dim=512, so we MUST
         // use cuBLAS attention for all layers (it handles arbitrary head_dim).
-        static bool no_cublas_attn = getenv("IMP_NO_CUBLAS_ATTN");
-        static bool use_naive_attn = getenv("IMP_NAIVE_ATTN") != nullptr;
+        const bool no_cublas_attn = RuntimeConfig::current().attention.no_cublas;
+        const bool use_naive_attn = RuntimeConfig::current().attention.naive;
         bool force_cublas_attn = per_layer_shapes;  // Gemma 4 dual head_dim
         // Gemma-4 long-context workarounds. Two failure modes at n > 1024:
         //   (a) SWA layers (hd=256) with sliding_active → FMHA chain emits
@@ -718,7 +719,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                        && n > cublas_cap);
         bool use_naive_for_swa = ((gemma4_swa_broken || gemma4_global_too_long)
                                   && n <= 8192
-                                  && getenv("IMP_NO_NAIVE_SWA") == nullptr);
+                                  && !RuntimeConfig::current().attention.no_naive_swa);
         if ((use_naive_attn && n <= 2048) || use_naive_for_swa) {
             // Naive reference attention: simple FP32, no optimization.
             if (layer == 0 && use_naive_for_swa && !use_naive_attn)
@@ -811,7 +812,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
 
         // DEBUG: force cuBLAS attention for decode to isolate paged attention bugs.
         // When enabled, uses the same materialized QK^T path as prefill.
-        static bool force_cublas_decode = (getenv("IMP_FORCE_CUBLAS_DECODE") != nullptr);
+        const bool force_cublas_decode = RuntimeConfig::current().attention.force_cublas_decode;
         if (force_cublas_decode && n == 1 && attn_scores_buf_) {
             // Reconstruct K/V from cache for this position
             KVCache* cache_dbg = state.kv_cache;
@@ -1042,7 +1043,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // and dp4a fast paths via output.qtype==FP32 guards in dispatch.
         const bool fp32_attn_out = (model_->config().arch == ModelArch::GEMMA4 &&
             using_fp32_accum &&
-            std::getenv("IMP_GEMMA4_FP32_GEMM_OUT") != nullptr);
+            RuntimeConfig::current().gemma4.fp32_gemm_out);
         void* po_fp32_buf = nullptr;
         if (fp32_attn_out) {
             size_t bytes = static_cast<size_t>(n) * model_->config().d_model * sizeof(float);

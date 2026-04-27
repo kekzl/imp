@@ -28,11 +28,14 @@ struct RuntimeConfig {
         bool        warmup             = true;
         int         max_seq_len        = 0;        // 0 = use model default
         bool        no_pdl             = false;
+        bool        debug_raw          = false;    // raw stream debug
+        bool        no_vision_graph    = false;    // disable SigLIP graph capture
     } runtime;
 
     struct KVCache {
         std::string dtype                       = "fp16";  // fp16 | fp8 | int8 | int4 | nvfp4
         bool        allow_nondeterministic_fp8  = false;
+        bool        fp8_auto_legacy             = false;   // legacy IMP_KV_FP8_AUTO compat
     } kv_cache;
 
     struct Attention {
@@ -53,10 +56,14 @@ struct RuntimeConfig {
 
     struct MoE {
         int  expert_overhead_pct = 10;
-        bool force_host_experts  = false;
+        int  force_host_experts  = 0;     // last N layers forced to host (0 = none)
         bool skip                = false;
         bool force_fp16_sync     = false;
         bool no_expert_cache     = false;
+        bool zero_workspace      = false;
+        bool no_shared_mlp       = false;
+        bool no_shexp_gate       = false;
+        bool no_cutlass3x        = false;
     } moe;
 
     struct GDN {
@@ -76,16 +83,29 @@ struct RuntimeConfig {
     } gemm;
 
     struct Gemma4 {
-        bool fp32_gemm_out = false;
-        bool no_graphs     = false;
-        bool force_mmvq    = false;
+        bool fp32_gemm_out    = false;
+        bool no_graphs        = false;
+        bool force_mmvq       = false;
+        bool fp32_expert_down = false;
+        bool no_decode_fast   = false;
+        bool no_post_ffw_1    = false;
+        bool ggml_prefill     = false;
     } gemma4;
 
     struct Generation {
         bool no_logit_softcap = false;
         bool lm_dequant_fp16  = false;
         int  think_budget     = 0;
+        bool force_bos        = false;
     } generation;
+
+    struct Server {
+        bool prefix_cache = false;
+    } server;
+
+    struct Bench {
+        bool generate = false;
+    } bench;
 
     struct Paths {
         std::string mmproj;
@@ -93,11 +113,11 @@ struct RuntimeConfig {
 
     struct Diagnostics {
         bool        debug_forward       = false;
-        bool        debug_raw           = false;
         bool        debug_gemm_dispatch = false;
+        bool        debug_template      = false;
         std::string dump_hidden_dir;
-        bool        dump_logits         = false;
-        bool        dump_routing        = false;
+        std::string dump_logits_dir;     // path or empty
+        std::string dump_routing_dir;    // path or empty
         bool        dump_tokens         = false;
         int         exit_layer          = -1;
         bool        profile             = false;
@@ -124,6 +144,22 @@ struct RuntimeConfig {
     // Pass empty path to use the search-path default.
     static RuntimeConfig load(const std::string& explicit_path,
                               const std::vector<std::string>& overrides);
+
+    // ---- Process-wide singleton -----------------------------------------
+    //
+    // Engine init calls install() once with the loaded RuntimeConfig.
+    // All ~80 former getenv("IMP_*") call sites read via current(), which
+    // returns a const reference to the installed config (or a default-
+    // constructed one if install() was never called).
+    //
+    // This is intentionally a process-wide singleton because the runtime
+    // configuration is global state — there is no expectation of two
+    // engines with different runtime configs in the same process. If
+    // that ever changes, threading a const RuntimeConfig& through every
+    // executor call site is a mechanical refactor; the read-side API
+    // (current().runtime.no_pdl etc.) does not need to change.
+    static const RuntimeConfig& current();
+    static void install(const RuntimeConfig& cfg);
 };
 
 } // namespace imp

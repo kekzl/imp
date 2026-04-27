@@ -13,6 +13,7 @@
 #include "graph/executor_kernels.h"
 #include "graph/gemm_context.h"
 #include "graph/executor_debug.h"
+#include "runtime/config.h"
 #include "compute/embedding.h"
 #include "compute/gemv_ggml_compat.h"
 #include "compute/ggml_mmvq.h"
@@ -148,7 +149,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // DIAGNOSTIC (Phase 2 Item 2 follow-up): zero MoE workspace buffers so any
     // legacy-serial-fallback uninit reads become deterministic zero reads.
     // Set IMP_MOE_ZERO_WORKSPACE=1 to enable. Cheap (~1 MiB total memset).
-    if (getenv("IMP_MOE_ZERO_WORKSPACE")) {
+    if (RuntimeConfig::current().moe.zero_workspace) {
         cudaMemsetAsync(moe_.expert_gate.data, 0, moe_.expert_gate.nbytes(), stream);
         cudaMemsetAsync(moe_.expert_up.data, 0, moe_.expert_up.nbytes(), stream);
         cudaMemsetAsync(moe_.expert_swiglu.data, 0, moe_.expert_swiglu.nbytes(), stream);
@@ -227,7 +228,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // at GEMM output) to isolate precision drift. Allocated below in the FP16
     // batch path; freed at moe_after_experts. Other prefill paths ignore this.
     const bool fp32_down_active = (cfg.arch == ModelArch::GEMMA4 &&
-        std::getenv("IMP_GEMMA4_FP32_EXPERT_DOWN") != nullptr);
+        RuntimeConfig::current().gemma4.fp32_expert_down);
     void* fp32_down_buf = nullptr;
     bool moe_fused_norm_q8 = (n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
                                h.qtype == QType::F16 && !nvfp4_covers_layer && !gemma4_fp32_norm);
@@ -327,7 +328,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // Gemma 4: dp4a decode fast path ENABLED by default. dp4a matches llama's
     // Q4_K×Q8_1 accumulation for MoE experts, preventing the routing drift that
     // occurs with FP16 dequant+cuBLAS. Set IMP_G4_NO_DECODE_FAST=1 to disable.
-    if (cfg.arch == ModelArch::GEMMA4 && getenv("IMP_G4_NO_DECODE_FAST")) {
+    if (cfg.arch == ModelArch::GEMMA4 && RuntimeConfig::current().gemma4.no_decode_fast) {
         will_decode_fast = false;
     }
 
@@ -343,8 +344,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         Tensor gate_logits_f32 = slice_rows(moe_.gate_logits, n);
         // Diagnostic: dump gate logits pre-topk when IMP_DUMP_LOGITS is set.
         // Compares imp's softmax-input against llama.cpp's ffn_moe_probs-N.
-        if (const char* dl = getenv("IMP_DUMP_LOGITS")) {
-            bool dump_all = (std::strcmp(dl, "all") == 0);
+        if (const std::string& dl = RuntimeConfig::current().diagnostics.dump_logits_dir; !dl.empty()) {
+            bool dump_all = (dl == "all");
             if (layer == 29 || dump_all) {
                 int last_tok = n - 1;
                 std::vector<float> h_logits(ne);
@@ -419,8 +420,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     last_tok, rsum, std::sqrt(rss), rl[0], rl[1], rl[2]);
         }
         // IMP_DUMP_LOGITS=all: dump top-8-by-value of gate logits per layer.
-        if (const char* dl = getenv("IMP_DUMP_LOGITS")) {
-            bool dump_all = (std::strcmp(dl, "all") == 0);
+        if (const std::string& dl = RuntimeConfig::current().diagnostics.dump_logits_dir; !dl.empty()) {
+            bool dump_all = (dl == "all");
             if (layer == 29 || dump_all) {
                 int last_tok = n - 1;
                 std::vector<float> h_logits(ne);
@@ -446,10 +447,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         }
     }
 
-    // Dump routing for last token (use direct getenv, not debug_forward_enabled).
-    // IMP_DUMP_ROUTING=1: only layer 0. IMP_DUMP_ROUTING=all: every layer.
-    if (const char* drv = getenv("IMP_DUMP_ROUTING")) {
-        bool dump_all = (std::strcmp(drv, "all") == 0);
+    // Dump routing for last token. [diagnostics] dump_routing_dir = "<path>"
+    // dumps layer 0 only; dump_routing_dir = "all" dumps every layer.
+    if (const std::string& drv = RuntimeConfig::current().diagnostics.dump_routing_dir; !drv.empty()) {
+        bool dump_all = (drv == "all");
         if (layer == 0 || dump_all) {
             int last_tok = n - 1;
             std::vector<int32_t> h_idx(top_k);
@@ -716,7 +717,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             if (!non_gated_experts) {
                 // Fused activation → Q8_1 (1 kernel instead of 2)
                 if (cfg.ffn_activation == FFNActivation::GEGLU) {
-                    if (layer == 0 && getenv("IMP_DEBUG_FORWARD"))
+                    if (layer == 0 && RuntimeConfig::current().diagnostics.debug_forward)
                         fprintf(stderr, "[DEBUG_MoE] Using GEGLU activation for MoE experts\n");
                     geglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf,
                                          top_k * eff, stream);
@@ -893,7 +894,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         }
 
         // Falls through to scatter (step 7)
-    } else if (getenv("IMP_G4_GGML_PREFILL") && cfg.arch == ModelArch::GEMMA4 &&
+    } else if (RuntimeConfig::current().gemma4.ggml_prefill && cfg.arch == ModelArch::GEMMA4 &&
                ly.expert_gate_packed.on_device && ly.expert_up_packed.on_device &&
                ly.expert_down_packed.on_device) {
     // =========================================================================
@@ -1367,7 +1368,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         //   Decode n=1:    ~48 tok/s (vs legacy ~38)     — 25% win
         // After shared-quantize gate+up (2026-04-20), 3.x beats legacy at all n.
         // `IMP_NO_CUTLASS3X_MOE=1` forces legacy (for debugging).
-        static const bool force_off = std::getenv("IMP_NO_CUTLASS3X_MOE") != nullptr;
+        static const bool force_off = RuntimeConfig::current().moe.no_cutlass3x;
         if (force_off) return false;
         if (!cutlass_grouped_3x_nvfp4_available()) return false;
         if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf) return false;
@@ -1984,7 +1985,7 @@ moe_after_experts:
 
     // Shared expert: enabled by default. Gemma 4: requires post_ffw_norm_1 to be uploaded.
     // DIAGNOSTIC: IMP_NO_SHARED_MLP=1 skips this branch (Gemma-4 NVFP4 audit).
-    static const bool s_no_shared_mlp = (getenv("IMP_NO_SHARED_MLP") != nullptr);
+    static const bool s_no_shared_mlp = RuntimeConfig::current().moe.no_shared_mlp;
     if (ly.w_up_shared.data != nullptr && !s_no_shared_mlp) {
         int eff_shared = static_cast<int>(ly.w_up_shared.shape[0]);
         bool shared_gated = (ly.w_gate_shared.data != nullptr);
@@ -2042,7 +2043,7 @@ moe_after_experts:
         }
         // Gemma 4: apply post_ffw_norm_1 on shared MLP output (sh_down).
         if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_post_norm_1.data != nullptr &&
-            getenv("IMP_G4_NO_POST_FFW_1") == nullptr) {
+            !RuntimeConfig::current().gemma4.no_post_ffw_1) {
             rmsnorm(sh_down, ly.ffn_post_norm_1, sh_down, eps, stream, norm_w_off_);
         }
 
@@ -2058,7 +2059,7 @@ moe_after_experts:
         //   gate[r] = sigmoid(sum_d no[r,d] * W_gate_inp_shexp[d])
         //   sh_down[r, :] *= gate[r]
         // Absent in Qwen3 MoE / Gemma-4 (tensor pointer is null → skip).
-        static const bool skip_shexp_gate = std::getenv("IMP_NO_SHEXP_GATE") != nullptr;
+        static const bool skip_shexp_gate = RuntimeConfig::current().moe.no_shexp_gate;
         if (!skip_shexp_gate &&
             ly.shared_expert_gate_inp.data != nullptr &&
             ly.shared_expert_gate_inp.on_device &&

@@ -9,6 +9,7 @@
 #include "core/logging.h"
 #include "memory/vram_allocator.h"
 #include "runtime/storage_planner.h"
+#include "runtime/config.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -1196,7 +1197,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 // 14) cascade we have not yet root-caused. Tracking in
                 // qwen35_27b_mxfp4_ima_2026_04_25.md. Until that's resolved,
                 // honor the historical fallback path.
-                bool force_fallback = (std::getenv("IMP_MXFP4_FP16_FALLBACK") != nullptr);
+                bool force_fallback = RuntimeConfig::current().attention.mxfp4_fp16_fallback;
                 bool has_gdn = (cfg.ssm_inner_size > 0);
                 bool mxfp4_gemv_available = !force_fallback && !has_gdn;
                 for (auto& [p, m] : wcache_.cutlass_mxfp4)
@@ -1232,8 +1233,13 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                         static_cast<size_t>(2) * 1024 * 1024 * 1024;
                     bool oversubscribe = (free_mem <= kRuntimeHeadroom ||
                                            fp16_total + kRuntimeHeadroom > free_mem);
-                    const char* force = std::getenv("IMP_MXFP4_FP16_FALLBACK");
-                    bool allow_force = (force && std::string(force) == "force");
+                    // The "force anyway despite oversubscription" path is gone —
+                    // attention.mxfp4_fp16_fallback is a plain bool now. If the
+                    // user explicitly opts in via imp.conf the oversubscribe
+                    // check still gates them; this matches the previous
+                    // IMP_MXFP4_FP16_FALLBACK=1 semantics. The legacy
+                    // =force escape hatch is obsolete.
+                    bool allow_force = false;
                     if (oversubscribe && !allow_force) {
                         IMP_LOG_ERROR(
                             "MXFP4 FP16 fallback would oversubscribe VRAM "
