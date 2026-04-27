@@ -36,15 +36,28 @@ TEST_F(LlmCompressorE2E, Gemma4_LoadsWithoutIMA) {
     imp_model_free(model);
 }
 
-// Gemma-4 generation runs to completion without crashing. We do NOT assert
-// content coherence here because the spec's R1 risk has materialized:
-// llm-compressor Gemma-4 NVFP4 ships with extra scaling tensors
-// (.layer_scalar, .per_expert_scale, .scale) that imp's Phase 1 loader
-// skips. Without those scales applied, output is incoherent (e.g.
-// "Pac<unused5>"). Quality recovery requires Phase 2 work — see
-// docs/superpowers/specs/2026-04-26-llm-compressor-nvfp4-loader-design.md
-// section R1 + the TODO backlog. Loader correctness is gated by the
-// LoadsWithoutIMA test above and the Mistral-Small dense test (Task 9).
+// Gemma-4 generation runs to completion without crashing. Coherence is NOT
+// asserted because the R1 risk from the Phase 1 spec is only partially
+// resolved as of this commit:
+//
+// Phase 1 skipped the 90 extra scaling tensors (.layer_scalar,
+// .per_expert_scale, .scale) → output stopped immediately with "Pac<unused5>".
+//
+// Phase 2 Item 2 (this commit) routes them through translate_name → weight_map,
+// which assigns them to the same per-layer fields used by the Gemma-4 GGUF path
+// (layer_out_scale, expert_down_scale, ffn_gate_inp_scale). Output is now
+// varied (e.g. "What is the capital of France?" → " way world ات set" with
+// chat-template gemma) instead of an immediate degenerate stop, meaning the
+// scales are reaching the forward pass. But coherence isn't fully recovered:
+// either the per-channel router.scale and per-expert routing scale have
+// different semantics (multiplier vs divisor, similar to the Phase-1
+// weight_global_scale flip) than the GGUF analogues, or there is an additional
+// reconstruction step the vLLM reference (PR vllm-project/vllm#39045) performs
+// that imp doesn't replicate yet.
+//
+// Disposition: full coherence recovery deferred — needs a side-by-side reference
+// trace against vLLM. Mistral-Small (dense, no MoE extras) remains the actual
+// coherence gate for the loader.
 TEST_F(LlmCompressorE2E, Gemma4_GeneratesNonEmptyOutput) {
     if (!dir_exists(kGemma4Dir)) {
         GTEST_SKIP() << "Model not present at " << kGemma4Dir;

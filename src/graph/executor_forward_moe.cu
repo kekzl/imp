@@ -145,6 +145,17 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // Configure shared workspace for MoE phase
     configure_moe_workspace(shared_workspace_max_tokens_);
 
+    // DIAGNOSTIC (Phase 2 Item 2 follow-up): zero MoE workspace buffers so any
+    // legacy-serial-fallback uninit reads become deterministic zero reads.
+    // Set IMP_MOE_ZERO_WORKSPACE=1 to enable. Cheap (~1 MiB total memset).
+    if (getenv("IMP_MOE_ZERO_WORKSPACE")) {
+        cudaMemsetAsync(moe_.expert_gate.data, 0, moe_.expert_gate.nbytes(), stream);
+        cudaMemsetAsync(moe_.expert_up.data, 0, moe_.expert_up.nbytes(), stream);
+        cudaMemsetAsync(moe_.expert_swiglu.data, 0, moe_.expert_swiglu.nbytes(), stream);
+        cudaMemsetAsync(moe_.expert_down.data, 0, moe_.expert_down.nbytes(), stream);
+        cudaMemsetAsync(moe_.gathered.data, 0, moe_.gathered.nbytes(), stream);
+    }
+
     const auto& cfg = model_->config();
     const auto& ly  = model_->layer(layer);
 
@@ -1601,17 +1612,28 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             int N_dim = static_cast<int>(nw.N);
             int K_dim = static_cast<int>(nw.K);
             int M = static_cast<int>(a.shape[0]);
+
             if (M == 1) {
-                // Single-token decode: direct NVFP4 GEMV
+                // Single-token decode: direct NVFP4 GEMV (verified coherent).
                 gemv_nvfp4_kpar(nw, static_cast<const half*>(a.data),
                                static_cast<half*>(c.data), N_dim, K_dim, stream);
             } else {
-                // Multi-token: per-row GEMV (each row is one token)
-                for (int r = 0; r < M; r++) {
-                    const half* a_row = static_cast<const half*>(a.data) + r * K_dim;
-                    half* c_row = static_cast<half*>(c.data) + r * N_dim;
-                    gemv_nvfp4_kpar(nw, a_row, c_row, N_dim, K_dim, stream);
-                }
+                // Multi-token (legacy MoE prefill): the per-row gemv_nvfp4_kpar
+                // loop produces wrong output on Gemma-4 NVFP4 experts even though
+                // it works for Mistral dense decode at the same kernel/dimensions
+                // (see commit message + memory/llm_compressor_phase2_item2…). The
+                // dense-path mirror — gemm_nvfp4 (NVFP4 → FP16 dequant + cuBLAS
+                // gemm) — is correct on Gemma-4 and is what Mistral dense prefill
+                // already uses, so route the multi-token expert prefill through
+                // it. Bisected via IMP_EXPERT_NVFP4_DEQUANT_MR=1 on 2026-04-27:
+                // M=1 on gemv_kpar + M>1 on gemm_nvfp4 → "The capital of France
+                // is Paris."; M>1 on gemv_kpar → token-stuck loop.
+                int64_t a_shape[2] = {static_cast<int64_t>(M), static_cast<int64_t>(K_dim)};
+                int64_t c_shape[2] = {static_cast<int64_t>(M), static_cast<int64_t>(N_dim)};
+                Tensor a_t(const_cast<void*>(static_cast<const void*>(a.data)),
+                           DType::FP16, 2, a_shape, true);
+                Tensor c_t(c.data, DType::FP16, 2, c_shape, true);
+                gemm_nvfp4(nw, a_t, c_t, stream);
             }
             return;
         }
@@ -1961,7 +1983,9 @@ moe_after_experts:
     }
 
     // Shared expert: enabled by default. Gemma 4: requires post_ffw_norm_1 to be uploaded.
-    if (ly.w_up_shared.data != nullptr) {
+    // DIAGNOSTIC: IMP_NO_SHARED_MLP=1 skips this branch (Gemma-4 NVFP4 audit).
+    static const bool s_no_shared_mlp = (getenv("IMP_NO_SHARED_MLP") != nullptr);
+    if (ly.w_up_shared.data != nullptr && !s_no_shared_mlp) {
         int eff_shared = static_cast<int>(ly.w_up_shared.shape[0]);
         bool shared_gated = (ly.w_gate_shared.data != nullptr);
 

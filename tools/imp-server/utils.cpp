@@ -146,6 +146,95 @@ void strip_think_block(std::string& text) {
     }
 }
 
+ChannelSegments split_channel_segments(const std::string& text) {
+    static const char kOpen[] = "<|channel>";
+    static const char kClose[] = "<channel|>";
+    constexpr size_t kOpenLen = sizeof(kOpen) - 1;
+    constexpr size_t kCloseLen = sizeof(kClose) - 1;
+
+    ChannelSegments out;
+    // Empty channel name = "before any header" — Gemma-4's chat template often
+    // routes pre-thought turn boilerplate through this state. Treat it as
+    // user-facing content (matches the legacy strip_channel_headers behaviour).
+    std::string current_channel;
+
+    auto append_to_channel = [&](char c) {
+        if (current_channel == "thought" || current_channel == "analysis") {
+            out.reasoning.push_back(c);
+        } else if (current_channel == "final" || current_channel.empty()) {
+            out.content.push_back(c);
+        } else {
+            out.other.push_back(c);
+        }
+    };
+
+    size_t i = 0;
+    while (i < text.size()) {
+        const bool is_open = (i + kOpenLen <= text.size() &&
+                              text.compare(i, kOpenLen, kOpen) == 0);
+        const bool is_close = (!is_open &&
+                               i + kCloseLen <= text.size() &&
+                               text.compare(i, kCloseLen, kClose) == 0);
+        if (is_open) {
+            // The header runs from "<|channel>" up to the FIRST of:
+            //   1. a newline, or
+            //   2. a "<channel|>" marker (Q5_K_M variant — see strip_channel_headers comment).
+            size_t name_start = i + kOpenLen;
+            size_t nl   = text.find('\n', name_start);
+            size_t cls  = text.find(kClose, name_start);
+            size_t end  = std::min<size_t>(
+                nl  == std::string::npos ? text.size() : nl,
+                cls == std::string::npos ? text.size() : cls);
+            std::string name = text.substr(name_start, end - name_start);
+            // Trim header name (whitespace, args after first space)
+            size_t s = name.find_first_not_of("\n\r\t ");
+            size_t e = name.find_last_not_of("\n\r\t ");
+            if (s == std::string::npos) {
+                name.clear();
+            } else {
+                name = name.substr(s, e - s + 1);
+                size_t sp = name.find_first_of(" \t");
+                if (sp != std::string::npos) name = name.substr(0, sp);
+            }
+            current_channel = std::move(name);
+            // Skip past the header — including the trailing \n if that's what
+            // ended it. If a <channel|> marker ended the header, leave it for
+            // the close-marker branch on the next iteration so the "header
+            // separator" rule below stays a no-op rather than swallowing body.
+            if (end == nl && nl != std::string::npos) {
+                i = nl + 1;
+            } else {
+                i = end;
+            }
+            continue;
+        }
+        if (is_close) {
+            // <channel|> on its own. The model's observed Gemma-4 emission is
+            //   <|channel>thought\nTHOUGHT<channel|>FINAL
+            // i.e. <channel|> CLOSES the current channel and the body that
+            // follows is the user-facing answer (no explicit
+            // <|channel>final\n<channel|> opener for the final answer — the
+            // chat-template prefix already supplied that). Treat a standalone
+            // close-marker as "switch back to default (content)".
+            current_channel.clear();
+            i += kCloseLen;
+            continue;
+        }
+        append_to_channel(text[i++]);
+    }
+
+    auto trim = [](std::string& s) {
+        size_t a = s.find_first_not_of("\n\r\t ");
+        if (a == std::string::npos) { s.clear(); return; }
+        size_t b = s.find_last_not_of("\n\r\t ");
+        s = s.substr(a, b - a + 1);
+    };
+    trim(out.reasoning);
+    trim(out.content);
+    trim(out.other);
+    return out;
+}
+
 void strip_channel_headers(std::string& text) {
     // Scan for "<|channel>" and "<channel|>" markers. Each one begins a header
     // that runs until the next '\n'. Remove the markers and the characters up

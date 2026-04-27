@@ -13,7 +13,7 @@ struct TranslationCounters {
     int suffix_renames = 0;       // .weight_packed → .weight, etc.
     int prefix_strips = 0;        // model.language_model. → model.
     int vision_skipped = 0;       // model.vision_tower.* / model.visual.*
-    int gemma4_extra_skipped = 0; // .layer_scalar / .per_expert_scale / Gemma-4 .scale
+    int gemma4_extras = 0;        // .layer_scalar / .per_expert_scale / router.scale (passed through to weight_map)
     int passed_through = 0;       // unknown patterns, returned unchanged
 };
 

@@ -1919,10 +1919,21 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 strip_think_block(content);
             }
 
-            // Gemma-4 channel headers: structural "<|channel>NAME\n" / "<channel|>\n"
-            // never belong in user-facing content. Strip regardless of reasoning_format.
+            // Gemma-4 channel headers: structural "<|channel>NAME[<channel|>]…"
+            // wraps both the chain-of-thought and the user-facing answer. Split
+            // them so "thought" content goes to reasoning_content (OpenAI-
+            // compat) and "final" content stays in content. Falls back to
+            // strip-only if the request asked reasoning_format=none.
             if (snap_channel_open_id >= 0) {
-                strip_channel_headers(content);
+                if (state.default_args.reasoning_format == "none") {
+                    strip_channel_headers(content);
+                } else {
+                    auto segs = split_channel_segments(content);
+                    if (!segs.reasoning.empty() && reasoning_content.empty()) {
+                        reasoning_content = std::move(segs.reasoning);
+                    }
+                    content = std::move(segs.content);
+                }
             }
 
             // Build logprobs object if requested
