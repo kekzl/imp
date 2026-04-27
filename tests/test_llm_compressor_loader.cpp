@@ -71,27 +71,47 @@ TEST(LlmCompressorTranslate, SkipsVisualPrefix) {
     EXPECT_EQ(c.vision_skipped, 1);
 }
 
-TEST(LlmCompressorTranslate, SkipsLayerScalar) {
+// Phase 2: layer_scalar is now emitted (not skipped) — weight_map.cpp routes
+// it to layer.layer_out_scale, which executor_forward applies after each MoE
+// layer. The counter records emission for the load summary log line.
+TEST(LlmCompressorTranslate, EmitsLayerScalar) {
     TranslationCounters c{};
     auto t = translate_name("model.layers.0.layer_scalar", c);
-    EXPECT_EQ(t.action, NameTranslation::SKIP);
-    EXPECT_EQ(c.gemma4_extra_skipped, 1);
+    EXPECT_EQ(t.action, NameTranslation::EMIT);
+    EXPECT_EQ(t.out_name, "model.layers.0.layer_scalar");
+    EXPECT_EQ(c.gemma4_extras, 1);
 }
 
-TEST(LlmCompressorTranslate, SkipsPerExpertScale) {
+// Phase 2: per_expert_scale is now emitted — weight_map routes it to
+// layer.expert_down_scale, applied by moe_apply_per_expert_scale_kernel
+// before the routing weighted sum.
+TEST(LlmCompressorTranslate, EmitsPerExpertScale) {
     TranslationCounters c{};
-    auto t = translate_name("model.layers.5.experts.per_expert_scale", c);
-    EXPECT_EQ(t.action, NameTranslation::SKIP);
-    EXPECT_EQ(c.gemma4_extra_skipped, 1);
+    auto t = translate_name("model.layers.5.router.per_expert_scale", c);
+    EXPECT_EQ(t.action, NameTranslation::EMIT);
+    EXPECT_EQ(t.out_name, "model.layers.5.router.per_expert_scale");
+    EXPECT_EQ(c.gemma4_extras, 1);
 }
 
-TEST(LlmCompressorTranslate, DoesNotSkipProjScale) {
-    // .scale suffix on a recognized projection name is NOT a Gemma-4 extra.
-    // (Defensive against false-positive blanket .scale skip.)
+// Phase 2: router.scale (per-input-channel router pre-scale) is now emitted —
+// weight_map routes it to layer.ffn_gate_inp_scale, applied to the router
+// input before the gating projection.
+TEST(LlmCompressorTranslate, EmitsRouterScale) {
+    TranslationCounters c{};
+    auto t = translate_name("model.layers.0.router.scale", c);
+    EXPECT_EQ(t.action, NameTranslation::EMIT);
+    EXPECT_EQ(t.out_name, "model.layers.0.router.scale");
+    EXPECT_EQ(c.gemma4_extras, 1);
+}
+
+// Defensive: .scale on a known projection (q_proj/k_proj/...) is NOT a Gemma-4
+// extra and must not increment the gemma4_extras counter.
+TEST(LlmCompressorTranslate, ProjScaleIsNotGemma4Extra) {
     TranslationCounters c{};
     auto t = translate_name("model.layers.0.self_attn.q_proj.scale", c);
-    EXPECT_EQ(t.action, NameTranslation::EMIT);  // pass through
-    EXPECT_EQ(c.gemma4_extra_skipped, 0);
+    EXPECT_EQ(t.action, NameTranslation::EMIT);
+    EXPECT_EQ(c.gemma4_extras, 0);
+    EXPECT_EQ(c.passed_through, 1);
 }
 
 // Mistral3 layout: `language_model.model.layers.*` (no leading `model.`).

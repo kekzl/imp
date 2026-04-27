@@ -29,6 +29,17 @@ std::pair<std::string, std::string> extract_reasoning(const std::string& text);
 // that emit both get both stripped, leaving only the body text concatenated.
 void strip_channel_headers(std::string& text);
 
+// Channel-aware split: parses Gemma-4 style `<|channel>NAME[<channel|>]BODY...`
+// segments and returns the reasoning (= "thought" channel) separately from the
+// user-facing content (= "final" channel + any pre-channel text). Bodies are
+// preserved verbatim minus the markers/header names. Each segment is trimmed.
+struct ChannelSegments {
+    std::string reasoning;  // "thought" channel(s)
+    std::string content;    // "final" channel(s) + un-channeled text
+    std::string other;      // any unrecognised channel name (debug)
+};
+ChannelSegments split_channel_segments(const std::string& text);
+
 std::string sse_chunk(const std::string& id, int64_t created,
                       const std::string& model,
                       const json& delta,
