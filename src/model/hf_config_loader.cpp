@@ -5,6 +5,7 @@
 
 #include <cstring>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -319,16 +320,16 @@ std::string HFConfigLoader::load_chat_template(const std::string& model_dir) {
     JValue root;
     if (!parse_json_file(path, root)) return "";
 
-    // Case 1: chat_template is a plain string
+    // Case 1: chat_template is a plain string in tokenizer_config.json
     std::string chat_template;
-    if (jobj_get_string(root, "chat_template", chat_template)) {
+    if (jobj_get_string(root, "chat_template", chat_template) && !chat_template.empty()) {
         IMP_LOG_INFO("loaded chat_template from tokenizer_config.json (%zu chars)",
                      chat_template.size());
         return chat_template;
     }
 
-    // Case 2: chat_template is an array of {name, template} objects
-    // HuggingFace format: [{"name": "default", "template": "..."}, ...]
+    // Case 2: chat_template is an array of {name, template} objects in
+    // tokenizer_config.json (HuggingFace format: [{"name":"default","template":"..."}, …]).
     const JValue* ct = jobj_find(root, "chat_template");
     if (ct && ct->type == JType::ARRAY) {
         // Prefer "default" entry
@@ -337,7 +338,7 @@ std::string HFConfigLoader::load_chat_template(const std::string& model_dir) {
             std::string name;
             if (!jobj_get_string(entry, "name", name)) continue;
             if (name == "default") {
-                if (jobj_get_string(entry, "template", chat_template)) {
+                if (jobj_get_string(entry, "template", chat_template) && !chat_template.empty()) {
                     IMP_LOG_INFO("loaded chat_template (default) from tokenizer_config.json (%zu chars)",
                                  chat_template.size());
                     return chat_template;
@@ -347,7 +348,7 @@ std::string HFConfigLoader::load_chat_template(const std::string& model_dir) {
         // Fallback: first entry with a valid template string
         for (const auto& entry : ct->arr) {
             if (entry.type != JType::OBJECT) continue;
-            if (jobj_get_string(entry, "template", chat_template)) {
+            if (jobj_get_string(entry, "template", chat_template) && !chat_template.empty()) {
                 std::string name;
                 jobj_get_string(entry, "name", name);
                 IMP_LOG_INFO("loaded chat_template (%s) from tokenizer_config.json (%zu chars)",
@@ -356,6 +357,23 @@ std::string HFConfigLoader::load_chat_template(const std::string& model_dir) {
             }
         }
         IMP_LOG_WARN("chat_template array found but no usable entry in %s", path.c_str());
+    }
+
+    // Case 3: standalone chat_template.jinja file alongside tokenizer_config.json.
+    // Newer HuggingFace exports (e.g. Gemma-4 llm-compressor NVFP4) ship the
+    // template as a separate file with no chat_template field in
+    // tokenizer_config.json. Read it raw — the Jinja2 engine consumes the
+    // string, so no parsing required here.
+    std::string jinja_path = model_dir + "/chat_template.jinja";
+    if (std::ifstream in(jinja_path); in.good()) {
+        std::stringstream buf;
+        buf << in.rdbuf();
+        chat_template = buf.str();
+        if (!chat_template.empty()) {
+            IMP_LOG_INFO("loaded chat_template from chat_template.jinja (%zu chars)",
+                         chat_template.size());
+            return chat_template;
+        }
     }
 
     return "";

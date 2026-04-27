@@ -1192,6 +1192,19 @@ bool Engine::init_features() {
                 if (tid >= 0) keep_ids.push_back(tid);
             }
         }
+        // Gemma-4 channel markers: the model is trained to wrap its turn in
+        // <|channel>final<channel|> ... structure (and <|channel>thought<channel|>
+        // for reasoning). Banning these forces the model off-distribution and
+        // it produces token-stuck loops or repetition (observed on llm-compressor
+        // NVFP4 server prefill — the natural argmax IS <|channel>). Keep them
+        // and let the server strip the markers from user-facing output via
+        // strip_channel_headers().
+        if (tok) {
+            for (const char* name : {"<|channel>", "<channel|>"}) {
+                int32_t tid = tok->find_token(name);
+                if (tid >= 0) keep_ids.push_back(tid);
+            }
+        }
         auto is_kept = [&](int32_t id) {
             return std::find(keep_ids.begin(), keep_ids.end(), id) != keep_ids.end();
         };
@@ -1732,6 +1745,28 @@ void Engine::step_prefill_one(std::shared_ptr<Request>& req, int effective_chunk
             Tensor last_logits = logits_out.slice(0, 1);
             int64_t vocab_shape[1] = {last_logits.shape[1]};
             last_logits = last_logits.reshape(1, vocab_shape);
+
+            // Ban special tokens (e.g. Gemma-4 <|channel>) before greedy
+            // argmax — otherwise the natural-argmax channel marker triggers
+            // is_stop_token and the request finishes with 0 completion
+            // tokens. Same logic as GraphExecutor::forward (executor.cu:88)
+            // and apply_pre_sample (executor.cu) but inline here because
+            // sample_greedy_device runs on raw logits without going through
+            // either of those wrappers.
+            if (state.banned_tokens != nullptr && state.n_banned_tokens > 0) {
+                float* lp = static_cast<float*>(last_logits.data);
+                int vocab = static_cast<int>(last_logits.shape[0]);
+                float neg_inf = -1e30f;
+                for (int bi = 0; bi < state.n_banned_tokens; bi++) {
+                    int32_t tid = state.banned_tokens[bi];
+                    if (tid >= 0 && tid < vocab) {
+                        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
+                            lp + tid, &neg_inf, sizeof(float),
+                            cudaMemcpyHostToDevice, pf_stream));
+                    }
+                }
+            }
+
             sample_greedy_device(last_logits, executor_->d_sample_result(),
                                   h_sample_pinned_, pf_stream);
 

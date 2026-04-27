@@ -242,6 +242,24 @@ std::vector<int32_t> GraphExecutor::sample_from_logits(const Tensor& logits,
         } else if (st.json_constrainer) {
             st.json_constrainer->apply_mask(lp, vocab, stream);
         }
+        // Ban special tokens (chat template delimiters etc.). MUST happen
+        // before sampling — without this, greedy can pick a banned token
+        // (e.g. Gemma-4 NVFP4 picks `<|channel>` as the natural argmax) and
+        // the request finishes immediately because is_stop_token treats banned
+        // tokens as stop tokens. forward() (line 88) already does this; the
+        // sample_from_logits / sample_single_from_logits / use_event_sync
+        // prefill paths historically forgot to. Match forward()'s impl.
+        if (st.banned_tokens != nullptr && st.n_banned_tokens > 0) {
+            float neg_inf = -1e30f;
+            for (int bi = 0; bi < st.n_banned_tokens; bi++) {
+                int32_t tid = st.banned_tokens[bi];
+                if (tid >= 0 && tid < vocab) {
+                    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
+                        lp + tid, &neg_inf, sizeof(float),
+                        cudaMemcpyHostToDevice, stream));
+                }
+            }
+        }
         if (st.min_p > 0.0f) {
             apply_min_p(lp, vocab, st.min_p, stream);
         }
