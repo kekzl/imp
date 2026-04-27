@@ -261,14 +261,19 @@ void attention_cublas_prefill(
     float zero_f = 0.0f;
 
     // FP32 S matrix: avoids FP16 truncation of attention scores before softmax.
-    // Critical for Gemma-4 (scale=1.0 → large QK^T scores, FP16 loses precision).
-    // llama's flash attention keeps scores in FP32 throughout.
-    // Check: FP32 S needs n_heads * seq_len^2 * 4 bytes, FP16 buffer has
-    //        n_heads * S_capacity^2 * 2 bytes. FP32 fits when seq_len <= S_capacity/sqrt(2).
+    // Originally gated on scale==1.0 (Gemma-4, where the lack of 1/sqrt(hd)
+    // scaling makes QK^T scores large enough for FP16 to truncate). But the
+    // FP16-S path also fails for Qwen3.5-27B (head_dim=512, scale=1/sqrt(512))
+    // at deeper layers — the residual stream values grow ~5× from L0 to L58
+    // and the post-RMSNorm Q/K projections produce attention scores that
+    // accumulate FP16 round-off into NaN by L59. Symptom: cuBLAS attention
+    // emits all-NaN output at one specific layer and silently produces NaN
+    // logits downstream. Use FP32 S whenever the scratch buffer fits — FP16
+    // only when forced by buffer constraints.
     int64_t s_buf_fp16_elems = static_cast<int64_t>(S.shape[0]) * S.shape[1];
     if (S.ndim >= 3) s_buf_fp16_elems *= S.shape[2];
     int64_t s_fp32_elems = static_cast<int64_t>(n_heads) * seq_len * seq_len;
-    bool use_fp32_s = (scale == 1.0f && s_fp32_elems * 2 <= s_buf_fp16_elems);
+    bool use_fp32_s = (s_fp32_elems * 2 <= s_buf_fp16_elems);
     float* S_f32 = use_fp32_s ? reinterpret_cast<float*>(S.data) : nullptr;
 
     if (gqa_ratio == 1) {
