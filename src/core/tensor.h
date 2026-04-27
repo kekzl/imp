@@ -24,14 +24,17 @@ struct Tensor {
     bool    on_device    = false;
     TensorKind kind      = TensorKind::UNKNOWN;
 
-    // Sidecar pointers for block-quantised tensors. Borrowed; lifetime
-    // managed by the loader/WeightCaches that allocated them.
-    //   scales       — per-block scales (FP8 micro-scales for NVFP4,
-    //                  FP16 per-group scales for FP8 weights, etc.)
-    //   tensor_scale — per-tensor scalar (FP32) for two-level schemes
-    //                  like NVFP4 and absolute FP8.
-    void*   scales       = nullptr;
-    void*   tensor_scale = nullptr;
+    // Sidecar metadata for block-quantised tensors:
+    //   scales       — borrowed device pointer to per-block scales
+    //                  (FP8 E4M3 micro-scales for NVFP4 [N, K/16],
+    //                  FP16 per-group scales for split Q4_0, etc.)
+    //   tensor_scale — per-tensor scalar (FP32, by value) for two-level
+    //                  schemes like NVFP4. Default 1.0 = no-op
+    //                  (multiplicative identity). For llm-compressor
+    //                  NVFP4 the loader pre-applies the 1/x reciprocal
+    //                  so the runtime can always multiply.
+    void* scales        = nullptr;
+    float tensor_scale  = 1.0f;
 
     Tensor() = default;
 

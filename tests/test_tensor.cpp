@@ -10,7 +10,7 @@ TEST(TensorTest, DefaultConstruction) {
     EXPECT_EQ(t.ndim, 0);
     EXPECT_EQ(t.qtype, QType::NONE);
     EXPECT_EQ(t.scales, nullptr);
-    EXPECT_EQ(t.tensor_scale, nullptr);
+    EXPECT_EQ(t.tensor_scale, 1.0f);  // default = multiplicative identity
     EXPECT_FALSE(t.on_device);
 }
 

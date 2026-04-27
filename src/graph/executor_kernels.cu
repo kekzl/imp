@@ -1944,23 +1944,41 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
             }
         }
     }
-    // NVFP4 cache path: GEMV for M=1 (decode), CUTLASS/dequant for M>1 (prefill).
-    if (nvfp4_cache != nullptr && input.qtype == QType::F16) {
+    // NVFP4 dispatch: Tensor sidecars (prequant load path, qtype=NVFP4 set
+    // directly on the weight) take precedence over the legacy nvfp4_cache
+    // (decode-cache path, FP16/Q*_K weights converted on-the-fly during init).
+    // Build NvFP4QuantResult on-the-fly when the sidecars are populated;
+    // otherwise fall through to the cache lookup.
+    NvFP4QuantResult nvfp4_tmp;
+    const NvFP4QuantResult* nvfp4_view = nullptr;
+    if (input.qtype == QType::F16 && weight.qtype == QType::NVFP4 &&
+        weight.scales != nullptr) {
+        nvfp4_tmp.packed_data  = weight.data;
+        nvfp4_tmp.micro_scales = weight.scales;
+        nvfp4_tmp.tensor_scale = weight.tensor_scale;
+        nvfp4_tmp.N            = weight.shape[0];
+        // shape[1] holds packed K/2 for FP4 → kernel needs logical K
+        nvfp4_tmp.K            = weight.shape[1] * 2;
+        nvfp4_view             = &nvfp4_tmp;
+    } else if (nvfp4_cache != nullptr && input.qtype == QType::F16) {
         auto it = nvfp4_cache->find(weight.data);
-        if (it != nvfp4_cache->end()) {
-            if (input.shape[0] == 1) {
-                gemv_nvfp4_kpar(it->second,
-                                reinterpret_cast<const half*>(input.data),
-                                reinterpret_cast<half*>(output.data),
-                                static_cast<int>(it->second.N),
-                                static_cast<int>(it->second.K), stream);
-            } else if (cutlass_nvfp4_cache != nullptr && cutlass_act_data != nullptr) {
+        if (it != nvfp4_cache->end()) nvfp4_view = &it->second;
+    }
+    if (nvfp4_view != nullptr) {
+        const NvFP4QuantResult& res = *nvfp4_view;
+        if (input.shape[0] == 1) {
+            gemv_nvfp4_kpar(res,
+                            reinterpret_cast<const half*>(input.data),
+                            reinterpret_cast<half*>(output.data),
+                            static_cast<int>(res.N),
+                            static_cast<int>(res.K), stream);
+        } else if (cutlass_nvfp4_cache != nullptr && cutlass_act_data != nullptr) {
                 // Native FP4 GEMM: try cuBLASLt first, then CUTLASS sm_120
                 auto ct_it = cutlass_nvfp4_cache->find(weight.data);
                 if (ct_it != cutlass_nvfp4_cache->end()) {
                     int M = static_cast<int>(input.shape[0]);
                     int K = static_cast<int>(input.shape[1]);
-                    int N = static_cast<int>(it->second.N);
+                    int N = static_cast<int>(res.N);
                     quantize_fp16_to_nvfp4_cutlass(input.data, cutlass_act_data,
                                                     cutlass_act_sf, M, K, stream);
 
@@ -1992,11 +2010,10 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
                     if (ok) return;
                 }
             }
-            if (input.shape[0] > 1) {
-                gemm_nvfp4(it->second, input, output, stream);
-            }
-            return;
+        if (input.shape[0] > 1) {
+            gemm_nvfp4(res, input, output, stream);
         }
+        return;
     }
     // Gemma 4: if FP16 cache has the weight, use it (dp4a dispatch has issues
     // with non-standard strides from per-layer narrow tensors).

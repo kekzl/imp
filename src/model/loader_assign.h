@@ -27,7 +27,7 @@ inline void assign_quant(Tensor& slot, QType& slot_qtype, const Tensor& src) {
 inline void assign_quant_with_scales(Tensor& slot, QType& slot_qtype,
                                      const Tensor& src,
                                      void* scales,
-                                     void* tensor_scale = nullptr) {
+                                     float tensor_scale = 1.0f) {
     slot = src;
     slot.scales = scales;
     slot.tensor_scale = tensor_scale;

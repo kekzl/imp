@@ -207,65 +207,77 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         }
     }
 
-    // --- Phase 0: Register NVFP4 pre-quantized weights directly (no quantization needed) ---
+    // --- Phase 0: Promote NVFP4 pre-quantized weights to Tensor sidecars ---
+    //
+    // Reads the (now-deprecated) NvFP4PreQuantWeight slots populated by the
+    // SafeTensors loader and writes the corresponding metadata directly onto
+    // the main weight tensor:
+    //   weight.qtype        = QType::NVFP4
+    //   weight.scales       = nw.weight_scale.data   (FP8 E4M3 micro-scales)
+    //   weight.tensor_scale = scalar from weight_scale_2 (with the
+    //                         llm-compressor reciprocal trick pre-applied
+    //                         so the runtime can always multiply)
+    //
+    // After this loop runs, gemm_dispatch / gemv_nvfp4_kpar can read the
+    // metadata straight from the weight tensor — no map lookup, no per-call
+    // reconstruction. The legacy wcache_.nvfp4 map is gone.
     if (cfg.is_nvfp4_prequant) {
         int prequant_count = 0;
-        auto register_prequant = [&](const TransformerLayer::NvFP4PreQuantWeight& nw,
-                                      const Tensor& weight) {
-            if (!nw.valid() || !weight.data) return;
-            NvFP4QuantResult result;
-            result.packed_data = weight.data;       // FP4 packed [N, K/2]
-            result.micro_scales = nw.weight_scale.data;  // FP8 E4M3 [N, K/group_size]
-            result.N = weight.shape[0];
-            // K is packed: shape[1] stores K/2 for FP4
-            result.K = weight.shape[1] * 2;
-            // tensor_scale from weight_scale_2 (scalar FP32, may be on host or device).
-            // Modelopt: val = fp4 * micro_scale * tensor_scale  (multiply)
-            // llm-compressor: val = fp4 * micro_scale / tensor_scale (divide → store 1/x)
+        auto promote = [&](const TransformerLayer::NvFP4PreQuantWeight& nw,
+                            Tensor& w) {
+            if (!nw.valid() || !w.data) return;
+            if (!w.on_device || !nw.weight_scale.on_device) {
+                IMP_LOG_DEBUG("NVFP4 prequant: skipping %p (data_dev=%d, scale_dev=%d)",
+                              w.data, w.on_device, nw.weight_scale.on_device);
+                return;
+            }
+            float h_scale = 1.0f;
             if (nw.weight_scale_2.data) {
-                float h_scale = 1.0f;
                 if (nw.weight_scale_2.on_device) {
                     cudaMemcpy(&h_scale, nw.weight_scale_2.data, sizeof(float), cudaMemcpyDeviceToHost);
                 } else {
                     memcpy(&h_scale, nw.weight_scale_2.data, sizeof(float));
                 }
-                result.tensor_scale = cfg.is_llm_compressor_nvfp4 ? (1.0f / h_scale) : h_scale;
             }
-            // Only register if both data and scales are on device
-            if (weight.on_device && nw.weight_scale.on_device) {
-                wcache_.nvfp4[weight.data] = result;
-                prequant_count++;
-            } else {
-                IMP_LOG_DEBUG("NVFP4 prequant: skipping %p (data_dev=%d, scale_dev=%d)",
-                              weight.data, weight.on_device, nw.weight_scale.on_device);
-            }
+            // Modelopt:        val = fp4 * micro_scale * tensor_scale  (multiply)
+            // llm-compressor:  val = fp4 * micro_scale / tensor_scale  (divide → store 1/x)
+            w.qtype        = QType::NVFP4;
+            w.scales       = nw.weight_scale.data;
+            w.tensor_scale = cfg.is_llm_compressor_nvfp4 ? (1.0f / h_scale) : h_scale;
+            prequant_count++;
         };
 
+        // model_ is held as const Model* in the executor; the prequant
+        // promote step is the one place we deliberately mutate it after
+        // load (writing qtype/scales/tensor_scale onto already-uploaded
+        // weight tensors). const_cast is local and bounded to this loop.
+        Model* mut_model = const_cast<Model*>(model_);
         for (int i = 0; i < cfg.n_layers; i++) {
-            const auto& L = model_->layer(i);
+            auto& L = mut_model->layers_[i];
             // Dense weights
-            register_prequant(L.nvfp4_q, L.wq);
-            register_prequant(L.nvfp4_k, L.wk);
-            register_prequant(L.nvfp4_v, L.wv);
-            register_prequant(L.nvfp4_o, L.wo);
+            promote(L.nvfp4_q, L.wq);
+            promote(L.nvfp4_k, L.wk);
+            promote(L.nvfp4_v, L.wv);
+            promote(L.nvfp4_o, L.wo);
             // For Gemma-4, mlp.{gate,up,down}_proj weights are stored in w_{gate,up,down}_shared
             // (not w_{gate,up,down}) because weight_map.cpp routes them there. Fall back to
-            // shared weights when the primary dense-layer pointers are null.
-            register_prequant(L.nvfp4_gate, L.w_gate.data ? L.w_gate : L.w_gate_shared);
-            register_prequant(L.nvfp4_up,   L.w_up.data   ? L.w_up   : L.w_up_shared);
-            register_prequant(L.nvfp4_down, L.w_down.data ? L.w_down : L.w_down_shared);
-            // Expert weights
+            // shared when primary is null.
+            promote(L.nvfp4_gate, L.w_gate.data ? L.w_gate : L.w_gate_shared);
+            promote(L.nvfp4_up,   L.w_up.data   ? L.w_up   : L.w_up_shared);
+            promote(L.nvfp4_down, L.w_down.data ? L.w_down : L.w_down_shared);
+            // Per-expert weights
             for (size_t e = 0; e < L.expert_nvfp4_gate.size(); e++) {
-                if (e < L.expert_w_gate.size()) register_prequant(L.expert_nvfp4_gate[e], L.expert_w_gate[e]);
-                if (e < L.expert_w_up.size())   register_prequant(L.expert_nvfp4_up[e],   L.expert_w_up[e]);
-                if (e < L.expert_w_down.size()) register_prequant(L.expert_nvfp4_down[e], L.expert_w_down[e]);
+                if (e < L.expert_w_gate.size()) promote(L.expert_nvfp4_gate[e], L.expert_w_gate[e]);
+                if (e < L.expert_w_up.size())   promote(L.expert_nvfp4_up[e],   L.expert_w_up[e]);
+                if (e < L.expert_w_down.size()) promote(L.expert_nvfp4_down[e], L.expert_w_down[e]);
             }
         }
         // LM head (output projection)
-        register_prequant(model_->nvfp4_out_proj(), model_->output_proj());
+        promote(mut_model->nvfp4_out_proj_, mut_model->out_proj_);
 
         if (prequant_count > 0) {
-            IMP_LOG_INFO("NVFP4 pre-quantized: registered %d weights directly (no quantization)", prequant_count);
+            IMP_LOG_INFO("NVFP4 pre-quantized: promoted %d weights to Tensor sidecars",
+                         prequant_count);
         }
     }
 

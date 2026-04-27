@@ -64,7 +64,7 @@ Tensor Tensor::reshape(int new_ndim, const int64_t* new_shape) const {
     t.data = data;
     t.qtype = qtype;
     t.scales = scales;
-    t.tensor_scale = tensor_scale;
+    t.tensor_scale = tensor_scale;  // copies the float by value
     t.ndim = new_ndim;
     t.on_device = on_device;
     t.kind = kind;
