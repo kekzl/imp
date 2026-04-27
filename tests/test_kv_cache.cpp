@@ -171,19 +171,19 @@ TEST(KVCacheTest, KVCacheConstruction) {
     const int head_dim   = 64;
     const int max_blocks = 8;
 
-    KVCache cache(n_layers, n_kv_heads, head_dim, DType::FP16, max_blocks);
+    KVCache cache(n_layers, n_kv_heads, head_dim, QType::F16, max_blocks);
 
     EXPECT_EQ(cache.n_layers(), n_layers);
     EXPECT_EQ(cache.n_kv_heads(), n_kv_heads);
     EXPECT_EQ(cache.head_dim(), head_dim);
-    EXPECT_EQ(cache.dtype(), DType::FP16);
+    EXPECT_EQ(cache.qtype(), QType::F16);
     EXPECT_EQ(cache.total_blocks(), max_blocks);
     EXPECT_EQ(cache.num_free_blocks(), max_blocks);
 
     // block_bytes = kKVBlockSize * n_kv_heads * head_dim * dtype_size(FP16)
     //            = 16 * 4 * 64 * 2 = 8192
     size_t expected_block_bytes =
-        static_cast<size_t>(kKVBlockSize) * n_kv_heads * head_dim * dtype_size(DType::FP16);
+        static_cast<size_t>(kKVBlockSize) * n_kv_heads * head_dim * dtype_size(QType::F16);
     EXPECT_EQ(cache.block_bytes(), expected_block_bytes);
     EXPECT_EQ(expected_block_bytes, 8192u);
 }
@@ -193,7 +193,7 @@ TEST(KVCacheTest, KVCacheBlockAllocation) {
     SKIP_IF_NO_CUDA();
 
     const int max_blocks = 8;
-    KVCache cache(2, 4, 64, DType::FP16, max_blocks);
+    KVCache cache(2, 4, 64, QType::F16, max_blocks);
 
     // Allocate all 8 blocks and verify IDs are 0..7 in order.
     std::vector<int> ids;
@@ -218,7 +218,7 @@ TEST(KVCacheTest, KVCacheBlockFree) {
     SKIP_IF_NO_CUDA();
 
     const int max_blocks = 8;
-    KVCache cache(2, 4, 64, DType::FP16, max_blocks);
+    KVCache cache(2, 4, 64, QType::F16, max_blocks);
 
     // Allocate 4 blocks.
     std::vector<int> ids;
@@ -243,7 +243,7 @@ TEST(KVCacheTest, KVCacheRefCounting) {
     SKIP_IF_NO_CUDA();
 
     const int max_blocks = 8;
-    KVCache cache(2, 4, 64, DType::FP16, max_blocks);
+    KVCache cache(2, 4, 64, QType::F16, max_blocks);
 
     int block = cache.allocate_block();
     ASSERT_GE(block, 0);
@@ -275,7 +275,7 @@ TEST(KVCacheTest, KVCachePointers) {
     const int head_dim   = 64;
     const int max_blocks = 8;
 
-    KVCache cache(n_layers, n_kv_heads, head_dim, DType::FP16, max_blocks);
+    KVCache cache(n_layers, n_kv_heads, head_dim, QType::F16, max_blocks);
     size_t bb = cache.block_bytes();
 
     int b0 = cache.allocate_block();
@@ -345,7 +345,7 @@ TEST(KVCacheTest, KVCacheReadWriteData) {
     const int head_dim   = 32;
     const int max_blocks = 4;
 
-    KVCache cache(n_layers, n_kv_heads, head_dim, DType::FP32, max_blocks);
+    KVCache cache(n_layers, n_kv_heads, head_dim, QType::F32, max_blocks);
     size_t bb = cache.block_bytes();
 
     int block = cache.allocate_block();
@@ -407,7 +407,7 @@ static std::unique_ptr<KVCacheManager> MakeManager(int max_blocks,
                                                     int n_layers   = 2,
                                                     int n_kv_heads = 4,
                                                     int head_dim   = 64,
-                                                    DType dtype    = DType::FP16) {
+                                                    QType dtype    = QType::F16) {
     auto cache = std::make_unique<KVCache>(n_layers, n_kv_heads, head_dim,
                                            dtype, max_blocks);
     return std::make_unique<KVCacheManager>(std::move(cache));

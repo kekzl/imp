@@ -13,15 +13,6 @@ enum class FFNActivation { SWIGLU, GEGLU, RELU_SQR };
 // Norm placement relative to residual connection
 enum class NormPlacement { PRE_NORM, POST_NORM };
 
-// GGML quantization type stored alongside tensor for dequant dispatch
-enum class GGMLQuantType : uint32_t {
-    NONE = 0,
-    F32 = 0, F16 = 1, Q4_0 = 2, Q4_1 = 3,
-    Q5_0 = 6, Q5_1 = 7, Q8_0 = 8, Q8_1 = 9,
-    Q2_K = 10, Q3_K = 11, Q4_K = 12, Q5_K = 13,
-    Q6_K = 14, Q8_K = 15, BF16 = 30, MXFP4 = 31,
-};
-
 struct ModelConfig {
     ModelArch arch = ModelArch::GENERIC;
     int n_layers = 0, n_heads = 0, n_kv_heads = 0;
@@ -112,15 +103,15 @@ struct TransformerLayer {
     // Packed expert tensors (3D: [n_experts, rows, cols]) loaded from GGUF *_exps
     // These are temporary: weight_upload slices them into the per-expert vectors above.
     Tensor expert_gate_packed, expert_up_packed, expert_down_packed;
-    GGMLQuantType expert_gate_qtype = GGMLQuantType::NONE;
-    GGMLQuantType expert_up_qtype   = GGMLQuantType::NONE;
-    GGMLQuantType expert_down_qtype = GGMLQuantType::NONE;
+    QType expert_gate_qtype = QType::NONE;
+    QType expert_up_qtype   = QType::NONE;
+    QType expert_down_qtype = QType::NONE;
 
     // Shared expert (always-active, e.g. Nemotron/DeepSeek)
     Tensor w_up_shared, w_down_shared, w_gate_shared;
-    GGMLQuantType w_up_shared_qtype   = GGMLQuantType::NONE;
-    GGMLQuantType w_down_shared_qtype = GGMLQuantType::NONE;
-    GGMLQuantType w_gate_shared_qtype = GGMLQuantType::NONE;
+    QType w_up_shared_qtype   = QType::NONE;
+    QType w_down_shared_qtype = QType::NONE;
+    QType w_gate_shared_qtype = QType::NONE;
 
     // Qwen3-Next / Qwen3.6 shared-expert input gate: a [d_model] FP32 projection
     // that, after sigmoid, produces a per-token scalar used to gate the shared
@@ -133,13 +124,13 @@ struct TransformerLayer {
     Tensor w_gate_scales, w_up_scales, w_down_scales;
 
     // Store original GGML quant types for dequant dispatch
-    GGMLQuantType wq_qtype = GGMLQuantType::NONE;
-    GGMLQuantType wk_qtype = GGMLQuantType::NONE;
-    GGMLQuantType wv_qtype = GGMLQuantType::NONE;
-    GGMLQuantType wo_qtype = GGMLQuantType::NONE;
-    GGMLQuantType w_gate_qtype = GGMLQuantType::NONE;
-    GGMLQuantType w_up_qtype = GGMLQuantType::NONE;
-    GGMLQuantType w_down_qtype = GGMLQuantType::NONE;
+    QType wq_qtype = QType::NONE;
+    QType wk_qtype = QType::NONE;
+    QType wv_qtype = QType::NONE;
+    QType wo_qtype = QType::NONE;
+    QType w_gate_qtype = QType::NONE;
+    QType w_up_qtype = QType::NONE;
+    QType w_down_qtype = QType::NONE;
 
     // WeightRegistry indices (populated by pre_dequant_weights, Phase 2+).
     // kInvalidTensorID means the corresponding Tensor is absent on this layer
@@ -194,16 +185,16 @@ struct TransformerLayer {
     Tensor ssm_dt_b;                      // dt bias
     Tensor ssm_a, ssm_d;                  // A (log) and D (skip connection)
     Tensor ssm_norm_w;                    // Group RMSNorm weight
-    GGMLQuantType ssm_in_qtype = GGMLQuantType::NONE;
-    GGMLQuantType ssm_out_qtype = GGMLQuantType::NONE;
+    QType ssm_in_qtype = QType::NONE;
+    QType ssm_out_qtype = QType::NONE;
 
     // Gated DeltaNet (GDN) weights (Qwen3.5 hybrid)
     Tensor gdn_gate;     // [d_model, inner_size] output gating projection
     Tensor gdn_alpha;    // [d_model, n_gdn_heads] delta rule decay
     Tensor gdn_beta;     // [d_model, n_gdn_heads] delta rule learning rate
-    GGMLQuantType gdn_gate_qtype  = GGMLQuantType::NONE;
-    GGMLQuantType gdn_alpha_qtype = GGMLQuantType::NONE;
-    GGMLQuantType gdn_beta_qtype  = GGMLQuantType::NONE;
+    QType gdn_gate_qtype  = QType::NONE;
+    QType gdn_alpha_qtype = QType::NONE;
+    QType gdn_beta_qtype  = QType::NONE;
 
     // Router bias (Nemotron MoE)
     Tensor moe_router_bias;

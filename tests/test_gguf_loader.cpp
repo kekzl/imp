@@ -38,34 +38,34 @@ TEST(GgufLoaderTest, LoadNonexistentFile) {
 
 TEST(GgufLoaderTest, GGMLTypeHelpers) {
     // Block sizes
-    EXPECT_EQ(ggml_blck_size(GGMLType::F32), 1);
-    EXPECT_EQ(ggml_blck_size(GGMLType::F16), 1);
-    EXPECT_EQ(ggml_blck_size(GGMLType::Q4_0), 32);
-    EXPECT_EQ(ggml_blck_size(GGMLType::Q8_0), 32);
-    EXPECT_EQ(ggml_blck_size(GGMLType::Q4_K), 256);
+    EXPECT_EQ(gguf_blck_size(GgufWireType::F32), 1);
+    EXPECT_EQ(gguf_blck_size(GgufWireType::F16), 1);
+    EXPECT_EQ(gguf_blck_size(GgufWireType::Q4_0), 32);
+    EXPECT_EQ(gguf_blck_size(GgufWireType::Q8_0), 32);
+    EXPECT_EQ(gguf_blck_size(GgufWireType::Q4_K), 256);
 
     // Type sizes
-    EXPECT_EQ(ggml_type_size(GGMLType::F32), 4u);
-    EXPECT_EQ(ggml_type_size(GGMLType::F16), 2u);
-    EXPECT_EQ(ggml_type_size(GGMLType::BF16), 2u);
-    EXPECT_EQ(ggml_type_size(GGMLType::Q4_0), 18u);
-    EXPECT_EQ(ggml_type_size(GGMLType::Q8_0), 34u);
+    EXPECT_EQ(gguf_type_size(GgufWireType::F32), 4u);
+    EXPECT_EQ(gguf_type_size(GgufWireType::F16), 2u);
+    EXPECT_EQ(gguf_type_size(GgufWireType::BF16), 2u);
+    EXPECT_EQ(gguf_type_size(GgufWireType::Q4_0), 18u);
+    EXPECT_EQ(gguf_type_size(GgufWireType::Q8_0), 34u);
 
     // Row size
-    EXPECT_EQ(ggml_row_size(GGMLType::F32, 4096), 4096u * 4);
-    EXPECT_EQ(ggml_row_size(GGMLType::F16, 4096), 4096u * 2);
+    EXPECT_EQ(gguf_row_size(GgufWireType::F32, 4096), 4096u * 4);
+    EXPECT_EQ(gguf_row_size(GgufWireType::F16, 4096), 4096u * 2);
     // Q4_0: 4096 elements / 32 elements_per_block * 18 bytes_per_block
-    EXPECT_EQ(ggml_row_size(GGMLType::Q4_0, 4096), (4096u / 32) * 18);
+    EXPECT_EQ(gguf_row_size(GgufWireType::Q4_0, 4096), (4096u / 32) * 18);
 
     // Type names
-    EXPECT_STREQ(ggml_type_name(GGMLType::F32), "F32");
-    EXPECT_STREQ(ggml_type_name(GGMLType::Q4_K), "Q4_K");
+    EXPECT_STREQ(gguf_type_name(GgufWireType::F32), "F32");
+    EXPECT_STREQ(gguf_type_name(GgufWireType::Q4_K), "Q4_K");
 
-    // DType conversion
-    EXPECT_EQ(ggml_type_to_dtype(GGMLType::F32), DType::FP32);
-    EXPECT_EQ(ggml_type_to_dtype(GGMLType::F16), DType::FP16);
-    EXPECT_EQ(ggml_type_to_dtype(GGMLType::BF16), DType::BF16);
-    EXPECT_EQ(ggml_type_to_dtype(GGMLType::Q4_0), DType::INT4);
+    // QType conversion
+    EXPECT_EQ(gguf_type_to_qtype(GgufWireType::F32), QType::F32);
+    EXPECT_EQ(gguf_type_to_qtype(GgufWireType::F16), QType::F16);
+    EXPECT_EQ(gguf_type_to_qtype(GgufWireType::BF16), QType::BF16);
+    EXPECT_EQ(gguf_type_to_qtype(GgufWireType::Q4_0), QType::INT4);
 }
 
 TEST(GgufLoaderTest, InvalidMagic) {

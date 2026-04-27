@@ -68,7 +68,7 @@ static std::unique_ptr<Model> make_bench_model(
             buf[i] = float_to_fp16(dist(rng));
         }
         int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
-        return Tensor(buf, DType::FP16, 2, shape, false);
+        return Tensor(buf, QType::F16, 2, shape, false);
     };
 
     // Helper: create 1D FP16 norm weight on host (all 1.0).
@@ -77,22 +77,22 @@ static std::unique_ptr<Model> make_bench_model(
         uint16_t one = float_to_fp16(1.0f);
         for (int i = 0; i < dim; ++i) buf[i] = one;
         int64_t shape[4] = {static_cast<int64_t>(dim), 0, 0, 0};
-        return Tensor(buf, DType::FP16, 1, shape, false);
+        return Tensor(buf, QType::F16, 1, shape, false);
     };
 
     std::mt19937 rng(42);
 
     // Token embedding [vocab_size, d_model]
     model->tok_emb_ = make_fp16_weight(vocab_size, d_model, rng);
-    model->tok_emb_qtype_ = GGMLQuantType::F16;
+    model->tok_emb_qtype_ = QType::F16;
 
     // Output norm [d_model]
     model->out_norm_ = make_norm_weight(d_model);
-    model->out_norm_qtype_ = GGMLQuantType::F16;
+    model->out_norm_qtype_ = QType::F16;
 
     // Output projection [vocab_size, d_model]
     model->out_proj_ = make_fp16_weight(vocab_size, d_model, rng);
-    model->out_proj_qtype_ = GGMLQuantType::F16;
+    model->out_proj_qtype_ = QType::F16;
 
     // Layers
     model->layers_.resize(n_layers);
@@ -101,25 +101,25 @@ static std::unique_ptr<Model> make_bench_model(
         auto& ly = model->layers_[l];
 
         ly.wq = make_fp16_weight(n_heads * head_dim, d_model, rng);
-        ly.wq_qtype = GGMLQuantType::F16;
+        ly.wq_qtype = QType::F16;
 
         ly.wk = make_fp16_weight(n_kv_heads * head_dim, d_model, rng);
-        ly.wk_qtype = GGMLQuantType::F16;
+        ly.wk_qtype = QType::F16;
 
         ly.wv = make_fp16_weight(n_kv_heads * head_dim, d_model, rng);
-        ly.wv_qtype = GGMLQuantType::F16;
+        ly.wv_qtype = QType::F16;
 
         ly.wo = make_fp16_weight(d_model, n_heads * head_dim, rng);
-        ly.wo_qtype = GGMLQuantType::F16;
+        ly.wo_qtype = QType::F16;
 
         ly.w_gate = make_fp16_weight(d_ff, d_model, rng);
-        ly.w_gate_qtype = GGMLQuantType::F16;
+        ly.w_gate_qtype = QType::F16;
 
         ly.w_up = make_fp16_weight(d_ff, d_model, rng);
-        ly.w_up_qtype = GGMLQuantType::F16;
+        ly.w_up_qtype = QType::F16;
 
         ly.w_down = make_fp16_weight(d_model, d_ff, rng);
-        ly.w_down_qtype = GGMLQuantType::F16;
+        ly.w_down_qtype = QType::F16;
 
         ly.attn_norm = make_norm_weight(d_model);
         ly.ffn_norm = make_norm_weight(d_model);
@@ -165,14 +165,14 @@ void bench_e2e() {
     // Build and upload model
     auto model = make_bench_model(d_model, d_ff, n_heads, n_kv_heads,
                                   n_layers, vocab_size, max_seq_len);
-    if (!model->upload_weights_gpu(DType::FP16, nullptr)) {
+    if (!model->upload_weights_gpu(QType::F16, nullptr)) {
         printf("bench_e2e: failed to upload weights to GPU\n");
         return;
     }
 
     // Initialize executor
     GraphExecutor executor;
-    if (!executor.init(*model, DType::FP16, false)) {
+    if (!executor.init(*model, QType::F16, false)) {
         printf("bench_e2e: failed to initialize GraphExecutor\n");
         return;
     }

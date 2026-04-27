@@ -157,7 +157,7 @@ uint64_t val_uint(const VGGUFValue& v) {
 
 // Upload raw tensor data to GPU as FP16.
 // Handles F32 -> FP16 conversion and F16 passthrough.
-bool upload_tensor_fp16(const void* src, GGMLType type,
+bool upload_tensor_fp16(const void* src, GgufWireType type,
                         int64_t n_elements, void** d_out,
                         std::vector<void*>& gpu_allocs) {
     size_t fp16_bytes = static_cast<size_t>(n_elements) * sizeof(half);
@@ -168,9 +168,9 @@ bool upload_tensor_fp16(const void* src, GGMLType type,
     }
     gpu_allocs.push_back(d_ptr);
 
-    if (type == GGMLType::F16) {
+    if (type == GgufWireType::F16) {
         IMP_CUDA_CHECK_LOG(cudaMemcpy(d_ptr, src, fp16_bytes, cudaMemcpyHostToDevice));
-    } else if (type == GGMLType::F32) {
+    } else if (type == GgufWireType::F32) {
         // Convert F32 -> F16 on host, then upload
         const float* f32 = static_cast<const float*>(src);
         std::vector<half> h_fp16(static_cast<size_t>(n_elements));
@@ -178,7 +178,7 @@ bool upload_tensor_fp16(const void* src, GGMLType type,
             h_fp16[i] = __float2half(f32[i]);
         }
         IMP_CUDA_CHECK_LOG(cudaMemcpy(d_ptr, h_fp16.data(), fp16_bytes, cudaMemcpyHostToDevice));
-    } else if (type == GGMLType::BF16) {
+    } else if (type == GgufWireType::BF16) {
         // Convert BF16 -> FP16 on host
         const uint16_t* bf16 = static_cast<const uint16_t*>(src);
         std::vector<half> h_fp16(static_cast<size_t>(n_elements));
@@ -269,7 +269,7 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
         std::string name;
         uint32_t n_dims;
         int64_t dims[4];
-        GGMLType type;
+        GgufWireType type;
         uint64_t offset;
     };
 
@@ -286,7 +286,7 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
             reader.read_u64();
         for (uint32_t d = info.n_dims; d < 4; d++)
             info.dims[d] = 1;
-        info.type = static_cast<GGMLType>(reader.read_u32());
+        info.type = static_cast<GgufWireType>(reader.read_u32());
         info.offset = reader.read_u64();
         tensor_infos.push_back(std::move(info));
     }
@@ -380,7 +380,7 @@ std::unique_ptr<VisionModel> load_vision_gguf(const std::string& path) {
         }
 
         // Create Tensor (on_device = true)
-        Tensor t(d_ptr, DType::FP16, static_cast<int>(info.n_dims), shape, true);
+        Tensor t(d_ptr, QType::F16, static_cast<int>(info.n_dims), shape, true);
 
         const auto& name = info.name;
 

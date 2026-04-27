@@ -226,9 +226,9 @@ static uint16_t float_to_fp16(float val) {
 // For F32: converts to FP16 on host, uploads. scales_out stays empty.
 // ---------------------------------------------------------------------------
 
-static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
+static bool upload_weight(Tensor& weight, QType qtype,
                           Tensor& scales_out,
-                          DType compute_dtype,
+                          QType compute_dtype,
                           cudaStream_t stream,
                           std::vector<void*>& gpu_allocs,
                           bool raw_quant = true) {
@@ -243,7 +243,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
     // Split on CPU: upload only the 16-byte data portion to GPU.
     // Saves ~6% VRAM (1 byte/block scale overhead eliminated from GPU buffer).
     // Scales are extracted to a separate host buffer, uploaded in executor_workspace.
-    if (qtype == GGMLQuantType::MXFP4) {
+    if (qtype == QType::MXFP4) {
         if (weight.ndim < 2) return false;
         int64_t N = weight.shape[0];
         int64_t K = weight.shape[1];
@@ -268,14 +268,14 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         h2d_copy(d_data, h_buf.data(), total_bytes, stream);
         gpu_allocs.push_back(d_data);
         int64_t new_shape[4] = {N, K, 0, 0};
-        weight = Tensor(d_data, DType::INT4, 2, new_shape, true);
+        weight = Tensor(d_data, QType::INT4, 2, new_shape, true);
         IMP_LOG_DEBUG("  MXFP4 upload: [%lld, %lld] %.2f MiB (data+scales split)",
                      (long long)N, (long long)K, total_bytes / (1024.0 * 1024.0));
         return true;
     }
 
     // ---- Q4_0 ----
-    if (qtype == GGMLQuantType::Q4_0) {
+    if (qtype == QType::Q4_0) {
         if (weight.ndim < 2) {
             IMP_LOG_WARN("Q4_0 weight has < 2 dims, skipping upload");
             return false;
@@ -287,7 +287,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         // Raw upload: keep quantized bytes on GPU for dp4a GEMV decode path.
         // Prefill uses fp16_cache or on-the-fly dequant_gpu → cuBLAS GEMM.
         if (raw_quant) {
-            size_t raw_bytes = static_cast<size_t>(N) * ggml_quant_row_bytes(qtype, K);
+            size_t raw_bytes = static_cast<size_t>(N) * qtype_row_bytes(qtype, K);
             void* d_data = nullptr;
             checked_cuda_malloc(&d_data, raw_bytes);
             if (!d_data) return false;
@@ -296,7 +296,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
 
             // Logical shape [N, K] — qtype tells executor data is raw quantized
             int64_t new_shape[4] = {N, K, 0, 0};
-            weight = Tensor(d_data, DType::FP16, 2, new_shape, true);
+            weight = Tensor(d_data, QType::F16, 2, new_shape, true);
             return true;
         }
 
@@ -347,17 +347,17 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
 
         // Update weight tensor to point to packed nibbles on GPU
         int64_t new_shape[4] = {N, static_cast<int64_t>(half_K), 0, 0};
-        weight = Tensor(d_nibbles, DType::INT4, 2, new_shape, true);
+        weight = Tensor(d_nibbles, QType::INT4, 2, new_shape, true);
 
         // Set scales output
         int64_t scales_shape[4] = {N, static_cast<int64_t>(num_groups), 0, 0};
-        scales_out = Tensor(d_scales, DType::FP16, 2, scales_shape, true);
+        scales_out = Tensor(d_scales, QType::F16, 2, scales_shape, true);
 
         return true;
     }
 
     // ---- Q8_0 ----
-    if (qtype == GGMLQuantType::Q8_0) {
+    if (qtype == QType::Q8_0) {
         if (weight.ndim < 2) {
             IMP_LOG_WARN("Q8_0 weight has < 2 dims, skipping upload");
             return false;
@@ -368,7 +368,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
 
         // Raw upload: keep quantized bytes on GPU, dequant on-the-fly in executor
         if (raw_quant) {
-            size_t raw_bytes = static_cast<size_t>(N) * ggml_quant_row_bytes(qtype, K);
+            size_t raw_bytes = static_cast<size_t>(N) * qtype_row_bytes(qtype, K);
             void* d_data = nullptr;
             checked_cuda_malloc(&d_data, raw_bytes);
             if (!d_data) return false;
@@ -377,7 +377,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
 
             // Logical shape [N, K] — qtype tells executor data is raw quantized
             int64_t new_shape[4] = {N, K, 0, 0};
-            weight = Tensor(d_data, DType::FP16, 2, new_shape, true);
+            weight = Tensor(d_data, QType::F16, 2, new_shape, true);
             return true;
         }
 
@@ -414,12 +414,12 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         gpu_allocs.push_back(d_data);
 
         int64_t new_shape[4] = {N, K, 0, 0};
-        weight = Tensor(d_data, DType::FP16, 2, new_shape, true);
+        weight = Tensor(d_data, QType::F16, 2, new_shape, true);
         return true;
     }
 
     // ---- Q6_K ----
-    if (qtype == GGMLQuantType::Q6_K) {
+    if (qtype == QType::Q6_K) {
         if (weight.ndim < 2) {
             IMP_LOG_WARN("Q6_K weight has < 2 dims, skipping upload");
             return false;
@@ -430,7 +430,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
 
         // Raw upload: keep quantized bytes on GPU, dequant on-the-fly in executor
         if (raw_quant) {
-            size_t raw_bytes = static_cast<size_t>(N) * ggml_quant_row_bytes(qtype, K);
+            size_t raw_bytes = static_cast<size_t>(N) * qtype_row_bytes(qtype, K);
             void* d_data = nullptr;
             checked_cuda_malloc(&d_data, raw_bytes);
             if (!d_data) return false;
@@ -438,7 +438,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
             gpu_allocs.push_back(d_data);
 
             int64_t new_shape[4] = {N, K, 0, 0};
-            weight = Tensor(d_data, DType::FP16, 2, new_shape, true);
+            weight = Tensor(d_data, QType::F16, 2, new_shape, true);
             return true;
         }
 
@@ -489,7 +489,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         gpu_allocs.push_back(d_data);
 
         int64_t new_shape[4] = {N, K, 0, 0};
-        weight = Tensor(d_data, DType::FP16, 2, new_shape, true);
+        weight = Tensor(d_data, QType::F16, 2, new_shape, true);
         return true;
     }
 
@@ -501,7 +501,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
 
         if (raw_quant) {
             // Upload raw quantized bytes — executor dequants on-the-fly
-            size_t raw_bytes = static_cast<size_t>(N) * ggml_quant_row_bytes(qtype, K);
+            size_t raw_bytes = static_cast<size_t>(N) * qtype_row_bytes(qtype, K);
             void* d_data = nullptr;
             checked_cuda_malloc(&d_data, raw_bytes);
             if (!d_data) return false;
@@ -515,11 +515,11 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
             IMP_LOG_DEBUG("Upload raw qtype=%u [%ldx%ld] %zu bytes -> GPU %p",
                           (unsigned)qtype, (long)N, (long)K, raw_bytes, d_data);
             int64_t new_shape[4] = {N, K, 0, 0};
-            weight = Tensor(d_data, DType::FP16, 2, new_shape, true);
+            weight = Tensor(d_data, QType::F16, 2, new_shape, true);
             return true;
         } else {
             // Dequant on GPU: upload raw → dequant to FP16 → free raw
-            size_t raw_bytes = static_cast<size_t>(N) * ggml_quant_row_bytes(qtype, K);
+            size_t raw_bytes = static_cast<size_t>(N) * qtype_row_bytes(qtype, K);
             void* d_raw = nullptr;
             checked_cuda_malloc(&d_raw, raw_bytes);
             if (!d_raw) return false;
@@ -536,13 +536,13 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
             IMP_CUDA_CHECK_LOG(cudaFree(d_raw));
             gpu_allocs.push_back(d_fp16);
 
-            weight = Tensor(d_fp16, DType::FP16, weight.ndim, weight.shape, true);
+            weight = Tensor(d_fp16, QType::F16, weight.ndim, weight.shape, true);
             return true;
         }
     }
 
     // ---- F16: direct upload ----
-    if (qtype == GGMLQuantType::F16) {
+    if (qtype == QType::F16) {
         size_t bytes = weight.nbytes();
         void* d_data = nullptr;
         checked_cuda_malloc(&d_data, bytes);
@@ -555,7 +555,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         return true;
     }
     // ---- BF16 (GGUF): convert to FP16 on host, then upload ----
-    if (qtype == GGMLQuantType::BF16) {
+    if (qtype == QType::BF16) {
         int64_t n_elem = weight.numel();
         const uint16_t* src = static_cast<const uint16_t*>(weight.data);
         std::vector<uint16_t> h_fp16(static_cast<size_t>(n_elem));
@@ -571,14 +571,14 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         if (!d_data) return false;
         h2d_copy(d_data, h_fp16.data(), bytes, stream);
         gpu_allocs.push_back(d_data);
-        weight = Tensor(d_data, DType::FP16, weight.ndim, weight.shape, true);
+        weight = Tensor(d_data, QType::F16, weight.ndim, weight.shape, true);
         return true;
     }
 
     // ---- F32: convert to FP16 on host, then upload ----
-    if (qtype == GGMLQuantType::F32 || qtype == GGMLQuantType::NONE) {
+    if (qtype == QType::F32 || qtype == QType::NONE) {
         // BF16 (SafeTensors non-quantized weights): convert to FP16
-        if (weight.dtype == DType::BF16) {
+        if (weight.qtype == QType::BF16) {
             int64_t n_elem = weight.numel();
             const uint16_t* src = static_cast<const uint16_t*>(weight.data);
             std::vector<uint16_t> h_fp16(static_cast<size_t>(n_elem));
@@ -595,11 +595,11 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
             if (!d_data) return false;
             h2d_copy(d_data, h_fp16.data(), bytes, stream);
             gpu_allocs.push_back(d_data);
-            weight = Tensor(d_data, DType::FP16, weight.ndim, weight.shape, true);
+            weight = Tensor(d_data, QType::F16, weight.ndim, weight.shape, true);
             return true;
         }
         // NONE maps to F32 (both are enum value 0)
-        if (weight.dtype != DType::FP32) {
+        if (weight.qtype != QType::F32) {
             // If it's not actually FP32 data (e.g. INT8/U8 packed FP4), direct upload
             size_t bytes = weight.nbytes();
             void* d_data = nullptr;
@@ -627,7 +627,7 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
         h2d_copy(d_data, h_fp16.data(), bytes, stream);
         gpu_allocs.push_back(d_data);
 
-        weight = Tensor(d_data, DType::FP16, weight.ndim, weight.shape, true);
+        weight = Tensor(d_data, QType::F16, weight.ndim, weight.shape, true);
         return true;
     }
 
@@ -642,8 +642,8 @@ static bool upload_weight(Tensor& weight, GGMLQuantType qtype,
 // ---------------------------------------------------------------------------
 
 static bool upload_unquantized_weight(Tensor& weight,
-                                      GGMLQuantType qtype,
-                                      DType compute_dtype,
+                                      QType qtype,
+                                      QType compute_dtype,
                                       cudaStream_t stream,
                                       std::vector<void*>& gpu_allocs,
                                       bool raw_quant = true) {
@@ -660,9 +660,9 @@ size_t Model::estimate_expert_bytes() const {
     size_t total = 0;
     for (int i = 0; i < n_layers(); ++i) {
         const TransformerLayer& L = layers_[i];
-        auto add_packed = [&](const Tensor& p, GGMLQuantType qt) {
+        auto add_packed = [&](const Tensor& p, QType qt) {
             if (!p.data || p.ndim < 3 || !dequant_gpu_supported(qt)) return;
-            size_t row_bytes = ggml_quant_row_bytes(qt, p.shape[2]);
+            size_t row_bytes = qtype_row_bytes(qt, p.shape[2]);
             total += static_cast<size_t>(p.shape[0]) * p.shape[1] * row_bytes;
         };
         add_packed(L.expert_gate_packed, L.expert_gate_qtype);
@@ -677,7 +677,7 @@ size_t Model::estimate_expert_bytes() const {
 // Passed by reference to avoid >8 params on every helper call.
 // ---------------------------------------------------------------------------
 struct UploadCtx {
-    DType compute_dtype;
+    QType compute_dtype;
     cudaStream_t stream;
     std::vector<void*>& gpu_allocs;
     std::vector<void*>& host_pinned;
@@ -709,7 +709,7 @@ struct UploadCtx {
 #define UPLOAD_UNQUANT_OR_FAIL(tensor, msg, layer_idx, ctx) \
     do { \
         if ((tensor).data && !(tensor).on_device) { \
-            if (!upload_unquantized_weight((tensor), GGMLQuantType::NONE, \
+            if (!upload_unquantized_weight((tensor), QType::NONE, \
                                            (ctx).compute_dtype, (ctx).stream, \
                                            (ctx).gpu_allocs)) { \
                 IMP_LOG_ERROR("Failed to upload " msg " for layer %d", (layer_idx)); \
@@ -722,9 +722,9 @@ struct UploadCtx {
 // upload_embeddings_and_output: token embedding, output norm, output projection
 // ---------------------------------------------------------------------------
 static bool upload_embeddings_and_output(
-        Tensor& tok_emb, GGMLQuantType& tok_emb_qtype,
-        Tensor& out_norm, GGMLQuantType out_norm_qtype,
-        Tensor& out_proj, GGMLQuantType& out_proj_qtype,
+        Tensor& tok_emb, QType& tok_emb_qtype,
+        Tensor& out_norm, QType out_norm_qtype,
+        Tensor& out_proj, QType& out_proj_qtype,
         const UploadCtx& ctx) {
     // Upload token embedding
     // Embedding lookup only supports Q8_0/Q6_K natively; other quant types
@@ -732,8 +732,8 @@ static bool upload_embeddings_and_output(
     // embedding gather works.
     const void* tok_emb_host_ptr = tok_emb.data;  // save for weight-tying check below
     if (tok_emb.data && !tok_emb.on_device) {
-        bool emb_raw = (tok_emb_qtype == GGMLQuantType::Q8_0 ||
-                        tok_emb_qtype == GGMLQuantType::Q6_K);
+        bool emb_raw = (tok_emb_qtype == QType::Q8_0 ||
+                        tok_emb_qtype == QType::Q6_K);
         if (!upload_unquantized_weight(tok_emb, tok_emb_qtype, ctx.compute_dtype,
                                        ctx.stream, ctx.gpu_allocs, emb_raw)) {
             IMP_LOG_ERROR("Failed to upload token embedding");
@@ -741,8 +741,8 @@ static bool upload_embeddings_and_output(
         }
         // If we dequanted to FP16, update the qtype so embedding_lookup
         // uses the FP16 path.
-        if (!emb_raw && tok_emb.dtype == DType::FP16) {
-            tok_emb_qtype = GGMLQuantType::F16;
+        if (!emb_raw && tok_emb.qtype == QType::F16) {
+            tok_emb_qtype = QType::F16;
         }
     }
 
@@ -769,9 +769,9 @@ static bool upload_embeddings_and_output(
             out_proj = tok_emb;
             IMP_LOG_INFO("Output projection shares GPU data with token embedding (weight tying)");
         } else {
-            bool raw_ok = (out_proj_qtype == GGMLQuantType::Q6_K ||
-                           out_proj_qtype == GGMLQuantType::Q8_0 ||
-                           out_proj_qtype == GGMLQuantType::Q4_0);
+            bool raw_ok = (out_proj_qtype == QType::Q6_K ||
+                           out_proj_qtype == QType::Q8_0 ||
+                           out_proj_qtype == QType::Q4_0);
             if (!upload_unquantized_weight(out_proj, out_proj_qtype, ctx.compute_dtype,
                                            ctx.stream, ctx.gpu_allocs,
                                            /*raw_quant=*/raw_ok)) {
@@ -781,8 +781,8 @@ static bool upload_embeddings_and_output(
             // Mirror tok_emb: if upload host-dequanted to FP16, update the qtype
             // so downstream LM-head dispatch uses the FP16 path instead of
             // re-interpreting the FP16 bytes as the original quant block format.
-            if (!raw_ok && out_proj.dtype == DType::FP16) {
-                out_proj_qtype = GGMLQuantType::F16;
+            if (!raw_ok && out_proj.qtype == QType::F16) {
+                out_proj_qtype = QType::F16;
             }
         }
     }
@@ -880,7 +880,7 @@ static bool upload_gptq_weight(const TransformerLayer::GPTQWeight& gptq,
 
     // 8. Set output tensor
     int64_t out_shape[4] = {N, K, 0, 0};
-    output = Tensor(d_out, DType::FP16, 2, out_shape, true);
+    output = Tensor(d_out, QType::F16, 2, out_shape, true);
     gpu_allocs.push_back(d_out);
 
     return true;
@@ -923,7 +923,7 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i,
     // Attention biases (Qwen2-style Q/K/V biases, F32)
     for (auto* bias : {&L.q_bias, &L.k_bias, &L.v_bias}) {
         if (bias->data && !bias->on_device) {
-            if (!upload_unquantized_weight(*bias, GGMLQuantType::NONE,
+            if (!upload_unquantized_weight(*bias, QType::NONE,
                                            ctx.compute_dtype, ctx.stream,
                                            ctx.gpu_allocs)) {
                 IMP_LOG_ERROR("Failed to upload attention bias for layer %d", i);
@@ -938,7 +938,7 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i,
                        &L.ffn_gate_inp_scale, &L.layer_out_scale,
                        &L.expert_down_scale}) {
         if (norm->data && !norm->on_device) {
-            if (!upload_unquantized_weight(*norm, GGMLQuantType::NONE,
+            if (!upload_unquantized_weight(*norm, QType::NONE,
                                            ctx.compute_dtype, ctx.stream,
                                            ctx.gpu_allocs)) {
                 IMP_LOG_ERROR("Failed to upload post-layer norm for layer %d", i);
@@ -950,7 +950,7 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i,
     // rope_freqs: upload as raw FP32 (NOT converted to FP16).
     // The RoPE kernel reads these as float* — FP16 conversion would corrupt them.
     if (L.rope_freqs.data && !L.rope_freqs.on_device &&
-        L.rope_freqs.dtype == DType::FP32) {
+        L.rope_freqs.qtype == QType::F32) {
         IMP_LOG_INFO("Layer %d: uploading rope_freqs as raw FP32 (%lld elements)",
                      i, L.rope_freqs.numel());
         size_t bytes = L.rope_freqs.nbytes();
@@ -1026,7 +1026,7 @@ static bool upload_layer_ffn_weights(TransformerLayer& L, int i,
     // Qwen3-Next / Qwen3.6 shared-expert input gate (FP32 [d_model]).
     if (L.shared_expert_gate_inp.data && !L.shared_expert_gate_inp.on_device) {
         Tensor dummy_scales;
-        UPLOAD_OR_FAIL(L.shared_expert_gate_inp, GGMLQuantType::F32, dummy_scales,
+        UPLOAD_OR_FAIL(L.shared_expert_gate_inp, QType::F32, dummy_scales,
                        "shared_expert_gate_inp", i, ctx);
     }
 
@@ -1048,7 +1048,7 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i,
     // SSM tensors that convert to compute_dtype (FP16): conv1d weights, norm
     for (Tensor* t : {&L.ssm_conv1d_w, &L.ssm_conv1d_b, &L.ssm_norm_w}) {
         if (t->data && !t->on_device) {
-            if (!upload_unquantized_weight(*t, GGMLQuantType::NONE, ctx.compute_dtype,
+            if (!upload_unquantized_weight(*t, QType::NONE, ctx.compute_dtype,
                                            ctx.stream, ctx.gpu_allocs)) {
                 IMP_LOG_ERROR("Failed to upload SSM tensor for layer %d", i);
                 return false;
@@ -1110,9 +1110,9 @@ static bool upload_expert_weights(
     std::vector<size_t> layer_expert_bytes(n_layers, 0);
     for (int i = 0; i < n_layers; ++i) {
         const TransformerLayer& L = layers[i];
-        auto add_packed = [&](const Tensor& p, GGMLQuantType qt) {
+        auto add_packed = [&](const Tensor& p, QType qt) {
             if (!p.data || p.ndim < 3 || !dequant_gpu_supported(qt)) return;
-            size_t row_bytes = ggml_quant_row_bytes(qt, p.shape[2]);
+            size_t row_bytes = qtype_row_bytes(qt, p.shape[2]);
             size_t bytes = static_cast<size_t>(p.shape[0]) * p.shape[1] * row_bytes;
             layer_expert_bytes[i] += bytes;
             total_expert_bytes += bytes;
@@ -1264,7 +1264,7 @@ static bool upload_expert_weights(
         //    - For F16/BF16/F32: dequant/upload and slice into per-expert views.
         // B) Per-expert 2D tensors: upload individually (legacy per-expert GGUF format)
 
-        auto upload_packed_experts = [&](Tensor& packed, GGMLQuantType qtype,
+        auto upload_packed_experts = [&](Tensor& packed, QType qtype,
                                          std::vector<Tensor>& expert_vec,
                                          const char* name) -> bool {
             if (!packed.data || packed.ndim < 3) return true;  // nothing to do
@@ -1277,7 +1277,7 @@ static bool upload_expert_weights(
             // Path A1: Quantized types -- upload raw bytes to GPU if they fit,
             // otherwise keep on host (mmap'd) with optional pinning for H2D.
             if (dequant_gpu_supported(qtype)) {
-                size_t row_bytes = ggml_quant_row_bytes(qtype, cols);
+                size_t row_bytes = qtype_row_bytes(qtype, cols);
                 size_t expert_raw = static_cast<size_t>(rows) * row_bytes;
                 size_t total_raw = static_cast<size_t>(n_experts) * expert_raw;
 
@@ -1332,8 +1332,8 @@ static bool upload_expert_weights(
                         ctx.host_pinned.push_back(packed.data);
                         IMP_LOG_DEBUG("  %s: %d experts, raw %s pinned on host (%.2f MiB)",
                                       name, n_experts,
-                                      qtype == GGMLQuantType::Q6_K ? "Q6_K" :
-                                      qtype == GGMLQuantType::Q8_0 ? "Q8_0" : "Q4_0",
+                                      qtype == QType::Q6_K ? "Q6_K" :
+                                      qtype == QType::Q8_0 ? "Q8_0" : "Q4_0",
                                       total_raw / (1024.0 * 1024.0));
                     } else {
                         IMP_LOG_WARN("  %s: cudaHostRegister failed (%s), H2D will be slower",
@@ -1346,7 +1346,7 @@ static bool upload_expert_weights(
 
             // Path A2: Unquantized (F16/BF16/F32) -- dequant to FP16, slice per-expert.
             int64_t flat_shape[4] = {static_cast<int64_t>(n_experts) * rows, cols, 0, 0};
-            Tensor flat(packed.data, packed.dtype, 2, flat_shape, packed.on_device);
+            Tensor flat(packed.data, packed.qtype, 2, flat_shape, packed.on_device);
 
             Tensor dummy_scales;
             if (!upload_weight(flat, qtype, dummy_scales, ctx.compute_dtype,
@@ -1360,7 +1360,7 @@ static bool upload_expert_weights(
             for (int e = 0; e < n_experts; e++) {
                 char* ptr = static_cast<char*>(flat.data) + e * expert_bytes;
                 int64_t eshape[4] = {rows, cols, 0, 0};
-                expert_vec[e] = Tensor(ptr, DType::FP16, 2, eshape, true);
+                expert_vec[e] = Tensor(ptr, QType::F16, 2, eshape, true);
             }
             packed = Tensor();
             return true;
@@ -1395,7 +1395,7 @@ static bool upload_expert_weights(
             int64_t fused_rows = L.expert_gate_packed.shape[1];
             int64_t cols = L.expert_gate_packed.shape[2];
             int64_t half_rows = fused_rows / 2;
-            size_t row_bytes = ggml_quant_row_bytes(L.expert_gate_qtype, cols);
+            size_t row_bytes = qtype_row_bytes(L.expert_gate_qtype, cols);
             size_t half_raw = static_cast<size_t>(n_exp) * half_rows * row_bytes;
             size_t src_pitch = static_cast<size_t>(fused_rows) * row_bytes;
             size_t dst_pitch = static_cast<size_t>(half_rows) * row_bytes;
@@ -1426,8 +1426,8 @@ static bool upload_expert_weights(
             }
 
             int64_t split_shape[4] = {n_exp, half_rows, cols, 0};
-            L.expert_gate_packed = Tensor(gate_buf, L.expert_gate_packed.dtype, 3, split_shape, false);
-            L.expert_up_packed   = Tensor(up_buf,   L.expert_gate_packed.dtype, 3, split_shape, false);
+            L.expert_gate_packed = Tensor(gate_buf, L.expert_gate_packed.qtype, 3, split_shape, false);
+            L.expert_up_packed   = Tensor(up_buf,   L.expert_gate_packed.qtype, 3, split_shape, false);
             L.expert_up_qtype    = L.expert_gate_qtype;
             ctx.host_pinned_allocs.push_back(gate_buf);
             ctx.host_pinned_allocs.push_back(up_buf);
@@ -1445,7 +1445,7 @@ static bool upload_expert_weights(
             int64_t fused_rows = L.expert_gate_packed.shape[1];
             int64_t cols = L.expert_gate_packed.shape[2];
             int64_t half_rows = fused_rows / 2;
-            size_t row_bytes = ggml_quant_row_bytes(L.expert_gate_qtype, cols);
+            size_t row_bytes = qtype_row_bytes(L.expert_gate_qtype, cols);
             size_t half_raw = static_cast<size_t>(n_exp) * half_rows * row_bytes;
 
             // Memory-efficient split: allocate only ONE half-sized buffer for the
@@ -1500,8 +1500,8 @@ static bool upload_expert_weights(
             // Reuse fused buffer (now compacted to half size) as gate_packed.
             int64_t split_shape[4] = {n_exp, half_rows, cols, 0};
             void* gate_buf = L.expert_gate_packed.data;
-            L.expert_gate_packed = Tensor(gate_buf, L.expert_gate_packed.dtype, 3, split_shape, true);
-            L.expert_up_packed = Tensor(up_buf, L.expert_gate_packed.dtype, 3, split_shape, true);
+            L.expert_gate_packed = Tensor(gate_buf, L.expert_gate_packed.qtype, 3, split_shape, true);
+            L.expert_up_packed = Tensor(up_buf, L.expert_gate_packed.qtype, 3, split_shape, true);
             L.expert_up_qtype = L.expert_gate_qtype;
             // gate_buf is already in ctx.gpu_allocs from the original upload.
             ctx.gpu_allocs.push_back(up_buf);
@@ -1557,7 +1557,7 @@ static bool upload_expert_weights(
 // Model::upload_weights_gpu
 // ---------------------------------------------------------------------------
 
-bool Model::upload_weights_gpu(DType compute_dtype, cudaStream_t stream,
+bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream,
                                 size_t expert_reserve_bytes) {
     if (gpu_weights_ready_) {
         IMP_LOG_WARN("Weights already uploaded to GPU");

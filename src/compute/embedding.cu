@@ -1,5 +1,5 @@
 #include "compute/embedding.h"
-#include "model/model_config.h"  // GGMLQuantType
+#include "model/model_config.h"  // QType
 #include "core/tensor.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
@@ -190,8 +190,8 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids,
 
     if (n_tokens == 0) return;
 
-    switch (table.dtype) {
-        case DType::FP32: {
+    switch (table.qtype) {
+        case QType::F32: {
             if (d_model % 4 == 0) {
                 embedding_lookup_vec_kernel<float><<<n_tokens, block, 0, stream>>>(
                     static_cast<const float*>(table.data),
@@ -207,7 +207,7 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids,
             }
             break;
         }
-        case DType::FP16: {
+        case QType::F16: {
             if (d_model % 4 == 0) {
                 embedding_lookup_vec_kernel<__half><<<n_tokens, block, 0, stream>>>(
                     static_cast<const __half*>(table.data),
@@ -223,7 +223,7 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids,
             }
             break;
         }
-        case DType::BF16: {
+        case QType::BF16: {
             embedding_lookup_vec_kernel<uint16_t><<<n_tokens, block, 0, stream>>>(
                 static_cast<const uint16_t*>(table.data),
                 token_ids,
@@ -242,7 +242,7 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids,
 // --------------------------------------------------------------------------
 void embedding_lookup(const Tensor& table, const int32_t* token_ids,
                       int n_tokens, Tensor& out,
-                      GGMLQuantType qtype,
+                      QType qtype,
                       cudaStream_t stream)
 {
     if (n_tokens == 0) return;
@@ -250,7 +250,7 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids,
     const int d_model = static_cast<int>(table.shape[1]);
     const int block = 256;
 
-    if (qtype == GGMLQuantType::Q8_0) {
+    if (qtype == QType::Q8_0) {
         embedding_lookup_q8_0_kernel<<<n_tokens, block, 0, stream>>>(
             static_cast<const uint8_t*>(table.data),
             token_ids,
@@ -259,7 +259,7 @@ void embedding_lookup(const Tensor& table, const int32_t* token_ids,
         return;
     }
 
-    if (qtype == GGMLQuantType::Q6_K) {
+    if (qtype == QType::Q6_K) {
         embedding_lookup_q6k_kernel<<<n_tokens, block, 0, stream>>>(
             static_cast<const uint8_t*>(table.data),
             token_ids,
@@ -344,13 +344,13 @@ void embedding_lookup_from_device(const Tensor& table, const int32_t* d_token_id
     const int d_model = static_cast<int>(table.shape[1]);
     const int block = 256;
 
-    if (table.dtype == DType::FP16) {
+    if (table.qtype == QType::F16) {
         embedding_lookup_fp16_device_kernel<<<1, block, 0, stream>>>(
             static_cast<const __half*>(table.data),
             d_token_id,
             static_cast<__half*>(out.data),
             d_model);
-    } else if (table.dtype == DType::FP32) {
+    } else if (table.qtype == QType::F32) {
         // For FP32 tables, fall back to regular path with a device-to-host copy
         // (FP32 embedding tables are uncommon in quantized models)
         int32_t h_token;
@@ -362,12 +362,12 @@ void embedding_lookup_from_device(const Tensor& table, const int32_t* d_token_id
 }
 
 void embedding_lookup_from_device(const Tensor& table, const int32_t* d_token_id,
-                                   Tensor& out, GGMLQuantType qtype,
+                                   Tensor& out, QType qtype,
                                    cudaStream_t stream) {
     const int d_model = static_cast<int>(table.shape[1]);
     const int block = 256;
 
-    if (qtype == GGMLQuantType::Q8_0) {
+    if (qtype == QType::Q8_0) {
         embedding_lookup_q8_0_device_kernel<<<1, block, 0, stream>>>(
             static_cast<const uint8_t*>(table.data),
             d_token_id,
@@ -376,7 +376,7 @@ void embedding_lookup_from_device(const Tensor& table, const int32_t* d_token_id
         return;
     }
 
-    if (qtype == GGMLQuantType::Q6_K) {
+    if (qtype == QType::Q6_K) {
         embedding_lookup_q6k_device_kernel<<<1, block, 0, stream>>>(
             static_cast<const uint8_t*>(table.data),
             d_token_id,

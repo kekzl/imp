@@ -122,10 +122,10 @@ TEST(ForwardPassTest, SyntheticModelForwardLogits) {
     auto tm = DenseTestModel::create(128, 512, 256, 1, 4, 4, 64);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false, 1, 64));
+    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false, 1, 64));
     ASSERT_TRUE(executor.allocate_workspaces());
 
-    KVCache cache(1, 4, 32, DType::FP16, 8);
+    KVCache cache(1, 4, 32, QType::F16, 8);
     Tensor logits = run_prefill(executor, cache, {1, 42, 100, 200});
 
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);
@@ -145,10 +145,10 @@ TEST(ForwardPassTest, SyntheticModelDecodeAfterPrefill) {
     auto tm = DenseTestModel::create(128, 512, 256, 1, 4, 4, 64);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false, 1, 64));
+    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false, 1, 64));
     ASSERT_TRUE(executor.allocate_workspaces());
 
-    KVCache cache(1, 4, 32, DType::FP16, 8);
+    KVCache cache(1, 4, 32, QType::F16, 8);
 
     // Prefill 3 tokens
     run_prefill(executor, cache, {1, 2, 3});
@@ -172,10 +172,10 @@ TEST(ForwardPassTest, MultiLayerPrefill) {
 
     GraphExecutor executor;
     gemm_init();
-    ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false, 1, 64));
+    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false, 1, 64));
     ASSERT_TRUE(executor.allocate_workspaces());
 
-    KVCache cache(4, 4, 32, DType::FP16, 8);
+    KVCache cache(4, 4, 32, QType::F16, 8);
     Tensor logits = run_prefill(executor, cache, {1, 2, 3, 4, 5, 6, 7, 8});
 
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);
@@ -196,11 +196,11 @@ TEST(ForwardPassTest, GQAForwardPass) {
 
     GraphExecutor executor;
     gemm_init();
-    ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false, 1, 64));
+    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false, 1, 64));
     ASSERT_TRUE(executor.allocate_workspaces());
 
     // n_kv_heads=2 for KVCache
-    KVCache cache(2, 2, 32, DType::FP16, 8);
+    KVCache cache(2, 2, 32, QType::F16, 8);
 
     // Prefill
     run_prefill(executor, cache, {1, 2, 3, 4});
@@ -223,10 +223,10 @@ TEST(ForwardPassTest, MultiStepDecode) {
     auto tm = DenseTestModel::create(128, 512, 256, 1, 4, 4, 64);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false, 1, 64));
+    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false, 1, 64));
     ASSERT_TRUE(executor.allocate_workspaces());
 
-    KVCache cache(1, 4, 32, DType::FP16, 8);
+    KVCache cache(1, 4, 32, QType::F16, 8);
 
     // Prefill 4 tokens
     run_prefill(executor, cache, {1, 2, 3, 4});
@@ -260,19 +260,19 @@ TEST(ForwardPassTest, DeterministicLogits) {
     auto tm = DenseTestModel::create(128, 512, 256, 1, 4, 4, 64);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false, 1, 64));
+    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false, 1, 64));
     ASSERT_TRUE(executor.allocate_workspaces());
 
     std::vector<int32_t> tokens = {1, 42, 100};
 
     // Run 1
-    KVCache cache1(1, 4, 32, DType::FP16, 8);
+    KVCache cache1(1, 4, 32, QType::F16, 8);
     Tensor logits1 = run_prefill(executor, cache1, tokens);
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);
     auto h1 = read_logits(logits1, 256);
 
     // Run 2 (fresh KV cache)
-    KVCache cache2(1, 4, 32, DType::FP16, 8);
+    KVCache cache2(1, 4, 32, QType::F16, 8);
     Tensor logits2 = run_prefill(executor, cache2, tokens);
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);
     auto h2 = read_logits(logits2, 256);
@@ -295,11 +295,11 @@ TEST(ForwardPassTest, LongSequencePrefill) {
     auto tm = DenseTestModel::create(128, 512, 256, 1, 4, 4, 64);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false, 1, 64));
+    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false, 1, 64));
     ASSERT_TRUE(executor.allocate_workspaces());
 
     // 32 tokens need 2 KV blocks (block_size=16)
-    KVCache cache(1, 4, 32, DType::FP16, 8);
+    KVCache cache(1, 4, 32, QType::F16, 8);
 
     std::vector<int32_t> tokens(32);
     for (int i = 0; i < 32; i++) tokens[i] = (i + 1) % 256;

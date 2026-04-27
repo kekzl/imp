@@ -365,7 +365,7 @@ TEST(SchedulerTest, MemoryAwareScheduling) {
     // Create a small KV cache with limited blocks
     auto cache = std::make_unique<KVCache>(
         /*n_layers=*/2, /*n_kv_heads=*/4, /*head_dim=*/64,
-        DType::FP16, /*max_blocks=*/4);
+        QType::F16, /*max_blocks=*/4);
 
     auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
 
@@ -957,7 +957,7 @@ TEST(SchedulerTest, MemoryAwareSkipsLargeAdmitsSmall) {
     // 4 blocks total, block_size=16
     auto cache = std::make_unique<KVCache>(
         /*n_layers=*/1, /*n_kv_heads=*/1, /*head_dim=*/64,
-        DType::FP16, /*max_blocks=*/4);
+        QType::F16, /*max_blocks=*/4);
     auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
 
     Scheduler sched(16);
@@ -990,7 +990,7 @@ TEST(SchedulerTest, AllRequestsTooLargeForMemory) {
 
     auto cache = std::make_unique<KVCache>(
         /*n_layers=*/1, /*n_kv_heads=*/1, /*head_dim=*/64,
-        DType::FP16, /*max_blocks=*/2);
+        QType::F16, /*max_blocks=*/2);
     auto mgr = std::make_unique<KVCacheManager>(std::move(cache));
 
     Scheduler sched(16);

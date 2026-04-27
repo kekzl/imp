@@ -343,7 +343,7 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
         IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3: output must be a pre-allocated device tensor");
         return;
     }
-    if (input.dtype != DType::FP16) {
+    if (input.qtype != QType::F16) {
         IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3: input dtype must be FP16");
         return;
     }

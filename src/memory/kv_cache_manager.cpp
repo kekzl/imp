@@ -707,7 +707,7 @@ int KVCacheManager::save_prefix_cache(const std::string& path, cudaStream_t stre
     hdr.n_layers = static_cast<uint32_t>(nl);
     hdr.n_kv_heads = static_cast<uint32_t>(cache_->n_kv_heads());
     hdr.head_dim = static_cast<uint32_t>(cache_->head_dim());
-    hdr.dtype = static_cast<uint32_t>(cache_->dtype());
+    hdr.dtype = static_cast<uint32_t>(cache_->qtype());
     hdr.block_bytes = bb;
 
     if (fwrite(&hdr, sizeof(hdr), 1, f) != 1) {
@@ -829,12 +829,12 @@ int KVCacheManager::load_prefix_cache(const std::string& path, cudaStream_t stre
     if (hdr.n_layers != static_cast<uint32_t>(cache_->n_layers()) ||
         hdr.n_kv_heads != static_cast<uint32_t>(cache_->n_kv_heads()) ||
         hdr.head_dim != static_cast<uint32_t>(cache_->head_dim()) ||
-        hdr.dtype != static_cast<uint32_t>(cache_->dtype()) ||
+        hdr.dtype != static_cast<uint32_t>(cache_->qtype()) ||
         hdr.block_bytes != cache_->block_bytes()) {
         IMP_LOG_WARN("Prefix cache: config mismatch (layers=%u/%d, heads=%u/%d, "
                      "dim=%u/%d, dtype=%u/%d)",
                      hdr.n_layers, cache_->n_layers(), hdr.n_kv_heads, cache_->n_kv_heads(),
-                     hdr.head_dim, cache_->head_dim(), hdr.dtype, static_cast<int>(cache_->dtype()));
+                     hdr.head_dim, cache_->head_dim(), hdr.dtype, static_cast<int>(cache_->qtype()));
         fclose(f);
         return -1;
     }

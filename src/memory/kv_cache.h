@@ -21,7 +21,7 @@ public:
     //   TURBOQUANT_LITE: should be multiplier * head_dim for quality (e.g. 2*head_dim).
     // use_mxfp4: if true and dtype==TURBOQUANT, use FP4 E2M1 + UE8M0 micro-scales
     //   instead of uniform INT4 for K direction quantization (sm_120 path).
-    KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
+    KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype,
             int max_blocks, int block_size = kKVBlockSize,
             VRAMAllocator* alloc = nullptr, int sketch_dim = 0,
             bool use_mxfp4 = false);
@@ -32,7 +32,7 @@ public:
     KVCache(int n_layers,
             const std::vector<int>& n_kv_heads_per_layer,
             const std::vector<int>& head_dim_per_layer,
-            DType dtype,
+            QType dtype,
             int max_blocks, int block_size,
             VRAMAllocator* alloc);
     ~KVCache();
@@ -79,7 +79,7 @@ public:
     int head_dim() const;
     int sketch_dim() const { return sketch_dim_; }
     bool use_mxfp4() const { return use_mxfp4_; }
-    DType dtype() const;
+    QType qtype() const;
 
 private:
     int n_layers_;
@@ -89,7 +89,7 @@ private:
     int block_size_;                // tokens per block (default 16)
     int sketch_dim_ = 0;           // QJL sketch dimension (0 if not TurboQuant)
     bool use_mxfp4_ = false;       // FP4 E2M1 + UE8M0 micro-scales for K dirs (sm_120)
-    DType dtype_;
+    QType dtype_;
     VRAMAllocator* alloc_ = nullptr;
     size_t block_bytes_;            // cached: block_size * n_kv_heads * head_dim * dtype_size(dtype)
 

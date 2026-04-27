@@ -48,16 +48,16 @@ namespace imp {
 // Layer methods: executor_attention.cu, executor_ffn.cu, executor_ssm_gdn.cu
 
 // LM head dp4a GEMV dispatch: y = W @ x (FP32 output for logits).
-static void dispatch_gemv_fp32(GGMLQuantType qtype,
+static void dispatch_gemv_fp32(QType qtype,
                                 const void* W, const block_q8_1* q8_1, const float* d8,
                                 float* y, int M, int K, cudaStream_t stream) {
     switch (qtype) {
-        case GGMLQuantType::Q6_K: gemv_q6k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
-        case GGMLQuantType::Q4_0: gemv_q4_0_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
-        case GGMLQuantType::Q4_K: gemv_q4_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
-        case GGMLQuantType::Q5_K: gemv_q5_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
-        case GGMLQuantType::Q2_K: gemv_q2_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
-        case GGMLQuantType::Q3_K: gemv_q3_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q6_K: gemv_q6k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q4_0: gemv_q4_0_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q4_K: gemv_q4_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q5_K: gemv_q5_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q2_K: gemv_q2_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q3_K: gemv_q3_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
         default:                  gemv_q8_0_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
     }
 }
@@ -101,14 +101,14 @@ void debug_top_logits(const Tensor& logits, cudaStream_t stream, int topk = 10) 
     // Dump the LAST row (the one that actually gets sampled from for the next token).
     int row = nrows - 1;
     int64_t row_stride = (logits.ndim >= 2 && logits.stride[0] > 0) ? logits.stride[0] : vocab;
-    const size_t elem_sz = (logits.dtype == DType::FP32) ? sizeof(float) : sizeof(half);
+    const size_t elem_sz = (logits.qtype == QType::F32) ? sizeof(float) : sizeof(half);
     const char* src = static_cast<const char*>(logits.data) + (int64_t)row * row_stride * elem_sz;
     std::vector<float> host(vocab);
 
-    if (logits.dtype == DType::FP32) {
+    if (logits.qtype == QType::F32) {
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(host.data(), src, vocab * sizeof(float),
                          cudaMemcpyDeviceToHost, stream));
-    } else if (logits.dtype == DType::FP16) {
+    } else if (logits.qtype == QType::F16) {
         std::vector<half> tmp(vocab);
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(tmp.data(), src, vocab * sizeof(half),
                          cudaMemcpyDeviceToHost, stream));
@@ -247,7 +247,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                      model_->tok_emb_qtype_, stream);
 
     // Gemma: scale embeddings by sqrt(d_model)
-    if (cfg.embed_scale > 0.0f && h.dtype == DType::FP16) {
+    if (cfg.embed_scale > 0.0f && h.qtype == QType::F16) {
         int64_t total = static_cast<int64_t>(n) * cfg.d_model;
         int threads = 256;
         int blocks = static_cast<int>((total / 2 + threads - 1) / threads);
@@ -389,7 +389,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         {
             const auto& ly = model_->layer(i);
             if (ly.layer_out_scale.data != nullptr && ly.layer_out_scale.on_device &&
-                h.dtype == DType::FP16) {
+                h.qtype == QType::F16) {
                 int64_t total = static_cast<int64_t>(n) * cfg.d_model;
                 int threads = 256;
                 int blocks = static_cast<int>((total / 2 + threads - 1) / threads);
@@ -522,7 +522,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     // use fused RMSNorm→Q8_1 + dp4a GEMV with FP32 output. Saves ~2.45x VRAM
     // bandwidth vs cuBLAS FP16 path (reads quantized weights directly).
     const auto out_qtype = model_->out_proj_qtype_;
-    const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == DType::FP16 &&
+    const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 &&
         is_dp4a_qtype(out_qtype) && getenv("IMP_NO_DP4A_LM") == nullptr;
 
     // GemmContext for LM head GEMM dispatches.
@@ -593,7 +593,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 IMP_CUDA_CHECK_LOG(cudaMallocAsync(&w_fp16_dev, fp16_bytes, stream));
                 dequant_gpu(model_->output_proj().data, w_fp16_dev, out_qtype, N, K, stream);
                 int64_t w_shape[2] = {N, K};
-                Tensor w_fp16(w_fp16_dev, DType::FP16, 2, w_shape, true);
+                Tensor w_fp16(w_fp16_dev, QType::F16, 2, w_shape, true);
                 gemm(no_last, w_fp16, lg, 1.0f, 0.0f, stream);
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(w_fp16_dev, stream));
                 fprintf(stderr, "[DEBUG_FWD] LM head via dequant->FP16->cuBLAS path\n");
@@ -720,8 +720,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             // Raw gemm() can't handle Q8_0/Q6_K weights with cuBLAS.
             if (lm_tier == StorageTier::FP8 && qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
                 int64_t wshape[2] = {lm_h->shape[0], lm_h->shape[1]};
-                Tensor fp8_lm_w(lm_h->payload.fp8.data, DType::FP8_E4M3, 2, wshape, true);
-                Tensor fp8_no(qscratch_.fp8_act, DType::FP8_E4M3, no_final.ndim, no_final.shape, true);
+                Tensor fp8_lm_w(lm_h->payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
+                Tensor fp8_no(qscratch_.fp8_act, QType::FP8_E4M3, no_final.ndim, no_final.shape, true);
                 quantize_fp16_to_fp8_e4m3(no_final, fp8_no, qscratch_.d_act_scale, stream,
                                           qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
                 gemm_cublaslt(fp8_no, fp8_lm_w, lg, 1.0f, 0.0f,

@@ -15,18 +15,18 @@ namespace {
 
 // ---- GPU tensor helpers ----
 
-Tensor make_gpu_tensor(const float* host_data, DType dtype,
+Tensor make_gpu_tensor(const float* host_data, QType dtype,
                        int ndim, const int64_t* shape) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim = ndim;
     for (int i = 0; i < ndim; i++) t.shape[i] = shape[i];
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
-    if (dtype == DType::FP32) {
+    if (dtype == QType::F32) {
         cudaMemcpy(t.data, host_data, t.nbytes(), cudaMemcpyHostToDevice);
-    } else if (dtype == DType::FP16) {
+    } else if (dtype == QType::F16) {
         std::vector<half> h(t.numel());
         for (int64_t j = 0; j < t.numel(); j++)
             h[j] = __float2half(host_data[j]);
@@ -35,9 +35,9 @@ Tensor make_gpu_tensor(const float* host_data, DType dtype,
     return t;
 }
 
-Tensor alloc_gpu_tensor(DType dtype, int ndim, const int64_t* shape) {
+Tensor alloc_gpu_tensor(QType dtype, int ndim, const int64_t* shape) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim = ndim;
     for (int i = 0; i < ndim; i++) t.shape[i] = shape[i];
     t.compute_strides();
@@ -73,8 +73,8 @@ TEST(ReduceTest, SumLastDimFP32) {
 
     int64_t in_shape[] = {rows, cols};
     int64_t out_shape[] = {rows};
-    Tensor d_in = make_gpu_tensor(h_in.data(), DType::FP32, 2, in_shape);
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, 1, out_shape);
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F32, 2, in_shape);
+    Tensor d_out = alloc_gpu_tensor(QType::F32, 1, out_shape);
 
     reduce_sum(d_in, d_out, 1);
     cudaDeviceSynchronize();
@@ -101,8 +101,8 @@ TEST(ReduceTest, SumLastDimFP16) {
 
     int64_t in_shape[] = {rows, cols};
     int64_t out_shape[] = {rows};
-    Tensor d_in = make_gpu_tensor(h_in.data(), DType::FP16, 2, in_shape);
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, 1, out_shape);
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F16, 2, in_shape);
+    Tensor d_out = alloc_gpu_tensor(QType::F32, 1, out_shape);
 
     reduce_sum(d_in, d_out, 1);
     cudaDeviceSynchronize();
@@ -128,8 +128,8 @@ TEST(ReduceTest, SumFirstDim) {
 
     int64_t in_shape[] = {3, 4};
     int64_t out_shape[] = {4};
-    Tensor d_in = make_gpu_tensor(h_in.data(), DType::FP32, 2, in_shape);
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, 1, out_shape);
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F32, 2, in_shape);
+    Tensor d_out = alloc_gpu_tensor(QType::F32, 1, out_shape);
 
     reduce_sum(d_in, d_out, 0);
     cudaDeviceSynchronize();
@@ -147,8 +147,8 @@ TEST(ReduceTest, SumSingleElement) {
     std::vector<float> h_in = {42.0f};
     int64_t in_shape[] = {1, 1};
     int64_t out_shape[] = {1};
-    Tensor d_in = make_gpu_tensor(h_in.data(), DType::FP32, 2, in_shape);
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, 1, out_shape);
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F32, 2, in_shape);
+    Tensor d_out = alloc_gpu_tensor(QType::F32, 1, out_shape);
 
     reduce_sum(d_in, d_out, 1);
     cudaDeviceSynchronize();
@@ -172,8 +172,8 @@ TEST(ReduceTest, SumLargeRow) {
 
     int64_t in_shape[] = {rows, cols};
     int64_t out_shape[] = {rows};
-    Tensor d_in = make_gpu_tensor(h_in.data(), DType::FP32, 2, in_shape);
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, 1, out_shape);
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F32, 2, in_shape);
+    Tensor d_out = alloc_gpu_tensor(QType::F32, 1, out_shape);
 
     reduce_sum(d_in, d_out, 1);
     cudaDeviceSynchronize();
@@ -195,8 +195,8 @@ TEST(ReduceTest, SumNegativeDim) {
 
     int64_t in_shape[] = {rows, cols};
     int64_t out_shape[] = {rows};
-    Tensor d_in = make_gpu_tensor(h_in.data(), DType::FP32, 2, in_shape);
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, 1, out_shape);
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F32, 2, in_shape);
+    Tensor d_out = alloc_gpu_tensor(QType::F32, 1, out_shape);
 
     reduce_sum(d_in, d_out, -1);
     cudaDeviceSynchronize();
@@ -230,8 +230,8 @@ TEST(ReduceTest, Sum3DMiddleDim) {
 
     int64_t in_shape[] = {d0, d1, d2};
     int64_t out_shape[] = {d0, d2};
-    Tensor d_in = make_gpu_tensor(h_in.data(), DType::FP32, 3, in_shape);
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, 2, out_shape);
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F32, 3, in_shape);
+    Tensor d_out = alloc_gpu_tensor(QType::F32, 2, out_shape);
 
     reduce_sum(d_in, d_out, 1);
     cudaDeviceSynchronize();
@@ -260,8 +260,8 @@ TEST(ReduceTest, MaxLastDimFP32) {
 
     int64_t in_shape[] = {rows, cols};
     int64_t out_shape[] = {rows};
-    Tensor d_in = make_gpu_tensor(h_in.data(), DType::FP32, 2, in_shape);
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, 1, out_shape);
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F32, 2, in_shape);
+    Tensor d_out = alloc_gpu_tensor(QType::F32, 1, out_shape);
 
     reduce_max(d_in, d_out, 1);
     cudaDeviceSynchronize();
@@ -286,8 +286,8 @@ TEST(ReduceTest, MaxFirstDim) {
 
     int64_t in_shape[] = {3, 3};
     int64_t out_shape[] = {3};
-    Tensor d_in = make_gpu_tensor(h_in.data(), DType::FP32, 2, in_shape);
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, 1, out_shape);
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F32, 2, in_shape);
+    Tensor d_out = alloc_gpu_tensor(QType::F32, 1, out_shape);
 
     reduce_max(d_in, d_out, 0);
     cudaDeviceSynchronize();
@@ -308,8 +308,8 @@ TEST(ReduceTest, MaxNegativeValues) {
 
     int64_t in_shape[] = {2, 3};
     int64_t out_shape[] = {2};
-    Tensor d_in = make_gpu_tensor(h_in.data(), DType::FP32, 2, in_shape);
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, 1, out_shape);
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F32, 2, in_shape);
+    Tensor d_out = alloc_gpu_tensor(QType::F32, 1, out_shape);
 
     reduce_max(d_in, d_out, 1);
     cudaDeviceSynchronize();
@@ -339,8 +339,8 @@ TEST(ReduceTest, MaxFP16) {
 
     int64_t in_shape[] = {rows, cols};
     int64_t out_shape[] = {rows};
-    Tensor d_in = make_gpu_tensor(h_in.data(), DType::FP16, 2, in_shape);
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, 1, out_shape);
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F16, 2, in_shape);
+    Tensor d_out = alloc_gpu_tensor(QType::F32, 1, out_shape);
 
     reduce_max(d_in, d_out, 1);
     cudaDeviceSynchronize();
@@ -365,8 +365,8 @@ TEST(ReduceTest, MaxLargeRow) {
 
     int64_t in_shape[] = {rows, cols};
     int64_t out_shape[] = {rows};
-    Tensor d_in = make_gpu_tensor(h_in.data(), DType::FP32, 2, in_shape);
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, 1, out_shape);
+    Tensor d_in = make_gpu_tensor(h_in.data(), QType::F32, 2, in_shape);
+    Tensor d_out = alloc_gpu_tensor(QType::F32, 1, out_shape);
 
     reduce_max(d_in, d_out, 1);
     cudaDeviceSynchronize();

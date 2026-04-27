@@ -15,10 +15,10 @@ namespace {
 // ---------------------------------------------------------------------------
 // Helper: create a GPU tensor from host float data, with optional FP16 conversion
 // ---------------------------------------------------------------------------
-Tensor make_gpu_tensor(const float* host_data, DType dtype,
+Tensor make_gpu_tensor(const float* host_data, QType dtype,
                        std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim  = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
@@ -26,9 +26,9 @@ Tensor make_gpu_tensor(const float* host_data, DType dtype,
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
 
-    if (dtype == DType::FP32) {
+    if (dtype == QType::F32) {
         cudaMemcpy(t.data, host_data, t.nbytes(), cudaMemcpyHostToDevice);
-    } else if (dtype == DType::FP16) {
+    } else if (dtype == QType::F16) {
         std::vector<half> h(t.numel());
         for (int64_t j = 0; j < t.numel(); j++)
             h[j] = __float2half(host_data[j]);
@@ -40,9 +40,9 @@ Tensor make_gpu_tensor(const float* host_data, DType dtype,
 // ---------------------------------------------------------------------------
 // Helper: allocate a zeroed GPU tensor (output buffer)
 // ---------------------------------------------------------------------------
-Tensor alloc_gpu_tensor(DType dtype, std::initializer_list<int64_t> shape_list) {
+Tensor alloc_gpu_tensor(QType dtype, std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim  = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
@@ -58,9 +58,9 @@ Tensor alloc_gpu_tensor(DType dtype, std::initializer_list<int64_t> shape_list) 
 // ---------------------------------------------------------------------------
 std::vector<float> read_gpu_tensor(const Tensor& t) {
     std::vector<float> result(t.numel());
-    if (t.dtype == DType::FP32) {
+    if (t.qtype == QType::F32) {
         cudaMemcpy(result.data(), t.data, t.nbytes(), cudaMemcpyDeviceToHost);
-    } else if (t.dtype == DType::FP16) {
+    } else if (t.qtype == QType::F16) {
         std::vector<half> h(t.numel());
         cudaMemcpy(h.data(), t.data, t.nbytes(), cudaMemcpyDeviceToHost);
         for (int64_t j = 0; j < t.numel(); j++)
@@ -142,9 +142,9 @@ TEST(LayerNormTest, RMSNormBasic) {
     cpu_rmsnorm(h_x.data(), h_w.data(), h_ref.data(), rows, cols, eps);
 
     // GPU computation
-    Tensor d_x   = make_gpu_tensor(h_x.data(), DType::FP32, {rows, cols});
-    Tensor d_w   = make_gpu_tensor(h_w.data(), DType::FP32, {cols});
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, {rows, cols});
+    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
+    Tensor d_w   = make_gpu_tensor(h_w.data(), QType::F32, {cols});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {rows, cols});
 
     rmsnorm(d_x, d_w, d_out, eps, nullptr);
     cudaDeviceSynchronize();
@@ -188,10 +188,10 @@ TEST(LayerNormTest, RMSNormResidual) {
     // GPU computation
     // Note: the kernel modifies x in-place (x <- x + residual), so we use
     // a separate copy for x.
-    Tensor d_x   = make_gpu_tensor(h_x.data(), DType::FP32, {rows, cols});
-    Tensor d_res = make_gpu_tensor(h_residual.data(), DType::FP32, {rows, cols});
-    Tensor d_w   = make_gpu_tensor(h_w.data(), DType::FP32, {cols});
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, {rows, cols});
+    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
+    Tensor d_res = make_gpu_tensor(h_residual.data(), QType::F32, {rows, cols});
+    Tensor d_w   = make_gpu_tensor(h_w.data(), QType::F32, {cols});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {rows, cols});
 
     rmsnorm_residual(d_x, d_res, d_w, d_out, eps, nullptr);
     cudaDeviceSynchronize();
@@ -248,9 +248,9 @@ TEST(LayerNormTest, RMSNormFP16) {
     cpu_rmsnorm(h_x_fp16.data(), h_w_fp16.data(), h_ref.data(), rows, cols, eps);
 
     // GPU computation in FP16
-    Tensor d_x   = make_gpu_tensor(h_x.data(), DType::FP16, {rows, cols});
-    Tensor d_w   = make_gpu_tensor(h_w.data(), DType::FP16, {cols});
-    Tensor d_out = alloc_gpu_tensor(DType::FP16, {rows, cols});
+    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F16, {rows, cols});
+    Tensor d_w   = make_gpu_tensor(h_w.data(), QType::F16, {cols});
+    Tensor d_out = alloc_gpu_tensor(QType::F16, {rows, cols});
 
     rmsnorm(d_x, d_w, d_out, eps, nullptr);
     cudaDeviceSynchronize();
@@ -291,9 +291,9 @@ TEST(LayerNormTest, RMSNormLargeRow) {
     cpu_rmsnorm(h_x.data(), h_w.data(), h_ref.data(), rows, cols, eps);
 
     // GPU
-    Tensor d_x   = make_gpu_tensor(h_x.data(), DType::FP32, {rows, cols});
-    Tensor d_w   = make_gpu_tensor(h_w.data(), DType::FP32, {cols});
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, {rows, cols});
+    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
+    Tensor d_w   = make_gpu_tensor(h_w.data(), QType::F32, {cols});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {rows, cols});
 
     rmsnorm(d_x, d_w, d_out, eps, nullptr);
     cudaDeviceSynchronize();
@@ -343,17 +343,17 @@ TEST(LayerNormTest, EpsilonEffect) {
         << "CPU references for different eps values should differ on near-zero input";
 
     // GPU with small eps
-    Tensor d_x_s   = make_gpu_tensor(h_x.data(), DType::FP32, {rows, cols});
-    Tensor d_w_s   = make_gpu_tensor(h_w.data(), DType::FP32, {cols});
-    Tensor d_out_s = alloc_gpu_tensor(DType::FP32, {rows, cols});
+    Tensor d_x_s   = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
+    Tensor d_w_s   = make_gpu_tensor(h_w.data(), QType::F32, {cols});
+    Tensor d_out_s = alloc_gpu_tensor(QType::F32, {rows, cols});
     rmsnorm(d_x_s, d_w_s, d_out_s, eps_small, nullptr);
     cudaDeviceSynchronize();
     auto h_out_small = read_gpu_tensor(d_out_s);
 
     // GPU with large eps
-    Tensor d_x_l   = make_gpu_tensor(h_x.data(), DType::FP32, {rows, cols});
-    Tensor d_w_l   = make_gpu_tensor(h_w.data(), DType::FP32, {cols});
-    Tensor d_out_l = alloc_gpu_tensor(DType::FP32, {rows, cols});
+    Tensor d_x_l   = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
+    Tensor d_w_l   = make_gpu_tensor(h_w.data(), QType::F32, {cols});
+    Tensor d_out_l = alloc_gpu_tensor(QType::F32, {rows, cols});
     rmsnorm(d_x_l, d_w_l, d_out_l, eps_large, nullptr);
     cudaDeviceSynchronize();
     auto h_out_large = read_gpu_tensor(d_out_l);

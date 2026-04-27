@@ -73,6 +73,7 @@ endif()
 # --- Core library sources ---
 set(IMP_CORE_SOURCES
     src/core/tensor.cpp
+    src/core/qtype.cpp
     src/core/buffer.cpp
     src/core/allocator.cpp
     src/core/logging.cpp

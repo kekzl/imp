@@ -54,7 +54,7 @@ void ssm_conv1d_prefill_f32_silu(void* conv_state, const Tensor& x_in,
 // y:        [inner_size] compute_dtype (output)
 // z:        [inner_size] compute_dtype (gate input, nullptr = no fusion)
 //           When non-null, output is y * SiLU(z) (fused gating, saves 2 kernels).
-// h_dtype: DType of h_state storage (FP32 default, FP16 for VRAM savings).
+// h_dtype: QType of h_state storage (FP32 default, FP16 for VRAM savings).
 // Computation always in FP32; FP16 only affects load/store.
 void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C,
                      const Tensor& dt, const Tensor& A_log, const Tensor& D,
@@ -62,7 +62,7 @@ void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C,
                      Tensor& y, const void* z,
                      int n_heads, int head_dim_ssm,
                      int state_size, int n_groups,
-                     DType h_dtype = DType::FP32,
+                     QType h_dtype = QType::F32,
                      cudaStream_t stream = nullptr);
 
 // SSM scan prefill: iterate scan_decode over all tokens sequentially.
@@ -73,7 +73,7 @@ void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C,
                       Tensor& y, const void* z,
                       int n_tokens, int n_heads, int head_dim_ssm,
                       int state_size, int n_groups,
-                      DType h_dtype = DType::FP32,
+                      QType h_dtype = QType::F32,
                       cudaStream_t stream = nullptr);
 
 // Group RMSNorm: normalize each of n_groups groups independently.

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "core/tensor.h"
-#include "model/model_config.h" // GGMLQuantType (Q6_K, Q4_0, etc.)
+#include "model/model_config.h" // QType (Q6_K, Q4_0, etc.)
 #include "compute/gemm.h"       // block_q8_1
 
 #include <cuda_runtime.h>
@@ -276,15 +276,15 @@ __global__ __launch_bounds__(256) void fp32_to_fp16_kernel(const float* __restri
 // ---------------------------------------------------------------------------
 
 // Returns true if the quant type supports dp4a (Q8_1-input) GEMV kernels.
-inline bool is_dp4a_qtype(GGMLQuantType qt) {
-    return qt == GGMLQuantType::Q6_K || qt == GGMLQuantType::Q8_0 ||
-           qt == GGMLQuantType::Q4_0 || qt == GGMLQuantType::Q4_K ||
-           qt == GGMLQuantType::Q5_K || qt == GGMLQuantType::Q2_K ||
-           qt == GGMLQuantType::Q3_K;
+inline bool is_dp4a_qtype(QType qt) {
+    return qt == QType::Q6_K || qt == QType::Q8_0 ||
+           qt == QType::Q4_0 || qt == QType::Q4_K ||
+           qt == QType::Q5_K || qt == QType::Q2_K ||
+           qt == QType::Q3_K;
 }
 
 // Dispatch dp4a GEMV by quant type: y = W @ q8_1 (FP16 output).
-void dispatch_dp4a_gemv(GGMLQuantType qtype,
+void dispatch_dp4a_gemv(QType qtype,
                         const void* W, const block_q8_1* q8_1, const float* d8,
                         half* y, int M, int K, cudaStream_t stream);
 
@@ -336,7 +336,7 @@ Tensor slice_rows(const Tensor& buf, int n_tokens);
 // inside executor_kernels.cu.
 struct GemmContext;  // forward decl — defined in gemm_context.h
 void gemm_dispatch(const Tensor& input, const Tensor& weight,
-                   GGMLQuantType qtype, Tensor& output,
+                   QType qtype, Tensor& output,
                    const GemmContext& ctx);
 
 } // namespace imp

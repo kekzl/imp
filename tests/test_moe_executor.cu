@@ -31,7 +31,7 @@ TEST(MoEExecutorTest, InitSucceeds) {
         /*n_experts=*/4, /*n_experts_active=*/2, /*expert_d_ff=*/128);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
 
     tm.cleanup();
 }
@@ -48,7 +48,7 @@ TEST(MoEExecutorTest, ForwardProducesValidOutput) {
         /*n_experts=*/4, /*n_experts_active=*/2, /*expert_d_ff=*/128);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -113,7 +113,7 @@ TEST(MoEExecutorTest, ForwardSamplesToken) {
         /*n_experts=*/4, /*n_experts_active=*/2, /*expert_d_ff=*/128);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -160,7 +160,7 @@ TEST(MoEExecutorTest, Deterministic) {
         /*n_experts=*/4, /*n_experts_active=*/2, /*expert_d_ff=*/128);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -208,7 +208,7 @@ TEST(MoEExecutorTest, MultiLayer) {
         /*n_experts=*/4, /*n_experts_active=*/2, /*expert_d_ff=*/128);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -254,7 +254,7 @@ TEST(MoEExecutorTest, EightExperts) {
         /*n_experts=*/8, /*n_experts_active=*/2, /*expert_d_ff=*/128);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -300,7 +300,7 @@ TEST(MoEExecutorTest, SingleToken) {
         /*n_experts=*/4, /*n_experts_active=*/2, /*expert_d_ff=*/128);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -353,10 +353,10 @@ TEST(MoEExecutorTest, MoEVsDenseDiffer) {
         /*max_seq_len=*/512, /*seed=*/200, /*weight_scale=*/0.5f);
 
     GraphExecutor dense_exec, moe_exec;
-    ASSERT_TRUE(dense_exec.init(*dense.model, DType::FP16, false));
+    ASSERT_TRUE(dense_exec.init(*dense.model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(dense_exec.allocate_workspaces(false));
-    ASSERT_TRUE(moe_exec.init(*moe.model, DType::FP16, false));
+    ASSERT_TRUE(moe_exec.init(*moe.model, QType::F16, false));
     ASSERT_TRUE(moe_exec.allocate_workspaces(false));
 
     const int n_tokens = 4;
@@ -439,7 +439,7 @@ TEST(MoEExecutorTest, LogitsShape) {
         /*n_experts=*/4, /*n_experts_active=*/2, /*expert_d_ff=*/128);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -516,7 +516,7 @@ TEST(MoEExecutorTest, MixedMoEDense) {
     tm.all_tensors.push_back(ly0.w_down);
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*tm.model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*tm.model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 

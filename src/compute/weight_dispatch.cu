@@ -46,7 +46,7 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w,
         // ---- FP16 -------------------------------------------------------
         case StorageTier::FP16: {
             int64_t wshape[2] = {w.shape[0], w.shape[1]};
-            Tensor w_tensor(w.payload.fp16.data, DType::FP16, 2, wshape, true);
+            Tensor w_tensor(w.payload.fp16.data, QType::F16, 2, wshape, true);
             gemm(w_tensor, x, y, alpha, beta, stream);
             return;
         }
@@ -59,7 +59,7 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w,
         // handles mixed dtype via cuBLASLt algorithm selection).
         case StorageTier::FP8: {
             int64_t wshape[2] = {w.shape[0], w.shape[1]};
-            Tensor w_tensor(w.payload.fp8.data, DType::FP8_E4M3, 2, wshape, true);
+            Tensor w_tensor(w.payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
             // aScale: activation scale.  For FP8 x the caller has already
             // embedded the scale in the tensor metadata; pass nullptr and let
             // cuBLASLt use default scale=1.0.  For FP16 x no aScale is needed.
@@ -272,7 +272,7 @@ void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y,
         // ---- FP16 -------------------------------------------------------
         case StorageTier::FP16: {
             int64_t wshape[2] = {w.shape[0], w.shape[1]};
-            Tensor w_tensor(w.payload.fp16.data, DType::FP16, 2, wshape, true);
+            Tensor w_tensor(w.payload.fp16.data, QType::F16, 2, wshape, true);
             gemm(w_tensor, x, y, 1.0f, 0.0f, stream);
             return;
         }
@@ -288,7 +288,7 @@ void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y,
                                 sizeof(float), cudaMemcpyDeviceToHost, stream);
                 cudaStreamSynchronize(stream);
             }
-            Tensor w_tensor(w.payload.fp8.data, DType::FP8_E4M3, 2, wshape, true);
+            Tensor w_tensor(w.payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
             gemv_fp8(w_tensor, x, y, host_scale, stream);
             return;
         }
@@ -420,7 +420,7 @@ void gemm_grouped_dispatch(cublasLtHandle_t /*lt*/,
 
             gemm_moe_batched(x_flat.data, y_flat.data,
                              offsets.data(), b_ptrs.data(),
-                             K, N, DType::FP16, ne, stream,
+                             K, N, QType::F16, ne, stream,
                              /*d_work_ptrs=*/nullptr);
             return;
         }

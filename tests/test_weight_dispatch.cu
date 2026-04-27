@@ -81,10 +81,10 @@ TEST_F(WeightDispatchTest, FP16_GemmMatchesDirect) {
     half* d_y_disp;   cudaMalloc(&d_y_disp,    M * N * sizeof(half));
 
     int64_t wshape[2] = {M, K}, xshape[2] = {N, K}, yshape[2] = {M, N};
-    Tensor w_t(d_w, DType::FP16, 2, wshape, true);
-    Tensor x_t(d_x, DType::FP16, 2, xshape, true);
-    Tensor y_direct(d_y_direct, DType::FP16, 2, yshape, true);
-    Tensor y_disp(d_y_disp, DType::FP16, 2, yshape, true);
+    Tensor w_t(d_w, QType::F16, 2, wshape, true);
+    Tensor x_t(d_x, QType::F16, 2, xshape, true);
+    Tensor y_direct(d_y_direct, QType::F16, 2, yshape, true);
+    Tensor y_disp(d_y_disp, QType::F16, 2, yshape, true);
 
     gemm(w_t, x_t, y_direct, 1.0f, 0.0f, stream_);
     cudaStreamSynchronize(stream_);
@@ -122,10 +122,10 @@ TEST_F(WeightDispatchTest, FP16_GemvMatchesDirect) {
     half* d_y_disp;   cudaMalloc(&d_y_disp,   M * sizeof(half));
 
     int64_t wshape[2] = {M, K}, xshape[2] = {1, K}, yshape[2] = {M, 1};
-    Tensor w_t(d_w, DType::FP16, 2, wshape, true);
-    Tensor x_t(d_x, DType::FP16, 2, xshape, true);
-    Tensor y_direct(d_y_direct, DType::FP16, 2, yshape, true);
-    Tensor y_disp(d_y_disp,   DType::FP16, 2, yshape, true);
+    Tensor w_t(d_w, QType::F16, 2, wshape, true);
+    Tensor x_t(d_x, QType::F16, 2, xshape, true);
+    Tensor y_direct(d_y_direct, QType::F16, 2, yshape, true);
+    Tensor y_disp(d_y_disp,   QType::F16, 2, yshape, true);
 
     gemm(w_t, x_t, y_direct, 1.0f, 0.0f, stream_);
     cudaStreamSynchronize(stream_);
@@ -181,10 +181,10 @@ TEST_F(WeightDispatchTest, FP8_GemmMatchesDirect) {
     float* d_x_scale;  cudaMalloc(&d_x_scale,  sizeof(float));
 
     int64_t wshape[2] = {M, K}, xshape[2] = {N, K};
-    Tensor w_fp16_t(d_w_fp16, DType::FP16, 2, wshape, true);
-    Tensor w_fp8_t(d_w_fp8, DType::FP8_E4M3, 2, wshape, true);
-    Tensor x_fp16_t(d_x_fp16, DType::FP16, 2, xshape, true);
-    Tensor x_fp8_t(d_x_fp8, DType::FP8_E4M3, 2, xshape, true);
+    Tensor w_fp16_t(d_w_fp16, QType::F16, 2, wshape, true);
+    Tensor w_fp8_t(d_w_fp8, QType::FP8_E4M3, 2, wshape, true);
+    Tensor x_fp16_t(d_x_fp16, QType::F16, 2, xshape, true);
+    Tensor x_fp8_t(d_x_fp8, QType::FP8_E4M3, 2, xshape, true);
 
     quantize_fp16_to_fp8_e4m3(w_fp16_t, w_fp8_t, d_w_scale, stream_);
     quantize_fp16_to_fp8_e4m3(x_fp16_t, x_fp8_t, d_x_scale, stream_);
@@ -193,8 +193,8 @@ TEST_F(WeightDispatchTest, FP8_GemmMatchesDirect) {
     int64_t yshape[2] = {M, N};
     half* d_y_direct; cudaMalloc(&d_y_direct, M * N * sizeof(half));
     half* d_y_disp;   cudaMalloc(&d_y_disp,   M * N * sizeof(half));
-    Tensor y_direct(d_y_direct, DType::FP16, 2, yshape, true);
-    Tensor y_disp(d_y_disp,   DType::FP16, 2, yshape, true);
+    Tensor y_direct(d_y_direct, QType::F16, 2, yshape, true);
+    Tensor y_disp(d_y_disp,   QType::F16, 2, yshape, true);
 
     // Direct call: gemm_cublaslt(fp8_x, fp8_w, fp16_y, alpha, beta, aScale, bScale)
     gemm_cublaslt(x_fp8_t, w_fp8_t, y_direct, 1.0f, 0.0f, d_x_scale, d_w_scale, stream_);
@@ -249,8 +249,8 @@ TEST_F(WeightDispatchTest, FP8_GemvMatchesDirect) {
     float* d_scale; cudaMalloc(&d_scale, sizeof(float));
 
     int64_t wshape[2] = {M, K};
-    Tensor w_fp16_t(d_w_fp16, DType::FP16, 2, wshape, true);
-    Tensor w_fp8_t(d_w_fp8, DType::FP8_E4M3, 2, wshape, true);
+    Tensor w_fp16_t(d_w_fp16, QType::F16, 2, wshape, true);
+    Tensor w_fp8_t(d_w_fp8, QType::FP8_E4M3, 2, wshape, true);
     quantize_fp16_to_fp8_e4m3(w_fp16_t, w_fp8_t, d_scale, stream_);
     cudaStreamSynchronize(stream_);
 
@@ -259,12 +259,12 @@ TEST_F(WeightDispatchTest, FP8_GemvMatchesDirect) {
     cudaMemcpy(&host_scale, d_scale, sizeof(float), cudaMemcpyDeviceToHost);
 
     int64_t xshape[2] = {1, K}, yshape[2] = {M, 1};
-    Tensor x_t(d_x, DType::FP16, 2, xshape, true);
+    Tensor x_t(d_x, QType::F16, 2, xshape, true);
 
     half* d_y_direct; cudaMalloc(&d_y_direct, M * sizeof(half));
     half* d_y_disp;   cudaMalloc(&d_y_disp,   M * sizeof(half));
-    Tensor y_direct(d_y_direct, DType::FP16, 2, yshape, true);
-    Tensor y_disp(d_y_disp,   DType::FP16, 2, yshape, true);
+    Tensor y_direct(d_y_direct, QType::F16, 2, yshape, true);
+    Tensor y_disp(d_y_disp,   QType::F16, 2, yshape, true);
 
     gemv_fp8(w_fp8_t, x_t, y_direct, host_scale, stream_);
     cudaStreamSynchronize(stream_);
@@ -313,7 +313,7 @@ TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
     half* d_x = dev_alloc_copy(h_x);
 
     int64_t wshape[2] = {M, K};
-    Tensor w_t(d_w, DType::FP16, 2, wshape, true);
+    Tensor w_t(d_w, QType::F16, 2, wshape, true);
 
     // Quantize to NVFP4
     NvFP4QuantResult qr;
@@ -326,12 +326,12 @@ TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
     qr.tensor_scale = 1.0f;
 
     int64_t xshape[2] = {N, K}, yshape[2] = {M, N};
-    Tensor x_t(d_x, DType::FP16, 2, xshape, true);
+    Tensor x_t(d_x, QType::F16, 2, xshape, true);
 
     half* d_y_direct; cudaMalloc(&d_y_direct, M * N * sizeof(half));
     half* d_y_disp;   cudaMalloc(&d_y_disp,   M * N * sizeof(half));
-    Tensor y_direct(d_y_direct, DType::FP16, 2, yshape, true);
-    Tensor y_disp(d_y_disp,   DType::FP16, 2, yshape, true);
+    Tensor y_direct(d_y_direct, QType::F16, 2, yshape, true);
+    Tensor y_disp(d_y_disp,   QType::F16, 2, yshape, true);
 
     gemm_nvfp4(qr, x_t, y_direct, stream_);
     cudaStreamSynchronize(stream_);
@@ -380,7 +380,7 @@ TEST_F(WeightDispatchTest, NVFP4_GemvMatchesDirect) {
     half* d_x = dev_alloc_copy(h_x);
 
     int64_t wshape[2] = {M, K};
-    Tensor w_t(d_w, DType::FP16, 2, wshape, true);
+    Tensor w_t(d_w, QType::F16, 2, wshape, true);
 
     NvFP4QuantResult qr;
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
@@ -396,8 +396,8 @@ TEST_F(WeightDispatchTest, NVFP4_GemvMatchesDirect) {
     cudaStreamSynchronize(stream_);
 
     int64_t xshape[2] = {1, K}, yshape[2] = {M, 1};
-    Tensor x_t(d_x, DType::FP16, 2, xshape, true);
-    Tensor y_disp(d_y_disp, DType::FP16, 2, yshape, true);
+    Tensor x_t(d_x, QType::F16, 2, xshape, true);
+    Tensor y_disp(d_y_disp, QType::F16, 2, yshape, true);
 
     WeightHandle h;
     h.kind = TensorKind::WQ;
@@ -456,7 +456,7 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     half* d_x = dev_alloc_copy(h_x);
 
     int64_t wshape[2] = {N, K};
-    Tensor w_t(d_w, DType::FP16, 2, wshape, true);
+    Tensor w_t(d_w, QType::F16, 2, wshape, true);
 
     NvFP4QuantResult qr;
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
@@ -502,8 +502,8 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     h.payload.cutlass_nvfp4.global_scale = const_cast<float*>(&cw.tensor_scale);
 
     int64_t xshape[2] = {M, K}, yshape[2] = {M, N};
-    Tensor x_t(d_x, DType::FP16, 2, xshape, true);
-    Tensor y_disp(d_y_disp, DType::FP16, 2, yshape, true);
+    Tensor x_t(d_x, QType::F16, 2, xshape, true);
+    Tensor y_disp(d_y_disp, QType::F16, 2, yshape, true);
 
     // Workspace layout: [act_data | act_sf | cutlass_ws]
     // Must fit in kWorkspaceBytes (64 MiB)
@@ -558,8 +558,8 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemvIsStub) {
     cudaMemset(d_y, 0, M * sizeof(half));
 
     int64_t xshape[2] = {1, K}, yshape[2] = {M, 1};
-    Tensor x_t(d_x, DType::FP16, 2, xshape, true);
-    Tensor y_t(d_y, DType::FP16, 2, yshape, true);
+    Tensor x_t(d_x, QType::F16, 2, xshape, true);
+    Tensor y_t(d_y, QType::F16, 2, yshape, true);
 
     // Must not crash; output buffer is unchanged (stub returns early)
     EXPECT_NO_THROW(gemv_dispatch(h, x_t, y_t, stream_));
@@ -594,7 +594,7 @@ TEST_F(WeightDispatchTest, MXFP4_GemmMatchesDirect) {
     half* d_x = dev_alloc_copy(h_x);
 
     int64_t wshape[2] = {N, K};
-    Tensor w_t(d_w, DType::FP16, 2, wshape, true);
+    Tensor w_t(d_w, QType::F16, 2, wshape, true);
 
     // Quantize: FP16 → NVFP4 → MXFP4
     NvFP4QuantResult qr;
@@ -640,8 +640,8 @@ TEST_F(WeightDispatchTest, MXFP4_GemmMatchesDirect) {
     h.payload.mxfp4.linear_scales = mw.linear_scales;
 
     int64_t xshape[2] = {M, K}, yshape[2] = {M, N};
-    Tensor x_t(d_x, DType::FP16, 2, xshape, true);
-    Tensor y_disp(d_y_disp, DType::FP16, 2, yshape, true);
+    Tensor x_t(d_x, QType::F16, 2, xshape, true);
+    Tensor y_disp(d_y_disp, QType::F16, 2, yshape, true);
 
     ASSERT_LE(act_data_bytes + act_sf_bytes + ws_needed, kWorkspaceBytes);
 
@@ -680,7 +680,7 @@ TEST_F(WeightDispatchTest, MXFP4_GemvMatchesDirect) {
     half* d_x = dev_alloc_copy(h_x);
 
     int64_t wshape[2] = {M, K};
-    Tensor w_t(d_w, DType::FP16, 2, wshape, true);
+    Tensor w_t(d_w, QType::F16, 2, wshape, true);
 
     NvFP4QuantResult qr;
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
@@ -703,8 +703,8 @@ TEST_F(WeightDispatchTest, MXFP4_GemvMatchesDirect) {
 
     // Dispatch call
     int64_t xshape[2] = {1, K}, yshape[2] = {M, 1};
-    Tensor x_t(d_x, DType::FP16, 2, xshape, true);
-    Tensor y_disp(d_y_disp, DType::FP16, 2, yshape, true);
+    Tensor x_t(d_x, QType::F16, 2, xshape, true);
+    Tensor y_disp(d_y_disp, QType::F16, 2, yshape, true);
 
     WeightHandle h;
     h.kind = TensorKind::WQ;

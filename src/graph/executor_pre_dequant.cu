@@ -137,7 +137,7 @@ static bool create_fused_weight_pair(
                      cudaMemcpyDeviceToDevice, stream));
 
     int64_t shape[2] = {2 * a_rows, static_cast<int64_t>(K)};
-    out_map[layer_idx] = Tensor(fused_buf, DType::FP16, 2, shape, true);
+    out_map[layer_idx] = Tensor(fused_buf, QType::F16, 2, shape, true);
     total_cache_bytes += 2 * one_sz;
     return true;
 }
@@ -269,10 +269,10 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
     }
 
     // Helper: does this qtype benefit from NVFP4 conversion? (> 4.5 bits/elem)
-    auto nvfp4_beneficial = [](GGMLQuantType qt) -> bool {
+    auto nvfp4_beneficial = [](QType qt) -> bool {
         switch (qt) {
-            case GGMLQuantType::Q8_0: case GGMLQuantType::Q8_K:
-            case GGMLQuantType::Q6_K: case GGMLQuantType::Q5_K:
+            case QType::Q8_0: case QType::Q8_K:
+            case QType::Q6_K: case QType::Q5_K:
                 return true;
             default: return false;
         }
@@ -293,7 +293,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                      "VRAM reserved for NVFP4 decode cache");
     } else {
         // --- Phase 1: FP16 weight cache + fused KV + fused gate+up ---
-        auto cache_weight = [&](const Tensor& w, GGMLQuantType qtype) {
+        auto cache_weight = [&](const Tensor& w, QType qtype) {
             if (!w.data || !dequant_gpu_supported(qtype)) return;
             if (wcache_.fp16.count(w.data)) return;  // already cached
             if (budget_exhausted) return;
@@ -321,7 +321,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
             dequant_gpu(w.data, fp16_buf, qtype, rows, cols, stream);
 
-            Tensor fp16_tensor(fp16_buf, DType::FP16, w.ndim, w.shape, true);
+            Tensor fp16_tensor(fp16_buf, QType::F16, w.ndim, w.shape, true);
             wcache_.fp16[w.data] = fp16_tensor;
             total_cache_bytes += fp16_bytes;
             cached_count++;
@@ -418,12 +418,12 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         struct FP8OverflowEntry {
             const void* orig_ptr;
             Tensor weight;
-            GGMLQuantType qtype;
+            QType qtype;
             size_t n_elems;
         };
         std::vector<FP8OverflowEntry> fp8_entries;
 
-        auto collect_weight_fp8 = [&](const Tensor& w, GGMLQuantType qtype) {
+        auto collect_weight_fp8 = [&](const Tensor& w, QType qtype) {
             if (!w.data || !dequant_gpu_supported(qtype)) return;
             if (wcache_.fp16.count(w.data)) return;
             if (wcache_.fp8.count(w.data)) return;
@@ -496,7 +496,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     d_block_maxes, max_grid,
                     d_absmax, d_scales_all + static_cast<ptrdiff_t>(i), stream);
 
-                Tensor fp8_t(fp8_buf, DType::FP8_E4M3, e.weight.ndim, e.weight.shape, true);
+                Tensor fp8_t(fp8_buf, QType::FP8_E4M3, e.weight.ndim, e.weight.shape, true);
                 wcache_.fp8[e.orig_ptr] = {fp8_t, 0.0f, d_scales_all + static_cast<ptrdiff_t>(i)};
                 actual_count++;
             }
@@ -585,12 +585,12 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         struct NvFP4Entry {
             const void* orig_ptr;
             Tensor weight;
-            GGMLQuantType qtype;
+            QType qtype;
             bool from_scratch;
         };
         std::vector<NvFP4Entry> nvfp4_entries;
 
-        auto collect_weight_nvfp4 = [&](const Tensor& w, GGMLQuantType qtype) {
+        auto collect_weight_nvfp4 = [&](const Tensor& w, QType qtype) {
             if (!w.data) return;
             if (!nvfp4_beneficial(qtype)) return;
             if (wcache_.nvfp4.count(w.data)) return;
@@ -667,7 +667,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     fp16_ptr = reinterpret_cast<const half*>(it->second.data);
                 }
 
-                Tensor fp16_view(const_cast<half*>(fp16_ptr), DType::FP16, 2,
+                Tensor fp16_view(const_cast<half*>(fp16_ptr), QType::F16, 2,
                                  e.weight.shape, true);
 
                 NvFP4QuantResult result;
@@ -766,7 +766,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     fp16_ptr = reinterpret_cast<const half*>(it->second.data);
                 }
 
-                Tensor fp16_view(const_cast<half*>(fp16_ptr), DType::FP16, 2,
+                Tensor fp16_view(const_cast<half*>(fp16_ptr), QType::F16, 2,
                                  e.weight.shape, true);
 
                 NvFP4QuantResult result;
@@ -862,7 +862,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                             d_block_maxes, max_grid,
                             d_absmax, d_scales_all + i, stream);
 
-                        Tensor fp8_t(fp8_buf, DType::FP8_E4M3, e.fp16_tensor.ndim,
+                        Tensor fp8_t(fp8_buf, QType::FP8_E4M3, e.fp16_tensor.ndim,
                                      e.fp16_tensor.shape, true);
                         wcache_.fp8[e.orig_ptr] = {fp8_t, 0.0f, d_scales_all + static_cast<ptrdiff_t>(i)};
                         migrated++;
@@ -973,7 +973,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 }
                 dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
 
-                Tensor fp16_view(reinterpret_cast<half*>(dq_buf), DType::FP16, 2,
+                Tensor fp16_view(reinterpret_cast<half*>(dq_buf), QType::F16, 2,
                                  e.weight.shape, true);
                 NvFP4QuantResult result;
                 quantize_fp16_to_nvfp4_async(fp16_view, result,
@@ -1058,8 +1058,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             if (cutlass_sm120_mxfp4_available()) {
                 // Check if any layer has MXFP4 weights
                 bool has_mxfp4 = false;
-                auto check_mxfp4 = [&](const Tensor&, GGMLQuantType qt) {
-                    if (qt == GGMLQuantType::MXFP4) has_mxfp4 = true;
+                auto check_mxfp4 = [&](const Tensor&, QType qt) {
+                    if (qt == QType::MXFP4) has_mxfp4 = true;
                 };
                 for (int i = 0; i < cfg.n_layers && !has_mxfp4; i++) {
                     const auto& L = model_->layer(i);
@@ -1146,8 +1146,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         if (qscratch_.mxfp4_act_sf != nullptr && cutlass_sm120_mxfp4_available()) {
             int mx_native = 0;
             size_t mx_native_bytes = 0;
-            auto register_if_mxfp4 = [&](const Tensor& w, GGMLQuantType qt, bool is_attn = true) {
-                if (qt != GGMLQuantType::MXFP4 || !w.data || !w.on_device) return;
+            auto register_if_mxfp4 = [&](const Tensor& w, QType qt, bool is_attn = true) {
+                if (qt != QType::MXFP4 || !w.data || !w.on_device) return;
                 if (w.ndim < 2 || w.shape[1] % 32 != 0) return;
                 if (wcache_.cutlass_mxfp4.count(w.data)) return;  // already registered
                 CutlassMxFP4Weight mw;
@@ -1282,7 +1282,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     // correctly (data first, scales at offset N*K/2).
                     dequant_mxfp4_to_fp16(ptr, mw.N, mw.K, d_fp16, stream);
                     int64_t shape[2] = {mw.N, mw.K};
-                    wcache_.fp16[ptr] = Tensor(d_fp16, DType::FP16, 2, shape, true);
+                    wcache_.fp16[ptr] = Tensor(d_fp16, QType::F16, 2, shape, true);
                     }
                 }  // end if (d_fp16_bulk)
 
@@ -1296,11 +1296,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     // Replace model weight tensor pointers with FP16 data.
                     // This ensures ALL code paths (GEMV, direct gemm, etc.) see
                     // valid FP16 data instead of raw MXFP4 blocks.
-                    auto replace_weight = [&](Tensor& w, GGMLQuantType& qt) {
+                    auto replace_weight = [&](Tensor& w, QType& qt) {
                         auto it = wcache_.fp16.find(w.data);
-                        if (it != wcache_.fp16.end() && qt == GGMLQuantType::MXFP4) {
+                        if (it != wcache_.fp16.end() && qt == QType::MXFP4) {
                             w = it->second;
-                            qt = GGMLQuantType::F16;
+                            qt = QType::F16;
                         }
                     };
                     for (int i = 0; i < cfg.n_layers; i++) {
@@ -1341,7 +1341,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         }
         bool moe_budget_exhausted = false;
 
-        auto cache_moe_expert_nvfp4 = [&](const Tensor& packed, GGMLQuantType qtype) {
+        auto cache_moe_expert_nvfp4 = [&](const Tensor& packed, QType qtype) {
             if (!packed.data) return;
             if (!nvfp4_beneficial(qtype)) return;
             if (wcache_.nvfp4_moe.count(packed.data)) return;
@@ -1402,8 +1402,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         bool has_mxfp4 = false;
         for (int i = 0; i < cfg.n_layers && !has_mxfp4; i++) {
             const auto& L = model_->layer(i);
-            if (L.wq_qtype == GGMLQuantType::MXFP4 || L.w_gate_qtype == GGMLQuantType::MXFP4 ||
-                L.ssm_in_qtype == GGMLQuantType::MXFP4 || L.ssm_out_qtype == GGMLQuantType::MXFP4)
+            if (L.wq_qtype == QType::MXFP4 || L.w_gate_qtype == QType::MXFP4 ||
+                L.ssm_in_qtype == QType::MXFP4 || L.ssm_out_qtype == QType::MXFP4)
                 has_mxfp4 = true;
         }
         if (has_mxfp4) {
@@ -1436,8 +1436,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 std::vector<SmallWeight> small_weights;
                 for (int i = 0; i < cfg.n_layers; i++) {
                     const auto& L = model_->layer(i);
-                    auto collect = [&](const Tensor& w, GGMLQuantType qt) {
-                        if (qt != GGMLQuantType::MXFP4 || !w.data) return;
+                    auto collect = [&](const Tensor& w, QType qt) {
+                        if (qt != QType::MXFP4 || !w.data) return;
                         small_weights.push_back({w.data, w.shape[0], w.shape[1]});
                         fp16_total += static_cast<size_t>(w.shape[0]) * w.shape[1] * sizeof(half);
                     };
@@ -1455,17 +1455,17 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                             offset += bytes;
                             dequant_mxfp4_to_fp16(sw.ptr, sw.N, sw.K, d_fp16, stream);
                             int64_t shape[2] = {sw.N, sw.K};
-                            wcache_.fp16[sw.ptr] = Tensor(d_fp16, DType::FP16, 2, shape, true);
+                            wcache_.fp16[sw.ptr] = Tensor(d_fp16, QType::F16, 2, shape, true);
                         }
                         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                         IMP_LOG_INFO("MXFP4 → FP16 (alpha/beta): %.2f MiB (%d tensors)",
                                      fp16_total / (1024.0 * 1024.0), (int)small_weights.size());
                         for (int i = 0; i < cfg.n_layers; i++) {
                             TransformerLayer& L = const_cast<Model*>(model_)->layer(i);
-                            auto replace = [&](Tensor& w, GGMLQuantType& qt) {
+                            auto replace = [&](Tensor& w, QType& qt) {
                                 auto it = wcache_.fp16.find(w.data);
-                                if (it != wcache_.fp16.end() && qt == GGMLQuantType::MXFP4) {
-                                    w = it->second; qt = GGMLQuantType::F16;
+                                if (it != wcache_.fp16.end() && qt == QType::MXFP4) {
+                                    w = it->second; qt = QType::F16;
                                 }
                             };
                             replace(L.gdn_alpha, L.gdn_alpha_qtype);
@@ -1477,8 +1477,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
             // THEN: register + unpack MXFP4 weights (in-place compaction)
             int mx_count = 0;
-            auto register_mx = [&](const Tensor& w, GGMLQuantType qt, bool is_attn) {
-                if (qt != GGMLQuantType::MXFP4 || !w.data || !w.on_device) return;
+            auto register_mx = [&](const Tensor& w, QType qt, bool is_attn) {
+                if (qt != QType::MXFP4 || !w.data || !w.on_device) return;
                 if (w.ndim < 2 || w.shape[1] % 32 != 0) return;
                 if (wcache_.cutlass_mxfp4.count(w.data)) return;
                 CutlassMxFP4Weight mw;

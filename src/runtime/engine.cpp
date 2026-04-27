@@ -381,10 +381,10 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     //                   users who rely on it for batch-serving VRAM budgets.
     const bool force_kv_fp16  = (std::getenv("IMP_KV_FP16") != nullptr);
     const bool fp8_auto_legacy = (std::getenv("IMP_KV_FP8_AUTO") != nullptr);
-    if (fp8_auto_legacy && config_.kv_cache_dtype == DType::FP16 && !debug_raw_ && !force_kv_fp16) {
-        config_.kv_cache_dtype = DType::FP8_E4M3;
+    if (fp8_auto_legacy && config_.kv_cache_dtype == QType::F16 && !debug_raw_ && !force_kv_fp16) {
+        config_.kv_cache_dtype = QType::FP8_E4M3;
         IMP_LOG_INFO("KV cache dtype: IMP_KV_FP8_AUTO=1 → FP8_E4M3 (legacy opt-out)");
-    } else if (config_.kv_cache_dtype == DType::FP16) {
+    } else if (config_.kv_cache_dtype == QType::F16) {
         IMP_LOG_INFO("KV cache dtype: FP16 (default — pass --kv-fp8 for FP8 E4M3 memory savings)");
     }
 
@@ -402,7 +402,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // choice, does not disable tensor cores). Users who've verified their
     // model is fine with non-deterministic FP8 KV can opt out via
     // IMP_ALLOW_NONDETERMINISTIC_FP8_KV=1.
-    if (config_.kv_cache_dtype == DType::FP8_E4M3 &&
+    if (config_.kv_cache_dtype == QType::FP8_E4M3 &&
         !getenv("IMP_ALLOW_NONDETERMINISTIC_FP8_KV") &&
         !getenv("IMP_DETERMINISTIC_GEMM")) {
         setenv("IMP_DETERMINISTIC_GEMM", "1", 1);
@@ -455,8 +455,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             if (model_->layer(i).gdn_gate.data != nullptr) { has_gdn_for_dtype = true; break; }
         }
     }
-    if (config_.ssm_state_dtype == DType::FP32 && mcfg.ssm_state_size > 0 && !has_gdn_for_dtype) {
-        config_.ssm_state_dtype = DType::FP16;
+    if (config_.ssm_state_dtype == QType::F32 && mcfg.ssm_state_size > 0 && !has_gdn_for_dtype) {
+        config_.ssm_state_dtype = QType::F16;
         IMP_LOG_INFO("SSM state dtype: auto → FP16 (hybrid SSM model, state_size=%d)",
                      mcfg.ssm_state_size);
     }
@@ -498,10 +498,10 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // FP8 prefill auto-disable for sub-8-bit models
     if (config_.use_fp8_prefill) {
         auto qtype = model_->layer(0).wq_qtype;
-        bool sub_8bit = (qtype == GGMLQuantType::Q4_0 || qtype == GGMLQuantType::Q4_K ||
-                         qtype == GGMLQuantType::Q5_0 || qtype == GGMLQuantType::Q5_K ||
-                         qtype == GGMLQuantType::Q3_K || qtype == GGMLQuantType::Q2_K ||
-                         qtype == GGMLQuantType::Q4_1 || qtype == GGMLQuantType::Q5_1);
+        bool sub_8bit = (qtype == QType::Q4_0 || qtype == QType::Q4_K ||
+                         qtype == QType::Q5_0 || qtype == QType::Q5_K ||
+                         qtype == QType::Q3_K || qtype == QType::Q2_K ||
+                         qtype == QType::Q4_1 || qtype == QType::Q5_1);
         if (sub_8bit) {
             config_.use_fp8_prefill = 0;
             IMP_LOG_INFO("FP8 prefill cache: auto-disabled (sub-8-bit weights)");
@@ -541,9 +541,9 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             config_.dual_path_quant = false;
         }
         // Force FP16 KV cache (FP8 KV cache calibration reads narrow stride incorrectly)
-        if (config_.kv_cache_dtype == DType::FP8_E4M3) {
+        if (config_.kv_cache_dtype == QType::FP8_E4M3) {
             IMP_LOG_INFO("Gemma 4: forcing FP16 KV cache (FP8 stride mismatch)");
-            config_.kv_cache_dtype = DType::FP16;
+            config_.kv_cache_dtype = QType::F16;
         }
         // Gemma 4 output_norm has extreme outliers (max=588). Small numeric jitter
         // from cuBLAS algo autotuning / split-K atomics amplifies into wildly
@@ -587,8 +587,8 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
         int head_dim = mcfg.head_dim > 0 ? mcfg.head_dim : (mcfg.d_model / mcfg.n_heads);
         // Per-token KV bytes for the real kv dtype (INT4/TQ pack 2 elems/byte).
         auto kv = config_.kv_cache_dtype;
-        bool packed_int4 = (kv == DType::INT4 || kv == DType::TURBOQUANT ||
-                            kv == DType::TURBOQUANT_LITE);
+        bool packed_int4 = (kv == QType::INT4 || kv == QType::TURBOQUANT ||
+                            kv == QType::TURBOQUANT_LITE);
         size_t per_tok_elems = static_cast<size_t>(mcfg.n_kv_heads) * head_dim *
                                mcfg.n_layers * 2;  // K+V, per KV head, all layers
         size_t kv_bytes_per_token = packed_int4 ? (per_tok_elems / 2)
@@ -656,7 +656,7 @@ bool Engine::init_weights() {
             // quantized variants don't yet skip -1 sentinels in their block
             // tables. Refuse to enable streaming with non-FP16 KV caches so
             // we never call evict_middle_blocks for an unsupported path.
-            if (config_.kv_cache_dtype != DType::FP16) {
+            if (config_.kv_cache_dtype != QType::F16) {
                 IMP_LOG_WARN("StreamingLLM smart KV cache requires FP16 KV cache "
                              "(requested %d) — disabling streaming.",
                              static_cast<int>(config_.kv_cache_dtype));
@@ -873,7 +873,7 @@ bool Engine::init_kv_cache() {
         ? config_.kv_cache_max_blocks : vram_budget.kv_max_blocks;
 
     {
-        DType kv_dtype = config_.kv_cache_dtype;
+        QType kv_dtype = config_.kv_cache_dtype;
         size_t block_bytes = static_cast<size_t>(kv_bs) * mcfg.n_kv_heads * head_dim * dtype_size(kv_dtype);
         size_t total_kv = static_cast<size_t>(n_kv_layers) * max_blocks * 2 * block_bytes;
         IMP_LOG_INFO("KV cache: %d blocks (%.0f tokens), %.2f MiB, dtype=%s "
@@ -886,9 +886,9 @@ bool Engine::init_kv_cache() {
 
     // Compute sketch_dim for TurboQuant / TurboQuant Lite (0 for other modes)
     int kv_sketch_dim = 0;
-    if (config_.kv_cache_dtype == DType::TURBOQUANT) {
+    if (config_.kv_cache_dtype == QType::TURBOQUANT) {
         kv_sketch_dim = head_dim;
-    } else if (config_.kv_cache_dtype == DType::TURBOQUANT_LITE) {
+    } else if (config_.kv_cache_dtype == QType::TURBOQUANT_LITE) {
         int mult = config_.turboquant_sketch_multiplier;
         if (mult <= 0) mult = 2;
         kv_sketch_dim = head_dim * mult;
@@ -896,7 +896,7 @@ bool Engine::init_kv_cache() {
 
     // MXFP4 TurboQuant: FP4 E2M1 + UE8M0 micro-scales (requires head_dim % 32 == 0)
     bool tq_use_mxfp4 = false;
-    if (config_.kv_cache_dtype == DType::TURBOQUANT && (head_dim % 32 == 0)) {
+    if (config_.kv_cache_dtype == QType::TURBOQUANT && (head_dim % 32 == 0)) {
         tq_use_mxfp4 = true;
         IMP_LOG_INFO("TurboQuant: using MXFP4 FP4 E2M1 + UE8M0 for K directions");
     }
@@ -905,10 +905,10 @@ bool Engine::init_kv_cache() {
     // nkv/hd arrays restricted to attention layers (hybrid models may have non-attn layers).
     std::unique_ptr<KVCache> kv_cache;
     if (!mcfg.head_dim_per_layer.empty() &&
-        config_.kv_cache_dtype != DType::TURBOQUANT &&
-        config_.kv_cache_dtype != DType::TURBOQUANT_LITE &&
-        config_.kv_cache_dtype != DType::INT8 &&
-        config_.kv_cache_dtype != DType::INT4) {
+        config_.kv_cache_dtype != QType::TURBOQUANT &&
+        config_.kv_cache_dtype != QType::TURBOQUANT_LITE &&
+        config_.kv_cache_dtype != QType::INT8 &&
+        config_.kv_cache_dtype != QType::INT4) {
         std::vector<int> per_layer_nkv(n_kv_layers, 0);
         std::vector<int> per_layer_hd(n_kv_layers, 0);
         for (int l = 0, k = 0; l < mcfg.n_layers && k < n_kv_layers; l++) {
@@ -951,11 +951,11 @@ bool Engine::init_kv_cache() {
     executor_->set_kv_layer_map(std::move(kv_layer_map));
 
     // Initialize QJL projection for TurboQuant / TurboQuant Lite KV cache
-    if (config_.kv_cache_dtype == DType::TURBOQUANT
-        || config_.kv_cache_dtype == DType::TURBOQUANT_LITE) {
+    if (config_.kv_cache_dtype == QType::TURBOQUANT
+        || config_.kv_cache_dtype == QType::TURBOQUANT_LITE) {
         auto& qjl = executor_->qjl_projection();
         int sketch_dim;
-        if (config_.kv_cache_dtype == DType::TURBOQUANT_LITE) {
+        if (config_.kv_cache_dtype == QType::TURBOQUANT_LITE) {
             int mult = config_.turboquant_sketch_multiplier;
             if (mult <= 0) mult = 2;
             sketch_dim = head_dim * mult;
@@ -1318,7 +1318,7 @@ void Engine::warmup() {
     // and attempt to use raw MXFP4 data as FP16 weights.
     bool has_mxfp4_weights = false;
     for (int i = 0; i < model_->config().n_layers && !has_mxfp4_weights; i++) {
-        if (model_->layer(i).wq_qtype == GGMLQuantType::MXFP4) has_mxfp4_weights = true;
+        if (model_->layer(i).wq_qtype == QType::MXFP4) has_mxfp4_weights = true;
     }
     if (has_mxfp4_weights) {
         IMP_LOG_INFO("Warmup skipped (MXFP4 model)");

@@ -39,11 +39,11 @@ TEST(FP8KVCache, Construction) {
     const int max_blocks = 16;
 
     // FP16 cache
-    KVCache fp16_cache(n_layers, n_kv_heads, head_dim, DType::FP16, max_blocks);
+    KVCache fp16_cache(n_layers, n_kv_heads, head_dim, QType::F16, max_blocks);
     size_t fp16_block_bytes = fp16_cache.block_bytes();
 
     // FP8 cache
-    KVCache fp8_cache(n_layers, n_kv_heads, head_dim, DType::FP8_E4M3, max_blocks);
+    KVCache fp8_cache(n_layers, n_kv_heads, head_dim, QType::FP8_E4M3, max_blocks);
     size_t fp8_block_bytes = fp8_cache.block_bytes();
 
     // FP8 blocks should be exactly half the size of FP16
@@ -53,7 +53,7 @@ TEST(FP8KVCache, Construction) {
     EXPECT_EQ(fp8_cache.n_layers(), n_layers);
     EXPECT_EQ(fp8_cache.n_kv_heads(), n_kv_heads);
     EXPECT_EQ(fp8_cache.head_dim(), head_dim);
-    EXPECT_EQ(fp8_cache.dtype(), DType::FP8_E4M3);
+    EXPECT_EQ(fp8_cache.qtype(), QType::FP8_E4M3);
     EXPECT_EQ(fp8_cache.total_blocks(), max_blocks);
     EXPECT_EQ(fp8_cache.num_free_blocks(), max_blocks);
 
@@ -92,7 +92,7 @@ TEST(FP8KVCache, ScaleCalibration) {
     cudaMemcpy(d_data, h_data.data(), n * k * sizeof(half), cudaMemcpyHostToDevice);
 
     int64_t shape[2] = {n, k};
-    Tensor t(d_data, DType::FP16, 2, shape, true);
+    Tensor t(d_data, QType::F16, 2, shape, true);
 
     float scale = calibrate_fp8_scale(t, nullptr);
     cudaDeviceSynchronize();
@@ -121,7 +121,7 @@ TEST(FP8KVCache, ScaleCalibrationZeros) {
     cudaMemset(d_data, 0, n * k * sizeof(half));
 
     int64_t shape[2] = {n, k};
-    Tensor t(d_data, DType::FP16, 2, shape, true);
+    Tensor t(d_data, QType::F16, 2, shape, true);
 
     float scale = calibrate_fp8_scale(t, nullptr);
     cudaDeviceSynchronize();
@@ -143,13 +143,13 @@ TEST(FP8KVCache, BlockBytesMatchesDTypeSize) {
     const int head_dim = 128;
     const int max_blocks = 8;
 
-    KVCache cache(1, n_kv_heads, head_dim, DType::FP8_E4M3, max_blocks);
+    KVCache cache(1, n_kv_heads, head_dim, QType::FP8_E4M3, max_blocks);
 
     // block_bytes = kKVBlockSize * n_kv_heads * head_dim * dtype_size(FP8_E4M3)
     size_t expected = static_cast<size_t>(kKVBlockSize) * n_kv_heads * head_dim *
-                      dtype_size(DType::FP8_E4M3);
+                      dtype_size(QType::FP8_E4M3);
     EXPECT_EQ(cache.block_bytes(), expected);
-    EXPECT_EQ(dtype_size(DType::FP8_E4M3), 1u);  // FP8 = 1 byte per element
+    EXPECT_EQ(dtype_size(QType::FP8_E4M3), 1u);  // FP8 = 1 byte per element
 }
 
 // ============================================================================
@@ -220,8 +220,8 @@ TEST(FP8KVCache, SplitKConsistency) {
     // ---- Quantize KV to FP8 ----
     int64_t q_shape[4] = {batch_size, 1, n_heads, head_dim};
     int64_t kv_shape[4] = {num_blocks, block_size, n_kv_heads, head_dim};
-    Tensor t_k16(d_k_fp16, DType::FP16, 4, kv_shape, true);
-    Tensor t_v16(d_v_fp16, DType::FP16, 4, kv_shape, true);
+    Tensor t_k16(d_k_fp16, QType::F16, 4, kv_shape, true);
+    Tensor t_v16(d_v_fp16, QType::F16, 4, kv_shape, true);
 
     float k_scale = calibrate_fp8_scale(t_k16, nullptr);
     cudaDeviceSynchronize();
@@ -238,9 +238,9 @@ TEST(FP8KVCache, SplitKConsistency) {
     quantize_fp16_to_fp8_e4m3_scaled(d_v_fp16, d_v_fp8, total_kv_elems, kv_scale, nullptr);
     cudaDeviceSynchronize();
 
-    Tensor t_q(d_q, DType::FP16, 4, q_shape, true);
-    Tensor t_k8(d_k_fp8, DType::FP8_E4M3, 4, kv_shape, true);
-    Tensor t_v8(d_v_fp8, DType::FP8_E4M3, 4, kv_shape, true);
+    Tensor t_q(d_q, QType::F16, 4, q_shape, true);
+    Tensor t_k8(d_k_fp8, QType::FP8_E4M3, 4, kv_shape, true);
+    Tensor t_v8(d_v_fp8, QType::FP8_E4M3, 4, kv_shape, true);
 
     // ---- Output buffers ----
     void* d_o_nosplit = nullptr;
@@ -251,7 +251,7 @@ TEST(FP8KVCache, SplitKConsistency) {
     cudaMemset(d_o_splitk, 0, q_elems * sizeof(half));
 
     // ---- Run FP8 decode WITHOUT Split-K (reference) ----
-    Tensor t_o_nosplit(d_o_nosplit, DType::FP16, 4, q_shape, true);
+    Tensor t_o_nosplit(d_o_nosplit, QType::F16, 4, q_shape, true);
     paged_attention_set_splitk_scratch(nullptr, 0);  // force non-split-K
     paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_nosplit,
                                d_bt, d_ctx, block_size, scale, kv_scale,
@@ -265,7 +265,7 @@ TEST(FP8KVCache, SplitKConsistency) {
     void* d_scratch = nullptr;
     cudaMalloc(&d_scratch, scratch_size);
 
-    Tensor t_o_splitk(d_o_splitk, DType::FP16, 4, q_shape, true);
+    Tensor t_o_splitk(d_o_splitk, QType::F16, 4, q_shape, true);
     paged_attention_set_splitk_scratch(d_scratch, scratch_size);
     paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_splitk,
                                d_bt, d_ctx, block_size, scale, kv_scale,
@@ -325,18 +325,18 @@ TEST(INT8KVCache, Construction) {
     const int max_blocks = 16;
 
     // FP16 cache for size comparison
-    KVCache fp16_cache(n_layers, n_kv_heads, head_dim, DType::FP16, max_blocks);
+    KVCache fp16_cache(n_layers, n_kv_heads, head_dim, QType::F16, max_blocks);
     size_t fp16_block_bytes = fp16_cache.block_bytes();
 
     // INT8 cache
-    KVCache int8_cache(n_layers, n_kv_heads, head_dim, DType::INT8, max_blocks);
+    KVCache int8_cache(n_layers, n_kv_heads, head_dim, QType::INT8, max_blocks);
     size_t int8_block_bytes = int8_cache.block_bytes();
 
     // INT8 blocks should be exactly half the size of FP16
     EXPECT_EQ(int8_block_bytes * 2, fp16_block_bytes);
 
     // Verify accessors
-    EXPECT_EQ(int8_cache.dtype(), DType::INT8);
+    EXPECT_EQ(int8_cache.qtype(), QType::INT8);
     EXPECT_EQ(int8_cache.n_kv_heads(), n_kv_heads);
     EXPECT_EQ(int8_cache.head_dim(), head_dim);
 
@@ -479,9 +479,9 @@ TEST(INT8KVCache, SplitKConsistency) {
     // ---- Create tensors ----
     int64_t q_shape[4] = {batch_size, 1, n_heads, head_dim};
     int64_t kv_shape[4] = {num_blocks, block_size, n_kv_heads, head_dim};
-    Tensor t_q(d_q, DType::FP16, 4, q_shape, true);
-    Tensor t_k_i8(d_k_int8, DType::INT8, 4, kv_shape, true);
-    Tensor t_v_i8(d_v_int8, DType::INT8, 4, kv_shape, true);
+    Tensor t_q(d_q, QType::F16, 4, q_shape, true);
+    Tensor t_k_i8(d_k_int8, QType::INT8, 4, kv_shape, true);
+    Tensor t_v_i8(d_v_int8, QType::INT8, 4, kv_shape, true);
 
     // ---- Output buffers ----
     void* d_o_nosplit = nullptr;
@@ -492,7 +492,7 @@ TEST(INT8KVCache, SplitKConsistency) {
     cudaMemset(d_o_splitk, 0, q_elems * sizeof(half));
 
     // ---- Run INT8 decode WITHOUT Split-K ----
-    Tensor t_o_nosplit(d_o_nosplit, DType::FP16, 4, q_shape, true);
+    Tensor t_o_nosplit(d_o_nosplit, QType::F16, 4, q_shape, true);
     paged_attention_set_splitk_scratch(nullptr, 0);
     paged_attention_decode_int8(t_q, t_k_i8, t_v_i8, t_o_nosplit,
                                 static_cast<const half*>(d_k_scales),
@@ -508,7 +508,7 @@ TEST(INT8KVCache, SplitKConsistency) {
     void* d_scratch = nullptr;
     cudaMalloc(&d_scratch, scratch_size);
 
-    Tensor t_o_splitk(d_o_splitk, DType::FP16, 4, q_shape, true);
+    Tensor t_o_splitk(d_o_splitk, QType::F16, 4, q_shape, true);
     paged_attention_set_splitk_scratch(d_scratch, scratch_size);
     paged_attention_decode_int8(t_q, t_k_i8, t_v_i8, t_o_splitk,
                                 static_cast<const half*>(d_k_scales),
@@ -581,7 +581,7 @@ TEST(FP8KVCache, QuantDequantRoundtrip) {
 
     // Calibrate scale
     int64_t shape[1] = {n_elements};
-    Tensor t_input(d_input, DType::FP16, 1, shape, true);
+    Tensor t_input(d_input, QType::F16, 1, shape, true);
     float scale = calibrate_fp8_scale(t_input, nullptr);
     cudaDeviceSynchronize();
     ASSERT_GT(scale, 0.0f);
@@ -677,8 +677,8 @@ TEST(FP8KVCache, PagedAttentionDecodeFP8vsFP16) {
 
     // ---- Quantize KV to FP8 ----
     int64_t kv_shape[4] = {num_blocks, block_size, n_kv_heads, head_dim};
-    Tensor t_k16(d_k_fp16, DType::FP16, 4, kv_shape, true);
-    Tensor t_v16(d_v_fp16, DType::FP16, 4, kv_shape, true);
+    Tensor t_k16(d_k_fp16, QType::F16, 4, kv_shape, true);
+    Tensor t_v16(d_v_fp16, QType::F16, 4, kv_shape, true);
 
     float k_scale = calibrate_fp8_scale(t_k16, nullptr);
     cudaDeviceSynchronize();
@@ -709,15 +709,15 @@ TEST(FP8KVCache, PagedAttentionDecodeFP8vsFP16) {
 
     // ---- Tensors ----
     int64_t q_shape[4] = {batch_size, 1, n_heads, head_dim};
-    Tensor t_q(d_q, DType::FP16, 4, q_shape, true);
-    Tensor t_k8(d_k_fp8, DType::FP8_E4M3, 4, kv_shape, true);
-    Tensor t_v8(d_v_fp8, DType::FP8_E4M3, 4, kv_shape, true);
+    Tensor t_q(d_q, QType::F16, 4, q_shape, true);
+    Tensor t_k8(d_k_fp8, QType::FP8_E4M3, 4, kv_shape, true);
+    Tensor t_v8(d_v_fp8, QType::FP8_E4M3, 4, kv_shape, true);
 
     // ---- Run FP16 decode (reference) ----
     void* d_o_fp16 = nullptr;
     cudaMalloc(&d_o_fp16, q_elems * sizeof(half));
     cudaMemset(d_o_fp16, 0, q_elems * sizeof(half));
-    Tensor t_o_fp16(d_o_fp16, DType::FP16, 4, q_shape, true);
+    Tensor t_o_fp16(d_o_fp16, QType::F16, 4, q_shape, true);
     paged_attention_set_splitk_scratch(nullptr, 0);
     paged_attention_decode(t_q, t_k16, t_v16, t_o_fp16,
                            d_bt, d_ctx, block_size, scale,
@@ -728,7 +728,7 @@ TEST(FP8KVCache, PagedAttentionDecodeFP8vsFP16) {
     void* d_o_fp8 = nullptr;
     cudaMalloc(&d_o_fp8, q_elems * sizeof(half));
     cudaMemset(d_o_fp8, 0, q_elems * sizeof(half));
-    Tensor t_o_fp8(d_o_fp8, DType::FP16, 4, q_shape, true);
+    Tensor t_o_fp8(d_o_fp8, QType::F16, 4, q_shape, true);
     paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_fp8,
                                d_bt, d_ctx, block_size, scale, kv_scale,
                                ctx_len, 0, 0.0f, nullptr);
@@ -839,8 +839,8 @@ TEST(FP8KVCache, SplitKHD256) {
     // Quantize KV to FP8
     int64_t q_shape[4] = {batch_size, 1, n_heads, head_dim};
     int64_t kv_shape[4] = {num_blocks, block_size, n_kv_heads, head_dim};
-    Tensor t_k16(d_k_fp16, DType::FP16, 4, kv_shape, true);
-    Tensor t_v16(d_v_fp16, DType::FP16, 4, kv_shape, true);
+    Tensor t_k16(d_k_fp16, QType::F16, 4, kv_shape, true);
+    Tensor t_v16(d_v_fp16, QType::F16, 4, kv_shape, true);
 
     float k_scale = calibrate_fp8_scale(t_k16, nullptr);
     cudaDeviceSynchronize();
@@ -857,9 +857,9 @@ TEST(FP8KVCache, SplitKHD256) {
     quantize_fp16_to_fp8_e4m3_scaled(d_v_fp16, d_v_fp8, total_kv_elems, kv_scale, nullptr);
     cudaDeviceSynchronize();
 
-    Tensor t_q(d_q, DType::FP16, 4, q_shape, true);
-    Tensor t_k8(d_k_fp8, DType::FP8_E4M3, 4, kv_shape, true);
-    Tensor t_v8(d_v_fp8, DType::FP8_E4M3, 4, kv_shape, true);
+    Tensor t_q(d_q, QType::F16, 4, q_shape, true);
+    Tensor t_k8(d_k_fp8, QType::FP8_E4M3, 4, kv_shape, true);
+    Tensor t_v8(d_v_fp8, QType::FP8_E4M3, 4, kv_shape, true);
 
     // Output buffers
     void* d_o_nosplit = nullptr;
@@ -870,7 +870,7 @@ TEST(FP8KVCache, SplitKHD256) {
     cudaMemset(d_o_splitk, 0, q_elems * sizeof(half));
 
     // Run FP8 decode WITHOUT Split-K (reference — uses non-pipelined kernel)
-    Tensor t_o_nosplit(d_o_nosplit, DType::FP16, 4, q_shape, true);
+    Tensor t_o_nosplit(d_o_nosplit, QType::F16, 4, q_shape, true);
     paged_attention_set_splitk_scratch(nullptr, 0);
     paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_nosplit,
                                d_bt, d_ctx, block_size, scale, kv_scale,
@@ -884,7 +884,7 @@ TEST(FP8KVCache, SplitKHD256) {
     void* d_scratch = nullptr;
     cudaMalloc(&d_scratch, scratch_size);
 
-    Tensor t_o_splitk(d_o_splitk, DType::FP16, 4, q_shape, true);
+    Tensor t_o_splitk(d_o_splitk, QType::F16, 4, q_shape, true);
     paged_attention_set_splitk_scratch(d_scratch, scratch_size);
     paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_splitk,
                                d_bt, d_ctx, block_size, scale, kv_scale,

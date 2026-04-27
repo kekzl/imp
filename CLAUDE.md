@@ -81,7 +81,7 @@ cmake -B build-asan -DIMP_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
 ### Dependencies
 
 - **CUDA Toolkit 13.2+** (required) — cudart, cuda_driver, cublas, cublasLt
-- **CUTLASS v4.4.1** (fetched via FetchContent) — SM120 FMHA (FP16/FP8/MXFP4), NVFP4/MXFP4 GEMM, MoE Grouped GEMM
+- **CUTLASS v4.4.2** (fetched via FetchContent) — SM120 FMHA (FP16/FP8/MXFP4), NVFP4/MXFP4 GEMM, MoE Grouped GEMM
 - **Google Test v1.14.0** (fetched via FetchContent when tests enabled)
 - **stb_image / stb_image_resize2** (vendored in `third_party/stb/`) — image loading for vision
 - **pthread** (linked privately)

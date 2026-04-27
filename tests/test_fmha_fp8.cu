@@ -108,10 +108,10 @@ protected:
 
         int64_t q_shape[] = {B, Sq, NH, HD};
         int64_t kv_shape[] = {B, Skv, NKV, HD};
-        Tensor Qt(d_q, DType::FP16, 4, q_shape, true);
-        Tensor Kt(d_k, DType::FP16, 4, kv_shape, true);
-        Tensor Vt(d_v, DType::FP16, 4, kv_shape, true);
-        Tensor Ot(d_o, DType::FP16, 4, q_shape, true);
+        Tensor Qt(d_q, QType::F16, 4, q_shape, true);
+        Tensor Kt(d_k, QType::F16, 4, kv_shape, true);
+        Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
+        Tensor Ot(d_o, QType::F16, 4, q_shape, true);
 
         bool ok = fmha_sm120_fp8_prefill(Qt, Kt, Vt, Ot, scale, causal, sw, softcap, stream_);
         if (!ok) {

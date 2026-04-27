@@ -299,7 +299,7 @@ public:
 
     // Phase 1: Initialize model reference, compute workspace sizes, enable PDL.
     // Does NOT allocate GPU memory — call allocate_workspaces() after weight upload.
-    [[nodiscard]] bool init(const Model& model, DType compute_dtype = DType::FP16, bool use_pdl = false,
+    [[nodiscard]] bool init(const Model& model, QType compute_dtype = QType::F16, bool use_pdl = false,
                             int max_batch_size = 1, int max_seq_len = 0, bool use_fp8_prefill = false,
                             int use_nvfp4_decode = 0, bool use_mxfp4_prefill = false);
 
@@ -434,7 +434,7 @@ private:
 
     class VRAMAllocator* vram_alloc_ = nullptr;
     const Model* model_ = nullptr;
-    DType compute_dtype_ = DType::FP16;
+    QType compute_dtype_ = QType::F16;
     float norm_w_off_ = 0.0f;  // Gemma: 1.0 (norms use w+1 instead of w)
     void* v_norm_ones_buf_ = nullptr;  // Gemma 4: ones buffer for V-norm (no learned weight)
     bool initialized_ = false;

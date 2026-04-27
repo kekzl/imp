@@ -17,8 +17,8 @@ namespace imp {
 // With stride 9: lane i starts at bank (i*9)%32 — all unique, zero conflicts.
 static constexpr int kSmemQ8Stride = 9;
 
-// Tag enum for template dispatch (separate from GGMLQuantType)
-enum class QType { Q4_0, Q8_0, Q6_K, Q4_K, Q5_K, Q2_K, Q3_K, Q5_1 };
+// File-local tag enum for template dispatch (distinct from imp::QType).
+enum class DPQTag { Q4_0, Q8_0, Q6_K, Q4_K, Q5_K, Q2_K, Q3_K, Q5_1 };
 
 // ============================================================================
 // Helper device functions (moved from gemm.cu, unchanged)
@@ -174,7 +174,7 @@ __device__ __forceinline__ float q5k_dp4a_sub(
 }
 
 // ============================================================================
-// DequantTraits<QType> — compile-time constants + dp4a_block() per type
+// DequantTraits<DPQTag> — compile-time constants + dp4a_block() per type
 //
 // dp4a_block(bp, sub, xi, dq, q8_sum):
 //   bp      — pointer to the start of the weight block/super-block
@@ -184,9 +184,9 @@ __device__ __forceinline__ float q5k_dp4a_sub(
 //   q8_sum  — sum of Q8_1 int8 values (only used by Q4_0)
 // ============================================================================
 
-template<QType Q> struct DequantTraits;
+template<DPQTag Q> struct DequantTraits;
 
-template<> struct DequantTraits<QType::Q6_K> {
+template<> struct DequantTraits<DPQTag::Q6_K> {
     static constexpr int kBlockBytes   = 210;
     static constexpr int kBlockElems   = 256;
     static constexpr int kQ8PerWeight  = 8;
@@ -204,7 +204,7 @@ template<> struct DequantTraits<QType::Q6_K> {
     }
 };
 
-template<> struct DequantTraits<QType::Q8_0> {
+template<> struct DequantTraits<DPQTag::Q8_0> {
     static constexpr int kBlockBytes   = 34;
     static constexpr int kBlockElems   = 32;
     static constexpr int kQ8PerWeight  = 1;
@@ -236,7 +236,7 @@ template<> struct DequantTraits<QType::Q8_0> {
     }
 };
 
-template<> struct DequantTraits<QType::Q4_0> {
+template<> struct DequantTraits<DPQTag::Q4_0> {
     static constexpr int kBlockBytes   = 18;
     static constexpr int kBlockElems   = 32;
     static constexpr int kQ8PerWeight  = 1;
@@ -276,7 +276,7 @@ template<> struct DequantTraits<QType::Q4_0> {
     }
 };
 
-template<> struct DequantTraits<QType::Q4_K> {
+template<> struct DequantTraits<DPQTag::Q4_K> {
     static constexpr int kBlockBytes   = 144;
     static constexpr int kBlockElems   = 256;
     static constexpr int kQ8PerWeight  = 8;
@@ -301,7 +301,7 @@ template<> struct DequantTraits<QType::Q4_K> {
     }
 };
 
-template<> struct DequantTraits<QType::Q5_K> {
+template<> struct DequantTraits<DPQTag::Q5_K> {
     static constexpr int kBlockBytes   = 176;
     static constexpr int kBlockElems   = 256;
     static constexpr int kQ8PerWeight  = 8;
@@ -327,7 +327,7 @@ template<> struct DequantTraits<QType::Q5_K> {
     }
 };
 
-template<> struct DequantTraits<QType::Q2_K> {
+template<> struct DequantTraits<DPQTag::Q2_K> {
     static constexpr int kBlockBytes   = 84;
     static constexpr int kBlockElems   = 256;
     static constexpr int kQ8PerWeight  = 8;
@@ -391,7 +391,7 @@ template<> struct DequantTraits<QType::Q2_K> {
     }
 };
 
-template<> struct DequantTraits<QType::Q3_K> {
+template<> struct DequantTraits<DPQTag::Q3_K> {
     static constexpr int kBlockBytes   = 110;
     static constexpr int kBlockElems   = 256;
     static constexpr int kQ8PerWeight  = 8;
@@ -482,7 +482,7 @@ template<> struct DequantTraits<QType::Q3_K> {
 // Convenience aliases
 // Q5_1: 24 bytes per 32 elements: [2B delta_fp16] [2B min_fp16] [16B low_nibbles] [4B high_bits]
 // Dequant: val = q5 * delta + min, where q5 = low4 | (hi1 << 4), range 0..31
-template<> struct DequantTraits<QType::Q5_1> {
+template<> struct DequantTraits<DPQTag::Q5_1> {
     static constexpr int kBlockBytes   = 24;
     static constexpr int kBlockElems   = 32;
     static constexpr int kQ8PerWeight  = 1;
@@ -531,14 +531,14 @@ template<> struct DequantTraits<QType::Q5_1> {
     }
 };
 
-using Q5_1_Traits = DequantTraits<QType::Q5_1>;
-using Q4_0_Traits = DequantTraits<QType::Q4_0>;
-using Q8_0_Traits = DequantTraits<QType::Q8_0>;
-using Q6_K_Traits = DequantTraits<QType::Q6_K>;
-using Q4_K_Traits = DequantTraits<QType::Q4_K>;
-using Q5_K_Traits = DequantTraits<QType::Q5_K>;
-using Q2_K_Traits = DequantTraits<QType::Q2_K>;
-using Q3_K_Traits = DequantTraits<QType::Q3_K>;
+using Q5_1_Traits = DequantTraits<DPQTag::Q5_1>;
+using Q4_0_Traits = DequantTraits<DPQTag::Q4_0>;
+using Q8_0_Traits = DequantTraits<DPQTag::Q8_0>;
+using Q6_K_Traits = DequantTraits<DPQTag::Q6_K>;
+using Q4_K_Traits = DequantTraits<DPQTag::Q4_K>;
+using Q5_K_Traits = DequantTraits<DPQTag::Q5_K>;
+using Q2_K_Traits = DequantTraits<DPQTag::Q2_K>;
+using Q3_K_Traits = DequantTraits<DPQTag::Q3_K>;
 
 // ============================================================================
 // K-parallel helpers and occupancy heuristic

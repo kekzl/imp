@@ -30,7 +30,7 @@ public:
     // For Q8_0: dequantizes to FP16 on GPU.
     // For F16/BF16: direct upload.
     // For F32: converts to compute_dtype and uploads.
-    bool upload_weights_gpu(DType compute_dtype = DType::FP16, cudaStream_t stream = nullptr,
+    bool upload_weights_gpu(QType compute_dtype = QType::F16, cudaStream_t stream = nullptr,
                             size_t expert_reserve_bytes = 1ULL << 30);
 
     bool gpu_weights_ready() const { return gpu_weights_ready_; }
@@ -44,9 +44,9 @@ public:
 
     ModelConfig config_;
     Tensor tok_emb_, out_norm_, out_proj_;
-    GGMLQuantType tok_emb_qtype_ = GGMLQuantType::NONE;
-    GGMLQuantType out_norm_qtype_ = GGMLQuantType::NONE;
-    GGMLQuantType out_proj_qtype_ = GGMLQuantType::NONE;
+    QType tok_emb_qtype_ = QType::NONE;
+    QType out_norm_qtype_ = QType::NONE;
+    QType out_proj_qtype_ = QType::NONE;
     TransformerLayer::NvFP4PreQuantWeight nvfp4_out_proj_;  // prequant LM head scales
     TensorID out_proj_id = kInvalidTensorID;  // registry handle for LM head (Task 3.5)
     TensorID tok_emb_id  = kInvalidTensorID;  // registry handle for token embedding

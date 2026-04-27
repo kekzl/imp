@@ -52,16 +52,16 @@ __device__ __forceinline__ int kv_resolve_slot(
 
 // Dispatch dp4a GEMV by quant type: y = W @ q8_1 (FP16 output).
 // Defined here, declared in executor_kernels.h for use by executor_forward.cu.
-void dispatch_dp4a_gemv(GGMLQuantType qtype,
+void dispatch_dp4a_gemv(QType qtype,
                         const void* W, const block_q8_1* q8_1, const float* d8,
                         half* y, int M, int K, cudaStream_t stream) {
     switch (qtype) {
-        case GGMLQuantType::Q6_K: gemv_q6k_q8_1(W, q8_1, d8, y, M, K, stream); break;
-        case GGMLQuantType::Q4_0: gemv_q4_0_q8_1(W, q8_1, d8, y, M, K, stream); break;
-        case GGMLQuantType::Q4_K: gemv_q4_k_q8_1(W, q8_1, d8, y, M, K, stream); break;
-        case GGMLQuantType::Q5_K: gemv_q5_k_q8_1(W, q8_1, d8, y, M, K, stream); break;
-        case GGMLQuantType::Q2_K: gemv_q2_k_q8_1(W, q8_1, d8, y, M, K, stream); break;
-        case GGMLQuantType::Q3_K: gemv_q3_k_q8_1(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q6_K: gemv_q6k_q8_1(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q4_0: gemv_q4_0_q8_1(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q4_K: gemv_q4_k_q8_1(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q5_K: gemv_q5_k_q8_1(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q2_K: gemv_q2_k_q8_1(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q3_K: gemv_q3_k_q8_1(W, q8_1, d8, y, M, K, stream); break;
         default:                  gemv_q8_0_q8_1(W, q8_1, d8, y, M, K, stream); break;
     }
 }
@@ -1548,7 +1548,7 @@ __global__ __launch_bounds__(256) void fp32_to_fp16_kernel(const float* __restri
 
 void elementwise_add(Tensor& a, const Tensor& b, cudaStream_t stream) {
     int64_t n = a.numel();
-    if (a.dtype == DType::FP16) {
+    if (a.qtype == QType::F16) {
         int64_t n2 = (n + 1) / 2;
         int threads = 256;
         int blocks = static_cast<int>((n2 + threads - 1) / threads);
@@ -1885,7 +1885,7 @@ Tensor slice_rows(const Tensor& buf, int n_tokens) {
 // - dp4a MMVQ path (M=1 + q8_1_buf/d8_buf): pre-quantize input to Q8_1, dot
 //   products via native INT8 SIMD (~2x faster than FP16 dequant for Q6_K/Q8_0).
 static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
-                           const Tensor& scales, GGMLQuantType qtype,
+                           const Tensor& scales, QType qtype,
                            Tensor& output, void* dequant_scratch,
                            cudaStream_t stream,
                            block_q8_1* q8_1_buf,
@@ -1911,7 +1911,7 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
     // beta != 0 (residual-fused GEMM) is only supported on FP16/dequant/FP8 paths
     // below; callers must ensure their preconditions route there.
     // Native MXFP4 GGUF: GEMV for M=1, CUTLASS for M>1.
-    if (mxfp4_cache != nullptr && input.dtype == DType::FP16) {
+    if (mxfp4_cache != nullptr && input.qtype == QType::F16) {
         auto mx_it = mxfp4_cache->find(weight.data);
         if (mx_it != mxfp4_cache->end() && mx_it->second.linear_scales) {
             if (input.shape[0] == 1) {
@@ -1937,14 +1937,14 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
                 size_t fp16_bytes = static_cast<size_t>(N) * K * sizeof(half);
                 dequant_mxfp4_to_fp16(mx_it->second.data, N, K, dequant_scratch, stream);
                 int64_t w_shape[2] = {N, K};
-                Tensor w_fp16(dequant_scratch, DType::FP16, 2, w_shape, true);
+                Tensor w_fp16(dequant_scratch, QType::F16, 2, w_shape, true);
                 gemm(input, w_fp16, output, 1.0f, beta, stream);
                 return;
             }
         }
     }
     // NVFP4 cache path: GEMV for M=1 (decode), CUTLASS/dequant for M>1 (prefill).
-    if (nvfp4_cache != nullptr && input.dtype == DType::FP16) {
+    if (nvfp4_cache != nullptr && input.qtype == QType::F16) {
         auto it = nvfp4_cache->find(weight.data);
         if (it != nvfp4_cache->end()) {
             if (input.shape[0] == 1) {
@@ -2022,16 +2022,16 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
     // FP16-only fast paths (mmvq, dp4a, gemv_q6k, gemv_q8_0) write directly to
     // half* — must skip when caller requested FP32 output, otherwise the FP16
     // bytes get interpreted as FP32 and produce billions-magnitude garbage.
-    const bool fp32_output = (output.dtype == DType::FP32);
+    const bool fp32_output = (output.qtype == QType::F32);
     bool use_mmvq = (getenv("IMP_GEMMA4_FORCE_MMVQ") != nullptr) &&
-                    !prefer_fp16_cache && input.dtype == DType::FP16 && !fp32_output &&
-                    (qtype == GGMLQuantType::Q4_K || qtype == GGMLQuantType::Q5_K ||
-                     qtype == GGMLQuantType::Q5_1 || qtype == GGMLQuantType::Q8_0) &&
+                    !prefer_fp16_cache && input.qtype == QType::F16 && !fp32_output &&
+                    (qtype == QType::Q4_K || qtype == QType::Q5_K ||
+                     qtype == QType::Q5_1 || qtype == QType::Q8_0) &&
                     (weight.shape[1] % 32 == 0) &&
-                    !(no_mmvq_q8_0 && qtype == GGMLQuantType::Q8_0) &&
+                    !(no_mmvq_q8_0 && qtype == QType::Q8_0) &&
                     !no_mmvq_all;
     bool use_dp4a = !no_dp4a_gemv && !prefer_fp16_cache && input.shape[0] == 1 &&
-                    input.dtype == DType::FP16 && !fp32_output &&
+                    input.qtype == QType::F16 && !fp32_output &&
                     q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype);
     if (use_mmvq) {
         int M = static_cast<int>(input.shape[0]);
@@ -2046,19 +2046,19 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
             cudaMalloc(&s_mmvq_scratch, q8_need * 2);
             s_mmvq_scratch_size = q8_need * 2;
         }
-        if (qtype == GGMLQuantType::Q4_K)
+        if (qtype == QType::Q4_K)
             ggml_mmvq_q4k(weight.data, static_cast<const half*>(input.data),
                           static_cast<half*>(output.data), M, N, K,
                           s_mmvq_scratch, s_mmvq_scratch_size, stream);
-        else if (qtype == GGMLQuantType::Q5_K)
+        else if (qtype == QType::Q5_K)
             ggml_mmvq_q5k(weight.data, static_cast<const half*>(input.data),
                           static_cast<half*>(output.data), M, N, K,
                           s_mmvq_scratch, s_mmvq_scratch_size, stream);
-        else if (qtype == GGMLQuantType::Q5_1)
+        else if (qtype == QType::Q5_1)
             ggml_mmvq_q5_1(weight.data, static_cast<const half*>(input.data),
                            static_cast<half*>(output.data), M, N, K,
                            s_mmvq_scratch, s_mmvq_scratch_size, stream);
-        else if (qtype == GGMLQuantType::Q8_0)
+        else if (qtype == QType::Q8_0)
             ggml_mmvq_q8_0(weight.data, static_cast<const half*>(input.data),
                            static_cast<half*>(output.data), M, N, K,
                            s_mmvq_scratch, s_mmvq_scratch_size, stream);
@@ -2069,7 +2069,7 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
                                q8_1_buf, d8_buf, K, stream);
         dispatch_dp4a_gemv(qtype, weight.data, q8_1_buf, d8_buf,
                            static_cast<half*>(output.data), N, K, stream);
-    } else if (qtype == GGMLQuantType::Q4_1 && fp16_cache != nullptr) {
+    } else if (qtype == QType::Q4_1 && fp16_cache != nullptr) {
         // Prefer pre-dequantized FP16 cache (P3 optimization)
         auto it = fp16_cache->find(weight.data);
         if (it != fp16_cache->end()) {
@@ -2077,17 +2077,17 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
         } else {
             quant_gemm_int4(input, weight, scales, output, stream);
         }
-    } else if (qtype == GGMLQuantType::Q4_1) {
+    } else if (qtype == QType::Q4_1) {
         // weight is [N, K/2] packed nibbles, scales is [N, num_groups]
         quant_gemm_int4(input, weight, scales, output, stream);
-    } else if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
-               dequant_scratch != nullptr && qtype == GGMLQuantType::Q6_K) {
+    } else if (input.shape[0] == 1 && input.qtype == QType::F16 &&
+               dequant_scratch != nullptr && qtype == QType::Q6_K) {
         // Fallback: Fused Q6_K GEMV (FP16 dequant path)
         gemv_q6k(weight.data, static_cast<const half*>(input.data),
                  static_cast<half*>(output.data),
                  static_cast<int>(weight.shape[0]), static_cast<int>(weight.shape[1]), stream);
-    } else if (input.shape[0] == 1 && input.dtype == DType::FP16 &&
-               dequant_scratch != nullptr && qtype == GGMLQuantType::Q8_0) {
+    } else if (input.shape[0] == 1 && input.qtype == QType::F16 &&
+               dequant_scratch != nullptr && qtype == QType::Q8_0) {
         // Fallback: Fused Q8_0 GEMV (FP16 dequant path)
         gemv_q8_0(weight.data, static_cast<const half*>(input.data),
                   static_cast<half*>(output.data),
@@ -2096,7 +2096,7 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
         // FP8 cache: quantize activation → FP8, then FP8×FP8 cuBLASLt GEMM (2x throughput on sm_120)
         auto it = fp8_cache->find(weight.data);
         if (it != fp8_cache->end()) {
-            Tensor fp8_act(fp8_act_buf, DType::FP8_E4M3, input.ndim, input.shape, true);
+            Tensor fp8_act(fp8_act_buf, QType::FP8_E4M3, input.ndim, input.shape, true);
             quantize_fp16_to_fp8_e4m3(input, fp8_act, d_act_scale, stream,
                                        d_fp8_block_maxes, d_fp8_absmax, fp8_max_grid);
             gemm_cublaslt(fp8_act, it->second.weight, output, 1.0f, beta,
@@ -2105,23 +2105,23 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
             int rows = static_cast<int>(weight.shape[0]);
             int cols = static_cast<int>(weight.shape[1]);
             dequant_gpu(weight.data, dequant_scratch, qtype, rows, cols, stream);
-            Tensor w_fp16(dequant_scratch, DType::FP16, weight.ndim, weight.shape, true);
+            Tensor w_fp16(dequant_scratch, QType::F16, weight.ndim, weight.shape, true);
             gemm(input, w_fp16, output, 1.0f, beta, stream);
         } else {
             gemm(input, weight, output, 1.0f, beta, stream);
         }
-    } else if (fp16_cache != nullptr && (dequant_gpu_supported(qtype) || qtype == GGMLQuantType::MXFP4)) {
+    } else if (fp16_cache != nullptr && (dequant_gpu_supported(qtype) || qtype == QType::MXFP4)) {
         // Pre-dequantized FP16 cache: zero per-GEMM dequant overhead
         auto it = fp16_cache->find(weight.data);
         if (getenv("IMP_DEBUG_GEMM_DISPATCH") != nullptr) fprintf(stderr, "[GEMM_DISP]   -> fp16_cache hit=%d\n", (int)(it != fp16_cache->end()));
         if (it != fp16_cache->end()) {
             gemm(input, it->second, output, 1.0f, beta, stream);
-        } else if (dequant_scratch != nullptr && qtype != GGMLQuantType::MXFP4) {
+        } else if (dequant_scratch != nullptr && qtype != QType::MXFP4) {
             // Cache miss (shouldn't happen) — fall back to on-the-fly dequant
             int rows = static_cast<int>(weight.shape[0]);
             int cols = static_cast<int>(weight.shape[1]);
             dequant_gpu(weight.data, dequant_scratch, qtype, rows, cols, stream);
-            Tensor w_fp16(dequant_scratch, DType::FP16, weight.ndim, weight.shape, true);
+            Tensor w_fp16(dequant_scratch, QType::F16, weight.ndim, weight.shape, true);
             gemm(input, w_fp16, output, 1.0f, beta, stream);
         } else {
             gemm(input, weight, output, 1.0f, beta, stream);
@@ -2131,7 +2131,7 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
         int rows = static_cast<int>(weight.shape[0]);
         int cols = static_cast<int>(weight.shape[1]);
         dequant_gpu(weight.data, dequant_scratch, qtype, rows, cols, stream);
-        Tensor w_fp16(dequant_scratch, DType::FP16, weight.ndim, weight.shape, true);
+        Tensor w_fp16(dequant_scratch, QType::F16, weight.ndim, weight.shape, true);
         gemm(input, w_fp16, output, 1.0f, beta, stream);
     } else {
         // Standard FP16/BF16 GEMM
@@ -2145,7 +2145,7 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
 // once all call sites are migrated.
 // ---------------------------------------------------------------------------
 void gemm_dispatch(const Tensor& input, const Tensor& weight,
-                   GGMLQuantType qtype, Tensor& output,
+                   QType qtype, Tensor& output,
                    const GemmContext& ctx) {
     const auto* wc = ctx.wcache;
     const auto* qs = ctx.qscratch;
@@ -2164,11 +2164,11 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
             int rows = static_cast<int>(weight.shape[0]);
             int cols = static_cast<int>(weight.shape[1]);
             dequant_gpu(weight.data, qs->dequant, qtype, rows, cols, ctx.stream);
-            Tensor w_fp16(qs->dequant, DType::FP16, weight.ndim, weight.shape, true);
+            Tensor w_fp16(qs->dequant, QType::F16, weight.ndim, weight.shape, true);
             gemm(input, w_fp16, output, 1.0f, ctx.beta, ctx.stream);
             return;
         }
-        if (weight.dtype == DType::FP16 || weight.dtype == DType::BF16) {
+        if (weight.qtype == QType::F16 || weight.qtype == QType::BF16) {
             gemm(input, weight, output, 1.0f, ctx.beta, ctx.stream);
             return;
         }

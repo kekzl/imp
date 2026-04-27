@@ -22,7 +22,7 @@ static constexpr int BLOCK_SIZE = 16;
 Tensor make_gpu_tensor_fp16(const float* host_data,
                             std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = DType::FP16;
+    t.qtype = QType::F16;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
@@ -38,7 +38,7 @@ Tensor make_gpu_tensor_fp16(const float* host_data,
 
 Tensor alloc_gpu_tensor_fp16(std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = DType::FP16;
+    t.qtype = QType::F16;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
@@ -1036,7 +1036,7 @@ TEST(PagedAttentionINT4Test, DecodeSingleHead) {
 
     // INT4 cache: [num_blocks, block_size, n_kv_heads, head_dim/2]
     Tensor d_K_cache, d_V_cache;
-    d_K_cache.dtype = DType::INT8;  // raw bytes
+    d_K_cache.qtype = QType::INT8;  // raw bytes
     d_K_cache.ndim = 4;
     d_K_cache.shape[0] = num_blocks; d_K_cache.shape[1] = BLOCK_SIZE;
     d_K_cache.shape[2] = n_kv_heads; d_K_cache.shape[3] = half_hd;
@@ -1044,7 +1044,7 @@ TEST(PagedAttentionINT4Test, DecodeSingleHead) {
     cudaMalloc(&d_K_cache.data, cache_bytes);
     cudaMemcpy(d_K_cache.data, k_int4.data(), cache_bytes, cudaMemcpyHostToDevice);
 
-    d_V_cache.dtype = DType::INT8;
+    d_V_cache.qtype = QType::INT8;
     d_V_cache.ndim = 4;
     d_V_cache.shape[0] = num_blocks; d_V_cache.shape[1] = BLOCK_SIZE;
     d_V_cache.shape[2] = n_kv_heads; d_V_cache.shape[3] = half_hd;

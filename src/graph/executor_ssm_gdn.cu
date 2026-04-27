@@ -167,7 +167,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
         // For n=1 decode this is just pointer arithmetic (no copy needed).
         // For n>1 prefill, we must de-interleave.
 
-        DType h_dtype = (state.ssm_state) ? state.ssm_state->h_dtype() : DType::FP32;
+        QType h_dtype = (state.ssm_state) ? state.ssm_state->h_dtype() : QType::F32;
 
         if (n == 1) {
             // Decode: single token, just pass pointers directly into xBC_out row
@@ -352,7 +352,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     // Compare to llama's `conv_output_silu-{layer}` tensor.
     {
         int64_t cf_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(conv_channels)};
-        Tensor conv_f32_t(conv_f32, DType::FP32, 2, cf_shape, true);
+        Tensor conv_f32_t(conv_f32, QType::F32, 2, cf_shape, true);
         dump_tensor_npy("gdn_conv_f32", conv_f32_t, stream, layer, cur_decode_step_);
     }
 
@@ -532,7 +532,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         void* fp32_out = nullptr;
         IMP_CUDA_CHECK_LOG(cudaMallocAsync(&fp32_out, fp32_bytes, stream));
         int64_t out_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(cfg.d_model)};
-        Tensor fp32_out_t(fp32_out, DType::FP32, 2, out_shape, true);
+        Tensor fp32_out_t(fp32_out, QType::F32, 2, out_shape, true);
 
         // NOTE: when FP32_SCAN is also active, the post-norm-gated tensor lives
         // in FP32 memory, but we can't pass it directly to gemm_dispatch because

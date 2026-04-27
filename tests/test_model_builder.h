@@ -41,7 +41,7 @@ inline Tensor make_random_weight(int64_t rows, int64_t cols,
     }
 
     Tensor t;
-    t.dtype = DType::FP16;
+    t.qtype = QType::F16;
     t.ndim = 2;
     t.shape[0] = rows;
     t.shape[1] = cols;
@@ -58,7 +58,7 @@ inline Tensor make_norm_weight(int64_t dim) {
     std::vector<half> h_data(dim, __float2half(1.0f));
 
     Tensor t;
-    t.dtype = DType::FP16;
+    t.qtype = QType::F16;
     t.ndim = 1;
     t.shape[0] = dim;
     t.compute_strides();
@@ -82,7 +82,7 @@ inline void free_tensor(Tensor& t) {
 // ---------------------------------------------------------------------------
 inline void verify_logits_finite(const Tensor& logits, int vocab_size) {
     std::vector<float> h_logits(vocab_size);
-    if (logits.dtype == DType::FP32) {
+    if (logits.qtype == QType::F32) {
         cudaMemcpy(h_logits.data(), logits.data, vocab_size * sizeof(float),
                    cudaMemcpyDeviceToHost);
     } else {
@@ -109,7 +109,7 @@ inline void verify_logits_finite(const Tensor& logits, int vocab_size) {
 // ---------------------------------------------------------------------------
 inline std::vector<float> read_logits(const Tensor& logits, int count) {
     std::vector<float> h(count);
-    if (logits.dtype == DType::FP32) {
+    if (logits.qtype == QType::F32) {
         cudaMemcpy(h.data(), logits.data, count * sizeof(float),
                    cudaMemcpyDeviceToHost);
     } else {
@@ -323,7 +323,7 @@ inline Tensor make_q8_0_weight(int64_t rows, int64_t cols,
     }
 
     Tensor t;
-    t.dtype = DType::FP16;  // logical dtype for shape computation
+    t.qtype = QType::F16;  // logical dtype for shape computation
     t.ndim = 2;
     t.shape[0] = rows;
     t.shape[1] = cols;
@@ -375,7 +375,7 @@ struct Q8DenseTestModel {
         result.all_tensors.push_back(result.model->out_norm_);
 
         result.model->out_proj_ = make_random_weight(vocab_size, d_model, rng);
-        result.model->out_proj_qtype_ = GGMLQuantType::NONE;
+        result.model->out_proj_qtype_ = QType::NONE;
         result.all_tensors.push_back(result.model->out_proj_);
 
         result.model->layers_.resize(n_layers);
@@ -387,10 +387,10 @@ struct Q8DenseTestModel {
             ly.wk = make_q8_0_weight(n_kv_heads * head_dim, d_model, rng);
             ly.wv = make_q8_0_weight(n_kv_heads * head_dim, d_model, rng);
             ly.wo = make_q8_0_weight(d_model, n_heads * head_dim, rng);
-            ly.wq_qtype = GGMLQuantType::Q8_0;
-            ly.wk_qtype = GGMLQuantType::Q8_0;
-            ly.wv_qtype = GGMLQuantType::Q8_0;
-            ly.wo_qtype = GGMLQuantType::Q8_0;
+            ly.wq_qtype = QType::Q8_0;
+            ly.wk_qtype = QType::Q8_0;
+            ly.wv_qtype = QType::Q8_0;
+            ly.wo_qtype = QType::Q8_0;
 
             // Norms stay FP16
             ly.attn_norm = make_norm_weight(d_model);
@@ -400,9 +400,9 @@ struct Q8DenseTestModel {
             ly.w_gate = make_q8_0_weight(d_ff, d_model, rng);
             ly.w_up = make_q8_0_weight(d_ff, d_model, rng);
             ly.w_down = make_q8_0_weight(d_model, d_ff, rng);
-            ly.w_gate_qtype = GGMLQuantType::Q8_0;
-            ly.w_up_qtype = GGMLQuantType::Q8_0;
-            ly.w_down_qtype = GGMLQuantType::Q8_0;
+            ly.w_gate_qtype = QType::Q8_0;
+            ly.w_up_qtype = QType::Q8_0;
+            ly.w_down_qtype = QType::Q8_0;
 
             result.all_tensors.push_back(ly.wq);
             result.all_tensors.push_back(ly.wk);

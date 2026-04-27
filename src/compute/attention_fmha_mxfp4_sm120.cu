@@ -930,7 +930,7 @@ bool fmha_sm120_mxfp4_prefill(
     cudaStream_t stream,
     bool use_blockscale)
 {
-    if (Q.dtype != DType::FP16) return false;
+    if (Q.qtype != QType::F16) return false;
     // Blockscale MMA operates on K=64 per issue; head_dim must be a multiple of 64.
     // head_dim=96 (Gemma-class) is a multiple of 32 but NOT 64 → fall back to legacy.
     if (use_blockscale && (static_cast<int>(Q.shape[3]) % 64 != 0)) {

@@ -39,7 +39,7 @@ std::vector<T> to_host(const T* dev, size_t count) {
 }
 
 // Build a contiguous 4-D Tensor descriptor on the device.
-Tensor make_device_tensor(void* dev_ptr, DType dtype,
+Tensor make_device_tensor(void* dev_ptr, QType dtype,
                           int64_t d0, int64_t d1, int64_t d2, int64_t d3) {
     int64_t shape[4] = {d0, d1, d2, d3};
     return Tensor(dev_ptr, dtype, 4, shape, /*on_device=*/true);
@@ -134,8 +134,8 @@ TEST(RoPETest, RopeBasicFP32) {
     float* k_dev = to_device(k_host.data(), k_count);
     int*  pos_dev = to_device(pos_host.data(), pos_host.size());
 
-    Tensor Q = make_device_tensor(q_dev, DType::FP32, batch, seq_len, n_heads, head_dim);
-    Tensor K = make_device_tensor(k_dev, DType::FP32, batch, seq_len, n_kv_heads, head_dim);
+    Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
+    Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
 
     rope_forward(Q, K, pos_dev, head_dim, theta, scaling);
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -200,8 +200,8 @@ TEST(RoPETest, RopeBasicFP16) {
     __half* k_dev = to_device(k_half.data(), k_count);
     int*  pos_dev = to_device(pos_host.data(), pos_host.size());
 
-    Tensor Q = make_device_tensor(q_dev, DType::FP16, batch, seq_len, n_heads, head_dim);
-    Tensor K = make_device_tensor(k_dev, DType::FP16, batch, seq_len, n_kv_heads, head_dim);
+    Tensor Q = make_device_tensor(q_dev, QType::F16, batch, seq_len, n_heads, head_dim);
+    Tensor K = make_device_tensor(k_dev, QType::F16, batch, seq_len, n_kv_heads, head_dim);
 
     rope_forward(Q, K, pos_dev, head_dim, theta, scaling);
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -258,8 +258,8 @@ TEST(RoPETest, RopePositionInvariance) {
     float* k_dev = to_device(k_host.data(), k_count);
     int* pos_dev = to_device(pos_host.data(), pos_host.size());
 
-    Tensor Q = make_device_tensor(q_dev, DType::FP32, batch, seq_len, n_heads, head_dim);
-    Tensor K = make_device_tensor(k_dev, DType::FP32, batch, seq_len, n_kv_heads, head_dim);
+    Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
+    Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
 
     rope_forward(Q, K, pos_dev, head_dim, 10000.0f, 1.0f);
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -311,8 +311,8 @@ TEST(RoPETest, RopeThetaScaling) {
     float* k_dev1 = to_device(k_host.data(), k_count);
     int* pos_dev = to_device(pos_host.data(), pos_host.size());
 
-    Tensor Q1 = make_device_tensor(q_dev1, DType::FP32, batch, seq_len, n_heads, head_dim);
-    Tensor K1 = make_device_tensor(k_dev1, DType::FP32, batch, seq_len, n_kv_heads, head_dim);
+    Tensor Q1 = make_device_tensor(q_dev1, QType::F32, batch, seq_len, n_heads, head_dim);
+    Tensor K1 = make_device_tensor(k_dev1, QType::F32, batch, seq_len, n_kv_heads, head_dim);
 
     rope_forward(Q1, K1, pos_dev, head_dim, 10000.0f, 1.0f);
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -324,8 +324,8 @@ TEST(RoPETest, RopeThetaScaling) {
     float* q_dev2 = to_device(q_host.data(), q_count);
     float* k_dev2 = to_device(k_host.data(), k_count);
 
-    Tensor Q2 = make_device_tensor(q_dev2, DType::FP32, batch, seq_len, n_heads, head_dim);
-    Tensor K2 = make_device_tensor(k_dev2, DType::FP32, batch, seq_len, n_kv_heads, head_dim);
+    Tensor Q2 = make_device_tensor(q_dev2, QType::F32, batch, seq_len, n_heads, head_dim);
+    Tensor K2 = make_device_tensor(k_dev2, QType::F32, batch, seq_len, n_kv_heads, head_dim);
 
     rope_forward(Q2, K2, pos_dev, head_dim, 1000000.0f, 1.0f);
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -390,8 +390,8 @@ TEST(RoPETest, RopeLargerDim) {
     float* k_dev = to_device(k_host.data(), k_count);
     int*  pos_dev = to_device(pos_host.data(), pos_host.size());
 
-    Tensor Q = make_device_tensor(q_dev, DType::FP32, batch, seq_len, n_heads, head_dim);
-    Tensor K = make_device_tensor(k_dev, DType::FP32, batch, seq_len, n_kv_heads, head_dim);
+    Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
+    Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
 
     rope_forward(Q, K, pos_dev, head_dim, theta, scaling);
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -480,8 +480,8 @@ TEST(RoPETest, PartialRoPE) {
     float* k_dev  = to_device(k_host.data(), k_count);
     int*  pos_dev = to_device(pos_host.data(), pos_host.size());
 
-    Tensor Q = make_device_tensor(q_dev, DType::FP32, batch, seq_len, n_heads, head_dim);
-    Tensor K = make_device_tensor(k_dev, DType::FP32, batch, seq_len, n_kv_heads, head_dim);
+    Tensor Q = make_device_tensor(q_dev, QType::F32, batch, seq_len, n_heads, head_dim);
+    Tensor K = make_device_tensor(k_dev, QType::F32, batch, seq_len, n_kv_heads, head_dim);
 
     rope_forward(Q, K, pos_dev, head_dim, theta, scaling, rope_dim);
     CUDA_CHECK(cudaDeviceSynchronize());
