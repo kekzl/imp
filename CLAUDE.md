@@ -30,9 +30,14 @@ imp/
 │   ├── imp-server/       # OpenAI-compatible HTTP server (SSE streaming)
 │   └── imp-bench/        # Benchmark tool: GEMM, attention, end-to-end
 ├── third_party/stb/      # stb_image headers (image loading for vision)
-├── tests/                # Google Test suite (45 test files, 544 tests)
+├── tests/                # Google Test suite (58 test files, 606 tests)
+├── scripts/              # verify.sh, gen_perf_baseline.sh, pre-push.hook, imp-pull.py
+├── docs/                 # SM120 status, MXFP4, Qwen3.6 roadmap, gemv plan, layer-diff dumps
 ├── cmake/                # Custom CMake modules (CompilerFlags, FindCUDAToolkit131)
 ├── CMakeLists.txt        # Build configuration
+├── Makefile              # Docker-based test/bench/verify targets (canonical workflow)
+├── Dockerfile            # CUDA 13.2 build image
+├── docker-compose.yml    # imp-server + open-webui stack
 └── .gitignore
 ```
 
@@ -125,70 +130,26 @@ Only one GPU is available. **Always test models sequentially** — never run mul
 
 ## Running Tests
 
+The canonical workflow uses the Makefile (Docker, GPU passthrough). Host builds also work if CUDA 13.2+ is installed on the host.
+
 ```bash
-# Build tests
-cmake -B build -DIMP_BUILD_TESTS=ON
-cmake --build build -j$(nproc)
+# Docker workflow (primary)
+make build               # docker build → imp:test
+make test-unit           # CPU-only filter (~5s)
+make test-gpu            # full CUDA suite (~30s)
+make test-e2e            # real-model E2E (Qwen3-4B, Qwen3.5-4B GDN, Gemma-4)
+make bench               # full benchmark suite across baseline models
+make verify-fast         # build + filtered tests + perf baseline + 1 smoke prompt (~90s)
+make verify              # full pre-merge gate (~5min)
+make install-hooks       # install pre-push hook → runs verify-fast on src/include/tools/tests changes
 
-# Run all tests via CTest
-cd build && ctest --output-on-failure
-
-# Or run the test binary directly
-./build/imp-tests
-
-# Run specific test
-./build/imp-tests --gtest_filter="TensorTest.*"
+# Host build (no Docker)
+cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
+./build/imp-tests                                  # 606 tests across 58 files
+./build/imp-tests --gtest_filter="TensorTest.*"    # specific suite
 ```
 
-Tests require an NVIDIA GPU with the appropriate compute capability. Test files are in `tests/` and use Google Test (GTest).
-
-### Test Files
-
-| File | Covers |
-|---|---|
-| `test_tensor.cpp` | Tensor construction, strides, reshape, slicing |
-| `test_gguf_loader.cpp` | GGUF model file parsing |
-| `test_tokenizer.cpp` | Tokenizer encode/decode |
-| `test_kv_cache.cpp` | KV cache block allocation, ref counting, LRU |
-| `test_attention_tc.cu` | Tensor-core attention (WMMA) |
-| `test_paged_attention.cu` | Paged attention decode (split-K, FP8, INT8) |
-| `test_rope.cu` | Rotary positional embeddings |
-| `test_layernorm.cu` | RMSNorm kernels |
-| `test_activation.cu` | SwiGLU, GeGLU activation kernels |
-| `test_embedding.cu` | Token embedding lookup |
-| `test_gemm.cu` | GEMM/GEMV correctness |
-| `test_moe.cu` | Mixture-of-Experts routing |
-| `test_moe_executor.cu` | MoE end-to-end execution |
-| `test_quant.cu` | Quantization kernels |
-| `test_quant_integration.cu` | Quantized inference pipeline |
-| `test_fp8_gemm.cu` | FP8 GEMM correctness |
-| `test_fp8_kv_cache.cu` | FP8 E4M3 KV cache read/write |
-| `test_nvfp4_quant.cu` | NVFP4 quantization |
-| `test_sampling.cu` | Sampling kernels (argmax, top-k/p) |
-| `test_reduce.cu` | Reduction kernels |
-| `test_green_ctx.cu` | CUDA Green Context SM partitioning |
-| `test_chat_template.cpp` | Chat template rendering |
-| `test_e2e.cpp` | End-to-end generation pipeline |
-| `test_e2e_models.cpp` | Real model tests (Qwen3, Qwen3.5 GDN) |
-| `test_continuous_batching.cpp` | Continuous batching scheduler |
-| `test_speculative.cpp` | Speculative decoding (draft + verify) |
-| `test_gdn_kernel.cu` | GDN delta rule scan (single + multi-token) |
-| `test_forward_pass.cu` | Forward pass (multi-layer, GQA, decode, determinism) |
-| `test_engine_integration.cu` | Engine init/step/generate with synthetic models |
-| `test_executor_kernels.cu` | Executor utility kernels (elementwise, norms) |
-| `test_kv_cache_write.cu` | KV cache write correctness |
-| `test_attention_fmha_sm120.cu` | CUTLASS FMHA on Blackwell (FP16 + FP8) |
-| `test_fmha_fp8.cu` | FP8 FMHA correctness |
-| `test_attention_mxfp4.cu` | MXFP4 attention prefill |
-| `test_turboquant.cu` | TurboQuant KV cache quantization |
-| `test_hadamard.cu` | Hadamard transform kernel |
-| `test_softmax.cu` | Softmax kernels |
-| `test_ssm.cu` | SSM conv1d kernels |
-| `test_json_constrain.cu` | JSON constraint decoding |
-| `test_gemm_dp4a.cu` | DP4A INT8 GEMM/GEMV |
-| `test_jinja.cpp` | Jinja2 template engine |
-| `test_degeneration.cpp` | Output degeneration detection |
-| `test_tokenizer_compat.cpp` | Tokenizer HuggingFace compatibility |
+Test files live in `tests/` (Google Test). Most CUDA tests require sm_120; CPU-only tests are filtered by `make test-unit`.
 
 ## Tools
 
@@ -204,6 +165,10 @@ Interactive and single-shot LLM inference. Supports both GGUF files and SafeTens
 
 Options: `--model`, `--prompt`, `--max-tokens`, `--temperature`, `--top-p`, `--top-k`, `--seed`, `--interactive`, `--device`, `--mmproj`, `--image`, `--chat-template`, `--bench`.
 
+### imp-server
+
+OpenAI-compatible HTTP server with SSE streaming. Runs in Docker via `docker compose up imp-server` (pairs with Open WebUI on port 3000) or directly: `./build/imp-server --model path/to/model.gguf --port 8080`. Configuration via env vars — see "Environment Variables" below.
+
 ### imp-bench
 
 Benchmarks for GEMM, attention, and end-to-end inference.
@@ -212,36 +177,14 @@ Benchmarks for GEMM, attention, and end-to-end inference.
 ./build/imp-bench
 ```
 
-## Benchmark Results (v0.6, RTX 5090, 2026-04-06)
+## Benchmarks
 
-All benchmarks on a single NVIDIA RTX 5090 (32 GB GDDR7, Blackwell sm_120). CUDA 13.2. Models loaded from GGUF or SafeTensors. imp uses NVFP4 decode cache + FP8 prefill (non-GDN) / FP16 prefill (GDN) + upfront VRAM budget planner. llama.cpp b8445 with flash attention enabled.
-
-### Decode Throughput (tg256, tok/s)
-
-| Model | Quant | imp v0.6 | llama.cpp | Speedup |
-|-------|-------|----------|-----------|---------|
-| Qwen3-4B | Q8_0 | **377** | 244 | **+55%** |
-| Qwen3-8B | Q8_0 | **255** | 157 | **+62%** |
-| Qwen3.5-4B (GDN) | Q8_0 | **306** | 180 | **+70%** |
-| Qwen3.5-9B (GDN) | Q8_0 | **134** | — | — |
-| Llama-3.2-3B | Q8_0 | **208** | — | — |
-| Qwen3-Coder-30B-A3B | NVFP4 | **38** | — | — |
-
-### Prefill Throughput (pp512, tok/s)
-
-| Model | Quant | imp v0.6 | llama.cpp | Speedup |
-|-------|-------|----------|-----------|---------|
-| Qwen3-4B | Q8_0 | **27201** | 21337 | **+27%** |
-| Qwen3-8B | Q8_0 | **17636** | 14172 | **+24%** |
-| Qwen3.5-4B (GDN) | Q8_0 | **14823** | 11149 | **+33%** |
-| Qwen3.5-9B (GDN) | Q8_0 | **8520** | — | — |
-| Llama-3.2-3B | Q8_0 | **22544** | — | — |
-| Qwen3-Coder-30B-A3B | NVFP4 | **90** | — | — |
+Live baselines: `tests/perf_baseline.json` (consumed by the verify gate). Refresh after intentional perf changes via `scripts/gen_perf_baseline.sh`. Historical numbers: `BENCHMARKS.md`. llama.cpp comparison harness: `bench_compare.sh`.
 
 **Notes:**
-- Qwen3-Coder-30B-A3B is a 128-expert MoE model loaded from NVIDIA Model Optimizer NVFP4 SafeTensors. Decode uses per-expert NVFP4 GEMV; prefill uses CUTLASS NVFP4 GEMM for dense layers + per-expert NVFP4 GEMV for MoE.
-- GDN prefill uses FP16 weights instead of FP8 for numerical stability (~8% slower than FP8 but eliminates multi-turn degeneration).
-- Prefill numbers have high variance due to cuBLAS autotuning algorithm selection between container restarts (up to 2.6x range on Gemma-3). Decode numbers are stable. Compare decode only for reliable A/B testing.
+- Decode (tg256) is stable and the reliable A/B signal. Prefill (pp512) has up to 2.6× variance from cuBLAS autotuning across container restarts — do not gate on it.
+- GDN models (Qwen3.5/3.6) use FP16 prefill instead of FP8 (~8% slower but eliminates multi-turn state collapse).
+- imp uses NVFP4 decode cache + FP8 prefill (non-GDN) / FP16 prefill (GDN) by default.
 
 ## Code Conventions
 
@@ -331,9 +274,30 @@ Hybrid architecture: 24 GDN layers (recurrent) + 8 attention layers + 32 dense F
 - DeepSeek (MoE)
 - Qwen3 / Qwen3-MoE
 - Qwen3.5 / Qwen3.5-MoE (Gated DeltaNet hybrid — GDN + Attention + dense FFN)
+- Qwen3.6 (35B-A3B GDN+MoE hybrid)
 - Gemma-3 (text + vision via SigLIP encoder)
+- Gemma-4 (26B-A4B MoE; FP32 router, host gate_up split, decode fast-path supports CUDA Graphs)
 - Nemotron-H (Mamba2 + Attention + MoE hybrid)
 - Generic fallback
+
+### Environment Variables
+
+Runtime knobs (set via shell env or `docker-compose.yml`):
+
+| Variable | Effect |
+|---|---|
+| `IMP_KV_FP8` | Use FP8 E4M3 KV cache (recommended sweet spot vs FP16) |
+| `IMP_KV_INT8` | Use INT8 KV cache (lower VRAM, mild quality loss) |
+| `IMP_DECODE_NVFP4` | NVFP4 decode KV cache (max VRAM compression) |
+| `IMP_NO_CUDA_GRAPHS` | Disable CUDA graph capture (required for some MoE configs) |
+| `IMP_SSM_FP16` | Force FP16 SSM/GDN scan instead of FP32 gate path |
+| `IMP_PREFILL_CHUNK_SIZE` | Chunked prefill split size (default auto) |
+| `IMP_THINK_BUDGET` | Max thinking tokens for reasoning models |
+| `IMP_EXPERT_OVERHEAD_PCT` | MoE expert offload overhead estimate (10 = enable auto-probe; 30 = fallback) |
+| `IMP_MMPROJ` | Path to mmproj.gguf for vision models |
+| `IMP_MXFP4_ATTENTION` | Enable MXFP4 prefill FMHA path |
+| `IMP_NO_FP8_FMHA` | Force FP16 FMHA (debug) |
+| `IMP_NO_FMHA_SM120` | Force WMMA fallback attention (debug) |
 
 ### Vision (Multimodal)
 Gemma-3 vision uses a frozen 400M-parameter SigLIP ViT that produces 256 image tokens per image, projected into the LLM's embedding space. The vision encoder weights ship as a separate `mmproj.gguf` file. The pipeline: load image → resize 896x896 → normalize → extract 14x14 patches → 27 SigLIP transformer layers → 4x4 avg pool → RMSNorm + linear projection → replace `<image_soft_token>` embeddings before LLM prefill.
@@ -345,8 +309,8 @@ Draft model generates K candidate tokens, target model verifies in a single pass
 
 **Every change MUST be verified in this order before `git add`, `git commit`, and `git push`:**
 
-1. **Tests** — Build and run the test suite (`ctest --output-on-failure` or `./imp-tests`). All tests must pass.
-2. **Performance** — Run benchmarks (`--bench`) on affected models. Verify no regressions in tok/s (prefill and decode).
-3. **Real prompts** — Test with actual prompts (`--prompt "..."`) on at least 2-3 models to confirm correct, coherent output.
+1. **Tests** — `make test-gpu` (or `./build/imp-tests`). All 606 tests must pass.
+2. **Performance** — `make verify-fast` runs the perf baseline gate (`tests/perf_baseline.json`, 3% decode / 5% prefill thresholds). Refresh the baseline after intentional perf changes via `scripts/gen_perf_baseline.sh`.
+3. **Real prompts** — `--prompt "..."` on at least 2-3 affected models to confirm coherent output (degeneration detector covers this in `verify-fast` smoke step).
 
-Only after all three checks pass may the changes be committed and pushed.
+`make install-hooks` wires `verify-fast` into the pre-push hook so this gate runs automatically on `src/`, `include/`, `tools/`, `tests/` changes.

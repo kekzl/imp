@@ -5,7 +5,7 @@ DOCKER_IMG ?= imp:test
 DOCKER_RUN = docker run --rm --gpus all -v $(PWD)/models:/models $(DOCKER_IMG)
 BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 
-.PHONY: build test-unit test-gpu test-fast test-all test-perf test-golden bench check-gpu
+.PHONY: build test-unit test-gpu test-fast test-all test-perf test-golden bench check-gpu verify verify-fast install-hooks
 
 # Check that no other process is using the GPU (games, other inference, etc.)
 check-gpu:
@@ -76,3 +76,17 @@ test-perf: build check-gpu
 # Golden output comparison (greedy, temp=0)
 test-golden: build
 	@echo "Golden output tests require running server — use pytest tests/api/ instead"
+
+# verify: full pre-merge gate (host build, ~5 min). build + ctest + perf + smoke.
+verify:
+	@scripts/verify.sh full
+
+# verify-fast: pre-push gate (host build, ~90s). build + filtered tests + 1 smoke.
+verify-fast:
+	@scripts/verify.sh fast
+
+# install the pre-push hook that runs verify-fast when source files change
+install-hooks:
+	@cp scripts/pre-push.hook .git/hooks/pre-push
+	@chmod +x .git/hooks/pre-push
+	@echo "pre-push hook installed → runs 'make verify-fast' when src/, include/, or tools/ changes"
