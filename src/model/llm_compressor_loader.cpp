@@ -91,8 +91,13 @@ std::vector<std::string> parse_bracket_array(std::string_view body) {
 NameTranslation translate_name(const std::string& in, TranslationCounters& counters) {
     std::string out = in;
 
-    // Step 1: skip patterns (vision tower) — check raw input before any mutation.
-    if (starts_with(out, "model.vision_tower.") || starts_with(out, "model.visual.")) {
+    // Step 1: skip patterns (vision tower / multimodal projector). Cover both
+    // the Gemma-4 nesting (model.vision_tower.*) and the Mistral3-style raw
+    // top-level layout (vision_tower.* / multi_modal_projector.*).
+    if (starts_with(out, "model.vision_tower.") ||
+        starts_with(out, "model.visual.") ||
+        starts_with(out, "vision_tower.") ||
+        starts_with(out, "multi_modal_projector.")) {
         counters.vision_skipped++;
         return {NameTranslation::SKIP, ""};
     }
@@ -112,13 +117,23 @@ NameTranslation translate_name(const std::string& in, TranslationCounters& count
         // else fall through (pass-through handles it).
     }
 
-    // Step 3: prefix strip (multimodal language_model wrapper).
-    static constexpr const char kMultimodalPrefix[] = "model.language_model.";
-    static constexpr size_t kMultimodalPrefixLen = sizeof(kMultimodalPrefix) - 1;
-    if (starts_with(out, kMultimodalPrefix)) {
-        out = "model." + out.substr(kMultimodalPrefixLen);
+    // Step 3: prefix strip. Two multimodal wrappers seen in the wild:
+    //   (a) Gemma-4-style: `model.language_model.<rest>` → `model.<rest>`
+    //   (b) Mistral3-style: `language_model.<rest>` → `<rest>` (so e.g.
+    //       `language_model.model.layers.0.q.weight_packed` becomes
+    //       `model.layers.0.q.weight_packed`, and `language_model.lm_head.weight`
+    //       becomes `lm_head.weight`).
+    // (a) wins when both could match because it is a strict superset prefix.
+    static constexpr const char kGemma4Prefix[] = "model.language_model.";
+    static constexpr size_t kGemma4PrefixLen = sizeof(kGemma4Prefix) - 1;
+    static constexpr const char kMistral3Prefix[] = "language_model.";
+    static constexpr size_t kMistral3PrefixLen = sizeof(kMistral3Prefix) - 1;
+    if (starts_with(out, kGemma4Prefix)) {
+        out = "model." + out.substr(kGemma4PrefixLen);
         counters.prefix_strips++;
-        // Continue to suffix-rename step below.
+    } else if (starts_with(out, kMistral3Prefix)) {
+        out = out.substr(kMistral3PrefixLen);
+        counters.prefix_strips++;
     }
 
     // Step 4: suffix renames (mutually exclusive).
@@ -150,6 +165,17 @@ void log_summary(const TranslationCounters& c) {
                  c.passed_through);
 }
 
+// Count leading spaces (tabs counted as 4) to track YAML block scope.
+static int count_indent(const std::string& line) {
+    int n = 0;
+    for (char c : line) {
+        if (c == ' ') n++;
+        else if (c == '\t') n += 4;
+        else break;
+    }
+    return n;
+}
+
 bool parse_recipe_yaml(const std::string& model_dir,
                        imp::HFConfigLoader::NvFP4Config& cfg) {
     std::ifstream in(model_dir + "/recipe.yaml");
@@ -159,18 +185,89 @@ bool parse_recipe_yaml(const std::string& model_dir,
     std::vector<std::string> ignore_list;
     bool seen_quant_mod = false;
 
+    // Indent-aware tracking for the elaborate `config_groups: group_0: weights: {...}`
+    // schema (Mistral3 / SmoothQuant pipelines). When weights_indent >= 0 we are
+    // inside the `weights:` block of `config_groups.group_0` and capture the
+    // numeric quantization signature.
+    int config_groups_indent = -1;
+    int weights_indent = -1;
+    int weights_num_bits = -1;
+    std::string weights_type;
+    int weights_group_size = -1;
+
+    // Multi-line bracket-array accumulator for `ignore: [..., ..., \n  ...]`.
+    std::string ignore_buf;
+    bool collecting_ignore = false;
+
     std::string line;
     while (std::getline(in, line)) {
+        if (collecting_ignore) {
+            ignore_buf.push_back(' ');
+            ignore_buf.append(line);
+            if (ignore_buf.find(']') != std::string::npos) {
+                ignore_list = parse_bracket_array(ignore_buf);
+                collecting_ignore = false;
+                ignore_buf.clear();
+            }
+            continue;
+        }
+
+        int indent = count_indent(line);
         std::string_view sv(line);
         while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t')) sv.remove_prefix(1);
 
-        if (sv.find("QuantizationModifier:") == 0) { seen_quant_mod = true; continue; }
+        // Indent-based exits — only fire on non-empty content lines so blank
+        // lines don't bogusly close a block.
+        if (!sv.empty()) {
+            if (weights_indent >= 0 && indent <= weights_indent) {
+                weights_indent = -1;
+            }
+            if (config_groups_indent >= 0 && indent <= config_groups_indent) {
+                config_groups_indent = -1;
+                weights_indent = -1;
+            }
+        }
+
+        if (sv.find("QuantizationModifier:") == 0) {
+            seen_quant_mod = true;
+            // A new modifier block resets any prior config_groups state.
+            config_groups_indent = -1;
+            weights_indent = -1;
+            continue;
+        }
         if (!seen_quant_mod) continue;
+
+        if (sv.find("config_groups:") == 0) {
+            config_groups_indent = indent;
+            continue;
+        }
+        if (config_groups_indent >= 0 && sv.find("weights:") == 0) {
+            weights_indent = indent;
+            continue;
+        }
+
+        if (weights_indent >= 0) {
+            if (sv.find("num_bits:") == 0) {
+                try { weights_num_bits = std::stoi(trim_value(sv.substr(9))); } catch (...) {}
+            } else if (sv.find("type:") == 0) {
+                weights_type = trim_value(sv.substr(5));
+            } else if (sv.find("group_size:") == 0) {
+                try { weights_group_size = std::stoi(trim_value(sv.substr(11))); } catch (...) {}
+            }
+            continue;
+        }
 
         if (sv.find("scheme:") == 0) {
             scheme = trim_value(sv.substr(7));
         } else if (sv.find("ignore:") == 0) {
-            ignore_list = parse_bracket_array(sv.substr(7));
+            std::string body(sv.substr(7));
+            if (body.find('[') != std::string::npos &&
+                body.find(']') == std::string::npos) {
+                ignore_buf = std::move(body);
+                collecting_ignore = true;
+            } else {
+                ignore_list = parse_bracket_array(body);
+            }
         } else if (sv.find("group_size:") == 0) {
             try { cfg.group_size = std::stoi(trim_value(sv.substr(11))); }
             catch (...) { /* keep default */ }
@@ -181,6 +278,14 @@ bool parse_recipe_yaml(const std::string& model_dir,
         IMP_LOG_ERROR("recipe.yaml has no QuantizationModifier block");
         return false;
     }
+
+    // If no simple `scheme:` line appeared, infer NVFP4 from the elaborate
+    // `config_groups.group_0.weights.{num_bits: 4, type: float}` shape.
+    if (scheme.empty() && weights_num_bits == 4 && weights_type == "float") {
+        scheme = "NVFP4";
+        if (weights_group_size > 0) cfg.group_size = weights_group_size;
+    }
+
     if (scheme != "NVFP4" && scheme != "NVFP4_W4A16") {
         IMP_LOG_ERROR("recipe.yaml scheme '%s' not supported (need NVFP4 or NVFP4_W4A16)",
                       scheme.c_str());
