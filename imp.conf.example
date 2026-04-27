@@ -1,0 +1,109 @@
+# imp.conf — central runtime configuration for the imp inference engine.
+#
+# Loading precedence (first non-empty wins):
+#   1. --config <path>              CLI flag
+#   2. $IMP_CONFIG                  environment variable
+#   3. ./imp.conf                   working-dir relative
+#   4. ~/.config/imp/imp.conf       user config directory
+#   5. embedded defaults            (no file, all values below)
+#
+# Per-run overrides on top via:
+#   imp --set kv_cache.dtype=fp8 --set runtime.cuda_graphs=never ...
+#
+# Lines starting with '#' are comments; section headers in [brackets].
+
+[runtime]
+# Force deterministic GEMM (cuBLASLt no_reduce_split). Slower but reproducible.
+deterministic_gemm   = false
+# CUDA Graph capture: "auto" picks per-model based on architecture support;
+# "always" forces capture (fails for MoE with D2H routing); "never" disables.
+cuda_graphs          = "auto"
+# Run a warmup forward pass at engine init to prime cuBLAS handles + L2 cache.
+warmup               = true
+# Override the model's max_seq_len (0 = use the model default).
+max_seq_len          = 0
+# Disable Programmatic Dependent Launch (PDL). Diagnostic; small perf impact.
+no_pdl               = false
+
+[kv_cache]
+# KV-cache element type: fp16 | fp8 | int8 | int4 | nvfp4
+dtype                       = "fp16"
+# Allow cuBLASLt non-deterministic algorithms with FP8 KV. Slightly faster
+# but reproducibility is lost.
+allow_nondeterministic_fp8  = false
+
+[attention]
+# Each "auto" key picks the kernel automatically based on weight type +
+# context length. Override only for benchmarking or compatibility tests.
+fp8_prefill          = "auto"
+fp8_fmha             = "auto"
+fmha_sm120           = "auto"
+mxfp4                = "auto"
+mxfp4_fp16_fallback  = false
+fmha_blockscale      = "auto"
+naive                = false
+no_cublas            = false
+force_cublas_decode  = false
+no_qknorm_fused      = false
+no_naive_swa         = false
+splitk_pipe          = true
+gate_concat          = false
+
+[moe]
+# Expected per-expert overhead (% of expert size) before deciding to upload
+# all experts vs. host-fall-back. 10 = aggressive, 30 = conservative.
+expert_overhead_pct  = 10
+force_host_experts   = false
+skip                 = false
+force_fp16_sync      = false
+no_expert_cache      = false
+
+[gdn]
+# FP32 scan/output for Gated-DeltaNet (Qwen3.5/3.6). Slightly slower but
+# eliminates FP16 precision drift at long context.
+fp32_scan            = false
+fp32_out             = false
+# 0 = use the model's rms_norm_eps; otherwise override (diagnostic).
+norm_eps_override    = 0.0
+ref_kernel           = false
+vhead_reorder        = false
+
+[gemm]
+# dp4a = INT8 4-element packed multiply-accumulate. mmvq = matrix*vec
+# quantized GEMM. Disabling forces dequant->cuBLAS path (diagnostic).
+no_dp4a              = false
+no_dp4a_gemv         = false
+no_dp4a_lm           = false
+no_mmvq              = false
+no_mmvq_q8_0         = false
+
+[gemma4]
+fp32_gemm_out        = false
+no_graphs            = false
+force_mmvq           = false
+
+[generation]
+no_logit_softcap     = false
+lm_dequant_fp16      = false
+# Max tokens spent in <think>...</think> blocks (0 = unlimited).
+think_budget         = 0
+
+[paths]
+# Path to a vision projector .gguf file (Gemma-3, Mistral3 multimodal).
+mmproj               = ""
+
+[diagnostics]
+# Verbose per-layer forward dumps. Heavy I/O — use only for bisecting bugs.
+debug_forward        = false
+debug_raw            = false
+debug_gemm_dispatch  = false
+# If non-empty, dump per-layer hidden states as .npy files to this directory.
+dump_hidden_dir      = ""
+dump_logits          = false
+dump_routing         = false
+dump_tokens          = false
+# Stop forward pass after layer N (-1 = run full forward).
+exit_layer           = -1
+profile              = false
+graph_diag           = false
+graph_dump_dir       = ""

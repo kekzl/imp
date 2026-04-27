@@ -34,10 +34,4 @@ inline void assign_quant_with_scales(Tensor& slot, QType& slot_qtype,
     slot_qtype = src.qtype;
 }
 
-// Plain assign for slots without a *_qtype mirror (norms, biases, RoPE
-// freqs, embeddings). The tensor's own qtype carries the type.
-inline void assign(Tensor& slot, const Tensor& src) {
-    slot = src;
-}
-
 } // namespace imp

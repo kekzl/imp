@@ -179,6 +179,7 @@ endif()
 # (ptxas C7600 on sm_120a). This is resolved by using sm_120f instead.
 
 set(IMP_RUNTIME_SOURCES
+    src/runtime/config.cpp
     src/runtime/green_ctx.cu
     src/runtime/scheduler.cpp
     src/runtime/request.cpp
@@ -371,6 +372,7 @@ if(IMP_BUILD_TESTS)
         tests/test_kv_cache.cpp
         tests/test_gguf_loader.cpp
         tests/test_llm_compressor_loader.cpp
+        tests/test_config.cpp
     )
 
     imp_add_test_module(test-text SOURCES
