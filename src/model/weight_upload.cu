@@ -1056,21 +1056,56 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i,
             }
         }
     }
-    // SSM tensors that MUST stay F32: A_log, D, dt_bias (scan kernel uses float*)
+    // SSM scalar/vector tensors that MUST end up as FP32 on device, because
+    // the GDN/Mamba scan kernels read them as `const float*` (A_log, D,
+    // dt_bias). GGUF emits them as F32 — direct upload. SafeTensors with
+    // bfloat16 model dtype emits them as BF16, and a previous engine version
+    // simply h2d_copy'd the bytes — the scan kernel then reinterpreted BF16
+    // as F32 (sign/exponent/mantissa all wrong) and produced NaN within the
+    // first GDN layer. Convert on host before upload so the scan always sees
+    // real FP32 values.
     for (Tensor* t : {&L.ssm_a, &L.ssm_d, &L.ssm_dt_b}) {
-        if (t->data && !t->on_device) {
-            size_t bytes = t->nbytes();
-            void* d_data = nullptr;
-            checked_cuda_malloc(&d_data, bytes);
-            if (!d_data) {
-                IMP_LOG_ERROR("Failed to allocate GPU memory for SSM F32 tensor in layer %d", i);
-                return false;
-            }
-            h2d_copy(d_data, t->data, bytes, ctx.stream);
-            ctx.gpu_allocs.push_back(d_data);
-            t->data = d_data;
-            t->on_device = true;
+        if (!t->data || t->on_device) continue;
+        const int64_t n_elem = t->numel();
+        const size_t fp32_bytes = static_cast<size_t>(n_elem) * sizeof(float);
+        void* d_data = nullptr;
+        checked_cuda_malloc(&d_data, fp32_bytes);
+        if (!d_data) {
+            IMP_LOG_ERROR("Failed to allocate GPU memory for SSM F32 tensor in layer %d", i);
+            return false;
         }
+
+        if (t->qtype == QType::F32 || t->qtype == QType::NONE) {
+            // GGUF path — already FP32.
+            h2d_copy(d_data, t->data, fp32_bytes, ctx.stream);
+        } else if (t->qtype == QType::BF16) {
+            // SafeTensors path — convert BF16 → F32 on host.
+            std::vector<float> h_fp32(static_cast<size_t>(n_elem));
+            const uint16_t* src = static_cast<const uint16_t*>(t->data);
+            for (int64_t k = 0; k < n_elem; ++k) {
+                uint32_t bits = static_cast<uint32_t>(src[k]) << 16;
+                std::memcpy(&h_fp32[k], &bits, sizeof(float));
+            }
+            h2d_copy(d_data, h_fp32.data(), fp32_bytes, ctx.stream);
+        } else if (t->qtype == QType::F16) {
+            // Defensive: F16 weight → F32 (no model emits this for SSM scalars
+            // currently, but keep symmetric with BF16).
+            std::vector<float> h_fp32(static_cast<size_t>(n_elem));
+            const uint16_t* src = static_cast<const uint16_t*>(t->data);
+            for (int64_t k = 0; k < n_elem; ++k) {
+                h_fp32[k] = fp16_to_float(src[k]);
+            }
+            h2d_copy(d_data, h_fp32.data(), fp32_bytes, ctx.stream);
+        } else {
+            IMP_LOG_ERROR("SSM scalar tensor has unexpected qtype %u (layer %d)",
+                          static_cast<unsigned>(t->qtype), i);
+            return false;
+        }
+
+        ctx.gpu_allocs.push_back(d_data);
+        t->data = d_data;
+        t->qtype = QType::F32;
+        t->on_device = true;
     }
 
     // Gated DeltaNet (GDN) weights (Qwen3.5).
