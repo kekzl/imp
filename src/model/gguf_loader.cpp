@@ -1,4 +1,5 @@
 #include "model/gguf_loader.h"
+#include "model/loader_assign.h"
 #include "model/model_arch.h"
 #include "model/tensor_kind_matcher.h"
 #include "quant/dequant_gpu.h"
@@ -341,22 +342,19 @@ static bool assign_tensor(Model& model, const std::string& name,
                            const Tensor& tensor, GgufWireType gtype) {
     auto qtype = static_cast<QType>(static_cast<uint32_t>(gtype));
     if (name == "token_embd.weight") {
-        model.tok_emb_ = tensor;
-        model.tok_emb_qtype_ = qtype;
+        assign_quant(model.tok_emb_, model.tok_emb_qtype_, tensor);
         return true;
     }
     if (name == "output_norm.weight") {
-        model.out_norm_ = tensor;
-        model.out_norm_qtype_ = qtype;
+        assign_quant(model.out_norm_, model.out_norm_qtype_, tensor);
         return true;
     }
     if (name == "rope_freqs.weight") {
-        model.layers_[0].rope_freqs = tensor;
+        assign(model.layers_[0].rope_freqs, tensor);
         return true;
     }
     if (name == "output.weight") {
-        model.out_proj_ = tensor;
-        model.out_proj_qtype_ = qtype;
+        assign_quant(model.out_proj_, model.out_proj_qtype_, tensor);
         return true;
     }
 
@@ -377,8 +375,8 @@ static bool assign_tensor(Model& model, const std::string& name,
     // 3-part: "blk.{i}.{name}" — SSM scalar/vector tensors without .weight/.bias suffix
     if (parts.size() == 3) {
         const auto& field = parts[2];
-        if      (field == "ssm_a") layer.ssm_a = tensor;
-        else if (field == "ssm_d") layer.ssm_d = tensor;
+        if      (field == "ssm_a") assign(layer.ssm_a, tensor);
+        else if (field == "ssm_d") assign(layer.ssm_d, tensor);
         else return false;
         return true;
     }
@@ -390,21 +388,21 @@ static bool assign_tensor(Model& model, const std::string& name,
 
         // Attention projections: distinguish weight vs bias
         if (field == "attn_q") {
-            if (suffix == "bias")       { layer.q_bias = tensor; }
-            else                        { layer.wq = tensor; layer.wq_qtype = qtype; }
+            if (suffix == "bias")       assign(layer.q_bias, tensor);
+            else                        assign_quant(layer.wq, layer.wq_qtype, tensor);
         }
         else if (field == "attn_k") {
-            if (suffix == "bias")       { layer.k_bias = tensor; }
-            else                        { layer.wk = tensor; layer.wk_qtype = qtype; }
+            if (suffix == "bias")       assign(layer.k_bias, tensor);
+            else                        assign_quant(layer.wk, layer.wk_qtype, tensor);
         }
         else if (field == "attn_v") {
-            if (suffix == "bias")       { layer.v_bias = tensor; }
-            else                        { layer.wv = tensor; layer.wv_qtype = qtype; }
+            if (suffix == "bias")       assign(layer.v_bias, tensor);
+            else                        assign_quant(layer.wv, layer.wv_qtype, tensor);
         }
-        else if (field == "attn_output") { layer.wo = tensor; layer.wo_qtype = qtype; }
-        else if (field == "attn_norm")     layer.attn_norm = tensor;
-        else if (field == "attn_q_norm") layer.attn_q_norm = tensor;
-        else if (field == "attn_k_norm") layer.attn_k_norm = tensor;
+        else if (field == "attn_output") assign_quant(layer.wo, layer.wo_qtype, tensor);
+        else if (field == "attn_norm")   assign(layer.attn_norm, tensor);
+        else if (field == "attn_q_norm") assign(layer.attn_q_norm, tensor);
+        else if (field == "attn_k_norm") assign(layer.attn_k_norm, tensor);
         // Fused QKV: either standard attention (Phi-4) or GDN (Qwen3.5)
         else if (field == "attn_qkv") {
             const auto& cfg = model.config();
@@ -416,8 +414,7 @@ static bool assign_tensor(Model& model, const std::string& name,
                                     2 * cfg.ssm_group_count * cfg.ssm_state_size;
             if (cfg.ssm_inner_size > 0 && total_rows == ssm_conv_channels) {
                 // GDN layer: treat attn_qkv as ssm_in (fused projection → conv1d input)
-                layer.ssm_in = tensor;
-                layer.ssm_in_qtype = qtype;
+                assign_quant(layer.ssm_in, layer.ssm_in_qtype, tensor);
             } else {
                 // Standard fused QKV: split into separate Q, K, V
                 // For Qwen3.5 attention: Q has 2× output (Q + gate interleaved),
@@ -430,65 +427,65 @@ static bool assign_tensor(Model& model, const std::string& name,
                 int64_t q_shape[4] = {q_rows, d_model, 1, 1};
                 int64_t kv_shape[4] = {k_rows, d_model, 1, 1};
 
-                layer.wq = Tensor(base, tensor.qtype, 2, q_shape, tensor.on_device);
-                layer.wq_qtype = qtype;
-                layer.wk = Tensor(base + static_cast<size_t>(q_rows) * row_bytes,
-                                   tensor.qtype, 2, kv_shape, tensor.on_device);
-                layer.wk_qtype = qtype;
-                layer.wv = Tensor(base + static_cast<size_t>(q_rows + k_rows) * row_bytes,
-                                   tensor.qtype, 2, kv_shape, tensor.on_device);
-                layer.wv_qtype = qtype;
+                Tensor q_t(base, tensor.qtype, 2, q_shape, tensor.on_device);
+                Tensor k_t(base + static_cast<size_t>(q_rows) * row_bytes,
+                           tensor.qtype, 2, kv_shape, tensor.on_device);
+                Tensor v_t(base + static_cast<size_t>(q_rows + k_rows) * row_bytes,
+                           tensor.qtype, 2, kv_shape, tensor.on_device);
+                assign_quant(layer.wq, layer.wq_qtype, q_t);
+                assign_quant(layer.wk, layer.wk_qtype, k_t);
+                assign_quant(layer.wv, layer.wv_qtype, v_t);
             }
         }
         // Post-layer norms (Gemma-3)
-        else if (field == "post_attention_norm") layer.post_attn_norm = tensor;
-        else if (field == "post_ffw_norm")       layer.post_ffn_norm = tensor;
+        else if (field == "post_attention_norm") assign(layer.post_attn_norm, tensor);
+        else if (field == "post_ffw_norm")       assign(layer.post_ffn_norm, tensor);
         // Gemma 4: parallel shared MLP + MoE expert branch norms
-        else if (field == "pre_ffw_norm_2")      layer.ffn_pre_norm_2 = tensor;
-        else if (field == "post_ffw_norm_1")     layer.ffn_post_norm_1 = tensor;
-        else if (field == "post_ffw_norm_2")     layer.ffn_post_norm_2 = tensor;
-        else if (field == "layer_output_scale")  layer.layer_out_scale = tensor;
-        else if (field == "rope_freqs")          layer.rope_freqs = tensor;
+        else if (field == "pre_ffw_norm_2")      assign(layer.ffn_pre_norm_2, tensor);
+        else if (field == "post_ffw_norm_1")     assign(layer.ffn_post_norm_1, tensor);
+        else if (field == "post_ffw_norm_2")     assign(layer.ffn_post_norm_2, tensor);
+        else if (field == "layer_output_scale")  assign(layer.layer_out_scale, tensor);
+        else if (field == "rope_freqs")          assign(layer.rope_freqs, tensor);
         // Gemma 4: fused gate+up experts: [n_experts, n_ff_exp*2, d_model]
         // We keep it packed; the MoE executor handles de-interleaving at dispatch.
         else if (field == "ffn_gate_up_exps") {
-            layer.expert_gate_packed = tensor;  // reuse gate packed slot with full fused tensor
-            layer.expert_gate_qtype = qtype;
+            // Reuses gate packed slot with full fused tensor.
             // Mark fused by leaving expert_up_packed null — executor detects this.
+            assign_quant(layer.expert_gate_packed, layer.expert_gate_qtype, tensor);
         }
         // FFN
-        else if (field == "ffn_gate")    { layer.w_gate = tensor; layer.w_gate_qtype = qtype; }
-        else if (field == "ffn_up")      { layer.w_up = tensor; layer.w_up_qtype = qtype; }
-        else if (field == "ffn_down")    { layer.w_down = tensor; layer.w_down_qtype = qtype; }
-        else if (field == "ffn_norm")      layer.ffn_norm = tensor;
+        else if (field == "ffn_gate")    assign_quant(layer.w_gate, layer.w_gate_qtype, tensor);
+        else if (field == "ffn_up")      assign_quant(layer.w_up,   layer.w_up_qtype,   tensor);
+        else if (field == "ffn_down")    assign_quant(layer.w_down, layer.w_down_qtype, tensor);
+        else if (field == "ffn_norm")    assign(layer.ffn_norm, tensor);
         else if (field == "ffn_gate_inp") {
             // Distinguish .weight (the gate matrix) from .scale (per-channel multiplier).
             // Gemma 4 stores `blk.X.ffn_gate_inp.scale` as a 4-part tensor name; without
             // this branch the scale would be silently misassigned to layer.moe_gate.
-            if (suffix == "scale") layer.ffn_gate_inp_scale = tensor;
-            else                   layer.moe_gate = tensor;
+            if (suffix == "scale") assign(layer.ffn_gate_inp_scale, tensor);
+            else                   assign(layer.moe_gate, tensor);
         }
         // Packed expert tensors: 3D [n_experts, rows, cols]
-        else if (field == "ffn_gate_exps") { layer.expert_gate_packed = tensor; layer.expert_gate_qtype = qtype; }
-        else if (field == "ffn_up_exps")   { layer.expert_up_packed = tensor; layer.expert_up_qtype = qtype; }
+        else if (field == "ffn_gate_exps") assign_quant(layer.expert_gate_packed, layer.expert_gate_qtype, tensor);
+        else if (field == "ffn_up_exps")   assign_quant(layer.expert_up_packed,   layer.expert_up_qtype,   tensor);
         else if (field == "ffn_down_exps") {
             // Distinguish .weight (the per-expert FFN down weights) from .scale
             // (per-expert output multiplier, shape [n_expert]). Same 4-part-name
             // bug as ffn_gate_inp.scale: the scale tensor would otherwise overwrite
             // expert_down_packed.
-            if (suffix == "scale") layer.expert_down_scale = tensor;
-            else                   { layer.expert_down_packed = tensor; layer.expert_down_qtype = qtype; }
+            if (suffix == "scale") assign(layer.expert_down_scale, tensor);
+            else                   assign_quant(layer.expert_down_packed, layer.expert_down_qtype, tensor);
         }
         // Shared expert (always-active, e.g. Nemotron/DeepSeek)
-        else if (field == "ffn_gate_shexp") { layer.w_gate_shared = tensor; layer.w_gate_shared_qtype = qtype; }
-        else if (field == "ffn_up_shexp")   { layer.w_up_shared = tensor; layer.w_up_shared_qtype = qtype; }
-        else if (field == "ffn_down_shexp") { layer.w_down_shared = tensor; layer.w_down_shared_qtype = qtype; }
+        else if (field == "ffn_gate_shexp") assign_quant(layer.w_gate_shared, layer.w_gate_shared_qtype, tensor);
+        else if (field == "ffn_up_shexp")   assign_quant(layer.w_up_shared,   layer.w_up_shared_qtype,   tensor);
+        else if (field == "ffn_down_shexp") assign_quant(layer.w_down_shared, layer.w_down_shared_qtype, tensor);
         // Qwen3-Next / Qwen3.6 per-token sigmoid gate on the shared expert
         // output. 1D [d_model] FP32 projection; sigmoid(cur @ W) yields [M, 1].
-        else if (field == "ffn_gate_inp_shexp") { layer.shared_expert_gate_inp = tensor; }
+        else if (field == "ffn_gate_inp_shexp") assign(layer.shared_expert_gate_inp, tensor);
         // SSM weights (Mamba2)
-        else if (field == "ssm_in")   { layer.ssm_in = tensor; layer.ssm_in_qtype = qtype; }
-        else if (field == "ssm_out")  { layer.ssm_out = tensor; layer.ssm_out_qtype = qtype; }
+        else if (field == "ssm_in")   assign_quant(layer.ssm_in,  layer.ssm_in_qtype,  tensor);
+        else if (field == "ssm_out")  assign_quant(layer.ssm_out, layer.ssm_out_qtype, tensor);
         else if (field == "ssm_dt") {
             // Some converters (Qwen3.5-27B-mxfp4) emit A_log under the name
             // "ssm_dt.weight" — a 1D vector of shape [n_heads]. Differentiate
@@ -496,23 +493,23 @@ static bool assign_tensor(Model& model, const std::string& name,
             // weight → ssm_a (per-head A_log). Without this branch the weight
             // silently overwrites the bias and ssm_a stays null, causing the
             // GDN scan kernel to NULL-deref A_log[h] on first launch.
-            if (suffix == "bias")        layer.ssm_dt_b = tensor;
-            else if (suffix == "weight") layer.ssm_a = tensor;
+            if (suffix == "bias")        assign(layer.ssm_dt_b, tensor);
+            else if (suffix == "weight") assign(layer.ssm_a, tensor);
             else return false;
         }
-        else if (field == "ssm_norm")   layer.ssm_norm_w = tensor;
+        else if (field == "ssm_norm")   assign(layer.ssm_norm_w, tensor);
         // SSM conv1d: "blk.{i}.ssm_conv1d.weight" / "blk.{i}.ssm_conv1d.bias"
         else if (field == "ssm_conv1d") {
-            if (suffix == "weight")     layer.ssm_conv1d_w = tensor;
-            else if (suffix == "bias")  layer.ssm_conv1d_b = tensor;
+            if (suffix == "weight")     assign(layer.ssm_conv1d_w, tensor);
+            else if (suffix == "bias")  assign(layer.ssm_conv1d_b, tensor);
             else return false;
         }
         // Gated DeltaNet (GDN) weights (Qwen3.5)
-        else if (field == "attn_gate")  { layer.gdn_gate  = tensor; layer.gdn_gate_qtype  = qtype; }
-        else if (field == "ssm_alpha")  { layer.gdn_alpha = tensor; layer.gdn_alpha_qtype = qtype; }
-        else if (field == "ssm_beta")   { layer.gdn_beta  = tensor; layer.gdn_beta_qtype  = qtype; }
+        else if (field == "attn_gate")  assign_quant(layer.gdn_gate,  layer.gdn_gate_qtype,  tensor);
+        else if (field == "ssm_alpha")  assign_quant(layer.gdn_alpha, layer.gdn_alpha_qtype, tensor);
+        else if (field == "ssm_beta")   assign_quant(layer.gdn_beta,  layer.gdn_beta_qtype,  tensor);
         // Router bias (Nemotron MoE)
-        else if (field == "exp_probs_b") layer.moe_router_bias = tensor;
+        else if (field == "exp_probs_b") assign(layer.moe_router_bias, tensor);
         else return false;
         return true;
     }
@@ -526,13 +523,13 @@ static bool assign_tensor(Model& model, const std::string& name,
         // Gemma 4 scale tensors
         if (subfield == "scale") {
             if (field == "ffn_gate_inp") {
-                layer.ffn_gate_inp_scale = tensor;
+                assign(layer.ffn_gate_inp_scale, tensor);
                 return true;
             }
             if (field == "ffn_down_exps") {
                 // Per-expert output scale. Not yet consumed by the executor — store as
                 // router bias slot so weight_upload at least preserves it.
-                layer.moe_router_bias = tensor;
+                assign(layer.moe_router_bias, tensor);
                 return true;
             }
             return false;
@@ -546,9 +543,20 @@ static bool assign_tensor(Model& model, const std::string& name,
         int n_experts = model.config().n_experts;
         if (expert_idx < 0 || expert_idx >= n_experts) return false;
 
-        if      (field == "ffn_gate") { layer.expert_w_gate[expert_idx] = tensor; if (expert_idx == 0) layer.expert_gate_qtype = qtype; }
-        else if (field == "ffn_up")   { layer.expert_w_up[expert_idx] = tensor; if (expert_idx == 0) layer.expert_up_qtype = qtype; }
-        else if (field == "ffn_down") { layer.expert_w_down[expert_idx] = tensor; if (expert_idx == 0) layer.expert_down_qtype = qtype; }
+        // Per-expert vectors: assign to slot N. The layer-wide qtype mirror is
+        // populated only on the first expert (all experts share the same qtype).
+        if (field == "ffn_gate") {
+            assign(layer.expert_w_gate[expert_idx], tensor);
+            if (expert_idx == 0) layer.expert_gate_qtype = qtype;
+        }
+        else if (field == "ffn_up") {
+            assign(layer.expert_w_up[expert_idx], tensor);
+            if (expert_idx == 0) layer.expert_up_qtype = qtype;
+        }
+        else if (field == "ffn_down") {
+            assign(layer.expert_w_down[expert_idx], tensor);
+            if (expert_idx == 0) layer.expert_down_qtype = qtype;
+        }
         else return false;
         return true;
     }
