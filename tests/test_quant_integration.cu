@@ -181,17 +181,17 @@ static std::unique_ptr<Model> make_test_model(
     // Token embedding [vocab_size, d_model]
     auto [tok_emb_buf, tok_emb] = make_fp16_weight(vocab_size, d_model, rng);
     model->tok_emb_ = tok_emb;
-    model->tok_emb_qtype_ = QType::F16;
+    model->tok_emb_.qtype = QType::F16;
 
     // Output norm [d_model]
     auto [out_norm_buf, out_norm] = make_norm_weight(d_model);
     model->out_norm_ = out_norm;
-    model->out_norm_qtype_ = QType::F16;
+    model->out_norm_.qtype = QType::F16;
 
     // Output projection [vocab_size, d_model]
     auto [out_proj_buf, out_proj] = make_fp16_weight(vocab_size, d_model, rng);
     model->out_proj_ = out_proj;
-    model->out_proj_qtype_ = QType::F16;
+    model->out_proj_.qtype = QType::F16;
 
     // Layers
     model->layers_.resize(n_layers);
@@ -202,48 +202,48 @@ static std::unique_ptr<Model> make_test_model(
         if (use_q4_0) {
             // Attention weights in Q4_0
             auto [wq_buf, wq] = make_q4_0_weight(n_heads * head_dim, d_model);
-            ly.wq = wq; ly.wq_qtype = QType::Q4_0;
+            ly.wq = wq; ly.wq.qtype = QType::Q4_0;
 
             auto [wk_buf, wk] = make_q4_0_weight(n_kv_heads * head_dim, d_model);
-            ly.wk = wk; ly.wk_qtype = QType::Q4_0;
+            ly.wk = wk; ly.wk.qtype = QType::Q4_0;
 
             auto [wv_buf, wv] = make_q4_0_weight(n_kv_heads * head_dim, d_model);
-            ly.wv = wv; ly.wv_qtype = QType::Q4_0;
+            ly.wv = wv; ly.wv.qtype = QType::Q4_0;
 
             auto [wo_buf, wo] = make_q4_0_weight(d_model, n_heads * head_dim);
-            ly.wo = wo; ly.wo_qtype = QType::Q4_0;
+            ly.wo = wo; ly.wo.qtype = QType::Q4_0;
 
             // FFN weights in Q4_0
             auto [wg_buf, wg] = make_q4_0_weight(d_ff, d_model);
-            ly.w_gate = wg; ly.w_gate_qtype = QType::Q4_0;
+            ly.w_gate = wg; ly.w_gate.qtype = QType::Q4_0;
 
             auto [wu_buf, wu] = make_q4_0_weight(d_ff, d_model);
-            ly.w_up = wu; ly.w_up_qtype = QType::Q4_0;
+            ly.w_up = wu; ly.w_up.qtype = QType::Q4_0;
 
             auto [wd_buf, wd] = make_q4_0_weight(d_model, d_ff);
-            ly.w_down = wd; ly.w_down_qtype = QType::Q4_0;
+            ly.w_down = wd; ly.w_down.qtype = QType::Q4_0;
         } else {
             // Attention weights in FP16
             auto [wq_buf, wq] = make_fp16_weight(n_heads * head_dim, d_model, rng);
-            ly.wq = wq; ly.wq_qtype = QType::F16;
+            ly.wq = wq; ly.wq.qtype = QType::F16;
 
             auto [wk_buf, wk] = make_fp16_weight(n_kv_heads * head_dim, d_model, rng);
-            ly.wk = wk; ly.wk_qtype = QType::F16;
+            ly.wk = wk; ly.wk.qtype = QType::F16;
 
             auto [wv_buf, wv] = make_fp16_weight(n_kv_heads * head_dim, d_model, rng);
-            ly.wv = wv; ly.wv_qtype = QType::F16;
+            ly.wv = wv; ly.wv.qtype = QType::F16;
 
             auto [wo_buf, wo] = make_fp16_weight(d_model, n_heads * head_dim, rng);
-            ly.wo = wo; ly.wo_qtype = QType::F16;
+            ly.wo = wo; ly.wo.qtype = QType::F16;
 
             auto [wg_buf, wg] = make_fp16_weight(d_ff, d_model, rng);
-            ly.w_gate = wg; ly.w_gate_qtype = QType::F16;
+            ly.w_gate = wg; ly.w_gate.qtype = QType::F16;
 
             auto [wu_buf, wu] = make_fp16_weight(d_ff, d_model, rng);
-            ly.w_up = wu; ly.w_up_qtype = QType::F16;
+            ly.w_up = wu; ly.w_up.qtype = QType::F16;
 
             auto [wd_buf, wd] = make_fp16_weight(d_model, d_ff, rng);
-            ly.w_down = wd; ly.w_down_qtype = QType::F16;
+            ly.w_down = wd; ly.w_down.qtype = QType::F16;
         }
 
         // Norm weights always FP16
@@ -316,17 +316,17 @@ static std::unique_ptr<Model> make_q8_0_test_model(
     // Token embedding in FP16 (small values)
     auto [tok_emb_buf, tok_emb] = make_fp16_weight(vocab_size, d_model);
     model->tok_emb_ = tok_emb;
-    model->tok_emb_qtype_ = QType::F16;
+    model->tok_emb_.qtype = QType::F16;
 
     // Output norm
     auto [out_norm_buf, out_norm] = make_norm_weight(d_model);
     model->out_norm_ = out_norm;
-    model->out_norm_qtype_ = QType::F16;
+    model->out_norm_.qtype = QType::F16;
 
     // Output projection in FP16
     auto [out_proj_buf, out_proj] = make_fp16_weight(vocab_size, d_model);
     model->out_proj_ = out_proj;
-    model->out_proj_qtype_ = QType::F16;
+    model->out_proj_.qtype = QType::F16;
 
     // Layers with Q8_0 weights
     model->layers_.resize(n_layers);
@@ -334,25 +334,25 @@ static std::unique_ptr<Model> make_q8_0_test_model(
         auto& ly = model->layers_[l];
 
         auto [wq_buf, wq] = make_q8_0_weight(n_heads * head_dim, d_model);
-        ly.wq = wq; ly.wq_qtype = QType::Q8_0;
+        ly.wq = wq; ly.wq.qtype = QType::Q8_0;
 
         auto [wk_buf, wk] = make_q8_0_weight(n_kv_heads * head_dim, d_model);
-        ly.wk = wk; ly.wk_qtype = QType::Q8_0;
+        ly.wk = wk; ly.wk.qtype = QType::Q8_0;
 
         auto [wv_buf, wv] = make_q8_0_weight(n_kv_heads * head_dim, d_model);
-        ly.wv = wv; ly.wv_qtype = QType::Q8_0;
+        ly.wv = wv; ly.wv.qtype = QType::Q8_0;
 
         auto [wo_buf, wo] = make_q8_0_weight(d_model, n_heads * head_dim);
-        ly.wo = wo; ly.wo_qtype = QType::Q8_0;
+        ly.wo = wo; ly.wo.qtype = QType::Q8_0;
 
         auto [wg_buf, wg] = make_q8_0_weight(d_ff, d_model);
-        ly.w_gate = wg; ly.w_gate_qtype = QType::Q8_0;
+        ly.w_gate = wg; ly.w_gate.qtype = QType::Q8_0;
 
         auto [wu_buf, wu] = make_q8_0_weight(d_ff, d_model);
-        ly.w_up = wu; ly.w_up_qtype = QType::Q8_0;
+        ly.w_up = wu; ly.w_up.qtype = QType::Q8_0;
 
         auto [wd_buf, wd] = make_q8_0_weight(d_model, d_ff);
-        ly.w_down = wd; ly.w_down_qtype = QType::Q8_0;
+        ly.w_down = wd; ly.w_down.qtype = QType::Q8_0;
 
         auto [an_buf, an] = make_norm_weight(d_model);
         ly.attn_norm = an;
@@ -455,7 +455,7 @@ TEST(QuantIntegrationTest, Q8_0WeightUpload) {
     int64_t shape[4] = {rows, cols, 0, 0};
     model->layers_.resize(1);
     model->layers_[0].wq = Tensor(q8_buf, QType::INT8, 2, shape, false);
-    model->layers_[0].wq_qtype = QType::Q8_0;
+    model->layers_[0].wq.qtype = QType::Q8_0;
 
     // Set other weights to minimal FP16 (just need wq for this test)
     auto make_fp16 = [](int r, int c) -> Tensor {
@@ -473,21 +473,21 @@ TEST(QuantIntegrationTest, Q8_0WeightUpload) {
     };
 
     auto& ly = model->layers_[0];
-    ly.wk = make_fp16(32, 32); ly.wk_qtype = QType::F16;
-    ly.wv = make_fp16(32, 32); ly.wv_qtype = QType::F16;
-    ly.wo = make_fp16(32, 32); ly.wo_qtype = QType::F16;
-    ly.w_gate = make_fp16(64, 32); ly.w_gate_qtype = QType::F16;
-    ly.w_up = make_fp16(64, 32); ly.w_up_qtype = QType::F16;
-    ly.w_down = make_fp16(32, 64); ly.w_down_qtype = QType::F16;
+    ly.wk = make_fp16(32, 32); ly.wk.qtype = QType::F16;
+    ly.wv = make_fp16(32, 32); ly.wv.qtype = QType::F16;
+    ly.wo = make_fp16(32, 32); ly.wo.qtype = QType::F16;
+    ly.w_gate = make_fp16(64, 32); ly.w_gate.qtype = QType::F16;
+    ly.w_up = make_fp16(64, 32); ly.w_up.qtype = QType::F16;
+    ly.w_down = make_fp16(32, 64); ly.w_down.qtype = QType::F16;
     ly.attn_norm = make_norm(32);
     ly.ffn_norm = make_norm(32);
 
     model->tok_emb_ = make_fp16(32, 32);
-    model->tok_emb_qtype_ = QType::F16;
+    model->tok_emb_.qtype = QType::F16;
     model->out_norm_ = make_norm(32);
-    model->out_norm_qtype_ = QType::F16;
+    model->out_norm_.qtype = QType::F16;
     model->out_proj_ = make_fp16(32, 32);
-    model->out_proj_qtype_ = QType::F16;
+    model->out_proj_.qtype = QType::F16;
 
     // Upload
     ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
@@ -553,7 +553,7 @@ TEST(QuantIntegrationTest, F32WeightUpload) {
 
     int64_t shape[4] = {rows, cols, 0, 0};
     model->tok_emb_ = Tensor(f32_buf, QType::F32, 2, shape, false);
-    model->tok_emb_qtype_ = QType::F32;
+    model->tok_emb_.qtype = QType::F32;
 
     // Minimal other weights
     auto make_fp16 = [](int r, int c) -> Tensor {
@@ -570,19 +570,19 @@ TEST(QuantIntegrationTest, F32WeightUpload) {
     };
 
     model->out_norm_ = make_norm(32);
-    model->out_norm_qtype_ = QType::F16;
+    model->out_norm_.qtype = QType::F16;
     model->out_proj_ = make_fp16(32, 32);
-    model->out_proj_qtype_ = QType::F16;
+    model->out_proj_.qtype = QType::F16;
 
     model->layers_.resize(1);
     auto& ly = model->layers_[0];
-    ly.wq = make_fp16(32, 32); ly.wq_qtype = QType::F16;
-    ly.wk = make_fp16(32, 32); ly.wk_qtype = QType::F16;
-    ly.wv = make_fp16(32, 32); ly.wv_qtype = QType::F16;
-    ly.wo = make_fp16(32, 32); ly.wo_qtype = QType::F16;
-    ly.w_gate = make_fp16(64, 32); ly.w_gate_qtype = QType::F16;
-    ly.w_up = make_fp16(64, 32); ly.w_up_qtype = QType::F16;
-    ly.w_down = make_fp16(32, 64); ly.w_down_qtype = QType::F16;
+    ly.wq = make_fp16(32, 32); ly.wq.qtype = QType::F16;
+    ly.wk = make_fp16(32, 32); ly.wk.qtype = QType::F16;
+    ly.wv = make_fp16(32, 32); ly.wv.qtype = QType::F16;
+    ly.wo = make_fp16(32, 32); ly.wo.qtype = QType::F16;
+    ly.w_gate = make_fp16(64, 32); ly.w_gate.qtype = QType::F16;
+    ly.w_up = make_fp16(64, 32); ly.w_up.qtype = QType::F16;
+    ly.w_down = make_fp16(32, 64); ly.w_down.qtype = QType::F16;
     ly.attn_norm = make_norm(32);
     ly.ffn_norm = make_norm(32);
 
@@ -1245,42 +1245,42 @@ static std::unique_ptr<Model> make_q4_k_test_model(
     // Token embedding [vocab_size, d_model] in FP16
     auto [tok_emb_buf, tok_emb] = make_fp16_weight(vocab_size, d_model);
     model->tok_emb_ = tok_emb;
-    model->tok_emb_qtype_ = QType::F16;
+    model->tok_emb_.qtype = QType::F16;
 
     // Output norm [d_model]
     auto [out_norm_buf, out_norm] = make_norm_weight(d_model);
     model->out_norm_ = out_norm;
-    model->out_norm_qtype_ = QType::F16;
+    model->out_norm_.qtype = QType::F16;
 
     // Output projection [vocab_size, d_model] in FP16
     auto [out_proj_buf, out_proj] = make_fp16_weight(vocab_size, d_model);
     model->out_proj_ = out_proj;
-    model->out_proj_qtype_ = QType::F16;
+    model->out_proj_.qtype = QType::F16;
 
     model->layers_.resize(n_layers);
     for (int l = 0; l < n_layers; ++l) {
         auto& ly = model->layers_[l];
 
         auto [wq_buf, wq] = make_q4_k_weight(n_heads * head_dim, d_model);
-        ly.wq = wq; ly.wq_qtype = QType::Q4_K;
+        ly.wq = wq; ly.wq.qtype = QType::Q4_K;
 
         auto [wk_buf, wk] = make_q4_k_weight(n_kv_heads * head_dim, d_model);
-        ly.wk = wk; ly.wk_qtype = QType::Q4_K;
+        ly.wk = wk; ly.wk.qtype = QType::Q4_K;
 
         auto [wv_buf, wv] = make_q4_k_weight(n_kv_heads * head_dim, d_model);
-        ly.wv = wv; ly.wv_qtype = QType::Q4_K;
+        ly.wv = wv; ly.wv.qtype = QType::Q4_K;
 
         auto [wo_buf, wo] = make_q4_k_weight(d_model, n_heads * head_dim);
-        ly.wo = wo; ly.wo_qtype = QType::Q4_K;
+        ly.wo = wo; ly.wo.qtype = QType::Q4_K;
 
         auto [wg_buf, wg] = make_q4_k_weight(d_ff, d_model);
-        ly.w_gate = wg; ly.w_gate_qtype = QType::Q4_K;
+        ly.w_gate = wg; ly.w_gate.qtype = QType::Q4_K;
 
         auto [wu_buf, wu] = make_q4_k_weight(d_ff, d_model);
-        ly.w_up = wu; ly.w_up_qtype = QType::Q4_K;
+        ly.w_up = wu; ly.w_up.qtype = QType::Q4_K;
 
         auto [wd_buf, wd] = make_q4_k_weight(d_model, d_ff);
-        ly.w_down = wd; ly.w_down_qtype = QType::Q4_K;
+        ly.w_down = wd; ly.w_down.qtype = QType::Q4_K;
 
         auto [an_buf, an] = make_norm_weight(d_model);
         ly.attn_norm = an;
@@ -1347,40 +1347,40 @@ static std::unique_ptr<Model> make_q5_k_test_model(
 
     auto [tok_emb_buf, tok_emb] = make_fp16_weight(vocab_size, d_model);
     model->tok_emb_ = tok_emb;
-    model->tok_emb_qtype_ = QType::F16;
+    model->tok_emb_.qtype = QType::F16;
 
     auto [out_norm_buf, out_norm] = make_norm_weight(d_model);
     model->out_norm_ = out_norm;
-    model->out_norm_qtype_ = QType::F16;
+    model->out_norm_.qtype = QType::F16;
 
     auto [out_proj_buf, out_proj] = make_fp16_weight(vocab_size, d_model);
     model->out_proj_ = out_proj;
-    model->out_proj_qtype_ = QType::F16;
+    model->out_proj_.qtype = QType::F16;
 
     model->layers_.resize(n_layers);
     for (int l = 0; l < n_layers; ++l) {
         auto& ly = model->layers_[l];
 
         auto [wq_buf, wq] = make_q5_k_weight(n_heads * head_dim, d_model);
-        ly.wq = wq; ly.wq_qtype = QType::Q5_K;
+        ly.wq = wq; ly.wq.qtype = QType::Q5_K;
 
         auto [wk_buf, wk] = make_q5_k_weight(n_kv_heads * head_dim, d_model);
-        ly.wk = wk; ly.wk_qtype = QType::Q5_K;
+        ly.wk = wk; ly.wk.qtype = QType::Q5_K;
 
         auto [wv_buf, wv] = make_q5_k_weight(n_kv_heads * head_dim, d_model);
-        ly.wv = wv; ly.wv_qtype = QType::Q5_K;
+        ly.wv = wv; ly.wv.qtype = QType::Q5_K;
 
         auto [wo_buf, wo] = make_q5_k_weight(d_model, n_heads * head_dim);
-        ly.wo = wo; ly.wo_qtype = QType::Q5_K;
+        ly.wo = wo; ly.wo.qtype = QType::Q5_K;
 
         auto [wg_buf, wg] = make_q5_k_weight(d_ff, d_model);
-        ly.w_gate = wg; ly.w_gate_qtype = QType::Q5_K;
+        ly.w_gate = wg; ly.w_gate.qtype = QType::Q5_K;
 
         auto [wu_buf, wu] = make_q5_k_weight(d_ff, d_model);
-        ly.w_up = wu; ly.w_up_qtype = QType::Q5_K;
+        ly.w_up = wu; ly.w_up.qtype = QType::Q5_K;
 
         auto [wd_buf, wd] = make_q5_k_weight(d_model, d_ff);
-        ly.w_down = wd; ly.w_down_qtype = QType::Q5_K;
+        ly.w_down = wd; ly.w_down.qtype = QType::Q5_K;
 
         auto [an_buf, an] = make_norm_weight(d_model);
         ly.attn_norm = an;

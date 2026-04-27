@@ -103,15 +103,9 @@ struct TransformerLayer {
     // Packed expert tensors (3D: [n_experts, rows, cols]) loaded from GGUF *_exps
     // These are temporary: weight_upload slices them into the per-expert vectors above.
     Tensor expert_gate_packed, expert_up_packed, expert_down_packed;
-    QType expert_gate_qtype = QType::NONE;
-    QType expert_up_qtype   = QType::NONE;
-    QType expert_down_qtype = QType::NONE;
 
     // Shared expert (always-active, e.g. Nemotron/DeepSeek)
     Tensor w_up_shared, w_down_shared, w_gate_shared;
-    QType w_up_shared_qtype   = QType::NONE;
-    QType w_down_shared_qtype = QType::NONE;
-    QType w_gate_shared_qtype = QType::NONE;
 
     // Qwen3-Next / Qwen3.6 shared-expert input gate: a [d_model] FP32 projection
     // that, after sigmoid, produces a per-token scalar used to gate the shared
@@ -119,18 +113,11 @@ struct TransformerLayer {
     // `blk.{i}.ffn_gate_inp_shexp.weight`. Absent for Qwen2-MoE / Qwen3 MoE.
     Tensor shared_expert_gate_inp;
 
-    // Per-group scales for quantized weights (GPU, FP16)
-    Tensor wq_scales, wk_scales, wv_scales, wo_scales;
-    Tensor w_gate_scales, w_up_scales, w_down_scales;
-
-    // Store original GGML quant types for dequant dispatch
-    QType wq_qtype = QType::NONE;
-    QType wk_qtype = QType::NONE;
-    QType wv_qtype = QType::NONE;
-    QType wo_qtype = QType::NONE;
-    QType w_gate_qtype = QType::NONE;
-    QType w_up_qtype = QType::NONE;
-    QType w_down_qtype = QType::NONE;
+    // (Per-group scales now ride along on each tensor's .scales field —
+    //  see core/tensor.h. The legacy *_scales mirror fields were removed
+    //  in Stage F.)
+    //
+    // (qtype mirrors removed in Stage G — read tensor.qtype directly.)
 
     // WeightRegistry indices (populated by pre_dequant_weights, Phase 2+).
     // kInvalidTensorID means the corresponding Tensor is absent on this layer
@@ -185,16 +172,11 @@ struct TransformerLayer {
     Tensor ssm_dt_b;                      // dt bias
     Tensor ssm_a, ssm_d;                  // A (log) and D (skip connection)
     Tensor ssm_norm_w;                    // Group RMSNorm weight
-    QType ssm_in_qtype = QType::NONE;
-    QType ssm_out_qtype = QType::NONE;
 
     // Gated DeltaNet (GDN) weights (Qwen3.5 hybrid)
     Tensor gdn_gate;     // [d_model, inner_size] output gating projection
     Tensor gdn_alpha;    // [d_model, n_gdn_heads] delta rule decay
     Tensor gdn_beta;     // [d_model, n_gdn_heads] delta rule learning rate
-    QType gdn_gate_qtype  = QType::NONE;
-    QType gdn_alpha_qtype = QType::NONE;
-    QType gdn_beta_qtype  = QType::NONE;
 
     // Router bias (Nemotron MoE)
     Tensor moe_router_bias;

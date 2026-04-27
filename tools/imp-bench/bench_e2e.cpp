@@ -84,15 +84,15 @@ static std::unique_ptr<Model> make_bench_model(
 
     // Token embedding [vocab_size, d_model]
     model->tok_emb_ = make_fp16_weight(vocab_size, d_model, rng);
-    model->tok_emb_qtype_ = QType::F16;
+    model->tok_emb_.qtype = QType::F16;
 
     // Output norm [d_model]
     model->out_norm_ = make_norm_weight(d_model);
-    model->out_norm_qtype_ = QType::F16;
+    model->out_norm_.qtype = QType::F16;
 
     // Output projection [vocab_size, d_model]
     model->out_proj_ = make_fp16_weight(vocab_size, d_model, rng);
-    model->out_proj_qtype_ = QType::F16;
+    model->out_proj_.qtype = QType::F16;
 
     // Layers
     model->layers_.resize(n_layers);
@@ -101,25 +101,25 @@ static std::unique_ptr<Model> make_bench_model(
         auto& ly = model->layers_[l];
 
         ly.wq = make_fp16_weight(n_heads * head_dim, d_model, rng);
-        ly.wq_qtype = QType::F16;
+        ly.wq.qtype = QType::F16;
 
         ly.wk = make_fp16_weight(n_kv_heads * head_dim, d_model, rng);
-        ly.wk_qtype = QType::F16;
+        ly.wk.qtype = QType::F16;
 
         ly.wv = make_fp16_weight(n_kv_heads * head_dim, d_model, rng);
-        ly.wv_qtype = QType::F16;
+        ly.wv.qtype = QType::F16;
 
         ly.wo = make_fp16_weight(d_model, n_heads * head_dim, rng);
-        ly.wo_qtype = QType::F16;
+        ly.wo.qtype = QType::F16;
 
         ly.w_gate = make_fp16_weight(d_ff, d_model, rng);
-        ly.w_gate_qtype = QType::F16;
+        ly.w_gate.qtype = QType::F16;
 
         ly.w_up = make_fp16_weight(d_ff, d_model, rng);
-        ly.w_up_qtype = QType::F16;
+        ly.w_up.qtype = QType::F16;
 
         ly.w_down = make_fp16_weight(d_model, d_ff, rng);
-        ly.w_down_qtype = QType::F16;
+        ly.w_down.qtype = QType::F16;
 
         ly.attn_norm = make_norm_weight(d_model);
         ly.ffn_norm = make_norm_weight(d_model);

@@ -12,26 +12,21 @@
 
 namespace imp {
 
-// Assign a parsed tensor to a layer slot AND its qtype mirror field.
-// The tensor's own qtype is the canonical source; the mirror field is a
-// deprecated copy that gets read by some legacy dispatch sites. This
-// helper guarantees the two stay in sync.
-inline void assign_quant(Tensor& slot, QType& slot_qtype, const Tensor& src) {
+// Assign a parsed tensor to a layer slot. The tensor's own qtype field
+// carries the type — Stage G removed the per-layer *_qtype mirrors.
+inline void assign_quant(Tensor& slot, const Tensor& src) {
     slot = src;
-    slot_qtype = src.qtype;
 }
 
-// Variant that also wires NVFP4 / FP8 sidecar pointers on the tensor
-// itself. Used by SafeTensors / llm-compressor loaders where the
-// per-tensor scales come in as separate parsed tensors.
-inline void assign_quant_with_scales(Tensor& slot, QType& slot_qtype,
-                                     const Tensor& src,
+// Variant that also wires NVFP4 / FP8 sidecar pointers on the tensor.
+// Used by SafeTensors / llm-compressor loaders where the per-tensor
+// scales come in as separate parsed tensors.
+inline void assign_quant_with_scales(Tensor& slot, const Tensor& src,
                                      void* scales,
                                      float tensor_scale = 1.0f) {
     slot = src;
     slot.scales = scales;
     slot.tensor_scale = tensor_scale;
-    slot_qtype = src.qtype;
 }
 
 } // namespace imp

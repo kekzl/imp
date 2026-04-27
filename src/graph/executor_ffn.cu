@@ -87,7 +87,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                   wd_tier == StorageTier::NVFP4);
     bool will_fuse_down_residual = (!has_post_ffn_norm && !will_fuse_down_nvfp4 &&
                                      n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
-                                     h.qtype == QType::F16 && is_dp4a_qtype(ly.w_down_qtype));
+                                     h.qtype == QType::F16 && is_dp4a_qtype(ly.w_down.qtype));
     bool will_fuse_down_beta1 = (!has_post_ffn_norm && !will_fuse_down_residual &&
                                   !will_fuse_down_nvfp4 && n > 1 &&
                                   (wd_tier == StorageTier::FP16 || wd_tier == StorageTier::FP8));
@@ -95,7 +95,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                           !will_fuse_down_nvfp4 &&
                                           !will_fuse_down_beta1 && n > 1 &&
                                           qscratch_.dequant != nullptr &&
-                                          dequant_gpu_supported(ly.w_down_qtype));
+                                          dequant_gpu_supported(ly.w_down.qtype));
     if (!will_fuse_down_residual && !will_fuse_down_beta1 &&
         !will_fuse_down_dequant_beta1 && !will_fuse_down_nvfp4 && !will_fuse_down_mxfp4 &&
         !using_fp32_accum) {
@@ -126,7 +126,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                           hwg && hwg->primary_tier == StorageTier::NVFP4 &&
                           hwu && hwu->primary_tier == StorageTier::NVFP4);
         bool fused_ffn_norm = (n == 1 && q8 != nullptr && qscratch_.d8_buf != nullptr &&
-                               h.qtype == QType::F16 && is_dp4a_qtype(ly.w_gate_qtype));
+                               h.qtype == QType::F16 && is_dp4a_qtype(ly.w_gate.qtype));
         if (mxfp4_ffn) {
             // MXFP4 gate+up: RMSNorm, optional Hadamard, then MXFP4 fused GEMV
             rmsnorm(h, ffn_norm_w, no, eps, stream, norm_w_off_);
@@ -186,7 +186,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             gemv_gate_up_fused(ly.w_gate.data, ly.w_up.data, q8, qscratch_.d8_buf,
                                 static_cast<half*>(go.data),
                                 static_cast<half*>(uo.data),
-                                ffn_rows, d, ly.w_gate_qtype, stream);
+                                ffn_rows, d, ly.w_gate.qtype, stream);
         } else {
             rmsnorm(h, ffn_norm_w, no, eps, stream, norm_w_off_);
 
@@ -243,7 +243,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
         auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
         bool fused_down_residual = (!has_post_ffn_norm &&
                                      n == 1 && q8 != nullptr && qscratch_.d8_buf != nullptr &&
-                                     so.qtype == QType::F16 && is_dp4a_qtype(ly.w_down_qtype));
+                                     so.qtype == QType::F16 && is_dp4a_qtype(ly.w_down.qtype));
         if (will_fuse_down_mxfp4) {
             int K_d = static_cast<int>(ly.w_down.shape[1]);
             int M_d = static_cast<int>(ly.w_down.shape[0]);
@@ -349,7 +349,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
             }
             // Use h.data as residual source (memcpy was skipped)
             const half* residual_ptr = static_cast<const half*>(h.data);
-            dispatch_gemv_residual(ly.w_down_qtype, ly.w_down.data, q8, qscratch_.d8_buf,
+            dispatch_gemv_residual(ly.w_down.qtype, ly.w_down.data, q8, qscratch_.d8_buf,
                                    static_cast<half*>(h.data), residual_ptr,
                                    M_d, K_d, stream);
         } else if (has_post_ffn_norm && using_fp32_accum && n == 1 &&
@@ -380,7 +380,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 cfg.d_model, eps, norm_w_off_);
         } else if (has_post_ffn_norm && using_fp32_accum && n == 1 &&
                    q8 != nullptr && qscratch_.d8_buf != nullptr &&
-                   is_dp4a_qtype(ly.w_down_qtype)) {
+                   is_dp4a_qtype(ly.w_down.qtype)) {
             // Post-norm FP32 accum decode: fused activation→Q8_1 + GEMV + fused post-norm.
             // Saves 3 kernel launches per layer vs the fallback path.
             int K_d = static_cast<int>(ly.w_down.shape[1]);
@@ -394,7 +394,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                                     static_cast<const half*>(uo.data),
                                     q8, qscratch_.d8_buf, K_d, stream);
             half* fo_ptr = static_cast<half*>(fo.data);
-            dispatch_dp4a_gemv(ly.w_down_qtype, ly.w_down.data, q8, qscratch_.d8_buf,
+            dispatch_dp4a_gemv(ly.w_down.qtype, ly.w_down.data, q8, qscratch_.d8_buf,
                                fo_ptr, M_d, K_d, stream);
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             rmsnorm_fp32_accum_to_fp16_kernel<<<n, 256, 0, stream>>>(
@@ -423,7 +423,7 @@ void GraphExecutor::run_ffn(int layer, cudaStream_t stream) {
                 // Fused: hidden = swiglu_out @ w_down^T + hidden (cuBLAS beta=1).
                 gemm_dispatch(so, ly.w_down, h, ctx.with_beta(1.0f));
             } else if ((will_fuse_down_beta1 || will_fuse_down_dequant_beta1) &&
-                       qscratch_.dequant != nullptr && dequant_gpu_supported(ly.w_down_qtype)) {
+                       qscratch_.dequant != nullptr && dequant_gpu_supported(ly.w_down.qtype)) {
                 // Dequant into scratch, then beta=1.0 GEMM directly into hidden (which holds residual)
                 gemm_dispatch(so, ly.w_down, h, ctx.with_beta(1.0f));
             } else {

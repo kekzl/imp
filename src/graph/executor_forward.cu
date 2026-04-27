@@ -245,7 +245,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     }
     Tensor h = view_tokens(hidden_, n);
     embedding_lookup(model_->token_embedding(), state.token_ids, n, h,
-                     model_->tok_emb_qtype_, stream);
+                     model_->tok_emb_.qtype, stream);
 
     // Gemma: scale embeddings by sqrt(d_model)
     if (cfg.embed_scale > 0.0f && h.qtype == QType::F16) {
@@ -519,7 +519,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     // For raw Q6_K/Q8_0 output projection with single token (n=1 or prefill last):
     // use fused RMSNorm→Q8_1 + dp4a GEMV with FP32 output. Saves ~2.45x VRAM
     // bandwidth vs cuBLAS FP16 path (reads quantized weights directly).
-    const auto out_qtype = model_->out_proj_qtype_;
+    const auto out_qtype = model_->out_proj_.qtype;
     const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 &&
         is_dp4a_qtype(out_qtype) && !RuntimeConfig::current().gemm.no_dp4a_lm;
 

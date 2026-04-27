@@ -500,7 +500,7 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
 
     // FP8 prefill auto-disable for sub-8-bit models
     if (config_.use_fp8_prefill) {
-        auto qtype = model_->layer(0).wq_qtype;
+        auto qtype = model_->layer(0).wq.qtype;
         bool sub_8bit = (qtype == QType::Q4_0 || qtype == QType::Q4_K ||
                          qtype == QType::Q5_0 || qtype == QType::Q5_K ||
                          qtype == QType::Q3_K || qtype == QType::Q2_K ||
@@ -1323,7 +1323,7 @@ void Engine::warmup() {
     // and attempt to use raw MXFP4 data as FP16 weights.
     bool has_mxfp4_weights = false;
     for (int i = 0; i < model_->config().n_layers && !has_mxfp4_weights; i++) {
-        if (model_->layer(i).wq_qtype == QType::MXFP4) has_mxfp4_weights = true;
+        if (model_->layer(i).wq.qtype == QType::MXFP4) has_mxfp4_weights = true;
     }
     if (has_mxfp4_weights) {
         IMP_LOG_INFO("Warmup skipped (MXFP4 model)");

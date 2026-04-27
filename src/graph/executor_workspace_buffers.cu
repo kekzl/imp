@@ -220,9 +220,9 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     size_t expert_raw = static_cast<size_t>(p.shape[1]) * rb;
                     max_expert_raw = std::max(max_expert_raw, expert_raw);
                 };
-                check(L.expert_up_packed, L.expert_up_qtype);
-                check(L.expert_down_packed, L.expert_down_qtype);
-                check(L.expert_gate_packed, L.expert_gate_qtype);
+                check(L.expert_up_packed, L.expert_up_packed.qtype);
+                check(L.expert_down_packed, L.expert_down_packed.qtype);
+                check(L.expert_gate_packed, L.expert_gate_packed.qtype);
             }
             if (max_expert_raw > 0) {
                 moe_.raw_staging_buf = vram_alloc(vram_alloc_, max_expert_raw, "moe_staging");

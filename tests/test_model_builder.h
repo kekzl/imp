@@ -375,7 +375,7 @@ struct Q8DenseTestModel {
         result.all_tensors.push_back(result.model->out_norm_);
 
         result.model->out_proj_ = make_random_weight(vocab_size, d_model, rng);
-        result.model->out_proj_qtype_ = QType::NONE;
+        result.model->out_proj_.qtype = QType::NONE;
         result.all_tensors.push_back(result.model->out_proj_);
 
         result.model->layers_.resize(n_layers);
@@ -387,10 +387,10 @@ struct Q8DenseTestModel {
             ly.wk = make_q8_0_weight(n_kv_heads * head_dim, d_model, rng);
             ly.wv = make_q8_0_weight(n_kv_heads * head_dim, d_model, rng);
             ly.wo = make_q8_0_weight(d_model, n_heads * head_dim, rng);
-            ly.wq_qtype = QType::Q8_0;
-            ly.wk_qtype = QType::Q8_0;
-            ly.wv_qtype = QType::Q8_0;
-            ly.wo_qtype = QType::Q8_0;
+            ly.wq.qtype = QType::Q8_0;
+            ly.wk.qtype = QType::Q8_0;
+            ly.wv.qtype = QType::Q8_0;
+            ly.wo.qtype = QType::Q8_0;
 
             // Norms stay FP16
             ly.attn_norm = make_norm_weight(d_model);
@@ -400,9 +400,9 @@ struct Q8DenseTestModel {
             ly.w_gate = make_q8_0_weight(d_ff, d_model, rng);
             ly.w_up = make_q8_0_weight(d_ff, d_model, rng);
             ly.w_down = make_q8_0_weight(d_model, d_ff, rng);
-            ly.w_gate_qtype = QType::Q8_0;
-            ly.w_up_qtype = QType::Q8_0;
-            ly.w_down_qtype = QType::Q8_0;
+            ly.w_gate.qtype = QType::Q8_0;
+            ly.w_up.qtype = QType::Q8_0;
+            ly.w_down.qtype = QType::Q8_0;
 
             result.all_tensors.push_back(ly.wq);
             result.all_tensors.push_back(ly.wk);

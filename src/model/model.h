@@ -44,9 +44,7 @@ public:
 
     ModelConfig config_;
     Tensor tok_emb_, out_norm_, out_proj_;
-    QType tok_emb_qtype_ = QType::NONE;
-    QType out_norm_qtype_ = QType::NONE;
-    QType out_proj_qtype_ = QType::NONE;
+    // (qtype mirrors removed in Stage G — read tok_emb_.qtype directly.)
     TransformerLayer::NvFP4PreQuantWeight nvfp4_out_proj_;  // prequant LM head scales
     TensorID out_proj_id = kInvalidTensorID;  // registry handle for LM head (Task 3.5)
     TensorID tok_emb_id  = kInvalidTensorID;  // registry handle for token embedding

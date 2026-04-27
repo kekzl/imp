@@ -237,7 +237,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                wo_tier == StorageTier::NVFP4);
     bool will_fuse_o_residual = (!has_post_attn_norm && !will_fuse_o_nvfp4 &&
                                   n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
-                                  h.qtype == QType::F16 && is_dp4a_qtype(ly.wo_qtype));
+                                  h.qtype == QType::F16 && is_dp4a_qtype(ly.wo.qtype));
     bool will_fuse_o_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 &&
                                n > 1 &&
                                (wo_tier == StorageTier::FP16 || wo_tier == StorageTier::FP8));
@@ -245,7 +245,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     bool will_fuse_o_dequant_beta1 = (!has_post_attn_norm && !will_fuse_o_residual &&
                                       !will_fuse_o_nvfp4 && !will_fuse_o_beta1 &&
                                       n > 1 && qscratch_.dequant != nullptr &&
-                                      dequant_gpu_supported(ly.wo_qtype));
+                                      dequant_gpu_supported(ly.wo.qtype));
     if (!will_fuse_o_residual && !will_fuse_o_beta1 && !will_fuse_o_dequant_beta1 &&
         !will_fuse_o_nvfp4 && !using_fp32_accum) {
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(),
@@ -282,8 +282,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // reads FP16 h instead of fp32_hidden_, losing precision through 128-expert routing.
         bool fused_qkv = (!has_attn_output_gate && n == 1 && q8 != nullptr && qscratch_.d8_buf != nullptr &&
                           no.qtype == QType::F16 &&
-                          ly.wq_qtype == ly.wk_qtype && ly.wk_qtype == ly.wv_qtype &&
-                          is_dp4a_qtype(ly.wq_qtype) &&
+                          ly.wq.qtype == ly.wk.qtype && ly.wk.qtype == ly.wv.qtype &&
+                          is_dp4a_qtype(ly.wq.qtype) &&
                           !(using_fp32_accum && cfg.arch == ModelArch::GEMMA4));
         if (mxfp4_qkv) {
             // MXFP4 fused QKV: RMSNorm, optional Hadamard, then MXFP4 GEMV
@@ -359,7 +359,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             int q_rows = static_cast<int>(ly.wq.shape[0]);
             int k_rows = static_cast<int>(ly.wk.shape[0]);
             int v_rows = static_cast<int>(ly.wv.shape[0]);
-            dispatch_gemv_qkv_fused(ly.wq_qtype,
+            dispatch_gemv_qkv_fused(ly.wq.qtype,
                                      ly.wq.data, ly.wk.data, ly.wv.data,
                                      q8, qscratch_.d8_buf,
                                      static_cast<half*>(qv.data),
@@ -1004,7 +1004,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         const half* residual_ptr = static_cast<const half*>(h.data);
         quantize_fp16_to_q8_1(attn_fp16, static_cast<block_q8_1*>(qscratch_.q8_1_buf),
                                qscratch_.d8_buf, K_o, stream);
-        dispatch_gemv_residual(ly.wo_qtype, ly.wo.data,
+        dispatch_gemv_residual(ly.wo.qtype, ly.wo.data,
                                static_cast<block_q8_1*>(qscratch_.q8_1_buf),
                                qscratch_.d8_buf, static_cast<half*>(h.data), residual_ptr,
                                M_o, K_o, stream);
@@ -1024,7 +1024,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // Safe: hidden is only READ (never written) between attn_norm and here.
         gemm_dispatch(ao, ly.wo, h, ctx.with_beta(1.0f));
     } else if ((will_fuse_o_beta1 || will_fuse_o_dequant_beta1) &&
-               qscratch_.dequant != nullptr && dequant_gpu_supported(ly.wo_qtype) &&
+               qscratch_.dequant != nullptr && dequant_gpu_supported(ly.wo.qtype) &&
                !per_layer_shapes) {  // Gemma 4: workspace stride mismatch with narrow ao
         // Dequant beta=1: dequant weights on-the-fly, then FP16 GEMM + residual
         gemm_dispatch(ao, ly.wo, h, ctx.with_beta(1.0f));
@@ -1062,7 +1062,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             debug_tensor_rows    ("ao_pre_wo-0",    view_tokens(ao, n), stream);
             // dump wo weight shape info
             fprintf(stderr, "[DEBUG_FWD] wo_shape: ndim=%d shape=[%ld,%ld] qtype=%d\n",
-                    ly.wo.ndim, (long)ly.wo.shape[0], (long)ly.wo.shape[1], (int)ly.wo_qtype);
+                    ly.wo.ndim, (long)ly.wo.shape[0], (long)ly.wo.shape[1], (int)ly.wo.qtype);
         }
         if (has_post_attn_norm && using_fp32_accum) {
             // Sandwich norm with FP32 accumulator (Gemma-3):

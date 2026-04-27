@@ -147,21 +147,21 @@ template <typename Fn>
 static void for_each_dense_weight(const Model& model, const ModelConfig& cfg, Fn&& fn) {
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model.layer(i);
-        fn(L.wq, L.wq_qtype);
-        fn(L.wk, L.wk_qtype);
-        fn(L.wv, L.wv_qtype);
-        fn(L.wo, L.wo_qtype);
+        fn(L.wq, L.wq.qtype);
+        fn(L.wk, L.wk.qtype);
+        fn(L.wv, L.wv.qtype);
+        fn(L.wo, L.wo.qtype);
     }
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model.layer(i);
-        fn(L.ssm_in, L.ssm_in_qtype);
-        fn(L.ssm_out, L.ssm_out_qtype);
-        fn(L.w_gate_shared, L.w_gate_shared_qtype);
-        fn(L.w_up_shared, L.w_up_shared_qtype);
-        fn(L.w_down_shared, L.w_down_shared_qtype);
-        fn(L.w_gate, L.w_gate_qtype);
-        fn(L.w_up, L.w_up_qtype);
-        fn(L.w_down, L.w_down_qtype);
+        fn(L.ssm_in, L.ssm_in.qtype);
+        fn(L.ssm_out, L.ssm_out.qtype);
+        fn(L.w_gate_shared, L.w_gate_shared.qtype);
+        fn(L.w_up_shared, L.w_up_shared.qtype);
+        fn(L.w_down_shared, L.w_down_shared.qtype);
+        fn(L.w_gate, L.w_gate.qtype);
+        fn(L.w_up, L.w_up.qtype);
+        fn(L.w_down, L.w_down.qtype);
     }
 }
 
@@ -346,28 +346,28 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         // before SSM weights exhaust the VRAM budget.
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
-            cache_weight(L.wq, L.wq_qtype);
-            cache_weight(L.wk, L.wk_qtype);
-            cache_weight(L.wv, L.wv_qtype);
-            cache_weight(L.wo, L.wo_qtype);
+            cache_weight(L.wq, L.wq.qtype);
+            cache_weight(L.wk, L.wk.qtype);
+            cache_weight(L.wv, L.wv.qtype);
+            cache_weight(L.wo, L.wo.qtype);
         }
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
-            cache_weight(L.ssm_in, L.ssm_in_qtype);
-            cache_weight(L.ssm_out, L.ssm_out_qtype);
-            cache_weight(L.w_gate_shared, L.w_gate_shared_qtype);
-            cache_weight(L.w_up_shared, L.w_up_shared_qtype);
-            cache_weight(L.w_down_shared, L.w_down_shared_qtype);
+            cache_weight(L.ssm_in, L.ssm_in.qtype);
+            cache_weight(L.ssm_out, L.ssm_out.qtype);
+            cache_weight(L.w_gate_shared, L.w_gate_shared.qtype);
+            cache_weight(L.w_up_shared, L.w_up_shared.qtype);
+            cache_weight(L.w_down_shared, L.w_down_shared.qtype);
             // When NVFP4 decode is active, skip dense FFN FP16 cache for eligible
             // weights.  Decode benefits more from NVFP4 (~47% BW reduction) than
             // prefill loses from on-the-fly dequant.  NVFP4 is also ~3.5x smaller
             // per tensor, so skipping FFN FP16 frees massive VRAM for full NVFP4.
-            if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_gate_qtype))
-                cache_weight(L.w_gate, L.w_gate_qtype);
-            if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_up_qtype))
-                cache_weight(L.w_up, L.w_up_qtype);
-            if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_down_qtype))
-                cache_weight(L.w_down, L.w_down_qtype);
+            if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_gate.qtype))
+                cache_weight(L.w_gate, L.w_gate.qtype);
+            if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_up.qtype))
+                cache_weight(L.w_up, L.w_up.qtype);
+            if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_down.qtype))
+                cache_weight(L.w_down, L.w_down.qtype);
         }
 
         // Create fused KV weights for strided batched prefill GEMM.
@@ -619,7 +619,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         };
 
         // LM head first: largest single weight (vocab × d_model), biggest bandwidth win.
-        collect_weight_nvfp4(model_->output_proj(), model_->out_proj_qtype_);
+        collect_weight_nvfp4(model_->output_proj(), model_->out_proj_.qtype);
 
         // Dense attention + FFN: every tensor benefits every decode step.
         for_each_dense_weight(*model_, cfg, collect_weight_nvfp4);
@@ -1076,11 +1076,11 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 };
                 for (int i = 0; i < cfg.n_layers && !has_mxfp4; i++) {
                     const auto& L = model_->layer(i);
-                    check_mxfp4(L.wq, L.wq_qtype);
-                    check_mxfp4(L.wk, L.wk_qtype);
-                    check_mxfp4(L.w_gate, L.w_gate_qtype);
-                    check_mxfp4(L.ssm_in, L.ssm_in_qtype);
-                    check_mxfp4(L.ssm_out, L.ssm_out_qtype);
+                    check_mxfp4(L.wq, L.wq.qtype);
+                    check_mxfp4(L.wk, L.wk.qtype);
+                    check_mxfp4(L.w_gate, L.w_gate.qtype);
+                    check_mxfp4(L.ssm_in, L.ssm_in.qtype);
+                    check_mxfp4(L.ssm_out, L.ssm_out.qtype);
                 }
 
                 // Allocate MXFP4 scratch if needed and not already allocated
@@ -1173,21 +1173,21 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             };
             for (int i = 0; i < cfg.n_layers; i++) {
                 const auto& L = model_->layer(i);
-                register_if_mxfp4(L.wq, L.wq_qtype, true);
-                register_if_mxfp4(L.wk, L.wk_qtype, true);
-                register_if_mxfp4(L.wv, L.wv_qtype, true);
-                register_if_mxfp4(L.wo, L.wo_qtype, true);
-                register_if_mxfp4(L.w_up, L.w_up_qtype, false);
-                register_if_mxfp4(L.w_gate, L.w_gate_qtype, false);
-                register_if_mxfp4(L.w_down, L.w_down_qtype, false);
+                register_if_mxfp4(L.wq, L.wq.qtype, true);
+                register_if_mxfp4(L.wk, L.wk.qtype, true);
+                register_if_mxfp4(L.wv, L.wv.qtype, true);
+                register_if_mxfp4(L.wo, L.wo.qtype, true);
+                register_if_mxfp4(L.w_up, L.w_up.qtype, false);
+                register_if_mxfp4(L.w_gate, L.w_gate.qtype, false);
+                register_if_mxfp4(L.w_down, L.w_down.qtype, false);
                 // GDN-specific weights (Qwen3.5)
-                register_if_mxfp4(L.ssm_in, L.ssm_in_qtype, true);
-                register_if_mxfp4(L.ssm_out, L.ssm_out_qtype, true);
-                register_if_mxfp4(L.gdn_gate, L.gdn_gate_qtype, true);
-                register_if_mxfp4(L.gdn_alpha, L.gdn_alpha_qtype, true);
-                register_if_mxfp4(L.gdn_beta, L.gdn_beta_qtype, true);
+                register_if_mxfp4(L.ssm_in, L.ssm_in.qtype, true);
+                register_if_mxfp4(L.ssm_out, L.ssm_out.qtype, true);
+                register_if_mxfp4(L.gdn_gate, L.gdn_gate.qtype, true);
+                register_if_mxfp4(L.gdn_alpha, L.gdn_alpha.qtype, true);
+                register_if_mxfp4(L.gdn_beta, L.gdn_beta.qtype, true);
             }
-            register_if_mxfp4(model_->output_proj(), model_->out_proj_qtype_);
+            register_if_mxfp4(model_->output_proj(), model_->out_proj_.qtype);
             if (mx_native > 0) {
                 IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                 wcache_.cutlass_mxfp4_bytes += mx_native_bytes;
@@ -1323,22 +1323,22 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     };
                     for (int i = 0; i < cfg.n_layers; i++) {
                         TransformerLayer& L = const_cast<Model*>(model_)->layer(i);
-                        replace_weight(L.wq, L.wq_qtype);
-                        replace_weight(L.wk, L.wk_qtype);
-                        replace_weight(L.wv, L.wv_qtype);
-                        replace_weight(L.wo, L.wo_qtype);
-                        replace_weight(L.w_up, L.w_up_qtype);
-                        replace_weight(L.w_gate, L.w_gate_qtype);
-                        replace_weight(L.w_down, L.w_down_qtype);
+                        replace_weight(L.wq, L.wq.qtype);
+                        replace_weight(L.wk, L.wk.qtype);
+                        replace_weight(L.wv, L.wv.qtype);
+                        replace_weight(L.wo, L.wo.qtype);
+                        replace_weight(L.w_up, L.w_up.qtype);
+                        replace_weight(L.w_gate, L.w_gate.qtype);
+                        replace_weight(L.w_down, L.w_down.qtype);
                         // GDN-specific weights (Qwen3.5)
-                        replace_weight(L.ssm_in, L.ssm_in_qtype);
-                        replace_weight(L.ssm_out, L.ssm_out_qtype);
-                        replace_weight(L.gdn_gate, L.gdn_gate_qtype);
-                        replace_weight(L.gdn_alpha, L.gdn_alpha_qtype);
-                        replace_weight(L.gdn_beta, L.gdn_beta_qtype);
+                        replace_weight(L.ssm_in, L.ssm_in.qtype);
+                        replace_weight(L.ssm_out, L.ssm_out.qtype);
+                        replace_weight(L.gdn_gate, L.gdn_gate.qtype);
+                        replace_weight(L.gdn_alpha, L.gdn_alpha.qtype);
+                        replace_weight(L.gdn_beta, L.gdn_beta.qtype);
                     }
                     replace_weight(const_cast<Model*>(model_)->out_proj_,
-                                   const_cast<Model*>(model_)->out_proj_qtype_);
+                                   const_cast<Model*>(model_)->out_proj_.qtype);
                     IMP_LOG_INFO("MXFP4 → FP16: replaced %d weight tensor pointers", (int)wcache_.fp16.size());
                 }
             }
@@ -1398,9 +1398,9 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
-            cache_moe_expert_nvfp4(L.expert_gate_packed, L.expert_gate_qtype);
-            cache_moe_expert_nvfp4(L.expert_up_packed,   L.expert_up_qtype);
-            cache_moe_expert_nvfp4(L.expert_down_packed,  L.expert_down_qtype);
+            cache_moe_expert_nvfp4(L.expert_gate_packed, L.expert_gate_packed.qtype);
+            cache_moe_expert_nvfp4(L.expert_up_packed,   L.expert_up_packed.qtype);
+            cache_moe_expert_nvfp4(L.expert_down_packed,  L.expert_down_packed.qtype);
         }
 
         if (nvfp4_moe_count > 0) {
@@ -1420,8 +1420,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         bool has_mxfp4 = false;
         for (int i = 0; i < cfg.n_layers && !has_mxfp4; i++) {
             const auto& L = model_->layer(i);
-            if (L.wq_qtype == QType::MXFP4 || L.w_gate_qtype == QType::MXFP4 ||
-                L.ssm_in_qtype == QType::MXFP4 || L.ssm_out_qtype == QType::MXFP4)
+            if (L.wq.qtype == QType::MXFP4 || L.w_gate.qtype == QType::MXFP4 ||
+                L.ssm_in.qtype == QType::MXFP4 || L.ssm_out.qtype == QType::MXFP4)
                 has_mxfp4 = true;
         }
         if (has_mxfp4) {
@@ -1459,8 +1459,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                         small_weights.push_back({w.data, w.shape[0], w.shape[1]});
                         fp16_total += static_cast<size_t>(w.shape[0]) * w.shape[1] * sizeof(half);
                     };
-                    collect(L.gdn_alpha, L.gdn_alpha_qtype);
-                    collect(L.gdn_beta, L.gdn_beta_qtype);
+                    collect(L.gdn_alpha, L.gdn_alpha.qtype);
+                    collect(L.gdn_beta, L.gdn_beta.qtype);
                 }
                 if (fp16_total > 0) {
                     void* d_fp16_bulk = nullptr;
@@ -1486,8 +1486,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                                     w = it->second; qt = QType::F16;
                                 }
                             };
-                            replace(L.gdn_alpha, L.gdn_alpha_qtype);
-                            replace(L.gdn_beta, L.gdn_beta_qtype);
+                            replace(L.gdn_alpha, L.gdn_alpha.qtype);
+                            replace(L.gdn_beta, L.gdn_beta.qtype);
                         }
                     }
                 }
@@ -1508,20 +1508,20 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             };
             for (int i = 0; i < cfg.n_layers; i++) {
                 const auto& L = model_->layer(i);
-                register_mx(L.wq, L.wq_qtype, true);
-                register_mx(L.wk, L.wk_qtype, true);
-                register_mx(L.wv, L.wv_qtype, true);
-                register_mx(L.wo, L.wo_qtype, true);
-                register_mx(L.w_up, L.w_up_qtype, false);
-                register_mx(L.w_gate, L.w_gate_qtype, false);
-                register_mx(L.w_down, L.w_down_qtype, false);
-                register_mx(L.ssm_in, L.ssm_in_qtype, true);
-                register_mx(L.ssm_out, L.ssm_out_qtype, true);
-                register_mx(L.gdn_gate, L.gdn_gate_qtype, true);
-                register_mx(L.gdn_alpha, L.gdn_alpha_qtype, true);
-                register_mx(L.gdn_beta, L.gdn_beta_qtype, true);
+                register_mx(L.wq, L.wq.qtype, true);
+                register_mx(L.wk, L.wk.qtype, true);
+                register_mx(L.wv, L.wv.qtype, true);
+                register_mx(L.wo, L.wo.qtype, true);
+                register_mx(L.w_up, L.w_up.qtype, false);
+                register_mx(L.w_gate, L.w_gate.qtype, false);
+                register_mx(L.w_down, L.w_down.qtype, false);
+                register_mx(L.ssm_in, L.ssm_in.qtype, true);
+                register_mx(L.ssm_out, L.ssm_out.qtype, true);
+                register_mx(L.gdn_gate, L.gdn_gate.qtype, true);
+                register_mx(L.gdn_alpha, L.gdn_alpha.qtype, true);
+                register_mx(L.gdn_beta, L.gdn_beta.qtype, true);
             }
-            register_mx(model_->output_proj(), model_->out_proj_qtype_, true);
+            register_mx(model_->output_proj(), model_->out_proj_.qtype, true);
             if (mx_count > 0) {
                 IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                 wcache_.use_mxfp4 = true;
