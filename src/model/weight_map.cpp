@@ -554,6 +554,29 @@ bool WeightMap::apply_weights(
                 else if (proj == "up_proj") { layer.w_up_shared = t; matched = true; }
                 else if (proj == "down_proj") { layer.w_down_shared = t; matched = true; }
             }
+            // Shared expert NVFP4 prequant scales (Qwen3.5/3.6 llm-compressor):
+            //   mlp.shared_expert.{proj}.{weight_scale,weight_scale_2,input_scale}
+            else if (parts.size() >= 7 && parts[4] == "shared_expert" &&
+                     (parts[6] == "weight_scale" || parts[6] == "weight_scale_2" ||
+                      parts[6] == "input_scale")) {
+                const std::string& proj = parts[5];
+                const std::string& kind = parts[6];
+                auto assign = [&](TransformerLayer::NvFP4PreQuantWeight& nw) {
+                    if (kind == "weight_scale")        nw.weight_scale = t;
+                    else if (kind == "weight_scale_2") nw.weight_scale_2 = t;
+                    else if (kind == "input_scale")    nw.input_scale = t;
+                };
+                if (proj == "gate_proj")      { assign(layer.nvfp4_w_gate_shared); matched = true; }
+                else if (proj == "up_proj")   { assign(layer.nvfp4_w_up_shared);   matched = true; }
+                else if (proj == "down_proj") { assign(layer.nvfp4_w_down_shared); matched = true; }
+            }
+            // Shared-expert sigmoid gate (Qwen3-Next/3.5/3.6):
+            //   mlp.shared_expert_gate.weight   ->   shared_expert_gate_inp
+            else if (parts.size() >= 6 && parts[4] == "shared_expert_gate" &&
+                     parts[5] == "weight") {
+                layer.shared_expert_gate_inp = t;
+                matched = true;
+            }
         }
 
         // -----------------------------------------------------------------
@@ -612,6 +635,47 @@ bool WeightMap::apply_weights(
             const std::string& proj = parts[4];
             if (proj == "q_norm") { layer.attn_q_norm = t; matched = true; }
             else if (proj == "k_norm") { layer.attn_k_norm = t; matched = true; }
+        }
+
+        // -----------------------------------------------------------------
+        // Gated DeltaNet (linear-attention) layers -- Qwen3.5/3.6 SafeTensors:
+        //   linear_attn.in_proj_qkv.weight   -> ssm_in   (fused Q,K,V)
+        //   linear_attn.in_proj_a.weight     -> gdn_alpha
+        //   linear_attn.in_proj_b.weight     -> gdn_beta
+        //   linear_attn.in_proj_z.weight     -> gdn_gate (output gate / z)
+        //   linear_attn.out_proj.weight      -> ssm_out
+        //   linear_attn.conv1d.weight        -> ssm_conv1d_w
+        //   linear_attn.conv1d.bias          -> ssm_conv1d_b   (if present)
+        //   linear_attn.norm.weight          -> ssm_norm_w
+        //   linear_attn.A_log                -> ssm_a
+        //   linear_attn.dt_bias              -> ssm_dt_b
+        // The Qwen3.6 GGUF layout splits the same weights across mamba.* +
+        // temporal_block.{gate_proj,alpha,beta}.weight; we route the
+        // SafeTensors variants to the same TransformerLayer slots so the
+        // existing GGUF forward path applies unchanged.
+        if (!matched && parts[3] == "linear_attn" && parts.size() >= 5) {
+            const std::string& proj = parts[4];
+            // 5-part forms: linear_attn.A_log / linear_attn.dt_bias
+            if (parts.size() == 5) {
+                if (proj == "A_log")   { layer.ssm_a    = t; matched = true; }
+                else if (proj == "dt_bias") { layer.ssm_dt_b = t; matched = true; }
+            }
+            // 6-part forms: linear_attn.<proj>.weight | conv1d.bias
+            else if (parts.size() >= 6) {
+                const std::string& kind = parts[5];
+                if (kind == "weight") {
+                    if (proj == "in_proj_qkv") { layer.ssm_in    = t; matched = true; }
+                    else if (proj == "in_proj_a") { layer.gdn_alpha = t; matched = true; }
+                    else if (proj == "in_proj_b") { layer.gdn_beta  = t; matched = true; }
+                    else if (proj == "in_proj_z") { layer.gdn_gate  = t; matched = true; }
+                    else if (proj == "out_proj")  { layer.ssm_out   = t; matched = true; }
+                    else if (proj == "conv1d")    { layer.ssm_conv1d_w = t; matched = true; }
+                    else if (proj == "norm")      { layer.ssm_norm_w   = t; matched = true; }
+                } else if (kind == "bias" && proj == "conv1d") {
+                    layer.ssm_conv1d_b = t;
+                    matched = true;
+                }
+            }
         }
 
         // -----------------------------------------------------------------
