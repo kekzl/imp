@@ -525,6 +525,32 @@ bool HFConfigLoader::load_special_tokens_map(const std::string& model_dir,
     return true;
 }
 
+// ---- load_tokenizer_flags ----
+
+bool HFConfigLoader::load_tokenizer_flags(const std::string& model_dir,
+                                           TokenizerFlags& out) {
+    std::string path = model_dir + "/tokenizer_config.json";
+    JValue root;
+    if (!parse_json_file(path, root)) return false;
+
+    auto read_bool = [&](const char* key, int& field) {
+        const JValue* v = jobj_find(root, key);
+        if (v && v->type == JType::NUMBER) {
+            field = (v->num_val != 0.0) ? 1 : 0;
+        }
+    };
+
+    read_bool("add_bos_token",    out.add_bos_token);
+    read_bool("add_eos_token",    out.add_eos_token);
+    read_bool("add_prefix_space", out.add_prefix_space);
+
+    IMP_LOG_INFO("tokenizer_config.json: add_bos=%s add_eos=%s add_prefix_space=%s",
+                 out.add_bos_token < 0    ? "unset" : (out.add_bos_token    ? "true" : "false"),
+                 out.add_eos_token < 0    ? "unset" : (out.add_eos_token    ? "true" : "false"),
+                 out.add_prefix_space < 0 ? "unset" : (out.add_prefix_space ? "true" : "false"));
+    return true;
+}
+
 // ---- load_gptq_config ----
 
 bool HFConfigLoader::load_gptq_config(const std::string& model_dir, GPTQConfig& cfg) {

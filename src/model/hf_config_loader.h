@@ -60,6 +60,22 @@ struct HFConfigLoader {
     static bool load_special_tokens_map(const std::string& model_dir,
                                         SpecialTokensMap& out);
 
+    // Tokenizer-side flags from tokenizer_config.json. The corresponding
+    // GGUF metadata is `tokenizer.ggml.add_bos_token` and
+    // `tokenizer.ggml.add_space_prefix` — `gguf_loader.cpp` already wires
+    // those. SafeTensors loader needs an equivalent path.
+    //
+    // Sentinel: -1 = field not present, 0 = false, 1 = true. Caller falls
+    // back to its own default (matching GGUF: gpt2-style tokenizers default
+    // add_bos=false, everything else true).
+    struct TokenizerFlags {
+        int add_bos_token    = -1;
+        int add_eos_token    = -1;
+        int add_prefix_space = -1;
+    };
+    static bool load_tokenizer_flags(const std::string& model_dir,
+                                     TokenizerFlags& out);
+
     // GPTQ quantization config from quantize_config.json
     struct GPTQConfig {
         int bits = 0;        // 4 or 8
