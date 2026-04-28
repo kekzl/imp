@@ -83,6 +83,25 @@ struct ModelConfig {
 // Used by nvfp4_moe_*_ptr borrowed pointers below.
 struct NvFP4MoEQuantResult;
 
+// Pre-quantized NVFP4 weights (from Model Optimizer / llm-compressor via
+// SafeTensors). Lives only on the Model::nvfp4_scratch_ load-time map —
+// once executor_pre_dequant.cu Phase 0 promotes the scale pointers onto
+// the corresponding main weight tensor's .scales / .tensor_scale fields,
+// the entry is dropped.
+//
+//   weight_scale     [N, K/group_size]  FP8 E4M3 micro-scales
+//   weight_scale_2   [1] or scalar      FP32 tensor-scale
+//   input_scale      [1]                FP32 activation scale (optional)
+//
+// `valid()` only requires weight_scale; weight_scale_2 is permitted to be
+// missing for some Modelopt variants.
+struct NvFP4PreQuantWeight {
+    Tensor weight_scale;
+    Tensor weight_scale_2;
+    Tensor input_scale;
+    bool valid() const { return weight_scale.data != nullptr; }
+};
+
 struct TransformerLayer {
     Tensor wq, wk, wv, wo, attn_norm;
     Tensor q_bias, k_bias, v_bias;    // Attention biases (Qwen2)
@@ -185,29 +204,6 @@ struct TransformerLayer {
     // expert's down-projection output BEFORE the routing weighted sum. Loaded
     // from `blk.X.ffn_down_exps.scale` (shape [n_expert]).
     Tensor expert_down_scale;
-
-    // Pre-quantized NVFP4 weights (from Model Optimizer via SafeTensors).
-    // weight_scale: FP8 E4M3 micro-scales per group_size elements
-    // weight_scale_2: FP32 tensor-scale (single value per tensor)
-    // input_scale: FP32 activation scale (optional, for FP8 activations)
-    struct NvFP4PreQuantWeight {
-        Tensor weight;          // [N, K/2] packed FP4 E2M1 nibbles
-        Tensor weight_scale;    // [N, K/group_size] FP8 E4M3 micro-scales
-        Tensor weight_scale_2;  // [1] or scalar FP32 tensor-scale
-        Tensor input_scale;     // [1] optional FP32 activation scale
-        bool valid() const { return weight.data != nullptr && weight_scale.data != nullptr; }
-    };
-    NvFP4PreQuantWeight nvfp4_q, nvfp4_k, nvfp4_v, nvfp4_o;
-    NvFP4PreQuantWeight nvfp4_gate, nvfp4_up, nvfp4_down;
-
-    // Shared-expert NVFP4 (Qwen3.5/3.6 MoE: per-layer always-active dense FFN
-    // alongside the routed experts). Loader populates these from
-    // mlp.shared_expert.{gate,up,down}_proj.{weight_packed,weight_scale,
-    //   weight_global_scale,input_global_scale}.
-    NvFP4PreQuantWeight nvfp4_w_gate_shared, nvfp4_w_up_shared, nvfp4_w_down_shared;
-
-    // Per-expert NVFP4 weights (MoE models with pre-quantized expert weights)
-    std::vector<NvFP4PreQuantWeight> expert_nvfp4_gate, expert_nvfp4_up, expert_nvfp4_down;
 
     // GPTQ quantized weights (temporary — dequantized to FP16 during upload)
     struct GPTQWeight {
