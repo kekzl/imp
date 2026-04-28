@@ -122,6 +122,7 @@ CliArgs parse_args(int argc, char** argv) {
             args.typical_p = static_cast<float>(std::atof(argv[++i]));
         } else if (std::strcmp(arg, "--repeat-penalty") == 0 && i + 1 < argc) {
             args.repetition_penalty = static_cast<float>(std::atof(argv[++i]));
+            args.repetition_penalty_set = true;
         } else if (std::strcmp(arg, "--frequency-penalty") == 0 && i + 1 < argc) {
             args.frequency_penalty = static_cast<float>(std::atof(argv[++i]));
         } else if (std::strcmp(arg, "--presence-penalty") == 0 && i + 1 < argc) {

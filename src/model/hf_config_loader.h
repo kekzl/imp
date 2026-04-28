@@ -15,10 +15,22 @@ struct HFConfigLoader {
     // Only overwrites cfg fields that are present in the JSON.
     static bool load_config(const std::string& model_dir, ModelConfig& cfg);
 
-    // Load generation_config.json — populates eos_token_ids.
-    // Returns true if file found and parsed.
+    // Sampling and stop-condition defaults shipped by the model author in
+    // generation_config.json. Sentinel values (<0 for floats, -1 for ints,
+    // empty vector for eos) mean "not present in JSON" — caller falls back
+    // to arch-family defaults or the hard-coded ImpGenerateParams baseline.
+    struct GenerationConfig {
+        float temperature        = -1.0f;
+        float top_p              = -1.0f;
+        int   top_k              = -1;
+        float repetition_penalty = -1.0f;
+        std::vector<int32_t> eos_token_ids;
+    };
+
+    // Load generation_config.json. Returns true if file found and parsed.
+    // Only fields present in the JSON are populated; the rest stay at sentinel.
     static bool load_generation_config(const std::string& model_dir,
-                                       std::vector<int32_t>& eos_token_ids);
+                                       GenerationConfig& cfg);
 
     // Load chat_template string from tokenizer_config.json.
     // Returns empty string if not found.

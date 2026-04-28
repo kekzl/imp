@@ -1,5 +1,6 @@
 #pragma once
 
+#include "model/hf_config_loader.h"
 #include "model/model_config.h"
 #include "model/tokenizer.h"
 #include <string>
@@ -16,6 +17,13 @@ public:
     ~Model();
 
     const ModelConfig& config() const { return config_; }
+
+    // Sampling/EOS defaults shipped by the model author in
+    // generation_config.json (SafeTensors only; empty for GGUF). Sentinel
+    // values (<0) mean the field was not present.
+    const HFConfigLoader::GenerationConfig& generation_config() const {
+        return generation_config_;
+    }
     const TransformerLayer& layer(int i) const { return layers_[i]; }
     TransformerLayer& layer(int i) { return layers_[i]; }
     const Tensor& token_embedding() const { return tok_emb_; }
@@ -44,6 +52,7 @@ public:
     size_t estimate_expert_bytes() const;
 
     ModelConfig config_;
+    HFConfigLoader::GenerationConfig generation_config_;
     Tensor tok_emb_, out_norm_, out_proj_;
     // (qtype mirrors removed in Stage G — read tok_emb_.qtype directly.)
     TensorID out_proj_id = kInvalidTensorID;  // registry handle for LM head (Task 3.5)

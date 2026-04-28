@@ -728,6 +728,19 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
         cfg.vocab_size = static_cast<int>(model->tok_emb_.shape[0]);
     }
 
+    // 10. generation_config.json — sampling/EOS defaults shipped by the model
+    // author. Loaded into model->generation_config_ for engine + CLI consumers.
+    // EOS IDs additionally pushed onto the tokenizer's eos list so the engine's
+    // existing stop-condition path picks them up without further plumbing.
+    if (!model_dir.empty()) {
+        HFConfigLoader::load_generation_config(model_dir, model->generation_config_);
+        if (model->tokenizer_) {
+            for (int32_t eid : model->generation_config_.eos_token_ids) {
+                model->tokenizer_->add_eos_id(eid);
+            }
+        }
+    }
+
     IMP_LOG_INFO("SafeTensors model loaded successfully from %s", path.c_str());
     return model;
 }
