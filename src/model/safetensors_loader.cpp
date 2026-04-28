@@ -672,58 +672,19 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
                      gptq_cfg.desc_act ? "true" : "false");
     }
 
-    // 6c. NVFP4 config: link weight tensors to NvFP4PreQuantWeight structs
+    // 6c. NVFP4 config detection. Scale tensors were already routed into
+    // model->nvfp4_scratch_ by weight_map.cpp during the layer-pattern pass;
+    // executor_pre_dequant.cu's Phase 0 promote() resolves each scratch key
+    // back to the main weight tensor and writes the device pointer onto its
+    // .scales / .tensor_scale sidecars. No load-side linking needed here.
     HFConfigLoader::NvFP4Config nvfp4_cfg;
     bool is_nvfp4 = HFConfigLoader::load_nvfp4_config(model_dir, nvfp4_cfg);
     if (is_nvfp4) {
         cfg.is_nvfp4_prequant = true;
         cfg.nvfp4_group_size = nvfp4_cfg.group_size;
         cfg.is_llm_compressor_nvfp4 = (nvfp4_cfg.format == HFConfigLoader::NvFP4Format::LLM_COMPRESSOR);
-        // Link the main weight tensors to nvfp4 structs (they share the same data pointer)
-        for (auto& layer : model->layers_) {
-            auto link = [](TransformerLayer::NvFP4PreQuantWeight& nw, const Tensor& w) {
-                if (nw.weight_scale.data != nullptr) nw.weight = w;
-            };
-            // Dense weights
-            link(layer.nvfp4_q, layer.wq);
-            link(layer.nvfp4_k, layer.wk);
-            link(layer.nvfp4_v, layer.wv);
-            link(layer.nvfp4_o, layer.wo);
-            // For Gemma-4, mlp.{gate,up,down}_proj weights land in w_{gate,up,down}_shared
-            // (weight_map.cpp routes them there). Fall back to shared when primary is null.
-            link(layer.nvfp4_gate, layer.w_gate.data ? layer.w_gate : layer.w_gate_shared);
-            link(layer.nvfp4_up,   layer.w_up.data   ? layer.w_up   : layer.w_up_shared);
-            link(layer.nvfp4_down, layer.w_down.data ? layer.w_down : layer.w_down_shared);
-            // Qwen3.5/3.6: per-layer shared dense MLP alongside routed experts.
-            // mlp.shared_expert.{gate,up,down}_proj.{weight,...} → w_*_shared
-            // and the matching scale variants → nvfp4_w_*_shared. Link them so
-            // executor_pre_dequant.cu's register_prequant() can register the
-            // shared MLP into wcache_.nvfp4 alongside attention/expert weights.
-            link(layer.nvfp4_w_gate_shared, layer.w_gate_shared);
-            link(layer.nvfp4_w_up_shared,   layer.w_up_shared);
-            link(layer.nvfp4_w_down_shared, layer.w_down_shared);
-            // Expert weights
-            for (size_t e = 0; e < layer.expert_nvfp4_gate.size(); e++) {
-                if (e < layer.expert_w_gate.size()) link(layer.expert_nvfp4_gate[e], layer.expert_w_gate[e]);
-                if (e < layer.expert_w_up.size())   link(layer.expert_nvfp4_up[e],   layer.expert_w_up[e]);
-                if (e < layer.expert_w_down.size()) link(layer.expert_nvfp4_down[e], layer.expert_w_down[e]);
-            }
-        }
-        int nvfp4_count = 0;
-        int nvfp4_expert_count = 0;
-        for (const auto& layer : model->layers_) {
-            for (const auto* nw : {&layer.nvfp4_q, &layer.nvfp4_k, &layer.nvfp4_v, &layer.nvfp4_o,
-                                   &layer.nvfp4_gate, &layer.nvfp4_up, &layer.nvfp4_down}) {
-                if (nw->valid()) nvfp4_count++;
-            }
-            for (const auto* vec : {&layer.expert_nvfp4_gate, &layer.expert_nvfp4_up, &layer.expert_nvfp4_down}) {
-                for (const auto& nw : *vec) {
-                    if (nw.valid()) nvfp4_expert_count++;
-                }
-            }
-        }
-        IMP_LOG_INFO("NVFP4 pre-quantized: %d dense + %d expert weight tensors (group_size=%d)",
-                     nvfp4_count, nvfp4_expert_count, nvfp4_cfg.group_size);
+        IMP_LOG_INFO("NVFP4 pre-quantized: %zu scratch entries (group_size=%d)",
+                     model->nvfp4_scratch_.size(), nvfp4_cfg.group_size);
     }
 
     // 7. Tie output projection if not found

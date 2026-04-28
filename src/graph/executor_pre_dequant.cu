@@ -209,78 +209,106 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
     // --- Phase 0: Promote NVFP4 pre-quantized weights to Tensor sidecars ---
     //
-    // Reads the (now-deprecated) NvFP4PreQuantWeight slots populated by the
-    // SafeTensors loader and writes the corresponding metadata directly onto
-    // the main weight tensor:
-    //   weight.qtype        = QType::NVFP4
-    //   weight.scales       = nw.weight_scale.data   (FP8 E4M3 micro-scales)
-    //   weight.tensor_scale = scalar from weight_scale_2 (with the
-    //                         llm-compressor reciprocal trick pre-applied
-    //                         so the runtime can always multiply)
+    // The SafeTensors loader + weight_map.cpp deposit each scale tensor into
+    // model_->nvfp4_scratch_, keyed by canonical slot name (e.g. "L5.wq",
+    // "L5.expert_w_gate.7", "out_proj"). Every entry's weight_scale /
+    // weight_scale_2 / input_scale tensors are uploaded to the GPU by
+    // weight_upload.cu before this phase runs.
     //
-    // After this loop runs, gemm_dispatch / gemv_nvfp4_kpar can read the
-    // metadata straight from the weight tensor — no map lookup, no per-call
-    // reconstruction. The legacy wcache_.nvfp4 map is gone.
+    // For each entry: resolve the key back to the corresponding main weight
+    // tensor (layer.wq, layer.expert_w_gate[e], etc.) and copy the device
+    // pointers + the FP32 tensor scalar (with the llm-compressor reciprocal
+    // trick pre-applied) onto its .qtype / .scales / .tensor_scale sidecar
+    // fields. After the loop runs, the runtime hot path reads NVFP4 metadata
+    // straight off the weight tensor — no cache lookup, no per-call
+    // reconstruction. The scratch map is then cleared.
     if (cfg.is_nvfp4_prequant) {
-        int prequant_count = 0;
-        auto promote = [&](const TransformerLayer::NvFP4PreQuantWeight& nw,
-                            Tensor& w) {
-            if (!nw.valid() || !w.data) return;
-            if (!w.on_device || !nw.weight_scale.on_device) {
-                IMP_LOG_DEBUG("NVFP4 prequant: skipping %p (data_dev=%d, scale_dev=%d)",
-                              w.data, w.on_device, nw.weight_scale.on_device);
-                return;
+        // model_ is held as const Model* in the executor; the prequant
+        // promote step is the one place we deliberately mutate it after
+        // load. const_cast is local and bounded to this block.
+        Model* mut_model = const_cast<Model*>(model_);
+
+        auto promote = [&](const NvFP4PreQuantWeight& sc, Tensor& w,
+                            const char* key) {
+            if (!sc.valid() || !w.data) return false;
+            if (!w.on_device || !sc.weight_scale.on_device) {
+                IMP_LOG_DEBUG("NVFP4 prequant: skipping %s (data_dev=%d, scale_dev=%d)",
+                              key, w.on_device, sc.weight_scale.on_device);
+                return false;
             }
             float h_scale = 1.0f;
-            if (nw.weight_scale_2.data) {
-                if (nw.weight_scale_2.on_device) {
-                    cudaMemcpy(&h_scale, nw.weight_scale_2.data, sizeof(float), cudaMemcpyDeviceToHost);
+            if (sc.weight_scale_2.data) {
+                if (sc.weight_scale_2.on_device) {
+                    cudaMemcpy(&h_scale, sc.weight_scale_2.data, sizeof(float), cudaMemcpyDeviceToHost);
                 } else {
-                    memcpy(&h_scale, nw.weight_scale_2.data, sizeof(float));
+                    memcpy(&h_scale, sc.weight_scale_2.data, sizeof(float));
                 }
             }
             // Modelopt:        val = fp4 * micro_scale * tensor_scale  (multiply)
             // llm-compressor:  val = fp4 * micro_scale / tensor_scale  (divide → store 1/x)
             w.qtype        = QType::NVFP4;
-            w.scales       = nw.weight_scale.data;
+            w.scales       = sc.weight_scale.data;
             w.tensor_scale = cfg.is_llm_compressor_nvfp4 ? (1.0f / h_scale) : h_scale;
-            prequant_count++;
+            return true;
         };
 
-        // model_ is held as const Model* in the executor; the prequant
-        // promote step is the one place we deliberately mutate it after
-        // load (writing qtype/scales/tensor_scale onto already-uploaded
-        // weight tensors). const_cast is local and bounded to this loop.
-        Model* mut_model = const_cast<Model*>(model_);
-        for (int i = 0; i < cfg.n_layers; i++) {
-            auto& L = mut_model->layers_[i];
-            // Dense weights
-            promote(L.nvfp4_q, L.wq);
-            promote(L.nvfp4_k, L.wk);
-            promote(L.nvfp4_v, L.wv);
-            promote(L.nvfp4_o, L.wo);
-            // For Gemma-4, mlp.{gate,up,down}_proj weights are stored in w_{gate,up,down}_shared
-            // (not w_{gate,up,down}) because weight_map.cpp routes them there. Fall back to
-            // shared when primary is null.
-            promote(L.nvfp4_gate, L.w_gate.data ? L.w_gate : L.w_gate_shared);
-            promote(L.nvfp4_up,   L.w_up.data   ? L.w_up   : L.w_up_shared);
-            promote(L.nvfp4_down, L.w_down.data ? L.w_down : L.w_down_shared);
-            // Shared-expert dense MLP NVFP4 (Qwen3.5/3.6: per-layer always-
-            // active dense MLP alongside the routed experts). promote() is a
-            // no-op when nw.valid()=false, so this is safe for archs that
-            // don't populate nvfp4_w_*_shared (Gemma-4 etc.).
-            promote(L.nvfp4_w_gate_shared, L.w_gate_shared);
-            promote(L.nvfp4_w_up_shared,   L.w_up_shared);
-            promote(L.nvfp4_w_down_shared, L.w_down_shared);
-            // Per-expert weights
-            for (size_t e = 0; e < L.expert_nvfp4_gate.size(); e++) {
-                if (e < L.expert_w_gate.size()) promote(L.expert_nvfp4_gate[e], L.expert_w_gate[e]);
-                if (e < L.expert_w_up.size())   promote(L.expert_nvfp4_up[e],   L.expert_w_up[e]);
-                if (e < L.expert_w_down.size()) promote(L.expert_nvfp4_down[e], L.expert_w_down[e]);
+        // Resolve "L{idx}.{slot}" / "out_proj" / "L{idx}.expert_w_*.{e}"
+        // back to the corresponding main weight tensor. Returns nullptr for
+        // unknown / out-of-range keys.
+        auto resolve = [&](const std::string& key) -> Tensor* {
+            if (key == "out_proj") return &mut_model->out_proj_;
+            if (key.size() < 3 || key[0] != 'L') return nullptr;
+            size_t dot = key.find('.', 1);
+            if (dot == std::string::npos) return nullptr;
+            int idx = std::atoi(key.substr(1, dot - 1).c_str());
+            if (idx < 0 || idx >= cfg.n_layers) return nullptr;
+            auto& L = mut_model->layers_[idx];
+            std::string slot = key.substr(dot + 1);
+
+            // Per-expert: "expert_w_{kind}.{e}"
+            if (slot.rfind("expert_w_", 0) == 0) {
+                size_t dot2 = slot.find('.');
+                if (dot2 == std::string::npos) return nullptr;
+                std::string kind = slot.substr(0, dot2);
+                int e = std::atoi(slot.substr(dot2 + 1).c_str());
+                std::vector<Tensor>* vec = nullptr;
+                if      (kind == "expert_w_gate") vec = &L.expert_w_gate;
+                else if (kind == "expert_w_up")   vec = &L.expert_w_up;
+                else if (kind == "expert_w_down") vec = &L.expert_w_down;
+                if (!vec || e < 0 || e >= static_cast<int>(vec->size())) return nullptr;
+                return &(*vec)[e];
             }
+
+            // Per-layer dense / shared.
+            if (slot == "wq") return &L.wq;
+            if (slot == "wk") return &L.wk;
+            if (slot == "wv") return &L.wv;
+            if (slot == "wo") return &L.wo;
+            // Gemma-4: mlp.{gate,up,down}_proj weights land in w_*_shared
+            // (weight_map.cpp routes them there). Fall back to shared when
+            // primary is null.
+            if (slot == "w_gate") return L.w_gate.data ? &L.w_gate : &L.w_gate_shared;
+            if (slot == "w_up")   return L.w_up.data   ? &L.w_up   : &L.w_up_shared;
+            if (slot == "w_down") return L.w_down.data ? &L.w_down : &L.w_down_shared;
+            if (slot == "w_gate_shared") return &L.w_gate_shared;
+            if (slot == "w_up_shared")   return &L.w_up_shared;
+            if (slot == "w_down_shared") return &L.w_down_shared;
+            return nullptr;
+        };
+
+        int prequant_count = 0;
+        for (auto& [key, sc] : mut_model->nvfp4_scratch_) {
+            Tensor* w = resolve(key);
+            if (!w) {
+                IMP_LOG_WARN("NVFP4 prequant: unresolved scratch key '%s'", key.c_str());
+                continue;
+            }
+            if (promote(sc, *w, key.c_str())) prequant_count++;
         }
-        // LM head (output projection)
-        promote(mut_model->nvfp4_out_proj_, mut_model->out_proj_);
+        // Drop the scratch — its data pointers (weight_scale, weight_scale_2,
+        // input_scale) are now device pointers borrowed by the main tensors,
+        // and the host-side metadata isn't needed anymore.
+        mut_model->nvfp4_scratch_.clear();
 
         if (prequant_count > 0) {
             IMP_LOG_INFO("NVFP4 pre-quantized: promoted %d weights to Tensor sidecars",
