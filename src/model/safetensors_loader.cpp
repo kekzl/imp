@@ -723,6 +723,29 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
         }
     }
 
+    // 9b. tokenizer_config.json — tokenizer-side flags (add_bos_token,
+    // add_prefix_space). Mirrors gguf_loader.cpp's read of
+    // tokenizer.ggml.add_bos_token / add_space_prefix. Without this the
+    // SafeTensors path used Tokenizer's hardcoded default `add_bos_=true`
+    // — wrong for any model that ships add_bos_token=false in its config
+    // (e.g. Qwen3-Coder-30B-A3B-FP4 which auto-prepends <|endoftext|>
+    // unwantedly otherwise).
+    if (!model_dir.empty() && model->tokenizer_) {
+        HFConfigLoader::TokenizerFlags tflags;
+        if (HFConfigLoader::load_tokenizer_flags(model_dir, tflags)) {
+            if (tflags.add_bos_token >= 0) {
+                model->tokenizer_->set_add_bos(tflags.add_bos_token != 0);
+            } else if (model->tokenizer_->type() == "gpt2") {
+                // Match GGUF default: BPE tokenizers without an explicit
+                // flag don't add BOS.
+                model->tokenizer_->set_add_bos(false);
+            }
+            if (tflags.add_prefix_space >= 0) {
+                model->tokenizer_->set_add_space_prefix(tflags.add_prefix_space != 0);
+            }
+        }
+    }
+
     // Re-infer vocab_size from token embedding if needed
     if (cfg.vocab_size == 0 && model->tok_emb_.data != nullptr) {
         cfg.vocab_size = static_cast<int>(model->tok_emb_.shape[0]);
