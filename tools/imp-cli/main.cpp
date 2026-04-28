@@ -73,8 +73,14 @@ int main(int argc, char** argv) {
 
     ImpConfig config = imp_config_default();
 
-    // Get model-family sampling defaults
+    // Sampling defaults: CLI flag > generation_config.json (SafeTensors only) >
+    // arch-family preset. Author-shipped values from generation_config.json are
+    // signalled by sentinel >= 0; sentinel <0 falls through to the family preset.
     imp::SamplingDefaults sampling = imp::get_sampling_defaults(model->model->config().arch);
+    const auto& gen = model->model->generation_config();
+    if (gen.temperature        >= 0.0f) sampling.temperature = gen.temperature;
+    if (gen.top_p              >= 0.0f) sampling.top_p       = gen.top_p;
+    if (gen.top_k              >= 0)    sampling.top_k       = gen.top_k;
 
     // CLI flags override auto-detection (only when explicitly set)
     config.device_id = args.device;
@@ -150,7 +156,10 @@ int main(int argc, char** argv) {
     params.seed = args.seed;
     params.min_p = args.min_p;
     params.typical_p = args.typical_p;
-    params.repetition_penalty = args.repetition_penalty;
+    params.repetition_penalty = args.repetition_penalty_set
+        ? args.repetition_penalty
+        : (gen.repetition_penalty >= 0.0f ? gen.repetition_penalty
+                                          : args.repetition_penalty);
     params.frequency_penalty = args.frequency_penalty;
     params.presence_penalty = args.presence_penalty;
     params.repeat_last_n = args.repeat_last_n;

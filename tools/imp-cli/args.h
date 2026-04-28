@@ -25,6 +25,7 @@ struct CliArgs {
     bool temperature_set = false;
     bool top_p_set = false;
     bool top_k_set = false;
+    bool repetition_penalty_set = false;
     int seed = -1;
     float min_p = 0.0f;
     float typical_p = 1.0f;        // Locally typical sampling (1.0 = disabled)
