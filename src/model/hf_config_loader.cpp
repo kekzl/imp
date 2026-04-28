@@ -340,30 +340,43 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
 // ---- load_generation_config ----
 
 bool HFConfigLoader::load_generation_config(const std::string& model_dir,
-                                             std::vector<int32_t>& eos_token_ids) {
+                                             GenerationConfig& cfg) {
     std::string path = model_dir + "/generation_config.json";
     JValue root;
     if (!parse_json_file(path, root)) return false;
 
-    const JValue* eos = jobj_find(root, "eos_token_id");
-    if (!eos) return false;
-
-    if (eos->type == JType::NUMBER) {
-        // Single EOS token ID
-        eos_token_ids.push_back(static_cast<int32_t>(eos->num_val));
-    } else if (eos->type == JType::ARRAY) {
-        // Array of EOS token IDs
-        for (const auto& v : eos->arr) {
-            if (v.type == JType::NUMBER) {
-                eos_token_ids.push_back(static_cast<int32_t>(v.num_val));
+    // EOS IDs (single number or array)
+    if (const JValue* eos = jobj_find(root, "eos_token_id")) {
+        if (eos->type == JType::NUMBER) {
+            cfg.eos_token_ids.push_back(static_cast<int32_t>(eos->num_val));
+        } else if (eos->type == JType::ARRAY) {
+            for (const auto& v : eos->arr) {
+                if (v.type == JType::NUMBER) {
+                    cfg.eos_token_ids.push_back(static_cast<int32_t>(v.num_val));
+                }
             }
         }
-    } else {
-        return false;
     }
 
-    IMP_LOG_INFO("loaded %zu EOS token IDs from generation_config.json",
-                 eos_token_ids.size());
+    // Sampling defaults. Each field is only overwritten if the JSON has it;
+    // otherwise the struct's sentinel survives.
+    jobj_get_float(root, "temperature",        cfg.temperature);
+    jobj_get_float(root, "top_p",              cfg.top_p);
+    jobj_get_int  (root, "top_k",              cfg.top_k);
+    jobj_get_float(root, "repetition_penalty", cfg.repetition_penalty);
+
+    // do_sample=false → force greedy. Authors set this when they want
+    // deterministic output regardless of temperature.
+    if (const JValue* ds = jobj_find(root, "do_sample")) {
+        if (ds->type == JType::NUMBER && ds->num_val == 0.0) {
+            cfg.temperature = 0.0f;
+        }
+    }
+
+    IMP_LOG_INFO("generation_config.json: eos=%zu temp=%.3g top_p=%.3g top_k=%d "
+                 "rep_penalty=%.3g",
+                 cfg.eos_token_ids.size(),
+                 cfg.temperature, cfg.top_p, cfg.top_k, cfg.repetition_penalty);
     return true;
 }
 
