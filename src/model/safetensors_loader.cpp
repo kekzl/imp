@@ -748,6 +748,10 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
             if (tflags.add_prefix_space >= 0) {
                 model->tokenizer_->set_add_space_prefix(tflags.add_prefix_space != 0);
             }
+            if (tflags.use_default_system_prompt >= 0) {
+                model->tokenizer_->set_use_default_system_prompt(
+                    tflags.use_default_system_prompt != 0);
+            }
         }
     }
 

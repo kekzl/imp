@@ -44,6 +44,15 @@ public:
     void set_chat_template_str(const std::string& tpl) { chat_template_str_ = tpl; }
     const std::string& chat_template_str() const { return chat_template_str_; }
 
+    // Author-shipped flag from tokenizer_config.json::use_default_system_prompt.
+    // When false, the chat-template apply path must inject an empty system
+    // message so the template's "no-system → default_system_message" branch
+    // doesn't fire (e.g. Mistral-Small-3.2 ships this flag false but its
+    // chat_template.jinja line 158 still injects a 600-token default unless
+    // an explicit system message is present).
+    void set_use_default_system_prompt(bool v) { use_default_system_prompt_ = v; }
+    bool use_default_system_prompt() const { return use_default_system_prompt_; }
+
     // Encode text to token IDs
     // no_prefix=true skips SPM space prefix (for chat template pieces after special tokens)
     std::vector<int32_t> encode(const std::string& text, bool no_prefix = false) const;
@@ -128,6 +137,7 @@ private:
     std::string pre_tokenizer_;     // Pre-tokenizer type from GGUF tokenizer.ggml.pre
     bool add_bos_ = true;
     bool add_space_prefix_ = true;  // SentencePiece ▁ prefix (false for Gemma)
+    bool use_default_system_prompt_ = true;  // false → skip template's hardcoded default system
     std::string chat_template_str_;  // Raw Jinja2 template from GGUF
 
     // GPT2 BPE merge ranks: "token1 token2" -> rank (lower = higher priority)
