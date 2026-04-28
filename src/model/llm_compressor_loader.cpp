@@ -102,6 +102,15 @@ NameTranslation translate_name(const std::string& in, TranslationCounters& count
         return {NameTranslation::SKIP, ""};
     }
 
+    // MTP head (Qwen3.6 multi-token-predictor — speculative-decoding helper).
+    // Phase 1 skips entirely; if/when we implement spec decode against the
+    // bundled MTP, we'll route these through a separate translate path.
+    if (starts_with(out, "mtp.") || starts_with(out, "model.mtp.")) {
+        counters.vision_skipped++;  // reuse counter; logged as "skipped tensors"
+        return {NameTranslation::SKIP, ""};
+    }
+
+
     // Step 2: count Gemma-4 extras (still emitted — weight_map routes them to
     // layer.{ffn_gate_inp_scale, expert_down_scale, layer_out_scale}, which the
     // forward path applies to make the model coherent). Phase 1 skipped these
