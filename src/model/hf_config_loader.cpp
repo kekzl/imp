@@ -540,14 +540,18 @@ bool HFConfigLoader::load_tokenizer_flags(const std::string& model_dir,
         }
     };
 
-    read_bool("add_bos_token",    out.add_bos_token);
-    read_bool("add_eos_token",    out.add_eos_token);
-    read_bool("add_prefix_space", out.add_prefix_space);
+    read_bool("add_bos_token",             out.add_bos_token);
+    read_bool("add_eos_token",             out.add_eos_token);
+    read_bool("add_prefix_space",          out.add_prefix_space);
+    read_bool("use_default_system_prompt", out.use_default_system_prompt);
 
-    IMP_LOG_INFO("tokenizer_config.json: add_bos=%s add_eos=%s add_prefix_space=%s",
+    IMP_LOG_INFO("tokenizer_config.json: add_bos=%s add_eos=%s add_prefix_space=%s "
+                 "use_default_system_prompt=%s",
                  out.add_bos_token < 0    ? "unset" : (out.add_bos_token    ? "true" : "false"),
                  out.add_eos_token < 0    ? "unset" : (out.add_eos_token    ? "true" : "false"),
-                 out.add_prefix_space < 0 ? "unset" : (out.add_prefix_space ? "true" : "false"));
+                 out.add_prefix_space < 0 ? "unset" : (out.add_prefix_space ? "true" : "false"),
+                 out.use_default_system_prompt < 0 ? "unset"
+                     : (out.use_default_system_prompt ? "true" : "false"));
     return true;
 }
 

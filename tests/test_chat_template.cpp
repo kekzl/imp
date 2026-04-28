@@ -340,6 +340,62 @@ TEST(ChatTemplateApplyTest, ChatMLBasicStructure) {
     EXPECT_GT(last_im_start, 0);
 }
 
+// Author-driven flag: when tokenizer ships use_default_system_prompt=false,
+// apply() must inject an empty system message before the user message so that
+// any chat template (Jinja or hardcoded) which has a "no system → default
+// system" branch instead sees an explicit system slot. Mistral-Small-3.2's
+// chat_template.jinja line 158 otherwise injects a 600-token default that
+// triggers the model's long-context regression.
+TEST(ChatTemplateApplyTest, UseDefaultSystemPromptFalseInjectsSystem) {
+    Tokenizer tok = make_chat_tokenizer();
+    tok.set_use_default_system_prompt(false);
+
+    ChatTemplate tpl;
+    tpl.init(ChatTemplateFamily::CHATML, tok);
+
+    std::vector<ChatMessage> msgs = {{"user", "Hi"}};
+    auto ids = tpl.apply(tok, msgs);
+
+    ASSERT_FALSE(ids.empty());
+    // Three <|im_start|> markers: system(empty) + user + assistant prefix.
+    int im_start_count = std::count(ids.begin(), ids.end(), IM_START);
+    EXPECT_EQ(im_start_count, 3);
+}
+
+TEST(ChatTemplateApplyTest, UseDefaultSystemPromptTrueDoesNotInject) {
+    Tokenizer tok = make_chat_tokenizer();
+    // Default — ensure the prior test didn't leak state.
+    EXPECT_TRUE(tok.use_default_system_prompt());
+
+    ChatTemplate tpl;
+    tpl.init(ChatTemplateFamily::CHATML, tok);
+
+    std::vector<ChatMessage> msgs = {{"user", "Hi"}};
+    auto ids = tpl.apply(tok, msgs);
+
+    // Two <|im_start|> markers: user + assistant prefix only.
+    int im_start_count = std::count(ids.begin(), ids.end(), IM_START);
+    EXPECT_EQ(im_start_count, 2);
+}
+
+// If caller already supplies a system message, the suppression helper must
+// be a no-op — never prepend a second empty system slot.
+TEST(ChatTemplateApplyTest, UseDefaultSystemPromptFalseRespectsExplicitSystem) {
+    Tokenizer tok = make_chat_tokenizer();
+    tok.set_use_default_system_prompt(false);
+
+    ChatTemplate tpl;
+    tpl.init(ChatTemplateFamily::CHATML, tok);
+
+    std::vector<ChatMessage> msgs = {{"system", "Be brief."}, {"user", "Hi"}};
+    auto ids = tpl.apply(tok, msgs);
+
+    // Three <|im_start|> markers: caller's system + user + assistant prefix.
+    // Crucially still 3 — no additional empty system was injected.
+    int im_start_count = std::count(ids.begin(), ids.end(), IM_START);
+    EXPECT_EQ(im_start_count, 3);
+}
+
 TEST(ChatTemplateApplyTest, ChatMLNoBOSWhenDisabled) {
     Tokenizer tok = make_chat_tokenizer();
     tok.set_add_bos(false);

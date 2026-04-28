@@ -235,6 +235,20 @@ TEST_F(TokenizerFlagsTest, MistralBosTrueEosFalse) {
     EXPECT_LT(flags.add_prefix_space, 0);  // null → unset
 }
 
+// Mistral-3.2-style: author opts out of the chat_template.jinja's hardcoded
+// default system prompt. Flag must propagate so apply() can suppress it.
+TEST_F(TokenizerFlagsTest, UseDefaultSystemPromptFalse) {
+    write_config(R"({
+        "add_bos_token": true,
+        "use_default_system_prompt": false
+    })");
+
+    HFConfigLoader::TokenizerFlags flags;
+    ASSERT_TRUE(HFConfigLoader::load_tokenizer_flags(tmp_dir_.string(), flags));
+
+    EXPECT_EQ(flags.use_default_system_prompt, 0);
+}
+
 // Gemma-4-style: tokenizer_config.json doesn't declare any of these flags;
 // metadata lives in tokenizer.json instead. All fields stay at sentinel,
 // caller falls back to its tokenizer-type-driven default.
