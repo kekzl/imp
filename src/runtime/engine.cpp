@@ -1173,7 +1173,18 @@ bool Engine::init_features() {
     // a continuation, causing output degeneration.  llama.cpp blocks all
     // control tokens via llama_token_is_control(); we scan the vocabulary for
     // tokens matching known special-token patterns.
-    {
+    // Diagnostic: IMP_NO_BAN=1 disables the ban list entirely. Used to bisect
+    // whether Mistral-Small-3.2-NVFP4's long-form repetition loop is caused
+    // by an over-aggressive ban (model wants to emit an end-of-turn marker
+    // but it's blocked) vs. NVFP4 weight-quality issue.
+    bool skip_ban = false;
+    if (const char* env = std::getenv("IMP_NO_BAN")) {
+        skip_ban = (env[0] == '1');
+    }
+    if (skip_ban) {
+        banned_token_ids_.clear();
+        IMP_LOG_WARN("IMP_NO_BAN=1: skipping banned-token list (debug)");
+    } else {
         banned_token_ids_.clear();
         auto add_if_valid = [this](int32_t id) {
             if (id >= 0) banned_token_ids_.push_back(id);

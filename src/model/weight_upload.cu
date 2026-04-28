@@ -1681,6 +1681,15 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream,
     // canonical slot name; replaced the per-layer NvFP4PreQuantWeight slots.
     if (config_.is_nvfp4_prequant) {
         int scale_count = 0;
+        // Diagnostic: IMP_AUDIT_NVFP4_SCALES=1 dumps per-slot stats for
+        // weight_scale_2 (tensor-level FP32 scalar) BEFORE upload, so we can
+        // bisect Mistral-3.2-NVFP4 long-form bugs by comparing scale ranges
+        // against a known-good model (e.g. Gemma-4-NVFP4).
+        const bool audit = std::getenv("IMP_AUDIT_NVFP4_SCALES") != nullptr;
+        float ws2_min = 1e30f, ws2_max = -1e30f, ws2_sum = 0.0f;
+        int ws2_count = 0, ws2_zero = 0;
+        std::vector<std::pair<std::string, float>> ws2_samples;
+        if (audit) ws2_samples.reserve(8);
         auto upload_scale = [&](Tensor& t) {
             if (!t.data || t.on_device || t.numel() == 0) return;
             size_t bytes = t.nbytes();
@@ -1692,10 +1701,35 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream,
             t.on_device = true;
             scale_count++;
         };
-        for (auto& [_, sc] : nvfp4_scratch_) {
+        for (auto& [name, sc] : nvfp4_scratch_) {
+            // Audit weight_scale_2 BEFORE upload (it's still a host pointer).
+            if (audit && sc.weight_scale_2.data && !sc.weight_scale_2.on_device) {
+                size_t n = sc.weight_scale_2.numel();
+                const float* p = static_cast<const float*>(sc.weight_scale_2.data);
+                for (size_t i = 0; i < n; ++i) {
+                    float v = p[i];
+                    if (v == 0.0f) ws2_zero++;
+                    if (v < ws2_min) ws2_min = v;
+                    if (v > ws2_max) ws2_max = v;
+                    ws2_sum += v;
+                    ws2_count++;
+                }
+                if (ws2_samples.size() < 8) {
+                    ws2_samples.emplace_back(name, p[0]);
+                }
+            }
             upload_scale(sc.weight_scale);
             upload_scale(sc.weight_scale_2);
             upload_scale(sc.input_scale);
+        }
+        if (audit && ws2_count > 0) {
+            IMP_LOG_INFO("NVFP4 audit: weight_scale_2 stats — count=%d zeros=%d "
+                         "min=%.6g max=%.6g mean=%.6g",
+                         ws2_count, ws2_zero, ws2_min, ws2_max,
+                         ws2_sum / ws2_count);
+            for (auto& [n, v] : ws2_samples) {
+                IMP_LOG_INFO("  sample: %s = %.6g", n.c_str(), v);
+            }
         }
         if (scale_count > 0)
             IMP_LOG_INFO("NVFP4 prequant: uploaded %d scale tensors to GPU", scale_count);
