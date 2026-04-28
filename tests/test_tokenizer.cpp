@@ -533,5 +533,54 @@ TEST(TokenizerGemma4Test, DecodeByteFallbackFormsValidUTF8) {
     EXPECT_EQ(decoded, " Linus");
 }
 
+// mark_as_control: defensive overlay used by the SafeTensors loader to patch
+// missing CONTROL flags from special_tokens_map.json's authoritative list.
+TEST(TokenizerControlTest, MarkAsControlAllocatesAndSets) {
+    Tokenizer tok = make_spm_tokenizer();
+    // Fixture has no token_types yet → has_token_types() is false.
+    EXPECT_FALSE(tok.has_token_types());
+
+    int32_t id_unk = 0;  // <unk> in the fixture
+    EXPECT_FALSE(tok.is_control_token(id_unk));  // empty types → false
+
+    tok.mark_as_control(id_unk);
+    EXPECT_TRUE(tok.has_token_types());      // lazy alloc
+    EXPECT_TRUE(tok.is_control_token(id_unk));
+
+    // Other vocab entries default to NORMAL=1 (not CONTROL).
+    EXPECT_FALSE(tok.is_control_token(4));  // 'H'
+    EXPECT_FALSE(tok.is_control_token(25)); // 'Hello'
+}
+
+TEST(TokenizerControlTest, MarkAsControlIsIdempotent) {
+    Tokenizer tok = make_spm_tokenizer();
+    tok.mark_as_control(2);  // </s>
+    tok.mark_as_control(2);  // again
+    EXPECT_TRUE(tok.is_control_token(2));
+}
+
+TEST(TokenizerControlTest, MarkAsControlIgnoresInvalidIds) {
+    Tokenizer tok = make_spm_tokenizer();
+    tok.mark_as_control(-1);                 // invalid
+    tok.mark_as_control(tok.vocab_size());   // out of range
+    EXPECT_FALSE(tok.has_token_types());     // no allocation triggered
+}
+
+TEST(TokenizerControlTest, PreservesExistingTypes) {
+    Tokenizer tok = make_spm_tokenizer();
+    // Pre-populate with a custom type vector (e.g. simulating GGUF metadata).
+    std::vector<int32_t> types(tok.vocab_size(), 1);  // all NORMAL
+    types[1] = 3;  // <s> = CONTROL
+    types[2] = 3;  // </s> = CONTROL
+    tok.load_token_types(types);
+
+    // Patching a previously-NORMAL token must not clobber the others.
+    tok.mark_as_control(0);  // <unk>
+    EXPECT_TRUE(tok.is_control_token(0));
+    EXPECT_TRUE(tok.is_control_token(1));
+    EXPECT_TRUE(tok.is_control_token(2));
+    EXPECT_FALSE(tok.is_control_token(4));  // 'H' still normal
+}
+
 } // namespace
 } // namespace imp

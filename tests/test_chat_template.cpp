@@ -123,6 +123,39 @@ TEST(ChatTemplateDetectTest, Llama2) {
               ChatTemplateFamily::LLAMA2);
 }
 
+// Mistral V3-Tekken (Mistral-Small-3.x, Mistral-Nemo, Mixtral-8x22B): superset
+// of Llama2 with [TOOL_CALLS] / [AVAILABLE_TOOLS]. Must be detected as V3
+// before falling through to the LLAMA2 [INST] check.
+TEST(ChatTemplateDetectTest, MistralV3_ToolCalls) {
+    EXPECT_EQ(ChatTemplate::detect_family(
+                  "[INST] {{ message.content }} [/INST]"
+                  "{% if tool_calls %}[TOOL_CALLS]{% endif %}"),
+              ChatTemplateFamily::MISTRAL_V3);
+}
+
+TEST(ChatTemplateDetectTest, MistralV3_AvailableTools) {
+    EXPECT_EQ(ChatTemplate::detect_family(
+                  "{% if available_tools %}[AVAILABLE_TOOLS]{{ available_tools }}"
+                  "[/AVAILABLE_TOOLS]{% endif %}[INST] {{ content }} [/INST]"),
+              ChatTemplateFamily::MISTRAL_V3);
+}
+
+// Plain Mistral V1/V2 (no tool markers) still detects as LLAMA2 — preserves
+// behavior for older Mistral and Llama-2 GGUFs.
+TEST(ChatTemplateDetectTest, OldMistralStillLlama2) {
+    EXPECT_EQ(ChatTemplate::detect_family("[INST] hi [/INST] hello"),
+              ChatTemplateFamily::LLAMA2);
+}
+
+TEST(ChatTemplateDetectTest, ParseFamilyMistralV3) {
+    EXPECT_EQ(ChatTemplate::parse_family("mistral_v3"),
+              ChatTemplateFamily::MISTRAL_V3);
+    EXPECT_EQ(ChatTemplate::parse_family("mistral-v3"),
+              ChatTemplateFamily::MISTRAL_V3);
+    EXPECT_STREQ(chat_template_family_name(ChatTemplateFamily::MISTRAL_V3),
+                 "mistral_v3");
+}
+
 TEST(ChatTemplateDetectTest, Nemotron) {
     EXPECT_EQ(ChatTemplate::detect_family("<extra_id_0>System\n"),
               ChatTemplateFamily::NEMOTRON);

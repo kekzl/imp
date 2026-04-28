@@ -723,6 +723,29 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
         }
     }
 
+    // 9b. tokenizer_config.json — tokenizer-side flags (add_bos_token,
+    // add_prefix_space). Mirrors gguf_loader.cpp's read of
+    // tokenizer.ggml.add_bos_token / add_space_prefix. Without this the
+    // SafeTensors path used Tokenizer's hardcoded default `add_bos_=true`
+    // — wrong for any model that ships add_bos_token=false in its config
+    // (e.g. Qwen3-Coder-30B-A3B-FP4 which auto-prepends <|endoftext|>
+    // unwantedly otherwise).
+    if (!model_dir.empty() && model->tokenizer_) {
+        HFConfigLoader::TokenizerFlags tflags;
+        if (HFConfigLoader::load_tokenizer_flags(model_dir, tflags)) {
+            if (tflags.add_bos_token >= 0) {
+                model->tokenizer_->set_add_bos(tflags.add_bos_token != 0);
+            } else if (model->tokenizer_->type() == "gpt2") {
+                // Match GGUF default: BPE tokenizers without an explicit
+                // flag don't add BOS.
+                model->tokenizer_->set_add_bos(false);
+            }
+            if (tflags.add_prefix_space >= 0) {
+                model->tokenizer_->set_add_space_prefix(tflags.add_prefix_space != 0);
+            }
+        }
+    }
+
     // Re-infer vocab_size from token embedding if needed
     if (cfg.vocab_size == 0 && model->tok_emb_.data != nullptr) {
         cfg.vocab_size = static_cast<int>(model->tok_emb_.shape[0]);
@@ -737,6 +760,31 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
         if (model->tokenizer_) {
             for (int32_t eid : model->generation_config_.eos_token_ids) {
                 model->tokenizer_->add_eos_id(eid);
+            }
+        }
+    }
+
+    // 11. Cross-check special_tokens_map.json against the loaded tokenizer's
+    // special-flag column. The model author's list is authoritative; if a
+    // string from `additional_special_tokens` exists in vocab but isn't
+    // marked CONTROL (token_type=3), patch it. Caught by the engine's
+    // banned-token scan in engine.cpp.
+    if (!model_dir.empty() && model->tokenizer_) {
+        HFConfigLoader::SpecialTokensMap stm;
+        if (HFConfigLoader::load_special_tokens_map(model_dir, stm)) {
+            int patched = 0, missing = 0;
+            for (const auto& s : stm.additional_special_tokens) {
+                int32_t id = model->tokenizer_->find_token(s);
+                if (id < 0) { missing++; continue; }
+                if (!model->tokenizer_->is_control_token(id)) {
+                    model->tokenizer_->mark_as_control(id);
+                    patched++;
+                }
+            }
+            if (patched > 0 || missing > 0) {
+                IMP_LOG_INFO("special_tokens_map: cross-check patched %d, "
+                             "missing-from-vocab %d",
+                             patched, missing);
             }
         }
     }
