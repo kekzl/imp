@@ -637,6 +637,11 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     IMP_LOG_INFO("Config: layers=%d d_model=%d d_ff=%d heads=%d kv_heads=%d vocab=%d ctx=%d",
                  cfg.n_layers, cfg.d_model, cfg.d_ff, cfg.n_heads, cfg.n_kv_heads,
                  cfg.vocab_size, cfg.max_seq_len);
+    IMP_LOG_INFO("RoPE: theta=%.0f freq_scale=%.4f head_dim=%d sliding_window=%d "
+                 "rope_theta_swa=%.0f rope_local_theta=%.0f rope_n_ctx_orig=%d",
+                 cfg.rope_theta, cfg.rope_freq_scale, cfg.head_dim,
+                 cfg.sliding_window, cfg.rope_theta_swa, cfg.rope_local_theta,
+                 cfg.rope_n_ctx_orig);
     if (cfg.n_experts > 0) {
         IMP_LOG_INFO("MoE: %d experts, %d active, expert_d_ff=%d",
                      cfg.n_experts, cfg.n_experts_active, cfg.expert_d_ff);
