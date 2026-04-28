@@ -200,6 +200,12 @@ struct TransformerLayer {
     NvFP4PreQuantWeight nvfp4_q, nvfp4_k, nvfp4_v, nvfp4_o;
     NvFP4PreQuantWeight nvfp4_gate, nvfp4_up, nvfp4_down;
 
+    // Shared-expert NVFP4 (Qwen3.5/3.6 MoE: per-layer always-active dense FFN
+    // alongside the routed experts). Loader populates these from
+    // mlp.shared_expert.{gate,up,down}_proj.{weight_packed,weight_scale,
+    //   weight_global_scale,input_global_scale}.
+    NvFP4PreQuantWeight nvfp4_w_gate_shared, nvfp4_w_up_shared, nvfp4_w_down_shared;
+
     // Per-expert NVFP4 weights (MoE models with pre-quantized expert weights)
     std::vector<NvFP4PreQuantWeight> expert_nvfp4_gate, expert_nvfp4_up, expert_nvfp4_down;
 

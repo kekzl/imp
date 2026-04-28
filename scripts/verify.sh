@@ -17,12 +17,40 @@
 #   IMP_VERIFY_MODELS=models
 #   IMP_VERIFY_BASELINE=tests/perf_baseline.json
 #   IMP_VERIFY_SKIP_BUILD=1   skip cmake build step
+#   IMP_VERIFY_IN_DOCKER=1    sentinel set by the auto-re-exec block; do not set manually
+#
+# Auto-Docker fallback: if cmake is not on PATH (Clean-Host workflow), the
+# script re-execs itself inside the imp:test container, mounting the repo at
+# /src and using the prebuilt /usr/local/bin/imp-cli + imp-tests. Requires
+# 'make build' to have produced the imp:test image first.
 #
 set -uo pipefail
 
-MODE="${1:-fast}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+
+# Auto re-exec in the imp:test container when cmake is unavailable on the host
+# (Clean-Host workflow: no language toolchains installed). The runtime image
+# has prebuilt binaries at /usr/local/bin/, so we skip the build step and point
+# IMP_VERIFY_BIN/TESTS at them. IMP_VERIFY_IN_DOCKER guards against infinite
+# re-exec if the runtime image somehow also lacks cmake.
+if ! command -v cmake >/dev/null 2>&1 && [ "${IMP_VERIFY_IN_DOCKER:-0}" != "1" ]; then
+    if ! docker image inspect imp:test >/dev/null 2>&1; then
+        echo "verify: cmake not found on host and imp:test image not built." >&2
+        echo "        Run 'make build' first, then re-run." >&2
+        exit 1
+    fi
+    echo "verify: host cmake unavailable — re-executing in imp:test container"
+    exec docker run --rm --gpus all \
+        -v "$ROOT":/src -w /src \
+        -e IMP_VERIFY_IN_DOCKER=1 \
+        -e IMP_VERIFY_BIN=/usr/local/bin/imp-cli \
+        -e IMP_VERIFY_TESTS=/usr/local/bin/imp-tests \
+        -e IMP_VERIFY_SKIP_BUILD=1 \
+        --entrypoint bash imp:test scripts/verify.sh "$@"
+fi
+
+MODE="${1:-fast}"
 
 BIN="${IMP_VERIFY_BIN:-build/imp-cli}"
 TESTS_BIN="${IMP_VERIFY_TESTS:-build/imp-tests}"
@@ -101,6 +129,8 @@ if [ ! -f "$BASELINE" ]; then
     skip "no $BASELINE — run scripts/gen_perf_baseline.sh to create one"
 elif [ ! -x "$BIN" ]; then
     fail "$BIN not found"
+elif ! command -v jq >/dev/null 2>&1; then
+    skip "jq not installed (needed to parse $BASELINE)"
 else
     BL_MODEL=$(jq -r '.model' "$BASELINE")
     BL_TG=$(jq -r '.metrics.decode_tps.tg128' "$BASELINE")

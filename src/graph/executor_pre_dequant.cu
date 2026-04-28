@@ -265,6 +265,13 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             promote(L.nvfp4_gate, L.w_gate.data ? L.w_gate : L.w_gate_shared);
             promote(L.nvfp4_up,   L.w_up.data   ? L.w_up   : L.w_up_shared);
             promote(L.nvfp4_down, L.w_down.data ? L.w_down : L.w_down_shared);
+            // Shared-expert dense MLP NVFP4 (Qwen3.5/3.6: per-layer always-
+            // active dense MLP alongside the routed experts). promote() is a
+            // no-op when nw.valid()=false, so this is safe for archs that
+            // don't populate nvfp4_w_*_shared (Gemma-4 etc.).
+            promote(L.nvfp4_w_gate_shared, L.w_gate_shared);
+            promote(L.nvfp4_w_up_shared,   L.w_up_shared);
+            promote(L.nvfp4_w_down_shared, L.w_down_shared);
             // Per-expert weights
             for (size_t e = 0; e < L.expert_nvfp4_gate.size(); e++) {
                 if (e < L.expert_w_gate.size()) promote(L.expert_nvfp4_gate[e], L.expert_w_gate[e]);
