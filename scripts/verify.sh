@@ -17,6 +17,9 @@
 #   IMP_VERIFY_MODELS=models
 #   IMP_VERIFY_BASELINE=tests/perf_baseline.json
 #   IMP_VERIFY_SKIP_BUILD=1   skip cmake build step
+#   IMP_VERIFY_SKIP_PERF=1    skip perf-baseline regression check (use when the
+#                             baseline is known-stale; refresh with
+#                             scripts/gen_perf_baseline.sh)
 #   IMP_VERIFY_IN_DOCKER=1    sentinel set by the auto-re-exec block; do not set manually
 #
 # Auto-Docker fallback: if cmake is not on PATH (Clean-Host workflow), the
@@ -47,6 +50,7 @@ if ! command -v cmake >/dev/null 2>&1 && [ "${IMP_VERIFY_IN_DOCKER:-0}" != "1" ]
         -e IMP_VERIFY_BIN=/usr/local/bin/imp-cli \
         -e IMP_VERIFY_TESTS=/usr/local/bin/imp-tests \
         -e IMP_VERIFY_SKIP_BUILD=1 \
+        -e IMP_VERIFY_SKIP_PERF="${IMP_VERIFY_SKIP_PERF:-0}" \
         --entrypoint bash imp:test scripts/verify.sh "$@"
 fi
 
@@ -125,7 +129,9 @@ fi
 
 # --------------------------------------------------------------------- 3. perf
 section "perf vs baseline"
-if [ ! -f "$BASELINE" ]; then
+if [ "${IMP_VERIFY_SKIP_PERF:-0}" = "1" ]; then
+    skip "perf gate (IMP_VERIFY_SKIP_PERF=1)"
+elif [ ! -f "$BASELINE" ]; then
     skip "no $BASELINE — run scripts/gen_perf_baseline.sh to create one"
 elif [ ! -x "$BIN" ]; then
     fail "$BIN not found"
