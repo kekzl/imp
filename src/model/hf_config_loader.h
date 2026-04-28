@@ -45,6 +45,37 @@ struct HFConfigLoader {
     };
     static std::vector<AddedToken> load_added_tokens(const std::string& model_dir);
 
+    // Authoritative special-token declarations from special_tokens_map.json.
+    // The model author lists every string that should be treated as a control
+    // token; tokenizer.json's `special: true` flag is normally a faithful copy
+    // but conversions can drop the flag. Cross-checking lets the loader patch
+    // the gap before the engine builds its banned-token list.
+    struct SpecialTokensMap {
+        std::vector<std::string> additional_special_tokens;
+        std::string bos_token;  // empty if not specified
+        std::string eos_token;
+        std::string pad_token;
+        std::string unk_token;
+    };
+    static bool load_special_tokens_map(const std::string& model_dir,
+                                        SpecialTokensMap& out);
+
+    // Tokenizer-side flags from tokenizer_config.json. The corresponding
+    // GGUF metadata is `tokenizer.ggml.add_bos_token` and
+    // `tokenizer.ggml.add_space_prefix` — `gguf_loader.cpp` already wires
+    // those. SafeTensors loader needs an equivalent path.
+    //
+    // Sentinel: -1 = field not present, 0 = false, 1 = true. Caller falls
+    // back to its own default (matching GGUF: gpt2-style tokenizers default
+    // add_bos=false, everything else true).
+    struct TokenizerFlags {
+        int add_bos_token    = -1;
+        int add_eos_token    = -1;
+        int add_prefix_space = -1;
+    };
+    static bool load_tokenizer_flags(const std::string& model_dir,
+                                     TokenizerFlags& out);
+
     // GPTQ quantization config from quantize_config.json
     struct GPTQConfig {
         int bits = 0;        // 4 or 8

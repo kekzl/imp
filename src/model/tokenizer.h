@@ -85,6 +85,18 @@ public:
         return id >= 0 && id < static_cast<int>(token_types_.size()) && token_types_[id] != 1;
     }
 
+    // Defensive overlay: mark a token as CONTROL even when it wasn't tagged
+    // by the source tokenizer. Used to cross-check special_tokens_map.json
+    // against tokenizer.json's special-flag column for HF model directories.
+    // No-op when id is invalid; allocates the type vector lazily if empty.
+    void mark_as_control(int32_t id) {
+        if (id < 0 || id >= static_cast<int32_t>(vocab_.size())) return;
+        if (token_types_.empty()) {
+            token_types_.assign(vocab_.size(), 1);  // default NORMAL=1
+        }
+        token_types_[id] = 3;  // CONTROL
+    }
+
 private:
     // UTF-8 helper: returns byte length of character starting at c
     static int utf8_char_len(uint8_t c);

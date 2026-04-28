@@ -9,10 +9,11 @@ namespace imp {
 
 const char* chat_template_family_name(ChatTemplateFamily family) {
     switch (family) {
-        case ChatTemplateFamily::RAW:      return "raw";
-        case ChatTemplateFamily::CHATML:   return "chatml";
-        case ChatTemplateFamily::LLAMA2:   return "llama2";
-        case ChatTemplateFamily::LLAMA3:   return "llama3";
+        case ChatTemplateFamily::RAW:         return "raw";
+        case ChatTemplateFamily::CHATML:      return "chatml";
+        case ChatTemplateFamily::LLAMA2:      return "llama2";
+        case ChatTemplateFamily::MISTRAL_V3:  return "mistral_v3";
+        case ChatTemplateFamily::LLAMA3:      return "llama3";
         case ChatTemplateFamily::NEMOTRON:    return "nemotron";
         case ChatTemplateFamily::GEMMA:       return "gemma";
         case ChatTemplateFamily::DEEPSEEK_R1: return "deepseek_r1";
@@ -34,6 +35,13 @@ ChatTemplateFamily ChatTemplate::detect_family(const std::string& jinja2_str) {
     // Gemma-4 uses <|turn> instead of <start_of_turn>
     if (jinja2_str.find("<|turn>") != std::string::npos)
         return ChatTemplateFamily::GEMMA;
+    // Mistral V3-Tekken (Mistral-Small-3.x, Mistral-Nemo, Mixtral-8x22B):
+    // adds [TOOL_CALLS] / [AVAILABLE_TOOLS] / [TOOL_RESULTS] markers on top of
+    // the V1/V2 [INST] core. Check BEFORE the LLAMA2 [INST] fallback so newer
+    // Mistrals don't get misclassified as the older family.
+    if (jinja2_str.find("[TOOL_CALLS]") != std::string::npos ||
+        jinja2_str.find("[AVAILABLE_TOOLS]") != std::string::npos)
+        return ChatTemplateFamily::MISTRAL_V3;
     if (jinja2_str.find("[INST]") != std::string::npos)
         return ChatTemplateFamily::LLAMA2;
     if (jinja2_str.find("<extra_id_0>") != std::string::npos)
@@ -72,6 +80,8 @@ ChatTemplateFamily ChatTemplate::parse_family(const std::string& name) {
     if (name == "none")     return ChatTemplateFamily::RAW;
     if (name == "chatml")   return ChatTemplateFamily::CHATML;
     if (name == "llama2")   return ChatTemplateFamily::LLAMA2;
+    if (name == "mistral_v3" || name == "mistral-v3" || name == "mistralv3")
+        return ChatTemplateFamily::MISTRAL_V3;
     if (name == "llama3")   return ChatTemplateFamily::LLAMA3;
     if (name == "nemotron") return ChatTemplateFamily::NEMOTRON;
     if (name == "gemma")   return ChatTemplateFamily::GEMMA;
@@ -134,11 +144,16 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer,
             stop_token_ids_.push_back(eot_id_);
             break;
         }
-        case ChatTemplateFamily::LLAMA2: {
+        case ChatTemplateFamily::LLAMA2:
+        case ChatTemplateFamily::MISTRAL_V3: {
+            // Both share the [INST]/[/INST] core. V3 adds tool-call markers
+            // ([TOOL_CALLS], [AVAILABLE_TOOLS], [TOOL_RESULTS]) which are
+            // emitted via the Jinja2 path when present in chat_template.jinja
+            // — the hardcoded apply method only handles the message-frame.
             inst_start_id_ = tokenizer.find_token("[INST]");
             inst_end_id_   = tokenizer.find_token("[/INST]");
             if (inst_start_id_ < 0 || inst_end_id_ < 0) {
-                IMP_LOG_WARN("Llama2 template: missing special tokens "
+                IMP_LOG_WARN("Mistral/Llama2 template: missing special tokens "
                              "(inst_start=%d, inst_end=%d), falling back to raw",
                              inst_start_id_, inst_end_id_);
                 family_ = ChatTemplateFamily::RAW;
@@ -263,7 +278,9 @@ std::vector<int32_t> ChatTemplate::apply(
     switch (family_) {
         case ChatTemplateFamily::CHATML:   return apply_chatml(tok, messages, suppress_thinking);
         case ChatTemplateFamily::LLAMA3:   return apply_llama3(tok, messages);
-        case ChatTemplateFamily::LLAMA2:   return apply_llama2(tok, messages);
+        case ChatTemplateFamily::LLAMA2:
+        case ChatTemplateFamily::MISTRAL_V3:
+            return apply_llama2(tok, messages);
         case ChatTemplateFamily::NEMOTRON:    return apply_nemotron(tok, messages);
         case ChatTemplateFamily::GEMMA:       return apply_gemma(tok, messages);
         case ChatTemplateFamily::DEEPSEEK_R1: return apply_deepseek_r1(tok, messages);
