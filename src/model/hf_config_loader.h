@@ -69,9 +69,15 @@ struct HFConfigLoader {
     // back to its own default (matching GGUF: gpt2-style tokenizers default
     // add_bos=false, everything else true).
     struct TokenizerFlags {
-        int add_bos_token    = -1;
-        int add_eos_token    = -1;
-        int add_prefix_space = -1;
+        int add_bos_token             = -1;
+        int add_eos_token             = -1;
+        int add_prefix_space          = -1;
+        // When the model author sets `use_default_system_prompt: false`, the
+        // chat-template apply path must NOT auto-fill the template's hardcoded
+        // default system message (e.g. Mistral-Small-3.2's 600-token default
+        // injected by chat_template.jinja line 158 when no system message is
+        // supplied).
+        int use_default_system_prompt = -1;
     };
     static bool load_tokenizer_flags(const std::string& model_dir,
                                      TokenizerFlags& out);

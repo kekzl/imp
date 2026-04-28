@@ -262,29 +262,47 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer,
     return true;
 }
 
+// Honor `tokenizer_config.json::use_default_system_prompt: false`. When the
+// model author opts out and the caller didn't provide an explicit system
+// message, prepend an empty one so the Jinja template's "if no system →
+// inject default_system_message" branch doesn't fire (Mistral-Small-3.2
+// otherwise auto-injects ~600 tokens of boilerplate).
+static std::vector<ChatMessage> maybe_suppress_default_system(
+    const Tokenizer& tok, const std::vector<ChatMessage>& messages)
+{
+    if (tok.use_default_system_prompt()) return messages;
+    if (!messages.empty() && messages.front().role == "system") return messages;
+    std::vector<ChatMessage> out;
+    out.reserve(messages.size() + 1);
+    out.push_back({"system", ""});
+    for (const auto& m : messages) out.push_back(m);
+    return out;
+}
+
 std::vector<int32_t> ChatTemplate::apply(
     const Tokenizer& tok,
     const std::vector<ChatMessage>& messages,
     bool suppress_thinking) const
 {
+    auto eff_msgs = maybe_suppress_default_system(tok, messages);
     // Prefer Jinja2 rendering when available (data-driven from GGUF).
     // Falls back to hardcoded families if Jinja rendering fails.
     if (use_jinja_ && jinja_tpl_) {
-        auto tokens = apply_jinja(tok, messages, true, suppress_thinking);
+        auto tokens = apply_jinja(tok, eff_msgs, true, suppress_thinking);
         if (!tokens.empty()) return tokens;
         IMP_LOG_WARN("Jinja2 render produced empty result, falling back to hardcoded template");
     }
 
     switch (family_) {
-        case ChatTemplateFamily::CHATML:   return apply_chatml(tok, messages, suppress_thinking);
-        case ChatTemplateFamily::LLAMA3:   return apply_llama3(tok, messages);
+        case ChatTemplateFamily::CHATML:   return apply_chatml(tok, eff_msgs, suppress_thinking);
+        case ChatTemplateFamily::LLAMA3:   return apply_llama3(tok, eff_msgs);
         case ChatTemplateFamily::LLAMA2:
         case ChatTemplateFamily::MISTRAL_V3:
-            return apply_llama2(tok, messages);
-        case ChatTemplateFamily::NEMOTRON:    return apply_nemotron(tok, messages);
-        case ChatTemplateFamily::GEMMA:       return apply_gemma(tok, messages);
-        case ChatTemplateFamily::DEEPSEEK_R1: return apply_deepseek_r1(tok, messages);
-        case ChatTemplateFamily::PHI:          return apply_phi(tok, messages);
+            return apply_llama2(tok, eff_msgs);
+        case ChatTemplateFamily::NEMOTRON:    return apply_nemotron(tok, eff_msgs);
+        case ChatTemplateFamily::GEMMA:       return apply_gemma(tok, eff_msgs);
+        case ChatTemplateFamily::DEEPSEEK_R1: return apply_deepseek_r1(tok, eff_msgs);
+        case ChatTemplateFamily::PHI:          return apply_phi(tok, eff_msgs);
         default: break;
     }
     return {};
@@ -1016,7 +1034,8 @@ std::vector<int32_t> ChatTemplate::apply_with_tools(
     // Try Jinja2 tools-aware path. Returns empty if Jinja2 is unavailable or
     // rendering fails, signaling the caller to fall back to text-based tool injection.
     if (use_jinja_ && jinja_tpl_ && !tools.empty()) {
-        auto tokens = apply_jinja_with_tools(tok, messages, tools, tool_choice,
+        auto eff_msgs = maybe_suppress_default_system(tok, messages);
+        auto tokens = apply_jinja_with_tools(tok, eff_msgs, tools, tool_choice,
                                               true, suppress_thinking);
         if (!tokens.empty()) return tokens;
         IMP_LOG_WARN("Jinja2 tools render failed, caller should inject text-based tool prompt");
