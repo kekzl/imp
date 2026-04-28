@@ -5,6 +5,7 @@
 
 #include "api/imp_internal.h"
 #include "model/hf_hub.h"
+#include "runtime/config.h"
 
 #include <chrono>
 #include <cmath>
@@ -279,10 +280,11 @@ ImpConfig build_config(const ServerArgs& args, const std::string& model_path,
         config.ngram_spec_k = args.ngram_spec_k;
     }
 
-    // Prefix caching: enable with IMP_PREFIX_CACHE=1 (off by default — cached
-    // blocks get different physical KV addresses, causing FP rounding differences
-    // in attention kernels and breaking determinism for identical requests).
-    config.use_prefix_caching = (std::getenv("IMP_PREFIX_CACHE") != nullptr) ? 1 : 0;
+    // Prefix caching: enable with [server] prefix_cache = true (off by default —
+    // cached blocks get different physical KV addresses, causing FP rounding
+    // differences in attention kernels and breaking determinism for identical
+    // requests).
+    config.use_prefix_caching = imp::RuntimeConfig::current().server.prefix_cache ? 1 : 0;
 
     // Green Contexts: SM partitioning for concurrent prefill/decode (CUDA 13.1+)
     config.enable_green_contexts = 1;

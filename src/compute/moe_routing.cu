@@ -599,10 +599,10 @@ __global__ void zero_float_kernel(float* data, int n) {
 // Helper to set up a Tensor descriptor
 // ============================================================================
 
-static Tensor make_tensor_1d(void* data, DType dtype, int64_t size, bool on_device) {
+static Tensor make_tensor_1d(void* data, QType dtype, int64_t size, bool on_device) {
     Tensor t;
     t.data = data;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim = 1;
     t.shape[0] = size;
     t.shape[1] = 0;
@@ -616,10 +616,10 @@ static Tensor make_tensor_1d(void* data, DType dtype, int64_t size, bool on_devi
     return t;
 }
 
-static Tensor make_tensor_2d(void* data, DType dtype, int64_t d0, int64_t d1, bool on_device) {
+static Tensor make_tensor_2d(void* data, QType dtype, int64_t d0, int64_t d1, bool on_device) {
     Tensor t;
     t.data = data;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim = 2;
     t.shape[0] = d0;
     t.shape[1] = d1;
@@ -711,15 +711,15 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
         d_sorted_token_ids, d_sorted_flat_idx, d_expert_offsets, nullptr);
 
     // ---- Fill result struct ----
-    result.expert_indices = make_tensor_2d(d_expert_indices, DType::INT32,
+    result.expert_indices = make_tensor_2d(d_expert_indices, QType::INT32,
                                            n_tokens, top_k, true);
-    result.expert_weights = make_tensor_2d(d_expert_weights, DType::FP32,
+    result.expert_weights = make_tensor_2d(d_expert_weights, QType::F32,
                                            n_tokens, top_k, true);
     // sorted_token_ids: we expose the full allocation (includes flat_idx)
     // but the tensor shape only covers the token IDs part.
-    result.sorted_token_ids = make_tensor_1d(d_sorted_token_ids, DType::INT32,
+    result.sorted_token_ids = make_tensor_1d(d_sorted_token_ids, QType::INT32,
                                              total_assignments, true);
-    result.expert_offsets = make_tensor_1d(d_expert_offsets, DType::INT32,
+    result.expert_offsets = make_tensor_1d(d_expert_offsets, QType::INT32,
                                            n_experts + 1, true);
 }
 
@@ -736,7 +736,7 @@ void moe_gather(const Tensor& input, const MoeRoutingResult& routing,
 
     (void)n_tokens_orig;
 
-    if (input.dtype == DType::FP16) {
+    if (input.qtype == QType::F16) {
         const half* d_input = static_cast<const half*>(input.data);
         half* d_gathered    = static_cast<half*>(gathered.data);
         moe_gather_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(
@@ -773,7 +773,7 @@ void moe_scatter(const Tensor& expert_output, const MoeRoutingResult& routing,
     float* d_output = static_cast<float*>(output.data);
     zero_float_kernel<<<grid_z, BLOCK_SIZE, 0, stream>>>(d_output, total_out_elems);
 
-    if (expert_output.dtype == DType::FP16) {
+    if (expert_output.qtype == QType::F16) {
         const half* d_expert_out = static_cast<const half*>(expert_output.data);
         moe_scatter_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(
             d_expert_out, d_sorted_token_ids, d_sorted_flat_idx,
@@ -889,13 +889,13 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
     // Fill result struct (no ownership -- memory belongs to buffers)
     result.owns_memory = false;
     result.token_to_expanded = buffers.token_to_expanded;
-    result.expert_indices = make_tensor_2d(d_expert_indices, DType::INT32,
+    result.expert_indices = make_tensor_2d(d_expert_indices, QType::INT32,
                                            n_tokens, top_k, true);
-    result.expert_weights = make_tensor_2d(d_expert_weights, DType::FP32,
+    result.expert_weights = make_tensor_2d(d_expert_weights, QType::F32,
                                            n_tokens, top_k, true);
-    result.sorted_token_ids = make_tensor_1d(d_sorted_token_ids, DType::INT32,
+    result.sorted_token_ids = make_tensor_1d(d_sorted_token_ids, QType::INT32,
                                              total_assignments, true);
-    result.expert_offsets = make_tensor_1d(d_expert_offsets, DType::INT32,
+    result.expert_offsets = make_tensor_1d(d_expert_offsets, QType::INT32,
                                            n_experts + 1, true);
 }
 
@@ -1045,13 +1045,13 @@ void moe_gate_topk_fused(const void* W_gate, const void* x,
 
     // Fill result struct (no ownership — memory belongs to buffers)
     result.owns_memory = false;
-    result.expert_indices = make_tensor_2d(buffers.expert_indices, DType::INT32,
+    result.expert_indices = make_tensor_2d(buffers.expert_indices, QType::INT32,
                                            1, top_k, true);
-    result.expert_weights = make_tensor_2d(buffers.expert_weights, DType::FP32,
+    result.expert_weights = make_tensor_2d(buffers.expert_weights, QType::F32,
                                            1, top_k, true);
-    result.sorted_token_ids = make_tensor_1d(buffers.sorted_token_ids, DType::INT32,
+    result.sorted_token_ids = make_tensor_1d(buffers.sorted_token_ids, QType::INT32,
                                              top_k, true);
-    result.expert_offsets = make_tensor_1d(buffers.expert_offsets, DType::INT32,
+    result.expert_offsets = make_tensor_1d(buffers.expert_offsets, QType::INT32,
                                            n_experts + 1, true);
 }
 

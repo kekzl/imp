@@ -22,10 +22,10 @@ namespace {
 // ===========================================================================
 
 // Create a GPU tensor from host float data, with optional FP16 conversion.
-Tensor make_gpu_tensor(const float* host_data, DType dtype,
+Tensor make_gpu_tensor(const float* host_data, QType dtype,
                        std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim  = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
@@ -33,9 +33,9 @@ Tensor make_gpu_tensor(const float* host_data, DType dtype,
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
 
-    if (dtype == DType::FP32) {
+    if (dtype == QType::F32) {
         cudaMemcpy(t.data, host_data, t.nbytes(), cudaMemcpyHostToDevice);
-    } else if (dtype == DType::FP16) {
+    } else if (dtype == QType::F16) {
         std::vector<half> h(t.numel());
         for (int64_t j = 0; j < t.numel(); j++)
             h[j] = __float2half(host_data[j]);
@@ -45,9 +45,9 @@ Tensor make_gpu_tensor(const float* host_data, DType dtype,
 }
 
 // Allocate a zeroed GPU tensor (output buffer).
-Tensor alloc_gpu_tensor(DType dtype, std::initializer_list<int64_t> shape_list) {
+Tensor alloc_gpu_tensor(QType dtype, std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim  = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
@@ -61,9 +61,9 @@ Tensor alloc_gpu_tensor(DType dtype, std::initializer_list<int64_t> shape_list) 
 // Read a GPU tensor back to host as floats.
 std::vector<float> read_gpu_tensor(const Tensor& t) {
     std::vector<float> result(t.numel());
-    if (t.dtype == DType::FP32) {
+    if (t.qtype == QType::F32) {
         cudaMemcpy(result.data(), t.data, t.nbytes(), cudaMemcpyDeviceToHost);
-    } else if (t.dtype == DType::FP16) {
+    } else if (t.qtype == QType::F16) {
         std::vector<half> h(t.numel());
         cudaMemcpy(h.data(), t.data, t.nbytes(), cudaMemcpyDeviceToHost);
         for (int64_t j = 0; j < t.numel(); j++)
@@ -126,8 +126,8 @@ void cpu_matmul(const float* A, const float* B_T, float* C,
 // ===========================================================================
 TEST(QuantTest, QuantConfigDefaults) {
     QuantConfig config;
-    EXPECT_EQ(config.quant_dtype, DType::FP16);
-    EXPECT_EQ(config.compute_dtype, DType::FP16);
+    EXPECT_EQ(config.quant_dtype, QType::F16);
+    EXPECT_EQ(config.compute_dtype, QType::F16);
     EXPECT_EQ(config.group_size, 128);
     EXPECT_FALSE(config.has_zero_point);
 }
@@ -546,11 +546,11 @@ TEST(QuantTest, QuantGemmINT4Basic) {
     cpu_matmul(h_A.data(), h_B_dequant.data(), h_C_ref.data(), M, N, K);
 
     // --- GPU tensors ---
-    Tensor d_A = make_gpu_tensor(h_A.data(), DType::FP16, {M, K});
+    Tensor d_A = make_gpu_tensor(h_A.data(), QType::F16, {M, K});
 
     // B_quant: raw bytes, use INT4 dtype. Shape [N, K/2].
     Tensor d_B;
-    d_B.dtype = DType::INT4;
+    d_B.qtype = QType::INT4;
     d_B.ndim = 2;
     d_B.shape[0] = N;
     d_B.shape[1] = half_K;
@@ -561,11 +561,11 @@ TEST(QuantTest, QuantGemmINT4Basic) {
                cudaMemcpyHostToDevice);
 
     // Scales: FP16 [N, num_groups]
-    Tensor d_scales = make_gpu_tensor(h_scales.data(), DType::FP16,
+    Tensor d_scales = make_gpu_tensor(h_scales.data(), QType::F16,
                                        {N, num_groups});
 
     // Output: C [M, N]
-    Tensor d_C = alloc_gpu_tensor(DType::FP16, {M, N});
+    Tensor d_C = alloc_gpu_tensor(QType::F16, {M, N});
 
     // --- Run fused quant GEMM ---
     quant_gemm_int4(d_A, d_B, d_scales, d_C, nullptr);

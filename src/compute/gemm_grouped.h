@@ -37,11 +37,11 @@ void gemm_grouped(const std::vector<Tensor>& A,
 void gemm_moe_batched(const void* a_base, void* c_base,
                       const int32_t* offsets,
                       const void* const* b_ptrs,
-                      int K, int N, DType dtype,
+                      int K, int N, QType dtype,
                       int n_experts,
                       cudaStream_t stream = nullptr,
                       void** d_work_ptrs = nullptr,
-                      DType output_dtype = DType(255),
+                      QType output_dtype = QType(255),
                       const float* a_scales = nullptr,
                       const float* b_scales = nullptr);
 

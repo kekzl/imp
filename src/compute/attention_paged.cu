@@ -2,6 +2,7 @@
 #include "compute/attention_paged_common.cuh"
 #include "compute/attention.h"
 #include "core/logging.h"
+#include "runtime/config.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cooperative_groups.h>
@@ -1451,7 +1452,7 @@ void paged_attention_decode(
         // Use pipelined cp.async kernel on sm_90+ for better memory/compute overlap.
         // IMP_SPLITK_NO_PIPE forces non-pipeline as a bisect escape hatch.
         static int sm_ver = get_device_sm_version();
-        static bool force_non_pipe = getenv("IMP_SPLITK_NO_PIPE") != nullptr;
+        const bool force_non_pipe = !RuntimeConfig::current().attention.splitk_pipe;
         if (sm_ver >= 90 && !force_non_pipe) {
             // Pipeline smem: 8 warps * 3 * head_dim * 2B (FP16)
             // Must be at least as large as reduction smem

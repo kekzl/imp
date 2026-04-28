@@ -12,19 +12,19 @@
 namespace imp {
 namespace {
 
-Tensor make_gpu_tensor(const float* host_data, DType dtype,
+Tensor make_gpu_tensor(const float* host_data, QType dtype,
                        std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
-    if (dtype == DType::FP32) {
+    if (dtype == QType::F32) {
         cudaMemcpy(t.data, host_data, t.nbytes(), cudaMemcpyHostToDevice);
-    } else if (dtype == DType::FP16) {
+    } else if (dtype == QType::F16) {
         std::vector<half> h(t.numel());
         for (int64_t j = 0; j < t.numel(); j++)
             h[j] = __float2half(host_data[j]);
@@ -33,9 +33,9 @@ Tensor make_gpu_tensor(const float* host_data, DType dtype,
     return t;
 }
 
-Tensor alloc_gpu_tensor(DType dtype, std::initializer_list<int64_t> shape_list) {
+Tensor alloc_gpu_tensor(QType dtype, std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
@@ -48,9 +48,9 @@ Tensor alloc_gpu_tensor(DType dtype, std::initializer_list<int64_t> shape_list) 
 
 std::vector<float> read_gpu_tensor(const Tensor& t) {
     std::vector<float> result(t.numel());
-    if (t.dtype == DType::FP32) {
+    if (t.qtype == QType::F32) {
         cudaMemcpy(result.data(), t.data, t.nbytes(), cudaMemcpyDeviceToHost);
-    } else if (t.dtype == DType::FP16) {
+    } else if (t.qtype == QType::F16) {
         std::vector<half> h(t.numel());
         cudaMemcpy(h.data(), t.data, t.nbytes(), cudaMemcpyDeviceToHost);
         for (int64_t j = 0; j < t.numel(); j++)
@@ -90,9 +90,9 @@ TEST(ActivationTest, SwiGLUBasicFP32) {
     for (int i = 0; i < N; i++)
         h_ref[i] = cpu_silu(h_gate[i]) * h_up[i];
 
-    Tensor d_gate = make_gpu_tensor(h_gate.data(), DType::FP32, {N});
-    Tensor d_up   = make_gpu_tensor(h_up.data(), DType::FP32, {N});
-    Tensor d_out  = alloc_gpu_tensor(DType::FP32, {N});
+    Tensor d_gate = make_gpu_tensor(h_gate.data(), QType::F32, {N});
+    Tensor d_up   = make_gpu_tensor(h_up.data(), QType::F32, {N});
+    Tensor d_out  = alloc_gpu_tensor(QType::F32, {N});
 
     swiglu(d_gate, d_up, d_out);
     cudaDeviceSynchronize();
@@ -114,9 +114,9 @@ TEST(ActivationTest, SwiGLUZeroGate) {
     std::vector<float> h_gate(N, 0.0f);
     std::vector<float> h_up = {1.0f, 2.0f, 3.0f, 4.0f};
 
-    Tensor d_gate = make_gpu_tensor(h_gate.data(), DType::FP32, {N});
-    Tensor d_up   = make_gpu_tensor(h_up.data(), DType::FP32, {N});
-    Tensor d_out  = alloc_gpu_tensor(DType::FP32, {N});
+    Tensor d_gate = make_gpu_tensor(h_gate.data(), QType::F32, {N});
+    Tensor d_up   = make_gpu_tensor(h_up.data(), QType::F32, {N});
+    Tensor d_out  = alloc_gpu_tensor(QType::F32, {N});
 
     swiglu(d_gate, d_up, d_out);
     cudaDeviceSynchronize();
@@ -144,9 +144,9 @@ TEST(ActivationTest, SwiGLUFP16) {
         h_ref[i] = cpu_silu(g) * u;
     }
 
-    Tensor d_gate = make_gpu_tensor(h_gate.data(), DType::FP16, {N});
-    Tensor d_up   = make_gpu_tensor(h_up.data(), DType::FP16, {N});
-    Tensor d_out  = alloc_gpu_tensor(DType::FP16, {N});
+    Tensor d_gate = make_gpu_tensor(h_gate.data(), QType::F16, {N});
+    Tensor d_up   = make_gpu_tensor(h_up.data(), QType::F16, {N});
+    Tensor d_out  = alloc_gpu_tensor(QType::F16, {N});
 
     swiglu(d_gate, d_up, d_out);
     cudaDeviceSynchronize();
@@ -172,9 +172,9 @@ TEST(ActivationTest, SwiGLULargeVector) {
         h_ref[i] = cpu_silu(h_gate[i]) * h_up[i];
     }
 
-    Tensor d_gate = make_gpu_tensor(h_gate.data(), DType::FP32, {N});
-    Tensor d_up   = make_gpu_tensor(h_up.data(), DType::FP32, {N});
-    Tensor d_out  = alloc_gpu_tensor(DType::FP32, {N});
+    Tensor d_gate = make_gpu_tensor(h_gate.data(), QType::F32, {N});
+    Tensor d_up   = make_gpu_tensor(h_up.data(), QType::F32, {N});
+    Tensor d_out  = alloc_gpu_tensor(QType::F32, {N});
 
     swiglu(d_gate, d_up, d_out);
     cudaDeviceSynchronize();
@@ -200,9 +200,9 @@ TEST(ActivationTest, SwiGLUNonAligned) {
     for (int i = 0; i < N; i++)
         h_ref[i] = cpu_silu(h_gate[i]) * h_up[i];
 
-    Tensor d_gate = make_gpu_tensor(h_gate.data(), DType::FP32, {N});
-    Tensor d_up   = make_gpu_tensor(h_up.data(), DType::FP32, {N});
-    Tensor d_out  = alloc_gpu_tensor(DType::FP32, {N});
+    Tensor d_gate = make_gpu_tensor(h_gate.data(), QType::F32, {N});
+    Tensor d_up   = make_gpu_tensor(h_up.data(), QType::F32, {N});
+    Tensor d_out  = alloc_gpu_tensor(QType::F32, {N});
 
     swiglu(d_gate, d_up, d_out);
     cudaDeviceSynchronize();
@@ -230,8 +230,8 @@ TEST(ActivationTest, GELUBasicFP32) {
     for (int i = 0; i < N; i++)
         h_ref[i] = cpu_gelu(h_x[i]);
 
-    Tensor d_x   = make_gpu_tensor(h_x.data(), DType::FP32, {N});
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, {N});
+    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {N});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {N});
 
     gelu(d_x, d_out);
     cudaDeviceSynchronize();
@@ -249,8 +249,8 @@ TEST(ActivationTest, GELUBasicFP32) {
 TEST(ActivationTest, GELUZero) {
     // gelu(0) = 0
     std::vector<float> h_x = {0.0f};
-    Tensor d_x   = make_gpu_tensor(h_x.data(), DType::FP32, {1});
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, {1});
+    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {1});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {1});
 
     gelu(d_x, d_out);
     cudaDeviceSynchronize();
@@ -266,8 +266,8 @@ TEST(ActivationTest, GELUSymmetry) {
     // gelu(-x) should be close to -x * sigmoid(-1.702*x) for the tanh approx
     // More practically: gelu(large_positive) ≈ x, gelu(large_negative) ≈ 0
     std::vector<float> h_x = {10.0f, -10.0f};
-    Tensor d_x   = make_gpu_tensor(h_x.data(), DType::FP32, {2});
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, {2});
+    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {2});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {2});
 
     gelu(d_x, d_out);
     cudaDeviceSynchronize();
@@ -290,8 +290,8 @@ TEST(ActivationTest, GELUFP16) {
         h_ref[i] = cpu_gelu(x);
     }
 
-    Tensor d_x   = make_gpu_tensor(h_x.data(), DType::FP16, {N});
-    Tensor d_out = alloc_gpu_tensor(DType::FP16, {N});
+    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F16, {N});
+    Tensor d_out = alloc_gpu_tensor(QType::F16, {N});
 
     gelu(d_x, d_out);
     cudaDeviceSynchronize();
@@ -323,9 +323,9 @@ TEST(ActivationTest, GeGLUBasicFP16) {
         h_ref[i] = cpu_gelu(g) * u;
     }
 
-    Tensor d_gate = make_gpu_tensor(h_gate.data(), DType::FP16, {N});
-    Tensor d_up   = make_gpu_tensor(h_up.data(), DType::FP16, {N});
-    Tensor d_out  = alloc_gpu_tensor(DType::FP16, {N});
+    Tensor d_gate = make_gpu_tensor(h_gate.data(), QType::F16, {N});
+    Tensor d_up   = make_gpu_tensor(h_up.data(), QType::F16, {N});
+    Tensor d_out  = alloc_gpu_tensor(QType::F16, {N});
 
     geglu(d_gate, d_up, d_out);
     cudaDeviceSynchronize();
@@ -350,9 +350,9 @@ TEST(ActivationTest, GeGLUBasicFP32) {
     for (int i = 0; i < N; i++)
         h_ref[i] = cpu_gelu(h_gate[i]) * h_up[i];
 
-    Tensor d_gate = make_gpu_tensor(h_gate.data(), DType::FP32, {N});
-    Tensor d_up   = make_gpu_tensor(h_up.data(), DType::FP32, {N});
-    Tensor d_out  = alloc_gpu_tensor(DType::FP32, {N});
+    Tensor d_gate = make_gpu_tensor(h_gate.data(), QType::F32, {N});
+    Tensor d_up   = make_gpu_tensor(h_up.data(), QType::F32, {N});
+    Tensor d_out  = alloc_gpu_tensor(QType::F32, {N});
 
     geglu(d_gate, d_up, d_out);
     cudaDeviceSynchronize();
@@ -374,8 +374,8 @@ TEST(ActivationTest, GeluInfInput) {
     float inf = std::numeric_limits<float>::infinity();
     std::vector<float> h_x = {inf, -inf, 0.0f, 1.0f};
 
-    Tensor d_x   = make_gpu_tensor(h_x.data(), DType::FP32, {N});
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, {N});
+    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {N});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {N});
 
     gelu(d_x, d_out);
     cudaDeviceSynchronize();
@@ -404,8 +404,8 @@ TEST(SoftmaxTest, BasicFP32) {
         1.0f, 1.0f, 1.0f, 1.0f   // row 1: uniform => all 0.25
     };
 
-    Tensor d_x   = make_gpu_tensor(h_x.data(), DType::FP32, {rows, cols});
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, {rows, cols});
+    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {rows, cols});
 
     softmax(d_x, d_out);
     cudaDeviceSynchronize();
@@ -445,8 +445,8 @@ TEST(SoftmaxTest, NumericalStability) {
     }
     for (int i = 0; i < N; i++) h_ref[i] /= sum;
 
-    Tensor d_x   = make_gpu_tensor(h_x.data(), DType::FP32, {1, N});
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, {1, N});
+    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {1, N});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {1, N});
 
     softmax(d_x, d_out);
     cudaDeviceSynchronize();
@@ -465,8 +465,8 @@ TEST(SoftmaxTest, NumericalStability) {
 
 TEST(SoftmaxTest, SingleElement) {
     std::vector<float> h_x = {5.0f};
-    Tensor d_x   = make_gpu_tensor(h_x.data(), DType::FP32, {1, 1});
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, {1, 1});
+    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {1, 1});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {1, 1});
 
     softmax(d_x, d_out);
     cudaDeviceSynchronize();
@@ -483,8 +483,8 @@ TEST(SoftmaxTest, FP16) {
     constexpr int cols = 8;
     std::vector<float> h_x = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f};
 
-    Tensor d_x   = make_gpu_tensor(h_x.data(), DType::FP16, {rows, cols});
-    Tensor d_out = alloc_gpu_tensor(DType::FP16, {rows, cols});
+    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F16, {rows, cols});
+    Tensor d_out = alloc_gpu_tensor(QType::F16, {rows, cols});
 
     softmax(d_x, d_out);
     cudaDeviceSynchronize();
@@ -510,8 +510,8 @@ TEST(SoftmaxTest, LargeRow) {
     for (int i = 0; i < cols; i++)
         h_x[i] = std::sin(static_cast<float>(i) * 0.01f);
 
-    Tensor d_x   = make_gpu_tensor(h_x.data(), DType::FP32, {1, cols});
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, {1, cols});
+    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {1, cols});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {1, cols});
 
     softmax(d_x, d_out);
     cudaDeviceSynchronize();

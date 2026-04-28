@@ -13,6 +13,7 @@
 #include "graph/executor_kernels.h"
 #include "graph/gemm_context.h"
 #include "graph/executor_debug.h"
+#include "runtime/config.h"
 #include "compute/embedding.h"
 #include "compute/gemv_ggml_compat.h"
 #include "compute/ggml_mmvq.h"
@@ -97,16 +98,16 @@ namespace {
 // quantization format, the dequant buffer exists, and compute dtype is FP16.
 // ---------------------------------------------------------------------------
 static bool can_decode_fast(int n, const Tensor& expert_up_packed,
-                            GGMLQuantType up_qtype, void* dequant_buf,
-                            DType compute_dtype) {
+                            QType up_qtype, void* dequant_buf,
+                            QType compute_dtype) {
     return (n == 1 &&
             expert_up_packed.data != nullptr && dequant_buf != nullptr &&
-            compute_dtype == DType::FP16 &&
+            compute_dtype == QType::F16 &&
             expert_up_packed.on_device &&
-            (up_qtype == GGMLQuantType::Q6_K || up_qtype == GGMLQuantType::Q8_0 ||
-             up_qtype == GGMLQuantType::Q4_0 || up_qtype == GGMLQuantType::Q4_K ||
-             up_qtype == GGMLQuantType::Q5_K || up_qtype == GGMLQuantType::Q2_K ||
-             up_qtype == GGMLQuantType::Q3_K || up_qtype == GGMLQuantType::Q5_1));
+            (up_qtype == QType::Q6_K || up_qtype == QType::Q8_0 ||
+             up_qtype == QType::Q4_0 || up_qtype == QType::Q4_K ||
+             up_qtype == QType::Q5_K || up_qtype == QType::Q2_K ||
+             up_qtype == QType::Q3_K || up_qtype == QType::Q5_1));
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +116,7 @@ static bool can_decode_fast(int n, const Tensor& expert_up_packed,
 // ---------------------------------------------------------------------------
 static void apply_expert_activation(void* gate_data, void* up_data, void* swiglu_data,
                                     bool non_gated, int64_t rows, int64_t eff,
-                                    DType compute_dtype, FFNActivation act_type,
+                                    QType compute_dtype, FFNActivation act_type,
                                     cudaStream_t stream) {
     int64_t act_shape[2] = {rows, eff};
     if (non_gated) {
@@ -133,10 +134,10 @@ static void apply_expert_activation(void* gate_data, void* up_data, void* swiglu
 // ---------------------------------------------------------------------------
 // Compute expert stride (bytes between experts in a packed tensor).
 // ---------------------------------------------------------------------------
-static size_t expert_stride(const Tensor& packed, GGMLQuantType qtype) {
+static size_t expert_stride(const Tensor& packed, QType qtype) {
     int64_t rows = packed.shape[1];
     int64_t cols = packed.shape[2];
-    return static_cast<size_t>(rows) * ggml_quant_row_bytes(qtype, cols);
+    return static_cast<size_t>(rows) * qtype_row_bytes(qtype, cols);
 }
 
 } // anonymous namespace
@@ -148,7 +149,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // DIAGNOSTIC (Phase 2 Item 2 follow-up): zero MoE workspace buffers so any
     // legacy-serial-fallback uninit reads become deterministic zero reads.
     // Set IMP_MOE_ZERO_WORKSPACE=1 to enable. Cheap (~1 MiB total memset).
-    if (getenv("IMP_MOE_ZERO_WORKSPACE")) {
+    if (RuntimeConfig::current().moe.zero_workspace) {
         cudaMemsetAsync(moe_.expert_gate.data, 0, moe_.expert_gate.nbytes(), stream);
         cudaMemsetAsync(moe_.expert_up.data, 0, moe_.expert_up.nbytes(), stream);
         cudaMemsetAsync(moe_.expert_swiglu.data, 0, moe_.expert_swiglu.nbytes(), stream);
@@ -192,7 +193,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // Pre-check: does NVFP4 MoE cache cover all expert tensors for this layer?
     // If so, the NVFP4 path doesn't need Q8_1 quantization (takes FP16 directly).
     bool nvfp4_covers_layer = false;
-    if (n == 1 && compute_dtype_ == DType::FP16) {
+    if (n == 1 && compute_dtype_ == QType::F16) {
         bool has_up   = (ly.nvfp4_moe_up_ptr   != nullptr);
         bool has_down = (ly.nvfp4_moe_down_ptr  != nullptr);
         nvfp4_covers_layer = has_up && has_down;
@@ -203,7 +204,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
     // Pre-check decode fast path (same logic as will_decode_fast below)
     bool will_skip_residual_copy = can_decode_fast(n, ly.expert_up_packed,
-        ly.expert_up_qtype, moe_.dequant_buf, compute_dtype_) &&
+        ly.expert_up_packed.qtype, moe_.dequant_buf, compute_dtype_) &&
         ly.w_up_shared.data == nullptr;  // must not have shared expert for full residual fusion
 
     if (!will_skip_residual_copy) {
@@ -227,10 +228,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // at GEMM output) to isolate precision drift. Allocated below in the FP16
     // batch path; freed at moe_after_experts. Other prefill paths ignore this.
     const bool fp32_down_active = (cfg.arch == ModelArch::GEMMA4 &&
-        std::getenv("IMP_GEMMA4_FP32_EXPERT_DOWN") != nullptr);
+        RuntimeConfig::current().gemma4.fp32_expert_down);
     void* fp32_down_buf = nullptr;
     bool moe_fused_norm_q8 = (n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
-                               h.dtype == DType::FP16 && !nvfp4_covers_layer && !gemma4_fp32_norm);
+                               h.qtype == QType::F16 && !nvfp4_covers_layer && !gemma4_fp32_norm);
     if (moe_fused_norm_q8) {
         // Fused: RMSNorm + Q8_1 (also writes FP16 norm_out for gate logits)
         rmsnorm_quantize_q8_1(static_cast<const half*>(h.data),
@@ -321,13 +322,13 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     bool use_sigmoid = cfg.moe_sigmoid_gating;
     bool norm_weights = cfg.expert_weights_norm;
 
-    GGMLQuantType up_qtype = ly.expert_up_qtype;
+    QType up_qtype = ly.expert_up_packed.qtype;
     bool will_decode_fast = can_decode_fast(n, ly.expert_up_packed, up_qtype,
                                             moe_.dequant_buf, compute_dtype_);
     // Gemma 4: dp4a decode fast path ENABLED by default. dp4a matches llama's
     // Q4_K×Q8_1 accumulation for MoE experts, preventing the routing drift that
     // occurs with FP16 dequant+cuBLAS. Set IMP_G4_NO_DECODE_FAST=1 to disable.
-    if (cfg.arch == ModelArch::GEMMA4 && getenv("IMP_G4_NO_DECODE_FAST")) {
+    if (cfg.arch == ModelArch::GEMMA4 && RuntimeConfig::current().gemma4.no_decode_fast) {
         will_decode_fast = false;
     }
 
@@ -343,8 +344,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         Tensor gate_logits_f32 = slice_rows(moe_.gate_logits, n);
         // Diagnostic: dump gate logits pre-topk when IMP_DUMP_LOGITS is set.
         // Compares imp's softmax-input against llama.cpp's ffn_moe_probs-N.
-        if (const char* dl = getenv("IMP_DUMP_LOGITS")) {
-            bool dump_all = (std::strcmp(dl, "all") == 0);
+        if (const std::string& dl = RuntimeConfig::current().diagnostics.dump_logits_dir; !dl.empty()) {
+            bool dump_all = (dl == "all");
             if (layer == 29 || dump_all) {
                 int last_tok = n - 1;
                 std::vector<float> h_logits(ne);
@@ -370,7 +371,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             moe_topk_gating(gate_logits_f32, top_k, routing, stream, use_sigmoid, norm_weights, router_bias_ptr);
         }
     } else if (ne <= kMaxFusedExperts &&
-        n == 1 && compute_dtype_ == DType::FP16 && ly.moe_gate.dtype == DType::FP16 &&
+        n == 1 && compute_dtype_ == QType::F16 && ly.moe_gate.qtype == QType::F16 &&
         moe_.routing_buffers.pool && will_decode_fast) {
         // Fused: gate GEMV + softmax/sigmoid + top-k in one kernel (1 launch)
         moe_gate_topk_fused(static_cast<const half*>(ly.moe_gate.data),
@@ -382,7 +383,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         // Separate: gate GEMV → intermediate logits → topk gating
         Tensor gate_logits_f32 = slice_rows(moe_.gate_logits, n);
 
-        if (n == 1 && compute_dtype_ == DType::FP16 && ly.moe_gate.dtype == DType::FP16) {
+        if (n == 1 && compute_dtype_ == QType::F16 && ly.moe_gate.qtype == QType::F16) {
             gemv_gate_fp32(static_cast<const half*>(ly.moe_gate.data),
                            static_cast<const half*>(router_in.data),
                            static_cast<float*>(gate_logits_f32.data),
@@ -395,7 +396,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             int64_t numel = static_cast<int64_t>(n) * ne;
             int threads = 256;
             int blocks = static_cast<int>((numel + threads - 1) / threads);
-            if (compute_dtype_ == DType::FP16) {
+            if (compute_dtype_ == QType::F16) {
                 fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(
                     static_cast<const half*>(gate_logits_tmp.data),
                     static_cast<float*>(gate_logits_f32.data),
@@ -419,8 +420,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     last_tok, rsum, std::sqrt(rss), rl[0], rl[1], rl[2]);
         }
         // IMP_DUMP_LOGITS=all: dump top-8-by-value of gate logits per layer.
-        if (const char* dl = getenv("IMP_DUMP_LOGITS")) {
-            bool dump_all = (std::strcmp(dl, "all") == 0);
+        if (const std::string& dl = RuntimeConfig::current().diagnostics.dump_logits_dir; !dl.empty()) {
+            bool dump_all = (dl == "all");
             if (layer == 29 || dump_all) {
                 int last_tok = n - 1;
                 std::vector<float> h_logits(ne);
@@ -446,10 +447,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         }
     }
 
-    // Dump routing for last token (use direct getenv, not debug_forward_enabled).
-    // IMP_DUMP_ROUTING=1: only layer 0. IMP_DUMP_ROUTING=all: every layer.
-    if (const char* drv = getenv("IMP_DUMP_ROUTING")) {
-        bool dump_all = (std::strcmp(drv, "all") == 0);
+    // Dump routing for last token. [diagnostics] dump_routing_dir = "<path>"
+    // dumps layer 0 only; dump_routing_dir = "all" dumps every layer.
+    if (const std::string& drv = RuntimeConfig::current().diagnostics.dump_routing_dir; !drv.empty()) {
+        bool dump_all = (drv == "all");
         if (layer == 0 || dump_all) {
             int last_tok = n - 1;
             std::vector<int32_t> h_idx(top_k);
@@ -605,38 +606,38 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
             // 5'+6'. Fused gate+up projection (single kernel launch)
             if (!non_gated_experts) {
-                size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_qtype);
-                if (up_qtype == GGMLQuantType::Q6_K) {
+                size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype);
+                if (up_qtype == QType::Q6_K) {
                     gemv_q6k_q8_1_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
                         expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
-                } else if (up_qtype == GGMLQuantType::Q4_K) {
+                } else if (up_qtype == QType::Q4_K) {
                     gemv_q4_k_q8_1_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
                         expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
-                } else if (up_qtype == GGMLQuantType::Q5_K) {
+                } else if (up_qtype == QType::Q5_K) {
                     gemv_q5_k_q8_1_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
                         expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
-                } else if (up_qtype == GGMLQuantType::Q4_0) {
+                } else if (up_qtype == QType::Q4_0) {
                     gemv_q4_0_q8_1_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
                         expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
-                } else if (up_qtype == GGMLQuantType::Q2_K) {
+                } else if (up_qtype == QType::Q2_K) {
                     gemv_q2_k_q8_1_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
                         expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*q8_1_stride=*/0, /*d8_stride=*/0, top_k, stream);
-                } else if (up_qtype == GGMLQuantType::Q3_K) {
+                } else if (up_qtype == QType::Q3_K) {
                     gemv_q3_k_q8_1_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
                         expert_indices, q8, qscratch_.d8_buf, gate_buf, up_buf,
@@ -651,17 +652,17 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 }
             } else {
                 // Non-gated: up projection only
-                auto moe_gemv_dp4a = (up_qtype == GGMLQuantType::Q6_K)
+                auto moe_gemv_dp4a = (up_qtype == QType::Q6_K)
                     ? gemv_q6k_q8_1_moe_decode
-                    : (up_qtype == GGMLQuantType::Q4_0)
+                    : (up_qtype == QType::Q4_0)
                     ? gemv_q4_0_q8_1_moe_decode
-                    : (up_qtype == GGMLQuantType::Q4_K)
+                    : (up_qtype == QType::Q4_K)
                     ? gemv_q4_k_q8_1_moe_decode
-                    : (up_qtype == GGMLQuantType::Q5_K)
+                    : (up_qtype == QType::Q5_K)
                     ? gemv_q5_k_q8_1_moe_decode
-                    : (up_qtype == GGMLQuantType::Q2_K)
+                    : (up_qtype == QType::Q2_K)
                     ? gemv_q2_k_q8_1_moe_decode
-                    : (up_qtype == GGMLQuantType::Q3_K)
+                    : (up_qtype == QType::Q3_K)
                     ? gemv_q3_k_q8_1_moe_decode : gemv_q8_0_q8_1_moe_decode;
                 moe_gemv_dp4a(ly.expert_up_packed.data, expert_indices,
                               q8, qscratch_.d8_buf, up_buf,
@@ -673,14 +674,14 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             size_t up_stride_bytes = expert_stride(ly.expert_up_packed, up_qtype);
 
             if (!non_gated_experts) {
-                size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_qtype);
-                if (up_qtype == GGMLQuantType::Q6_K) {
+                size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype);
+                if (up_qtype == QType::Q6_K) {
                     gemv_q6k_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
                         expert_indices, norm_ptr, gate_buf, up_buf,
                         eff, d, gate_stride, up_stride_bytes,
                         /*x_stride=*/0, top_k, stream);
-                } else if (up_qtype == GGMLQuantType::Q8_0) {
+                } else if (up_qtype == QType::Q8_0) {
                     gemv_q8_0_moe_gate_up_fused(
                         ly.expert_gate_packed.data, ly.expert_up_packed.data,
                         expert_indices, norm_ptr, gate_buf, up_buf,
@@ -690,11 +691,11 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     IMP_LOG_ERROR("MoE non-dp4a gate_up_fused: no kernel for qtype %d, skipping GEMV", (int)up_qtype);
                 }
             } else {
-                if (up_qtype == GGMLQuantType::Q6_K) {
+                if (up_qtype == QType::Q6_K) {
                     gemv_q6k_moe_decode(ly.expert_up_packed.data, expert_indices,
                                         norm_ptr, up_buf,
                                         eff, d, up_stride_bytes, /*x_stride=*/0, top_k, stream);
-                } else if (up_qtype == GGMLQuantType::Q8_0) {
+                } else if (up_qtype == QType::Q8_0) {
                     gemv_q8_0_moe_decode(ly.expert_up_packed.data, expert_indices,
                                          norm_ptr, up_buf,
                                          eff, d, up_stride_bytes, /*x_stride=*/0, top_k, stream);
@@ -716,7 +717,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             if (!non_gated_experts) {
                 // Fused activation → Q8_1 (1 kernel instead of 2)
                 if (cfg.ffn_activation == FFNActivation::GEGLU) {
-                    if (layer == 0 && getenv("IMP_DEBUG_FORWARD"))
+                    if (layer == 0 && RuntimeConfig::current().diagnostics.debug_forward)
                         fprintf(stderr, "[DEBUG_MoE] Using GEGLU activation for MoE experts\n");
                     geglu_quantize_q8_1(gate_buf, up_buf, q8, qscratch_.d8_buf,
                                          top_k * eff, stream);
@@ -730,23 +731,23 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             }
 
             // Down projection with dp4a GEMV — use down_qtype, NOT up_qtype
-            GGMLQuantType dqt = ly.expert_down_qtype;
-            auto moe_gemv_dp4a_down = (dqt == GGMLQuantType::Q6_K)
+            QType dqt = ly.expert_down_packed.qtype;
+            auto moe_gemv_dp4a_down = (dqt == QType::Q6_K)
                 ? gemv_q6k_q8_1_moe_decode
-                : (dqt == GGMLQuantType::Q4_0)
+                : (dqt == QType::Q4_0)
                 ? gemv_q4_0_q8_1_moe_decode
-                : (dqt == GGMLQuantType::Q4_K)
+                : (dqt == QType::Q4_K)
                 ? gemv_q4_k_q8_1_moe_decode
-                : (dqt == GGMLQuantType::Q5_K)
+                : (dqt == QType::Q5_K)
                 ? gemv_q5_k_q8_1_moe_decode
-                : (dqt == GGMLQuantType::Q2_K)
+                : (dqt == QType::Q2_K)
                 ? gemv_q2_k_q8_1_moe_decode
-                : (dqt == GGMLQuantType::Q3_K)
+                : (dqt == QType::Q3_K)
                 ? gemv_q3_k_q8_1_moe_decode
-                : (dqt == GGMLQuantType::Q5_1)
+                : (dqt == QType::Q5_1)
                 ? gemv_q5_1_q8_1_moe_decode
                 : gemv_q8_0_q8_1_moe_decode;
-            size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_qtype);
+            size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype);
             moe_gemv_dp4a_down(ly.expert_down_packed.data, expert_indices,
                           q8, qscratch_.d8_buf, down_buf,
                           d, eff, down_stride,
@@ -757,18 +758,18 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             apply_expert_activation(gate_buf, up_buf, act_buf,
                                     non_gated_experts, top_k, eff,
                                     compute_dtype_, cfg.ffn_activation, stream);
-            size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_qtype);
+            size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype);
             half* down_input = non_gated_experts ? up_buf : act_buf;
-            if (ly.expert_down_qtype == GGMLQuantType::Q6_K) {
+            if (ly.expert_down_packed.qtype == QType::Q6_K) {
                 gemv_q6k_moe_decode(ly.expert_down_packed.data, expert_indices,
                                     down_input, down_buf,
                                     d, eff, down_stride, /*x_stride=*/eff, top_k, stream);
-            } else if (ly.expert_down_qtype == GGMLQuantType::Q8_0) {
+            } else if (ly.expert_down_packed.qtype == QType::Q8_0) {
                 gemv_q8_0_moe_decode(ly.expert_down_packed.data, expert_indices,
                                      down_input, down_buf,
                                      d, eff, down_stride, /*x_stride=*/eff, top_k, stream);
             } else {
-                IMP_LOG_ERROR("MoE non-dp4a down projection: no kernel for qtype %d, skipping GEMV", (int)ly.expert_down_qtype);
+                IMP_LOG_ERROR("MoE non-dp4a down projection: no kernel for qtype %d, skipping GEMV", (int)ly.expert_down_packed.qtype);
             }
         }
 
@@ -800,13 +801,13 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     bool can_fused_q6k = (ne > 16 &&
                           ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
                           ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
-                          up_qtype == GGMLQuantType::Q6_K &&
-                          ly.expert_down_qtype == GGMLQuantType::Q6_K &&
-                          compute_dtype_ == DType::FP16);
+                          up_qtype == QType::Q6_K &&
+                          ly.expert_down_packed.qtype == QType::Q6_K &&
+                          compute_dtype_ == QType::F16);
     if (can_fused_q6k && !non_gated_experts)
         can_fused_q6k = (ly.expert_gate_packed.data &&
                          ly.expert_gate_packed.on_device &&
-                         ly.expert_gate_qtype == GGMLQuantType::Q6_K);
+                         ly.expert_gate_packed.qtype == QType::Q6_K);
 
     bool use_tc = can_fused_q6k && (expanded > ne * 12);
     bool use_scalar = can_fused_q6k && !use_tc && (expanded <= ne * 12);
@@ -832,7 +833,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     ly.expert_gate_packed.data,
                     no.data, expert_gate_base, d_offsets,
                     eff, d,
-                    expert_stride(ly.expert_gate_packed, ly.expert_gate_qtype),
+                    expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype),
                     ne, stream, d_sorted);
 
             // Up projection
@@ -858,7 +859,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     ly.expert_gate_packed.data,
                     gathered_base, expert_gate_base, d_offsets,
                     eff, d,
-                    expert_stride(ly.expert_gate_packed, ly.expert_gate_qtype),
+                    expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype),
                     ne, stream);
 
             gemm_q6k_fused_moe_prefill(
@@ -881,19 +882,19 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 ly.expert_down_packed.data,
                 fused_down_act, expert_down_base, d_offsets,
                 d, eff,
-                expert_stride(ly.expert_down_packed, ly.expert_down_qtype),
+                expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype),
                 ne, stream);
         } else {
             gemm_q6k_fused_moe_prefill(
                 ly.expert_down_packed.data,
                 fused_down_act, expert_down_base, d_offsets,
                 d, eff,
-                expert_stride(ly.expert_down_packed, ly.expert_down_qtype),
+                expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype),
                 ne, stream);
         }
 
         // Falls through to scatter (step 7)
-    } else if (getenv("IMP_G4_GGML_PREFILL") && cfg.arch == ModelArch::GEMMA4 &&
+    } else if (RuntimeConfig::current().gemma4.ggml_prefill && cfg.arch == ModelArch::GEMMA4 &&
                ly.expert_gate_packed.on_device && ly.expert_up_packed.on_device &&
                ly.expert_down_packed.on_device) {
     // =========================================================================
@@ -907,9 +908,9 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     half* up_buf   = static_cast<half*>(moe_.expert_up.data);
     half* down_buf = static_cast<half*>(moe_.expert_down.data);
 
-    size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_qtype);
+    size_t gate_stride = expert_stride(ly.expert_gate_packed, ly.expert_gate_packed.qtype);
     size_t up_stride = expert_stride(ly.expert_up_packed, up_qtype);
-    size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_qtype);
+    size_t down_stride = expert_stride(ly.expert_down_packed, ly.expert_down_packed.qtype);
 
     // Dedicated Q8_1 scratch buffer (persistent, sized for max of gate/up input d and down input eff)
     static void* s_q8_scratch = nullptr;
@@ -944,7 +945,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         if (fp32_accum_buf_ != nullptr) {
             int64_t tok_shape[2] = {1, static_cast<int64_t>(d)};
             Tensor fp32_tok(static_cast<float*>(fp32_hidden_.data) + static_cast<int64_t>(t) * d,
-                           DType::FP32, 2, tok_shape, true);
+                           QType::F32, 2, tok_shape, true);
             rmsnorm_fp32_to_fp32(fp32_tok, norm_w, s_norm_fp32, 1, d,
                                 eps, stream, norm_w_off_);
         } else {
@@ -965,10 +966,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             const uint8_t* up_w = static_cast<const uint8_t*>(ly.expert_up_packed.data)
                                 + static_cast<size_t>(eid) * up_stride;
 
-            auto do_mmvq = [&](const uint8_t* w, half* out, GGMLQuantType qt) {
+            auto do_mmvq = [&](const uint8_t* w, half* out, QType qt) {
                 if (tok_norm_f32) {
                     switch (qt) {
-                        case GGMLQuantType::Q4_K:
+                        case QType::Q4_K:
                             ggml_mmvq_q4k_f32(w, tok_norm_f32, out, 1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
                             break;
                         default:
@@ -978,10 +979,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 } else {
                     const half* tok_norm_fp16 = static_cast<const half*>(no.data) + static_cast<int64_t>(t) * d;
                     switch (qt) {
-                        case GGMLQuantType::Q4_K:
+                        case QType::Q4_K:
                             ggml_mmvq_q4k(w, tok_norm_fp16, out, 1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
                             break;
-                        case GGMLQuantType::Q8_0:
+                        case QType::Q8_0:
                             ggml_mmvq_q8_0(w, tok_norm_fp16, out, 1, eff, d, s_q8_scratch, s_q8_scratch_size, stream);
                             break;
                         default:
@@ -990,7 +991,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     }
                 }
             };
-            do_mmvq(gate_w, gate_buf + static_cast<int64_t>(k) * eff, ly.expert_gate_qtype);
+            do_mmvq(gate_w, gate_buf + static_cast<int64_t>(k) * eff, ly.expert_gate_packed.qtype);
             do_mmvq(up_w, up_buf + static_cast<int64_t>(k) * eff, up_qtype);
         }
 
@@ -1008,17 +1009,17 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             half* act_k = swiglu_buf + static_cast<int64_t>(k) * eff;
             half* out_k = down_buf + static_cast<int64_t>(k) * d;
 
-            switch (ly.expert_down_qtype) {
-                case GGMLQuantType::Q4_K:
+            switch (ly.expert_down_packed.qtype) {
+                case QType::Q4_K:
                     ggml_mmvq_q4k(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size, stream);
                     break;
-                case GGMLQuantType::Q5_K:
+                case QType::Q5_K:
                     ggml_mmvq_q5k(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size, stream);
                     break;
-                case GGMLQuantType::Q8_0:
+                case QType::Q8_0:
                     ggml_mmvq_q8_0(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size, stream);
                     break;
-                case GGMLQuantType::Q5_1:
+                case QType::Q5_1:
                     ggml_mmvq_q5_1(w_down, act_k, out_k, 1, d, eff, s_q8_scratch, s_q8_scratch_size, stream);
                     break;
                 default:
@@ -1066,11 +1067,11 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
         ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
         dequant_gpu_supported(up_qtype) &&
-        dequant_gpu_supported(ly.expert_down_qtype));
+        dequant_gpu_supported(ly.expert_down_packed.qtype));
     if (can_fp16_batch_nosync && !non_gated_experts)
         can_fp16_batch_nosync = (ly.expert_gate_packed.data &&
                                   ly.expert_gate_packed.on_device &&
-                                  dequant_gpu_supported(ly.expert_gate_qtype));
+                                  dequant_gpu_supported(ly.expert_gate_packed.qtype));
 
     // FP8 batch check: fallback when FP16 batch isn't available
     size_t up_fp8_sz   = static_cast<size_t>(ne) * ly.expert_up_packed.shape[1]
@@ -1086,14 +1087,14 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                           moe_.batch_dequant_buf_size >= fp8_buf_needed &&
                           ly.expert_up_packed.data && ly.expert_up_packed.on_device &&
                           ly.expert_down_packed.data && ly.expert_down_packed.on_device &&
-                          up_qtype == GGMLQuantType::Q6_K &&
-                          ly.expert_down_qtype == GGMLQuantType::Q6_K &&
-                          compute_dtype_ == DType::FP16 &&
+                          up_qtype == QType::Q6_K &&
+                          ly.expert_down_packed.qtype == QType::Q6_K &&
+                          compute_dtype_ == QType::F16 &&
                           ly.fp16_packed_up_cache == nullptr);
     if (can_fp8_batch && !non_gated_experts)
         can_fp8_batch = (ly.expert_gate_packed.data &&
                          ly.expert_gate_packed.on_device &&
-                         ly.expert_gate_qtype == GGMLQuantType::Q6_K);
+                         ly.expert_gate_packed.qtype == QType::Q6_K);
 
     if (debug_forward_enabled() && layer == 0) {
         int64_t gs[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(d)};
@@ -1130,10 +1131,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             IMP_CUDA_CHECK_LOG(cudaMallocAsync(&fp32_down_buf, fp32_bytes, stream));
         }
 
-        auto batch_dequant_gemm = [&](const Tensor& packed, GGMLQuantType qtype,
+        auto batch_dequant_gemm = [&](const Tensor& packed, QType qtype,
                                        const char* a_base, char* c_base,
                                        int K_dim, int N_dim,
-                                       DType out_dtype = DType::FP16) {
+                                       QType out_dtype = QType::F16) {
             int64_t rows = packed.shape[1];
             int64_t cols = packed.shape[2];
             size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
@@ -1147,14 +1148,14 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
             gemm_moe_batched(a_base, c_base,
                              h_offsets.data(), b_ptrs.data(),
-                             K_dim, N_dim, DType::FP16, ne, stream,
+                             K_dim, N_dim, QType::F16, ne, stream,
                              moe_.d_work_ptrs,
                              out_dtype);
         };
 
         // Gate projection
         if (!non_gated_experts)
-            batch_dequant_gemm(ly.expert_gate_packed, ly.expert_gate_qtype,
+            batch_dequant_gemm(ly.expert_gate_packed, ly.expert_gate_packed.qtype,
                                 gathered_base, expert_gate_base, d, eff);
         if (debug_forward_enabled() && layer == 0) {
             int64_t sh[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(eff)};
@@ -1186,8 +1187,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         char* down_target = fp32_down_active
             ? static_cast<char*>(fp32_down_buf)
             : expert_down_base;
-        DType down_out_dtype = fp32_down_active ? DType::FP32 : DType::FP16;
-        batch_dequant_gemm(ly.expert_down_packed, ly.expert_down_qtype,
+        QType down_out_dtype = fp32_down_active ? QType::F32 : QType::F16;
+        batch_dequant_gemm(ly.expert_down_packed, ly.expert_down_packed.qtype,
                             down_act, down_target, eff, d, down_out_dtype);
         if (debug_forward_enabled() && layer == 0 && !fp32_down_active) {
             int64_t sh[2] = {static_cast<int64_t>(expanded), static_cast<int64_t>(d)};
@@ -1205,7 +1206,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         char* buf = static_cast<char*>(moe_.batch_dequant_buf);
 
         // FP8 batched GEMM lambda: dequant Q6_K→FP8, quantize FP16 acts→FP8, cuBLAS FP8 GEMM→FP16
-        auto chunked_fp8_gemm = [&](const Tensor& packed, GGMLQuantType qtype,
+        auto chunked_fp8_gemm = [&](const Tensor& packed, QType qtype,
                                      const char* a_base_fp16, char* c_base_fp16,
                                      int K_dim, int N_dim) {
             int64_t rows = packed.shape[1];
@@ -1261,8 +1262,8 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
             gemm_moe_batched(fp8_acts, c_base_fp16,
                              h_offsets.data(), weight_ptrs.data(),
-                             K_dim, N_dim, DType::FP8_E4M3, ne, stream,
-                             moe_.d_work_ptrs, /*output_dtype=*/DType::FP16,
+                             K_dim, N_dim, QType::FP8_E4M3, ne, stream,
+                             moe_.d_work_ptrs, /*output_dtype=*/QType::F16,
                              moe_.d_fp8_scales ? h_act_scales.data() : nullptr);
         };
 
@@ -1274,7 +1275,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
         // Gate projection (gated models only)
         if (!non_gated_experts)
-            chunked_fp8_gemm(ly.expert_gate_packed, ly.expert_gate_qtype,
+            chunked_fp8_gemm(ly.expert_gate_packed, ly.expert_gate_packed.qtype,
                              gathered_base, expert_gate_base, d, eff);
 
         // Up projection
@@ -1288,7 +1289,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
         // Down projection: up buffer for non-gated (relu² in-place), swiglu for gated
         char* fp8_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
-        chunked_fp8_gemm(ly.expert_down_packed, ly.expert_down_qtype,
+        chunked_fp8_gemm(ly.expert_down_packed, ly.expert_down_packed.qtype,
                          fp8_down_act, expert_down_base, eff, d);
 
         // Falls through to existing scatter (step 7)
@@ -1335,7 +1336,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
             gemm_moe_batched(a_base, c_base,
                              h_offsets.data(), b_ptrs.data(),
-                             K_dim, N_dim, DType::FP16, ne, stream,
+                             K_dim, N_dim, QType::F16, ne, stream,
                              moe_.d_work_ptrs);
         };
 
@@ -1367,7 +1368,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         //   Decode n=1:    ~48 tok/s (vs legacy ~38)     — 25% win
         // After shared-quantize gate+up (2026-04-20), 3.x beats legacy at all n.
         // `IMP_NO_CUTLASS3X_MOE=1` forces legacy (for debugging).
-        static const bool force_off = std::getenv("IMP_NO_CUTLASS3X_MOE") != nullptr;
+        static const bool force_off = RuntimeConfig::current().moe.no_cutlass3x;
         if (force_off) return false;
         if (!cutlass_grouped_3x_nvfp4_available()) return false;
         if (!moe_.cutlass3x_packed || !moe_.cutlass3x_sf) return false;
@@ -1527,11 +1528,11 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // Returns a Tensor view into the scratch buffer with shape [rows, cols], FP16.
     // Uses slot 0 always -- safe because all ops are on the same stream, so the previous
     // GEMM reading from slot 0 completes before the next dequant writes to it.
-    auto dequant_expert = [&](const Tensor& packed, GGMLQuantType qtype,
+    auto dequant_expert = [&](const Tensor& packed, QType qtype,
                               int expert_idx) -> Tensor {
         int64_t rows = packed.shape[1];
         int64_t cols = packed.shape[2];
-        size_t row_bytes = ggml_quant_row_bytes(qtype, cols);
+        size_t row_bytes = qtype_row_bytes(qtype, cols);
         size_t expert_raw = static_cast<size_t>(rows) * row_bytes;
         size_t total_raw = static_cast<size_t>(packed.shape[0]) * expert_raw;
         size_t offset = static_cast<size_t>(expert_idx) * expert_raw;
@@ -1580,7 +1581,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         dequant_gpu(src, dst, qtype, static_cast<int>(rows), static_cast<int>(cols), stream);
 
         int64_t shape[2] = {rows, cols};
-        return Tensor(dst, DType::FP16, 2, shape, true);
+        return Tensor(dst, QType::F16, 2, shape, true);
     };
 
     // Helper: try fused quantized GEMV for count=1 decode (dequant+dot in one kernel),
@@ -1588,7 +1589,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     // For host-resident experts: H2D to staging buffer, then fused GEMV on staging —
     // eliminates separate dequant_gpu + cuBLAS gemm overhead.
     auto expert_gemm = [&](const Tensor& a, Tensor& c,
-                            const Tensor& packed, GGMLQuantType qtype,
+                            const Tensor& packed, QType qtype,
                             const std::vector<Tensor>& fallback,
                             const std::vector<TensorID>& fallback_ids, int eidx) {
         // NVFP4 prequant path: native NVFP4 GEMV (any batch size)
@@ -1631,18 +1632,18 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 int64_t a_shape[2] = {static_cast<int64_t>(M), static_cast<int64_t>(K_dim)};
                 int64_t c_shape[2] = {static_cast<int64_t>(M), static_cast<int64_t>(N_dim)};
                 Tensor a_t(const_cast<void*>(static_cast<const void*>(a.data)),
-                           DType::FP16, 2, a_shape, true);
-                Tensor c_t(c.data, DType::FP16, 2, c_shape, true);
+                           QType::F16, 2, a_shape, true);
+                Tensor c_t(c.data, QType::F16, 2, c_shape, true);
                 gemm_nvfp4(nw, a_t, c_t, stream);
             }
             return;
         }
         if (a.shape[0] == 1 && use_packed_dequant &&
-            compute_dtype_ == DType::FP16 &&
-            (qtype == GGMLQuantType::Q6_K || qtype == GGMLQuantType::Q8_0)) {
+            compute_dtype_ == QType::F16 &&
+            (qtype == QType::Q6_K || qtype == QType::Q8_0)) {
             int64_t rows = packed.shape[1];
             int64_t cols = packed.shape[2];
-            size_t rb = ggml_quant_row_bytes(qtype, cols);
+            size_t rb = qtype_row_bytes(qtype, cols);
             const void* w = nullptr;
 
             if (packed.on_device) {
@@ -1665,7 +1666,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             }
 
             if (w) {
-                auto fn = (qtype == GGMLQuantType::Q6_K) ? gemv_q6k : gemv_q8_0;
+                auto fn = (qtype == QType::Q6_K) ? gemv_q6k : gemv_q8_0;
                 fn(w, static_cast<const half*>(a.data), static_cast<half*>(c.data),
                    static_cast<int>(rows), static_cast<int>(cols), stream);
                 return;
@@ -1677,6 +1678,37 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 ? dequant_expert(packed, qtype, eidx)
                 : fallback[eidx];
             if (!b.data) return;  // dequant_expert failed (OOB or buffer too small)
+
+            // SafeTensors NVFP4 prequant: per-expert weights got promoted to
+            // qtype=NVFP4 + scales/tensor_scale sidecars at engine init
+            // (executor_pre_dequant.cu Phase 0). The legacy fallback below
+            // expects an FP16 weight; calling cuBLAS gemm with qtype=NVFP4
+            // would crash with "unsupported dtype 71". Route through the
+            // native NVFP4 path — same logic as the WeightHandle-driven
+            // has_nvfp4_id branch above.
+            if (b.qtype == QType::NVFP4 && b.scales != nullptr) {
+                NvFP4QuantResult nw;
+                nw.packed_data  = b.data;
+                nw.micro_scales = b.scales;
+                nw.tensor_scale = b.tensor_scale;
+                nw.N = static_cast<int>(b.shape[0]);
+                nw.K = static_cast<int>(b.shape[1]) * 2;  // packed → logical
+                if (a.shape[0] == 1) {
+                    gemv_nvfp4_kpar(nw, static_cast<const half*>(a.data),
+                                    static_cast<half*>(c.data),
+                                    static_cast<int>(nw.N),
+                                    static_cast<int>(nw.K), stream);
+                } else {
+                    int64_t a_shape[2] = {a.shape[0], static_cast<int64_t>(nw.K)};
+                    int64_t c_shape[2] = {a.shape[0], static_cast<int64_t>(nw.N)};
+                    Tensor a_t(const_cast<void*>(static_cast<const void*>(a.data)),
+                               QType::F16, 2, a_shape, true);
+                    Tensor c_t(c.data, QType::F16, 2, c_shape, true);
+                    gemm_nvfp4(nw, a_t, c_t, stream);
+                }
+                return;
+            }
+
             gemm(a, b, c, 1.0f, 0.0f, stream);
         }
     };
@@ -1689,7 +1721,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
         // Helper: get FP16 expert weight pointer from pre-dequant cache or unpacked weights.
         // fp16_cache is the borrowed Tensor* for the packed tensor's FP16 cache entry.
-        auto get_fp16_expert_ptr = [&](const Tensor& packed, GGMLQuantType /*qtype*/,
+        auto get_fp16_expert_ptr = [&](const Tensor& packed, QType /*qtype*/,
                                         const std::vector<Tensor>& fallback,
                                         const Tensor* fp16_cache,
                                         int eidx) -> const void* {
@@ -1700,7 +1732,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 return static_cast<const char*>(fp16_cache->data) + expert_offset;
             }
             if (!fallback.empty() && static_cast<size_t>(eidx) < fallback.size() &&
-                fallback[eidx].data && fallback[eidx].dtype == DType::FP16 &&
+                fallback[eidx].data && fallback[eidx].qtype == QType::F16 &&
                 fallback[eidx].on_device) {
                 return fallback[eidx].data;
             }
@@ -1710,7 +1742,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         // Helper: batch dequant all experts + single grouped GEMM.
         // Dequants all experts to FP16, then runs a single batched GEMM.
         // CUTLASS 2.x GemmGrouped provides lower launch overhead than cuBLAS.
-        auto chunked_dequant_gemm = [&](const Tensor& packed, GGMLQuantType qtype,
+        auto chunked_dequant_gemm = [&](const Tensor& packed, QType qtype,
                                         const std::vector<Tensor>& fallback,
                                         const std::vector<TensorID>& fallback_ids,
                                         const char* a_base, char* c_base,
@@ -1719,7 +1751,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             int64_t cols = packed.shape[2];
             size_t expert_fp16_sz = static_cast<size_t>(rows) * cols * sizeof(half);
             size_t expert_raw_sz = static_cast<size_t>(rows)
-                                   * ggml_quant_row_bytes(qtype, cols);
+                                   * qtype_row_bytes(qtype, cols);
 
             if (!moe_.batch_dequant_buf || expert_fp16_sz == 0) {
                 // No buffer — serial fallback
@@ -1759,7 +1791,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             // individual cublasLtMatmul calls).
             gemm_moe_batched(a_base, c_base,
                              h_offsets.data(), b_ptrs.data(),
-                             K_dim, N_dim, DType::FP16, ne, stream,
+                             K_dim, N_dim, QType::F16, ne, stream,
                              moe_.d_work_ptrs);
         };
 
@@ -1773,7 +1805,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
         bool can_dequant_batch = (moe_.batch_dequant_buf != nullptr &&
                                    ly.expert_up_packed.data != nullptr &&
                                    ly.expert_up_packed.on_device &&
-                                   dequant_gpu_supported(ly.expert_up_qtype));
+                                   dequant_gpu_supported(ly.expert_up_packed.qtype));
 
         if (has_precached_up) {
             // Pre-cached FP16 path — all expert packs in fp16_packed_*_cache
@@ -1783,22 +1815,22 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             std::vector<const void*> down_w_ptrs(ne, nullptr);
 
             for (int e = 0; e < ne; e++) {
-                up_w_ptrs[e] = get_fp16_expert_ptr(ly.expert_up_packed, ly.expert_up_qtype,
+                up_w_ptrs[e] = get_fp16_expert_ptr(ly.expert_up_packed, ly.expert_up_packed.qtype,
                                                      ly.expert_w_up, ly.fp16_packed_up_cache, e);
                 if (!non_gated_experts)
-                    gate_w_ptrs[e] = get_fp16_expert_ptr(ly.expert_gate_packed, ly.expert_gate_qtype,
+                    gate_w_ptrs[e] = get_fp16_expert_ptr(ly.expert_gate_packed, ly.expert_gate_packed.qtype,
                                                            ly.expert_w_gate, ly.fp16_packed_gate_cache, e);
-                down_w_ptrs[e] = get_fp16_expert_ptr(ly.expert_down_packed, ly.expert_down_qtype,
+                down_w_ptrs[e] = get_fp16_expert_ptr(ly.expert_down_packed, ly.expert_down_packed.qtype,
                                                        ly.expert_w_down, ly.fp16_packed_down_cache, e);
             }
 
             if (!non_gated_experts)
                 gemm_moe_batched(gathered_base, expert_gate_base,
                                   h_offsets.data(), gate_w_ptrs.data(),
-                                  d, eff, DType::FP16, ne, stream, moe_.d_work_ptrs);
+                                  d, eff, QType::F16, ne, stream, moe_.d_work_ptrs);
             gemm_moe_batched(gathered_base, expert_up_base,
                               h_offsets.data(), up_w_ptrs.data(),
-                              d, eff, DType::FP16, ne, stream, moe_.d_work_ptrs);
+                              d, eff, QType::F16, ne, stream, moe_.d_work_ptrs);
 
             apply_expert_activation(moe_.expert_gate.data, moe_.expert_up.data,
                                     moe_.expert_swiglu.data, non_gated_experts,
@@ -1808,7 +1840,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 char* batch_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
                 gemm_moe_batched(batch_down_act, expert_down_base,
                                   h_offsets.data(), down_w_ptrs.data(),
-                                  eff, d, DType::FP16, ne, stream, moe_.d_work_ptrs);
+                                  eff, d, QType::F16, ne, stream, moe_.d_work_ptrs);
             }
 
         } else if (can_dequant_batch) {
@@ -1816,10 +1848,10 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             // Dequant all experts to FP16, then single grouped GEMM via CUTLASS.
 
             if (!non_gated_experts)
-                chunked_dequant_gemm(ly.expert_gate_packed, ly.expert_gate_qtype,
+                chunked_dequant_gemm(ly.expert_gate_packed, ly.expert_gate_packed.qtype,
                                      ly.expert_w_gate, ly.expert_gate_ids,
                                      gathered_base, expert_gate_base, d, eff);
-            chunked_dequant_gemm(ly.expert_up_packed, ly.expert_up_qtype,
+            chunked_dequant_gemm(ly.expert_up_packed, ly.expert_up_packed.qtype,
                                  ly.expert_w_up, ly.expert_up_ids,
                                  gathered_base, expert_up_base, d, eff);
 
@@ -1829,7 +1861,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
 
             {
                 char* dequant_down_act = non_gated_experts ? expert_up_base : expert_swiglu_base;
-                chunked_dequant_gemm(ly.expert_down_packed, ly.expert_down_qtype,
+                chunked_dequant_gemm(ly.expert_down_packed, ly.expert_down_packed.qtype,
                                      ly.expert_w_down, ly.expert_down_ids,
                                      dequant_down_act, expert_down_base, eff, d);
             }
@@ -1852,7 +1884,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     Tensor c_view(expert_gate_base + static_cast<size_t>(start) * eff * es,
                                   compute_dtype_, 2, c_shape, true);
                     expert_gemm(a_view, c_view, ly.expert_gate_packed,
-                                ly.expert_gate_qtype, ly.expert_w_gate, ly.expert_gate_ids, e);
+                                ly.expert_gate_packed.qtype, ly.expert_w_gate, ly.expert_gate_ids, e);
                 }
 
                 {
@@ -1860,7 +1892,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                     Tensor c_view(expert_up_base + static_cast<size_t>(start) * eff * es,
                                   compute_dtype_, 2, c_shape, true);
                     expert_gemm(a_view, c_view, ly.expert_up_packed,
-                                ly.expert_up_qtype, ly.expert_w_up, ly.expert_up_ids, e);
+                                ly.expert_up_packed.qtype, ly.expert_w_up, ly.expert_up_ids, e);
                 }
             }
 
@@ -1885,7 +1917,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 Tensor c_view(expert_down_base + static_cast<size_t>(start) * d * es,
                               compute_dtype_, 2, c_shape, true);
                 expert_gemm(a_view, c_view, ly.expert_down_packed,
-                            ly.expert_down_qtype, ly.expert_w_down, ly.expert_down_ids, e);
+                            ly.expert_down_packed.qtype, ly.expert_w_down, ly.expert_down_ids, e);
             }
         }
     }
@@ -1899,7 +1931,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
     //      Fallback: atomicAdd scatter + FP32->FP16 convert.
     {
         bool has_shared_expert = (ly.w_up_shared.data != nullptr);
-        if (routing.token_to_expanded && compute_dtype_ == DType::FP16) {
+        if (routing.token_to_expanded && compute_dtype_ == QType::F16) {
             // Fused token-centric scatter: no atomics, no FP32 intermediate buffer.
             // If no shared expert, also fuse residual add.
             // Gemma-4 FP32 path: defer residual to post_ffn_norm (FP32 accumulator).
@@ -1934,7 +1966,7 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
             int64_t numel = static_cast<int64_t>(n) * d;
             int threads = 256;
             int blocks = static_cast<int>((numel + threads - 1) / threads);
-            if (compute_dtype_ == DType::FP16) {
+            if (compute_dtype_ == QType::F16) {
                 fp32_to_fp16_kernel<<<blocks, threads, 0, stream>>>(
                     static_cast<const float*>(moe_.scatter_out.data),
                     static_cast<half*>(h.data),
@@ -1984,7 +2016,7 @@ moe_after_experts:
 
     // Shared expert: enabled by default. Gemma 4: requires post_ffw_norm_1 to be uploaded.
     // DIAGNOSTIC: IMP_NO_SHARED_MLP=1 skips this branch (Gemma-4 NVFP4 audit).
-    static const bool s_no_shared_mlp = (getenv("IMP_NO_SHARED_MLP") != nullptr);
+    static const bool s_no_shared_mlp = RuntimeConfig::current().moe.no_shared_mlp;
     if (ly.w_up_shared.data != nullptr && !s_no_shared_mlp) {
         int eff_shared = static_cast<int>(ly.w_up_shared.shape[0]);
         bool shared_gated = (ly.w_gate_shared.data != nullptr);
@@ -2001,12 +2033,12 @@ moe_after_experts:
         // Up projection (dp4a MMVQ for decode)
         {
             auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_);
-            gemm_dispatch(no, ly.w_up_shared, ly.w_up_shared_qtype, sh_up, ctx);
+            gemm_dispatch(no, ly.w_up_shared, sh_up, ctx);
 
             if (shared_gated) {
                 // Gated: gate + SwiGLU
                 Tensor sh_gate(moe_.expert_gate.data, compute_dtype_, 2, sh_shape, true);
-                gemm_dispatch(no, ly.w_gate_shared, ly.w_gate_shared_qtype, sh_gate, ctx);
+                gemm_dispatch(no, ly.w_gate_shared, sh_gate, ctx);
                 if (cfg.ffn_activation == FFNActivation::GEGLU)
                     geglu(sh_gate, sh_up, sh_swiglu, stream);
                 else
@@ -2025,7 +2057,7 @@ moe_after_experts:
             // Down projection (reads from sh_up for non-gated since relu² was in-place)
             Tensor& sh_act = shared_gated ? sh_swiglu : sh_up;
             if (layer == 0) debug_tensor_stats_all("L0_sh_act_preDown", sh_act, stream);
-            gemm_dispatch(sh_act, ly.w_down_shared, ly.w_down_shared_qtype, sh_down, ctx);
+            gemm_dispatch(sh_act, ly.w_down_shared, sh_down, ctx);
         }
 
         if (layer == 0) {
@@ -2042,7 +2074,7 @@ moe_after_experts:
         }
         // Gemma 4: apply post_ffw_norm_1 on shared MLP output (sh_down).
         if (cfg.arch == ModelArch::GEMMA4 && ly.ffn_post_norm_1.data != nullptr &&
-            getenv("IMP_G4_NO_POST_FFW_1") == nullptr) {
+            !RuntimeConfig::current().gemma4.no_post_ffw_1) {
             rmsnorm(sh_down, ly.ffn_post_norm_1, sh_down, eps, stream, norm_w_off_);
         }
 
@@ -2058,11 +2090,11 @@ moe_after_experts:
         //   gate[r] = sigmoid(sum_d no[r,d] * W_gate_inp_shexp[d])
         //   sh_down[r, :] *= gate[r]
         // Absent in Qwen3 MoE / Gemma-4 (tensor pointer is null → skip).
-        static const bool skip_shexp_gate = std::getenv("IMP_NO_SHEXP_GATE") != nullptr;
+        static const bool skip_shexp_gate = RuntimeConfig::current().moe.no_shexp_gate;
         if (!skip_shexp_gate &&
             ly.shared_expert_gate_inp.data != nullptr &&
             ly.shared_expert_gate_inp.on_device &&
-            compute_dtype_ == DType::FP16) {
+            compute_dtype_ == QType::F16) {
             shared_expert_gate_scale(
                 no.data,
                 ly.shared_expert_gate_inp.data,

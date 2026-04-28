@@ -26,6 +26,7 @@
 #include "compute/attention_fmha_mxf4nvf4_sm120.h"
 #include "compute/attention_fmha_mxfp4_sm120.h"
 #include "core/logging.h"
+#include "runtime/config.h"
 #include <cuda_runtime.h>
 #include <cstdlib>
 #include <cstring>
@@ -33,16 +34,8 @@
 namespace imp {
 
 bool mxf4nvf4_blockscale_disabled() {
-    static int cached = -1;
-    if (cached < 0) {
-        const char* v = std::getenv("IMP_FMHA_BLOCKSCALE");
-        cached = (v != nullptr && std::strcmp(v, "0") == 0) ? 1 : 0;
-        if (cached) {
-            IMP_LOG_INFO("IMP_FMHA_BLOCKSCALE=0: MXFP4 attention forced to "
-                         "legacy kind::f8f6f4.m16n8k32 path (A/B debug only).");
-        }
-    }
-    return cached == 1;
+    // [attention] fmha_blockscale = "auto" (default) | "off"
+    return RuntimeConfig::current().attention.fmha_blockscale == "off";
 }
 
 bool mxf4nvf4_blockscale_enabled() {

@@ -1,8 +1,14 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 struct ServerArgs {
+    // imp.conf integration. --config overrides the search-path default;
+    // --set is a repeatable key=value applied on top.
+    std::string config_path;
+    std::vector<std::string> config_overrides;
+
     std::string model_path;
     std::string revision;      // --revision: HuggingFace model revision (branch/tag/commit)
     std::string host = "127.0.0.1";

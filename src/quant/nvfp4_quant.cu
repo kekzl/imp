@@ -318,7 +318,7 @@ float calibrate_nvfp4_scales(const Tensor& input, cudaStream_t stream,
                               float* d_reusable_max)
 {
     assert(input.on_device && "input must be on device");
-    assert(input.dtype == DType::FP16 && "input must be FP16");
+    assert(input.qtype == QType::F16 && "input must be FP16");
 
     int64_t n_elements = input.numel();
 
@@ -363,7 +363,7 @@ void quantize_fp16_to_nvfp4(const Tensor& input, NvFP4QuantResult& result,
                              cudaStream_t stream)
 {
     assert(input.on_device && "input must be on device");
-    assert(input.dtype == DType::FP16 && "input must be FP16");
+    assert(input.qtype == QType::F16 && "input must be FP16");
     assert(input.ndim == 2 && "input must be 2D [N, K]");
 
     int64_t N = input.shape[0];
@@ -412,7 +412,7 @@ void quantize_fp16_to_nvfp4_async(const Tensor& input, NvFP4QuantResult& result,
                                    cudaStream_t stream)
 {
     assert(input.on_device && "input must be on device");
-    assert(input.dtype == DType::FP16 && "input must be FP16");
+    assert(input.qtype == QType::F16 && "input must be FP16");
     assert(input.ndim == 2 && "input must be 2D [N, K]");
 
     int64_t N = input.shape[0];
@@ -574,7 +574,7 @@ void free_nvfp4_result(NvFP4QuantResult& result)
 // ---------------------------------------------------------------------------
 
 void quantize_packed_experts_to_nvfp4(
-    const void* packed_ggml_data, GGMLQuantType qtype,
+    const void* packed_ggml_data, QType qtype,
     int n_experts, int eff, int K,
     void* dequant_scratch,
     NvFP4MoEQuantResult& result,
@@ -599,7 +599,7 @@ void quantize_packed_experts_to_nvfp4(
     IMP_CUDA_CHECK_LOG(cudaMalloc(&d_tensor_scales, n_experts * sizeof(float)));
 
     // Compute expert stride in source GGML data
-    size_t src_expert_stride = static_cast<size_t>(eff) * ggml_quant_row_bytes(qtype, K);
+    size_t src_expert_stride = static_cast<size_t>(eff) * qtype_row_bytes(qtype, K);
 
     // Temporary device buffer for absmax reduction
     float* d_global_max = nullptr;

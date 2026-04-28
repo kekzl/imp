@@ -34,17 +34,17 @@ static cublasHandle_t get_cublas_handle() {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: map DType -> cudaDataType
+// Helper: map QType -> cudaDataType
 // ---------------------------------------------------------------------------
-static cudaDataType_t dtype_to_cuda(DType dt) {
+static cudaDataType_t dtype_to_cuda(QType dt) {
     switch (dt) {
-        case DType::FP32:     return CUDA_R_32F;
-        case DType::FP16:     return CUDA_R_16F;
-        case DType::BF16:     return CUDA_R_16BF;
-        case DType::FP8_E4M3: return CUDA_R_8F_E4M3;
-        case DType::FP8_E5M2: return CUDA_R_8F_E5M2;
-        case DType::INT8:     return CUDA_R_8I;
-        case DType::INT32:    return CUDA_R_32I;
+        case QType::F32:     return CUDA_R_32F;
+        case QType::F16:     return CUDA_R_16F;
+        case QType::BF16:     return CUDA_R_16BF;
+        case QType::FP8_E4M3: return CUDA_R_8F_E4M3;
+        case QType::FP8_E5M2: return CUDA_R_8F_E5M2;
+        case QType::INT8:     return CUDA_R_8I;
+        case QType::INT32:    return CUDA_R_32I;
         default:
             fprintf(stderr, "imp::gemm_grouped: unsupported dtype %d\n", (int)dt);
             abort();
@@ -54,14 +54,14 @@ static cudaDataType_t dtype_to_cuda(DType dt) {
 // ---------------------------------------------------------------------------
 // Helper: choose cuBLAS compute type for a given operand dtype
 // ---------------------------------------------------------------------------
-static cublasComputeType_t dtype_to_compute(DType dt) {
+static cublasComputeType_t dtype_to_compute(QType dt) {
     switch (dt) {
-        case DType::FP32:     return CUBLAS_COMPUTE_32F;
-        case DType::FP16:     return CUBLAS_COMPUTE_32F;
-        case DType::BF16:     return CUBLAS_COMPUTE_32F;
-        case DType::FP8_E4M3: return CUBLAS_COMPUTE_32F;
-        case DType::FP8_E5M2: return CUBLAS_COMPUTE_32F;
-        case DType::INT8:     return CUBLAS_COMPUTE_32I;
+        case QType::F32:     return CUBLAS_COMPUTE_32F;
+        case QType::F16:     return CUBLAS_COMPUTE_32F;
+        case QType::BF16:     return CUBLAS_COMPUTE_32F;
+        case QType::FP8_E4M3: return CUBLAS_COMPUTE_32F;
+        case QType::FP8_E5M2: return CUBLAS_COMPUTE_32F;
+        case QType::INT8:     return CUBLAS_COMPUTE_32I;
         default:              return CUBLAS_COMPUTE_32F;
     }
 }
@@ -85,10 +85,10 @@ static void run_expert_matmul(cublasHandle_t handle,
 
     if (Mi == 0) return;
 
-    cudaDataType_t cuda_dt_A = dtype_to_cuda(Ai.dtype);
-    cudaDataType_t cuda_dt_B = dtype_to_cuda(Bi.dtype);
-    cudaDataType_t cuda_dt_C = dtype_to_cuda(Ci.dtype);
-    cublasComputeType_t compute_type = dtype_to_compute(Ai.dtype);
+    cudaDataType_t cuda_dt_A = dtype_to_cuda(Ai.qtype);
+    cudaDataType_t cuda_dt_B = dtype_to_cuda(Bi.qtype);
+    cudaDataType_t cuda_dt_C = dtype_to_cuda(Ci.qtype);
+    cublasComputeType_t compute_type = dtype_to_compute(Ai.qtype);
 
     cublasSetStream(handle, stream);
 
@@ -182,11 +182,11 @@ void gemm_grouped(const std::vector<Tensor>& A,
 void gemm_moe_batched(const void* a_base, void* c_base,
                       const int32_t* offsets,
                       const void* const* b_ptrs,
-                      int K, int N, DType dtype,
+                      int K, int N, QType dtype,
                       int n_experts,
                       cudaStream_t stream,
                       void** d_work_ptrs,
-                      DType output_dtype,
+                      QType output_dtype,
                       const float* a_scales,
                       const float* b_scales)
 {
@@ -214,7 +214,7 @@ void gemm_moe_batched(const void* a_base, void* c_base,
     size_t elem_sz = dtype_size(dtype);
 
     // Output type: defaults to input type if not specified
-    DType out_dt = (output_dtype != DType(255)) ? output_dtype : dtype;
+    QType out_dt = (output_dtype != QType(255)) ? output_dtype : dtype;
     cudaDataType_t cuda_dt_c = dtype_to_cuda(out_dt);
     size_t out_elem_sz = dtype_size(out_dt);
 

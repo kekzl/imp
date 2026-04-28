@@ -1,6 +1,7 @@
 #include "compute/gemm.h"
 #include "core/logging.h"
 #include "runtime/pdl.h"
+#include "runtime/config.h"
 
 #include <cublas_v2.h>
 #include <cublasLt.h>
@@ -127,17 +128,17 @@ void gemm_init() {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: map DType -> cudaDataType
+// Helper: map QType -> cudaDataType
 // ---------------------------------------------------------------------------
-static cudaDataType_t dtype_to_cuda(DType dt) {
+static cudaDataType_t dtype_to_cuda(QType dt) {
     switch (dt) {
-        case DType::FP32:     return CUDA_R_32F;
-        case DType::FP16:     return CUDA_R_16F;
-        case DType::BF16:     return CUDA_R_16BF;
-        case DType::FP8_E4M3: return CUDA_R_8F_E4M3;
-        case DType::FP8_E5M2: return CUDA_R_8F_E5M2;
-        case DType::INT8:     return CUDA_R_8I;
-        case DType::INT32:    return CUDA_R_32I;
+        case QType::F32:     return CUDA_R_32F;
+        case QType::F16:     return CUDA_R_16F;
+        case QType::BF16:     return CUDA_R_16BF;
+        case QType::FP8_E4M3: return CUDA_R_8F_E4M3;
+        case QType::FP8_E5M2: return CUDA_R_8F_E5M2;
+        case QType::INT8:     return CUDA_R_8I;
+        case QType::INT32:    return CUDA_R_32I;
         default:
             fprintf(stderr, "imp::gemm: unsupported dtype %d\n", (int)dt);
             return CUDA_R_16F;  // fallback (caller guard should prevent reaching here)
@@ -147,14 +148,14 @@ static cudaDataType_t dtype_to_cuda(DType dt) {
 // ---------------------------------------------------------------------------
 // Helper: choose cuBLAS compute type for a given operand dtype
 // ---------------------------------------------------------------------------
-static cublasComputeType_t dtype_to_compute(DType dt) {
+static cublasComputeType_t dtype_to_compute(QType dt) {
     switch (dt) {
-        case DType::FP32:     return CUBLAS_COMPUTE_32F;
-        case DType::FP16:     return CUBLAS_COMPUTE_32F;   // accumulate in FP32 for accuracy
-        case DType::BF16:     return CUBLAS_COMPUTE_32F;
-        case DType::FP8_E4M3: return CUBLAS_COMPUTE_32F;
-        case DType::FP8_E5M2: return CUBLAS_COMPUTE_32F;
-        case DType::INT8:     return CUBLAS_COMPUTE_32I;
+        case QType::F32:     return CUBLAS_COMPUTE_32F;
+        case QType::F16:     return CUBLAS_COMPUTE_32F;   // accumulate in FP32 for accuracy
+        case QType::BF16:     return CUBLAS_COMPUTE_32F;
+        case QType::FP8_E4M3: return CUBLAS_COMPUTE_32F;
+        case QType::FP8_E5M2: return CUBLAS_COMPUTE_32F;
+        case QType::INT8:     return CUBLAS_COMPUTE_32I;
         default:              return CUBLAS_COMPUTE_32F;
     }
 }
@@ -322,9 +323,9 @@ static void benchmark_and_select_algo(
     cublasLtMatmulPreferenceDestroy(pref);
 
     if (nresults <= 0) { entry.has_algo = false; entry.workspace_size = 0; return; }
-    // IMP_DETERMINISTIC_GEMM=1 skips timing-based selection so repeat runs
-    // produce bitwise-identical prefill outputs (needed for layer-drift A/B).
-    static const bool s_deterministic_gemm = getenv("IMP_DETERMINISTIC_GEMM") != nullptr;
+    // [runtime] deterministic_gemm = true skips timing-based selection so
+    // repeat runs produce bitwise-identical prefill outputs.
+    const bool s_deterministic_gemm = RuntimeConfig::current().runtime.deterministic_gemm;
     if (s_deterministic_gemm || nresults == 1) {
         entry.algo = results[0].algo;
         entry.workspace_size = (results[0].workspaceSize <= s_workspace_size)
@@ -408,15 +409,15 @@ static bool gemm_try_gemv(const Tensor& A, const Tensor& B, Tensor& C,
                            float alpha, float beta, cudaStream_t stream) {
     const int64_t M = A.shape[0];
     if (M != 1 || alpha != 1.0f || beta != 0.0f) return false;
-    if (A.dtype != B.dtype || A.dtype != C.dtype) return false;
-    if (A.dtype != DType::FP16 && A.dtype != DType::FP32 && A.dtype != DType::BF16) return false;
+    if (A.qtype != B.qtype || A.qtype != C.qtype) return false;
+    if (A.qtype != QType::F16 && A.qtype != QType::F32 && A.qtype != QType::BF16) return false;
 
     const int64_t K = A.shape[1];
     const int64_t N = B.shape[0];
 
     Tensor x_vec;
     x_vec.data = A.data;
-    x_vec.dtype = A.dtype;
+    x_vec.qtype = A.qtype;
     x_vec.ndim = 1;
     x_vec.shape[0] = K;
     x_vec.stride[0] = 1;
@@ -424,7 +425,7 @@ static bool gemm_try_gemv(const Tensor& A, const Tensor& B, Tensor& C,
 
     Tensor y_vec;
     y_vec.data = C.data;
-    y_vec.dtype = C.dtype;
+    y_vec.qtype = C.qtype;
     y_vec.ndim = 1;
     y_vec.shape[0] = N;
     y_vec.stride[0] = 1;
@@ -440,7 +441,7 @@ static bool gemm_try_gemv(const Tensor& A, const Tensor& B, Tensor& C,
 // Returns true if handled.
 static bool gemm_try_sgemm(const Tensor& A, const Tensor& B, Tensor& C,
                              float alpha, float beta, cudaStream_t stream) {
-    if (A.dtype != DType::FP32 || B.dtype != DType::FP32 || C.dtype != DType::FP32)
+    if (A.qtype != QType::F32 || B.qtype != QType::F32 || C.qtype != QType::F32)
         return false;
 
     const int64_t M = A.shape[0];
@@ -480,10 +481,10 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C,
         return;  // Skip empty weight
     }
 
-    cudaDataType_t cuda_dtype_A = dtype_to_cuda(A.dtype);
-    cudaDataType_t cuda_dtype_B = dtype_to_cuda(B.dtype);
-    cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.dtype);
-    cublasComputeType_t compute_type = dtype_to_compute(A.dtype);
+    cudaDataType_t cuda_dtype_A = dtype_to_cuda(A.qtype);
+    cudaDataType_t cuda_dtype_B = dtype_to_cuda(B.qtype);
+    cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.qtype);
+    cublasComputeType_t compute_type = dtype_to_compute(A.qtype);
 
     // Mixed-precision output (e.g. FP16×FP16 → FP32 for diagnostic precision
     // probes): bypass cuBLASLt and use cublasGemmEx directly. cuBLASLt's
@@ -491,8 +492,8 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C,
     // FP16→FP32 dimensions on sm_120 (sums in the billions while real
     // attention output is ±100). cublasGemmEx is the legacy, well-tested API
     // that handles FP16×FP16→FP32 with CUBLAS_COMPUTE_32F correctly.
-    if (A.dtype != C.dtype && A.dtype == DType::FP16 && B.dtype == DType::FP16
-        && C.dtype == DType::FP32) {
+    if (A.qtype != C.qtype && A.qtype == QType::F16 && B.qtype == QType::F16
+        && C.qtype == QType::F32) {
         cublasHandle_t fb_handle = get_cublas_handle();
         cublasSetStream(fb_handle, stream);
         cublasStatus_t st = cublasGemmEx(fb_handle,
@@ -530,7 +531,7 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C,
             create_gemm_descriptors(new_entry, compute_type, scale_type,
                 cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, (int)K, (int)M, (int)N);
 
-            size_t c_bytes = (size_t)M * N * dtype_size(C.dtype);
+            size_t c_bytes = (size_t)M * N * dtype_size(C.qtype);
             benchmark_and_select_algo(lt, new_entry,
                 A.data, B.data, c_bytes, alpha, beta,
                 (compute_type == CUBLAS_COMPUTE_32I), stream);
@@ -627,7 +628,7 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C,
     // that should have been handled by the FP16 weight cache path.
     // Passing raw quantized data to cuBLAS causes illegal memory access
     // (cuBLAS reads sizeof(FP16)*numel bytes but only sizeof(quant)*numel exist).
-    if (B.dtype == DType::INT4) {
+    if (B.qtype == QType::INT4) {
         // This should never be reached — FP16 cache or gemm_dispatch should
         // handle quantized weights. If we get here, output will be zero (safe).
         return;
@@ -855,8 +856,8 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y,
     const int blocks = gemv_blocks(M);
 
     for (int b = 0; b < batch; ++b) {
-        switch (A.dtype) {
-            case DType::FP32: {
+        switch (A.qtype) {
+            case QType::F32: {
                 const float* A_ptr = static_cast<const float*>(A.data);
                 const float* x_ptr = static_cast<const float*>(x.data) + (int64_t)b * K;
                 float* y_ptr       = static_cast<float*>(y.data)       + (int64_t)b * M;
@@ -864,7 +865,7 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y,
                     A_ptr, x_ptr, y_ptr, M, K);
                 break;
             }
-            case DType::FP16: {
+            case QType::F16: {
                 const half* A_ptr = static_cast<const half*>(A.data);
                 const half* x_ptr = static_cast<const half*>(x.data) + (int64_t)b * K;
                 half* y_ptr       = static_cast<half*>(y.data)       + (int64_t)b * M;
@@ -872,7 +873,7 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y,
                     A_ptr, x_ptr, y_ptr, M, K);
                 break;
             }
-            case DType::BF16: {
+            case QType::BF16: {
                 const __nv_bfloat16* A_ptr = static_cast<const __nv_bfloat16*>(A.data);
                 const __nv_bfloat16* x_ptr = static_cast<const __nv_bfloat16*>(x.data) + (int64_t)b * K;
                 __nv_bfloat16* y_ptr       = static_cast<__nv_bfloat16*>(y.data)       + (int64_t)b * M;
@@ -884,8 +885,8 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y,
                 // Fallback: use cuBLAS gemv for other dtypes via gemm with N=1.
                 // Construct a temporary Tensor view for the column vectors.
                 Tensor x_col;
-                x_col.data = static_cast<char*>(x.data) + b * K * dtype_size(x.dtype);
-                x_col.dtype = x.dtype;
+                x_col.data = static_cast<char*>(x.data) + b * K * dtype_size(x.qtype);
+                x_col.qtype = x.qtype;
                 x_col.ndim = 2;
                 x_col.shape[0] = K;
                 x_col.shape[1] = 1;
@@ -894,8 +895,8 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y,
                 x_col.on_device = true;
 
                 Tensor y_col;
-                y_col.data = static_cast<char*>(y.data) + b * M * dtype_size(y.dtype);
-                y_col.dtype = y.dtype;
+                y_col.data = static_cast<char*>(y.data) + b * M * dtype_size(y.qtype);
+                y_col.qtype = y.qtype;
                 y_col.ndim = 2;
                 y_col.shape[0] = M;
                 y_col.shape[1] = 1;
@@ -926,9 +927,9 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
 
     // Cache key: (M, K, N, dtypes, beta) — scale pointers vary per-call but
     // don't affect descriptor/algo selection, only set via opDesc attribute.
-    cudaDataType_t cuda_dtype_A = dtype_to_cuda(A.dtype);
-    cudaDataType_t cuda_dtype_B = dtype_to_cuda(B.dtype);
-    cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.dtype);
+    cudaDataType_t cuda_dtype_A = dtype_to_cuda(A.qtype);
+    cudaDataType_t cuda_dtype_B = dtype_to_cuda(B.qtype);
+    cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.qtype);
     GemmCacheKey cache_key{cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, CUBLAS_COMPUTE_32F,
                            bucket_m(M), K, N, (aScale != nullptr)};
 
@@ -948,7 +949,7 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
             // Set scale pointers before benchmarking so FP8 algos run correctly
             set_gemm_scale_pointers(new_entry.opDesc, aScale, bScale);
 
-            size_t c_bytes = (size_t)M * N * dtype_size(C.dtype);
+            size_t c_bytes = (size_t)M * N * dtype_size(C.qtype);
             benchmark_and_select_algo(lt, new_entry,
                 A.data, B.data, c_bytes, alpha, beta, false, stream);
 
@@ -1638,7 +1639,7 @@ void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv,
     cublasHandle_t handle = get_cublas_handle();
     cublasSetStream(handle, stream);
 
-    cudaDataType_t dt = dtype_to_cuda(input.dtype);
+    cudaDataType_t dt = dtype_to_cuda(input.qtype);
     float alpha = 1.0f, beta = 0.0f;
 
     // Col-major interpretation (same trick as gemm()):
@@ -1679,14 +1680,14 @@ void gemm_pair_batched(const Tensor& input, const Tensor& weight_fused,
     cublasHandle_t handle = get_cublas_handle();
     cublasSetStream(handle, stream);
 
-    cudaDataType_t dt = dtype_to_cuda(input.dtype);
+    cudaDataType_t dt = dtype_to_cuda(input.qtype);
     float alpha = 1.0f, beta = 0.0f;
 
     long long weight_stride = static_cast<long long>(N) * K;
     // Compute actual byte offset between out1 and out2, then convert to element offset
     long long output_stride = (static_cast<const char*>(out2.data) -
                                static_cast<const char*>(out1.data)) /
-                              dtype_size(input.dtype);
+                              dtype_size(input.qtype);
 
     cublasStatus_t st = cublasGemmStridedBatchedEx(
         handle,

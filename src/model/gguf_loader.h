@@ -31,7 +31,7 @@ enum class GGUFValueType : uint32_t {
 };
 
 // GGML tensor quantization types
-enum class GGMLType : uint32_t {
+enum class GgufWireType : uint32_t {
     F32     = 0,
     F16     = 1,
     Q4_0    = 2,
@@ -66,25 +66,25 @@ enum class GGMLType : uint32_t {
 };
 
 // Block size (number of elements per quantization block)
-int ggml_blck_size(GGMLType type);
+int gguf_blck_size(GgufWireType type);
 
 // Bytes per block for quantized types, bytes per element for unquantized
-size_t ggml_type_size(GGMLType type);
+size_t gguf_type_size(GgufWireType type);
 
 // Total bytes for a row of n_elements of given type
-size_t ggml_row_size(GGMLType type, int64_t n_elements);
+size_t gguf_row_size(GgufWireType type, int64_t n_elements);
 
-// Convert GGML type to our DType (lossy for quantized types)
-DType ggml_type_to_dtype(GGMLType type);
+// Convert GGML type to our QType (lossy for quantized types)
+QType gguf_type_to_qtype(GgufWireType type);
 
-const char* ggml_type_name(GGMLType type);
+const char* gguf_type_name(GgufWireType type);
 
 // Tensor info parsed from GGUF file
 struct GGUFTensorInfo {
     std::string name;
     uint32_t n_dims;
     int64_t dims[4];     // GGUF order: dims[0] = innermost (fastest-changing)
-    GGMLType type;
+    GgufWireType type;
     uint64_t offset;     // relative to start of tensor data section
     const uint8_t* data_base = nullptr;  // shard data base pointer (for split GGUF)
 };

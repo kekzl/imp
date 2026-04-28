@@ -17,7 +17,7 @@ static Tensor make_tensor_stub(TensorKind kind, int64_t rows, int64_t cols,
                                uintptr_t ptr_sentinel) {
     Tensor t;
     t.data       = reinterpret_cast<void*>(ptr_sentinel);
-    t.dtype      = DType::FP16;
+    t.qtype      = QType::F16;
     t.ndim       = 2;
     t.shape[0]   = rows;
     t.shape[1]   = cols;

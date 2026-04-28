@@ -16,7 +16,7 @@ namespace {
 // Helper: create a 1D FP32 GPU tensor from host data
 Tensor make_logits(const float* data, int64_t vocab_size) {
     Tensor t;
-    t.dtype = DType::FP32;
+    t.qtype = QType::F32;
     t.ndim = 1;
     t.shape[0] = vocab_size;
     t.compute_strides();

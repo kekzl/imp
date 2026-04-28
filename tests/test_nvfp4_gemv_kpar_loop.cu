@@ -73,7 +73,7 @@ TEST_F(GemvKparLoopRepro, PerRowLoopMatchesSingleCallAtGemma4GateUpDims) {
     cudaMemcpy(d_a, h_a.data(), h_a.size() * sizeof(half), cudaMemcpyHostToDevice);
 
     int64_t wshape[2] = {N, K};
-    Tensor w_t(d_w, DType::FP16, 2, wshape, /*on_device=*/true);
+    Tensor w_t(d_w, QType::F16, 2, wshape, /*on_device=*/true);
 
     NvFP4QuantResult qr;
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
@@ -91,8 +91,8 @@ TEST_F(GemvKparLoopRepro, PerRowLoopMatchesSingleCallAtGemma4GateUpDims) {
     // Path B: gemm_nvfp4 single-call (dequant → cuBLAS) — the bypass path.
     int64_t ashape[2] = {M, K};
     int64_t yshape[2] = {M, N};
-    Tensor a_t(d_a, DType::FP16, 2, ashape, /*on_device=*/true);
-    Tensor y_single_t(d_y_single, DType::FP16, 2, yshape, /*on_device=*/true);
+    Tensor a_t(d_a, QType::F16, 2, ashape, /*on_device=*/true);
+    Tensor y_single_t(d_y_single, QType::F16, 2, yshape, /*on_device=*/true);
     cudaMemsetAsync(d_y_single, 0, static_cast<size_t>(M) * N * sizeof(half), stream_);
     gemm_nvfp4(qr, a_t, y_single_t, stream_);
     cudaStreamSynchronize(stream_);
@@ -170,7 +170,7 @@ TEST_F(GemvKparLoopRepro, PerRowLoopMatchesSingleCallAtGemma4DownDims) {
     cudaMemcpy(d_a, h_a.data(), h_a.size() * sizeof(half), cudaMemcpyHostToDevice);
 
     int64_t wshape[2] = {N, K};
-    Tensor w_t(d_w, DType::FP16, 2, wshape, /*on_device=*/true);
+    Tensor w_t(d_w, QType::F16, 2, wshape, /*on_device=*/true);
 
     NvFP4QuantResult qr;
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
@@ -188,8 +188,8 @@ TEST_F(GemvKparLoopRepro, PerRowLoopMatchesSingleCallAtGemma4DownDims) {
 
     int64_t ashape[2] = {M, K};
     int64_t yshape[2] = {M, N};
-    Tensor a_t(d_a, DType::FP16, 2, ashape, /*on_device=*/true);
-    Tensor y_single_t(d_y_single, DType::FP16, 2, yshape, /*on_device=*/true);
+    Tensor a_t(d_a, QType::F16, 2, ashape, /*on_device=*/true);
+    Tensor y_single_t(d_y_single, QType::F16, 2, yshape, /*on_device=*/true);
     gemm_nvfp4(qr, a_t, y_single_t, stream_);
     cudaStreamSynchronize(stream_);
 

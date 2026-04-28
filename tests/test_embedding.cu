@@ -10,19 +10,19 @@
 namespace imp {
 namespace {
 
-Tensor make_gpu_tensor(const float* host_data, DType dtype,
+Tensor make_gpu_tensor(const float* host_data, QType dtype,
                        std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
-    if (dtype == DType::FP32) {
+    if (dtype == QType::F32) {
         cudaMemcpy(t.data, host_data, t.nbytes(), cudaMemcpyHostToDevice);
-    } else if (dtype == DType::FP16) {
+    } else if (dtype == QType::F16) {
         std::vector<half> h(t.numel());
         for (int64_t j = 0; j < t.numel(); j++)
             h[j] = __float2half(host_data[j]);
@@ -31,9 +31,9 @@ Tensor make_gpu_tensor(const float* host_data, DType dtype,
     return t;
 }
 
-Tensor alloc_gpu_tensor(DType dtype, std::initializer_list<int64_t> shape_list) {
+Tensor alloc_gpu_tensor(QType dtype, std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
@@ -46,9 +46,9 @@ Tensor alloc_gpu_tensor(DType dtype, std::initializer_list<int64_t> shape_list) 
 
 std::vector<float> read_gpu_tensor(const Tensor& t) {
     std::vector<float> result(t.numel());
-    if (t.dtype == DType::FP32) {
+    if (t.qtype == QType::F32) {
         cudaMemcpy(result.data(), t.data, t.nbytes(), cudaMemcpyDeviceToHost);
-    } else if (t.dtype == DType::FP16) {
+    } else if (t.qtype == QType::F16) {
         std::vector<half> h(t.numel());
         cudaMemcpy(h.data(), t.data, t.nbytes(), cudaMemcpyDeviceToHost);
         for (int64_t j = 0; j < t.numel(); j++)
@@ -87,8 +87,8 @@ TEST(EmbeddingTest, BasicFP32) {
     int n_tokens = static_cast<int>(token_ids.size());
     int32_t* d_ids = upload_token_ids(token_ids);
 
-    Tensor d_table = make_gpu_tensor(h_table.data(), DType::FP32, {vocab, d_model});
-    Tensor d_out   = alloc_gpu_tensor(DType::FP32, {n_tokens, d_model});
+    Tensor d_table = make_gpu_tensor(h_table.data(), QType::F32, {vocab, d_model});
+    Tensor d_out   = alloc_gpu_tensor(QType::F32, {n_tokens, d_model});
 
     embedding_lookup(d_table, d_ids, n_tokens, d_out);
     cudaDeviceSynchronize();
@@ -127,8 +127,8 @@ TEST(EmbeddingTest, SingleToken) {
     std::vector<int32_t> token_ids = {1};
     int32_t* d_ids = upload_token_ids(token_ids);
 
-    Tensor d_table = make_gpu_tensor(h_table.data(), DType::FP32, {vocab, d_model});
-    Tensor d_out   = alloc_gpu_tensor(DType::FP32, {1, d_model});
+    Tensor d_table = make_gpu_tensor(h_table.data(), QType::F32, {vocab, d_model});
+    Tensor d_out   = alloc_gpu_tensor(QType::F32, {1, d_model});
 
     embedding_lookup(d_table, d_ids, 1, d_out);
     cudaDeviceSynchronize();
@@ -155,8 +155,8 @@ TEST(EmbeddingTest, RepeatedTokens) {
     std::vector<int32_t> token_ids = {1, 1, 1};
     int32_t* d_ids = upload_token_ids(token_ids);
 
-    Tensor d_table = make_gpu_tensor(h_table.data(), DType::FP32, {vocab, d_model});
-    Tensor d_out   = alloc_gpu_tensor(DType::FP32, {3, d_model});
+    Tensor d_table = make_gpu_tensor(h_table.data(), QType::F32, {vocab, d_model});
+    Tensor d_out   = alloc_gpu_tensor(QType::F32, {3, d_model});
 
     embedding_lookup(d_table, d_ids, 3, d_out);
     cudaDeviceSynchronize();
@@ -188,8 +188,8 @@ TEST(EmbeddingTest, FP16Lookup) {
     std::vector<int32_t> token_ids = {3, 1};
     int32_t* d_ids = upload_token_ids(token_ids);
 
-    Tensor d_table = make_gpu_tensor(h_table.data(), DType::FP16, {vocab, d_model});
-    Tensor d_out   = alloc_gpu_tensor(DType::FP16, {2, d_model});
+    Tensor d_table = make_gpu_tensor(h_table.data(), QType::F16, {vocab, d_model});
+    Tensor d_out   = alloc_gpu_tensor(QType::F16, {2, d_model});
 
     embedding_lookup(d_table, d_ids, 2, d_out);
     cudaDeviceSynchronize();
@@ -229,8 +229,8 @@ TEST(EmbeddingTest, LargeDModel) {
     std::vector<int32_t> token_ids = {5, 0, 7};
     int32_t* d_ids = upload_token_ids(token_ids);
 
-    Tensor d_table = make_gpu_tensor(h_table.data(), DType::FP32, {vocab, d_model});
-    Tensor d_out   = alloc_gpu_tensor(DType::FP32, {3, d_model});
+    Tensor d_table = make_gpu_tensor(h_table.data(), QType::F32, {vocab, d_model});
+    Tensor d_out   = alloc_gpu_tensor(QType::F32, {3, d_model});
 
     embedding_lookup(d_table, d_ids, 3, d_out);
     cudaDeviceSynchronize();
@@ -260,8 +260,8 @@ TEST(EmbeddingTest, NonAlignedDModel) {
     std::vector<int32_t> token_ids = {2, 0};
     int32_t* d_ids = upload_token_ids(token_ids);
 
-    Tensor d_table = make_gpu_tensor(h_table.data(), DType::FP32, {vocab, d_model});
-    Tensor d_out   = alloc_gpu_tensor(DType::FP32, {2, d_model});
+    Tensor d_table = make_gpu_tensor(h_table.data(), QType::F32, {vocab, d_model});
+    Tensor d_out   = alloc_gpu_tensor(QType::F32, {2, d_model});
 
     embedding_lookup(d_table, d_ids, 2, d_out);
     cudaDeviceSynchronize();
@@ -296,8 +296,8 @@ TEST(EmbeddingTest, DeviceSideLookup) {
     cudaMalloc(&d_token_id, sizeof(int32_t));
     cudaMemcpy(d_token_id, &token_id, sizeof(int32_t), cudaMemcpyHostToDevice);
 
-    Tensor d_table = make_gpu_tensor(h_table.data(), DType::FP16, {vocab, d_model});
-    Tensor d_out   = alloc_gpu_tensor(DType::FP16, {1, d_model});
+    Tensor d_table = make_gpu_tensor(h_table.data(), QType::F16, {vocab, d_model});
+    Tensor d_out   = alloc_gpu_tensor(QType::F16, {1, d_model});
 
     embedding_lookup_from_device(d_table, d_token_id, d_out);
     cudaDeviceSynchronize();
@@ -330,8 +330,8 @@ TEST(EmbeddingTest, BoundaryTokenIds) {
     std::vector<int32_t> token_ids = {0, vocab - 1};
     int32_t* d_ids = upload_token_ids(token_ids);
 
-    Tensor d_table = make_gpu_tensor(h_table.data(), DType::FP32, {vocab, d_model});
-    Tensor d_out   = alloc_gpu_tensor(DType::FP32, {2, d_model});
+    Tensor d_table = make_gpu_tensor(h_table.data(), QType::F32, {vocab, d_model});
+    Tensor d_out   = alloc_gpu_tensor(QType::F32, {2, d_model});
 
     embedding_lookup(d_table, d_ids, 2, d_out);
     cudaDeviceSynchronize();
@@ -376,8 +376,8 @@ TEST(EmbeddingTest, LargeVocab) {
     int n_tokens = static_cast<int>(token_ids.size());
     int32_t* d_ids = upload_token_ids(token_ids);
 
-    Tensor d_table = make_gpu_tensor(h_table.data(), DType::FP32, {vocab, d_model});
-    Tensor d_out   = alloc_gpu_tensor(DType::FP32, {n_tokens, d_model});
+    Tensor d_table = make_gpu_tensor(h_table.data(), QType::F32, {vocab, d_model});
+    Tensor d_out   = alloc_gpu_tensor(QType::F32, {n_tokens, d_model});
 
     embedding_lookup(d_table, d_ids, n_tokens, d_out);
     cudaDeviceSynchronize();

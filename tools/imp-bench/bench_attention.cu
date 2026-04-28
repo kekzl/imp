@@ -65,10 +65,10 @@ static float bench_kernel(
     int64_t kv_shape[4] = {batch, seq_len, cfg.n_kv_heads, cfg.head_dim};
     int64_t o_shape[4]  = {batch, seq_len, cfg.n_heads, cfg.head_dim};
 
-    Tensor Q(d_q, DType::FP16, 4, q_shape, true);
-    Tensor K(d_k, DType::FP16, 4, kv_shape, true);
-    Tensor V(d_v, DType::FP16, 4, kv_shape, true);
-    Tensor O(d_o, DType::FP16, 4, o_shape, true);
+    Tensor Q(d_q, QType::F16, 4, q_shape, true);
+    Tensor K(d_k, QType::F16, 4, kv_shape, true);
+    Tensor V(d_v, QType::F16, 4, kv_shape, true);
+    Tensor O(d_o, QType::F16, 4, o_shape, true);
 
     // Select kernel path
     auto run_kernel = [&]() {
@@ -208,14 +208,14 @@ void bench_attention() {
                     int64_t qs[4] = {batch, seq, c.n_heads, c.head_dim};
                     int64_t ks[4] = {batch, seq, c.n_kv_heads, c.head_dim};
 
-                    Tensor Q(dq, DType::FP16, 4, qs, true);
-                    Tensor K(dk, DType::FP16, 4, ks, true);
-                    Tensor V(dv, DType::FP16, 4, ks, true);
+                    Tensor Q(dq, QType::F16, 4, qs, true);
+                    Tensor K(dk, QType::F16, 4, ks, true);
+                    Tensor V(dv, QType::F16, 4, ks, true);
 
                     // FP8 FMHA
                     float ms_fp8 = -1.0f;
                     {
-                        Tensor O(dofp8, DType::FP16, 4, qs, true);
+                        Tensor O(dofp8, QType::F16, 4, qs, true);
                         for (int i = 0; i < warmup; i++)
                             fmha_sm120_fp8_prefill(Q, K, V, O, sc, true, 0, 0.0f, s);
                         cudaStreamSynchronize(s);
@@ -234,7 +234,7 @@ void bench_attention() {
                     // MXFP4 FMHA
                     float ms_mxfp4 = -1.0f;
                     {
-                        Tensor O(domx, DType::FP16, 4, qs, true);
+                        Tensor O(domx, QType::F16, 4, qs, true);
                         for (int i = 0; i < warmup; i++)
                             fmha_sm120_mxfp4_prefill(Q, K, V, O, sc, true, 0, 0.0f, s);
                         cudaStreamSynchronize(s);
@@ -336,10 +336,10 @@ static float bench_paged_decode_kernel(
     int64_t kv_shape[4] = {num_kv_blocks, block_size, cfg.n_kv_heads, cfg.head_dim};
     int64_t o_shape[4] = {batch, 1, cfg.n_heads, cfg.head_dim};
 
-    Tensor Q(d_q, DType::FP16, 4, q_shape, true);
-    Tensor K(d_k, DType::FP16, 4, kv_shape, true);
-    Tensor V(d_v, DType::FP16, 4, kv_shape, true);
-    Tensor O(d_o, DType::FP16, 4, o_shape, true);
+    Tensor Q(d_q, QType::F16, 4, q_shape, true);
+    Tensor K(d_k, QType::F16, 4, kv_shape, true);
+    Tensor V(d_v, QType::F16, 4, kv_shape, true);
+    Tensor O(d_o, QType::F16, 4, o_shape, true);
 
     auto run = [&]() {
         paged_attention_decode(Q, K, V, O, d_block_tables, d_context_lens,

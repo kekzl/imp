@@ -2,6 +2,7 @@
 
 #include "core/tensor.h"
 #include "core/logging.h"
+#include "runtime/config.h"
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdio>
@@ -15,8 +16,7 @@
 namespace imp {
 
 inline bool debug_forward_enabled() {
-    static const bool enabled = (std::getenv("IMP_DEBUG_FORWARD") != nullptr);
-    return enabled;
+    return RuntimeConfig::current().diagnostics.debug_forward;
 }
 
 // Decode-step counter shared between executor_forward.cu (writer) and
@@ -29,16 +29,14 @@ inline int& debug_decode_step() {
 }
 
 // Hidden-state npy dump for layer-diff analysis against llama.cpp.
-// Returns the directory if IMP_DUMP_HIDDEN is set to a non-empty string, else nullptr.
-// Accepts IMP_DUMP_HIDDEN=1 or "all" for backwards compat (mapped to /tmp).
+// Returns the directory if [diagnostics] dump_hidden_dir is non-empty, else
+// nullptr. Accepts "1" or "all" as shorthand for /tmp (matches the legacy
+// IMP_DUMP_HIDDEN=1 behaviour).
 inline const char* dump_hidden_dir() {
-    static const char* dir = []() -> const char* {
-        const char* v = std::getenv("IMP_DUMP_HIDDEN");
-        if (!v || !*v) return nullptr;
-        if (std::strcmp(v, "1") == 0 || std::strcmp(v, "all") == 0) return "/tmp";
-        return v;
-    }();
-    return dir;
+    const std::string& d = RuntimeConfig::current().diagnostics.dump_hidden_dir;
+    if (d.empty()) return nullptr;
+    if (d == "1" || d == "all") return "/tmp";
+    return d.c_str();
 }
 
 // Writes a numpy .npy v1.0 file with a 2D FP32 array.
@@ -77,7 +75,7 @@ inline void dump_tensor_npy(const char* tag, const Tensor& t, cudaStream_t strea
                             int layer, int step) {
     const char* dir = dump_hidden_dir();
     if (!dir) return;
-    if (t.dtype != DType::FP16 && t.dtype != DType::FP32) return;
+    if (t.qtype != QType::F16 && t.qtype != QType::F32) return;
     int cols = static_cast<int>(t.shape[t.ndim - 1]);
     int rows = (t.ndim >= 2) ? static_cast<int>(t.shape[0]) : 1;
     int64_t row_stride = (t.ndim >= 2 && t.stride[0] > 0) ? t.stride[0] : cols;
@@ -85,7 +83,7 @@ inline void dump_tensor_npy(const char* tag, const Tensor& t, cudaStream_t strea
 
     std::vector<float> host(n);
     cudaStreamSynchronize(stream);
-    if (t.dtype == DType::FP16) {
+    if (t.qtype == QType::F16) {
         std::vector<half> tmp(n);
         if (row_stride == cols) {
             cudaMemcpy(tmp.data(), t.data, n * sizeof(half), cudaMemcpyDeviceToHost);
@@ -127,18 +125,18 @@ inline void debug_tensor_stats(const char* name, const Tensor& t, cudaStream_t s
     int n = cols * nrows;
     std::vector<float> host(n);
 
-    if (t.dtype == DType::FP16) {
+    if (t.qtype == QType::F16) {
         std::vector<half> tmp(n);
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(tmp.data(), static_cast<const half*>(t.data) + (int64_t)row * cols,
                          n * sizeof(half), cudaMemcpyDeviceToHost, stream));
         cudaStreamSynchronize(stream);
         for (int i = 0; i < n; i++) host[i] = __half2float(tmp[i]);
-    } else if (t.dtype == DType::FP32) {
+    } else if (t.qtype == QType::F32) {
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(host.data(), static_cast<const float*>(t.data) + (int64_t)row * cols,
                          n * sizeof(float), cudaMemcpyDeviceToHost, stream));
         cudaStreamSynchronize(stream);
     } else {
-        fprintf(stderr, "[DEBUG_FWD] %s: unsupported dtype %d\n", name, (int)t.dtype);
+        fprintf(stderr, "[DEBUG_FWD] %s: unsupported dtype %d\n", name, (int)t.qtype);
         return;
     }
 
@@ -174,16 +172,16 @@ inline void debug_tensor_rows(const char* name, const Tensor& t, cudaStream_t st
     // stride[0] is in elements, not bytes. For contiguous [n, cols] it equals cols,
     // but for a slice view of a [max_tokens, cols] buffer it still equals cols.
     int64_t row_stride = (t.ndim >= 2 && t.stride[0] > 0) ? t.stride[0] : cols;
-    if (t.dtype != DType::FP16 && t.dtype != DType::FP32) return;
+    if (t.qtype != QType::F16 && t.qtype != QType::F32) return;
     const int max_rows = (nrows < 6) ? nrows : 6;
-    const size_t elem_sz = (t.dtype == DType::FP16) ? sizeof(half) : sizeof(float);
+    const size_t elem_sz = (t.qtype == QType::F16) ? sizeof(half) : sizeof(float);
     // Print one header line with shape/stride so layout bugs are visible.
     fprintf(stderr, "[DEBUG_FWD_ROW] %s: shape=[%d,%d] stride0=%lld nrows_dump=%d\n",
             name, nrows, cols, (long long)row_stride, max_rows);
     std::vector<float> row_f(cols);
     for (int r = 0; r < max_rows; r++) {
         const char* src = static_cast<const char*>(t.data) + (int64_t)r * row_stride * elem_sz;
-        if (t.dtype == DType::FP16) {
+        if (t.qtype == QType::F16) {
             std::vector<half> tmp(cols);
             cudaMemcpy(tmp.data(), src, cols * sizeof(half), cudaMemcpyDeviceToHost);
             for (int i = 0; i < cols; i++) row_f[i] = __half2float(tmp[i]);
@@ -206,12 +204,12 @@ inline void debug_tensor_stats_all(const char* name, const Tensor& t, cudaStream
     int cols = static_cast<int>(t.shape[t.ndim - 1]);
     int nrows = static_cast<int>(t.shape[0]);
     int64_t n = static_cast<int64_t>(cols) * nrows;
-    if (t.dtype != DType::FP16 && t.dtype != DType::FP32) {
-        fprintf(stderr, "[DEBUG_FWD_ALL] %s: unsupported dtype %d\n", name, (int)t.dtype);
+    if (t.qtype != QType::F16 && t.qtype != QType::F32) {
+        fprintf(stderr, "[DEBUG_FWD_ALL] %s: unsupported dtype %d\n", name, (int)t.qtype);
         return;
     }
     std::vector<float> host(n);
-    if (t.dtype == DType::FP16) {
+    if (t.qtype == QType::F16) {
         std::vector<half> tmp(n);
         cudaMemcpy(tmp.data(), t.data, n * sizeof(half), cudaMemcpyDeviceToHost);
         for (int64_t i = 0; i < n; i++) host[i] = __half2float(tmp[i]);

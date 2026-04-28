@@ -6,8 +6,6 @@
 
 namespace imp {
 
-enum class GGMLQuantType : uint32_t;  // forward declaration
-
 // NVFP4 (FP4 E2M1) quantization with two-level scaling:
 //   Level 1: FP8 E4M3 micro-scale per 16 values (micro-block)
 //   Level 2: FP32 tensor-scale (global)
@@ -69,7 +67,7 @@ struct NvFP4MoEQuantResult {
 // Quantize packed 3D expert weights (raw GGML format) to NVFP4.
 // dequant_scratch: [eff, K] FP16 scratch buffer on device (reused per expert).
 void quantize_packed_experts_to_nvfp4(
-    const void* packed_ggml_data, GGMLQuantType qtype,
+    const void* packed_ggml_data, QType qtype,
     int n_experts, int eff, int K,
     void* dequant_scratch,
     NvFP4MoEQuantResult& result,

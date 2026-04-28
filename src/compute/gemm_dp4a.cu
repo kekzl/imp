@@ -1,7 +1,7 @@
 #include "compute/gemm.h"
 #include "compute/gemv_dp4a_traits.cuh"
 #include "runtime/pdl.h"
-#include "model/model_config.h"  // GGMLQuantType
+#include "model/model_config.h"  // QType
 
 #include <cuda_fp16.h>
 #include <cstdio>
@@ -407,7 +407,7 @@ IMP_DP4A_QUANT_TYPES(IMP_DEFINE_GEMV_DP4A_QKV)
 void gemv_gate_up_fused(const void* gate_weights, const void* up_weights,
                          const block_q8_1* q8_1, const float* d8,
                          half* y_gate, half* y_up,
-                         int M, int K, GGMLQuantType qtype,
+                         int M, int K, QType qtype,
                          cudaStream_t stream) {
     const int threads_per_block = 256;
     const int warps_per_block = threads_per_block / 32;
@@ -450,13 +450,13 @@ void gemv_gate_up_fused(const void* gate_weights, const void* up_weights,
         LAUNCH_GATE_UP_NR(QT, 1); \
     } while(0)
 
-    if      (qtype == GGMLQuantType::Q6_K) { DISPATCH_GATE_UP(Q6_K_Traits); }
-    else if (qtype == GGMLQuantType::Q8_0) { DISPATCH_GATE_UP(Q8_0_Traits); }
-    else if (qtype == GGMLQuantType::Q4_0) { DISPATCH_GATE_UP(Q4_0_Traits); }
-    else if (qtype == GGMLQuantType::Q4_K) { DISPATCH_GATE_UP(Q4_K_Traits); }
-    else if (qtype == GGMLQuantType::Q5_K) { DISPATCH_GATE_UP(Q5_K_Traits); }
-    else if (qtype == GGMLQuantType::Q2_K) { DISPATCH_GATE_UP(Q2_K_Traits); }
-    else if (qtype == GGMLQuantType::Q3_K) { DISPATCH_GATE_UP(Q3_K_Traits); }
+    if      (qtype == QType::Q6_K) { DISPATCH_GATE_UP(Q6_K_Traits); }
+    else if (qtype == QType::Q8_0) { DISPATCH_GATE_UP(Q8_0_Traits); }
+    else if (qtype == QType::Q4_0) { DISPATCH_GATE_UP(Q4_0_Traits); }
+    else if (qtype == QType::Q4_K) { DISPATCH_GATE_UP(Q4_K_Traits); }
+    else if (qtype == QType::Q5_K) { DISPATCH_GATE_UP(Q5_K_Traits); }
+    else if (qtype == QType::Q2_K) { DISPATCH_GATE_UP(Q2_K_Traits); }
+    else if (qtype == QType::Q3_K) { DISPATCH_GATE_UP(Q3_K_Traits); }
 
 #undef DISPATCH_GATE_UP
 #undef LAUNCH_GATE_UP_NR

@@ -45,7 +45,7 @@ TEST_F(NVFP4QuantTest, QuantDequantRoundtrip) {
     cudaMemcpy(d_input, h_input.data(), fp16_bytes, cudaMemcpyHostToDevice);
 
     int64_t input_shape[] = {N, K};
-    Tensor input(d_input, DType::FP16, 2, input_shape, true);
+    Tensor input(d_input, QType::F16, 2, input_shape, true);
 
     // Just verify no crash (actual quantization correctness depends on implementation)
     EXPECT_NO_THROW(cudaStreamSynchronize(stream_));

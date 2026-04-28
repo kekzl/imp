@@ -254,8 +254,8 @@ static void dispatch_gated_activation(
     bool pdl_enabled, cudaStream_t stream)
 {
     const int block = 256;
-    switch (gate.dtype) {
-        case DType::FP32:
+    switch (gate.qtype) {
+        case QType::F32:
             if (n % 4 == 0 && n >= 4) {
                 const int grid = static_cast<int>((n / 4 + block - 1) / block);
                 fp32_vec4<<<grid, block, 0, stream>>>(
@@ -270,7 +270,7 @@ static void dispatch_gated_activation(
                     static_cast<float*>(out.data), n);
             }
             break;
-        case DType::FP16: {
+        case QType::F16: {
             const int64_t half_n = (n + 1) / 2;
             const int grid = static_cast<int>((half_n + block - 1) / block);
             if (pdl_enabled) {
@@ -325,8 +325,8 @@ void gelu(const Tensor& x, Tensor& out, cudaStream_t stream)
     if (n == 0) return;
 
     const int block = 256;
-    switch (x.dtype) {
-        case DType::FP32:
+    switch (x.qtype) {
+        case QType::F32:
             if (n % 4 == 0 && n >= 4) {
                 const int grid = static_cast<int>((n / 4 + block - 1) / block);
                 gelu_fp32_vec4_kernel<<<grid, block, 0, stream>>>(
@@ -339,7 +339,7 @@ void gelu(const Tensor& x, Tensor& out, cudaStream_t stream)
                     static_cast<float*>(out.data), n);
             }
             break;
-        case DType::FP16: {
+        case QType::F16: {
             const int64_t half_n = (n + 1) / 2;
             const int grid = static_cast<int>((half_n + block - 1) / block);
             gelu_fp16_kernel<<<grid, block, 0, stream>>>(

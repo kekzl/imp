@@ -6,44 +6,21 @@
 
 namespace imp {
 
-// ---------------------------------------------------------------------------
-// Raw byte count per row for GGML quantized formats
-// ---------------------------------------------------------------------------
+// qtype_row_bytes lives in src/core/qtype.cpp now.
 
-size_t ggml_quant_row_bytes(GGMLQuantType qtype, int64_t cols) {
+bool dequant_gpu_supported(QType qtype) {
     switch (qtype) {
-        case GGMLQuantType::Q6_K:  return static_cast<size_t>(cols / 256) * 210;
-        case GGMLQuantType::Q8_0:  return static_cast<size_t>(cols / 32) * 34;
-        case GGMLQuantType::Q4_0:  return static_cast<size_t>(cols / 32) * 18;
-        case GGMLQuantType::Q8_1:  return static_cast<size_t>(cols / 32) * 36;
-        case GGMLQuantType::Q4_1:  return static_cast<size_t>(cols / 32) * 20;
-        case GGMLQuantType::Q5_0:  return static_cast<size_t>(cols / 32) * 22;
-        case GGMLQuantType::Q5_1:  return static_cast<size_t>(cols / 32) * 24;
-        case GGMLQuantType::Q2_K:  return static_cast<size_t>(cols / 256) * 84;
-        case GGMLQuantType::Q3_K:  return static_cast<size_t>(cols / 256) * 110;
-        case GGMLQuantType::Q4_K:  return static_cast<size_t>(cols / 256) * 144;
-        case GGMLQuantType::Q5_K:  return static_cast<size_t>(cols / 256) * 176;
-        case GGMLQuantType::Q8_K:  return static_cast<size_t>(cols / 256) * 292;
-        case GGMLQuantType::F16:
-        case GGMLQuantType::BF16:  return static_cast<size_t>(cols) * 2;
-        case GGMLQuantType::F32:   return static_cast<size_t>(cols) * 4;  // NONE == F32 == 0
-        default:                   return static_cast<size_t>(cols) * 2;
-    }
-}
-
-bool dequant_gpu_supported(GGMLQuantType qtype) {
-    switch (qtype) {
-        case GGMLQuantType::Q6_K:
-        case GGMLQuantType::Q8_0:
-        case GGMLQuantType::Q4_0:
-        case GGMLQuantType::Q4_1:
-        case GGMLQuantType::Q5_0:
-        case GGMLQuantType::Q5_1:
-        case GGMLQuantType::Q2_K:
-        case GGMLQuantType::Q3_K:
-        case GGMLQuantType::Q4_K:
-        case GGMLQuantType::Q5_K:
-        case GGMLQuantType::Q8_K:
+        case QType::Q6_K:
+        case QType::Q8_0:
+        case QType::Q4_0:
+        case QType::Q4_1:
+        case QType::Q5_0:
+        case QType::Q5_1:
+        case QType::Q2_K:
+        case QType::Q3_K:
+        case QType::Q4_K:
+        case QType::Q5_K:
+        case QType::Q8_K:
             return true;
         default:
             return false;
@@ -791,13 +768,13 @@ __global__ void dequant_q6k_to_fp8_kernel(
 // Dispatch: Q6_K → FP8 E4M3
 // ---------------------------------------------------------------------------
 
-void dequant_gpu_fp8(const void* src, void* dst, GGMLQuantType qtype,
+void dequant_gpu_fp8(const void* src, void* dst, QType qtype,
                      int rows, int cols, cudaStream_t stream)
 {
     if (rows == 0 || cols == 0) return;
 
     switch (qtype) {
-        case GGMLQuantType::Q6_K: {
+        case QType::Q6_K: {
             int total_blocks = rows * (cols / 256);
             dequant_q6k_to_fp8_kernel<<<total_blocks, 128, 0, stream>>>(
                 static_cast<const uint8_t*>(src),
@@ -817,14 +794,14 @@ void dequant_gpu_fp8(const void* src, void* dst, GGMLQuantType qtype,
 
 // Macro for scalar dequant kernels that share (src_u8, dst_fp16, rows, cols) signature.
 #define DEQUANT_CASE(QTYPE, KERNEL) \
-    case GGMLQuantType::QTYPE: \
+    case QType::QTYPE: \
         KERNEL<<<blocks, threads, 0, stream>>>( \
             static_cast<const uint8_t*>(src), \
             static_cast<half*>(dst), \
             rows, cols); \
         break;
 
-void dequant_gpu(const void* src, void* dst, GGMLQuantType qtype,
+void dequant_gpu(const void* src, void* dst, QType qtype,
                  int rows, int cols, cudaStream_t stream)
 {
     int64_t total = static_cast<int64_t>(rows) * cols;
@@ -834,7 +811,7 @@ void dequant_gpu(const void* src, void* dst, GGMLQuantType qtype,
     int blocks = static_cast<int>((total + threads - 1) / threads);
 
     switch (qtype) {
-        case GGMLQuantType::Q6_K: {
+        case QType::Q6_K: {
             // Q6_K uses block-centric v2 kernel with different grid/thread config.
             int total_q6k_blocks = rows * (cols / 256);
             dequant_q6k_v2_kernel<<<total_q6k_blocks, 128, 0, stream>>>(

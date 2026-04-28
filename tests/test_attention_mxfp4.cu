@@ -103,10 +103,10 @@ TEST_F(AttentionMxFP4Test, BasicPrefill) {
 
     int64_t qo_shape[] = {B, SQ, NH, HD};
     int64_t kv_shape[] = {B, SKV, NKV, HD};
-    Tensor Q(d_q, DType::FP16, 4, qo_shape, true);
-    Tensor K(d_k, DType::FP16, 4, kv_shape, true);
-    Tensor V(d_v, DType::FP16, 4, kv_shape, true);
-    Tensor O(d_o, DType::FP16, 4, qo_shape, true);
+    Tensor Q(d_q, QType::F16, 4, qo_shape, true);
+    Tensor K(d_k, QType::F16, 4, kv_shape, true);
+    Tensor V(d_v, QType::F16, 4, kv_shape, true);
+    Tensor O(d_o, QType::F16, 4, qo_shape, true);
 
     float scale = 1.0f / std::sqrt(static_cast<float>(HD));
 
@@ -162,10 +162,10 @@ TEST_F(AttentionMxFP4Test, CompareWithFP16Reference) {
     // MXFP4 path
     {
         cudaMemset(d_o_mxfp4, 0, qo_elems * sizeof(half));
-        Tensor Q(d_q, DType::FP16, 4, qo_shape, true);
-        Tensor K(d_k, DType::FP16, 4, kv_shape, true);
-        Tensor V(d_v, DType::FP16, 4, kv_shape, true);
-        Tensor O(d_o_mxfp4, DType::FP16, 4, qo_shape, true);
+        Tensor Q(d_q, QType::F16, 4, qo_shape, true);
+        Tensor K(d_k, QType::F16, 4, kv_shape, true);
+        Tensor V(d_v, QType::F16, 4, kv_shape, true);
+        Tensor O(d_o_mxfp4, QType::F16, 4, qo_shape, true);
         bool ok = attention_mxfp4_prefill(Q, K, V, O, scale, true, 0.0f, stream_);
         ASSERT_TRUE(ok);
     }
@@ -173,10 +173,10 @@ TEST_F(AttentionMxFP4Test, CompareWithFP16Reference) {
     // FP16 reference (Blackwell or TC kernel)
     {
         cudaMemset(d_o_ref, 0, qo_elems * sizeof(half));
-        Tensor Q(d_q, DType::FP16, 4, qo_shape, true);
-        Tensor K(d_k, DType::FP16, 4, kv_shape, true);
-        Tensor V(d_v, DType::FP16, 4, kv_shape, true);
-        Tensor O(d_o_ref, DType::FP16, 4, qo_shape, true);
+        Tensor Q(d_q, QType::F16, 4, qo_shape, true);
+        Tensor K(d_k, QType::F16, 4, kv_shape, true);
+        Tensor V(d_v, QType::F16, 4, kv_shape, true);
+        Tensor O(d_o_ref, QType::F16, 4, qo_shape, true);
         if (sm_ >= 120) {
             flash_attention_blackwell(Q, K, V, O, scale, true, 0, 0.0f, stream_);
         } else {
@@ -231,10 +231,10 @@ TEST_F(AttentionMxFP4Test, GQASupport) {
 
     int64_t qo_shape[] = {B, SQ, NH, HD};
     int64_t kv_shape[] = {B, SKV, NKV, HD};
-    Tensor Q(d_q, DType::FP16, 4, qo_shape, true);
-    Tensor K(d_k, DType::FP16, 4, kv_shape, true);
-    Tensor V(d_v, DType::FP16, 4, kv_shape, true);
-    Tensor O(d_o, DType::FP16, 4, qo_shape, true);
+    Tensor Q(d_q, QType::F16, 4, qo_shape, true);
+    Tensor K(d_k, QType::F16, 4, kv_shape, true);
+    Tensor V(d_v, QType::F16, 4, kv_shape, true);
+    Tensor O(d_o, QType::F16, 4, qo_shape, true);
 
     float scale = 1.0f / std::sqrt(static_cast<float>(HD));
     bool ok = attention_mxfp4_prefill(Q, K, V, O, scale, true, 0.0f, stream_);
@@ -275,10 +275,10 @@ TEST_F(AttentionMxFP4Test, HeadDim128) {
 
     int64_t qo_shape[] = {B, SQ, NH, HD};
     int64_t kv_shape[] = {B, SKV, NKV, HD};
-    Tensor Q(d_q, DType::FP16, 4, qo_shape, true);
-    Tensor K(d_k, DType::FP16, 4, kv_shape, true);
-    Tensor V(d_v, DType::FP16, 4, kv_shape, true);
-    Tensor O(d_o, DType::FP16, 4, qo_shape, true);
+    Tensor Q(d_q, QType::F16, 4, qo_shape, true);
+    Tensor K(d_k, QType::F16, 4, kv_shape, true);
+    Tensor V(d_v, QType::F16, 4, kv_shape, true);
+    Tensor O(d_o, QType::F16, 4, qo_shape, true);
 
     float scale = 1.0f / std::sqrt(static_cast<float>(HD));
     bool ok = attention_mxfp4_prefill(Q, K, V, O, scale, true, 0.0f, stream_);
@@ -309,10 +309,10 @@ TEST_F(AttentionMxFP4Test, RejectsInvalidHeadDim) {
     cudaMemset(d_v, 0, elems * sizeof(half));
 
     int64_t shape[] = {B, SQ, NH, HD};
-    Tensor Q(d_q, DType::FP16, 4, shape, true);
-    Tensor K(d_k, DType::FP16, 4, shape, true);
-    Tensor V(d_v, DType::FP16, 4, shape, true);
-    Tensor O(d_o, DType::FP16, 4, shape, true);
+    Tensor Q(d_q, QType::F16, 4, shape, true);
+    Tensor K(d_k, QType::F16, 4, shape, true);
+    Tensor V(d_v, QType::F16, 4, shape, true);
+    Tensor O(d_o, QType::F16, 4, shape, true);
 
     float scale = 1.0f / std::sqrt(static_cast<float>(HD));
     bool ok = attention_mxfp4_prefill(Q, K, V, O, scale, true, 0.0f, stream_);
@@ -343,10 +343,10 @@ TEST_F(AttentionMxFP4Test, SoftcapSupport) {
 
     int64_t qo_shape[] = {B, SQ, NH, HD};
     int64_t kv_shape[] = {B, SKV, NKV, HD};
-    Tensor Q(d_q, DType::FP16, 4, qo_shape, true);
-    Tensor K(d_k, DType::FP16, 4, kv_shape, true);
-    Tensor V(d_v, DType::FP16, 4, kv_shape, true);
-    Tensor O(d_o, DType::FP16, 4, qo_shape, true);
+    Tensor Q(d_q, QType::F16, 4, qo_shape, true);
+    Tensor K(d_k, QType::F16, 4, kv_shape, true);
+    Tensor V(d_v, QType::F16, 4, kv_shape, true);
+    Tensor O(d_o, QType::F16, 4, qo_shape, true);
 
     float scale = 1.0f / std::sqrt(static_cast<float>(HD));
     float softcap = 50.0f;  // Gemma-2/3 style

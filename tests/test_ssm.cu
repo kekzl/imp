@@ -17,7 +17,7 @@ namespace {
 // ---------------------------------------------------------------------------
 Tensor make_fp16_gpu(const float* host, std::initializer_list<int64_t> shape) {
     Tensor t;
-    t.dtype = DType::FP16;
+    t.qtype = QType::F16;
     t.ndim  = static_cast<int>(shape.size());
     int i = 0;
     for (auto s : shape) t.shape[i++] = s;
@@ -33,7 +33,7 @@ Tensor make_fp16_gpu(const float* host, std::initializer_list<int64_t> shape) {
 
 Tensor alloc_fp16_gpu(std::initializer_list<int64_t> shape) {
     Tensor t;
-    t.dtype = DType::FP16;
+    t.qtype = QType::F16;
     t.ndim  = static_cast<int>(shape.size());
     int i = 0;
     for (auto s : shape) t.shape[i++] = s;
@@ -48,7 +48,7 @@ Tensor make_empty_tensor() {
     Tensor t;
     t.data = nullptr;
     t.ndim = 0;
-    t.dtype = DType::FP16;
+    t.qtype = QType::F16;
     return t;
 }
 

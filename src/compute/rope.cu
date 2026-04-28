@@ -194,8 +194,8 @@ void rope_forward(Tensor& Q, Tensor& K,
         cd1 = corr_dims[1];
     }
 
-    switch (Q.dtype) {
-        case DType::FP32:
+    switch (Q.qtype) {
+        case QType::F32:
             pdl::launch(rope_forward_kernel<float>, grid, block, 0, stream,
                 static_cast<float*>(Q.data),
                 static_cast<float*>(K.data),
@@ -205,7 +205,7 @@ void rope_forward(Tensor& Q, Tensor& K,
                 ext_factor, attn_factor, cd0, cd1,
                 longrope_inv_freqs);
             break;
-        case DType::FP16:
+        case QType::F16:
             pdl::launch(rope_forward_kernel<__half>, grid, block, 0, stream,
                 static_cast<__half*>(Q.data),
                 static_cast<__half*>(K.data),

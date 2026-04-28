@@ -11,14 +11,14 @@ public:
     TensorView() = default;
 
     explicit TensorView(const Tensor& t)
-        : data_(t.data), dtype_(t.dtype), ndim_(t.ndim), on_device_(t.on_device) {
+        : data_(t.data), dtype_(t.qtype), ndim_(t.ndim), on_device_(t.on_device) {
         for (int i = 0; i < t.ndim; ++i) {
             shape_[i] = t.shape[i];
             stride_[i] = t.stride[i];
         }
     }
 
-    TensorView(const void* data, DType dtype, int ndim,
+    TensorView(const void* data, QType dtype, int ndim,
                const int64_t* shape, const int64_t* stride, bool on_device)
         : data_(data), dtype_(dtype), ndim_(ndim), on_device_(on_device) {
         for (int i = 0; i < ndim; ++i) {
@@ -28,7 +28,7 @@ public:
     }
 
     const void* data() const { return data_; }
-    DType dtype() const { return dtype_; }
+    QType qtype() const { return dtype_; }
     int ndim() const { return ndim_; }
     bool on_device() const { return on_device_; }
     int64_t shape(int i) const { return shape_[i]; }
@@ -43,7 +43,7 @@ public:
 
     size_t nbytes() const {
         int64_t n = numel();
-        if (dtype_ == DType::INT4) return static_cast<size_t>((n + 1) / 2);
+        if (dtype_ == QType::INT4) return static_cast<size_t>((n + 1) / 2);
         return static_cast<size_t>(n) * dtype_size(dtype_);
     }
 
@@ -59,7 +59,7 @@ public:
 
 private:
     const void* data_ = nullptr;
-    DType dtype_       = DType::FP32;
+    QType dtype_       = QType::F32;
     int ndim_          = 0;
     int64_t shape_[kMaxDims]  = {};
     int64_t stride_[kMaxDims] = {};

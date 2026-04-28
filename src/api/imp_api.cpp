@@ -116,22 +116,22 @@ const char* imp_version(void) {
     return "0.7.0";
 }
 
-// --- Helper: map ImpDType to imp::DType ---
+// --- Helper: map ImpDType to imp::QType ---
 
-static imp::DType map_dtype(ImpDType dt) {
+static imp::QType map_dtype(ImpDType dt) {
     switch (dt) {
-        case IMP_DTYPE_FP32:     return imp::DType::FP32;
-        case IMP_DTYPE_FP16:     return imp::DType::FP16;
-        case IMP_DTYPE_BF16:     return imp::DType::BF16;
-        case IMP_DTYPE_FP8_E4M3: return imp::DType::FP8_E4M3;
-        case IMP_DTYPE_FP8_E5M2: return imp::DType::FP8_E5M2;
-        case IMP_DTYPE_INT8:     return imp::DType::INT8;
-        case IMP_DTYPE_INT4:     return imp::DType::INT4;
-        case IMP_DTYPE_INT32:    return imp::DType::INT32;
-        case IMP_DTYPE_FP4_E2M1: return imp::DType::FP4_E2M1;
-        case IMP_DTYPE_TURBOQUANT: return imp::DType::TURBOQUANT;
-        case IMP_DTYPE_TURBOQUANT_LITE: return imp::DType::TURBOQUANT_LITE;
-        default:                 return imp::DType::FP16;
+        case IMP_DTYPE_FP32:     return imp::QType::F32;
+        case IMP_DTYPE_FP16:     return imp::QType::F16;
+        case IMP_DTYPE_BF16:     return imp::QType::BF16;
+        case IMP_DTYPE_FP8_E4M3: return imp::QType::FP8_E4M3;
+        case IMP_DTYPE_FP8_E5M2: return imp::QType::FP8_E5M2;
+        case IMP_DTYPE_INT8:     return imp::QType::INT8;
+        case IMP_DTYPE_INT4:     return imp::QType::INT4;
+        case IMP_DTYPE_INT32:    return imp::QType::INT32;
+        case IMP_DTYPE_FP4_E2M1: return imp::QType::FP4_E2M1;
+        case IMP_DTYPE_TURBOQUANT: return imp::QType::TURBOQUANT;
+        case IMP_DTYPE_TURBOQUANT_LITE: return imp::QType::TURBOQUANT_LITE;
+        default:                 return imp::QType::F16;
     }
 }
 

@@ -77,9 +77,9 @@ static float bench_fp16_gemm(const GemmSize& sz) {
     int64_t shape_A[] = {M, K};
     int64_t shape_B[] = {K, N};
     int64_t shape_C[] = {M, N};
-    Tensor A(d_A, DType::FP16, 2, shape_A, true);
-    Tensor B(d_B, DType::FP16, 2, shape_B, true);
-    Tensor C(d_C, DType::FP16, 2, shape_C, true);
+    Tensor A(d_A, QType::F16, 2, shape_A, true);
+    Tensor B(d_B, QType::F16, 2, shape_B, true);
+    Tensor C(d_C, QType::F16, 2, shape_C, true);
 
     // Warmup
     for (int i = 0; i < kWarmupIters; ++i) {
@@ -157,10 +157,10 @@ static float bench_int4_gemm(const GemmSize& sz) {
     int64_t shape_scales[] = {N, num_groups};
     int64_t shape_C[]      = {M, N};
 
-    Tensor A(d_A, DType::FP16, 2, shape_A, true);
-    Tensor B_quant(d_Bq, DType::INT4, 2, shape_Bq, true);
-    Tensor scales(d_scales, DType::FP16, 2, shape_scales, true);
-    Tensor C(d_C, DType::FP16, 2, shape_C, true);
+    Tensor A(d_A, QType::F16, 2, shape_A, true);
+    Tensor B_quant(d_Bq, QType::INT4, 2, shape_Bq, true);
+    Tensor scales(d_scales, QType::F16, 2, shape_scales, true);
+    Tensor C(d_C, QType::F16, 2, shape_C, true);
 
     // Warmup
     for (int i = 0; i < kWarmupIters; ++i) {

@@ -6,8 +6,6 @@
 
 namespace imp {
 
-enum class GGMLQuantType : uint32_t;  // forward declaration
-
 // Pre-initialize cuBLAS handle and workspace. Call early (before weight upload)
 // to ensure workspace is allocated while GPU memory is available.
 void gemm_init();
@@ -150,7 +148,7 @@ void gemv_q3_k_q8_1_residual(const void* W, const block_q8_1* q8_1, const float*
 void gemv_gate_up_fused(const void* gate_weights, const void* up_weights,
                          const block_q8_1* q8_1, const float* d8,
                          half* y_gate, half* y_up,
-                         int M, int K, GGMLQuantType qtype,
+                         int M, int K, QType qtype,
                          cudaStream_t stream = nullptr);
 
 // ---------------------------------------------------------------------------

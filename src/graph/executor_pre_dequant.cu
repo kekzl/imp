@@ -9,6 +9,7 @@
 #include "core/logging.h"
 #include "memory/vram_allocator.h"
 #include "runtime/storage_planner.h"
+#include "runtime/config.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -137,7 +138,7 @@ static bool create_fused_weight_pair(
                      cudaMemcpyDeviceToDevice, stream));
 
     int64_t shape[2] = {2 * a_rows, static_cast<int64_t>(K)};
-    out_map[layer_idx] = Tensor(fused_buf, DType::FP16, 2, shape, true);
+    out_map[layer_idx] = Tensor(fused_buf, QType::F16, 2, shape, true);
     total_cache_bytes += 2 * one_sz;
     return true;
 }
@@ -146,21 +147,21 @@ template <typename Fn>
 static void for_each_dense_weight(const Model& model, const ModelConfig& cfg, Fn&& fn) {
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model.layer(i);
-        fn(L.wq, L.wq_qtype);
-        fn(L.wk, L.wk_qtype);
-        fn(L.wv, L.wv_qtype);
-        fn(L.wo, L.wo_qtype);
+        fn(L.wq, L.wq.qtype);
+        fn(L.wk, L.wk.qtype);
+        fn(L.wv, L.wv.qtype);
+        fn(L.wo, L.wo.qtype);
     }
     for (int i = 0; i < cfg.n_layers; i++) {
         const auto& L = model.layer(i);
-        fn(L.ssm_in, L.ssm_in_qtype);
-        fn(L.ssm_out, L.ssm_out_qtype);
-        fn(L.w_gate_shared, L.w_gate_shared_qtype);
-        fn(L.w_up_shared, L.w_up_shared_qtype);
-        fn(L.w_down_shared, L.w_down_shared_qtype);
-        fn(L.w_gate, L.w_gate_qtype);
-        fn(L.w_up, L.w_up_qtype);
-        fn(L.w_down, L.w_down_qtype);
+        fn(L.ssm_in, L.ssm_in.qtype);
+        fn(L.ssm_out, L.ssm_out.qtype);
+        fn(L.w_gate_shared, L.w_gate_shared.qtype);
+        fn(L.w_up_shared, L.w_up_shared.qtype);
+        fn(L.w_down_shared, L.w_down_shared.qtype);
+        fn(L.w_gate, L.w_gate.qtype);
+        fn(L.w_up, L.w_up.qtype);
+        fn(L.w_down, L.w_down.qtype);
     }
 }
 
@@ -206,80 +207,92 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         }
     }
 
-    // --- Phase 0: Register NVFP4 pre-quantized weights directly (no quantization needed) ---
+    // --- Phase 0: Promote NVFP4 pre-quantized weights to Tensor sidecars ---
+    //
+    // Reads the (now-deprecated) NvFP4PreQuantWeight slots populated by the
+    // SafeTensors loader and writes the corresponding metadata directly onto
+    // the main weight tensor:
+    //   weight.qtype        = QType::NVFP4
+    //   weight.scales       = nw.weight_scale.data   (FP8 E4M3 micro-scales)
+    //   weight.tensor_scale = scalar from weight_scale_2 (with the
+    //                         llm-compressor reciprocal trick pre-applied
+    //                         so the runtime can always multiply)
+    //
+    // After this loop runs, gemm_dispatch / gemv_nvfp4_kpar can read the
+    // metadata straight from the weight tensor — no map lookup, no per-call
+    // reconstruction. The legacy wcache_.nvfp4 map is gone.
     if (cfg.is_nvfp4_prequant) {
         int prequant_count = 0;
-        auto register_prequant = [&](const TransformerLayer::NvFP4PreQuantWeight& nw,
-                                      const Tensor& weight) {
-            if (!nw.valid() || !weight.data) return;
-            NvFP4QuantResult result;
-            result.packed_data = weight.data;       // FP4 packed [N, K/2]
-            result.micro_scales = nw.weight_scale.data;  // FP8 E4M3 [N, K/group_size]
-            result.N = weight.shape[0];
-            // K is packed: shape[1] stores K/2 for FP4
-            result.K = weight.shape[1] * 2;
-            // tensor_scale from weight_scale_2 (scalar FP32, may be on host or device).
-            // Modelopt: val = fp4 * micro_scale * tensor_scale  (multiply)
-            // llm-compressor: val = fp4 * micro_scale / tensor_scale (divide → store 1/x)
+        auto promote = [&](const TransformerLayer::NvFP4PreQuantWeight& nw,
+                            Tensor& w) {
+            if (!nw.valid() || !w.data) return;
+            if (!w.on_device || !nw.weight_scale.on_device) {
+                IMP_LOG_DEBUG("NVFP4 prequant: skipping %p (data_dev=%d, scale_dev=%d)",
+                              w.data, w.on_device, nw.weight_scale.on_device);
+                return;
+            }
+            float h_scale = 1.0f;
             if (nw.weight_scale_2.data) {
-                float h_scale = 1.0f;
                 if (nw.weight_scale_2.on_device) {
                     cudaMemcpy(&h_scale, nw.weight_scale_2.data, sizeof(float), cudaMemcpyDeviceToHost);
                 } else {
                     memcpy(&h_scale, nw.weight_scale_2.data, sizeof(float));
                 }
-                result.tensor_scale = cfg.is_llm_compressor_nvfp4 ? (1.0f / h_scale) : h_scale;
             }
-            // Only register if both data and scales are on device
-            if (weight.on_device && nw.weight_scale.on_device) {
-                wcache_.nvfp4[weight.data] = result;
-                prequant_count++;
-            } else {
-                IMP_LOG_DEBUG("NVFP4 prequant: skipping %p (data_dev=%d, scale_dev=%d)",
-                              weight.data, weight.on_device, nw.weight_scale.on_device);
-            }
+            // Modelopt:        val = fp4 * micro_scale * tensor_scale  (multiply)
+            // llm-compressor:  val = fp4 * micro_scale / tensor_scale  (divide → store 1/x)
+            w.qtype        = QType::NVFP4;
+            w.scales       = nw.weight_scale.data;
+            w.tensor_scale = cfg.is_llm_compressor_nvfp4 ? (1.0f / h_scale) : h_scale;
+            prequant_count++;
         };
 
+        // model_ is held as const Model* in the executor; the prequant
+        // promote step is the one place we deliberately mutate it after
+        // load (writing qtype/scales/tensor_scale onto already-uploaded
+        // weight tensors). const_cast is local and bounded to this loop.
+        Model* mut_model = const_cast<Model*>(model_);
         for (int i = 0; i < cfg.n_layers; i++) {
-            const auto& L = model_->layer(i);
+            auto& L = mut_model->layers_[i];
             // Dense weights
-            register_prequant(L.nvfp4_q, L.wq);
-            register_prequant(L.nvfp4_k, L.wk);
-            register_prequant(L.nvfp4_v, L.wv);
-            register_prequant(L.nvfp4_o, L.wo);
+            promote(L.nvfp4_q, L.wq);
+            promote(L.nvfp4_k, L.wk);
+            promote(L.nvfp4_v, L.wv);
+            promote(L.nvfp4_o, L.wo);
             // For Gemma-4, mlp.{gate,up,down}_proj weights are stored in w_{gate,up,down}_shared
             // (not w_{gate,up,down}) because weight_map.cpp routes them there. Fall back to
-            // shared weights when the primary dense-layer pointers are null.
-            register_prequant(L.nvfp4_gate, L.w_gate.data ? L.w_gate : L.w_gate_shared);
-            register_prequant(L.nvfp4_up,   L.w_up.data   ? L.w_up   : L.w_up_shared);
-            register_prequant(L.nvfp4_down, L.w_down.data ? L.w_down : L.w_down_shared);
-            // Shared-expert dense MLP NVFP4 (Qwen3.5/3.6: per-layer always-active
-            // dense MLP alongside the routed experts). register_prequant is a
-            // no-op when nw.valid()=false, so this is safe for archs that don't
-            // populate nvfp4_w_*_shared (Gemma-4 etc.).
-            register_prequant(L.nvfp4_w_gate_shared, L.w_gate_shared);
-            register_prequant(L.nvfp4_w_up_shared,   L.w_up_shared);
-            register_prequant(L.nvfp4_w_down_shared, L.w_down_shared);
-            // Expert weights
+            // shared when primary is null.
+            promote(L.nvfp4_gate, L.w_gate.data ? L.w_gate : L.w_gate_shared);
+            promote(L.nvfp4_up,   L.w_up.data   ? L.w_up   : L.w_up_shared);
+            promote(L.nvfp4_down, L.w_down.data ? L.w_down : L.w_down_shared);
+            // Shared-expert dense MLP NVFP4 (Qwen3.5/3.6: per-layer always-
+            // active dense MLP alongside the routed experts). promote() is a
+            // no-op when nw.valid()=false, so this is safe for archs that
+            // don't populate nvfp4_w_*_shared (Gemma-4 etc.).
+            promote(L.nvfp4_w_gate_shared, L.w_gate_shared);
+            promote(L.nvfp4_w_up_shared,   L.w_up_shared);
+            promote(L.nvfp4_w_down_shared, L.w_down_shared);
+            // Per-expert weights
             for (size_t e = 0; e < L.expert_nvfp4_gate.size(); e++) {
-                if (e < L.expert_w_gate.size()) register_prequant(L.expert_nvfp4_gate[e], L.expert_w_gate[e]);
-                if (e < L.expert_w_up.size())   register_prequant(L.expert_nvfp4_up[e],   L.expert_w_up[e]);
-                if (e < L.expert_w_down.size()) register_prequant(L.expert_nvfp4_down[e], L.expert_w_down[e]);
+                if (e < L.expert_w_gate.size()) promote(L.expert_nvfp4_gate[e], L.expert_w_gate[e]);
+                if (e < L.expert_w_up.size())   promote(L.expert_nvfp4_up[e],   L.expert_w_up[e]);
+                if (e < L.expert_w_down.size()) promote(L.expert_nvfp4_down[e], L.expert_w_down[e]);
             }
         }
         // LM head (output projection)
-        register_prequant(model_->nvfp4_out_proj(), model_->output_proj());
+        promote(mut_model->nvfp4_out_proj_, mut_model->out_proj_);
 
         if (prequant_count > 0) {
-            IMP_LOG_INFO("NVFP4 pre-quantized: registered %d weights directly (no quantization)", prequant_count);
+            IMP_LOG_INFO("NVFP4 pre-quantized: promoted %d weights to Tensor sidecars",
+                         prequant_count);
         }
     }
 
     // Helper: does this qtype benefit from NVFP4 conversion? (> 4.5 bits/elem)
-    auto nvfp4_beneficial = [](GGMLQuantType qt) -> bool {
+    auto nvfp4_beneficial = [](QType qt) -> bool {
         switch (qt) {
-            case GGMLQuantType::Q8_0: case GGMLQuantType::Q8_K:
-            case GGMLQuantType::Q6_K: case GGMLQuantType::Q5_K:
+            case QType::Q8_0: case QType::Q8_K:
+            case QType::Q6_K: case QType::Q5_K:
                 return true;
             default: return false;
         }
@@ -300,7 +313,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                      "VRAM reserved for NVFP4 decode cache");
     } else {
         // --- Phase 1: FP16 weight cache + fused KV + fused gate+up ---
-        auto cache_weight = [&](const Tensor& w, GGMLQuantType qtype) {
+        auto cache_weight = [&](const Tensor& w, QType qtype) {
             if (!w.data || !dequant_gpu_supported(qtype)) return;
             if (wcache_.fp16.count(w.data)) return;  // already cached
             if (budget_exhausted) return;
@@ -328,7 +341,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
             dequant_gpu(w.data, fp16_buf, qtype, rows, cols, stream);
 
-            Tensor fp16_tensor(fp16_buf, DType::FP16, w.ndim, w.shape, true);
+            Tensor fp16_tensor(fp16_buf, QType::F16, w.ndim, w.shape, true);
             wcache_.fp16[w.data] = fp16_tensor;
             total_cache_bytes += fp16_bytes;
             cached_count++;
@@ -340,28 +353,28 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         // before SSM weights exhaust the VRAM budget.
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
-            cache_weight(L.wq, L.wq_qtype);
-            cache_weight(L.wk, L.wk_qtype);
-            cache_weight(L.wv, L.wv_qtype);
-            cache_weight(L.wo, L.wo_qtype);
+            cache_weight(L.wq, L.wq.qtype);
+            cache_weight(L.wk, L.wk.qtype);
+            cache_weight(L.wv, L.wv.qtype);
+            cache_weight(L.wo, L.wo.qtype);
         }
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
-            cache_weight(L.ssm_in, L.ssm_in_qtype);
-            cache_weight(L.ssm_out, L.ssm_out_qtype);
-            cache_weight(L.w_gate_shared, L.w_gate_shared_qtype);
-            cache_weight(L.w_up_shared, L.w_up_shared_qtype);
-            cache_weight(L.w_down_shared, L.w_down_shared_qtype);
+            cache_weight(L.ssm_in, L.ssm_in.qtype);
+            cache_weight(L.ssm_out, L.ssm_out.qtype);
+            cache_weight(L.w_gate_shared, L.w_gate_shared.qtype);
+            cache_weight(L.w_up_shared, L.w_up_shared.qtype);
+            cache_weight(L.w_down_shared, L.w_down_shared.qtype);
             // When NVFP4 decode is active, skip dense FFN FP16 cache for eligible
             // weights.  Decode benefits more from NVFP4 (~47% BW reduction) than
             // prefill loses from on-the-fly dequant.  NVFP4 is also ~3.5x smaller
             // per tensor, so skipping FFN FP16 frees massive VRAM for full NVFP4.
-            if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_gate_qtype))
-                cache_weight(L.w_gate, L.w_gate_qtype);
-            if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_up_qtype))
-                cache_weight(L.w_up, L.w_up_qtype);
-            if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_down_qtype))
-                cache_weight(L.w_down, L.w_down_qtype);
+            if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_gate.qtype))
+                cache_weight(L.w_gate, L.w_gate.qtype);
+            if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_up.qtype))
+                cache_weight(L.w_up, L.w_up.qtype);
+            if (wcache_.nvfp4_decode_mode == 0 || !nvfp4_beneficial(L.w_down.qtype))
+                cache_weight(L.w_down, L.w_down.qtype);
         }
 
         // Create fused KV weights for strided batched prefill GEMM.
@@ -425,12 +438,12 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         struct FP8OverflowEntry {
             const void* orig_ptr;
             Tensor weight;
-            GGMLQuantType qtype;
+            QType qtype;
             size_t n_elems;
         };
         std::vector<FP8OverflowEntry> fp8_entries;
 
-        auto collect_weight_fp8 = [&](const Tensor& w, GGMLQuantType qtype) {
+        auto collect_weight_fp8 = [&](const Tensor& w, QType qtype) {
             if (!w.data || !dequant_gpu_supported(qtype)) return;
             if (wcache_.fp16.count(w.data)) return;
             if (wcache_.fp8.count(w.data)) return;
@@ -503,7 +516,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     d_block_maxes, max_grid,
                     d_absmax, d_scales_all + static_cast<ptrdiff_t>(i), stream);
 
-                Tensor fp8_t(fp8_buf, DType::FP8_E4M3, e.weight.ndim, e.weight.shape, true);
+                Tensor fp8_t(fp8_buf, QType::FP8_E4M3, e.weight.ndim, e.weight.shape, true);
                 wcache_.fp8[e.orig_ptr] = {fp8_t, 0.0f, d_scales_all + static_cast<ptrdiff_t>(i)};
                 actual_count++;
             }
@@ -592,12 +605,12 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         struct NvFP4Entry {
             const void* orig_ptr;
             Tensor weight;
-            GGMLQuantType qtype;
+            QType qtype;
             bool from_scratch;
         };
         std::vector<NvFP4Entry> nvfp4_entries;
 
-        auto collect_weight_nvfp4 = [&](const Tensor& w, GGMLQuantType qtype) {
+        auto collect_weight_nvfp4 = [&](const Tensor& w, QType qtype) {
             if (!w.data) return;
             if (!nvfp4_beneficial(qtype)) return;
             if (wcache_.nvfp4.count(w.data)) return;
@@ -613,7 +626,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         };
 
         // LM head first: largest single weight (vocab × d_model), biggest bandwidth win.
-        collect_weight_nvfp4(model_->output_proj(), model_->out_proj_qtype_);
+        collect_weight_nvfp4(model_->output_proj(), model_->out_proj_.qtype);
 
         // Dense attention + FFN: every tensor benefits every decode step.
         for_each_dense_weight(*model_, cfg, collect_weight_nvfp4);
@@ -674,7 +687,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     fp16_ptr = reinterpret_cast<const half*>(it->second.data);
                 }
 
-                Tensor fp16_view(const_cast<half*>(fp16_ptr), DType::FP16, 2,
+                Tensor fp16_view(const_cast<half*>(fp16_ptr), QType::F16, 2,
                                  e.weight.shape, true);
 
                 NvFP4QuantResult result;
@@ -773,7 +786,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     fp16_ptr = reinterpret_cast<const half*>(it->second.data);
                 }
 
-                Tensor fp16_view(const_cast<half*>(fp16_ptr), DType::FP16, 2,
+                Tensor fp16_view(const_cast<half*>(fp16_ptr), QType::F16, 2,
                                  e.weight.shape, true);
 
                 NvFP4QuantResult result;
@@ -869,7 +882,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                             d_block_maxes, max_grid,
                             d_absmax, d_scales_all + i, stream);
 
-                        Tensor fp8_t(fp8_buf, DType::FP8_E4M3, e.fp16_tensor.ndim,
+                        Tensor fp8_t(fp8_buf, QType::FP8_E4M3, e.fp16_tensor.ndim,
                                      e.fp16_tensor.shape, true);
                         wcache_.fp8[e.orig_ptr] = {fp8_t, 0.0f, d_scales_all + static_cast<ptrdiff_t>(i)};
                         migrated++;
@@ -980,7 +993,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 }
                 dequant_gpu(e.weight.data, dq_buf, e.qtype, rows, cols, stream);
 
-                Tensor fp16_view(reinterpret_cast<half*>(dq_buf), DType::FP16, 2,
+                Tensor fp16_view(reinterpret_cast<half*>(dq_buf), QType::F16, 2,
                                  e.weight.shape, true);
                 NvFP4QuantResult result;
                 quantize_fp16_to_nvfp4_async(fp16_view, result,
@@ -1065,16 +1078,16 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             if (cutlass_sm120_mxfp4_available()) {
                 // Check if any layer has MXFP4 weights
                 bool has_mxfp4 = false;
-                auto check_mxfp4 = [&](const Tensor&, GGMLQuantType qt) {
-                    if (qt == GGMLQuantType::MXFP4) has_mxfp4 = true;
+                auto check_mxfp4 = [&](const Tensor&, QType qt) {
+                    if (qt == QType::MXFP4) has_mxfp4 = true;
                 };
                 for (int i = 0; i < cfg.n_layers && !has_mxfp4; i++) {
                     const auto& L = model_->layer(i);
-                    check_mxfp4(L.wq, L.wq_qtype);
-                    check_mxfp4(L.wk, L.wk_qtype);
-                    check_mxfp4(L.w_gate, L.w_gate_qtype);
-                    check_mxfp4(L.ssm_in, L.ssm_in_qtype);
-                    check_mxfp4(L.ssm_out, L.ssm_out_qtype);
+                    check_mxfp4(L.wq, L.wq.qtype);
+                    check_mxfp4(L.wk, L.wk.qtype);
+                    check_mxfp4(L.w_gate, L.w_gate.qtype);
+                    check_mxfp4(L.ssm_in, L.ssm_in.qtype);
+                    check_mxfp4(L.ssm_out, L.ssm_out.qtype);
                 }
 
                 // Allocate MXFP4 scratch if needed and not already allocated
@@ -1153,8 +1166,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         if (qscratch_.mxfp4_act_sf != nullptr && cutlass_sm120_mxfp4_available()) {
             int mx_native = 0;
             size_t mx_native_bytes = 0;
-            auto register_if_mxfp4 = [&](const Tensor& w, GGMLQuantType qt, bool is_attn = true) {
-                if (qt != GGMLQuantType::MXFP4 || !w.data || !w.on_device) return;
+            auto register_if_mxfp4 = [&](const Tensor& w, QType qt, bool is_attn = true) {
+                if (qt != QType::MXFP4 || !w.data || !w.on_device) return;
                 if (w.ndim < 2 || w.shape[1] % 32 != 0) return;
                 if (wcache_.cutlass_mxfp4.count(w.data)) return;  // already registered
                 CutlassMxFP4Weight mw;
@@ -1167,21 +1180,21 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             };
             for (int i = 0; i < cfg.n_layers; i++) {
                 const auto& L = model_->layer(i);
-                register_if_mxfp4(L.wq, L.wq_qtype, true);
-                register_if_mxfp4(L.wk, L.wk_qtype, true);
-                register_if_mxfp4(L.wv, L.wv_qtype, true);
-                register_if_mxfp4(L.wo, L.wo_qtype, true);
-                register_if_mxfp4(L.w_up, L.w_up_qtype, false);
-                register_if_mxfp4(L.w_gate, L.w_gate_qtype, false);
-                register_if_mxfp4(L.w_down, L.w_down_qtype, false);
+                register_if_mxfp4(L.wq, L.wq.qtype, true);
+                register_if_mxfp4(L.wk, L.wk.qtype, true);
+                register_if_mxfp4(L.wv, L.wv.qtype, true);
+                register_if_mxfp4(L.wo, L.wo.qtype, true);
+                register_if_mxfp4(L.w_up, L.w_up.qtype, false);
+                register_if_mxfp4(L.w_gate, L.w_gate.qtype, false);
+                register_if_mxfp4(L.w_down, L.w_down.qtype, false);
                 // GDN-specific weights (Qwen3.5)
-                register_if_mxfp4(L.ssm_in, L.ssm_in_qtype, true);
-                register_if_mxfp4(L.ssm_out, L.ssm_out_qtype, true);
-                register_if_mxfp4(L.gdn_gate, L.gdn_gate_qtype, true);
-                register_if_mxfp4(L.gdn_alpha, L.gdn_alpha_qtype, true);
-                register_if_mxfp4(L.gdn_beta, L.gdn_beta_qtype, true);
+                register_if_mxfp4(L.ssm_in, L.ssm_in.qtype, true);
+                register_if_mxfp4(L.ssm_out, L.ssm_out.qtype, true);
+                register_if_mxfp4(L.gdn_gate, L.gdn_gate.qtype, true);
+                register_if_mxfp4(L.gdn_alpha, L.gdn_alpha.qtype, true);
+                register_if_mxfp4(L.gdn_beta, L.gdn_beta.qtype, true);
             }
-            register_if_mxfp4(model_->output_proj(), model_->out_proj_qtype_);
+            register_if_mxfp4(model_->output_proj(), model_->out_proj_.qtype);
             if (mx_native > 0) {
                 IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                 wcache_.cutlass_mxfp4_bytes += mx_native_bytes;
@@ -1203,7 +1216,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 // 14) cascade we have not yet root-caused. Tracking in
                 // qwen35_27b_mxfp4_ima_2026_04_25.md. Until that's resolved,
                 // honor the historical fallback path.
-                bool force_fallback = (std::getenv("IMP_MXFP4_FP16_FALLBACK") != nullptr);
+                bool force_fallback = RuntimeConfig::current().attention.mxfp4_fp16_fallback;
                 bool has_gdn = (cfg.ssm_inner_size > 0);
                 bool mxfp4_gemv_available = !force_fallback && !has_gdn;
                 for (auto& [p, m] : wcache_.cutlass_mxfp4)
@@ -1239,8 +1252,13 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                         static_cast<size_t>(2) * 1024 * 1024 * 1024;
                     bool oversubscribe = (free_mem <= kRuntimeHeadroom ||
                                            fp16_total + kRuntimeHeadroom > free_mem);
-                    const char* force = std::getenv("IMP_MXFP4_FP16_FALLBACK");
-                    bool allow_force = (force && std::string(force) == "force");
+                    // The "force anyway despite oversubscription" path is gone —
+                    // attention.mxfp4_fp16_fallback is a plain bool now. If the
+                    // user explicitly opts in via imp.conf the oversubscribe
+                    // check still gates them; this matches the previous
+                    // IMP_MXFP4_FP16_FALLBACK=1 semantics. The legacy
+                    // =force escape hatch is obsolete.
+                    bool allow_force = false;
                     if (oversubscribe && !allow_force) {
                         IMP_LOG_ERROR(
                             "MXFP4 FP16 fallback would oversubscribe VRAM "
@@ -1289,7 +1307,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     // correctly (data first, scales at offset N*K/2).
                     dequant_mxfp4_to_fp16(ptr, mw.N, mw.K, d_fp16, stream);
                     int64_t shape[2] = {mw.N, mw.K};
-                    wcache_.fp16[ptr] = Tensor(d_fp16, DType::FP16, 2, shape, true);
+                    wcache_.fp16[ptr] = Tensor(d_fp16, QType::F16, 2, shape, true);
                     }
                 }  // end if (d_fp16_bulk)
 
@@ -1303,31 +1321,31 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                     // Replace model weight tensor pointers with FP16 data.
                     // This ensures ALL code paths (GEMV, direct gemm, etc.) see
                     // valid FP16 data instead of raw MXFP4 blocks.
-                    auto replace_weight = [&](Tensor& w, GGMLQuantType& qt) {
+                    auto replace_weight = [&](Tensor& w, QType& qt) {
                         auto it = wcache_.fp16.find(w.data);
-                        if (it != wcache_.fp16.end() && qt == GGMLQuantType::MXFP4) {
+                        if (it != wcache_.fp16.end() && qt == QType::MXFP4) {
                             w = it->second;
-                            qt = GGMLQuantType::F16;
+                            qt = QType::F16;
                         }
                     };
                     for (int i = 0; i < cfg.n_layers; i++) {
                         TransformerLayer& L = const_cast<Model*>(model_)->layer(i);
-                        replace_weight(L.wq, L.wq_qtype);
-                        replace_weight(L.wk, L.wk_qtype);
-                        replace_weight(L.wv, L.wv_qtype);
-                        replace_weight(L.wo, L.wo_qtype);
-                        replace_weight(L.w_up, L.w_up_qtype);
-                        replace_weight(L.w_gate, L.w_gate_qtype);
-                        replace_weight(L.w_down, L.w_down_qtype);
+                        replace_weight(L.wq, L.wq.qtype);
+                        replace_weight(L.wk, L.wk.qtype);
+                        replace_weight(L.wv, L.wv.qtype);
+                        replace_weight(L.wo, L.wo.qtype);
+                        replace_weight(L.w_up, L.w_up.qtype);
+                        replace_weight(L.w_gate, L.w_gate.qtype);
+                        replace_weight(L.w_down, L.w_down.qtype);
                         // GDN-specific weights (Qwen3.5)
-                        replace_weight(L.ssm_in, L.ssm_in_qtype);
-                        replace_weight(L.ssm_out, L.ssm_out_qtype);
-                        replace_weight(L.gdn_gate, L.gdn_gate_qtype);
-                        replace_weight(L.gdn_alpha, L.gdn_alpha_qtype);
-                        replace_weight(L.gdn_beta, L.gdn_beta_qtype);
+                        replace_weight(L.ssm_in, L.ssm_in.qtype);
+                        replace_weight(L.ssm_out, L.ssm_out.qtype);
+                        replace_weight(L.gdn_gate, L.gdn_gate.qtype);
+                        replace_weight(L.gdn_alpha, L.gdn_alpha.qtype);
+                        replace_weight(L.gdn_beta, L.gdn_beta.qtype);
                     }
                     replace_weight(const_cast<Model*>(model_)->out_proj_,
-                                   const_cast<Model*>(model_)->out_proj_qtype_);
+                                   const_cast<Model*>(model_)->out_proj_.qtype);
                     IMP_LOG_INFO("MXFP4 → FP16: replaced %d weight tensor pointers", (int)wcache_.fp16.size());
                 }
             }
@@ -1348,7 +1366,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         }
         bool moe_budget_exhausted = false;
 
-        auto cache_moe_expert_nvfp4 = [&](const Tensor& packed, GGMLQuantType qtype) {
+        auto cache_moe_expert_nvfp4 = [&](const Tensor& packed, QType qtype) {
             if (!packed.data) return;
             if (!nvfp4_beneficial(qtype)) return;
             if (wcache_.nvfp4_moe.count(packed.data)) return;
@@ -1387,9 +1405,9 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
-            cache_moe_expert_nvfp4(L.expert_gate_packed, L.expert_gate_qtype);
-            cache_moe_expert_nvfp4(L.expert_up_packed,   L.expert_up_qtype);
-            cache_moe_expert_nvfp4(L.expert_down_packed,  L.expert_down_qtype);
+            cache_moe_expert_nvfp4(L.expert_gate_packed, L.expert_gate_packed.qtype);
+            cache_moe_expert_nvfp4(L.expert_up_packed,   L.expert_up_packed.qtype);
+            cache_moe_expert_nvfp4(L.expert_down_packed,  L.expert_down_packed.qtype);
         }
 
         if (nvfp4_moe_count > 0) {
@@ -1409,8 +1427,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         bool has_mxfp4 = false;
         for (int i = 0; i < cfg.n_layers && !has_mxfp4; i++) {
             const auto& L = model_->layer(i);
-            if (L.wq_qtype == GGMLQuantType::MXFP4 || L.w_gate_qtype == GGMLQuantType::MXFP4 ||
-                L.ssm_in_qtype == GGMLQuantType::MXFP4 || L.ssm_out_qtype == GGMLQuantType::MXFP4)
+            if (L.wq.qtype == QType::MXFP4 || L.w_gate.qtype == QType::MXFP4 ||
+                L.ssm_in.qtype == QType::MXFP4 || L.ssm_out.qtype == QType::MXFP4)
                 has_mxfp4 = true;
         }
         if (has_mxfp4) {
@@ -1443,13 +1461,13 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 std::vector<SmallWeight> small_weights;
                 for (int i = 0; i < cfg.n_layers; i++) {
                     const auto& L = model_->layer(i);
-                    auto collect = [&](const Tensor& w, GGMLQuantType qt) {
-                        if (qt != GGMLQuantType::MXFP4 || !w.data) return;
+                    auto collect = [&](const Tensor& w, QType qt) {
+                        if (qt != QType::MXFP4 || !w.data) return;
                         small_weights.push_back({w.data, w.shape[0], w.shape[1]});
                         fp16_total += static_cast<size_t>(w.shape[0]) * w.shape[1] * sizeof(half);
                     };
-                    collect(L.gdn_alpha, L.gdn_alpha_qtype);
-                    collect(L.gdn_beta, L.gdn_beta_qtype);
+                    collect(L.gdn_alpha, L.gdn_alpha.qtype);
+                    collect(L.gdn_beta, L.gdn_beta.qtype);
                 }
                 if (fp16_total > 0) {
                     void* d_fp16_bulk = nullptr;
@@ -1462,21 +1480,21 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                             offset += bytes;
                             dequant_mxfp4_to_fp16(sw.ptr, sw.N, sw.K, d_fp16, stream);
                             int64_t shape[2] = {sw.N, sw.K};
-                            wcache_.fp16[sw.ptr] = Tensor(d_fp16, DType::FP16, 2, shape, true);
+                            wcache_.fp16[sw.ptr] = Tensor(d_fp16, QType::F16, 2, shape, true);
                         }
                         IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                         IMP_LOG_INFO("MXFP4 → FP16 (alpha/beta): %.2f MiB (%d tensors)",
                                      fp16_total / (1024.0 * 1024.0), (int)small_weights.size());
                         for (int i = 0; i < cfg.n_layers; i++) {
                             TransformerLayer& L = const_cast<Model*>(model_)->layer(i);
-                            auto replace = [&](Tensor& w, GGMLQuantType& qt) {
+                            auto replace = [&](Tensor& w, QType& qt) {
                                 auto it = wcache_.fp16.find(w.data);
-                                if (it != wcache_.fp16.end() && qt == GGMLQuantType::MXFP4) {
-                                    w = it->second; qt = GGMLQuantType::F16;
+                                if (it != wcache_.fp16.end() && qt == QType::MXFP4) {
+                                    w = it->second; qt = QType::F16;
                                 }
                             };
-                            replace(L.gdn_alpha, L.gdn_alpha_qtype);
-                            replace(L.gdn_beta, L.gdn_beta_qtype);
+                            replace(L.gdn_alpha, L.gdn_alpha.qtype);
+                            replace(L.gdn_beta, L.gdn_beta.qtype);
                         }
                     }
                 }
@@ -1484,8 +1502,8 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
 
             // THEN: register + unpack MXFP4 weights (in-place compaction)
             int mx_count = 0;
-            auto register_mx = [&](const Tensor& w, GGMLQuantType qt, bool is_attn) {
-                if (qt != GGMLQuantType::MXFP4 || !w.data || !w.on_device) return;
+            auto register_mx = [&](const Tensor& w, QType qt, bool is_attn) {
+                if (qt != QType::MXFP4 || !w.data || !w.on_device) return;
                 if (w.ndim < 2 || w.shape[1] % 32 != 0) return;
                 if (wcache_.cutlass_mxfp4.count(w.data)) return;
                 CutlassMxFP4Weight mw;
@@ -1497,20 +1515,20 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             };
             for (int i = 0; i < cfg.n_layers; i++) {
                 const auto& L = model_->layer(i);
-                register_mx(L.wq, L.wq_qtype, true);
-                register_mx(L.wk, L.wk_qtype, true);
-                register_mx(L.wv, L.wv_qtype, true);
-                register_mx(L.wo, L.wo_qtype, true);
-                register_mx(L.w_up, L.w_up_qtype, false);
-                register_mx(L.w_gate, L.w_gate_qtype, false);
-                register_mx(L.w_down, L.w_down_qtype, false);
-                register_mx(L.ssm_in, L.ssm_in_qtype, true);
-                register_mx(L.ssm_out, L.ssm_out_qtype, true);
-                register_mx(L.gdn_gate, L.gdn_gate_qtype, true);
-                register_mx(L.gdn_alpha, L.gdn_alpha_qtype, true);
-                register_mx(L.gdn_beta, L.gdn_beta_qtype, true);
+                register_mx(L.wq, L.wq.qtype, true);
+                register_mx(L.wk, L.wk.qtype, true);
+                register_mx(L.wv, L.wv.qtype, true);
+                register_mx(L.wo, L.wo.qtype, true);
+                register_mx(L.w_up, L.w_up.qtype, false);
+                register_mx(L.w_gate, L.w_gate.qtype, false);
+                register_mx(L.w_down, L.w_down.qtype, false);
+                register_mx(L.ssm_in, L.ssm_in.qtype, true);
+                register_mx(L.ssm_out, L.ssm_out.qtype, true);
+                register_mx(L.gdn_gate, L.gdn_gate.qtype, true);
+                register_mx(L.gdn_alpha, L.gdn_alpha.qtype, true);
+                register_mx(L.gdn_beta, L.gdn_beta.qtype, true);
             }
-            register_mx(model_->output_proj(), model_->out_proj_qtype_, true);
+            register_mx(model_->output_proj(), model_->out_proj_.qtype, true);
             if (mx_count > 0) {
                 IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
                 wcache_.use_mxfp4 = true;

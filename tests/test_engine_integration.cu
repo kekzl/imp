@@ -22,8 +22,8 @@ static EngineConfig test_engine_config() {
     cfg.use_pdl = false;
     cfg.use_fp8_prefill = false;
     cfg.use_nvfp4_decode = 0;
-    cfg.kv_cache_dtype = DType::FP16;
-    cfg.compute_dtype = DType::FP16;
+    cfg.kv_cache_dtype = QType::F16;
+    cfg.compute_dtype = QType::F16;
     cfg.kv_block_size = 16;
     cfg.use_green_contexts = false;
     cfg.gpu_layers = -1;
