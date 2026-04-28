@@ -694,6 +694,14 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
             link(layer.nvfp4_gate, layer.w_gate.data ? layer.w_gate : layer.w_gate_shared);
             link(layer.nvfp4_up,   layer.w_up.data   ? layer.w_up   : layer.w_up_shared);
             link(layer.nvfp4_down, layer.w_down.data ? layer.w_down : layer.w_down_shared);
+            // Qwen3.5/3.6: per-layer shared dense MLP alongside routed experts.
+            // mlp.shared_expert.{gate,up,down}_proj.{weight,...} → w_*_shared
+            // and the matching scale variants → nvfp4_w_*_shared. Link them so
+            // executor_pre_dequant.cu's register_prequant() can register the
+            // shared MLP into wcache_.nvfp4 alongside attention/expert weights.
+            link(layer.nvfp4_w_gate_shared, layer.w_gate_shared);
+            link(layer.nvfp4_w_up_shared,   layer.w_up_shared);
+            link(layer.nvfp4_w_down_shared, layer.w_down_shared);
             // Expert weights
             for (size_t e = 0; e < layer.expert_nvfp4_gate.size(); e++) {
                 if (e < layer.expert_w_gate.size()) link(layer.expert_nvfp4_gate[e], layer.expert_w_gate[e]);
