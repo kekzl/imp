@@ -1678,6 +1678,37 @@ void GraphExecutor::run_moe_ffn(int layer, cudaStream_t stream) {
                 ? dequant_expert(packed, qtype, eidx)
                 : fallback[eidx];
             if (!b.data) return;  // dequant_expert failed (OOB or buffer too small)
+
+            // SafeTensors NVFP4 prequant: per-expert weights got promoted to
+            // qtype=NVFP4 + scales/tensor_scale sidecars at engine init
+            // (executor_pre_dequant.cu Phase 0). The legacy fallback below
+            // expects an FP16 weight; calling cuBLAS gemm with qtype=NVFP4
+            // would crash with "unsupported dtype 71". Route through the
+            // native NVFP4 path — same logic as the WeightHandle-driven
+            // has_nvfp4_id branch above.
+            if (b.qtype == QType::NVFP4 && b.scales != nullptr) {
+                NvFP4QuantResult nw;
+                nw.packed_data  = b.data;
+                nw.micro_scales = b.scales;
+                nw.tensor_scale = b.tensor_scale;
+                nw.N = static_cast<int>(b.shape[0]);
+                nw.K = static_cast<int>(b.shape[1]) * 2;  // packed → logical
+                if (a.shape[0] == 1) {
+                    gemv_nvfp4_kpar(nw, static_cast<const half*>(a.data),
+                                    static_cast<half*>(c.data),
+                                    static_cast<int>(nw.N),
+                                    static_cast<int>(nw.K), stream);
+                } else {
+                    int64_t a_shape[2] = {a.shape[0], static_cast<int64_t>(nw.K)};
+                    int64_t c_shape[2] = {a.shape[0], static_cast<int64_t>(nw.N)};
+                    Tensor a_t(const_cast<void*>(static_cast<const void*>(a.data)),
+                               QType::F16, 2, a_shape, true);
+                    Tensor c_t(c.data, QType::F16, 2, c_shape, true);
+                    gemm_nvfp4(nw, a_t, c_t, stream);
+                }
+                return;
+            }
+
             gemm(a, b, c, 1.0f, 0.0f, stream);
         }
     };
