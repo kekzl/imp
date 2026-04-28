@@ -1,4 +1,5 @@
 #include "runtime/pdl.h"
+#include "runtime/config.h"
 #include "core/logging.h"
 #include <cuda_runtime.h>
 #include <unordered_set>
@@ -27,10 +28,8 @@ void disable(const void* kernel_func) {
 }
 
 bool is_enabled(const void* kernel_func) {
-    // DIAGNOSTIC: env var to disable PDL globally without rebuilding.
-    // Set IMP_NO_PDL=1 to fall back to standard <<<>>> launches.
-    static const bool s_no_pdl = (getenv("IMP_NO_PDL") != nullptr);
-    if (s_no_pdl) return false;
+    // Disable PDL globally via [runtime] no_pdl = true in imp.conf.
+    if (RuntimeConfig::current().runtime.no_pdl) return false;
     return enabled_kernels().count(kernel_func) > 0;
 }
 

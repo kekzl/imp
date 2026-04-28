@@ -13,19 +13,19 @@ namespace {
 
 // ---- GPU tensor helpers (same pattern as other test files) ----
 
-Tensor make_gpu_tensor(const float* host_data, DType dtype,
+Tensor make_gpu_tensor(const float* host_data, QType dtype,
                        std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
-    if (dtype == DType::FP32) {
+    if (dtype == QType::F32) {
         cudaMemcpy(t.data, host_data, t.nbytes(), cudaMemcpyHostToDevice);
-    } else if (dtype == DType::FP16) {
+    } else if (dtype == QType::F16) {
         std::vector<half> h(t.numel());
         for (int64_t j = 0; j < t.numel(); j++)
             h[j] = __float2half(host_data[j]);
@@ -34,9 +34,9 @@ Tensor make_gpu_tensor(const float* host_data, DType dtype,
     return t;
 }
 
-Tensor alloc_gpu_tensor(DType dtype, std::initializer_list<int64_t> shape_list) {
+Tensor alloc_gpu_tensor(QType dtype, std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
@@ -49,9 +49,9 @@ Tensor alloc_gpu_tensor(DType dtype, std::initializer_list<int64_t> shape_list) 
 
 std::vector<float> read_gpu_fp32(const Tensor& t) {
     std::vector<float> result(t.numel());
-    if (t.dtype == DType::FP32) {
+    if (t.qtype == QType::F32) {
         cudaMemcpy(result.data(), t.data, t.nbytes(), cudaMemcpyDeviceToHost);
-    } else if (t.dtype == DType::FP16) {
+    } else if (t.qtype == QType::F16) {
         std::vector<half> h(t.numel());
         cudaMemcpy(h.data(), t.data, t.nbytes(), cudaMemcpyDeviceToHost);
         for (int64_t j = 0; j < t.numel(); j++)
@@ -104,9 +104,9 @@ TEST_F(GemmTest, FP32_Square) {
     std::vector<float> h_C(N * N, 0.0f);
     cpu_gemm(h_A.data(), h_B.data(), h_C.data(), N, N, N, 1.0f, 0.0f);
 
-    Tensor d_A = make_gpu_tensor(h_A.data(), DType::FP32, {N, N});
-    Tensor d_B = make_gpu_tensor(h_B.data(), DType::FP32, {N, N});
-    Tensor d_C = alloc_gpu_tensor(DType::FP32, {N, N});
+    Tensor d_A = make_gpu_tensor(h_A.data(), QType::F32, {N, N});
+    Tensor d_B = make_gpu_tensor(h_B.data(), QType::F32, {N, N});
+    Tensor d_C = alloc_gpu_tensor(QType::F32, {N, N});
 
     gemm(d_A, d_B, d_C);
     cudaDeviceSynchronize();
@@ -128,9 +128,9 @@ TEST_F(GemmTest, FP32_NonSquare) {
     std::vector<float> h_C(M * N, 0.0f);
     cpu_gemm(h_A.data(), h_B.data(), h_C.data(), M, N, K, 1.0f, 0.0f);
 
-    Tensor d_A = make_gpu_tensor(h_A.data(), DType::FP32, {M, K});
-    Tensor d_B = make_gpu_tensor(h_B.data(), DType::FP32, {N, K});
-    Tensor d_C = alloc_gpu_tensor(DType::FP32, {M, N});
+    Tensor d_A = make_gpu_tensor(h_A.data(), QType::F32, {M, K});
+    Tensor d_B = make_gpu_tensor(h_B.data(), QType::F32, {N, K});
+    Tensor d_C = alloc_gpu_tensor(QType::F32, {M, N});
 
     gemm(d_A, d_B, d_C);
     cudaDeviceSynchronize();
@@ -153,9 +153,9 @@ TEST_F(GemmTest, FP32_AlphaBeta) {
     std::vector<float> h_C = h_C_init;
     cpu_gemm(h_A.data(), h_B.data(), h_C.data(), M, N, K, 2.0f, 0.5f);
 
-    Tensor d_A = make_gpu_tensor(h_A.data(), DType::FP32, {M, K});
-    Tensor d_B = make_gpu_tensor(h_B.data(), DType::FP32, {N, K});
-    Tensor d_C = make_gpu_tensor(h_C_init.data(), DType::FP32, {M, N});
+    Tensor d_A = make_gpu_tensor(h_A.data(), QType::F32, {M, K});
+    Tensor d_B = make_gpu_tensor(h_B.data(), QType::F32, {N, K});
+    Tensor d_C = make_gpu_tensor(h_C_init.data(), QType::F32, {M, N});
 
     gemm(d_A, d_B, d_C, 2.0f, 0.5f);
     cudaDeviceSynchronize();
@@ -176,9 +176,9 @@ TEST_F(GemmTest, FP32_Identity) {
     for (int i = 0; i < N; i++) h_I[i * N + i] = 1.0f;
 
     // C = A @ I^T = A (identity is symmetric)
-    Tensor d_A = make_gpu_tensor(h_A.data(), DType::FP32, {N, N});
-    Tensor d_I = make_gpu_tensor(h_I.data(), DType::FP32, {N, N});
-    Tensor d_C = alloc_gpu_tensor(DType::FP32, {N, N});
+    Tensor d_A = make_gpu_tensor(h_A.data(), QType::F32, {N, N});
+    Tensor d_I = make_gpu_tensor(h_I.data(), QType::F32, {N, N});
+    Tensor d_C = alloc_gpu_tensor(QType::F32, {N, N});
 
     gemm(d_A, d_I, d_C);
     cudaDeviceSynchronize();
@@ -206,9 +206,9 @@ TEST_F(GemmTest, FP16_Square) {
     std::vector<float> h_C(N * N, 0.0f);
     cpu_gemm(h_A.data(), h_B.data(), h_C.data(), N, N, N, 1.0f, 0.0f);
 
-    Tensor d_A = make_gpu_tensor(h_A.data(), DType::FP16, {N, N});
-    Tensor d_B = make_gpu_tensor(h_B.data(), DType::FP16, {N, N});
-    Tensor d_C = alloc_gpu_tensor(DType::FP16, {N, N});
+    Tensor d_A = make_gpu_tensor(h_A.data(), QType::F16, {N, N});
+    Tensor d_B = make_gpu_tensor(h_B.data(), QType::F16, {N, N});
+    Tensor d_C = alloc_gpu_tensor(QType::F16, {N, N});
 
     gemm(d_A, d_B, d_C);
     cudaDeviceSynchronize();
@@ -230,9 +230,9 @@ TEST_F(GemmTest, FP16_Large) {
     std::vector<float> h_C(M * N, 0.0f);
     cpu_gemm(h_A.data(), h_B.data(), h_C.data(), M, N, K, 1.0f, 0.0f);
 
-    Tensor d_A = make_gpu_tensor(h_A.data(), DType::FP16, {M, K});
-    Tensor d_B = make_gpu_tensor(h_B.data(), DType::FP16, {N, K});
-    Tensor d_C = alloc_gpu_tensor(DType::FP16, {M, N});
+    Tensor d_A = make_gpu_tensor(h_A.data(), QType::F16, {M, K});
+    Tensor d_B = make_gpu_tensor(h_B.data(), QType::F16, {N, K});
+    Tensor d_C = alloc_gpu_tensor(QType::F16, {M, N});
 
     gemm(d_A, d_B, d_C);
     cudaDeviceSynchronize();
@@ -261,9 +261,9 @@ TEST_F(GemmTest, GEMV_FP16) {
         for (int k = 0; k < K; k++)
             h_y[i] += h_W[i * K + k] * h_x[k];
 
-    Tensor d_W = make_gpu_tensor(h_W.data(), DType::FP16, {N, K});
-    Tensor d_x = make_gpu_tensor(h_x.data(), DType::FP16, {K});
-    Tensor d_y = alloc_gpu_tensor(DType::FP16, {N});
+    Tensor d_W = make_gpu_tensor(h_W.data(), QType::F16, {N, K});
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F16, {K});
+    Tensor d_y = alloc_gpu_tensor(QType::F16, {N});
 
     gemv(d_W, d_x, d_y);
     cudaDeviceSynchronize();
@@ -287,9 +287,9 @@ TEST_F(GemmTest, GEMV_FP32) {
         for (int k = 0; k < K; k++)
             h_y[i] += h_W[i * K + k] * h_x[k];
 
-    Tensor d_W = make_gpu_tensor(h_W.data(), DType::FP32, {N, K});
-    Tensor d_x = make_gpu_tensor(h_x.data(), DType::FP32, {K});
-    Tensor d_y = alloc_gpu_tensor(DType::FP32, {N});
+    Tensor d_W = make_gpu_tensor(h_W.data(), QType::F32, {N, K});
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F32, {K});
+    Tensor d_y = alloc_gpu_tensor(QType::F32, {N});
 
     gemv(d_W, d_x, d_y);
     cudaDeviceSynchronize();
@@ -316,9 +316,9 @@ TEST_F(GemmTest, GemmDispatchToGEMV) {
     std::vector<float> h_C(N, 0.0f);
     cpu_gemm(h_A.data(), h_B.data(), h_C.data(), 1, N, K, 1.0f, 0.0f);
 
-    Tensor d_A = make_gpu_tensor(h_A.data(), DType::FP16, {1, K});
-    Tensor d_B = make_gpu_tensor(h_B.data(), DType::FP16, {N, K});
-    Tensor d_C = alloc_gpu_tensor(DType::FP16, {1, N});
+    Tensor d_A = make_gpu_tensor(h_A.data(), QType::F16, {1, K});
+    Tensor d_B = make_gpu_tensor(h_B.data(), QType::F16, {N, K});
+    Tensor d_C = alloc_gpu_tensor(QType::F16, {1, N});
 
     gemm(d_A, d_B, d_C);
     cudaDeviceSynchronize();
@@ -382,9 +382,9 @@ TEST_F(GemmTest, ZeroMatrix) {
     constexpr int M = 4, N = 4, K = 4;
     std::vector<float> h_A(M * K, 0.0f), h_B(N * K, 1.0f);
 
-    Tensor d_A = make_gpu_tensor(h_A.data(), DType::FP32, {M, K});
-    Tensor d_B = make_gpu_tensor(h_B.data(), DType::FP32, {N, K});
-    Tensor d_C = alloc_gpu_tensor(DType::FP32, {M, N});
+    Tensor d_A = make_gpu_tensor(h_A.data(), QType::F32, {M, K});
+    Tensor d_B = make_gpu_tensor(h_B.data(), QType::F32, {N, K});
+    Tensor d_C = alloc_gpu_tensor(QType::F32, {M, N});
 
     gemm(d_A, d_B, d_C);
     cudaDeviceSynchronize();

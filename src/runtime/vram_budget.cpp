@@ -13,11 +13,11 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
     const auto& mcfg = model.config();
 
     // --- 1. Classify model quantization ---
-    auto qtype = model.layer(0).wq_qtype;
-    bool sub_8bit = (qtype == GGMLQuantType::Q4_0 || qtype == GGMLQuantType::Q4_K ||
-                     qtype == GGMLQuantType::Q5_0 || qtype == GGMLQuantType::Q5_K ||
-                     qtype == GGMLQuantType::Q3_K || qtype == GGMLQuantType::Q2_K ||
-                     qtype == GGMLQuantType::Q4_1 || qtype == GGMLQuantType::Q5_1);
+    auto qtype = model.layer(0).wq.qtype;
+    bool sub_8bit = (qtype == QType::Q4_0 || qtype == QType::Q4_K ||
+                     qtype == QType::Q5_0 || qtype == QType::Q5_K ||
+                     qtype == QType::Q3_K || qtype == QType::Q2_K ||
+                     qtype == QType::Q4_1 || qtype == QType::Q5_1);
 
     // --- 2. Choose strategy ---
     if (config.use_nvfp4_decode == 0) {
@@ -64,9 +64,9 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
     // --- 4. Compute KV cache per-block cost ---
     int bs = config.kv_block_size > 0 ? config.kv_block_size : kKVBlockSize;
     size_t single_block_bytes;
-    bool is_tq = (config.kv_cache_dtype == DType::TURBOQUANT);
-    bool is_tql = (config.kv_cache_dtype == DType::TURBOQUANT_LITE);
-    if (config.kv_cache_dtype == DType::INT4 || is_tq || is_tql) {
+    bool is_tq = (config.kv_cache_dtype == QType::TURBOQUANT);
+    bool is_tql = (config.kv_cache_dtype == QType::TURBOQUANT_LITE);
+    if (config.kv_cache_dtype == QType::INT4 || is_tq || is_tql) {
         single_block_bytes = static_cast<size_t>(bs) *
                              mcfg.n_kv_heads * head_dim / 2;
     } else {
@@ -76,7 +76,7 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
     // TURBOQUANT_LITE: V-only pool (1x), all others: K+V (2x)
     size_t pool_multiplier = is_tql ? 1 : 2;
     size_t per_block_total = single_block_bytes * pool_multiplier * n_kv_layers;
-    if (config.kv_cache_dtype == DType::INT8 || config.kv_cache_dtype == DType::INT4
+    if (config.kv_cache_dtype == QType::INT8 || config.kv_cache_dtype == QType::INT4
         || is_tq || is_tql) {
         size_t scale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * sizeof(half);
         per_block_total += scale_per_block * 2 * n_kv_layers;  // K norms + V scales (always 2x)
@@ -104,8 +104,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
     int needed_blocks = blocks_per_seq * config.max_batch_size;
 
     // --- 5. Estimate NVFP4-eligible weight cache size ---
-    auto nvfp4_beneficial = [](GGMLQuantType qt) -> bool {
-        using enum GGMLQuantType;
+    auto nvfp4_beneficial = [](QType qt) -> bool {
+        using enum QType;
         switch (qt) {
             case Q8_0: case Q8_K:
             case Q6_K: case Q5_K:
@@ -115,27 +115,27 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
     };
 
     size_t nvfp4_elems = 0;
-    auto count_nvfp4 = [&](const Tensor& w, GGMLQuantType qt) {
+    auto count_nvfp4 = [&](const Tensor& w, QType qt) {
         if (!w.data || !nvfp4_beneficial(qt)) return;
         if (w.shape[1] % 16 != 0) return;
         nvfp4_elems += static_cast<size_t>(w.shape[0]) * w.shape[1];
     };
 
-    count_nvfp4(model.output_proj(), model.out_proj_qtype_);
+    count_nvfp4(model.output_proj(), model.out_proj_.qtype);
     for (int i = 0; i < mcfg.n_layers; i++) {
         const auto& L = model.layer(i);
-        count_nvfp4(L.wq, L.wq_qtype);
-        count_nvfp4(L.wk, L.wk_qtype);
-        count_nvfp4(L.wv, L.wv_qtype);
-        count_nvfp4(L.wo, L.wo_qtype);
-        count_nvfp4(L.w_gate, L.w_gate_qtype);
-        count_nvfp4(L.w_up, L.w_up_qtype);
-        count_nvfp4(L.w_down, L.w_down_qtype);
-        count_nvfp4(L.ssm_in, L.ssm_in_qtype);
-        count_nvfp4(L.ssm_out, L.ssm_out_qtype);
-        count_nvfp4(L.w_gate_shared, L.w_gate_shared_qtype);
-        count_nvfp4(L.w_up_shared, L.w_up_shared_qtype);
-        count_nvfp4(L.w_down_shared, L.w_down_shared_qtype);
+        count_nvfp4(L.wq, L.wq.qtype);
+        count_nvfp4(L.wk, L.wk.qtype);
+        count_nvfp4(L.wv, L.wv.qtype);
+        count_nvfp4(L.wo, L.wo.qtype);
+        count_nvfp4(L.w_gate, L.w_gate.qtype);
+        count_nvfp4(L.w_up, L.w_up.qtype);
+        count_nvfp4(L.w_down, L.w_down.qtype);
+        count_nvfp4(L.ssm_in, L.ssm_in.qtype);
+        count_nvfp4(L.ssm_out, L.ssm_out.qtype);
+        count_nvfp4(L.w_gate_shared, L.w_gate_shared.qtype);
+        count_nvfp4(L.w_up_shared, L.w_up_shared.qtype);
+        count_nvfp4(L.w_down_shared, L.w_down_shared.qtype);
     }
 
     size_t nvfp4_estimate = nvfp4_elems / 2 + nvfp4_elems / 16;

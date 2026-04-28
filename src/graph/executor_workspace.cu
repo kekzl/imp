@@ -39,7 +39,7 @@ GraphExecutor::~GraphExecutor() {
     free_buffers();
 }
 
-bool GraphExecutor::init(const Model& model, DType compute_dtype, bool use_pdl,
+bool GraphExecutor::init(const Model& model, QType compute_dtype, bool use_pdl,
                          int max_batch_size, int max_seq_len, bool use_fp8_prefill,
                          int use_nvfp4_decode, bool use_mxfp4_prefill) {
     if (initialized_) {
@@ -433,7 +433,7 @@ bool GraphExecutor::allocate_persistent_workspace(int max_tokens) {
 
     {
         int64_t shape[2] = {static_cast<int64_t>(max_logit_tokens_), static_cast<int64_t>(v)};
-        logits_ = Tensor(ptr, DType::FP32, 2, shape, true);
+        logits_ = Tensor(ptr, QType::F32, 2, shape, true);
         ptr += logits_sz;
     }
 
@@ -446,7 +446,7 @@ bool GraphExecutor::allocate_persistent_workspace(int max_tokens) {
         cudaError_t e2 = cudaMalloc(&fp32_accum_buf_, fp32_sz);
         if (e2 == cudaSuccess) {
             int64_t shape[2] = {static_cast<int64_t>(max_tokens), static_cast<int64_t>(d)};
-            fp32_hidden_ = Tensor(fp32_accum_buf_, DType::FP32, 2, shape, true);
+            fp32_hidden_ = Tensor(fp32_accum_buf_, QType::F32, 2, shape, true);
             IMP_LOG_INFO("FP32 residual accumulator: %.2f MiB (post-norm architecture)",
                          fp32_sz / (1024.0 * 1024.0));
         } else {

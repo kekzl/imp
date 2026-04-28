@@ -12,7 +12,7 @@ namespace imp {
 
 static inline size_t align256(size_t x) { return (x + 255) & ~size_t(255); }
 
-static inline Tensor make_workspace_tensor(char*& ptr, DType dtype,
+static inline Tensor make_workspace_tensor(char*& ptr, QType dtype,
                                            int64_t rows, int64_t cols, size_t aligned_sz) {
     int64_t shape[2] = {rows, cols};
     Tensor t(ptr, dtype, 2, shape, true);

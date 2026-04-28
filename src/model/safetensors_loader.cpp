@@ -221,23 +221,23 @@ static const JValue* jobj_find(const JValue& obj, const std::string& key) {
     return nullptr;
 }
 
-// ---- SafeTensors dtype string to DType ----
+// ---- SafeTensors dtype string to QType ----
 
-static DType safetensors_dtype(const std::string& s) {
-    if (s == "F32")  return DType::FP32;
-    if (s == "F16")  return DType::FP16;
-    if (s == "BF16") return DType::BF16;
-    if (s == "F64")  return DType::FP32;  // closest proxy
-    if (s == "I8")   return DType::INT8;
-    if (s == "U8")   return DType::INT8;   // treat unsigned byte as INT8
-    if (s == "I16")  return DType::INT32;  // closest proxy
-    if (s == "I32")  return DType::INT32;
-    if (s == "I64")  return DType::INT32;  // closest proxy
-    if (s == "BOOL") return DType::INT8;
-    if (s == "F8_E4M3") return DType::FP8_E4M3;
-    if (s == "F8_E5M2") return DType::FP8_E4M3;  // closest proxy
+static QType safetensors_dtype(const std::string& s) {
+    if (s == "F32")  return QType::F32;
+    if (s == "F16")  return QType::F16;
+    if (s == "BF16") return QType::BF16;
+    if (s == "F64")  return QType::F32;  // closest proxy
+    if (s == "I8")   return QType::INT8;
+    if (s == "U8")   return QType::INT8;   // treat unsigned byte as INT8
+    if (s == "I16")  return QType::INT32;  // closest proxy
+    if (s == "I32")  return QType::INT32;
+    if (s == "I64")  return QType::INT32;  // closest proxy
+    if (s == "BOOL") return QType::INT8;
+    if (s == "F8_E4M3") return QType::FP8_E4M3;
+    if (s == "F8_E5M2") return QType::FP8_E4M3;  // closest proxy
     IMP_LOG_WARN("Unknown SafeTensors dtype '%s', defaulting to FP32", s.c_str());
-    return DType::FP32;
+    return QType::F32;
 }
 
 // ---- Architecture detection from weight names ----
@@ -434,7 +434,7 @@ static bool load_shard(const std::string& path,
 
         const JValue* dtype_val = jobj_find(tensor_meta, "dtype");
         if (!dtype_val || dtype_val->type != JType::STRING) continue;
-        DType dtype = safetensors_dtype(dtype_val->str_val);
+        QType dtype = safetensors_dtype(dtype_val->str_val);
 
         const JValue* shape_val = jobj_find(tensor_meta, "shape");
         if (!shape_val || shape_val->type != JType::ARRAY) continue;

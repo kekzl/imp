@@ -5,8 +5,8 @@
 namespace imp {
 
 struct QuantConfig {
-    DType quant_dtype = DType::FP16;   // quantized storage type
-    DType compute_dtype = DType::FP16; // compute type
+    QType quant_dtype = QType::F16;   // quantized storage type
+    QType compute_dtype = QType::F16; // compute type
     int group_size = 128;
     bool has_zero_point = false;
     Tensor scales;      // per-channel or per-group scales

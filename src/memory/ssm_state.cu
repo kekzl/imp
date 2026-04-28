@@ -16,7 +16,7 @@ SSMState::~SSMState() {
 bool SSMState::init(int n_ssm_layers, int max_sequences,
                     int conv_channels, int conv_kernel,
                     int n_heads, int head_dim_ssm, int state_size,
-                    DType h_dtype, VRAMAllocator* alloc) {
+                    QType h_dtype, VRAMAllocator* alloc) {
     n_ssm_layers_ = n_ssm_layers;
     max_sequences_ = max_sequences;
     h_dtype_ = h_dtype;

@@ -301,15 +301,15 @@ void rmsnorm(const Tensor& x, const Tensor& weight, Tensor& out,
 
     if (rows == 0 || d_model == 0) return;
 
-    switch (x.dtype) {
-        case DType::FP32:
+    switch (x.qtype) {
+        case QType::F32:
             pdl::launch(rmsnorm_fp32_kernel, dim3(rows), dim3(block), 0, stream,
                 static_cast<const float*>(x.data),
                 static_cast<const float*>(weight.data),
                 static_cast<float*>(out.data),
                 d_model, eps, weight_offset);
             break;
-        case DType::FP16:
+        case QType::F16:
             pdl::launch(rmsnorm_fp16_kernel, dim3(rows), dim3(block), 0, stream,
                 static_cast<const __half*>(x.data),
                 static_cast<const __half*>(weight.data),
@@ -435,8 +435,8 @@ void rmsnorm_residual(const Tensor& x, const Tensor& residual,
 
     if (rows == 0 || d_model == 0) return;
 
-    switch (x.dtype) {
-        case DType::FP32:
+    switch (x.qtype) {
+        case QType::F32:
             pdl::launch(rmsnorm_residual_fp32_kernel, dim3(rows), dim3(block), 0, stream,
                 static_cast<float*>(x.data),
                 static_cast<const float*>(residual.data),
@@ -444,7 +444,7 @@ void rmsnorm_residual(const Tensor& x, const Tensor& residual,
                 static_cast<float*>(out.data),
                 d_model, eps, weight_offset);
             break;
-        case DType::FP16:
+        case QType::F16:
             pdl::launch(rmsnorm_residual_fp16_kernel, dim3(rows), dim3(block), 0, stream,
                 static_cast<__half*>(x.data),
                 static_cast<const __half*>(residual.data),

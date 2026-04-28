@@ -72,7 +72,7 @@ void GraphExecutor::configure_moe_workspace(int max_tokens) {
     char* ptr = static_cast<char*>(shared_workspace_);
 
     // gate_logits: FP32
-    moe_.gate_logits = make_workspace_tensor(ptr, DType::FP32, max_tokens, ne,
+    moe_.gate_logits = make_workspace_tensor(ptr, QType::F32, max_tokens, ne,
                                              align256(static_cast<size_t>(max_tokens) * ne * sizeof(float)));
 
     moe_.gathered      = make_workspace_tensor(ptr, compute_dtype_, expanded, d,
@@ -85,7 +85,7 @@ void GraphExecutor::configure_moe_workspace(int max_tokens) {
                                                align256(static_cast<size_t>(expanded) * eff * es));
     moe_.expert_down   = make_workspace_tensor(ptr, compute_dtype_, expanded, d,
                                                align256(static_cast<size_t>(expanded) * d * es));
-    moe_.scatter_out   = make_workspace_tensor(ptr, DType::FP32, max_tokens, d,
+    moe_.scatter_out   = make_workspace_tensor(ptr, QType::F32, max_tokens, d,
                                                align256(static_cast<size_t>(max_tokens) * d * sizeof(float)));
 }
 
@@ -240,19 +240,19 @@ void GraphExecutor::use_workspace(int slot) {
         int mb = decode_max_batch_;
         char* p = static_cast<char*>(decode_workspace_);
         int64_t shape_mb[2] = {mb, dm};
-        hidden_ = Tensor(p, DType::FP16, 2, shape_mb, true);
+        hidden_ = Tensor(p, QType::F16, 2, shape_mb, true);
         p += static_cast<size_t>(dm) * sizeof(half) * mb;
-        residual_ = Tensor(p, DType::FP16, 2, shape_mb, true);
+        residual_ = Tensor(p, QType::F16, 2, shape_mb, true);
         p += static_cast<size_t>(dm) * sizeof(half) * mb;
-        norm_out_ = Tensor(p, DType::FP16, 2, shape_mb, true);
+        norm_out_ = Tensor(p, QType::F16, 2, shape_mb, true);
         p += static_cast<size_t>(dm) * sizeof(half) * mb;
         int64_t shape_logits[2] = {mb, cfg.vocab_size};
-        logits_ = Tensor(p, DType::FP32, 2, shape_logits, true);
+        logits_ = Tensor(p, QType::F32, 2, shape_logits, true);
         p += static_cast<size_t>(cfg.vocab_size) * sizeof(float) * mb;
         if (saved_prefill_ws_.fp32_accum) {
             fp32_accum_buf_ = p;
             int64_t shape_fp32[2] = {mb, dm};
-            fp32_hidden_ = Tensor(p, DType::FP32, 2, shape_fp32, true);
+            fp32_hidden_ = Tensor(p, QType::F32, 2, shape_fp32, true);
         }
 
         active_workspace_ = 1;

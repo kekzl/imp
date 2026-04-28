@@ -22,7 +22,7 @@ void silu_inplace(Tensor& x, cudaStream_t stream) {
     int64_t n = x.numel();
     int threads = 256;
     int blocks = static_cast<int>((n + threads - 1) / threads);
-    if (x.dtype == DType::FP16) {
+    if (x.qtype == QType::F16) {
         silu_inplace_fp16_kernel<<<blocks, threads, 0, stream>>>(
             static_cast<half*>(x.data), n);
     }
@@ -46,7 +46,7 @@ void relu_sqr_inplace(Tensor& x, cudaStream_t stream) {
     int64_t n = x.numel();
     int threads = 256;
     int blocks = static_cast<int>((n + threads - 1) / threads);
-    if (x.dtype == DType::FP16) {
+    if (x.qtype == QType::F16) {
         relu_sqr_inplace_fp16_kernel<<<blocks, threads, 0, stream>>>(
             static_cast<half*>(x.data), n);
     }
@@ -75,7 +75,7 @@ void sigmoid_mul(const Tensor& a, const Tensor& b, Tensor& out,
     int64_t n = a.numel();
     int threads = 256;
     int blocks = static_cast<int>((n + threads - 1) / threads);
-    if (a.dtype == DType::FP16) {
+    if (a.qtype == QType::F16) {
         sigmoid_mul_fp16_kernel<<<blocks, threads, 0, stream>>>(
             static_cast<const half*>(a.data),
             static_cast<const half*>(b.data),
@@ -99,7 +99,7 @@ void elementwise_mul(const Tensor& a, const Tensor& b, Tensor& out,
     int64_t n = a.numel();
     int threads = 256;
     int blocks = static_cast<int>((n + threads - 1) / threads);
-    if (a.dtype == DType::FP16) {
+    if (a.qtype == QType::F16) {
         elementwise_mul_fp16_kernel<<<blocks, threads, 0, stream>>>(
             static_cast<const half*>(a.data),
             static_cast<const half*>(b.data),
@@ -472,7 +472,7 @@ static void ssm_scan_launch(const half* x, const half* B, const half* C,
                              const float* dt_bias, void* h_state, half* y,
                              const half* z,
                              int n_tokens, int n_heads, int head_dim_ssm,
-                             int state_size, int n_groups, DType h_dtype,
+                             int state_size, int n_groups, QType h_dtype,
                              cudaStream_t stream) {
     // Pick s_tiles to maximize thread count per block (power of 2, up to 1024 threads)
     int hd = std::max(head_dim_ssm, 1);
@@ -483,7 +483,7 @@ static void ssm_scan_launch(const half* x, const half* B, const half* C,
     int threads = hd * s_tiles;
     size_t smem_bytes = (s_tiles > 1) ? static_cast<size_t>(hd) * s_tiles * sizeof(float) : 0;
 
-    bool fp16 = (h_dtype == DType::FP16);
+    bool fp16 = (h_dtype == QType::F16);
     bool fused = (z != nullptr);
 
     #define SSM_SCAN_LAUNCH(H_FP16_V, FUSE_V) \
@@ -507,7 +507,7 @@ void ssm_scan_decode(const Tensor& x, const Tensor& B, const Tensor& C,
                      Tensor& y, const void* z,
                      int n_heads, int head_dim_ssm,
                      int state_size, int n_groups,
-                     DType h_dtype,
+                     QType h_dtype,
                      cudaStream_t stream) {
     ssm_scan_launch(static_cast<const half*>(x.data),
                     static_cast<const half*>(B.data),
@@ -528,7 +528,7 @@ void ssm_scan_prefill(const Tensor& x, const Tensor& B, const Tensor& C,
                       Tensor& y, const void* z,
                       int n_tokens, int n_heads, int head_dim_ssm,
                       int state_size, int n_groups,
-                      DType h_dtype,
+                      QType h_dtype,
                       cudaStream_t stream) {
     ssm_scan_launch(static_cast<const half*>(x.data),
                     static_cast<const half*>(B.data),

@@ -440,10 +440,10 @@ static __device__ __forceinline__ float vec_dot_q8_0_q8_1(
 // MMVQ kernel — warp-per-row, simplified from ggml mul_mat_vec_q
 // -------------------------------------------------------------------------
 
-// Template tag for dispatch
-enum class QType { Q4_K, Q5_1, Q5_K, Q8_0 };
+// File-local template tag for dispatch (distinct from imp::QType).
+enum class MMVQTag { Q4_K, Q5_1, Q5_K, Q8_0 };
 
-template <QType qtype>
+template <MMVQTag qtype>
 static __global__ void mmvq_kernel(
     const void* __restrict__ W,
     const ggml_block_q8_1* __restrict__ x_q8,
@@ -454,15 +454,15 @@ static __global__ void mmvq_kernel(
     // Grid: (N, M), Block: (32, nwarps)
     constexpr int nwarps = 4;
 
-    constexpr int qk  = (qtype == QType::Q4_K) ? QK4_K
-                       : (qtype == QType::Q5_K) ? QK5_K
-                       : (qtype == QType::Q8_0) ? QK8_0 : QK5_1;
-    constexpr int qi  = (qtype == QType::Q4_K) ? QI4_K
-                       : (qtype == QType::Q5_K) ? QI5_K
-                       : (qtype == QType::Q8_0) ? QI8_0 : QI5_1;
-    constexpr int vdr = (qtype == QType::Q4_K) ? VDR_Q4_K
-                       : (qtype == QType::Q5_K) ? VDR_Q5_K
-                       : (qtype == QType::Q8_0) ? VDR_Q8_0 : VDR_Q5_1;
+    constexpr int qk  = (qtype == MMVQTag::Q4_K) ? QK4_K
+                       : (qtype == MMVQTag::Q5_K) ? QK5_K
+                       : (qtype == MMVQTag::Q8_0) ? QK8_0 : QK5_1;
+    constexpr int qi  = (qtype == MMVQTag::Q4_K) ? QI4_K
+                       : (qtype == MMVQTag::Q5_K) ? QI5_K
+                       : (qtype == MMVQTag::Q8_0) ? QI8_0 : QI5_1;
+    constexpr int vdr = (qtype == MMVQTag::Q4_K) ? VDR_Q4_K
+                       : (qtype == MMVQTag::Q5_K) ? VDR_Q5_K
+                       : (qtype == MMVQTag::Q8_0) ? VDR_Q8_0 : VDR_Q5_1;
     constexpr int blocks_per_iter = vdr * nwarps * WARP_SIZE / qi;
 
     const int tid = WARP_SIZE * threadIdx.y + threadIdx.x;
@@ -482,11 +482,11 @@ static __global__ void mmvq_kernel(
         const int kby = kbx * (qk / QK8_1);
         const int kqs = vdr * (tid % (qi / vdr));
 
-        if constexpr (qtype == QType::Q4_K) {
+        if constexpr (qtype == MMVQTag::Q4_K) {
             tmp += vec_dot_q4_K_q8_1(W, &yq[kby], row * blocks_per_row + kbx, kqs);
-        } else if constexpr (qtype == QType::Q5_K) {
+        } else if constexpr (qtype == MMVQTag::Q5_K) {
             tmp += vec_dot_q5_K_q8_1(W, &yq[kby], row * blocks_per_row + kbx, kqs);
-        } else if constexpr (qtype == QType::Q8_0) {
+        } else if constexpr (qtype == MMVQTag::Q8_0) {
             tmp += vec_dot_q8_0_q8_1(W, &yq[kby], row * blocks_per_row + kbx, kqs);
         } else {
             tmp += vec_dot_q5_1_q8_1(W, &yq[kby], row * blocks_per_row + kbx, kqs);
@@ -542,7 +542,7 @@ void ggml_mmvq_q4k(
         constexpr int nwarps = 4;
         dim3 block(WARP_SIZE, nwarps);
         dim3 grid(N, M);
-        mmvq_kernel<QType::Q4_K><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
+        mmvq_kernel<MMVQTag::Q4_K><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
     }
 }
 
@@ -570,7 +570,7 @@ void ggml_mmvq_q5_1(
         constexpr int nwarps = 4;
         dim3 block(WARP_SIZE, nwarps);
         dim3 grid(N, M);
-        mmvq_kernel<QType::Q5_1><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
+        mmvq_kernel<MMVQTag::Q5_1><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
     }
 }
 
@@ -596,7 +596,7 @@ void ggml_mmvq_q4k_f32(
         constexpr int nwarps = 4;
         dim3 block(WARP_SIZE, nwarps);
         dim3 grid(N, M);
-        mmvq_kernel<QType::Q4_K><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
+        mmvq_kernel<MMVQTag::Q4_K><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
     }
 }
 
@@ -624,7 +624,7 @@ void ggml_mmvq_q5k(
         constexpr int nwarps = 4;
         dim3 block(WARP_SIZE, nwarps);
         dim3 grid(N, M);
-        mmvq_kernel<QType::Q5_K><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
+        mmvq_kernel<MMVQTag::Q5_K><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
     }
 }
 
@@ -649,7 +649,7 @@ void ggml_mmvq_q8_0(
         constexpr int nwarps = 4;
         dim3 block(WARP_SIZE, nwarps);
         dim3 grid(N, M);
-        mmvq_kernel<QType::Q8_0><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
+        mmvq_kernel<MMVQTag::Q8_0><<<grid, block, 0, stream>>>(W, x_q8, y, N, K);
     }
 }
 

@@ -15,7 +15,7 @@ namespace {
 
 Tensor make_gpu_fp16(const float* host_data, std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = DType::FP16;
+    t.qtype = QType::F16;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
@@ -31,7 +31,7 @@ Tensor make_gpu_fp16(const float* host_data, std::initializer_list<int64_t> shap
 
 Tensor make_gpu_fp32(const float* host_data, std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = DType::FP32;
+    t.qtype = QType::F32;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
@@ -42,9 +42,9 @@ Tensor make_gpu_fp32(const float* host_data, std::initializer_list<int64_t> shap
     return t;
 }
 
-Tensor alloc_gpu(DType dtype, std::initializer_list<int64_t> shape_list) {
+Tensor alloc_gpu(QType dtype, std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
@@ -146,7 +146,7 @@ TEST(ExecutorKernelsTest, ElementwiseAddStoreFP16) {
 
     Tensor a = make_gpu_fp16(ha.data(), {N});
     Tensor b = make_gpu_fp16(hb.data(), {N});
-    Tensor out = alloc_gpu(DType::FP16, {N});
+    Tensor out = alloc_gpu(QType::F16, {N});
 
     elementwise_add_store(a, b, out, nullptr);
     cudaDeviceSynchronize();
@@ -230,8 +230,8 @@ TEST(ExecutorKernelsTest, FP16ToFP32Roundtrip) {
     for (int i = 0; i < N; i++) h_data[i] = static_cast<float>(i) * 0.1f - 25.0f;
 
     Tensor fp16_in = make_gpu_fp16(h_data.data(), {N});
-    Tensor fp32_mid = alloc_gpu(DType::FP32, {N});
-    Tensor fp16_out = alloc_gpu(DType::FP16, {N});
+    Tensor fp32_mid = alloc_gpu(QType::F32, {N});
+    Tensor fp16_out = alloc_gpu(QType::F16, {N});
 
     int threads = 256;
     int blocks = (N + threads - 1) / threads;
@@ -321,7 +321,7 @@ TEST(ExecutorKernelsTest, ElementwiseAddOddLength) {
 // =========================================================================
 
 TEST(ExecutorKernelsTest, SliceRows) {
-    Tensor buf = alloc_gpu(DType::FP16, {8, 128});
+    Tensor buf = alloc_gpu(QType::F16, {8, 128});
     Tensor sliced = slice_rows(buf, 3);
 
     EXPECT_EQ(sliced.shape[0], 3);
@@ -383,7 +383,7 @@ TEST(ExecutorKernelsTest, ResidualAddRMSNorm) {
     Tensor hidden = make_gpu_fp16(h_hidden.data(), {1, d});
     Tensor residual = make_gpu_fp16(h_residual.data(), {1, d});
     Tensor weight = make_gpu_fp16(h_weight.data(), {d});
-    Tensor output = alloc_gpu(DType::FP16, {1, d});
+    Tensor output = alloc_gpu(QType::F16, {1, d});
 
     residual_add_rmsnorm(hidden, residual, weight, output, 1e-5f, nullptr);
     cudaDeviceSynchronize();
@@ -419,7 +419,7 @@ TEST(ExecutorKernelsTest, AddRMSNormInplace) {
 
     Tensor a = make_gpu_fp16(h_a.data(), {1, d});
     Tensor b = make_gpu_fp16(h_b.data(), {1, d});
-    Tensor h = alloc_gpu(DType::FP16, {1, d});
+    Tensor h = alloc_gpu(QType::F16, {1, d});
     Tensor w = make_gpu_fp16(h_w.data(), {d});
 
     add_rmsnorm_inplace(a, b, h, w, 1e-5f, nullptr);
@@ -446,7 +446,7 @@ TEST(ExecutorKernelsTest, RMSNormAddResidual) {
     Tensor input = make_gpu_fp16(h_in.data(), {1, d});
     Tensor w = make_gpu_fp16(h_w.data(), {d});
     Tensor r = make_gpu_fp16(h_r.data(), {1, d});
-    Tensor output = alloc_gpu(DType::FP16, {1, d});
+    Tensor output = alloc_gpu(QType::F16, {1, d});
 
     rmsnorm_add_residual(input, w, r, output, 1e-5f, nullptr);
     cudaDeviceSynchronize();

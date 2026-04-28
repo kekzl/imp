@@ -428,7 +428,7 @@ bool fmha_sm120_prefill(
     float scale, bool causal, int sliding_window, float softcap,
     cudaStream_t stream)
 {
-    if (Q.dtype != DType::FP16) return false;
+    if (Q.qtype != QType::F16) return false;
 
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int seq_q      = static_cast<int>(Q.shape[1]);
@@ -942,7 +942,7 @@ bool fmha_sm120_fp8_prefill(
     float scale, bool causal, int sliding_window, float softcap,
     cudaStream_t stream)
 {
-    if (Q.dtype != DType::FP16) return false;
+    if (Q.qtype != QType::F16) return false;
 
     const int batch_size = static_cast<int>(Q.shape[0]);
     const int seq_q      = static_cast<int>(Q.shape[1]);

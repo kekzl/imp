@@ -20,10 +20,10 @@ static constexpr float kTolerance = 1e-4f;
 
 // Create a device-resident Tensor from host data. Caller must free with
 // free_device_tensor().
-Tensor make_device_tensor(const void* host_data, DType dtype,
+Tensor make_device_tensor(const void* host_data, QType dtype,
                           int ndim, const int64_t* shape) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim = ndim;
     for (int i = 0; i < ndim; ++i) t.shape[i] = shape[i];
     t.compute_strides();
@@ -39,10 +39,10 @@ Tensor make_device_tensor(const void* host_data, DType dtype,
 }
 
 // Allocate a zero-initialized device tensor (no host source).
-Tensor make_device_tensor_zeros(DType dtype, int ndim,
+Tensor make_device_tensor_zeros(QType dtype, int ndim,
                                 const int64_t* shape) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim = ndim;
     for (int i = 0; i < ndim; ++i) t.shape[i] = shape[i];
     t.compute_strides();
@@ -145,7 +145,7 @@ protected:
 
     void SetUp() override {
         int64_t shape[2] = {kNTokens, kNExperts};
-        d_gate = make_device_tensor(gate_logits.data(), DType::FP32, 2, shape);
+        d_gate = make_device_tensor(gate_logits.data(), QType::F32, 2, shape);
 
         moe_topk_gating(d_gate, kTopK, routing, /*stream=*/nullptr);
         ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
@@ -165,12 +165,12 @@ TEST_F(MoERoutingTest, TopKSelection) {
     ASSERT_EQ(routing.expert_indices.ndim, 2);
     ASSERT_EQ(routing.expert_indices.shape[0], kNTokens);
     ASSERT_EQ(routing.expert_indices.shape[1], kTopK);
-    ASSERT_EQ(routing.expert_indices.dtype, DType::INT32);
+    ASSERT_EQ(routing.expert_indices.qtype, QType::INT32);
 
     ASSERT_EQ(routing.expert_weights.ndim, 2);
     ASSERT_EQ(routing.expert_weights.shape[0], kNTokens);
     ASSERT_EQ(routing.expert_weights.shape[1], kTopK);
-    ASSERT_EQ(routing.expert_weights.dtype, DType::FP32);
+    ASSERT_EQ(routing.expert_weights.qtype, QType::F32);
 
     auto h_indices = to_host<int32_t>(routing.expert_indices);
 
@@ -244,7 +244,7 @@ TEST_F(MoERoutingTest, WeightNormalization) {
 // Test 3: ExpertOffsets
 // ---------------------------------------------------------------------------
 TEST_F(MoERoutingTest, ExpertOffsets) {
-    ASSERT_EQ(routing.expert_offsets.dtype, DType::INT32);
+    ASSERT_EQ(routing.expert_offsets.qtype, QType::INT32);
 
     // expert_offsets should have n_experts + 1 elements
     int64_t expected_len = kNExperts + 1;
@@ -277,7 +277,7 @@ TEST_F(MoERoutingTest, ExpertOffsets) {
 // ---------------------------------------------------------------------------
 TEST_F(MoERoutingTest, SortedTokenIds) {
     int total = kNTokens * kTopK;
-    ASSERT_EQ(routing.sorted_token_ids.dtype, DType::INT32);
+    ASSERT_EQ(routing.sorted_token_ids.qtype, QType::INT32);
     ASSERT_EQ(routing.sorted_token_ids.numel(), total);
 
     auto h_sorted   = to_host<int32_t>(routing.sorted_token_ids);
@@ -330,12 +330,12 @@ TEST_F(MoERoutingTest, GatherScatter) {
     }
 
     int64_t input_shape[2] = {kNTokens, kDModel};
-    Tensor d_input = make_device_tensor(h_input.data(), DType::FP32, 2,
+    Tensor d_input = make_device_tensor(h_input.data(), QType::F32, 2,
                                         input_shape);
 
     // ---- Gather ----
     int64_t gathered_shape[2] = {total, kDModel};
-    Tensor d_gathered = make_device_tensor_zeros(DType::FP32, 2,
+    Tensor d_gathered = make_device_tensor_zeros(QType::F32, 2,
                                                  gathered_shape);
 
     moe_gather(d_input, routing, d_gathered, /*stream=*/nullptr);
@@ -365,7 +365,7 @@ TEST_F(MoERoutingTest, GatherScatter) {
     //   output[t] = sum_k  weight[t][k] * input[t]
     //             = input[t]   (because weights sum to 1)
     int64_t output_shape[2] = {kNTokens, kDModel};
-    Tensor d_output = make_device_tensor_zeros(DType::FP32, 2, output_shape);
+    Tensor d_output = make_device_tensor_zeros(QType::F32, 2, output_shape);
 
     moe_scatter(d_gathered, routing, d_output, /*stream=*/nullptr);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
@@ -435,7 +435,7 @@ TEST(MoERoutingEdgeTest, EmptyExpert) {
     };
 
     int64_t shape[2] = {kN, kE};
-    Tensor d_gate = make_device_tensor(logits.data(), DType::FP32, 2, shape);
+    Tensor d_gate = make_device_tensor(logits.data(), QType::F32, 2, shape);
 
     MoeRoutingResult routing{};
     moe_topk_gating(d_gate, kK, routing, /*stream=*/nullptr);
@@ -482,7 +482,7 @@ TEST(MoERoutingEdgeTest, AllTokensSameExpert) {
     }
 
     int64_t shape[2] = {kN, kE};
-    Tensor d_gate = make_device_tensor(logits.data(), DType::FP32, 2, shape);
+    Tensor d_gate = make_device_tensor(logits.data(), QType::F32, 2, shape);
 
     MoeRoutingResult routing{};
     moe_topk_gating(d_gate, kK, routing, /*stream=*/nullptr);

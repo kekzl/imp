@@ -1,6 +1,7 @@
 #include "compute/attention.h"
 #include "compute/attention_tc.h"
 #include "core/logging.h"
+#include "runtime/config.h"
 #include <cuda_runtime.h>
 #include <cstdlib>
 
@@ -55,7 +56,8 @@ void attention_prefill_dispatch(
 
     // Native sm_120 FP8 FMHA: QK^T in FP8 E4M3 (m16n8k32) for 2x score throughput.
     // PV stays FP16. Set IMP_NO_FP8_FMHA=1 to force FP16 path.
-    static bool use_fp8_fmha = !getenv("IMP_NO_FP8_FMHA");
+    // [attention] fp8_fmha: "auto" (default ON) | "never"
+    const bool use_fp8_fmha = RuntimeConfig::current().attention.fp8_fmha != "never";
     if (use_fp8_fmha) {
         bool fp8_ok = fmha_sm120_fp8_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream);
         if (fp8_ok) {
@@ -67,7 +69,7 @@ void attention_prefill_dispatch(
     // Native sm_120 FP16 FMHA: WMMA for Blackwell with sliding window support.
     // Fallback when FP8 is disabled or unsupported config.
     // Set IMP_NO_FMHA_SM120=1 to skip and use WMMA fallback.
-    static bool use_fmha_sm120 = !getenv("IMP_NO_FMHA_SM120");
+    const bool use_fmha_sm120 = RuntimeConfig::current().attention.fmha_sm120 != "never";
     if (use_fmha_sm120) {
         if (fmha_sm120_prefill(Q, K, V, O, scale, causal, sliding_window, softcap, stream)) {
             return;

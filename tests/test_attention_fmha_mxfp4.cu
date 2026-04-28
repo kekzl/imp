@@ -84,10 +84,10 @@ void run_compare_test(int B, int SQ, int SKV, int NH, int NKV, int HD,
     // MXFP4 Flash Attention
     {
         cudaMemset(d_o_mxfp4, 0, qo_elems * sizeof(half));
-        Tensor Q(d_q, DType::FP16, 4, qo_shape, true);
-        Tensor K(d_k, DType::FP16, 4, kv_shape, true);
-        Tensor V(d_v, DType::FP16, 4, kv_shape, true);
-        Tensor O(d_o_mxfp4, DType::FP16, 4, qo_shape, true);
+        Tensor Q(d_q, QType::F16, 4, qo_shape, true);
+        Tensor K(d_k, QType::F16, 4, kv_shape, true);
+        Tensor V(d_v, QType::F16, 4, kv_shape, true);
+        Tensor O(d_o_mxfp4, QType::F16, 4, qo_shape, true);
         bool ok = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal,
                                             sliding_window, softcap, stream);
         ASSERT_TRUE(ok) << "MXFP4 FMHA returned false for HD=" << HD;
@@ -96,10 +96,10 @@ void run_compare_test(int B, int SQ, int SKV, int NH, int NKV, int HD,
     // FP16 reference
     {
         cudaMemset(d_o_ref, 0, qo_elems * sizeof(half));
-        Tensor Q(d_q, DType::FP16, 4, qo_shape, true);
-        Tensor K(d_k, DType::FP16, 4, kv_shape, true);
-        Tensor V(d_v, DType::FP16, 4, kv_shape, true);
-        Tensor O(d_o_ref, DType::FP16, 4, qo_shape, true);
+        Tensor Q(d_q, QType::F16, 4, qo_shape, true);
+        Tensor K(d_k, QType::F16, 4, kv_shape, true);
+        Tensor V(d_v, QType::F16, 4, kv_shape, true);
+        Tensor O(d_o_ref, QType::F16, 4, qo_shape, true);
         if (sm >= 120)
             flash_attention_blackwell(Q, K, V, O, scale, causal, sliding_window, softcap, stream);
         else
@@ -243,13 +243,13 @@ static void run_blockscale_ab_test(int B, int SQ, int SKV, int NH, int NKV,
     int64_t kv_shape[] = {B, SKV, NKV, HD};
     float scale = 1.0f / std::sqrt(static_cast<float>(HD));
 
-    Tensor Q(d_q, DType::FP16, 4, qo_shape, true);
-    Tensor K(d_k, DType::FP16, 4, kv_shape, true);
-    Tensor V(d_v, DType::FP16, 4, kv_shape, true);
+    Tensor Q(d_q, QType::F16, 4, qo_shape, true);
+    Tensor K(d_k, QType::F16, 4, kv_shape, true);
+    Tensor V(d_v, QType::F16, 4, kv_shape, true);
 
     {
         cudaMemset(d_o_leg, 0, qo_elems * sizeof(half));
-        Tensor O(d_o_leg, DType::FP16, 4, qo_shape, true);
+        Tensor O(d_o_leg, QType::F16, 4, qo_shape, true);
         bool ok = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal,
                                              sliding_window, softcap, stream,
                                              /*use_blockscale=*/false);
@@ -257,7 +257,7 @@ static void run_blockscale_ab_test(int B, int SQ, int SKV, int NH, int NKV,
     }
     {
         cudaMemset(d_o_bs, 0, qo_elems * sizeof(half));
-        Tensor O(d_o_bs, DType::FP16, 4, qo_shape, true);
+        Tensor O(d_o_bs, QType::F16, 4, qo_shape, true);
         bool ok = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, causal,
                                              sliding_window, softcap, stream,
                                              /*use_blockscale=*/true);
@@ -332,10 +332,10 @@ TEST_F(FhmaMxFP4Test, RejectsHD48) {
 
     int64_t qo_shape[] = {B, SQ, NH, HD};
     int64_t kv_shape[] = {B, SKV, NKV, HD};
-    Tensor Q(d_q, DType::FP16, 4, qo_shape, true);
-    Tensor K(d_k, DType::FP16, 4, kv_shape, true);
-    Tensor V(d_v, DType::FP16, 4, kv_shape, true);
-    Tensor O(d_o, DType::FP16, 4, qo_shape, true);
+    Tensor Q(d_q, QType::F16, 4, qo_shape, true);
+    Tensor K(d_k, QType::F16, 4, kv_shape, true);
+    Tensor V(d_v, QType::F16, 4, kv_shape, true);
+    Tensor O(d_o, QType::F16, 4, qo_shape, true);
 
     float scale = 1.0f / std::sqrt(static_cast<float>(HD));
     bool ok = fmha_sm120_mxfp4_prefill(Q, K, V, O, scale, true, 0, 0.0f, stream_);

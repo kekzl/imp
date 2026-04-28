@@ -56,7 +56,7 @@ static void make_expert(SyntheticExpert& e, int N, int K, float wscale,
     cudaMemcpy(d_w_fp16, e.weight_fp16.data(),
                e.weight_fp16.size() * sizeof(half), cudaMemcpyHostToDevice);
     int64_t w_shape[2] = {N, K};
-    Tensor w_input(d_w_fp16, DType::FP16, 2, w_shape, true);
+    Tensor w_input(d_w_fp16, QType::F16, 2, w_shape, true);
     quantize_fp16_to_nvfp4(w_input, e.nvfp4, stream);
     cudaFree(d_w_fp16);
 

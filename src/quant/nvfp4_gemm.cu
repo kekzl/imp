@@ -1389,8 +1389,8 @@ void gemv_nvfp4(const NvFP4QuantResult& A, const Tensor& x, Tensor& y,
     assert(A.packed_data != nullptr && "A must be quantized");
     assert(x.on_device && "x must be on device");
     assert(y.on_device && "y must be on device");
-    assert(x.dtype == DType::FP16 && "x must be FP16");
-    assert(y.dtype == DType::FP16 && "y must be FP16");
+    assert(x.qtype == QType::F16 && "x must be FP16");
+    assert(y.qtype == QType::F16 && "y must be FP16");
 
     int M = static_cast<int>(A.N);
     int K = static_cast<int>(A.K);
@@ -1474,7 +1474,7 @@ void gemm_nvfp4(const NvFP4QuantResult& A, const Tensor& B, Tensor& C,
     dequantize_nvfp4_to_fp16(A, dequant_buf, stream);
 
     int64_t A_shape[2] = {N, K};
-    Tensor A_fp16(dequant_buf, DType::FP16, 2, A_shape, /*on_device=*/true);
+    Tensor A_fp16(dequant_buf, QType::F16, 2, A_shape, /*on_device=*/true);
 
     gemm(B, A_fp16, C, 1.0f, 0.0f, stream);
 }

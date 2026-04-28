@@ -371,7 +371,7 @@ void reduce_sum(const Tensor& input, Tensor& output, int dim,
     if (dim == input.ndim - 1) {
         // Reduce along last dimension (contiguous access)
         int num_rows = outer_size;  // inner_size == 1 for last-dim reduction
-        if (input.dtype == DType::FP16) {
+        if (input.qtype == QType::F16) {
             const half* d_input = static_cast<const half*>(input.data);
             reduce_sum_last_dim_fp16_kernel<<<num_rows, BLOCK_SIZE, 0, stream>>>(
                 d_input, d_output, reduce_size);
@@ -383,7 +383,7 @@ void reduce_sum(const Tensor& input, Tensor& output, int dim,
     } else {
         // General case: reduce along arbitrary dimension
         int num_output = outer_size * inner_size;
-        if (input.dtype == DType::FP16) {
+        if (input.qtype == QType::F16) {
             const half* d_input = static_cast<const half*>(input.data);
             reduce_sum_general_fp16_kernel<<<num_output, BLOCK_SIZE, 0, stream>>>(
                 d_input, d_output, outer_size, reduce_size, inner_size);
@@ -406,7 +406,7 @@ void reduce_max(const Tensor& input, Tensor& output, int dim,
 
     if (dim == input.ndim - 1) {
         int num_rows = outer_size;
-        if (input.dtype == DType::FP16) {
+        if (input.qtype == QType::F16) {
             const half* d_input = static_cast<const half*>(input.data);
             reduce_max_last_dim_fp16_kernel<<<num_rows, BLOCK_SIZE, 0, stream>>>(
                 d_input, d_output, reduce_size);
@@ -417,7 +417,7 @@ void reduce_max(const Tensor& input, Tensor& output, int dim,
         }
     } else {
         int num_output = outer_size * inner_size;
-        if (input.dtype == DType::FP16) {
+        if (input.qtype == QType::F16) {
             const half* d_input = static_cast<const half*>(input.data);
             reduce_max_general_fp16_kernel<<<num_output, BLOCK_SIZE, 0, stream>>>(
                 d_input, d_output, outer_size, reduce_size, inner_size);

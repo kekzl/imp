@@ -54,6 +54,10 @@ ServerArgs parse_server_args(int argc, char** argv) {
         if (std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0) {
             print_server_usage(argv[0]);
             std::exit(0);
+        } else if (std::strcmp(arg, "--config") == 0 && i + 1 < argc) {
+            args.config_path = argv[++i];
+        } else if (std::strcmp(arg, "--set") == 0 && i + 1 < argc) {
+            args.config_overrides.push_back(argv[++i]);
         } else if (std::strcmp(arg, "--model") == 0 && i + 1 < argc) {
             args.model_path = argv[++i];
         } else if (std::strcmp(arg, "--revision") == 0 && i + 1 < argc) {

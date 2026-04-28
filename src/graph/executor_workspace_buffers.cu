@@ -8,6 +8,7 @@
 #include "compute/gemm_cutlass_sm120.h"
 #include "compute/gemm_cutlass_mxfp4_sm120.h"
 #include "compute/sampling.h"
+#include "runtime/config.h"
 #include "quant/quant_gemm.h"
 #include "quant/dequant_gpu.h"
 #include "quant/nvfp4_gemm.h"
@@ -179,7 +180,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                 int64_t s_shape[3] = {static_cast<int64_t>(nh),
                                       static_cast<int64_t>(attn_seq),
                                       static_cast<int64_t>(attn_seq)};
-                attn_scores_ = Tensor(attn_scores_buf_, DType::FP16, 3, s_shape, true);
+                attn_scores_ = Tensor(attn_scores_buf_, QType::F16, 3, s_shape, true);
                 IMP_LOG_INFO("cuBLAS attention S-matrix: %.2f MiB (%d heads x %d x %d)",
                              s_sz / (1024.0 * 1024.0), nh, attn_seq, attn_seq);
             }
@@ -213,15 +214,15 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
         {
             for (int li = 0; li < model_->n_layers(); li++) {
                 const auto& L = model_->layer(li);
-                auto check = [&](const Tensor& p, GGMLQuantType qt) {
+                auto check = [&](const Tensor& p, QType qt) {
                     if (!p.data || p.ndim < 3) return;
-                    size_t rb = ggml_quant_row_bytes(qt, p.shape[2]);
+                    size_t rb = qtype_row_bytes(qt, p.shape[2]);
                     size_t expert_raw = static_cast<size_t>(p.shape[1]) * rb;
                     max_expert_raw = std::max(max_expert_raw, expert_raw);
                 };
-                check(L.expert_up_packed, L.expert_up_qtype);
-                check(L.expert_down_packed, L.expert_down_qtype);
-                check(L.expert_gate_packed, L.expert_gate_qtype);
+                check(L.expert_up_packed, L.expert_up_packed.qtype);
+                check(L.expert_down_packed, L.expert_down_packed.qtype);
+                check(L.expert_gate_packed, L.expert_gate_packed.qtype);
             }
             if (max_expert_raw > 0) {
                 moe_.raw_staging_buf = vram_alloc(vram_alloc_, max_expert_raw, "moe_staging");
@@ -249,7 +250,7 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
                     break;
                 }
             }
-            if (has_host_experts && !getenv("IMP_NO_EXPERT_CACHE")) {
+            if (has_host_experts && !RuntimeConfig::current().moe.no_expert_cache) {
                 // Budget: proportional to free VRAM (15%) instead of flat cap.
                 // KV cache + weight caches (FP8/NVFP4) need the remaining VRAM,
                 // so expert cache must not over-commit.

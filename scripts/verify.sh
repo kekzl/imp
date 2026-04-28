@@ -17,6 +17,9 @@
 #   IMP_VERIFY_MODELS=models
 #   IMP_VERIFY_BASELINE=tests/perf_baseline.json
 #   IMP_VERIFY_SKIP_BUILD=1   skip cmake build step
+#   IMP_VERIFY_SKIP_PERF=1    skip perf-baseline regression check (use when the
+#                             baseline is known-stale; refresh with
+#                             scripts/gen_perf_baseline.sh)
 #   IMP_VERIFY_IN_DOCKER=1    sentinel set by the auto-re-exec block; do not set manually
 #
 # Auto-Docker fallback: if cmake is not on PATH (Clean-Host workflow), the
@@ -47,6 +50,7 @@ if ! command -v cmake >/dev/null 2>&1 && [ "${IMP_VERIFY_IN_DOCKER:-0}" != "1" ]
         -e IMP_VERIFY_BIN=/usr/local/bin/imp-cli \
         -e IMP_VERIFY_TESTS=/usr/local/bin/imp-tests \
         -e IMP_VERIFY_SKIP_BUILD=1 \
+        -e IMP_VERIFY_SKIP_PERF="${IMP_VERIFY_SKIP_PERF:-0}" \
         --entrypoint bash imp:test scripts/verify.sh "$@"
 fi
 
@@ -63,6 +67,26 @@ section() { echo; echo "${YLW}== $* ==${RST}"; }
 pass()    { echo "${GRN}PASS${RST} $*"; }
 fail()    { echo "${RED}FAIL${RST} $*"; FAIL=$((FAIL+1)); }
 skip()    { echo "${YLW}SKIP${RST} $*"; }
+
+# Docker-only host (e.g. WSL2 with the "clean host" policy from CLAUDE.md):
+# host has neither cmake nor a build/ directory. Run the canonical Docker
+# build, then exit early — the test / perf / smoke gates below need the
+# host build artefacts and there's no clean way to reach them from here.
+# Override with IMP_VERIFY_SKIP_BUILD=1 if cmake-on-host is preferred.
+if [ "${IMP_VERIFY_SKIP_BUILD:-0}" != "1" ] && ! command -v cmake >/dev/null 2>&1; then
+    section "build (docker — host has no cmake)"
+    if make build >/tmp/imp_verify_build.log 2>&1; then
+        pass "docker build"
+    else
+        fail "docker build (see /tmp/imp_verify_build.log)"
+        tail -20 /tmp/imp_verify_build.log
+        exit 1
+    fi
+    section "remaining gates (skipped — Docker-only host)"
+    skip "tests / perf / smoke require host build artefacts; run 'make test-gpu'"
+    skip "and 'make verify' inside Docker manually for the full pre-merge gate"
+    exit 0
+fi
 
 # -------------------------------------------------------------------- 1. build
 section "build"
@@ -105,7 +129,9 @@ fi
 
 # --------------------------------------------------------------------- 3. perf
 section "perf vs baseline"
-if [ ! -f "$BASELINE" ]; then
+if [ "${IMP_VERIFY_SKIP_PERF:-0}" = "1" ]; then
+    skip "perf gate (IMP_VERIFY_SKIP_PERF=1)"
+elif [ ! -f "$BASELINE" ]; then
     skip "no $BASELINE — run scripts/gen_perf_baseline.sh to create one"
 elif [ ! -x "$BIN" ]; then
     fail "$BIN not found"

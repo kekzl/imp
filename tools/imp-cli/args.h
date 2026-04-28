@@ -4,6 +4,12 @@
 #include <vector>
 
 struct CliArgs {
+    // imp.conf integration. --config overrides the search-path default;
+    // --set is a repeatable key=value (e.g. --set kv_cache.dtype=fp8) that
+    // applies on top of the loaded config. See imp.conf.example for keys.
+    std::string config_path;
+    std::vector<std::string> config_overrides;
+
     std::string model_path;
     std::string revision;      // --revision: HuggingFace model revision (branch/tag/commit)
     std::string prompt;

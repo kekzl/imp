@@ -46,11 +46,11 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
 
     int threads = std::min(row_elems, 256);
 
-    bool use_fp8 = (cache->dtype() == DType::FP8_E4M3);
-    bool use_int8 = (cache->dtype() == DType::INT8);
-    bool use_int4 = (cache->dtype() == DType::INT4);
-    bool use_turboquant = (cache->dtype() == DType::TURBOQUANT);
-    bool use_turboquant_lite = (cache->dtype() == DType::TURBOQUANT_LITE);
+    bool use_fp8 = (cache->qtype() == QType::FP8_E4M3);
+    bool use_int8 = (cache->qtype() == QType::INT8);
+    bool use_int4 = (cache->qtype() == QType::INT4);
+    bool use_turboquant = (cache->qtype() == QType::TURBOQUANT);
+    bool use_turboquant_lite = (cache->qtype() == QType::TURBOQUANT_LITE);
 
     if (use_turboquant_lite) {
         // TurboQuant Lite: QJL sketch-only K + INT4 V

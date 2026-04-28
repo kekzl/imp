@@ -1,12 +1,13 @@
 #pragma once
 
 // Diagnostics for CUDA-graph capture/replay (Milestone A1).
-// Activated via environment variables:
-//   IMP_GRAPH_DIAG=1           — enable post-launch error checks and logging
-//   IMP_GRAPH_DUMP=<path>      — dump verbose DOT of each captured graph
+// Activated via imp.conf:
+//   [diagnostics] graph_diag = true        — post-launch error checks + logging
+//   [diagnostics] graph_dump_dir = "<path>" — dump verbose DOT per graph
 // Off by default; no overhead when unset.
 
 #include "core/logging.h"
+#include "runtime/config.h"
 #include <cuda_runtime.h>
 #include <cstdlib>
 #include <cstring>
@@ -20,13 +21,12 @@ enum class Phase { NORMAL, CAPTURE, REPLAY };
 inline thread_local Phase g_phase = Phase::NORMAL;
 
 inline bool enabled() {
-    static const bool v = (std::getenv("IMP_GRAPH_DIAG") != nullptr);
-    return v;
+    return RuntimeConfig::current().diagnostics.graph_diag;
 }
 
 inline const char* dump_path() {
-    static const char* v = std::getenv("IMP_GRAPH_DUMP");
-    return v;
+    const std::string& d = RuntimeConfig::current().diagnostics.graph_dump_dir;
+    return d.empty() ? nullptr : d.c_str();
 }
 
 inline const char* phase_name(Phase p) {

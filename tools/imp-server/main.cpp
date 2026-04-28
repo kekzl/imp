@@ -1,6 +1,7 @@
 #include "args.h"
 #include "handlers.h"
 #include "model/hf_hub.h"
+#include "runtime/config.h"
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -13,6 +14,11 @@ using json = nlohmann::json;
 
 int main(int argc, char** argv) {
     ServerArgs args = parse_server_args(argc, argv);
+
+    // Load imp.conf (if present) + apply --set overrides; install as the
+    // process-wide RuntimeConfig.
+    imp::RuntimeConfig::install(
+        imp::RuntimeConfig::load(args.config_path, args.config_overrides));
 
     if (args.model_path.empty()) {
         fprintf(stderr, "Error: --model is required\n");

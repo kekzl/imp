@@ -81,7 +81,7 @@ cmake -B build-asan -DIMP_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
 ### Dependencies
 
 - **CUDA Toolkit 13.2+** (required) — cudart, cuda_driver, cublas, cublasLt
-- **CUTLASS v4.4.1** (fetched via FetchContent) — SM120 FMHA (FP16/FP8/MXFP4), NVFP4/MXFP4 GEMM, MoE Grouped GEMM
+- **CUTLASS v4.4.2** (fetched via FetchContent) — SM120 FMHA (FP16/FP8/MXFP4), NVFP4/MXFP4 GEMM, MoE Grouped GEMM
 - **Google Test v1.14.0** (fetched via FetchContent when tests enabled)
 - **stb_image / stb_image_resize2** (vendored in `third_party/stb/`) — image loading for vision
 - **pthread** (linked privately)
@@ -280,24 +280,59 @@ Hybrid architecture: 24 GDN layers (recurrent) + 8 attention layers + 32 dense F
 - Nemotron-H (Mamba2 + Attention + MoE hybrid)
 - Generic fallback
 
-### Environment Variables
+### Runtime Configuration
 
-Runtime knobs (set via shell env or `docker-compose.yml`):
+Runtime knobs are read from `imp.conf` (TOML-subset). All previous
+`IMP_*`-prefixed environment variables (~50 of them) have been replaced
+by sectioned keys in this file. See `imp.conf.example` in the repo root
+for the full schema with defaults and inline comments.
 
-| Variable | Effect |
-|---|---|
-| `IMP_KV_FP8` | Use FP8 E4M3 KV cache (recommended sweet spot vs FP16) |
-| `IMP_KV_INT8` | Use INT8 KV cache (lower VRAM, mild quality loss) |
-| `IMP_DECODE_NVFP4` | NVFP4 decode KV cache (max VRAM compression) |
-| `IMP_NO_CUDA_GRAPHS` | Disable CUDA graph capture (required for some MoE configs) |
-| `IMP_SSM_FP16` | Force FP16 SSM/GDN scan instead of FP32 gate path |
-| `IMP_PREFILL_CHUNK_SIZE` | Chunked prefill split size (default auto) |
-| `IMP_THINK_BUDGET` | Max thinking tokens for reasoning models |
-| `IMP_EXPERT_OVERHEAD_PCT` | MoE expert offload overhead estimate (10 = enable auto-probe; 30 = fallback) |
-| `IMP_MMPROJ` | Path to mmproj.gguf for vision models |
-| `IMP_MXFP4_ATTENTION` | Enable MXFP4 prefill FMHA path |
-| `IMP_NO_FP8_FMHA` | Force FP16 FMHA (debug) |
-| `IMP_NO_FMHA_SM120` | Force WMMA fallback attention (debug) |
+**Loading precedence** (first non-empty wins):
+1. `--config <path>` CLI flag
+2. `$IMP_CONFIG` environment variable
+3. `./imp.conf` (working directory)
+4. `~/.config/imp/imp.conf`
+5. embedded defaults (no file)
+
+**Per-run overrides** on top of the loaded config:
+
+```bash
+imp-cli --set kv_cache.dtype=fp8 --set runtime.cuda_graphs=never \
+        --model X.gguf --prompt "..."
+```
+
+**Common keys** (excerpt — see `imp.conf.example` for the rest):
+
+| Section / Key | Default | Effect |
+|---|---|---|
+| `runtime.cuda_graphs` | `"auto"` | `auto` / `always` / `never` |
+| `runtime.deterministic_gemm` | `false` | Pin cuBLAS algo for byte-stable runs |
+| `runtime.warmup` | `true` | Run warmup forward at engine init |
+| `runtime.no_pdl` | `false` | Disable Programmatic Dependent Launch |
+| `kv_cache.dtype` | `"fp16"` | `fp16` / `fp8` / `int8` / `int4` / `nvfp4` |
+| `attention.fp8_prefill` | `"auto"` | `auto` / `never` |
+| `attention.fp8_fmha` | `"auto"` | `auto` / `never` |
+| `attention.fmha_sm120` | `"auto"` | `auto` / `never` |
+| `attention.mxfp4` | `"auto"` | `auto` / `always` (MXFP4 prefill FMHA) |
+| `moe.expert_overhead_pct` | `10` | 10 = aggressive, 30 = conservative |
+| `moe.force_host_experts` | `0` | Force last N MoE layers to host |
+| `gdn.fp32_scan` | `false` | FP32 GDN scan (slower, higher precision) |
+| `gemma4.no_graphs` | `false` | Bypass Gemma-4 CUDA graph capture |
+| `generation.think_budget` | `0` | Max tokens spent in `<think>...</think>` |
+| `paths.mmproj` | `""` | mmproj.gguf for vision (Gemma-3) |
+| `diagnostics.dump_hidden_dir` | `""` | Per-layer hidden-state .npy dumps |
+| `diagnostics.exit_layer` | `-1` | Stop forward at layer N |
+
+**Build-time only env vars** (kept as ENV because they shape the build):
+
+| Variable | Default | Effect |
+|---|---|---|
+| `IMP_BUILD_TESTS` | ON | Build the GTest suite |
+| `IMP_BUILD_TOOLS` | ON | Build imp-cli and imp-bench |
+| `IMP_BUILD_BENCH` | ON | Build benchmark tool |
+| `IMP_BUILD_SERVER` | ON | Build imp-server |
+| `IMP_SANITIZERS` | OFF | ASAN + UBSAN (host C++ code only) |
+| `IMP_CONFIG` | unset | Path to imp.conf (overrides search-path) |
 
 ### Vision (Multimodal)
 Gemma-3 vision uses a frozen 400M-parameter SigLIP ViT that produces 256 image tokens per image, projected into the LLM's embedding space. The vision encoder weights ship as a separate `mmproj.gguf` file. The pipeline: load image → resize 896x896 → normalize → extract 14x14 patches → 27 SigLIP transformer layers → 4x4 avg pool → RMSNorm + linear projection → replace `<image_soft_token>` embeddings before LLM prefill.

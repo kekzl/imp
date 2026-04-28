@@ -9,6 +9,7 @@
 #include "memory/gdn_state.h"
 #include "core/logging.h"
 #include "runtime/pdl.h"
+#include "runtime/config.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -72,7 +73,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
     // 2. ssm_in projection: [n, d_model] @ ssm_in^T -> [n, ssm_in_dim]
     //    ssm_in_dim = inner(z) + conv_channels(xBC) + n_heads(dt)
     Tensor proj = view_tokens(ssm_proj_buf_, n);
-    gemm_dispatch(no, ly.ssm_in, ly.ssm_in_qtype, proj, ctx);
+    gemm_dispatch(no, ly.ssm_in, proj, ctx);
 
     // 3. Split projection output [n, total_dim] into z, xBC, dt by column slices.
     //    proj layout: each row has [z(inner) | xBC(conv_channels) | dt(n_heads)].
@@ -167,7 +168,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
         // For n=1 decode this is just pointer arithmetic (no copy needed).
         // For n>1 prefill, we must de-interleave.
 
-        DType h_dtype = (state.ssm_state) ? state.ssm_state->h_dtype() : DType::FP32;
+        QType h_dtype = (state.ssm_state) ? state.ssm_state->h_dtype() : QType::F32;
 
         if (n == 1) {
             // Decode: single token, just pass pointers directly into xBC_out row
@@ -252,7 +253,7 @@ void GraphExecutor::run_ssm(int layer, const InferenceState& state,
 
     // 10. ssm_out projection: [n, inner] @ ssm_out^T -> [n, d_model]
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
-    gemm_dispatch(y_buf, ly.ssm_out, ly.ssm_out_qtype, out_buf, ctx);
+    gemm_dispatch(y_buf, ly.ssm_out, out_buf, ctx);
 
     // 11. Residual add: hidden = output + residual
     elementwise_add(out_buf, r, stream);
@@ -300,7 +301,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     //    ssm_proj_buf_ is [max_tokens, ssm_in_dim] but we only need [n, conv_channels].
     int64_t proj_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(conv_channels)};
     Tensor proj(ssm_proj_buf_.data, compute_dtype_, 2, proj_shape, true);
-    gemm_dispatch(no, ly.ssm_in, ly.ssm_in_qtype, proj, ctx);
+    gemm_dispatch(no, ly.ssm_in, proj, ctx);
     dump_tensor_npy("gdn_ssm_in_out", proj, stream, layer, cur_decode_step_);
 
     // 3. Conv1d on full projection output [n, conv_channels]
@@ -352,7 +353,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     // Compare to llama's `conv_output_silu-{layer}` tensor.
     {
         int64_t cf_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(conv_channels)};
-        Tensor conv_f32_t(conv_f32, DType::FP32, 2, cf_shape, true);
+        Tensor conv_f32_t(conv_f32, QType::F32, 2, cf_shape, true);
         dump_tensor_npy("gdn_conv_f32", conv_f32_t, stream, layer, cur_decode_step_);
     }
 
@@ -362,7 +363,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     // layout. Qwen 3.6 uses 16K/32V asymmetric heads and triggers this
     // mismatch. Gated by IMP_GDN_VHEAD_REORDER to avoid regressing symmetric
     // models or models whose converters already emit grouped layout.
-    static const bool vhead_reorder = std::getenv("IMP_GDN_VHEAD_REORDER") != nullptr;
+    const bool vhead_reorder = RuntimeConfig::current().gdn.vhead_reorder;
     if (vhead_reorder && n_groups != n_heads) {
         const int inner_v = n_heads * head_dim_ssm;  // V channels = 32 * 128 = 4096 for Qwen 3.6
         const int BC_size_vh = n_groups * ssize;      // Q/K per-group size = 16 * 128 = 2048
@@ -399,9 +400,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     // Gate projection — computed before scan, used after in RMSNormGated
     int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(inner)};
     Tensor gate_out(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
-    gemm_dispatch(no, ly.gdn_gate, ly.gdn_gate_qtype, gate_out, ctx);
+    gemm_dispatch(no, ly.gdn_gate, gate_out, ctx);
 
-    static const bool use_fp32_scan = std::getenv("IMP_GDN_FP32_SCAN") != nullptr;
+    const bool use_fp32_scan = RuntimeConfig::current().gdn.fp32_scan;
 
     if (h_st) {
         size_t es = dtype_size(compute_dtype_);
@@ -418,8 +419,8 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
             beta_proj_out = Tensor(beta_ptr, compute_dtype_, 2, ab_shape, true);
 
             // Alpha/beta: through gemm_dispatch for consistent MXFP4/FP16/quantized handling.
-            gemm_dispatch(no, ly.gdn_alpha, ly.gdn_alpha_qtype, alpha_proj_out, ctx);
-            gemm_dispatch(no, ly.gdn_beta, ly.gdn_beta_qtype, beta_proj_out, ctx);
+            gemm_dispatch(no, ly.gdn_alpha, alpha_proj_out, ctx);
+            gemm_dispatch(no, ly.gdn_beta, beta_proj_out, ctx);
             // Per-element dump: pre-softplus alpha and pre-sigmoid beta projections.
             // Compare to llama's `alpha-{layer}` and `beta-{layer}`.
             dump_tensor_npy("gdn_alpha", alpha_proj_out, stream, layer, cur_decode_step_);
@@ -435,7 +436,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         // IMP_GDN_FP32_SCAN=1: keep scan output in FP32 through RMSNorm+Gate.
         //   FP16 subnormal truncation (~6e-5) breaks RMS for near-zero heads on
         //   models with sparse scan activations (Qwen 3.6 L1 head 0).
-        static const bool use_ref = std::getenv("IMP_GDN_REF") != nullptr;
+        const bool use_ref = RuntimeConfig::current().gdn.ref_kernel;
         if (use_fp32_scan) {
             // Layout in conv_f32 tail:
             //   [n*conv_channels)                : conv_f32 (done)
@@ -503,10 +504,10 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     // Single kernel launch for all tokens × heads (replaces n×32×2 launches).
     // When IMP_GDN_FP32_SCAN is active, this was already done inline with the
     // scan above (FP32-input variant). Skip to avoid double-applying.
-    // IMP_GDN_NORM_EPS env can override eps (diagnostic).
+    // [gdn] norm_eps_override > 0 can override eps (diagnostic).
     float norm_eps = eps;
-    if (const char* e = std::getenv("IMP_GDN_NORM_EPS")) {
-        norm_eps = strtof(e, nullptr);
+    if (RuntimeConfig::current().gdn.norm_eps_override > 0.0f) {
+        norm_eps = RuntimeConfig::current().gdn.norm_eps_override;
     }
     if (!use_fp32_scan) {
         gdn_rmsnorm_gated_silu(static_cast<half*>(y_buf.data),
@@ -524,7 +525,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
     // residual in FP32 before downcast. FP16 accumulation here drifts ~5% per
     // element vs llama.cpp; that small drift amplifies to sign flips in
     // downstream near-zero projections and breaks Qwen 3.6.
-    static const bool use_fp32_out = std::getenv("IMP_GDN_FP32_OUT") != nullptr;
+    const bool use_fp32_out = RuntimeConfig::current().gdn.fp32_out;
     Tensor out_buf = view_tokens(ssm_out_buf_, n);
     if (use_fp32_out) {
         // Allocate FP32 scratch via cudaMallocAsync (small: n * d_model * 4 bytes)
@@ -532,14 +533,14 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
         void* fp32_out = nullptr;
         IMP_CUDA_CHECK_LOG(cudaMallocAsync(&fp32_out, fp32_bytes, stream));
         int64_t out_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(cfg.d_model)};
-        Tensor fp32_out_t(fp32_out, DType::FP32, 2, out_shape, true);
+        Tensor fp32_out_t(fp32_out, QType::F32, 2, out_shape, true);
 
         // NOTE: when FP32_SCAN is also active, the post-norm-gated tensor lives
         // in FP32 memory, but we can't pass it directly to gemm_dispatch because
         // cuBLAS FP32-input × FP16-cached-weight path silently produces zeros on
         // sm_120 with CUBLAS_COMPUTE_32F (tested 2026-04-21). Stay on FP16 y_buf
         // input; precision benefit from FP32 scan is limited to the rmsnorm stage.
-        gemm_dispatch(y_buf, ly.ssm_out, ly.ssm_out_qtype, fp32_out_t, ctx);
+        gemm_dispatch(y_buf, ly.ssm_out, fp32_out_t, ctx);
 
         // FP16 residual → FP32 + add + FP16 writeback to h in one kernel.
         int64_t total = static_cast<int64_t>(n) * cfg.d_model;
@@ -551,7 +552,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
             static_cast<__half*>(h.data), total);
         IMP_CUDA_CHECK_LOG(cudaFreeAsync(fp32_out, stream));
     } else {
-        gemm_dispatch(y_buf, ly.ssm_out, ly.ssm_out_qtype, out_buf, ctx);
+        gemm_dispatch(y_buf, ly.ssm_out, out_buf, ctx);
         // Per-element dump: linear_attn_out post-ssm_out GEMM, pre-residual.
         // Compare to llama's `linear_attn_out-{layer}` from eval-callback.
         dump_tensor_npy("gdn_linear_attn_out", out_buf, stream, layer, cur_decode_step_);

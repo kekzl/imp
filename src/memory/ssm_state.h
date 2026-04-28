@@ -21,11 +21,11 @@ public:
     ~SSMState();
 
     // Allocate state for the given configuration.
-    // h_dtype: DType::FP32 (default) or DType::FP16 for h_state storage.
+    // h_dtype: QType::F32 (default) or QType::F16 for h_state storage.
     bool init(int n_ssm_layers, int max_sequences,
               int conv_channels, int conv_kernel,
               int n_heads, int head_dim_ssm, int state_size,
-              DType h_dtype = DType::FP32,
+              QType h_dtype = QType::F32,
               VRAMAllocator* alloc = nullptr);
 
     // Get pointers into the state pool for a given sequence and SSM layer index.
@@ -37,14 +37,14 @@ public:
 
     int max_sequences() const { return max_sequences_; }
     int n_ssm_layers() const { return n_ssm_layers_; }
-    DType h_dtype() const { return h_dtype_; }
+    QType h_dtype() const { return h_dtype_; }
 
 private:
     VRAMAllocator* alloc_ = nullptr;
     void* pool_ = nullptr;
     int n_ssm_layers_ = 0;
     int max_sequences_ = 0;
-    DType h_dtype_ = DType::FP32;
+    QType h_dtype_ = QType::F32;
     size_t conv_bytes_ = 0;      // per (seq, layer) conv state
     size_t h_bytes_ = 0;         // per (seq, layer) h state
     size_t per_layer_bytes_ = 0; // conv_bytes_ + h_bytes_

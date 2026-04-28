@@ -133,7 +133,7 @@ static std::unique_ptr<Model> make_test_model(
             buf[i] = float_to_fp16(dist(rng));
         }
         int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
-        Tensor t(buf, DType::FP16, 2, shape, false);
+        Tensor t(buf, QType::F16, 2, shape, false);
         return {buf, t};
     };
 
@@ -151,7 +151,7 @@ static std::unique_ptr<Model> make_test_model(
 
         // Tensor shape is logical: [rows, cols]
         int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
-        Tensor t(buf, DType::INT4, 2, shape, false);
+        Tensor t(buf, QType::Q4_0, 2, shape, false);
         return {buf, t};
     };
 
@@ -161,7 +161,7 @@ static std::unique_ptr<Model> make_test_model(
         uint16_t one = float_to_fp16(1.0f);
         for (int i = 0; i < dim; ++i) buf[i] = one;
         int64_t shape[4] = {static_cast<int64_t>(dim), 0, 0, 0};
-        Tensor t(buf, DType::FP16, 1, shape, false);
+        Tensor t(buf, QType::F16, 1, shape, false);
         return {buf, t};
     };
 
@@ -181,17 +181,17 @@ static std::unique_ptr<Model> make_test_model(
     // Token embedding [vocab_size, d_model]
     auto [tok_emb_buf, tok_emb] = make_fp16_weight(vocab_size, d_model, rng);
     model->tok_emb_ = tok_emb;
-    model->tok_emb_qtype_ = GGMLQuantType::F16;
+    model->tok_emb_.qtype = QType::F16;
 
     // Output norm [d_model]
     auto [out_norm_buf, out_norm] = make_norm_weight(d_model);
     model->out_norm_ = out_norm;
-    model->out_norm_qtype_ = GGMLQuantType::F16;
+    model->out_norm_.qtype = QType::F16;
 
     // Output projection [vocab_size, d_model]
     auto [out_proj_buf, out_proj] = make_fp16_weight(vocab_size, d_model, rng);
     model->out_proj_ = out_proj;
-    model->out_proj_qtype_ = GGMLQuantType::F16;
+    model->out_proj_.qtype = QType::F16;
 
     // Layers
     model->layers_.resize(n_layers);
@@ -202,48 +202,48 @@ static std::unique_ptr<Model> make_test_model(
         if (use_q4_0) {
             // Attention weights in Q4_0
             auto [wq_buf, wq] = make_q4_0_weight(n_heads * head_dim, d_model);
-            ly.wq = wq; ly.wq_qtype = GGMLQuantType::Q4_0;
+            ly.wq = wq; ly.wq.qtype = QType::Q4_0;
 
             auto [wk_buf, wk] = make_q4_0_weight(n_kv_heads * head_dim, d_model);
-            ly.wk = wk; ly.wk_qtype = GGMLQuantType::Q4_0;
+            ly.wk = wk; ly.wk.qtype = QType::Q4_0;
 
             auto [wv_buf, wv] = make_q4_0_weight(n_kv_heads * head_dim, d_model);
-            ly.wv = wv; ly.wv_qtype = GGMLQuantType::Q4_0;
+            ly.wv = wv; ly.wv.qtype = QType::Q4_0;
 
             auto [wo_buf, wo] = make_q4_0_weight(d_model, n_heads * head_dim);
-            ly.wo = wo; ly.wo_qtype = GGMLQuantType::Q4_0;
+            ly.wo = wo; ly.wo.qtype = QType::Q4_0;
 
             // FFN weights in Q4_0
             auto [wg_buf, wg] = make_q4_0_weight(d_ff, d_model);
-            ly.w_gate = wg; ly.w_gate_qtype = GGMLQuantType::Q4_0;
+            ly.w_gate = wg; ly.w_gate.qtype = QType::Q4_0;
 
             auto [wu_buf, wu] = make_q4_0_weight(d_ff, d_model);
-            ly.w_up = wu; ly.w_up_qtype = GGMLQuantType::Q4_0;
+            ly.w_up = wu; ly.w_up.qtype = QType::Q4_0;
 
             auto [wd_buf, wd] = make_q4_0_weight(d_model, d_ff);
-            ly.w_down = wd; ly.w_down_qtype = GGMLQuantType::Q4_0;
+            ly.w_down = wd; ly.w_down.qtype = QType::Q4_0;
         } else {
             // Attention weights in FP16
             auto [wq_buf, wq] = make_fp16_weight(n_heads * head_dim, d_model, rng);
-            ly.wq = wq; ly.wq_qtype = GGMLQuantType::F16;
+            ly.wq = wq; ly.wq.qtype = QType::F16;
 
             auto [wk_buf, wk] = make_fp16_weight(n_kv_heads * head_dim, d_model, rng);
-            ly.wk = wk; ly.wk_qtype = GGMLQuantType::F16;
+            ly.wk = wk; ly.wk.qtype = QType::F16;
 
             auto [wv_buf, wv] = make_fp16_weight(n_kv_heads * head_dim, d_model, rng);
-            ly.wv = wv; ly.wv_qtype = GGMLQuantType::F16;
+            ly.wv = wv; ly.wv.qtype = QType::F16;
 
             auto [wo_buf, wo] = make_fp16_weight(d_model, n_heads * head_dim, rng);
-            ly.wo = wo; ly.wo_qtype = GGMLQuantType::F16;
+            ly.wo = wo; ly.wo.qtype = QType::F16;
 
             auto [wg_buf, wg] = make_fp16_weight(d_ff, d_model, rng);
-            ly.w_gate = wg; ly.w_gate_qtype = GGMLQuantType::F16;
+            ly.w_gate = wg; ly.w_gate.qtype = QType::F16;
 
             auto [wu_buf, wu] = make_fp16_weight(d_ff, d_model, rng);
-            ly.w_up = wu; ly.w_up_qtype = GGMLQuantType::F16;
+            ly.w_up = wu; ly.w_up.qtype = QType::F16;
 
             auto [wd_buf, wd] = make_fp16_weight(d_model, d_ff, rng);
-            ly.w_down = wd; ly.w_down_qtype = GGMLQuantType::F16;
+            ly.w_down = wd; ly.w_down.qtype = QType::F16;
         }
 
         // Norm weights always FP16
@@ -289,7 +289,7 @@ static std::unique_ptr<Model> make_q8_0_test_model(
         }
 
         int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
-        Tensor t(buf, DType::INT8, 2, shape, false);
+        Tensor t(buf, QType::INT8, 2, shape, false);
         return {buf, t};
     };
 
@@ -299,7 +299,7 @@ static std::unique_ptr<Model> make_q8_0_test_model(
         auto* buf = new uint16_t[n];
         for (size_t i = 0; i < n; ++i) buf[i] = float_to_fp16(0.01f);
         int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
-        Tensor t(buf, DType::FP16, 2, shape, false);
+        Tensor t(buf, QType::F16, 2, shape, false);
         return {buf, t};
     };
 
@@ -309,24 +309,24 @@ static std::unique_ptr<Model> make_q8_0_test_model(
         uint16_t one = float_to_fp16(1.0f);
         for (int i = 0; i < dim; ++i) buf[i] = one;
         int64_t shape[4] = {static_cast<int64_t>(dim), 0, 0, 0};
-        Tensor t(buf, DType::FP16, 1, shape, false);
+        Tensor t(buf, QType::F16, 1, shape, false);
         return {buf, t};
     };
 
     // Token embedding in FP16 (small values)
     auto [tok_emb_buf, tok_emb] = make_fp16_weight(vocab_size, d_model);
     model->tok_emb_ = tok_emb;
-    model->tok_emb_qtype_ = GGMLQuantType::F16;
+    model->tok_emb_.qtype = QType::F16;
 
     // Output norm
     auto [out_norm_buf, out_norm] = make_norm_weight(d_model);
     model->out_norm_ = out_norm;
-    model->out_norm_qtype_ = GGMLQuantType::F16;
+    model->out_norm_.qtype = QType::F16;
 
     // Output projection in FP16
     auto [out_proj_buf, out_proj] = make_fp16_weight(vocab_size, d_model);
     model->out_proj_ = out_proj;
-    model->out_proj_qtype_ = GGMLQuantType::F16;
+    model->out_proj_.qtype = QType::F16;
 
     // Layers with Q8_0 weights
     model->layers_.resize(n_layers);
@@ -334,25 +334,25 @@ static std::unique_ptr<Model> make_q8_0_test_model(
         auto& ly = model->layers_[l];
 
         auto [wq_buf, wq] = make_q8_0_weight(n_heads * head_dim, d_model);
-        ly.wq = wq; ly.wq_qtype = GGMLQuantType::Q8_0;
+        ly.wq = wq; ly.wq.qtype = QType::Q8_0;
 
         auto [wk_buf, wk] = make_q8_0_weight(n_kv_heads * head_dim, d_model);
-        ly.wk = wk; ly.wk_qtype = GGMLQuantType::Q8_0;
+        ly.wk = wk; ly.wk.qtype = QType::Q8_0;
 
         auto [wv_buf, wv] = make_q8_0_weight(n_kv_heads * head_dim, d_model);
-        ly.wv = wv; ly.wv_qtype = GGMLQuantType::Q8_0;
+        ly.wv = wv; ly.wv.qtype = QType::Q8_0;
 
         auto [wo_buf, wo] = make_q8_0_weight(d_model, n_heads * head_dim);
-        ly.wo = wo; ly.wo_qtype = GGMLQuantType::Q8_0;
+        ly.wo = wo; ly.wo.qtype = QType::Q8_0;
 
         auto [wg_buf, wg] = make_q8_0_weight(d_ff, d_model);
-        ly.w_gate = wg; ly.w_gate_qtype = GGMLQuantType::Q8_0;
+        ly.w_gate = wg; ly.w_gate.qtype = QType::Q8_0;
 
         auto [wu_buf, wu] = make_q8_0_weight(d_ff, d_model);
-        ly.w_up = wu; ly.w_up_qtype = GGMLQuantType::Q8_0;
+        ly.w_up = wu; ly.w_up.qtype = QType::Q8_0;
 
         auto [wd_buf, wd] = make_q8_0_weight(d_model, d_ff);
-        ly.w_down = wd; ly.w_down_qtype = GGMLQuantType::Q8_0;
+        ly.w_down = wd; ly.w_down.qtype = QType::Q8_0;
 
         auto [an_buf, an] = make_norm_weight(d_model);
         ly.attn_norm = an;
@@ -378,13 +378,15 @@ TEST(QuantIntegrationTest, Q4_0WeightUpload) {
     ASSERT_FALSE(model->gpu_weights_ready());
 
     // Upload weights to GPU
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
     EXPECT_TRUE(model->gpu_weights_ready());
 
-    // Check layer 0 wq: raw upload keeps logical shape [N, K] and FP16 dtype
+    // Check layer 0 wq: raw upload keeps logical shape [N, K] and Q4_0 qtype
+    // (post-Stage-D: weight.qtype carries the source quant type so dispatch
+    //  can read it directly without a separate qtype parameter).
     const auto& ly = model->layer(0);
     EXPECT_TRUE(ly.wq.on_device);
-    EXPECT_EQ(ly.wq.dtype, DType::FP16);
+    EXPECT_EQ(ly.wq.qtype, QType::Q4_0);
     EXPECT_EQ(ly.wq.ndim, 2);
     // wq shape: [n_heads * head_dim, d_model] = [32, 32]
     EXPECT_EQ(ly.wq.shape[0], 32);
@@ -452,8 +454,8 @@ TEST(QuantIntegrationTest, Q8_0WeightUpload) {
 
     int64_t shape[4] = {rows, cols, 0, 0};
     model->layers_.resize(1);
-    model->layers_[0].wq = Tensor(q8_buf, DType::INT8, 2, shape, false);
-    model->layers_[0].wq_qtype = GGMLQuantType::Q8_0;
+    model->layers_[0].wq = Tensor(q8_buf, QType::INT8, 2, shape, false);
+    model->layers_[0].wq.qtype = QType::Q8_0;
 
     // Set other weights to minimal FP16 (just need wq for this test)
     auto make_fp16 = [](int r, int c) -> Tensor {
@@ -461,39 +463,39 @@ TEST(QuantIntegrationTest, Q8_0WeightUpload) {
         auto* buf = new uint16_t[n];
         for (size_t i = 0; i < n; ++i) buf[i] = float_to_fp16(0.01f);
         int64_t s[4] = {static_cast<int64_t>(r), static_cast<int64_t>(c), 0, 0};
-        return Tensor(buf, DType::FP16, 2, s, false);
+        return Tensor(buf, QType::F16, 2, s, false);
     };
     auto make_norm = [](int d) -> Tensor {
         auto* buf = new uint16_t[d];
         for (int i = 0; i < d; ++i) buf[i] = float_to_fp16(1.0f);
         int64_t s[4] = {static_cast<int64_t>(d), 0, 0, 0};
-        return Tensor(buf, DType::FP16, 1, s, false);
+        return Tensor(buf, QType::F16, 1, s, false);
     };
 
     auto& ly = model->layers_[0];
-    ly.wk = make_fp16(32, 32); ly.wk_qtype = GGMLQuantType::F16;
-    ly.wv = make_fp16(32, 32); ly.wv_qtype = GGMLQuantType::F16;
-    ly.wo = make_fp16(32, 32); ly.wo_qtype = GGMLQuantType::F16;
-    ly.w_gate = make_fp16(64, 32); ly.w_gate_qtype = GGMLQuantType::F16;
-    ly.w_up = make_fp16(64, 32); ly.w_up_qtype = GGMLQuantType::F16;
-    ly.w_down = make_fp16(32, 64); ly.w_down_qtype = GGMLQuantType::F16;
+    ly.wk = make_fp16(32, 32); ly.wk.qtype = QType::F16;
+    ly.wv = make_fp16(32, 32); ly.wv.qtype = QType::F16;
+    ly.wo = make_fp16(32, 32); ly.wo.qtype = QType::F16;
+    ly.w_gate = make_fp16(64, 32); ly.w_gate.qtype = QType::F16;
+    ly.w_up = make_fp16(64, 32); ly.w_up.qtype = QType::F16;
+    ly.w_down = make_fp16(32, 64); ly.w_down.qtype = QType::F16;
     ly.attn_norm = make_norm(32);
     ly.ffn_norm = make_norm(32);
 
     model->tok_emb_ = make_fp16(32, 32);
-    model->tok_emb_qtype_ = GGMLQuantType::F16;
+    model->tok_emb_.qtype = QType::F16;
     model->out_norm_ = make_norm(32);
-    model->out_norm_qtype_ = GGMLQuantType::F16;
+    model->out_norm_.qtype = QType::F16;
     model->out_proj_ = make_fp16(32, 32);
-    model->out_proj_qtype_ = GGMLQuantType::F16;
+    model->out_proj_.qtype = QType::F16;
 
     // Upload
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     // After upload, wq should be on device with logical shape [N, K]
-    // Data is raw Q8_0 bytes (not dequanted FP16)
+    // Data is raw Q8_0 bytes; weight.qtype carries the source qtype now.
     EXPECT_TRUE(ly.wq.on_device);
-    EXPECT_EQ(ly.wq.dtype, DType::FP16);
+    EXPECT_EQ(ly.wq.qtype, QType::Q8_0);
     EXPECT_EQ(ly.wq.shape[0], rows);
     EXPECT_EQ(ly.wq.shape[1], cols);
 
@@ -507,7 +509,7 @@ TEST(QuantIntegrationTest, Q8_0WeightUpload) {
     // Verify on-the-fly dequant produces correct FP16 values
     void* d_fp16 = nullptr;
     cudaMalloc(&d_fp16, static_cast<size_t>(rows * cols) * sizeof(uint16_t));
-    dequant_gpu(ly.wq.data, d_fp16, GGMLQuantType::Q8_0, rows, cols, nullptr);
+    dequant_gpu(ly.wq.data, d_fp16, QType::Q8_0, rows, cols, nullptr);
     cudaDeviceSynchronize();
 
     std::vector<uint16_t> h_fp16(rows * cols);
@@ -550,45 +552,45 @@ TEST(QuantIntegrationTest, F32WeightUpload) {
     }
 
     int64_t shape[4] = {rows, cols, 0, 0};
-    model->tok_emb_ = Tensor(f32_buf, DType::FP32, 2, shape, false);
-    model->tok_emb_qtype_ = GGMLQuantType::F32;
+    model->tok_emb_ = Tensor(f32_buf, QType::F32, 2, shape, false);
+    model->tok_emb_.qtype = QType::F32;
 
     // Minimal other weights
     auto make_fp16 = [](int r, int c) -> Tensor {
         auto* buf = new uint16_t[static_cast<size_t>(r) * c];
         for (int i = 0; i < r * c; ++i) buf[i] = float_to_fp16(0.01f);
         int64_t s[4] = {static_cast<int64_t>(r), static_cast<int64_t>(c), 0, 0};
-        return Tensor(buf, DType::FP16, 2, s, false);
+        return Tensor(buf, QType::F16, 2, s, false);
     };
     auto make_norm = [](int d) -> Tensor {
         auto* buf = new uint16_t[d];
         for (int i = 0; i < d; ++i) buf[i] = float_to_fp16(1.0f);
         int64_t s[4] = {static_cast<int64_t>(d), 0, 0, 0};
-        return Tensor(buf, DType::FP16, 1, s, false);
+        return Tensor(buf, QType::F16, 1, s, false);
     };
 
     model->out_norm_ = make_norm(32);
-    model->out_norm_qtype_ = GGMLQuantType::F16;
+    model->out_norm_.qtype = QType::F16;
     model->out_proj_ = make_fp16(32, 32);
-    model->out_proj_qtype_ = GGMLQuantType::F16;
+    model->out_proj_.qtype = QType::F16;
 
     model->layers_.resize(1);
     auto& ly = model->layers_[0];
-    ly.wq = make_fp16(32, 32); ly.wq_qtype = GGMLQuantType::F16;
-    ly.wk = make_fp16(32, 32); ly.wk_qtype = GGMLQuantType::F16;
-    ly.wv = make_fp16(32, 32); ly.wv_qtype = GGMLQuantType::F16;
-    ly.wo = make_fp16(32, 32); ly.wo_qtype = GGMLQuantType::F16;
-    ly.w_gate = make_fp16(64, 32); ly.w_gate_qtype = GGMLQuantType::F16;
-    ly.w_up = make_fp16(64, 32); ly.w_up_qtype = GGMLQuantType::F16;
-    ly.w_down = make_fp16(32, 64); ly.w_down_qtype = GGMLQuantType::F16;
+    ly.wq = make_fp16(32, 32); ly.wq.qtype = QType::F16;
+    ly.wk = make_fp16(32, 32); ly.wk.qtype = QType::F16;
+    ly.wv = make_fp16(32, 32); ly.wv.qtype = QType::F16;
+    ly.wo = make_fp16(32, 32); ly.wo.qtype = QType::F16;
+    ly.w_gate = make_fp16(64, 32); ly.w_gate.qtype = QType::F16;
+    ly.w_up = make_fp16(64, 32); ly.w_up.qtype = QType::F16;
+    ly.w_down = make_fp16(32, 64); ly.w_down.qtype = QType::F16;
     ly.attn_norm = make_norm(32);
     ly.ffn_norm = make_norm(32);
 
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     // Token embedding should now be FP16 on device
     EXPECT_TRUE(model->tok_emb_.on_device);
-    EXPECT_EQ(model->tok_emb_.dtype, DType::FP16);
+    EXPECT_EQ(model->tok_emb_.qtype, QType::F16);
 
     // Read back and verify conversion
     std::vector<uint16_t> h_result(rows * cols);
@@ -614,11 +616,11 @@ TEST(QuantIntegrationTest, UploadIdempotent) {
 
     auto model = make_test_model(32, 64, 4, 4, 1, 32, false);
 
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
     EXPECT_TRUE(model->gpu_weights_ready());
 
     // Second call should succeed without re-uploading
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
     EXPECT_TRUE(model->gpu_weights_ready());
 }
 
@@ -629,10 +631,10 @@ TEST(QuantIntegrationTest, FP16ForwardPass) {
     SKIP_IF_NO_CUDA();
 
     auto model = make_test_model(32, 64, 4, 4, 1, 32, false);
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -677,10 +679,10 @@ TEST(QuantIntegrationTest, Q4_0ForwardPass) {
     // Use nibble=9 for small nonzero weights: (9-8)*0.01 = 0.01
     auto model = make_test_model(32, 64, 4, 4, 1, 32, true,
                                   /*scale=*/0.01f, /*nibble=*/9);
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -745,10 +747,10 @@ TEST(QuantIntegrationTest, Q4_0Deterministic) {
     SKIP_IF_NO_CUDA();
 
     auto model = make_test_model(32, 64, 4, 4, 1, 32, true, 0.01f, 9);
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -786,10 +788,10 @@ TEST(QuantIntegrationTest, Q4_0LogitsShape) {
     SKIP_IF_NO_CUDA();
 
     auto model = make_test_model(32, 64, 4, 4, 1, 32, true, 0.01f, 9);
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -819,7 +821,7 @@ TEST(QuantIntegrationTest, Q4_0LogitsShape) {
     EXPECT_EQ(logits.ndim, 2);
     EXPECT_EQ(logits.shape[0], 1);  // prefill: last token only
     EXPECT_EQ(logits.shape[1], 32); // vocab_size
-    EXPECT_EQ(logits.dtype, DType::FP32); // logits are FP32 for sampling precision
+    EXPECT_EQ(logits.qtype, QType::F32); // logits are FP32 for sampling precision
     EXPECT_TRUE(logits.on_device);
 
     cudaFree(d_tokens);
@@ -834,10 +836,10 @@ TEST(QuantIntegrationTest, Q4_0MultiLayer) {
 
     // 4 layers to test multi-layer quantized forward pass
     auto model = make_test_model(32, 64, 4, 4, 4, 32, true, 0.01f, 9);
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -875,10 +877,10 @@ TEST(QuantIntegrationTest, Q8_0ForwardPass) {
     SKIP_IF_NO_CUDA();
 
     auto model = make_q8_0_test_model(32, 64, 4, 4, 1, 32, 0.01f, 2);
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -940,10 +942,10 @@ TEST(QuantIntegrationTest, Q8_0MultiLayer) {
     SKIP_IF_NO_CUDA();
 
     auto model = make_q8_0_test_model(32, 64, 4, 4, 4, 32, 0.01f, 2);
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -1064,10 +1066,10 @@ TEST(QuantIntegrationTest, QuantGemmInt4LargerMatrix) {
     int64_t s_shape[4] = {N, static_cast<int64_t>(num_groups), 0, 0};
     int64_t c_shape[4] = {M, N, 0, 0};
 
-    Tensor t_A(d_A, DType::FP16, 2, a_shape, true);
-    Tensor t_B(d_B, DType::INT4, 2, b_shape, true);
-    Tensor t_S(d_scales, DType::FP16, 2, s_shape, true);
-    Tensor t_C(d_C, DType::FP16, 2, c_shape, true);
+    Tensor t_A(d_A, QType::F16, 2, a_shape, true);
+    Tensor t_B(d_B, QType::INT4, 2, b_shape, true);
+    Tensor t_S(d_scales, QType::F16, 2, s_shape, true);
+    Tensor t_C(d_C, QType::F16, 2, c_shape, true);
 
     quant_gemm_int4(t_A, t_B, t_S, t_C, nullptr);
     cudaDeviceSynchronize();
@@ -1218,7 +1220,7 @@ static std::unique_ptr<Model> make_q4_k_test_model(
             std::memcpy(buf + i * 144, blk.data(), 144);
         }
         int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
-        Tensor t(buf, DType::INT4, 2, shape, false);
+        Tensor t(buf, QType::Q4_K, 2, shape, false);
         return {buf, t};
     };
 
@@ -1227,7 +1229,7 @@ static std::unique_ptr<Model> make_q4_k_test_model(
         auto* buf = new uint16_t[n];
         for (size_t i = 0; i < n; ++i) buf[i] = float_to_fp16(0.01f);
         int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
-        Tensor t(buf, DType::FP16, 2, shape, false);
+        Tensor t(buf, QType::F16, 2, shape, false);
         return {buf, t};
     };
 
@@ -1236,49 +1238,49 @@ static std::unique_ptr<Model> make_q4_k_test_model(
         uint16_t one = float_to_fp16(1.0f);
         for (int i = 0; i < dim; ++i) buf[i] = one;
         int64_t shape[4] = {static_cast<int64_t>(dim), 0, 0, 0};
-        Tensor t(buf, DType::FP16, 1, shape, false);
+        Tensor t(buf, QType::F16, 1, shape, false);
         return {buf, t};
     };
 
     // Token embedding [vocab_size, d_model] in FP16
     auto [tok_emb_buf, tok_emb] = make_fp16_weight(vocab_size, d_model);
     model->tok_emb_ = tok_emb;
-    model->tok_emb_qtype_ = GGMLQuantType::F16;
+    model->tok_emb_.qtype = QType::F16;
 
     // Output norm [d_model]
     auto [out_norm_buf, out_norm] = make_norm_weight(d_model);
     model->out_norm_ = out_norm;
-    model->out_norm_qtype_ = GGMLQuantType::F16;
+    model->out_norm_.qtype = QType::F16;
 
     // Output projection [vocab_size, d_model] in FP16
     auto [out_proj_buf, out_proj] = make_fp16_weight(vocab_size, d_model);
     model->out_proj_ = out_proj;
-    model->out_proj_qtype_ = GGMLQuantType::F16;
+    model->out_proj_.qtype = QType::F16;
 
     model->layers_.resize(n_layers);
     for (int l = 0; l < n_layers; ++l) {
         auto& ly = model->layers_[l];
 
         auto [wq_buf, wq] = make_q4_k_weight(n_heads * head_dim, d_model);
-        ly.wq = wq; ly.wq_qtype = GGMLQuantType::Q4_K;
+        ly.wq = wq; ly.wq.qtype = QType::Q4_K;
 
         auto [wk_buf, wk] = make_q4_k_weight(n_kv_heads * head_dim, d_model);
-        ly.wk = wk; ly.wk_qtype = GGMLQuantType::Q4_K;
+        ly.wk = wk; ly.wk.qtype = QType::Q4_K;
 
         auto [wv_buf, wv] = make_q4_k_weight(n_kv_heads * head_dim, d_model);
-        ly.wv = wv; ly.wv_qtype = GGMLQuantType::Q4_K;
+        ly.wv = wv; ly.wv.qtype = QType::Q4_K;
 
         auto [wo_buf, wo] = make_q4_k_weight(d_model, n_heads * head_dim);
-        ly.wo = wo; ly.wo_qtype = GGMLQuantType::Q4_K;
+        ly.wo = wo; ly.wo.qtype = QType::Q4_K;
 
         auto [wg_buf, wg] = make_q4_k_weight(d_ff, d_model);
-        ly.w_gate = wg; ly.w_gate_qtype = GGMLQuantType::Q4_K;
+        ly.w_gate = wg; ly.w_gate.qtype = QType::Q4_K;
 
         auto [wu_buf, wu] = make_q4_k_weight(d_ff, d_model);
-        ly.w_up = wu; ly.w_up_qtype = GGMLQuantType::Q4_K;
+        ly.w_up = wu; ly.w_up.qtype = QType::Q4_K;
 
         auto [wd_buf, wd] = make_q4_k_weight(d_model, d_ff);
-        ly.w_down = wd; ly.w_down_qtype = GGMLQuantType::Q4_K;
+        ly.w_down = wd; ly.w_down.qtype = QType::Q4_K;
 
         auto [an_buf, an] = make_norm_weight(d_model);
         ly.attn_norm = an;
@@ -1321,7 +1323,7 @@ static std::unique_ptr<Model> make_q5_k_test_model(
             std::memcpy(buf + i * 176, blk.data(), 176);
         }
         int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
-        Tensor t(buf, DType::INT4, 2, shape, false);
+        Tensor t(buf, QType::Q5_K, 2, shape, false);
         return {buf, t};
     };
 
@@ -1330,7 +1332,7 @@ static std::unique_ptr<Model> make_q5_k_test_model(
         auto* buf = new uint16_t[n];
         for (size_t i = 0; i < n; ++i) buf[i] = float_to_fp16(0.01f);
         int64_t shape[4] = {static_cast<int64_t>(rows), static_cast<int64_t>(cols), 0, 0};
-        Tensor t(buf, DType::FP16, 2, shape, false);
+        Tensor t(buf, QType::F16, 2, shape, false);
         return {buf, t};
     };
 
@@ -1339,46 +1341,46 @@ static std::unique_ptr<Model> make_q5_k_test_model(
         uint16_t one = float_to_fp16(1.0f);
         for (int i = 0; i < dim; ++i) buf[i] = one;
         int64_t shape[4] = {static_cast<int64_t>(dim), 0, 0, 0};
-        Tensor t(buf, DType::FP16, 1, shape, false);
+        Tensor t(buf, QType::F16, 1, shape, false);
         return {buf, t};
     };
 
     auto [tok_emb_buf, tok_emb] = make_fp16_weight(vocab_size, d_model);
     model->tok_emb_ = tok_emb;
-    model->tok_emb_qtype_ = GGMLQuantType::F16;
+    model->tok_emb_.qtype = QType::F16;
 
     auto [out_norm_buf, out_norm] = make_norm_weight(d_model);
     model->out_norm_ = out_norm;
-    model->out_norm_qtype_ = GGMLQuantType::F16;
+    model->out_norm_.qtype = QType::F16;
 
     auto [out_proj_buf, out_proj] = make_fp16_weight(vocab_size, d_model);
     model->out_proj_ = out_proj;
-    model->out_proj_qtype_ = GGMLQuantType::F16;
+    model->out_proj_.qtype = QType::F16;
 
     model->layers_.resize(n_layers);
     for (int l = 0; l < n_layers; ++l) {
         auto& ly = model->layers_[l];
 
         auto [wq_buf, wq] = make_q5_k_weight(n_heads * head_dim, d_model);
-        ly.wq = wq; ly.wq_qtype = GGMLQuantType::Q5_K;
+        ly.wq = wq; ly.wq.qtype = QType::Q5_K;
 
         auto [wk_buf, wk] = make_q5_k_weight(n_kv_heads * head_dim, d_model);
-        ly.wk = wk; ly.wk_qtype = GGMLQuantType::Q5_K;
+        ly.wk = wk; ly.wk.qtype = QType::Q5_K;
 
         auto [wv_buf, wv] = make_q5_k_weight(n_kv_heads * head_dim, d_model);
-        ly.wv = wv; ly.wv_qtype = GGMLQuantType::Q5_K;
+        ly.wv = wv; ly.wv.qtype = QType::Q5_K;
 
         auto [wo_buf, wo] = make_q5_k_weight(d_model, n_heads * head_dim);
-        ly.wo = wo; ly.wo_qtype = GGMLQuantType::Q5_K;
+        ly.wo = wo; ly.wo.qtype = QType::Q5_K;
 
         auto [wg_buf, wg] = make_q5_k_weight(d_ff, d_model);
-        ly.w_gate = wg; ly.w_gate_qtype = GGMLQuantType::Q5_K;
+        ly.w_gate = wg; ly.w_gate.qtype = QType::Q5_K;
 
         auto [wu_buf, wu] = make_q5_k_weight(d_ff, d_model);
-        ly.w_up = wu; ly.w_up_qtype = GGMLQuantType::Q5_K;
+        ly.w_up = wu; ly.w_up.qtype = QType::Q5_K;
 
         auto [wd_buf, wd] = make_q5_k_weight(d_model, d_ff);
-        ly.w_down = wd; ly.w_down_qtype = GGMLQuantType::Q5_K;
+        ly.w_down = wd; ly.w_down.qtype = QType::Q5_K;
 
         auto [an_buf, an] = make_norm_weight(d_model);
         ly.attn_norm = an;
@@ -1398,7 +1400,7 @@ TEST(QuantIntegrationTest, Q4_KWeightUpload) {
     auto model = make_q4_k_test_model(
         /*d_model=*/256, /*d_ff=*/256, /*n_heads=*/4, /*n_kv_heads=*/4,
         /*n_layers=*/1, /*vocab_size=*/32);
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     const auto& ly = model->layer(0);
     EXPECT_TRUE(ly.wq.on_device);
@@ -1432,10 +1434,10 @@ TEST(QuantIntegrationTest, Q4_KForwardPass) {
     auto model = make_q4_k_test_model(
         /*d_model=*/256, /*d_ff=*/256, /*n_heads=*/4, /*n_kv_heads=*/4,
         /*n_layers=*/1, /*vocab_size=*/32);
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -1494,10 +1496,10 @@ TEST(QuantIntegrationTest, Q4_KDeterministic) {
     auto model = make_q4_k_test_model(
         /*d_model=*/256, /*d_ff=*/256, /*n_heads=*/4, /*n_kv_heads=*/4,
         /*n_layers=*/1, /*vocab_size=*/32);
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -1537,10 +1539,10 @@ TEST(QuantIntegrationTest, Q4_KMultiLayer) {
     auto model = make_q4_k_test_model(
         /*d_model=*/256, /*d_ff=*/256, /*n_heads=*/4, /*n_kv_heads=*/4,
         /*n_layers=*/4, /*vocab_size=*/32);
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -1580,7 +1582,7 @@ TEST(QuantIntegrationTest, Q5_KWeightUpload) {
     auto model = make_q5_k_test_model(
         /*d_model=*/256, /*d_ff=*/256, /*n_heads=*/4, /*n_kv_heads=*/4,
         /*n_layers=*/1, /*vocab_size=*/32);
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     const auto& ly = model->layer(0);
     EXPECT_TRUE(ly.wq.on_device);
@@ -1607,10 +1609,10 @@ TEST(QuantIntegrationTest, Q5_KForwardPass) {
     auto model = make_q5_k_test_model(
         /*d_model=*/256, /*d_ff=*/256, /*n_heads=*/4, /*n_kv_heads=*/4,
         /*n_layers=*/1, /*vocab_size=*/32);
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -1669,10 +1671,10 @@ TEST(QuantIntegrationTest, Q5_KMultiLayer) {
     auto model = make_q5_k_test_model(
         /*d_model=*/256, /*d_ff=*/256, /*n_heads=*/4, /*n_kv_heads=*/4,
         /*n_layers=*/4, /*vocab_size=*/32);
-    ASSERT_TRUE(model->upload_weights_gpu(DType::FP16, nullptr));
+    ASSERT_TRUE(model->upload_weights_gpu(QType::F16, nullptr));
 
     GraphExecutor executor;
-    ASSERT_TRUE(executor.init(*model, DType::FP16, false));
+    ASSERT_TRUE(executor.init(*model, QType::F16, false));
     gemm_init();
     ASSERT_TRUE(executor.allocate_workspaces(false));
 
@@ -1728,7 +1730,7 @@ TEST(QuantIntegrationTest, Q4_KDequantCorrectness) {
     // Dequant on GPU
     void* d_fp16 = nullptr;
     cudaMalloc(&d_fp16, cols * sizeof(uint16_t));
-    dequant_gpu(d_raw, d_fp16, GGMLQuantType::Q4_K, rows, cols, nullptr);
+    dequant_gpu(d_raw, d_fp16, QType::Q4_K, rows, cols, nullptr);
     cudaDeviceSynchronize();
 
     // Read back
@@ -1775,7 +1777,7 @@ TEST(QuantIntegrationTest, Q5_KDequantCorrectness) {
 
     void* d_fp16_0 = nullptr;
     cudaMalloc(&d_fp16_0, cols * sizeof(uint16_t));
-    dequant_gpu(d_raw0, d_fp16_0, GGMLQuantType::Q5_K, rows, cols, nullptr);
+    dequant_gpu(d_raw0, d_fp16_0, QType::Q5_K, rows, cols, nullptr);
     cudaDeviceSynchronize();
 
     std::vector<uint16_t> h_fp16_0(cols);
@@ -1800,7 +1802,7 @@ TEST(QuantIntegrationTest, Q5_KDequantCorrectness) {
 
     void* d_fp16_1 = nullptr;
     cudaMalloc(&d_fp16_1, cols * sizeof(uint16_t));
-    dequant_gpu(d_raw1, d_fp16_1, GGMLQuantType::Q5_K, rows, cols, nullptr);
+    dequant_gpu(d_raw1, d_fp16_1, QType::Q5_K, rows, cols, nullptr);
     cudaDeviceSynchronize();
 
     std::vector<uint16_t> h_fp16_1(cols);

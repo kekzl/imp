@@ -183,14 +183,14 @@ void softmax(const Tensor& input, Tensor& output,
     const int block = 256;
     const int grid  = static_cast<int>(rows);
 
-    switch (input.dtype) {
-        case DType::FP32:
+    switch (input.qtype) {
+        case QType::F32:
             softmax_fp32_kernel<<<grid, block, 0, stream>>>(
                 static_cast<const float*>(input.data),
                 static_cast<float*>(output.data),
                 static_cast<int>(cols));
             break;
-        case DType::FP16:
+        case QType::F16:
             softmax_fp16_kernel<<<grid, block, 0, stream>>>(
                 static_cast<const __half*>(input.data),
                 static_cast<__half*>(output.data),

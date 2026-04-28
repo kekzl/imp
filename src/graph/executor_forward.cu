@@ -3,6 +3,7 @@
 #include "graph/executor_helpers.h"
 #include "graph/executor_debug.h"
 #include "graph/gemm_context.h"
+#include "runtime/config.h"
 #include "compute/embedding.h"
 #include "compute/layernorm.h"
 #include "compute/rope.h"
@@ -48,16 +49,16 @@ namespace imp {
 // Layer methods: executor_attention.cu, executor_ffn.cu, executor_ssm_gdn.cu
 
 // LM head dp4a GEMV dispatch: y = W @ x (FP32 output for logits).
-static void dispatch_gemv_fp32(GGMLQuantType qtype,
+static void dispatch_gemv_fp32(QType qtype,
                                 const void* W, const block_q8_1* q8_1, const float* d8,
                                 float* y, int M, int K, cudaStream_t stream) {
     switch (qtype) {
-        case GGMLQuantType::Q6_K: gemv_q6k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
-        case GGMLQuantType::Q4_0: gemv_q4_0_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
-        case GGMLQuantType::Q4_K: gemv_q4_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
-        case GGMLQuantType::Q5_K: gemv_q5_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
-        case GGMLQuantType::Q2_K: gemv_q2_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
-        case GGMLQuantType::Q3_K: gemv_q3_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q6_K: gemv_q6k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q4_0: gemv_q4_0_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q4_K: gemv_q4_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q5_K: gemv_q5_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q2_K: gemv_q2_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q3_K: gemv_q3_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
         default:                  gemv_q8_0_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
     }
 }
@@ -101,14 +102,14 @@ void debug_top_logits(const Tensor& logits, cudaStream_t stream, int topk = 10) 
     // Dump the LAST row (the one that actually gets sampled from for the next token).
     int row = nrows - 1;
     int64_t row_stride = (logits.ndim >= 2 && logits.stride[0] > 0) ? logits.stride[0] : vocab;
-    const size_t elem_sz = (logits.dtype == DType::FP32) ? sizeof(float) : sizeof(half);
+    const size_t elem_sz = (logits.qtype == QType::F32) ? sizeof(float) : sizeof(half);
     const char* src = static_cast<const char*>(logits.data) + (int64_t)row * row_stride * elem_sz;
     std::vector<float> host(vocab);
 
-    if (logits.dtype == DType::FP32) {
+    if (logits.qtype == QType::F32) {
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(host.data(), src, vocab * sizeof(float),
                          cudaMemcpyDeviceToHost, stream));
-    } else if (logits.dtype == DType::FP16) {
+    } else if (logits.qtype == QType::F16) {
         std::vector<half> tmp(vocab);
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(tmp.data(), src, vocab * sizeof(half),
                          cudaMemcpyDeviceToHost, stream));
@@ -182,7 +183,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     // ---- Optional per-component profiling (IMP_PROFILE=1) ----
     // Profiling disables CUDA graph capture (they are incompatible).
     // Use IMP_PROFILE=1 for diagnostic runs only.
-    static const bool do_profile = (std::getenv("IMP_PROFILE") != nullptr);
+    const bool do_profile = RuntimeConfig::current().diagnostics.profile;
     static int profile_step_ = 0;
     static float acc_total = 0, acc_attn = 0, acc_ffn = 0, acc_lm = 0;
     bool profiling = do_profile;
@@ -244,10 +245,10 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     }
     Tensor h = view_tokens(hidden_, n);
     embedding_lookup(model_->token_embedding(), state.token_ids, n, h,
-                     model_->tok_emb_qtype_, stream);
+                     model_->tok_emb_.qtype, stream);
 
     // Gemma: scale embeddings by sqrt(d_model)
-    if (cfg.embed_scale > 0.0f && h.dtype == DType::FP16) {
+    if (cfg.embed_scale > 0.0f && h.qtype == QType::F16) {
         int64_t total = static_cast<int64_t>(n) * cfg.d_model;
         int threads = 256;
         int blocks = static_cast<int>((total / 2 + threads - 1) / threads);
@@ -290,7 +291,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 decode_step, tmp[0], tmp[1], tmp[2], tmp[3]);
     }
     // Binary dump: write the full FP16 hidden state to file
-    if (getenv("IMP_DUMP_HIDDEN")) {
+    if (!RuntimeConfig::current().diagnostics.dump_hidden_dir.empty()) {
         std::vector<half> h_buf(n * cfg.d_model);
         cudaMemcpy(h_buf.data(), h.data, h_buf.size() * sizeof(half), cudaMemcpyDeviceToHost);
         char fname[256];
@@ -306,13 +307,9 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     int max_layer = (state.exit_layer > 0)
                     ? std::min(state.exit_layer, cfg.n_layers)
                     : cfg.n_layers;
-    // Debug: allow IMP_EXIT_LAYER=N to run only N layers
+    // [diagnostics] exit_layer = N runs only N layers (-1 = full forward).
     {
-        static int s_exit = -1;
-        if (s_exit < 0) {
-            const char* e = getenv("IMP_EXIT_LAYER");
-            s_exit = e ? atoi(e) : 0;
-        }
+        const int s_exit = RuntimeConfig::current().diagnostics.exit_layer;
         if (s_exit > 0) max_layer = std::min(max_layer, s_exit);
     }
     const int skip_start = state.skip_layer_start;
@@ -362,7 +359,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
 
 
         // FFN: MoE, dense, or none (attention-only layers may have no FFN)
-        static bool skip_moe = (getenv("IMP_SKIP_MOE") != nullptr);
+        const bool skip_moe = RuntimeConfig::current().moe.skip;
         if (skip_moe) {
             // Debug: skip all FFN/MoE to isolate attention bugs
         } else if (layer_has_moe(i)) {
@@ -389,7 +386,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         {
             const auto& ly = model_->layer(i);
             if (ly.layer_out_scale.data != nullptr && ly.layer_out_scale.on_device &&
-                h.dtype == DType::FP16) {
+                h.qtype == QType::F16) {
                 int64_t total = static_cast<int64_t>(n) * cfg.d_model;
                 int threads = 256;
                 int blocks = static_cast<int>((total / 2 + threads - 1) / threads);
@@ -430,11 +427,12 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                                 __half2float(h_tmp[4]), __half2float(h_tmp[5]),
                                 __half2float(h_tmp[6]), __half2float(h_tmp[7]));
                     }
-                    // Binary dump: full hidden state for selected layers
-                    // IMP_DUMP_HIDDEN=1: default layers 0/5/15/29.
-                    // IMP_DUMP_HIDDEN=all: every layer (for host-expert A/B debugging).
-                    if (const char* dh = getenv("IMP_DUMP_HIDDEN")) {
-                        bool dump_all = (strcmp(dh, "all") == 0);
+                    // Binary dump: full hidden state for selected layers.
+                    // [diagnostics] dump_hidden_dir = "<path>"  → layers 0/5/15/29.
+                    // [diagnostics] dump_hidden_dir = "all"     → every layer.
+                    const std::string& dh = RuntimeConfig::current().diagnostics.dump_hidden_dir;
+                    if (!dh.empty()) {
+                        const bool dump_all = (dh == "all");
                         bool sel = dump_all || (i == 0 || i == 5 || i == 15 || i == 29);
                         if (sel) {
                             std::vector<half> h_buf(n * cfg.d_model);
@@ -466,7 +464,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         // Only sync when the MoE path did NOT go through the FP32 accum kernel
         // (e.g. layer has no post_ffn_norm or residual was fused into decode path).
         if (fp32_accum_buf_ && cfg.arch == ModelArch::GEMMA4 &&
-            getenv("IMP_FORCE_MOE_FP16_SYNC") != nullptr) {
+            RuntimeConfig::current().moe.force_fp16_sync) {
             Tensor fp32_h = view_tokens(fp32_hidden_, n);
             int64_t total = static_cast<int64_t>(n) * cfg.d_model;
             int threads = 256;
@@ -521,9 +519,9 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     // For raw Q6_K/Q8_0 output projection with single token (n=1 or prefill last):
     // use fused RMSNorm→Q8_1 + dp4a GEMV with FP32 output. Saves ~2.45x VRAM
     // bandwidth vs cuBLAS FP16 path (reads quantized weights directly).
-    const auto out_qtype = model_->out_proj_qtype_;
-    const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == DType::FP16 &&
-        is_dp4a_qtype(out_qtype) && getenv("IMP_NO_DP4A_LM") == nullptr;
+    const auto out_qtype = model_->out_proj_.qtype;
+    const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 &&
+        is_dp4a_qtype(out_qtype) && !RuntimeConfig::current().gemm.no_dp4a_lm;
 
     // GemmContext for LM head GEMM dispatches.
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_);
@@ -583,7 +581,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             // Dequant output_proj to FP16 temp buffer, cuBLAS FP16 GEMM into FP32 logits.
             // If this gives llama-matching top logit (~+2.07) then the dp4a path is buggy;
             // if it still gives +8.83 then the bug is in hidden state or output_norm.
-            if (getenv("IMP_LM_DEQUANT_FP16") != nullptr) {
+            if (RuntimeConfig::current().generation.lm_dequant_fp16) {
                 Tensor no_last = view_tokens(norm_out_, 1);
                 rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
                 int N = cfg.vocab_size;
@@ -593,7 +591,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 IMP_CUDA_CHECK_LOG(cudaMallocAsync(&w_fp16_dev, fp16_bytes, stream));
                 dequant_gpu(model_->output_proj().data, w_fp16_dev, out_qtype, N, K, stream);
                 int64_t w_shape[2] = {N, K};
-                Tensor w_fp16(w_fp16_dev, DType::FP16, 2, w_shape, true);
+                Tensor w_fp16(w_fp16_dev, QType::F16, 2, w_shape, true);
                 gemm(no_last, w_fp16, lg, 1.0f, 0.0f, stream);
                 IMP_CUDA_CHECK_LOG(cudaFreeAsync(w_fp16_dev, stream));
                 fprintf(stderr, "[DEBUG_FWD] LM head via dequant->FP16->cuBLAS path\n");
@@ -613,7 +611,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
             debug_tensor_stats("after_final_rmsnorm", no_last, stream);
             // LM head fallback: use gemm_dispatch for consistent MXFP4/FP16 handling
-            gemm_dispatch(no_last, model_->output_proj(), model_->out_proj_qtype_, lg, ctx);
+            gemm_dispatch(no_last, model_->output_proj(), lg, ctx);
         }
         logits_out = lg;
         debug_top_logits(lg, stream);
@@ -692,7 +690,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             if (lm_tier == StorageTier::FP16) {
                 Tensor no_final = view_tokens(norm_out_, n);
                 rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
-                gemm_dispatch(no_final, model_->output_proj(), model_->out_proj_qtype_, lg, ctx);
+                gemm_dispatch(no_final, model_->output_proj(), lg, ctx);
                 goto lm_head_done;
             }
             auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
@@ -720,15 +718,15 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             // Raw gemm() can't handle Q8_0/Q6_K weights with cuBLAS.
             if (lm_tier == StorageTier::FP8 && qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
                 int64_t wshape[2] = {lm_h->shape[0], lm_h->shape[1]};
-                Tensor fp8_lm_w(lm_h->payload.fp8.data, DType::FP8_E4M3, 2, wshape, true);
-                Tensor fp8_no(qscratch_.fp8_act, DType::FP8_E4M3, no_final.ndim, no_final.shape, true);
+                Tensor fp8_lm_w(lm_h->payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
+                Tensor fp8_no(qscratch_.fp8_act, QType::FP8_E4M3, no_final.ndim, no_final.shape, true);
                 quantize_fp16_to_fp8_e4m3(no_final, fp8_no, qscratch_.d_act_scale, stream,
                                           qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
                 gemm_cublaslt(fp8_no, fp8_lm_w, lg, 1.0f, 0.0f,
                               qscratch_.d_act_scale, lm_h->payload.fp8.d_scale, stream);
             } else {
                 // Fallback: gemm_dispatch handles FP16 cache, MXFP4, quantized, etc.
-                gemm_dispatch(no_final, model_->output_proj(), model_->out_proj_qtype_, lg, ctx);
+                gemm_dispatch(no_final, model_->output_proj(), lg, ctx);
             }
         }
     lm_head_done:
@@ -737,7 +735,7 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     }
 
     // ---- Final logit soft-capping (Gemma-2/3/4, cap=30) ----
-    bool skip_softcap = (getenv("IMP_NO_LOGIT_SOFTCAP") != nullptr);
+    const bool skip_softcap = RuntimeConfig::current().generation.no_logit_softcap;
     if (cfg.final_logit_softcap > 0.0f && !skip_softcap) {
         int64_t n_logits = static_cast<int64_t>(logits_out.shape[0]) * cfg.vocab_size;
         int threads = 256;

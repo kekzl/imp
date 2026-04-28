@@ -32,6 +32,7 @@
 #include "core/logging.h"
 #include "memory/kv_cache.h"
 #include "runtime/pdl.h"
+#include "runtime/config.h"
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -50,19 +51,19 @@ namespace imp {
 // is_dp4a_qtype() and dispatch_dp4a_gemv() are defined in executor_kernels.h
 
 // Fused QKV GEMV dispatch by quant type (all share identical signatures).
-static void dispatch_gemv_qkv_fused(GGMLQuantType qtype,
+static void dispatch_gemv_qkv_fused(QType qtype,
                                      const void* W_q, const void* W_k, const void* W_v,
                                      const block_q8_1* q8_1, const float* d8,
                                      half* y_q, half* y_k, half* y_v,
                                      int q_rows, int k_rows, int v_rows, int K,
                                      cudaStream_t stream) {
     switch (qtype) {
-        case GGMLQuantType::Q6_K: gemv_qkv_fused_q6k_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K, stream); break;
-        case GGMLQuantType::Q4_0: gemv_qkv_fused_q4_0_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K, stream); break;
-        case GGMLQuantType::Q4_K: gemv_qkv_fused_q4_k_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K, stream); break;
-        case GGMLQuantType::Q5_K: gemv_qkv_fused_q5_k_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K, stream); break;
-        case GGMLQuantType::Q2_K: gemv_qkv_fused_q2_k_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K, stream); break;
-        case GGMLQuantType::Q3_K: gemv_qkv_fused_q3_k_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K, stream); break;
+        case QType::Q6_K: gemv_qkv_fused_q6k_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K, stream); break;
+        case QType::Q4_0: gemv_qkv_fused_q4_0_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K, stream); break;
+        case QType::Q4_K: gemv_qkv_fused_q4_k_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K, stream); break;
+        case QType::Q5_K: gemv_qkv_fused_q5_k_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K, stream); break;
+        case QType::Q2_K: gemv_qkv_fused_q2_k_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K, stream); break;
+        case QType::Q3_K: gemv_qkv_fused_q3_k_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K, stream); break;
         default:                  gemv_qkv_fused_q8_0_q8_1(W_q, W_k, W_v, q8_1, d8, y_q, y_k, y_v, q_rows, k_rows, v_rows, K, stream); break;
     }
 }
@@ -232,11 +233,11 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     const StorageTier wo_tier = (ly.wo_id != kInvalidTensorID)
                                     ? registry_.handle(ly.wo_id).primary_tier
                                     : StorageTier::Undefined;
-    bool will_fuse_o_nvfp4 = (!has_post_attn_norm && n == 1 && h.dtype == DType::FP16 &&
+    bool will_fuse_o_nvfp4 = (!has_post_attn_norm && n == 1 && h.qtype == QType::F16 &&
                                wo_tier == StorageTier::NVFP4);
     bool will_fuse_o_residual = (!has_post_attn_norm && !will_fuse_o_nvfp4 &&
                                   n == 1 && qscratch_.q8_1_buf != nullptr && qscratch_.d8_buf != nullptr &&
-                                  h.dtype == DType::FP16 && is_dp4a_qtype(ly.wo_qtype));
+                                  h.qtype == QType::F16 && is_dp4a_qtype(ly.wo.qtype));
     bool will_fuse_o_beta1 = (!has_post_attn_norm && !will_fuse_o_residual && !will_fuse_o_nvfp4 &&
                                n > 1 &&
                                (wo_tier == StorageTier::FP16 || wo_tier == StorageTier::FP8));
@@ -244,7 +245,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     bool will_fuse_o_dequant_beta1 = (!has_post_attn_norm && !will_fuse_o_residual &&
                                       !will_fuse_o_nvfp4 && !will_fuse_o_beta1 &&
                                       n > 1 && qscratch_.dequant != nullptr &&
-                                      dequant_gpu_supported(ly.wo_qtype));
+                                      dequant_gpu_supported(ly.wo.qtype));
     if (!will_fuse_o_residual && !will_fuse_o_beta1 && !will_fuse_o_dequant_beta1 &&
         !will_fuse_o_nvfp4 && !using_fp32_accum) {
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(r.data, h.data, h.nbytes(),
@@ -280,9 +281,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // Gemma-4: disable fused QKV when FP32 accum is active — the fused kernel
         // reads FP16 h instead of fp32_hidden_, losing precision through 128-expert routing.
         bool fused_qkv = (!has_attn_output_gate && n == 1 && q8 != nullptr && qscratch_.d8_buf != nullptr &&
-                          no.dtype == DType::FP16 &&
-                          ly.wq_qtype == ly.wk_qtype && ly.wk_qtype == ly.wv_qtype &&
-                          is_dp4a_qtype(ly.wq_qtype) &&
+                          no.qtype == QType::F16 &&
+                          ly.wq.qtype == ly.wk.qtype && ly.wk.qtype == ly.wv.qtype &&
+                          is_dp4a_qtype(ly.wq.qtype) &&
                           !(using_fp32_accum && cfg.arch == ModelArch::GEMMA4));
         if (mxfp4_qkv) {
             // MXFP4 fused QKV: RMSNorm, optional Hadamard, then MXFP4 GEMV
@@ -358,7 +359,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             int q_rows = static_cast<int>(ly.wq.shape[0]);
             int k_rows = static_cast<int>(ly.wk.shape[0]);
             int v_rows = static_cast<int>(ly.wv.shape[0]);
-            dispatch_gemv_qkv_fused(ly.wq_qtype,
+            dispatch_gemv_qkv_fused(ly.wq.qtype,
                                      ly.wq.data, ly.wk.data, ly.wv.data,
                                      q8, qscratch_.d8_buf,
                                      static_cast<half*>(qv.data),
@@ -388,13 +389,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             if (n > 1 && !state.force_fp16_gemm &&
                 fp8_qkv_available &&
                 qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
-                Tensor fp8_no(qscratch_.fp8_act, DType::FP8_E4M3, no.ndim, no.shape, true);
+                Tensor fp8_no(qscratch_.fp8_act, QType::FP8_E4M3, no.ndim, no.shape, true);
                 quantize_fp16_to_fp8_e4m3(no, fp8_no, qscratch_.d_act_scale, stream,
                                           qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
                 // Reconstruct FP8 weight tensors from handle payloads.
                 auto make_fp8_tensor = [](const WeightHandle* hw) {
                     int64_t wshape[2] = {hw->shape[0], hw->shape[1]};
-                    return Tensor(hw->payload.fp8.data, DType::FP8_E4M3, 2, wshape, true);
+                    return Tensor(hw->payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
                 };
                 Tensor fp8_tq = make_fp8_tensor(fp8_hwq);
                 Tensor fp8_tk = make_fp8_tensor(fp8_hwk);
@@ -416,21 +417,21 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                 if (ly.fused_kv_id != kInvalidTensorID) {
                     const auto& h = registry_.handle(ly.fused_kv_id);
                     if (h.payload.fp16.data) {
-                        fused_from_handle = Tensor(h.payload.fp16.data, DType::FP16,
+                        fused_from_handle = Tensor(h.payload.fp16.data, QType::F16,
                                                    2, h.shape, true);
                         fused_kv = &fused_from_handle;
                     }
                 }
                 if (n > 1 && fused_kv && !per_layer_shapes) {
                     // Q: still separate (different output dim with GQA)
-                    gemm_dispatch(no, ly.wq, ly.wq_qtype, q_target, ctx);
+                    gemm_dispatch(no, ly.wq, q_target, ctx);
                     // K+V: one batched cuBLAS call
                     gemm_kv_batched(no, *fused_kv, kk, vv, stream);
                 } else {
-                    gemm_dispatch(no, ly.wq, ly.wq_qtype, q_target, ctx);
-                    gemm_dispatch(no, ly.wk, ly.wk_qtype, kk, ctx);
+                    gemm_dispatch(no, ly.wq, q_target, ctx);
+                    gemm_dispatch(no, ly.wk, kk, ctx);
                     if (ly.wv.data != nullptr) {
-                        gemm_dispatch(no, ly.wv, ly.wv_qtype, vv, ctx);
+                        gemm_dispatch(no, ly.wv, vv, ctx);
                     }
                     // else: K=V sharing path — vv populated below from kk.
                 }
@@ -447,7 +448,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     // valid V tensor.
     if (cfg.arch == ModelArch::GEMMA4 && ly.wv.data == nullptr &&
         kk.data != nullptr && vv.data != nullptr) {
-        size_t kv_bytes = static_cast<size_t>(n) * nkv * hd * dtype_size(kk.dtype);
+        size_t kv_bytes = static_cast<size_t>(n) * nkv * hd * dtype_size(kk.qtype);
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(vv.data, kk.data, kv_bytes,
                         cudaMemcpyDeviceToDevice, stream));
     }
@@ -457,9 +458,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
     // Required for both K=V-shared global layers and standard SWA layers.
     if (cfg.arch == ModelArch::GEMMA4 && v_norm_ones_buf_ != nullptr) {
         int64_t vflat_shape[4] = {static_cast<int64_t>(n) * nkv, hd, 0, 0};
-        Tensor v_flat(vv.data, vv.dtype, 2, vflat_shape, true);
+        Tensor v_flat(vv.data, vv.qtype, 2, vflat_shape, true);
         int64_t ones_shape[4] = {hd, 0, 0, 0};
-        Tensor ones_w(v_norm_ones_buf_, DType::FP16, 1, ones_shape, true);
+        Tensor ones_w(v_norm_ones_buf_, QType::F16, 1, ones_shape, true);
         rmsnorm(v_flat, ones_w, v_flat, eps, stream, 0.0f);
     }
 
@@ -536,7 +537,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         int64_t gate_shape[2] = {static_cast<int64_t>(n), static_cast<int64_t>(q_actual_dim)};
         attn_gate_buf = Tensor(ssm_z_buf_.data, compute_dtype_, 2, gate_shape, true);
 
-        static const bool use_concat = std::getenv("IMP_ATTN_GATE_CONCAT") != nullptr;
+        const bool use_concat = RuntimeConfig::current().attention.gate_concat;
         if (use_concat) {
             // Feature-dim concat: Q = src[:, :q_actual_dim]; gate = src[:, q_actual_dim:]
             // One 2D copy each, width = q_actual_dim bytes per row.
@@ -585,9 +586,9 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         bool has_qk_norm = (ly.attn_q_norm.data != nullptr && ly.attn_k_norm.data != nullptr);
         // Determine if we can fuse K-RoPE into KV cache write
         bool can_fuse_rope_kv = (!state.is_prefill && n == 1 &&
-                                  qv.dtype == DType::FP16 &&
+                                  qv.qtype == QType::F16 &&
                                   state.kv_cache &&
-                                  state.kv_cache->dtype() == DType::FP16);
+                                  state.kv_cache->qtype() == QType::F16);
         // Per-layer rope_dim. Gemma 4: both SWA and global layers rotate the
         // full head_dim. Global layers' freq_factors (loaded into
         // longrope_freqs above) zero out most pairs to realize the
@@ -598,8 +599,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         } else if (fused_rope_dim > hd || fused_rope_dim <= 0) {
             fused_rope_dim = hd;
         }
-        static bool no_qknorm_fused = getenv("IMP_NO_QKNORM_FUSED") != nullptr;
-        if (has_qk_norm && n == 1 && qv.dtype == DType::FP16 && !no_qknorm_fused) {
+        const bool no_qknorm_fused = RuntimeConfig::current().attention.no_qknorm_fused;
+        if (has_qk_norm && n == 1 && qv.qtype == QType::F16 && !no_qknorm_fused) {
             // Fused: QK-norm + RoPE in one kernel launch (decode only, n=1).
             // Keeps norm intermediate values in FP32 shared memory.
             qknorm_rope_fused(static_cast<half*>(qv.data),
@@ -697,8 +698,8 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // Set IMP_NO_CUBLAS_ATTN=1 to force flash attention (for benchmarking).
         // Gemma 4: flash attention kernels don't support head_dim=512, so we MUST
         // use cuBLAS attention for all layers (it handles arbitrary head_dim).
-        static bool no_cublas_attn = getenv("IMP_NO_CUBLAS_ATTN");
-        static bool use_naive_attn = getenv("IMP_NAIVE_ATTN") != nullptr;
+        const bool no_cublas_attn = RuntimeConfig::current().attention.no_cublas;
+        const bool use_naive_attn = RuntimeConfig::current().attention.naive;
         bool force_cublas_attn = per_layer_shapes;  // Gemma 4 dual head_dim
         // Gemma-4 long-context workarounds. Two failure modes at n > 1024:
         //   (a) SWA layers (hd=256) with sliding_active → FMHA chain emits
@@ -718,7 +719,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                        && n > cublas_cap);
         bool use_naive_for_swa = ((gemma4_swa_broken || gemma4_global_too_long)
                                   && n <= 8192
-                                  && getenv("IMP_NO_NAIVE_SWA") == nullptr);
+                                  && !RuntimeConfig::current().attention.no_naive_swa);
         if ((use_naive_attn && n <= 2048) || use_naive_for_swa) {
             // Naive reference attention: simple FP32, no optimization.
             if (layer == 0 && use_naive_for_swa && !use_naive_attn)
@@ -811,7 +812,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
 
         // DEBUG: force cuBLAS attention for decode to isolate paged attention bugs.
         // When enabled, uses the same materialized QK^T path as prefill.
-        static bool force_cublas_decode = (getenv("IMP_FORCE_CUBLAS_DECODE") != nullptr);
+        const bool force_cublas_decode = RuntimeConfig::current().attention.force_cublas_decode;
         if (force_cublas_decode && n == 1 && attn_scores_buf_) {
             // Reconstruct K/V from cache for this position
             KVCache* cache_dbg = state.kv_cache;
@@ -840,13 +841,13 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             // Reshape for cuBLAS attention: Q[1,nh,hd], K[ctx_len,nkv,hd], V[ctx_len,nkv,hd]
             int64_t k_shape[2] = {ctx_len, nkv * hd};
             int64_t v_shape[2] = {ctx_len, nkv * hd};
-            Tensor k_cont(k_flat, DType::FP16, 2, k_shape, true);
-            Tensor v_cont(v_flat, DType::FP16, 2, v_shape, true);
+            Tensor k_cont(k_flat, QType::F16, 2, k_shape, true);
+            Tensor v_cont(v_flat, QType::F16, 2, v_shape, true);
             // Use n=1 cuBLAS attention with causal=false (all context visible)
             int64_t s_shape[3] = {(int64_t)nh, 1, (int64_t)ctx_len};
             half* s_buf = nullptr;
             cudaMalloc(&s_buf, nh * ctx_len * sizeof(half));
-            Tensor s_view(s_buf, DType::FP16, 3, s_shape, true);
+            Tensor s_view(s_buf, QType::F16, 3, s_shape, true);
             attention_cublas_prefill(qv, k_cont, v_cont, ao, s_view,
                                      nh, nkv, hd, scale, /*causal=*/false,
                                      cfg.attn_logit_softcap, stream);
@@ -867,7 +868,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         KVCache* cache = state.kv_cache;
         const int kv_bs = cache->block_size();
         int total_blk  = cache->total_blocks();
-        DType cache_dtype = cache->dtype();
+        QType cache_dtype = cache->qtype();
         int64_t cs[4]  = {static_cast<int64_t>(total_blk),
                           static_cast<int64_t>(kv_bs),
                           static_cast<int64_t>(nkv),
@@ -881,7 +882,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // RTX 5090 has 96 MB L2 — enough for ~3K tokens of KV at FP8.
         set_l2_persist_kv(stream, k_c.data, k_c.nbytes() + v_c.nbytes());
 
-        if (cache_dtype == DType::TURBOQUANT_LITE) {
+        if (cache_dtype == QType::TURBOQUANT_LITE) {
             // TurboQuant Lite paged attention: QJL sketch-only K + INT4 V (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             paged_attention_decode_turboquant_lite(q4, v_c, o4,
@@ -894,7 +895,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                         state.max_context_len, layer_sliding_window,
                                         cfg.attn_logit_softcap, stream,
                                         state.max_blocks_per_seq);
-        } else if (cache_dtype == DType::TURBOQUANT) {
+        } else if (cache_dtype == QType::TURBOQUANT) {
             // TurboQuant paged attention: PolarQuant K + QJL correction + INT4 V (Split-K enabled)
             // K_mscales: non-null if MXFP4 path (FP4 E2M1 + UE8M0), null for uniform INT4
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
@@ -912,7 +913,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                         cfg.attn_logit_softcap, stream,
                                         state.max_blocks_per_seq,
                                         k_mscales);
-        } else if (cache_dtype == DType::INT4) {
+        } else if (cache_dtype == QType::INT4) {
             // INT4 paged attention with per-head scales and INT4 unpack (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             paged_attention_decode_int4(q4, k_c, v_c, o4,
@@ -923,7 +924,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                         state.max_context_len, layer_sliding_window,
                                         cfg.attn_logit_softcap, stream,
                                         state.max_blocks_per_seq);
-        } else if (cache_dtype == DType::INT8) {
+        } else if (cache_dtype == QType::INT8) {
             // INT8 dp4a paged attention with per-head scales (Split-K enabled)
             paged_attention_set_splitk_scratch(qscratch_.splitk, qscratch_.splitk_size);
             paged_attention_decode_int8(q4, k_c, v_c, o4,
@@ -934,7 +935,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
                                         state.max_context_len, layer_sliding_window,
                                         cfg.attn_logit_softcap, stream,
                                         state.max_blocks_per_seq);
-        } else if (cache_dtype == DType::FP8_E4M3) {
+        } else if (cache_dtype == QType::FP8_E4M3) {
             // FP8 paged attention with on-the-fly dequant (Split-K enabled)
             float kv_scale = (!kv_scales_.empty() && kv_layer < static_cast<int>(kv_scales_.size()))
                              ? kv_scales_[kv_layer] : 1.0f;
@@ -1003,7 +1004,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         const half* residual_ptr = static_cast<const half*>(h.data);
         quantize_fp16_to_q8_1(attn_fp16, static_cast<block_q8_1*>(qscratch_.q8_1_buf),
                                qscratch_.d8_buf, K_o, stream);
-        dispatch_gemv_residual(ly.wo_qtype, ly.wo.data,
+        dispatch_gemv_residual(ly.wo.qtype, ly.wo.data,
                                static_cast<block_q8_1*>(qscratch_.q8_1_buf),
                                qscratch_.d8_buf, static_cast<half*>(h.data), residual_ptr,
                                M_o, K_o, stream);
@@ -1013,20 +1014,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // FP8 beta=1: hidden = fp8(attn_out) @ fp8(wo)^T + hidden
         const WeightHandle& wo_h = registry_.handle(ly.wo_id);
         int64_t wshape[2] = {wo_h.shape[0], wo_h.shape[1]};
-        Tensor fp8_wo(wo_h.payload.fp8.data, DType::FP8_E4M3, 2, wshape, true);
-        Tensor fp8_ao(qscratch_.fp8_act, DType::FP8_E4M3, ao.ndim, ao.shape, true);
+        Tensor fp8_wo(wo_h.payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
+        Tensor fp8_ao(qscratch_.fp8_act, QType::FP8_E4M3, ao.ndim, ao.shape, true);
         quantize_fp16_to_fp8_e4m3(ao, fp8_ao, qscratch_.d_act_scale, stream,
                                   qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
         gemm_cublaslt(fp8_ao, fp8_wo, h, 1.0f, 1.0f, qscratch_.d_act_scale, wo_h.payload.fp8.d_scale, stream);
     } else if (will_fuse_o_beta1 && wo_tier == StorageTier::FP16) {
         // Fused: hidden = attn_out @ wo^T + hidden (cuBLAS beta=1).
         // Safe: hidden is only READ (never written) between attn_norm and here.
-        gemm_dispatch(ao, ly.wo, ly.wo_qtype, h, ctx.with_beta(1.0f));
+        gemm_dispatch(ao, ly.wo, h, ctx.with_beta(1.0f));
     } else if ((will_fuse_o_beta1 || will_fuse_o_dequant_beta1) &&
-               qscratch_.dequant != nullptr && dequant_gpu_supported(ly.wo_qtype) &&
+               qscratch_.dequant != nullptr && dequant_gpu_supported(ly.wo.qtype) &&
                !per_layer_shapes) {  // Gemma 4: workspace stride mismatch with narrow ao
         // Dequant beta=1: dequant weights on-the-fly, then FP16 GEMM + residual
-        gemm_dispatch(ao, ly.wo, ly.wo_qtype, h, ctx.with_beta(1.0f));
+        gemm_dispatch(ao, ly.wo, h, ctx.with_beta(1.0f));
     } else {
         // Fallback: separate O-projection + optional post-norm + residual add.
         // Diagnostic: when IMP_GEMMA4_FP32_GEMM_OUT is set on Gemma-4, after the
@@ -1039,20 +1040,20 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
         // preserve cuBLAS's internal FP32 accumulator precision through the
         // post-attention rmsnorm. Uses the cublasGemmEx FP16×FP16→FP32 path
         // (gemm.cu mixed-precision short-circuit). Skips the FP16-only mmvq
-        // and dp4a fast paths via output.dtype==FP32 guards in dispatch.
+        // and dp4a fast paths via output.qtype==FP32 guards in dispatch.
         const bool fp32_attn_out = (model_->config().arch == ModelArch::GEMMA4 &&
             using_fp32_accum &&
-            std::getenv("IMP_GEMMA4_FP32_GEMM_OUT") != nullptr);
+            RuntimeConfig::current().gemma4.fp32_gemm_out);
         void* po_fp32_buf = nullptr;
         if (fp32_attn_out) {
             size_t bytes = static_cast<size_t>(n) * model_->config().d_model * sizeof(float);
             IMP_CUDA_CHECK_LOG(cudaMallocAsync(&po_fp32_buf, bytes, stream));
             int64_t shape[2] = {static_cast<int64_t>(n),
                                 static_cast<int64_t>(model_->config().d_model)};
-            Tensor po_fp32(po_fp32_buf, DType::FP32, 2, shape, true);
-            gemm_dispatch(ao, ly.wo, ly.wo_qtype, po_fp32, ctx);
+            Tensor po_fp32(po_fp32_buf, QType::F32, 2, shape, true);
+            gemm_dispatch(ao, ly.wo, po_fp32, ctx);
         } else {
-            gemm_dispatch(ao, ly.wo, ly.wo_qtype, po, ctx);
+            gemm_dispatch(ao, ly.wo, po, ctx);
         }
         if (debug_attn_steps) {
             debug_tensor_stats_all("L0_ao_pre_wo",  view_tokens(ao, n), stream);
@@ -1061,7 +1062,7 @@ void GraphExecutor::run_attention(int layer, const InferenceState& state,
             debug_tensor_rows    ("ao_pre_wo-0",    view_tokens(ao, n), stream);
             // dump wo weight shape info
             fprintf(stderr, "[DEBUG_FWD] wo_shape: ndim=%d shape=[%ld,%ld] qtype=%d\n",
-                    ly.wo.ndim, (long)ly.wo.shape[0], (long)ly.wo.shape[1], (int)ly.wo_qtype);
+                    ly.wo.ndim, (long)ly.wo.shape[0], (long)ly.wo.shape[1], (int)ly.wo.qtype);
         }
         if (has_post_attn_norm && using_fp32_accum) {
             // Sandwich norm with FP32 accumulator (Gemma-3):

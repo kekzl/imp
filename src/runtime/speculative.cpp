@@ -246,10 +246,10 @@ SpeculativeDecoder::verify(const std::vector<int32_t>& draft,
     int vocab_size = static_cast<int>(logits.shape[logits.ndim - 1]);
 
     // Download logits to host for acceptance checking.
-    size_t logits_bytes = n_verify * vocab_size * dtype_size(logits.dtype);
+    size_t logits_bytes = n_verify * vocab_size * dtype_size(logits.qtype);
     std::vector<float> h_logits(n_verify * vocab_size);
 
-    if (logits.dtype == DType::FP32) {
+    if (logits.qtype == QType::F32) {
         IMP_CUDA_CHECK_LOG(cudaMemcpy(h_logits.data(), logits.data, logits_bytes, cudaMemcpyDeviceToHost));
     } else {
         // For FP16/BF16 logits, we need a conversion -- but for now, the
@@ -257,7 +257,7 @@ SpeculativeDecoder::verify(const std::vector<int32_t>& draft,
         // If not FP32, fall back to copying raw bytes and interpreting.
         // This path should not normally be hit since logits are computed in FP32.
         IMP_LOG_WARN("speculative: logits dtype is %s, expected FP32",
-                     dtype_name(logits.dtype));
+                     dtype_name(logits.qtype));
         IMP_CUDA_CHECK_LOG(cudaMemcpy(h_logits.data(), logits.data,
                    n_verify * vocab_size * sizeof(float), cudaMemcpyDeviceToHost));
     }

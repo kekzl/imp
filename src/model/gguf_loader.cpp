@@ -1,4 +1,5 @@
 #include "model/gguf_loader.h"
+#include "model/loader_assign.h"
 #include "model/model_arch.h"
 #include "model/tensor_kind_matcher.h"
 #include "quant/dequant_gpu.h"
@@ -21,133 +22,145 @@ namespace imp {
 
 // ---- GGML type tables ----
 
-int ggml_blck_size(GGMLType type) {
+int gguf_blck_size(GgufWireType type) {
     switch (type) {
-        case GGMLType::F32:     return 1;
-        case GGMLType::F16:     return 1;
-        case GGMLType::BF16:    return 1;
-        case GGMLType::F64:     return 1;
-        case GGMLType::I8:      return 1;
-        case GGMLType::I16:     return 1;
-        case GGMLType::I32:     return 1;
-        case GGMLType::I64:     return 1;
-        case GGMLType::Q4_0:    return 32;
-        case GGMLType::Q4_1:    return 32;
-        case GGMLType::Q5_0:    return 32;
-        case GGMLType::Q5_1:    return 32;
-        case GGMLType::Q8_0:    return 32;
-        case GGMLType::Q8_1:    return 32;
-        case GGMLType::IQ4_NL:  return 32;
-        case GGMLType::Q2_K:    return 256;
-        case GGMLType::Q3_K:    return 256;
-        case GGMLType::Q4_K:    return 256;
-        case GGMLType::Q5_K:    return 256;
-        case GGMLType::Q6_K:    return 256;
-        case GGMLType::Q8_K:    return 256;
-        case GGMLType::IQ2_XXS: return 256;
-        case GGMLType::IQ2_XS:  return 256;
-        case GGMLType::IQ2_S:   return 256;
-        case GGMLType::IQ3_XXS: return 256;
-        case GGMLType::IQ3_S:   return 256;
-        case GGMLType::IQ1_S:   return 256;
-        case GGMLType::IQ1_M:   return 256;
-        case GGMLType::IQ4_XS:  return 256;
-        case GGMLType::MXFP4:   return 32;
+        case GgufWireType::F32:     return 1;
+        case GgufWireType::F16:     return 1;
+        case GgufWireType::BF16:    return 1;
+        case GgufWireType::F64:     return 1;
+        case GgufWireType::I8:      return 1;
+        case GgufWireType::I16:     return 1;
+        case GgufWireType::I32:     return 1;
+        case GgufWireType::I64:     return 1;
+        case GgufWireType::Q4_0:    return 32;
+        case GgufWireType::Q4_1:    return 32;
+        case GgufWireType::Q5_0:    return 32;
+        case GgufWireType::Q5_1:    return 32;
+        case GgufWireType::Q8_0:    return 32;
+        case GgufWireType::Q8_1:    return 32;
+        case GgufWireType::IQ4_NL:  return 32;
+        case GgufWireType::Q2_K:    return 256;
+        case GgufWireType::Q3_K:    return 256;
+        case GgufWireType::Q4_K:    return 256;
+        case GgufWireType::Q5_K:    return 256;
+        case GgufWireType::Q6_K:    return 256;
+        case GgufWireType::Q8_K:    return 256;
+        case GgufWireType::IQ2_XXS: return 256;
+        case GgufWireType::IQ2_XS:  return 256;
+        case GgufWireType::IQ2_S:   return 256;
+        case GgufWireType::IQ3_XXS: return 256;
+        case GgufWireType::IQ3_S:   return 256;
+        case GgufWireType::IQ1_S:   return 256;
+        case GgufWireType::IQ1_M:   return 256;
+        case GgufWireType::IQ4_XS:  return 256;
+        case GgufWireType::MXFP4:   return 32;
         default: return 0;
     }
 }
 
-size_t ggml_type_size(GGMLType type) {
+size_t gguf_type_size(GgufWireType type) {
     switch (type) {
-        case GGMLType::F32:     return 4;
-        case GGMLType::F16:     return 2;
-        case GGMLType::BF16:    return 2;
-        case GGMLType::F64:     return 8;
-        case GGMLType::I8:      return 1;
-        case GGMLType::I16:     return 2;
-        case GGMLType::I32:     return 4;
-        case GGMLType::I64:     return 8;
-        case GGMLType::Q4_0:    return 18;   // 32*4/8 + 2 (fp16 scale)
-        case GGMLType::Q4_1:    return 20;   // 32*4/8 + 2 + 2 (scale + min)
-        case GGMLType::Q5_0:    return 22;   // 32*5/8 + 4 (high bits) + 2
-        case GGMLType::Q5_1:    return 24;   // 32*5/8 + 4 + 2 + 2
-        case GGMLType::Q8_0:    return 34;   // 32*1 + 2
-        case GGMLType::Q8_1:    return 36;   // 32*1 + 2 + 2
-        case GGMLType::Q2_K:    return 84;
-        case GGMLType::Q3_K:    return 110;
-        case GGMLType::Q4_K:    return 144;
-        case GGMLType::Q5_K:    return 176;
-        case GGMLType::Q6_K:    return 210;
-        case GGMLType::Q8_K:    return 292;
-        case GGMLType::IQ2_XXS: return 66;
-        case GGMLType::IQ2_XS:  return 74;
-        case GGMLType::IQ2_S:   return 82;
-        case GGMLType::IQ3_XXS: return 98;
-        case GGMLType::IQ3_S:   return 110;
-        case GGMLType::IQ1_S:   return 50;
-        case GGMLType::IQ1_M:   return 56;
-        case GGMLType::IQ4_NL:  return 18;
-        case GGMLType::IQ4_XS:  return 136;
-        case GGMLType::MXFP4:   return 17;   // 32*4/8 + 1 (UE8M0 scale)
+        case GgufWireType::F32:     return 4;
+        case GgufWireType::F16:     return 2;
+        case GgufWireType::BF16:    return 2;
+        case GgufWireType::F64:     return 8;
+        case GgufWireType::I8:      return 1;
+        case GgufWireType::I16:     return 2;
+        case GgufWireType::I32:     return 4;
+        case GgufWireType::I64:     return 8;
+        case GgufWireType::Q4_0:    return 18;   // 32*4/8 + 2 (fp16 scale)
+        case GgufWireType::Q4_1:    return 20;   // 32*4/8 + 2 + 2 (scale + min)
+        case GgufWireType::Q5_0:    return 22;   // 32*5/8 + 4 (high bits) + 2
+        case GgufWireType::Q5_1:    return 24;   // 32*5/8 + 4 + 2 + 2
+        case GgufWireType::Q8_0:    return 34;   // 32*1 + 2
+        case GgufWireType::Q8_1:    return 36;   // 32*1 + 2 + 2
+        case GgufWireType::Q2_K:    return 84;
+        case GgufWireType::Q3_K:    return 110;
+        case GgufWireType::Q4_K:    return 144;
+        case GgufWireType::Q5_K:    return 176;
+        case GgufWireType::Q6_K:    return 210;
+        case GgufWireType::Q8_K:    return 292;
+        case GgufWireType::IQ2_XXS: return 66;
+        case GgufWireType::IQ2_XS:  return 74;
+        case GgufWireType::IQ2_S:   return 82;
+        case GgufWireType::IQ3_XXS: return 98;
+        case GgufWireType::IQ3_S:   return 110;
+        case GgufWireType::IQ1_S:   return 50;
+        case GgufWireType::IQ1_M:   return 56;
+        case GgufWireType::IQ4_NL:  return 18;
+        case GgufWireType::IQ4_XS:  return 136;
+        case GgufWireType::MXFP4:   return 17;   // 32*4/8 + 1 (UE8M0 scale)
         default: return 0;
     }
 }
 
-size_t ggml_row_size(GGMLType type, int64_t n_elements) {
-    int bs = ggml_blck_size(type);
+size_t gguf_row_size(GgufWireType type, int64_t n_elements) {
+    int bs = gguf_blck_size(type);
     if (bs == 0) return 0;
-    return static_cast<size_t>((n_elements + bs - 1) / bs) * ggml_type_size(type);
+    return static_cast<size_t>((n_elements + bs - 1) / bs) * gguf_type_size(type);
 }
 
-DType ggml_type_to_dtype(GGMLType type) {
+QType gguf_type_to_qtype(GgufWireType type) {
+    // Wire-stable values 0..31 in QType match the GGUF on-disk numbering,
+    // so the cast is exact for every supported block-quant type. Anything
+    // outside the 0..31 range falls through to NONE.
     switch (type) {
-        case GGMLType::F32:  return DType::FP32;
-        case GGMLType::F16:  return DType::FP16;
-        case GGMLType::BF16: return DType::BF16;
-        case GGMLType::I8:   return DType::INT8;
-        case GGMLType::I32:  return DType::INT32;
-        // Quantized types: use INT4 for 4-bit, INT8 as proxy for others
-        case GGMLType::Q4_0: case GGMLType::Q4_1:
-        case GGMLType::Q4_K: case GGMLType::IQ4_NL: case GGMLType::IQ4_XS:
-        case GGMLType::MXFP4:
-            return DType::INT4;
+        case GgufWireType::F32:   return QType::F32;
+        case GgufWireType::F16:   return QType::F16;
+        case GgufWireType::BF16:  return QType::BF16;
+        case GgufWireType::Q4_0:  return QType::Q4_0;
+        case GgufWireType::Q4_1:  return QType::Q4_1;
+        case GgufWireType::Q5_0:  return QType::Q5_0;
+        case GgufWireType::Q5_1:  return QType::Q5_1;
+        case GgufWireType::Q8_0:  return QType::Q8_0;
+        case GgufWireType::Q8_1:  return QType::Q8_1;
+        case GgufWireType::Q2_K:  return QType::Q2_K;
+        case GgufWireType::Q3_K:  return QType::Q3_K;
+        case GgufWireType::Q4_K:  return QType::Q4_K;
+        case GgufWireType::Q5_K:  return QType::Q5_K;
+        case GgufWireType::Q6_K:  return QType::Q6_K;
+        case GgufWireType::Q8_K:  return QType::Q8_K;
+        case GgufWireType::MXFP4: return QType::MXFP4;
+        case GgufWireType::I8:    return QType::INT8;
+        case GgufWireType::I32:   return QType::INT32;
         default:
-            return DType::INT8;  // other quantized types stored as blocks
+            // IQ4_NL/IQ4_XS/etc. — no native QType yet; mark unsupported.
+            return QType::NONE;
     }
 }
 
-const char* ggml_type_name(GGMLType type) {
+const char* gguf_type_name(GgufWireType type) {
     switch (type) {
-        case GGMLType::F32:     return "F32";
-        case GGMLType::F16:     return "F16";
-        case GGMLType::BF16:    return "BF16";
-        case GGMLType::F64:     return "F64";
-        case GGMLType::I8:      return "I8";
-        case GGMLType::I16:     return "I16";
-        case GGMLType::I32:     return "I32";
-        case GGMLType::I64:     return "I64";
-        case GGMLType::Q4_0:    return "Q4_0";
-        case GGMLType::Q4_1:    return "Q4_1";
-        case GGMLType::Q5_0:    return "Q5_0";
-        case GGMLType::Q5_1:    return "Q5_1";
-        case GGMLType::Q8_0:    return "Q8_0";
-        case GGMLType::Q8_1:    return "Q8_1";
-        case GGMLType::Q2_K:    return "Q2_K";
-        case GGMLType::Q3_K:    return "Q3_K";
-        case GGMLType::Q4_K:    return "Q4_K";
-        case GGMLType::Q5_K:    return "Q5_K";
-        case GGMLType::Q6_K:    return "Q6_K";
-        case GGMLType::Q8_K:    return "Q8_K";
-        case GGMLType::IQ2_XXS: return "IQ2_XXS";
-        case GGMLType::IQ2_XS:  return "IQ2_XS";
-        case GGMLType::IQ2_S:   return "IQ2_S";
-        case GGMLType::IQ3_XXS: return "IQ3_XXS";
-        case GGMLType::IQ3_S:   return "IQ3_S";
-        case GGMLType::IQ1_S:   return "IQ1_S";
-        case GGMLType::IQ1_M:   return "IQ1_M";
-        case GGMLType::IQ4_NL:  return "IQ4_NL";
-        case GGMLType::IQ4_XS:  return "IQ4_XS";
-        case GGMLType::MXFP4:   return "MXFP4";
+        case GgufWireType::F32:     return "F32";
+        case GgufWireType::F16:     return "F16";
+        case GgufWireType::BF16:    return "BF16";
+        case GgufWireType::F64:     return "F64";
+        case GgufWireType::I8:      return "I8";
+        case GgufWireType::I16:     return "I16";
+        case GgufWireType::I32:     return "I32";
+        case GgufWireType::I64:     return "I64";
+        case GgufWireType::Q4_0:    return "Q4_0";
+        case GgufWireType::Q4_1:    return "Q4_1";
+        case GgufWireType::Q5_0:    return "Q5_0";
+        case GgufWireType::Q5_1:    return "Q5_1";
+        case GgufWireType::Q8_0:    return "Q8_0";
+        case GgufWireType::Q8_1:    return "Q8_1";
+        case GgufWireType::Q2_K:    return "Q2_K";
+        case GgufWireType::Q3_K:    return "Q3_K";
+        case GgufWireType::Q4_K:    return "Q4_K";
+        case GgufWireType::Q5_K:    return "Q5_K";
+        case GgufWireType::Q6_K:    return "Q6_K";
+        case GgufWireType::Q8_K:    return "Q8_K";
+        case GgufWireType::IQ2_XXS: return "IQ2_XXS";
+        case GgufWireType::IQ2_XS:  return "IQ2_XS";
+        case GgufWireType::IQ2_S:   return "IQ2_S";
+        case GgufWireType::IQ3_XXS: return "IQ3_XXS";
+        case GgufWireType::IQ3_S:   return "IQ3_S";
+        case GgufWireType::IQ1_S:   return "IQ1_S";
+        case GgufWireType::IQ1_M:   return "IQ1_M";
+        case GgufWireType::IQ4_NL:  return "IQ4_NL";
+        case GgufWireType::IQ4_XS:  return "IQ4_XS";
+        case GgufWireType::MXFP4:   return "MXFP4";
         default:                return "UNKNOWN";
     }
 }
@@ -338,16 +351,14 @@ static std::vector<std::string> split(const std::string& s, char delim) {
 // ---- Assign a single tensor to the model by GGUF name ----
 
 static bool assign_tensor(Model& model, const std::string& name,
-                           const Tensor& tensor, GGMLType gtype) {
-    auto qtype = static_cast<GGMLQuantType>(static_cast<uint32_t>(gtype));
+                           const Tensor& tensor, GgufWireType gtype) {
+    auto qtype = static_cast<QType>(static_cast<uint32_t>(gtype));
     if (name == "token_embd.weight") {
-        model.tok_emb_ = tensor;
-        model.tok_emb_qtype_ = qtype;
+        assign_quant(model.tok_emb_, tensor);
         return true;
     }
     if (name == "output_norm.weight") {
-        model.out_norm_ = tensor;
-        model.out_norm_qtype_ = qtype;
+        assign_quant(model.out_norm_, tensor);
         return true;
     }
     if (name == "rope_freqs.weight") {
@@ -355,8 +366,7 @@ static bool assign_tensor(Model& model, const std::string& name,
         return true;
     }
     if (name == "output.weight") {
-        model.out_proj_ = tensor;
-        model.out_proj_qtype_ = qtype;
+        assign_quant(model.out_proj_, tensor);
         return true;
     }
 
@@ -390,19 +400,19 @@ static bool assign_tensor(Model& model, const std::string& name,
 
         // Attention projections: distinguish weight vs bias
         if (field == "attn_q") {
-            if (suffix == "bias")       { layer.q_bias = tensor; }
-            else                        { layer.wq = tensor; layer.wq_qtype = qtype; }
+            if (suffix == "bias")       layer.q_bias = tensor;
+            else                        assign_quant(layer.wq, tensor);
         }
         else if (field == "attn_k") {
-            if (suffix == "bias")       { layer.k_bias = tensor; }
-            else                        { layer.wk = tensor; layer.wk_qtype = qtype; }
+            if (suffix == "bias")       layer.k_bias = tensor;
+            else                        assign_quant(layer.wk, tensor);
         }
         else if (field == "attn_v") {
-            if (suffix == "bias")       { layer.v_bias = tensor; }
-            else                        { layer.wv = tensor; layer.wv_qtype = qtype; }
+            if (suffix == "bias")       layer.v_bias = tensor;
+            else                        assign_quant(layer.wv, tensor);
         }
-        else if (field == "attn_output") { layer.wo = tensor; layer.wo_qtype = qtype; }
-        else if (field == "attn_norm")     layer.attn_norm = tensor;
+        else if (field == "attn_output") assign_quant(layer.wo, tensor);
+        else if (field == "attn_norm")   layer.attn_norm = tensor;
         else if (field == "attn_q_norm") layer.attn_q_norm = tensor;
         else if (field == "attn_k_norm") layer.attn_k_norm = tensor;
         // Fused QKV: either standard attention (Phi-4) or GDN (Qwen3.5)
@@ -416,28 +426,27 @@ static bool assign_tensor(Model& model, const std::string& name,
                                     2 * cfg.ssm_group_count * cfg.ssm_state_size;
             if (cfg.ssm_inner_size > 0 && total_rows == ssm_conv_channels) {
                 // GDN layer: treat attn_qkv as ssm_in (fused projection → conv1d input)
-                layer.ssm_in = tensor;
-                layer.ssm_in_qtype = qtype;
+                assign_quant(layer.ssm_in, tensor);
             } else {
                 // Standard fused QKV: split into separate Q, K, V
                 // For Qwen3.5 attention: Q has 2× output (Q + gate interleaved),
                 // so q_rows = total_rows - k_rows - v_rows (not just n_heads * head_dim).
                 int q_rows = cfg.n_heads * cfg.head_dim;
                 int k_rows = cfg.n_kv_heads * cfg.head_dim;
-                size_t row_bytes = ggml_quant_row_bytes(qtype, d_model);
+                size_t row_bytes = qtype_row_bytes(qtype, d_model);
 
                 uint8_t* base = static_cast<uint8_t*>(tensor.data);
                 int64_t q_shape[4] = {q_rows, d_model, 1, 1};
                 int64_t kv_shape[4] = {k_rows, d_model, 1, 1};
 
-                layer.wq = Tensor(base, tensor.dtype, 2, q_shape, tensor.on_device);
-                layer.wq_qtype = qtype;
-                layer.wk = Tensor(base + static_cast<size_t>(q_rows) * row_bytes,
-                                   tensor.dtype, 2, kv_shape, tensor.on_device);
-                layer.wk_qtype = qtype;
-                layer.wv = Tensor(base + static_cast<size_t>(q_rows + k_rows) * row_bytes,
-                                   tensor.dtype, 2, kv_shape, tensor.on_device);
-                layer.wv_qtype = qtype;
+                Tensor q_t(base, tensor.qtype, 2, q_shape, tensor.on_device);
+                Tensor k_t(base + static_cast<size_t>(q_rows) * row_bytes,
+                           tensor.qtype, 2, kv_shape, tensor.on_device);
+                Tensor v_t(base + static_cast<size_t>(q_rows + k_rows) * row_bytes,
+                           tensor.qtype, 2, kv_shape, tensor.on_device);
+                assign_quant(layer.wq, q_t);
+                assign_quant(layer.wk, k_t);
+                assign_quant(layer.wv, v_t);
             }
         }
         // Post-layer norms (Gemma-3)
@@ -452,15 +461,15 @@ static bool assign_tensor(Model& model, const std::string& name,
         // Gemma 4: fused gate+up experts: [n_experts, n_ff_exp*2, d_model]
         // We keep it packed; the MoE executor handles de-interleaving at dispatch.
         else if (field == "ffn_gate_up_exps") {
-            layer.expert_gate_packed = tensor;  // reuse gate packed slot with full fused tensor
-            layer.expert_gate_qtype = qtype;
+            // Reuses gate packed slot with full fused tensor.
             // Mark fused by leaving expert_up_packed null — executor detects this.
+            assign_quant(layer.expert_gate_packed, tensor);
         }
         // FFN
-        else if (field == "ffn_gate")    { layer.w_gate = tensor; layer.w_gate_qtype = qtype; }
-        else if (field == "ffn_up")      { layer.w_up = tensor; layer.w_up_qtype = qtype; }
-        else if (field == "ffn_down")    { layer.w_down = tensor; layer.w_down_qtype = qtype; }
-        else if (field == "ffn_norm")      layer.ffn_norm = tensor;
+        else if (field == "ffn_gate")    assign_quant(layer.w_gate, tensor);
+        else if (field == "ffn_up")      assign_quant(layer.w_up, tensor);
+        else if (field == "ffn_down")    assign_quant(layer.w_down, tensor);
+        else if (field == "ffn_norm")    layer.ffn_norm = tensor;
         else if (field == "ffn_gate_inp") {
             // Distinguish .weight (the gate matrix) from .scale (per-channel multiplier).
             // Gemma 4 stores `blk.X.ffn_gate_inp.scale` as a 4-part tensor name; without
@@ -469,26 +478,26 @@ static bool assign_tensor(Model& model, const std::string& name,
             else                   layer.moe_gate = tensor;
         }
         // Packed expert tensors: 3D [n_experts, rows, cols]
-        else if (field == "ffn_gate_exps") { layer.expert_gate_packed = tensor; layer.expert_gate_qtype = qtype; }
-        else if (field == "ffn_up_exps")   { layer.expert_up_packed = tensor; layer.expert_up_qtype = qtype; }
+        else if (field == "ffn_gate_exps") assign_quant(layer.expert_gate_packed, tensor);
+        else if (field == "ffn_up_exps")   assign_quant(layer.expert_up_packed, tensor);
         else if (field == "ffn_down_exps") {
             // Distinguish .weight (the per-expert FFN down weights) from .scale
             // (per-expert output multiplier, shape [n_expert]). Same 4-part-name
             // bug as ffn_gate_inp.scale: the scale tensor would otherwise overwrite
             // expert_down_packed.
             if (suffix == "scale") layer.expert_down_scale = tensor;
-            else                   { layer.expert_down_packed = tensor; layer.expert_down_qtype = qtype; }
+            else                   assign_quant(layer.expert_down_packed, tensor);
         }
         // Shared expert (always-active, e.g. Nemotron/DeepSeek)
-        else if (field == "ffn_gate_shexp") { layer.w_gate_shared = tensor; layer.w_gate_shared_qtype = qtype; }
-        else if (field == "ffn_up_shexp")   { layer.w_up_shared = tensor; layer.w_up_shared_qtype = qtype; }
-        else if (field == "ffn_down_shexp") { layer.w_down_shared = tensor; layer.w_down_shared_qtype = qtype; }
+        else if (field == "ffn_gate_shexp") assign_quant(layer.w_gate_shared, tensor);
+        else if (field == "ffn_up_shexp")   assign_quant(layer.w_up_shared, tensor);
+        else if (field == "ffn_down_shexp") assign_quant(layer.w_down_shared, tensor);
         // Qwen3-Next / Qwen3.6 per-token sigmoid gate on the shared expert
         // output. 1D [d_model] FP32 projection; sigmoid(cur @ W) yields [M, 1].
-        else if (field == "ffn_gate_inp_shexp") { layer.shared_expert_gate_inp = tensor; }
+        else if (field == "ffn_gate_inp_shexp") layer.shared_expert_gate_inp = tensor;
         // SSM weights (Mamba2)
-        else if (field == "ssm_in")   { layer.ssm_in = tensor; layer.ssm_in_qtype = qtype; }
-        else if (field == "ssm_out")  { layer.ssm_out = tensor; layer.ssm_out_qtype = qtype; }
+        else if (field == "ssm_in")   assign_quant(layer.ssm_in, tensor);
+        else if (field == "ssm_out")  assign_quant(layer.ssm_out, tensor);
         else if (field == "ssm_dt") {
             // Some converters (Qwen3.5-27B-mxfp4) emit A_log under the name
             // "ssm_dt.weight" — a 1D vector of shape [n_heads]. Differentiate
@@ -508,9 +517,9 @@ static bool assign_tensor(Model& model, const std::string& name,
             else return false;
         }
         // Gated DeltaNet (GDN) weights (Qwen3.5)
-        else if (field == "attn_gate")  { layer.gdn_gate  = tensor; layer.gdn_gate_qtype  = qtype; }
-        else if (field == "ssm_alpha")  { layer.gdn_alpha = tensor; layer.gdn_alpha_qtype = qtype; }
-        else if (field == "ssm_beta")   { layer.gdn_beta  = tensor; layer.gdn_beta_qtype  = qtype; }
+        else if (field == "attn_gate")  assign_quant(layer.gdn_gate, tensor);
+        else if (field == "ssm_alpha")  assign_quant(layer.gdn_alpha, tensor);
+        else if (field == "ssm_beta")   assign_quant(layer.gdn_beta, tensor);
         // Router bias (Nemotron MoE)
         else if (field == "exp_probs_b") layer.moe_router_bias = tensor;
         else return false;
@@ -546,9 +555,20 @@ static bool assign_tensor(Model& model, const std::string& name,
         int n_experts = model.config().n_experts;
         if (expert_idx < 0 || expert_idx >= n_experts) return false;
 
-        if      (field == "ffn_gate") { layer.expert_w_gate[expert_idx] = tensor; if (expert_idx == 0) layer.expert_gate_qtype = qtype; }
-        else if (field == "ffn_up")   { layer.expert_w_up[expert_idx] = tensor; if (expert_idx == 0) layer.expert_up_qtype = qtype; }
-        else if (field == "ffn_down") { layer.expert_w_down[expert_idx] = tensor; if (expert_idx == 0) layer.expert_down_qtype = qtype; }
+        // Per-expert vectors: assign to slot N. The layer-wide qtype mirror is
+        // populated only on the first expert (all experts share the same qtype).
+        if (field == "ffn_gate") {
+            layer.expert_w_gate[expert_idx] = tensor;
+            if (expert_idx == 0) layer.expert_gate_packed.qtype = qtype;
+        }
+        else if (field == "ffn_up") {
+            layer.expert_w_up[expert_idx] = tensor;
+            if (expert_idx == 0) layer.expert_up_packed.qtype = qtype;
+        }
+        else if (field == "ffn_down") {
+            layer.expert_w_down[expert_idx] = tensor;
+            if (expert_idx == 0) layer.expert_down_packed.qtype = qtype;
+        }
         else return false;
         return true;
     }
@@ -575,7 +595,7 @@ static void parse_tensor_infos(BinaryReader& reader, uint64_t tensor_count,
         for (uint32_t d = info.n_dims; d < 4; d++) {
             info.dims[d] = 1;
         }
-        info.type = static_cast<GGMLType>(reader.read_u32());
+        info.type = static_cast<GgufWireType>(reader.read_u32());
         info.offset = reader.read_u64();
         out.push_back(std::move(info));
     }
@@ -1097,14 +1117,14 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             shape[d] = info.dims[ndim - 1 - d];
         }
 
-        Tensor t(tensor_data, ggml_type_to_dtype(info.type), ndim, shape, /*on_device=*/false);
+        Tensor t(tensor_data, gguf_type_to_qtype(info.type), ndim, shape, /*on_device=*/false);
         t.kind = match_tensor_kind(info.name);
 
         if (assign_tensor(*model, info.name, t, info.type)) {
             assigned++;
         } else {
             IMP_LOG_DEBUG("Unassigned tensor: %s [%s] shape=[%ld,%ld,%ld,%ld]",
-                          info.name.c_str(), ggml_type_name(info.type),
+                          info.name.c_str(), gguf_type_name(info.type),
                           (long)info.dims[0], (long)info.dims[1],
                           (long)info.dims[2], (long)info.dims[3]);
             skipped++;
@@ -1120,7 +1140,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     // Weight tying: if no output.weight, share token_embd
     if (model->out_proj_.data == nullptr && model->tok_emb_.data != nullptr) {
         model->out_proj_ = model->tok_emb_;
-        model->out_proj_qtype_ = model->tok_emb_qtype_;
+        model->out_proj_.qtype = model->tok_emb_.qtype;
         IMP_LOG_INFO("Weight tying: output projection shares token embedding");
     }
 
@@ -1134,15 +1154,15 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                 ly.w_up.shape[0] == 2 * cfg.d_ff) {
                 int64_t d_model = ly.w_up.shape[1];
                 int64_t d_ff = cfg.d_ff;
-                size_t row_bytes = ggml_quant_row_bytes(ly.w_up_qtype, d_model);
+                size_t row_bytes = qtype_row_bytes(ly.w_up.qtype, d_model);
 
                 uint8_t* base = static_cast<uint8_t*>(ly.w_up.data);
                 int64_t half_shape[4] = {d_ff, d_model, 1, 1};
 
-                ly.w_gate = Tensor(base, ly.w_up.dtype, 2, half_shape, ly.w_up.on_device);
-                ly.w_gate_qtype = ly.w_up_qtype;
+                ly.w_gate = Tensor(base, ly.w_up.qtype, 2, half_shape, ly.w_up.on_device);
+                ly.w_gate.qtype = ly.w_up.qtype;
                 ly.w_up = Tensor(base + static_cast<size_t>(d_ff) * row_bytes,
-                                  ly.w_up.dtype, 2, half_shape, ly.w_up.on_device);
+                                  ly.w_up.qtype, 2, half_shape, ly.w_up.on_device);
                 // w_up_qtype unchanged
                 fused_count++;
             }
@@ -1177,12 +1197,12 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
             // alongside expert tensors → remap dense FFN to shared expert.
             // Some GGUF converters output shared experts as ffn_gate/ffn_up/ffn_down.
             if (has_moe && has_dense && !has_shared) {
-                ly.w_gate_shared = ly.w_gate;   ly.w_gate_shared_qtype = ly.w_gate_qtype;
-                ly.w_up_shared   = ly.w_up;     ly.w_up_shared_qtype   = ly.w_up_qtype;
-                ly.w_down_shared = ly.w_down;   ly.w_down_shared_qtype = ly.w_down_qtype;
-                ly.w_gate = Tensor();  ly.w_gate_qtype = GGMLQuantType::NONE;
-                ly.w_up   = Tensor();  ly.w_up_qtype   = GGMLQuantType::NONE;
-                ly.w_down = Tensor();  ly.w_down_qtype = GGMLQuantType::NONE;
+                ly.w_gate_shared = ly.w_gate;   ly.w_gate_shared.qtype = ly.w_gate.qtype;
+                ly.w_up_shared   = ly.w_up;     ly.w_up_shared.qtype   = ly.w_up.qtype;
+                ly.w_down_shared = ly.w_down;   ly.w_down_shared.qtype = ly.w_down.qtype;
+                ly.w_gate = Tensor();  ly.w_gate.qtype = QType::NONE;
+                ly.w_up   = Tensor();  ly.w_up.qtype   = QType::NONE;
+                ly.w_down = Tensor();  ly.w_down.qtype = QType::NONE;
                 n_remapped++;
                 has_shared = true;
             }
@@ -1239,7 +1259,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         // expects ready-to-use freq values, so do the math on the host.
         if (cfg.arch == ModelArch::GEMMA4 && !cfg.swa_layers.empty() &&
             model->layers_[0].rope_freqs.data != nullptr &&
-            model->layers_[0].rope_freqs.dtype == DType::FP32) {
+            model->layers_[0].rope_freqs.qtype == QType::F32) {
             const Tensor& src = model->layers_[0].rope_freqs;
             int n_pairs = static_cast<int>(src.shape[0]);  // hd/2 for global layer
             int hd_global = n_pairs * 2;
@@ -1257,7 +1277,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                 effective[p] = base_freq / divisors[p];
             }
             int64_t shape[4] = {n_pairs, 0, 0, 0};
-            Tensor eff_tensor(effective, DType::FP32, 1, shape, /*on_device=*/false);
+            Tensor eff_tensor(effective, QType::F32, 1, shape, /*on_device=*/false);
             int n_global = 0;
             for (int i = 0; i < cfg.n_layers; ++i) {
                 bool is_swa = (i < (int)cfg.swa_layers.size() && cfg.swa_layers[i]);

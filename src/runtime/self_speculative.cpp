@@ -1,5 +1,6 @@
 #include "runtime/self_speculative.h"
 #include "runtime/speculative_common.h"
+#include "runtime/config.h"
 #include "compute/sampling.h"
 #include "core/logging.h"
 #include <cstring>
@@ -72,9 +73,9 @@ bool SelfSpeculativeDecoder::init(GraphExecutor* executor,
 
     // Pre-size verify graph pool for n_verify ∈ [2, spec_k+1]. One graph per
     // batch size avoids padding compute when draft shorter than K. Honors
-    // IMP_NO_CUDA_GRAPH — leaving the pool empty forces the eager forward
-    // path inside verify().
-    if (!getenv("IMP_NO_CUDA_GRAPH")) {
+    // [runtime] cuda_graphs = "never" leaves the pool empty, forcing the
+    // eager forward path inside verify().
+    if (RuntimeConfig::current().runtime.cuda_graphs != "never") {
         verify_graphs_.resize(max_n + 1);  // slot 0..1 unused, slots 2..max_n active
         verify_graph_max_blocks_.assign(max_n + 1, -1);
         for (int i = 2; i <= max_n; ++i) {

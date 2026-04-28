@@ -65,10 +65,10 @@ TEST_F(AttentionTCTest, SmallPrefill) {
 
     int64_t qo_shape[] = {B, S, NH, HD};
     int64_t kv_shape[] = {B, S, NH, HD};
-    Tensor Q(d_q, DType::FP16, 4, qo_shape, true);
-    Tensor K(d_k, DType::FP16, 4, kv_shape, true);
-    Tensor V(d_v, DType::FP16, 4, kv_shape, true);
-    Tensor O(d_o, DType::FP16, 4, qo_shape, true);
+    Tensor Q(d_q, QType::F16, 4, qo_shape, true);
+    Tensor K(d_k, QType::F16, 4, kv_shape, true);
+    Tensor V(d_v, QType::F16, 4, kv_shape, true);
+    Tensor O(d_o, QType::F16, 4, qo_shape, true);
 
     float scale = 1.0f / std::sqrt(static_cast<float>(HD));
     flash_attention_prefill_tc(Q, K, V, O, scale, true, 0, 0.0f, stream_);
@@ -111,10 +111,10 @@ TEST_F(AttentionTCTest, DispatchSelectsCorrectKernel) {
     cudaMemset(d_o, 0, bytes);
 
     int64_t shape[] = {B, S, NH, HD};
-    Tensor Q(d_q, DType::FP16, 4, shape, true);
-    Tensor K(d_k, DType::FP16, 4, shape, true);
-    Tensor V(d_v, DType::FP16, 4, shape, true);
-    Tensor O(d_o, DType::FP16, 4, shape, true);
+    Tensor Q(d_q, QType::F16, 4, shape, true);
+    Tensor K(d_k, QType::F16, 4, shape, true);
+    Tensor V(d_v, QType::F16, 4, shape, true);
+    Tensor O(d_o, QType::F16, 4, shape, true);
 
     float scale = 1.0f / std::sqrt(static_cast<float>(HD));
     EXPECT_NO_THROW(attention_prefill_dispatch(Q, K, V, O, scale, true, 0, 0.0f, stream_));
@@ -240,10 +240,10 @@ protected:
 
         int64_t q_shape[]  = {B, Sq, NH, HD};
         int64_t kv_shape[] = {B, Skv, NKV, HD};
-        Tensor Qt(d_q, DType::FP16, 4, q_shape, true);
-        Tensor Kt(d_k, DType::FP16, 4, kv_shape, true);
-        Tensor Vt(d_v, DType::FP16, 4, kv_shape, true);
-        Tensor Ot(d_o, DType::FP16, 4, q_shape, true);
+        Tensor Qt(d_q, QType::F16, 4, q_shape, true);
+        Tensor Kt(d_k, QType::F16, 4, kv_shape, true);
+        Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
+        Tensor Ot(d_o, QType::F16, 4, q_shape, true);
 
         flash_attention_blackwell(Qt, Kt, Vt, Ot, scale, causal, 0, 0.0f, stream_);
         cudaStreamSynchronize(stream_);
@@ -395,10 +395,10 @@ TEST_F(AttentionBlackwellTest, SlidingWindow) {
 
     int64_t q_shape[]  = {B, Sq, NH, HD};
     int64_t kv_shape[] = {B, Skv, NKV, HD};
-    Tensor Qt(d_q, DType::FP16, 4, q_shape, true);
-    Tensor Kt(d_k, DType::FP16, 4, kv_shape, true);
-    Tensor Vt(d_v, DType::FP16, 4, kv_shape, true);
-    Tensor Ot(d_o, DType::FP16, 4, q_shape, true);
+    Tensor Qt(d_q, QType::F16, 4, q_shape, true);
+    Tensor Kt(d_k, QType::F16, 4, kv_shape, true);
+    Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
+    Tensor Ot(d_o, QType::F16, 4, q_shape, true);
 
     flash_attention_blackwell(Qt, Kt, Vt, Ot, scale, /*causal=*/true,
                               sliding_window, 0.0f, stream_);

@@ -31,7 +31,7 @@ namespace imp {
 //   Total = n_layers * max_blocks * block_bytes_  (1x, not 2x)
 // ---------------------------------------------------------------------------
 
-KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
+KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype,
                  int max_blocks, int block_size, VRAMAllocator* alloc, int sketch_dim,
                  bool use_mxfp4)
     : n_layers_(n_layers)
@@ -43,17 +43,17 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
     , use_mxfp4_(use_mxfp4)
     , dtype_(dtype)
     , alloc_(alloc)
-    , block_bytes_((dtype == DType::INT4 || dtype == DType::TURBOQUANT
-                    || dtype == DType::TURBOQUANT_LITE)
+    , block_bytes_((dtype == QType::INT4 || dtype == QType::TURBOQUANT
+                    || dtype == QType::TURBOQUANT_LITE)
                    ? (static_cast<size_t>(block_size_) * n_kv_heads * head_dim / 2)
                    : (static_cast<size_t>(block_size_) * n_kv_heads * head_dim *
                       dtype_size(dtype))) {
 
-    bool lite = (dtype == DType::TURBOQUANT_LITE);
+    bool lite = (dtype == QType::TURBOQUANT_LITE);
 
     // Resolve sketch_dim default: head_dim for TURBOQUANT, 0 for non-TQ modes
-    if (dtype == DType::TURBOQUANT && sketch_dim_ <= 0) sketch_dim_ = head_dim;
-    if (dtype == DType::TURBOQUANT_LITE && sketch_dim_ <= 0) sketch_dim_ = 2 * head_dim;
+    if (dtype == QType::TURBOQUANT && sketch_dim_ <= 0) sketch_dim_ = head_dim;
+    if (dtype == QType::TURBOQUANT_LITE && sketch_dim_ <= 0) sketch_dim_ = 2 * head_dim;
 
     // Allocate contiguous GPU pool
     // TURBOQUANT_LITE: V-only (1x), all others: K+V (2x)
@@ -78,8 +78,8 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
 
     // Allocate separate scale buffer for INT8/INT4/TURBOQUANT/TURBOQUANT_LITE KV cache
     // For TURBOQUANT_LITE: K scales = FP16 norms, V scales = INT4 per-head scales
-    if (dtype == DType::INT8 || dtype == DType::INT4
-        || dtype == DType::TURBOQUANT || dtype == DType::TURBOQUANT_LITE) {
+    if (dtype == QType::INT8 || dtype == QType::INT4
+        || dtype == QType::TURBOQUANT || dtype == QType::TURBOQUANT_LITE) {
         scale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * sizeof(half);
         // Always 2x: K scales region + V scales region (even for TURBOQUANT_LITE)
         size_t scale_total = static_cast<size_t>(n_layers_) * max_blocks_ * 2 * scale_block_bytes_;
@@ -103,7 +103,7 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
     }
 
     // Allocate QJL 1-bit sketch buffer for TurboQuant / TurboQuant Lite K-cache
-    if (dtype == DType::TURBOQUANT || dtype == DType::TURBOQUANT_LITE) {
+    if (dtype == QType::TURBOQUANT || dtype == QType::TURBOQUANT_LITE) {
         sketch_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * (sketch_dim_ / 8);
         // Only K needs sketches, so n_layers * max_blocks * sketch_block_bytes (no 2x)
         size_t sketch_total = static_cast<size_t>(n_layers_) * max_blocks_ * sketch_block_bytes_;
@@ -134,7 +134,7 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
 
     // Allocate MXFP4 UE8M0 micro-scale pool for TurboQuant K directions (sm_120 path).
     // One UE8M0 byte per 32 direction elements per head per token.
-    if (dtype == DType::TURBOQUANT && use_mxfp4_ && head_dim >= kTQMicroScaleGroup) {
+    if (dtype == QType::TURBOQUANT && use_mxfp4_ && head_dim >= kTQMicroScaleGroup) {
         int n_groups_per_head = head_dim / kTQMicroScaleGroup;
         mscale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * n_groups_per_head;
         // K-only (same indexing as sketch pool)
@@ -173,7 +173,7 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, DType dtype,
 KVCache::KVCache(int n_layers,
                  const std::vector<int>& n_kv_heads_per_layer,
                  const std::vector<int>& head_dim_per_layer,
-                 DType dtype,
+                 QType dtype,
                  int max_blocks, int block_size,
                  VRAMAllocator* alloc)
     : n_layers_(n_layers)
@@ -184,11 +184,11 @@ KVCache::KVCache(int n_layers,
 {
     // Only FP16, BF16, FP8, INT8, INT4 supported for per-layer variant.
     // (TurboQuant / sketches / mscales aren't per-layer aware yet.)
-    if (dtype == DType::TURBOQUANT || dtype == DType::TURBOQUANT_LITE) {
+    if (dtype == QType::TURBOQUANT || dtype == QType::TURBOQUANT_LITE) {
         throw std::runtime_error("KVCache per-layer shape: TurboQuant variants not supported");
     }
 
-    size_t elem_size = (dtype == DType::INT4)
+    size_t elem_size = (dtype == QType::INT4)
         ? 0  // INT4 uses /2 below
         : dtype_size(dtype);
 
@@ -211,7 +211,7 @@ KVCache::KVCache(int n_layers,
         max_nkv = std::max(max_nkv, nkv);
         max_hd  = std::max(max_hd, hd);
 
-        size_t bb = (dtype == DType::INT4)
+        size_t bb = (dtype == QType::INT4)
             ? (static_cast<size_t>(block_size_) * nkv * hd / 2)
             : (static_cast<size_t>(block_size_) * nkv * hd * elem_size);
         layer_block_bytes_[l] = bb;
@@ -227,7 +227,7 @@ KVCache::KVCache(int n_layers,
     // Populate scalar fallback fields with max values (for external queries)
     n_kv_heads_ = max_nkv;
     head_dim_   = max_hd;
-    block_bytes_ = (dtype == DType::INT4)
+    block_bytes_ = (dtype == QType::INT4)
         ? (static_cast<size_t>(block_size_) * max_nkv * max_hd / 2)
         : (static_cast<size_t>(block_size_) * max_nkv * max_hd * elem_size);
 
@@ -248,7 +248,7 @@ KVCache::KVCache(int n_layers,
     IMP_CUDA_CHECK_LOG(cudaMemset(pool_, 0, total));
 
     // INT8/INT4 per-layer scales not yet supported in per-layer mode.
-    if (dtype == DType::INT8 || dtype == DType::INT4) {
+    if (dtype == QType::INT8 || dtype == QType::INT4) {
         throw std::runtime_error("KVCache per-layer shape: INT8/INT4 scale pools not yet supported");
     }
 
@@ -345,7 +345,7 @@ void KVCache::inc_ref(int block_id) {
 
 void* KVCache::k_ptr(int layer, int block_id) {
     // TURBOQUANT_LITE: no K directions in pool, K is represented by sketches only
-    if (dtype_ == DType::TURBOQUANT_LITE) return nullptr;
+    if (dtype_ == QType::TURBOQUANT_LITE) return nullptr;
 
 #ifdef IMP_DEBUG
     if (layer < 0 || layer >= n_layers_ || block_id < 0 || block_id >= max_blocks_) {
@@ -372,7 +372,7 @@ void* KVCache::v_ptr(int layer, int block_id) {
                       layer, n_layers_, block_id, max_blocks_);
     }
 #endif
-    if (dtype_ == DType::TURBOQUANT_LITE) {
+    if (dtype_ == QType::TURBOQUANT_LITE) {
         // V-only pool: [layer * max_blocks + block_id] * block_bytes
         size_t offset = (static_cast<size_t>(layer) * max_blocks_ +
                          static_cast<size_t>(block_id)) * block_bytes_;
@@ -422,7 +422,7 @@ int KVCache::head_dim() const {
     return head_dim_;
 }
 
-DType KVCache::dtype() const {
+QType KVCache::qtype() const {
     return dtype_;
 }
 

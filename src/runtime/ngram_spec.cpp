@@ -1,4 +1,5 @@
 #include "runtime/ngram_spec.h"
+#include "runtime/config.h"
 #include "core/logging.h"
 #include "compute/sampling.h"
 #include <cuda_runtime.h>
@@ -35,8 +36,8 @@ bool NgramSpecDecoder::init(GraphExecutor* executor, KVCacheManager* kv_manager,
 
     // Graph pool for verify forward pass (one per n_verify ∈ [2, spec_k+1]).
     // Sampling stays eager after replay — same pattern as self_speculative.
-    // Honors IMP_NO_CUDA_GRAPH: empty pool forces eager forward in verify().
-    if (!getenv("IMP_NO_CUDA_GRAPH")) {
+    // Honors [runtime] cuda_graphs = "never": empty pool forces eager forward.
+    if (RuntimeConfig::current().runtime.cuda_graphs != "never") {
         verify_graphs_.resize(max_tokens + 1);
         verify_graph_max_blocks_.assign(max_tokens + 1, -1);
         for (int i = 2; i <= max_tokens; ++i) {

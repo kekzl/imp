@@ -16,10 +16,10 @@ namespace {
 // ---------------------------------------------------------------------------
 // Helpers (same pattern as test_layernorm.cu)
 // ---------------------------------------------------------------------------
-Tensor make_gpu_tensor(const float* host_data, DType dtype,
+Tensor make_gpu_tensor(const float* host_data, QType dtype,
                        std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim  = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
@@ -27,9 +27,9 @@ Tensor make_gpu_tensor(const float* host_data, DType dtype,
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
 
-    if (dtype == DType::FP32) {
+    if (dtype == QType::F32) {
         cudaMemcpy(t.data, host_data, t.nbytes(), cudaMemcpyHostToDevice);
-    } else if (dtype == DType::FP16) {
+    } else if (dtype == QType::F16) {
         std::vector<half> h(t.numel());
         for (int64_t j = 0; j < t.numel(); j++)
             h[j] = __float2half(host_data[j]);
@@ -38,9 +38,9 @@ Tensor make_gpu_tensor(const float* host_data, DType dtype,
     return t;
 }
 
-Tensor alloc_gpu_tensor(DType dtype, std::initializer_list<int64_t> shape_list) {
+Tensor alloc_gpu_tensor(QType dtype, std::initializer_list<int64_t> shape_list) {
     Tensor t;
-    t.dtype = dtype;
+    t.qtype = dtype;
     t.ndim  = static_cast<int>(shape_list.size());
     int i = 0;
     for (auto s : shape_list) t.shape[i++] = s;
@@ -53,9 +53,9 @@ Tensor alloc_gpu_tensor(DType dtype, std::initializer_list<int64_t> shape_list) 
 
 std::vector<float> read_gpu_tensor(const Tensor& t) {
     std::vector<float> result(t.numel());
-    if (t.dtype == DType::FP32) {
+    if (t.qtype == QType::F32) {
         cudaMemcpy(result.data(), t.data, t.nbytes(), cudaMemcpyDeviceToHost);
-    } else if (t.dtype == DType::FP16) {
+    } else if (t.qtype == QType::F16) {
         std::vector<half> h(t.numel());
         cudaMemcpy(h.data(), t.data, t.nbytes(), cudaMemcpyDeviceToHost);
         for (int64_t j = 0; j < t.numel(); j++)
@@ -79,8 +79,8 @@ TEST(SoftmaxTest, OutputSumsToOne) {
     for (int i = 0; i < rows * cols; i++)
         h_in[i] = std::sin(static_cast<float>(i) * 0.3f) * 2.0f;
 
-    Tensor d_in  = make_gpu_tensor(h_in.data(), DType::FP16, {rows, cols});
-    Tensor d_out = alloc_gpu_tensor(DType::FP16, {rows, cols});
+    Tensor d_in  = make_gpu_tensor(h_in.data(), QType::F16, {rows, cols});
+    Tensor d_out = alloc_gpu_tensor(QType::F16, {rows, cols});
 
     softmax(d_in, d_out, nullptr);
     cudaDeviceSynchronize();
@@ -108,8 +108,8 @@ TEST(SoftmaxTest, OutputSumsToOneFP32) {
     for (int i = 0; i < rows * cols; i++)
         h_in[i] = std::cos(static_cast<float>(i) * 0.17f) * 5.0f;
 
-    Tensor d_in  = make_gpu_tensor(h_in.data(), DType::FP32, {rows, cols});
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, {rows, cols});
+    Tensor d_in  = make_gpu_tensor(h_in.data(), QType::F32, {rows, cols});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {rows, cols});
 
     softmax(d_in, d_out, nullptr);
     cudaDeviceSynchronize();
@@ -135,8 +135,8 @@ TEST(SoftmaxTest, AllEqualInput) {
     constexpr int rows = 1, cols = 32;
     std::vector<float> h_in(cols, 3.0f);  // all equal
 
-    Tensor d_in  = make_gpu_tensor(h_in.data(), DType::FP32, {rows, cols});
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, {rows, cols});
+    Tensor d_in  = make_gpu_tensor(h_in.data(), QType::F32, {rows, cols});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {rows, cols});
 
     softmax(d_in, d_out, nullptr);
     cudaDeviceSynchronize();
@@ -158,8 +158,8 @@ TEST(SoftmaxTest, SingleElement) {
     SKIP_IF_NO_CUDA();
 
     std::vector<float> h_in = {42.0f};
-    Tensor d_in  = make_gpu_tensor(h_in.data(), DType::FP32, {1, 1});
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, {1, 1});
+    Tensor d_in  = make_gpu_tensor(h_in.data(), QType::F32, {1, 1});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {1, 1});
 
     softmax(d_in, d_out, nullptr);
     cudaDeviceSynchronize();
@@ -183,8 +183,8 @@ TEST(SoftmaxTest, NegativeInfMasking) {
     std::vector<float> h_in = {neg_inf, 1.0f, neg_inf, 2.0f,
                                 neg_inf, 3.0f, neg_inf, 0.5f};
 
-    Tensor d_in  = make_gpu_tensor(h_in.data(), DType::FP32, {1, cols});
-    Tensor d_out = alloc_gpu_tensor(DType::FP32, {1, cols});
+    Tensor d_in  = make_gpu_tensor(h_in.data(), QType::F32, {1, cols});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {1, cols});
 
     softmax(d_in, d_out, nullptr);
     cudaDeviceSynchronize();

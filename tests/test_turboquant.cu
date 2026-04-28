@@ -40,7 +40,7 @@ TEST(TurboQuantTest, CacheConstruction) {
     const int block_size = 16;
 
     // TurboQuant cache
-    KVCache tq_cache(n_layers, n_kv_heads, head_dim, DType::TURBOQUANT, max_blocks, block_size);
+    KVCache tq_cache(n_layers, n_kv_heads, head_dim, QType::TURBOQUANT, max_blocks, block_size);
 
     // Block bytes should match INT4 (packed: block_size * n_kv_heads * head_dim / 2)
     size_t expected_block_bytes = static_cast<size_t>(block_size) * n_kv_heads * head_dim / 2;
@@ -58,7 +58,7 @@ TEST(TurboQuantTest, CacheConstruction) {
     EXPECT_EQ(tq_cache.sketch_block_bytes(), expected_sketch_bytes);
 
     // Verify FP16 comparison: TurboQuant should use less memory per block
-    KVCache fp16_cache(n_layers, n_kv_heads, head_dim, DType::FP16, max_blocks, block_size);
+    KVCache fp16_cache(n_layers, n_kv_heads, head_dim, QType::F16, max_blocks, block_size);
     EXPECT_LT(tq_cache.block_bytes(), fp16_cache.block_bytes());
     // INT4 packed = half the FP16 bytes
     EXPECT_EQ(tq_cache.block_bytes() * 4, fp16_cache.block_bytes());
@@ -142,7 +142,7 @@ TEST(TurboQuantTest, SketchPointers) {
     const int max_blocks = 8;
     const int block_size = 16;
 
-    KVCache cache(n_layers, n_kv_heads, head_dim, DType::TURBOQUANT, max_blocks, block_size);
+    KVCache cache(n_layers, n_kv_heads, head_dim, QType::TURBOQUANT, max_blocks, block_size);
 
     // Sketch pointers should be different for different layers
     void* s0_0 = cache.k_sketch_ptr(0, 0);
@@ -309,8 +309,8 @@ TEST(TurboQuantTest, MemoryReduction) {
     const int max_blocks = 256;
     const int block_size = 16;
 
-    KVCache fp16_cache(n_layers, n_kv_heads, head_dim, DType::FP16, max_blocks, block_size);
-    KVCache tq_cache(n_layers, n_kv_heads, head_dim, DType::TURBOQUANT, max_blocks, block_size);
+    KVCache fp16_cache(n_layers, n_kv_heads, head_dim, QType::F16, max_blocks, block_size);
+    KVCache tq_cache(n_layers, n_kv_heads, head_dim, QType::TURBOQUANT, max_blocks, block_size);
 
     // TurboQuant K+V data pool should be 1/4 of FP16 (INT4 packed for both K dirs and V)
     double ratio = static_cast<double>(tq_cache.block_bytes()) / fp16_cache.block_bytes();
@@ -340,7 +340,7 @@ TEST(TurboQuantLiteTest, CacheConstruction) {
     const int block_size = 16;
     const int sketch_dim = 2 * head_dim;  // multiplier = 2
 
-    KVCache tql_cache(n_layers, n_kv_heads, head_dim, DType::TURBOQUANT_LITE,
+    KVCache tql_cache(n_layers, n_kv_heads, head_dim, QType::TURBOQUANT_LITE,
                       max_blocks, block_size, nullptr, sketch_dim);
 
     // Block bytes should match INT4 V (same as standard INT4)
@@ -387,7 +387,7 @@ TEST(TurboQuantLiteTest, VPointerOffsets) {
     const int block_size = 16;
     const int sketch_dim = 2 * head_dim;
 
-    KVCache cache(n_layers, n_kv_heads, head_dim, DType::TURBOQUANT_LITE,
+    KVCache cache(n_layers, n_kv_heads, head_dim, QType::TURBOQUANT_LITE,
                   max_blocks, block_size, nullptr, sketch_dim);
 
     // V pointers should differ between blocks
@@ -420,12 +420,12 @@ TEST(TurboQuantLiteTest, MemorySavings) {
     const int max_blocks = 256;
     const int block_size = 16;
 
-    KVCache fp16_cache(n_layers, n_kv_heads, head_dim, DType::FP16, max_blocks, block_size);
-    KVCache tq_cache(n_layers, n_kv_heads, head_dim, DType::TURBOQUANT, max_blocks, block_size);
+    KVCache fp16_cache(n_layers, n_kv_heads, head_dim, QType::F16, max_blocks, block_size);
+    KVCache tq_cache(n_layers, n_kv_heads, head_dim, QType::TURBOQUANT, max_blocks, block_size);
 
     // TQ Lite with mult=2: sketch_dim = 256
     const int sketch_dim_lite = 2 * head_dim;
-    KVCache tql_cache(n_layers, n_kv_heads, head_dim, DType::TURBOQUANT_LITE,
+    KVCache tql_cache(n_layers, n_kv_heads, head_dim, QType::TURBOQUANT_LITE,
                       max_blocks, block_size, nullptr, sketch_dim_lite);
 
     // TQ Lite should use less VRAM than TQ (no INT4 K directions in pool)

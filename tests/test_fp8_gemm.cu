@@ -43,9 +43,9 @@ TEST_F(FP8GemmTest, GemmCublasLtFP16) {
     int64_t a_shape[] = {M, K};
     int64_t b_shape[] = {N, K};
     int64_t c_shape[] = {M, N};
-    Tensor A(d_a, DType::FP16, 2, a_shape, true);
-    Tensor B(d_b, DType::FP16, 2, b_shape, true);
-    Tensor C(d_c, DType::FP16, 2, c_shape, true);
+    Tensor A(d_a, QType::F16, 2, a_shape, true);
+    Tensor B(d_b, QType::F16, 2, b_shape, true);
+    Tensor C(d_c, QType::F16, 2, c_shape, true);
 
     gemm_cublaslt(A, B, C, 1.0f, 0.0f, nullptr, nullptr, stream_);
     cudaStreamSynchronize(stream_);
@@ -79,9 +79,9 @@ TEST_F(FP8GemmTest, GemvFP8Basic) {
     int64_t a_shape[] = {M, K};
     int64_t x_shape[] = {K};
     int64_t y_shape[] = {M};
-    Tensor A(d_a, DType::FP8_E4M3, 2, a_shape, true);
-    Tensor x(d_x, DType::FP16, 1, x_shape, true);
-    Tensor y(d_y, DType::FP16, 1, y_shape, true);
+    Tensor A(d_a, QType::FP8_E4M3, 2, a_shape, true);
+    Tensor x(d_x, QType::F16, 1, x_shape, true);
+    Tensor y(d_y, QType::F16, 1, y_shape, true);
 
     gemv_fp8(A, x, y, scale, stream_);
     cudaStreamSynchronize(stream_);

@@ -34,7 +34,7 @@ struct EngineConfig {
     float green_ctx_prefill_ratio = 0.8f;
     bool use_cuda_graphs = true;
     bool use_pdl = true;
-    DType compute_dtype = DType::FP16;
+    QType compute_dtype = QType::F16;
 
     // Default sampling parameters
     float temperature = 1.0f;
@@ -43,13 +43,13 @@ struct EngineConfig {
     int seed = -1;
 
     // KV cache dtype: FP16 (default) or FP8_E4M3 for ~50% KV VRAM savings
-    DType kv_cache_dtype = DType::FP16;
+    QType kv_cache_dtype = QType::F16;
 
     // TurboQuant Lite: sketch_dim = turboquant_sketch_multiplier * head_dim
     int turboquant_sketch_multiplier = 2;
 
     // SSM state dtype: FP32 (default) or FP16 for ~50% VRAM savings on h_state
-    DType ssm_state_dtype = DType::FP32;
+    QType ssm_state_dtype = QType::F32;
 
     // VRAM budget: max GPU memory to use (MiB), 0 = use all available
     size_t vram_budget_mb = 0;
