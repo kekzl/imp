@@ -741,6 +741,31 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
         }
     }
 
+    // 11. Cross-check special_tokens_map.json against the loaded tokenizer's
+    // special-flag column. The model author's list is authoritative; if a
+    // string from `additional_special_tokens` exists in vocab but isn't
+    // marked CONTROL (token_type=3), patch it. Caught by the engine's
+    // banned-token scan in engine.cpp.
+    if (!model_dir.empty() && model->tokenizer_) {
+        HFConfigLoader::SpecialTokensMap stm;
+        if (HFConfigLoader::load_special_tokens_map(model_dir, stm)) {
+            int patched = 0, missing = 0;
+            for (const auto& s : stm.additional_special_tokens) {
+                int32_t id = model->tokenizer_->find_token(s);
+                if (id < 0) { missing++; continue; }
+                if (!model->tokenizer_->is_control_token(id)) {
+                    model->tokenizer_->mark_as_control(id);
+                    patched++;
+                }
+            }
+            if (patched > 0 || missing > 0) {
+                IMP_LOG_INFO("special_tokens_map: cross-check patched %d, "
+                             "missing-from-vocab %d",
+                             patched, missing);
+            }
+        }
+    }
+
     IMP_LOG_INFO("SafeTensors model loaded successfully from %s", path.c_str());
     return model;
 }

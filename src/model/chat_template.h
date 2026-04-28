@@ -13,7 +13,8 @@ namespace imp {
 enum class ChatTemplateFamily {
     RAW,        // No template — pass raw text
     CHATML,     // <|im_start|>...<|im_end|> (Qwen3, etc.)
-    LLAMA2,     // [INST]...[/INST] (Llama 2, Mistral)
+    LLAMA2,     // [INST]...[/INST] (Llama 2, older Mistral V1/V2)
+    MISTRAL_V3, // [INST]...[/INST] + [TOOL_CALLS]/[AVAILABLE_TOOLS] (Mistral V3-Tekken: 3.x family)
     LLAMA3,     // <|start_header_id|>...<|end_header_id|>...<|eot_id|>
     NEMOTRON,   // <extra_id_0>System\n...<extra_id_1>\n<extra_id_0>User\n...
     GEMMA,      // <start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n

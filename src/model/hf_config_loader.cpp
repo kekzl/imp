@@ -477,6 +477,54 @@ std::vector<HFConfigLoader::AddedToken> HFConfigLoader::load_added_tokens(
     return result;
 }
 
+// ---- load_special_tokens_map ----
+
+namespace {
+
+// Token entry in special_tokens_map.json comes in two shapes:
+//   "<unk>"                                    (plain string)
+//   {"content": "<s>", "lstrip": false, ...}   (object with metadata)
+// Extract the content string from either; returns empty if neither matches.
+std::string extract_token_content(const JValue& v) {
+    if (v.type == JType::STRING) return v.str_val;
+    if (v.type == JType::OBJECT) {
+        std::string s;
+        jobj_get_string(v, "content", s);
+        return s;
+    }
+    return {};
+}
+
+} // namespace
+
+bool HFConfigLoader::load_special_tokens_map(const std::string& model_dir,
+                                              SpecialTokensMap& out) {
+    std::string path = model_dir + "/special_tokens_map.json";
+    JValue root;
+    if (!parse_json_file(path, root)) return false;
+
+    if (const JValue* arr = jobj_find(root, "additional_special_tokens");
+        arr && arr->type == JType::ARRAY) {
+        out.additional_special_tokens.reserve(arr->arr.size());
+        for (const auto& v : arr->arr) {
+            std::string s = extract_token_content(v);
+            if (!s.empty()) out.additional_special_tokens.push_back(std::move(s));
+        }
+    }
+
+    if (const JValue* bos = jobj_find(root, "bos_token"))   out.bos_token = extract_token_content(*bos);
+    if (const JValue* eos = jobj_find(root, "eos_token"))   out.eos_token = extract_token_content(*eos);
+    if (const JValue* pad = jobj_find(root, "pad_token"))   out.pad_token = extract_token_content(*pad);
+    if (const JValue* unk = jobj_find(root, "unk_token"))   out.unk_token = extract_token_content(*unk);
+
+    IMP_LOG_INFO("special_tokens_map.json: %zu additional_special_tokens, "
+                 "bos='%s' eos='%s' pad='%s' unk='%s'",
+                 out.additional_special_tokens.size(),
+                 out.bos_token.c_str(), out.eos_token.c_str(),
+                 out.pad_token.c_str(), out.unk_token.c_str());
+    return true;
+}
+
 // ---- load_gptq_config ----
 
 bool HFConfigLoader::load_gptq_config(const std::string& model_dir, GPTQConfig& cfg) {
