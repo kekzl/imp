@@ -57,6 +57,7 @@ FROM nvidia/cuda:13.2.1-runtime-ubuntu24.04
 RUN apt-get update && apt-get install -y --no-install-recommends --allow-change-held-packages \
         libcublas-13-2 \
         curl \
+        jq \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy built binaries
