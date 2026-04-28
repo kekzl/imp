@@ -2,6 +2,8 @@
 
 #include "model/model_config.h"
 #include "model/tokenizer.h"
+#include <string>
+#include <unordered_map>
 #include <vector>
 #include <memory>
 #include <cuda_runtime.h>
@@ -19,7 +21,6 @@ public:
     const Tensor& token_embedding() const { return tok_emb_; }
     const Tensor& output_norm() const { return out_norm_; }
     const Tensor& output_proj() const { return out_proj_; }
-    const TransformerLayer::NvFP4PreQuantWeight& nvfp4_out_proj() const { return nvfp4_out_proj_; }
     int n_layers() const { return static_cast<int>(layers_.size()); }
 
     Tokenizer* tokenizer() const { return tokenizer_.get(); }
@@ -45,11 +46,22 @@ public:
     ModelConfig config_;
     Tensor tok_emb_, out_norm_, out_proj_;
     // (qtype mirrors removed in Stage G — read tok_emb_.qtype directly.)
-    TransformerLayer::NvFP4PreQuantWeight nvfp4_out_proj_;  // prequant LM head scales
     TensorID out_proj_id = kInvalidTensorID;  // registry handle for LM head (Task 3.5)
     TensorID tok_emb_id  = kInvalidTensorID;  // registry handle for token embedding
     std::vector<TransformerLayer> layers_;
     std::unique_ptr<Tokenizer> tokenizer_;
+
+    // Load-time scratch for NVFP4 prequant scale tensors.
+    // Keys:
+    //   "L{idx}.{slot}"          per-layer dense (e.g. "L5.wq", "L5.w_gate_shared")
+    //   "L{idx}.expert_w_{kind}.{e}"  per-expert (e.g. "L5.expert_w_gate.7")
+    //   "out_proj"               LM head
+    // Populated by safetensors_loader → weight_map.cpp on the SafeTensors
+    // NVFP4-prequant load path. Cleared after executor_pre_dequant.cu's
+    // Phase 0 promote() copies the device-side scale pointers and the FP32
+    // tensor scalar onto each main weight tensor's .scales / .tensor_scale
+    // sidecars. Empty for GGUF and non-NVFP4 SafeTensors models.
+    std::unordered_map<std::string, NvFP4PreQuantWeight> nvfp4_scratch_;
 
     void* mmap_base_ = nullptr;
     size_t mmap_size_ = 0;

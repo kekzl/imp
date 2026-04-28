@@ -52,12 +52,17 @@ static void ensure_expert(TransformerLayer& layer, int idx) {
         layer.expert_w_up.resize(needed);
     if (static_cast<int>(layer.expert_w_down.size()) < needed)
         layer.expert_w_down.resize(needed);
-    if (static_cast<int>(layer.expert_nvfp4_gate.size()) < needed)
-        layer.expert_nvfp4_gate.resize(needed);
-    if (static_cast<int>(layer.expert_nvfp4_up.size()) < needed)
-        layer.expert_nvfp4_up.resize(needed);
-    if (static_cast<int>(layer.expert_nvfp4_down.size()) < needed)
-        layer.expert_nvfp4_down.resize(needed);
+}
+
+// Helper: write one of weight_scale / weight_scale_2 / input_scale into
+// model.nvfp4_scratch_[key], depending on `kind`. Used by every NVFP4-
+// prequant scale-routing branch in apply_weights().
+static void route_nvfp4_scale(Model& model, const std::string& key,
+                               const std::string& kind, const Tensor& t) {
+    auto& sc = model.nvfp4_scratch_[key];
+    if      (kind == "weight_scale")    sc.weight_scale = t;
+    else if (kind == "weight_scale_2")  sc.weight_scale_2 = t;
+    else if (kind == "input_scale")     sc.input_scale = t;
 }
 
 // ---------------------------------------------------------------------------
@@ -291,22 +296,17 @@ bool WeightMap::apply_weights(
             ++assigned;
             continue;
         }
-        // NVFP4 prequant LM head scales (Model Optimizer)
-        if (name == "lm_head.weight_scale") {
-            model.nvfp4_out_proj_.weight_scale = t;
-            IMP_LOG_DEBUG("  assigned: %s -> nvfp4_out_proj.weight_scale", name.c_str());
-            ++assigned;
-            continue;
-        }
-        if (name == "lm_head.weight_scale_2") {
-            model.nvfp4_out_proj_.weight_scale_2 = t;
-            IMP_LOG_DEBUG("  assigned: %s -> nvfp4_out_proj.weight_scale_2", name.c_str());
-            ++assigned;
-            continue;
-        }
-        if (name == "lm_head.input_scale") {
-            model.nvfp4_out_proj_.input_scale = t;
-            IMP_LOG_DEBUG("  assigned: %s -> nvfp4_out_proj.input_scale", name.c_str());
+        // NVFP4 prequant LM head scales (Model Optimizer / llm-compressor).
+        // Routed into the load-time scratch map under key "out_proj"; Phase 0
+        // promote() in executor_pre_dequant.cu copies the device pointer onto
+        // model.out_proj_'s sidecars and clears the entry.
+        if (name == "lm_head.weight_scale" ||
+            name == "lm_head.weight_scale_2" ||
+            name == "lm_head.input_scale") {
+            const std::string kind = name.substr(8);  // strip "lm_head."
+            route_nvfp4_scale(model, "out_proj", kind, t);
+            IMP_LOG_DEBUG("  assigned: %s -> nvfp4_scratch_[out_proj].%s",
+                          name.c_str(), kind.c_str());
             ++assigned;
             continue;
         }
@@ -443,33 +443,36 @@ bool WeightMap::apply_weights(
 
         // -- NVFP4 scale tensors (ModelOpt pre-quantized) --
         // self_attn.{q,k,v,o}_proj.{weight_scale,weight_scale_2,input_scale}
+        const std::string layer_key_prefix = "L" + std::to_string(layer_idx) + ".";
+
+        // self_attn.{q,k,v,o}_proj.{weight_scale,weight_scale_2,input_scale}
         if (!matched && parts.size() >= 6 && parts[3] == "self_attn" &&
             (parts[5] == "weight_scale" || parts[5] == "weight_scale_2" || parts[5] == "input_scale")) {
             const std::string& proj = parts[4];
             const std::string& kind = parts[5];
-            auto assign = [&](TransformerLayer::NvFP4PreQuantWeight& nw) {
-                if (kind == "weight_scale")   nw.weight_scale = t;
-                else if (kind == "weight_scale_2") nw.weight_scale_2 = t;
-                else if (kind == "input_scale")    nw.input_scale = t;
-            };
-            if (proj == "q_proj") { assign(layer.nvfp4_q); matched = true; }
-            else if (proj == "k_proj") { assign(layer.nvfp4_k); matched = true; }
-            else if (proj == "v_proj") { assign(layer.nvfp4_v); matched = true; }
-            else if (proj == "o_proj") { assign(layer.nvfp4_o); matched = true; }
+            const char* slot = nullptr;
+            if      (proj == "q_proj") slot = "wq";
+            else if (proj == "k_proj") slot = "wk";
+            else if (proj == "v_proj") slot = "wv";
+            else if (proj == "o_proj") slot = "wo";
+            if (slot) {
+                route_nvfp4_scale(model, layer_key_prefix + slot, kind, t);
+                matched = true;
+            }
         }
         // mlp.{gate,up,down}_proj.{weight_scale,weight_scale_2,input_scale}
         if (!matched && parts.size() >= 6 && parts[3] == "mlp" &&
             (parts[5] == "weight_scale" || parts[5] == "weight_scale_2" || parts[5] == "input_scale")) {
             const std::string& proj = parts[4];
             const std::string& kind = parts[5];
-            auto assign = [&](TransformerLayer::NvFP4PreQuantWeight& nw) {
-                if (kind == "weight_scale")   nw.weight_scale = t;
-                else if (kind == "weight_scale_2") nw.weight_scale_2 = t;
-                else if (kind == "input_scale")    nw.input_scale = t;
-            };
-            if (proj == "gate_proj") { assign(layer.nvfp4_gate); matched = true; }
-            else if (proj == "up_proj") { assign(layer.nvfp4_up); matched = true; }
-            else if (proj == "down_proj") { assign(layer.nvfp4_down); matched = true; }
+            const char* slot = nullptr;
+            if      (proj == "gate_proj") slot = "w_gate";
+            else if (proj == "up_proj")   slot = "w_up";
+            else if (proj == "down_proj") slot = "w_down";
+            if (slot) {
+                route_nvfp4_scale(model, layer_key_prefix + slot, kind, t);
+                matched = true;
+            }
         }
 
         // -----------------------------------------------------------------
@@ -537,14 +540,16 @@ bool WeightMap::apply_weights(
                     ensure_expert(layer, expert_idx);
                     const std::string& proj = parts[6];
                     const std::string& kind = parts[7];
-                    auto assign = [&](TransformerLayer::NvFP4PreQuantWeight& nw) {
-                        if (kind == "weight_scale")   nw.weight_scale = t;
-                        else if (kind == "weight_scale_2") nw.weight_scale_2 = t;
-                        else if (kind == "input_scale")    nw.input_scale = t;
-                    };
-                    if (proj == "gate_proj") { assign(layer.expert_nvfp4_gate[expert_idx]); matched = true; }
-                    else if (proj == "up_proj") { assign(layer.expert_nvfp4_up[expert_idx]); matched = true; }
-                    else if (proj == "down_proj") { assign(layer.expert_nvfp4_down[expert_idx]); matched = true; }
+                    const char* slot = nullptr;
+                    if      (proj == "gate_proj") slot = "expert_w_gate";
+                    else if (proj == "up_proj")   slot = "expert_w_up";
+                    else if (proj == "down_proj") slot = "expert_w_down";
+                    if (slot) {
+                        route_nvfp4_scale(model,
+                            layer_key_prefix + slot + "." + std::to_string(expert_idx),
+                            kind, t);
+                        matched = true;
+                    }
                 }
             }
             // Shared expert: mlp.shared_expert.{gate,up,down}_proj.weight
@@ -561,14 +566,14 @@ bool WeightMap::apply_weights(
                       parts[6] == "input_scale")) {
                 const std::string& proj = parts[5];
                 const std::string& kind = parts[6];
-                auto assign = [&](TransformerLayer::NvFP4PreQuantWeight& nw) {
-                    if (kind == "weight_scale")        nw.weight_scale = t;
-                    else if (kind == "weight_scale_2") nw.weight_scale_2 = t;
-                    else if (kind == "input_scale")    nw.input_scale = t;
-                };
-                if (proj == "gate_proj")      { assign(layer.nvfp4_w_gate_shared); matched = true; }
-                else if (proj == "up_proj")   { assign(layer.nvfp4_w_up_shared);   matched = true; }
-                else if (proj == "down_proj") { assign(layer.nvfp4_w_down_shared); matched = true; }
+                const char* slot = nullptr;
+                if      (proj == "gate_proj") slot = "w_gate_shared";
+                else if (proj == "up_proj")   slot = "w_up_shared";
+                else if (proj == "down_proj") slot = "w_down_shared";
+                if (slot) {
+                    route_nvfp4_scale(model, layer_key_prefix + slot, kind, t);
+                    matched = true;
+                }
             }
             // Shared-expert sigmoid gate (Qwen3-Next/3.5/3.6):
             //   mlp.shared_expert_gate.weight   ->   shared_expert_gate_inp
@@ -597,14 +602,17 @@ bool WeightMap::apply_weights(
                     else if (proj == "down_proj") { layer.expert_w_down[expert_idx] = t; matched = true; }
                 } else if (field == "weight_scale" || field == "weight_scale_2" || field == "input_scale") {
                     ensure_expert(layer, expert_idx);
-                    auto assign = [&](TransformerLayer::NvFP4PreQuantWeight& nw) {
-                        if (field == "weight_scale")        nw.weight_scale = t;
-                        else if (field == "weight_scale_2") nw.weight_scale_2 = t;
-                        else if (field == "input_scale")    nw.input_scale = t;
-                    };
-                    if (proj == "gate_proj") { assign(layer.expert_nvfp4_gate[expert_idx]); matched = true; }
-                    else if (proj == "up_proj") { assign(layer.expert_nvfp4_up[expert_idx]); matched = true; }
-                    else if (proj == "down_proj") { assign(layer.expert_nvfp4_down[expert_idx]); matched = true; }
+                    const char* slot = nullptr;
+                    if      (proj == "gate_proj") slot = "expert_w_gate";
+                    else if (proj == "up_proj")   slot = "expert_w_up";
+                    else if (proj == "down_proj") slot = "expert_w_down";
+                    if (slot) {
+                        const std::string layer_key_prefix2 = "L" + std::to_string(layer_idx) + ".";
+                        route_nvfp4_scale(model,
+                            layer_key_prefix2 + slot + "." + std::to_string(expert_idx),
+                            field, t);
+                        matched = true;
+                    }
                 }
             }
         }

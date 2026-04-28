@@ -1677,7 +1677,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream,
         return false;
     }
 
-    // Upload NVFP4 pre-quantized scale tensors (weight_scale, weight_scale_2, input_scale)
+    // Upload NVFP4 pre-quantized scale tensors. Single scratch map keyed by
+    // canonical slot name; replaced the per-layer NvFP4PreQuantWeight slots.
     if (config_.is_nvfp4_prequant) {
         int scale_count = 0;
         auto upload_scale = [&](Tensor& t) {
@@ -1691,28 +1692,11 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream,
             t.on_device = true;
             scale_count++;
         };
-
-        for (auto& L : layers_) {
-            for (auto* nw : {&L.nvfp4_q, &L.nvfp4_k, &L.nvfp4_v, &L.nvfp4_o,
-                             &L.nvfp4_gate, &L.nvfp4_up, &L.nvfp4_down,
-                             &L.nvfp4_w_gate_shared, &L.nvfp4_w_up_shared,
-                             &L.nvfp4_w_down_shared}) {
-                upload_scale(nw->weight_scale);
-                upload_scale(nw->weight_scale_2);
-                upload_scale(nw->input_scale);
-            }
-            for (auto* vec : {&L.expert_nvfp4_gate, &L.expert_nvfp4_up, &L.expert_nvfp4_down}) {
-                for (auto& nw : *vec) {
-                    upload_scale(nw.weight_scale);
-                    upload_scale(nw.weight_scale_2);
-                    upload_scale(nw.input_scale);
-                }
-            }
+        for (auto& [_, sc] : nvfp4_scratch_) {
+            upload_scale(sc.weight_scale);
+            upload_scale(sc.weight_scale_2);
+            upload_scale(sc.input_scale);
         }
-        // LM head (output projection) scales
-        upload_scale(nvfp4_out_proj_.weight_scale);
-        upload_scale(nvfp4_out_proj_.weight_scale_2);
-        upload_scale(nvfp4_out_proj_.input_scale);
         if (scale_count > 0)
             IMP_LOG_INFO("NVFP4 prequant: uploaded %d scale tensors to GPU", scale_count);
     }
