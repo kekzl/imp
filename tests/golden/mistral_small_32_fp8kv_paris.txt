@@ -1,0 +1,9 @@
+# imp greedy generation golden
+# Model:    Mistral-Small-3.2-24B-Instruct-2506-NVFP4 (SafeTensors, llm-compressor NVFP4)
+# Path:     NVFP4 weights, FP8 E4M3 KV cache (--kv-fp8), FP8 prefill, FP8 FMHA
+# Prompt:   "The capital of France is"
+# Flags:    --max-tokens 64 --temperature 0 --seed 0 --chat-template none --kv-fp8
+# Captured: 2026-04-29 by bringup/auto-2026-04-29
+# First 8 tokens (deterministic): 6993 ' Paris', 1046 '.', 2157 ' It', 1395 ' is', 1278 ' the', 8961 ' capital', 1307 ' of', 5498 ' France'
+# Cross-precision: tokens 1..8 identical to NVFP4-FP16-KV golden (mistral_small_32_nvfp4_paris.txt)
+ Paris. It is the capital of France. It is the capital of France and one of the most visited cities in the world. It is known as the "City of Light" (La Ville Lumiere) is the capital of France and one of the most visited cities in the world. It is known as the
