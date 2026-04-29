@@ -1,0 +1,37 @@
+Unknown argument: --max-seq-len
+Usage: imp-server [options]
+
+Options:
+  --model <path>        Path to model file or HuggingFace repo ID (optional)
+  --revision <rev>      HuggingFace model revision (branch, tag, or commit hash)
+  --host <addr>         Listen address (default: 127.0.0.1)
+  --port <n>            Listen port (default: 8080)
+  --max-tokens <n>      Default max tokens (default: 8192)
+  --gpu-layers <n>      Layers on GPU, -1 = all (default: -1)
+  --device <n>          CUDA device ID (default: 0)
+  --chat-template <t>   auto, none, chatml, llama2, llama3, nemotron, gemma
+  --no-cuda-graphs      Disable CUDA Graph capture for decode
+  --ssm-fp16            Use FP16 for SSM h_state
+  --kv-fp8              Use FP8 E4M3 KV cache (halves KV memory)
+  --kv-int8             Use INT8 KV cache with dp4a attention
+  --kv-int4             Use INT4 KV cache (quarters KV memory)
+  --prefill-chunk-size <n> Max tokens per prefill chunk (0 = no chunking)
+  --decode-nvfp4        NVFP4 decode cache (additive: FP16 prefill + NVFP4 decode)
+  --decode-nvfp4-only   NVFP4 decode cache (replacement: saves VRAM, slower prefill)
+  --mxfp4-prefill       Use CUTLASS MXFP4 GEMM for prefill (sm_120, requires NVFP4)
+  --dual-path-quant     FP8 attention + NVFP4 FFN (higher quality attention, faster FFN)
+  --no-nvfp4            Disable NVFP4 decode cache (override auto-detection)
+  --mmproj <path>       Path to vision encoder GGUF (mmproj) for multimodal
+  --models-dir <path>   Directory to scan for .gguf models (auto-load on select)
+  --api-key <key>       Require Bearer token authentication
+  --reasoning-format <f> deepseek (default) or none
+  --think-budget <f>    Fraction of max_tokens for reasoning (default: 0.5, 0=disabled)
+  --self-speculative    Self-speculative decoding (early-exit draft, same model)
+  --self-spec-k <n>     Draft tokens per self-spec step (default: 4)
+  --self-spec-exit-layer <n>  Early-exit layer (-1 = n_layers/2)
+  --ngram-spec          N-gram speculative decoding (draft from token history)
+  --ngram-spec-k <n>    N-gram max draft tokens per step (default: 5)
+  --max-concurrent <n>  Max simultaneous requests (default: 64, 0=unlimited)
+  --request-timeout <s> Per-request timeout in seconds (default: 300, 0=unlimited)
+  --rate-limit <n>      Max requests/minute per IP (default: 0=unlimited)
+  --help                Show this help message
