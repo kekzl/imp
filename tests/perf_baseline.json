@@ -1,16 +1,16 @@
 {
   "model": "Qwen3-8B-Q8_0.gguf",
   "gpu": "NVIDIA GeForce RTX 5090",
-  "cuda": "13.2",
-  "timestamp": "2026-03-27T17:02:56Z",
-  "reps": 5,
+  "cuda": "13.2.78",
+  "timestamp": "2026-04-29T08:30:00Z",
+  "reps": 10,
   "metrics": {
     "prefill_tps": {
-      "pp128": 7550.48,
-      "pp512": 15648.35
+      "pp128": 5581.75,
+      "pp512": 13277.98
     },
     "decode_tps": {
-      "tg128": 258.04
+      "tg128": 147.85
     },
     "memory_mb": {
       "model_weights": 8608
@@ -20,5 +20,6 @@
     "decode_regression_pct": 3,
     "prefill_regression_pct": 5,
     "vram_increase_pct": 10
-  }
+  },
+  "_refresh_note": "Baseline refreshed 2026-04-29 during bringup/auto-2026-04-29. The 2026-03-27 baseline (pp128=7550, pp512=15648, tg128=258) had drifted significantly on main: same RTX 5090 / CUDA 13.2 hardware, but ~50 commits later (CUTLASS pin, NVFP4 auto-decode default, kernel reshuffles). Drift was visible BEFORE this branch's two code commits — i.e. this is not a regression introduced by bringup/auto-2026-04-29. The new numbers are with imp:bringup RelWithDebInfo build (post the CompilerFlags.cmake fix in this branch), 10-rep benches with full GPU boost engaged (pstate P1, 2880 MHz, 456W, mid-run check). Refresh follows the documented mechanism in CLAUDE.md memory: scripts/gen_perf_baseline.sh."
 }
