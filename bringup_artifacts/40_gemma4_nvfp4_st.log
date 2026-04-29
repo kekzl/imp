@@ -1,0 +1,134 @@
+[00:13:24][INFO] config.cpp:264: imp.conf: no config file found, using built-in defaults
+IMP Inference Engine 0.7.0
+Loading model: /home/kekz/models/Gemma-4-26B-A4B-it-NVFP4 (SafeTensors)
+[00:13:24][INFO] llm_compressor_loader.cpp:304: NVFP4 model (llm-compressor): scheme=NVFP4, group_size=16, exclude=4 modules
+[00:13:24][INFO] safetensors_loader.cpp:511: Sharded SafeTensors: 1 shards
+[00:13:24][INFO] llm_compressor_loader.cpp:304: NVFP4 model (llm-compressor): scheme=NVFP4, group_size=16, exclude=4 modules
+[00:13:25][INFO] safetensors_loader.cpp:529: Loaded shard: model.safetensors (47293 tensors total)
+[00:13:25][INFO] llm_compressor_loader.cpp:167: llm-compressor format: 35175 suffix renames, 47292 prefix strips, 355 vision tensors skipped, 90 Gemma-4 extras emitted, 12118 pass-through
+[00:13:25][INFO] safetensors_loader.cpp:605: Parsed 47293 tensors from SafeTensors
+[00:13:25][INFO] hf_config_loader.cpp:59: loading HF config from /home/kekz/models/Gemma-4-26B-A4B-it-NVFP4/config.json
+[00:13:25][INFO] hf_config_loader.cpp:312: Gemma 4 (HF): scalar head_dim 256 → 512 (max of per-layer)
+[00:13:25][INFO] hf_config_loader.cpp:330:   tie_word_embeddings = true
+[00:13:25][INFO] hf_config_loader.cpp:333:   arch=gemma4 layers=30 d_model=2816 heads=16 kv_heads=8 d_ff=2112 vocab=262144
+[00:13:25][INFO] safetensors_loader.cpp:636: Architecture: gemma4
+[00:13:25][INFO] safetensors_loader.cpp:637: Config: layers=30 d_model=2816 d_ff=2112 heads=16 kv_heads=8 vocab=262144 ctx=262144
+[00:13:25][INFO] safetensors_loader.cpp:641: MoE: 128 experts, 8 active, expert_d_ff=704
+[00:13:25][WARN] weight_map.cpp:318: WeightMap: unrecognised weight name: model.embed_vision.embedding_projection.weight
+[00:13:25][INFO] weight_map.cpp:808: WeightMap (gemma4): assigned 47292 tensors, skipped 1, layers=30, experts=128
+[00:13:25][INFO] llm_compressor_loader.cpp:304: NVFP4 model (llm-compressor): scheme=NVFP4, group_size=16, exclude=4 modules
+[00:13:25][INFO] safetensors_loader.cpp:686: NVFP4 pre-quantized: 11725 scratch entries (group_size=16)
+[00:13:25][INFO] safetensors_loader.cpp:693: Tied output projection to token embedding
+[00:13:25][INFO] hf_config_loader.cpp:440: loaded chat_template from chat_template.jinja (16448 chars)
+[00:13:25][WARN] weight_map.cpp:827: WeightMap: output projection (out_proj) was not found (may be tied to embed_tokens)
+[00:13:25][INFO] tokenizer.cpp:505: tokenizer.json: loaded 262144 vocab entries (type=BPE)
+[00:13:25][INFO] tokenizer.cpp:524: tokenizer.json: loaded 514906 merges
+[00:13:25][INFO] tokenizer.cpp:649: tokenizer.json: type=spm vocab_size=262144 bos=1 eos=2 add_prefix=true
+[00:13:25][INFO] safetensors_loader.cpp:721: Loaded tokenizer from /home/kekz/models/Gemma-4-26B-A4B-it-NVFP4/tokenizer.json
+[00:13:25][INFO] hf_config_loader.cpp:547: tokenizer_config.json: add_bos=unset add_eos=unset add_prefix_space=unset
+[00:13:25][INFO] hf_config_loader.cpp:376: generation_config.json: eos=3 temp=1 top_p=0.95 top_k=64 rep_penalty=-1
+[00:13:25][INFO] safetensors_loader.cpp:792: SafeTensors model loaded successfully from /home/kekz/models/Gemma-4-26B-A4B-it-NVFP4
+[00:13:25][INFO] engine.cpp:388: KV cache dtype: FP16 (default — pass --kv-fp8 for FP8 E4M3 memory savings)
+[00:13:25][INFO] engine.cpp:476: FP8 prefill: auto → enabled
+[00:13:25][INFO] engine.cpp:497: NVFP4 decode: auto → mode 2
+[00:13:25][INFO] engine.cpp:535: Gemma 4: disabling FP8 prefill (per-layer head_dim not yet supported)
+[00:13:25][INFO] engine.cpp:539: Gemma 4: disabling NVFP4 decode cache (per-layer head_dim not yet supported)
+[00:13:25][INFO] engine.cpp:559: Gemma 4: enabling runtime.deterministic_gemm (output_norm outliers amplify algo jitter)
+[00:13:25][INFO] engine.cpp:563: Gemma 4: setting CUBLAS_WORKSPACE_CONFIG=:4096:8 for deterministic grouped GEMM
+[00:13:25][INFO] engine.cpp:577: Gemma 4: enabling MMVQ for all weight GEMMs (numerical parity with llama.cpp)
+[00:13:25][INFO] engine.cpp:608: max_seq_len: auto → 39586 (model=262144, vram_cap=39586, kv=491520 B/tok)
+[00:13:25][INFO] vram_allocator.cu:26: VRAMAllocator: total=32607 MiB, headroom=1630 MiB (5%)
+[00:13:25][INFO] executor_workspace.cu:65: Gemma 4: allocated V-norm ones buffer (512 halfs)
+[00:13:25][INFO] pdl.cu:52: PDL: available (sm_120+)
+[00:13:25][INFO] executor_workspace.cu:176: PDL enabled on executor + compute + GEMV kernels
+[00:13:25][INFO] executor_workspace.cu:229: GraphExecutor initialized: max_tokens=4096, d_model=2816, n_layers=30, dtype=F16, pdl=on
+[00:13:25][INFO] engine.cpp:706: L2 persisting cache: reserved 45 MB / 60 MB total
+[00:13:25][INFO] engine.cpp:770: Expert upload reserve: 4188.93 MiB (workspace=672.27, kv=3260.66, ssm+safety=rest)
+[00:13:25][INFO] engine.cpp:779: GPU memory before weight upload: 30729 MiB free / 32606 MiB total
+[00:13:25][INFO] weight_upload.cu:1587: Uploading model weights to GPU (30 layers)...
+[00:13:25][INFO] weight_upload.cu:1608: Pinned staging enabled (2x 64 MiB buffers)
+[00:13:30][INFO] weight_upload.cu:781: Output projection shares GPU data with token embedding (weight tying)
+[00:13:32][INFO] weight_upload.cu:1210: Expert offload: all experts fit with 10% overhead (10.63 GiB experts, 27.64 GiB free) — picking aggressive.
+[00:13:32][INFO] weight_upload.cu:1231: Expert weights: 10.63 GiB -> uploading ALL to GPU (27.64 GiB free, 4.09 GiB reserve)
+[00:14:05][INFO] weight_upload.cu:1701: NVFP4 prequant: uploaded 35175 scale tensors to GPU
+[00:14:05][INFO] weight_upload.cu:1712: All model weights uploaded to GPU (47292 allocations)
+[00:14:05][INFO] engine.cpp:804: GPU memory after weight upload: 15261 MiB free / 32606 MiB total (weights ~15468 MiB)
+[00:14:05][INFO] executor_workspace.cu:440: Persistent workspace: 67.00 MiB (hidden+residual+norm+logits)
+[00:14:05][INFO] executor_workspace.cu:450: FP32 residual accumulator: 44.00 MiB (post-norm architecture)
+[00:14:05][INFO] executor_workspace.cu:481: Shared workspace: 530.00 MiB = max(attn=214.0, ffn=71.5, moe=530.0, ssm=0.0 MiB) — saved 285.50 MiB vs separate allocation
+[00:14:05][INFO] executor_workspace_buffers.cu:51: Dequant scratch buffer: 22.00 MiB
+[00:14:05][INFO] executor_workspace_buffers.cu:123: MMVQ scratch buffers: 4.50 KiB (q8_1) + 0.50 KiB (d8), max_blocks=128 (max_k=4096, moe_down=0)
+[00:14:05][INFO] executor_workspace_buffers.cu:148: Split-K paged attention scratch: 2056.00 KiB
+[00:14:05][INFO] executor_workspace_buffers.cu:184: cuBLAS attention S-matrix: 255.95 MiB (16 heads x 2896 x 2896)
+[00:14:05][INFO] executor_workspace_buffers.cu:207: MoE dequant buffer: 3.78 MiB (1 expert slot)
+[00:14:05][INFO] executor_workspace_buffers.cu:292: MoE batch dequant buffer: 484.00 MiB (128 experts)
+[00:14:05][INFO] executor_workspace_buffers.cu:335: CUTLASS 3.x MoE staging: 52.25 MiB (packed=44.00, sf=8.25) max_expanded=32768
+[00:14:05][INFO] engine.cpp:864: KV cache layers: 30 attention out of 30 total
+[00:14:05][INFO] engine.cpp:869: KV block size: auto → 16 (n_kv_heads=8)
+[00:14:05][INFO] vram_budget.cpp:224: VRAM budget: strategy=FP16_ONLY, available=10532.3 MiB, kv=1123 blocks (8422.5 MiB), nvfp4=0.0 MiB, fp8=0.0 MiB, reserve=3261 MiB, second_pass=no
+[00:14:05][INFO] engine.cpp:884: KV cache: 1123 blocks (17968 tokens), 8422.50 MiB, dtype=F16 (layers=30/30, kv_heads=8, head_dim=512, block_size=16)
+[00:14:05][INFO] kv_cache.cu:262: KVCache (per-layer): 30 layers, pool 3860.31 MiB, max nkv=8, max hd=512
+[00:14:05][WARN] executor_pre_dequant.cu:201: StoragePlanner (diagnostic): plan failed — vram budget insufficient even at required_floor tiers
+[00:14:06][INFO] executor_pre_dequant.cu:314: NVFP4 pre-quantized: promoted 11725 weights to Tensor sidecars
+[00:14:06][INFO] executor_pre_dequant.cu:1692: WeightRegistry populated with 0 handles (phase-2 shim)
+[00:14:06][INFO] executor_pre_dequant.cu:1720: Phase-4 overlay: registry=0 cached / plan-ideal=11727 (uncached 11727 remain as native GGUF blocks)
+[00:14:06][INFO] executor_pre_dequant.cu:1744: Phase-4 gap by kind: WQ plan=30 registry=0 (uncached=30)
+[00:14:06][INFO] executor_pre_dequant.cu:1744: Phase-4 gap by kind: WK plan=30 registry=0 (uncached=30)
+[00:14:06][INFO] executor_pre_dequant.cu:1744: Phase-4 gap by kind: WV plan=25 registry=0 (uncached=25)
+[00:14:06][INFO] executor_pre_dequant.cu:1744: Phase-4 gap by kind: WO plan=30 registry=0 (uncached=30)
+[00:14:06][INFO] executor_pre_dequant.cu:1744: Phase-4 gap by kind: W_GATE plan=30 registry=0 (uncached=30)
+[00:14:06][INFO] executor_pre_dequant.cu:1744: Phase-4 gap by kind: W_UP plan=30 registry=0 (uncached=30)
+[00:14:06][INFO] executor_pre_dequant.cu:1744: Phase-4 gap by kind: W_DOWN plan=30 registry=0 (uncached=30)
+[00:14:06][INFO] executor_pre_dequant.cu:1744: Phase-4 gap by kind: EXPERT_GATE plan=3840 registry=0 (uncached=3840)
+[00:14:06][INFO] executor_pre_dequant.cu:1744: Phase-4 gap by kind: EXPERT_UP plan=3840 registry=0 (uncached=3840)
+[00:14:06][INFO] executor_pre_dequant.cu:1744: Phase-4 gap by kind: EXPERT_DOWN plan=3840 registry=0 (uncached=3840)
+[00:14:06][INFO] executor_pre_dequant.cu:1744: Phase-4 gap by kind: TOK_EMBED plan=1 registry=0 (uncached=1)
+[00:14:06][INFO] executor_pre_dequant.cu:1744: Phase-4 gap by kind: LM_HEAD plan=1 registry=0 (uncached=1)
+[00:14:06][INFO] executor_pre_dequant.cu:1750: Phase-4 plan-ideal tiers: fp16=2 fp8=55 nvfp4=11670 cutlass_nvfp4=0 mxfp4=0 fp32=0
+[00:14:06][INFO] executor_pre_dequant.cu:1754: Phase-4 wcache actual: fp16=0 fp8=0 nvfp4=0 cutlass_nvfp4=0 cutlass_mxfp4=0 nvfp4_moe=0 fused_kv=0 fused_gate_up=0
+[00:14:06][INFO] executor_pre_dequant.cu:1767: Phase-4 native: 47292 Model::gpu_allocations_ pointers (GGUF blocks + norms + scratch — bypass the overlay layer)
+[00:14:06][INFO] engine.cpp:1090: GPU memory: 22676 MiB used / 32607 MiB total (9931 MiB free)
+[00:14:06][INFO] vram_allocator.cu:135: VRAMAllocator report: tracked=5276 MiB, free=9931 MiB, headroom=1630 MiB, total=32607 MiB
+[00:14:06][INFO] vram_allocator.cu:143:   attn_scores                 255.9 MiB  (1 allocs)
+[00:14:06][INFO] vram_allocator.cu:143:   batch_pool                    0.0 MiB  (1 allocs)
+[00:14:06][INFO] vram_allocator.cu:143:   dequant_scratch              22.0 MiB  (1 allocs)
+[00:14:06][INFO] vram_allocator.cu:143:   kv_cache                   3860.3 MiB  (1 allocs)
+[00:14:06][INFO] vram_allocator.cu:143:   moe_3x_packed                44.0 MiB  (1 allocs)
+[00:14:06][INFO] vram_allocator.cu:143:   moe_3x_sf                     8.2 MiB  (1 allocs)
+[00:14:06][INFO] vram_allocator.cu:143:   moe_batch_dequant           484.0 MiB  (1 allocs)
+[00:14:06][INFO] vram_allocator.cu:143:   moe_dequant                   3.8 MiB  (1 allocs)
+[00:14:06][INFO] vram_allocator.cu:143:   penalty_tokens                0.2 MiB  (1 allocs)
+[00:14:06][INFO] vram_allocator.cu:143:   persistent_workspace         67.0 MiB  (1 allocs)
+[00:14:06][INFO] vram_allocator.cu:143:   prefill_pool                  0.3 MiB  (1 allocs)
+[00:14:06][INFO] vram_allocator.cu:143:   shared_workspace            530.0 MiB  (1 allocs)
+[00:14:06][INFO] chat_template.cpp:106: Chat template: using Jinja2 engine
+[00:14:06][INFO] chat_template.cpp:261: Chat template: gemma
+[00:14:06][INFO] engine.cpp:1264: Banned 17 special tokens from generation
+[00:14:06][INFO] engine.cpp:1271:   banned: 0(<pad>) 3(<unk>) 4(<mask>) 46(<|tool>) 47(<tool|>) 48(<|tool_call>) 49(<tool_call|>) 51(<tool_response|>) 52(<|"|>) 105(<|turn>) 255999(<|image>) 256000(<|audio>) 258880(<|image|>) 258881(<|audio|>) 258882(<image|>) 258883(<audio|>) 258884(<|video|>) 
+[00:14:06][INFO] engine.cpp:1339: Warmup skipped (Gemma-4 algo-jitter protection)
+Init: 41257.29 ms (model load + engine setup)
+[00:14:06][WARN] nvfp4_gemm.cu:1459: gemm_nvfp4: using slow dequant-to-FP16 fallback for M=23 (CUTLASS/cuBLASLt NVFP4 unavailable). Allocating 22.0 MiB dequant buffer for [4096, 2816] weight matrix
+[00:14:06][INFO] executor_forward_moe.cu:1518: MoE prefill: legacy FP16 fallback path (n=23, expanded=184)
+[tok=100 '<|channel>'] <|channel>[00:14:06][INFO] executor_forward_moe.cu:1518: MoE prefill: legacy FP16 fallback path (n=1, expanded=8)
+[tok=45518 'thought'] thought[00:14:06][INFO] executor_forward_moe.cu:1518: MoE prefill: legacy FP16 fallback path (n=1, expanded=8)
+[tok=107 '
+'] 
+[00:14:06][INFO] executor_forward_moe.cu:1518: MoE prefill: legacy FP16 fallback path (n=1, expanded=8)
+[tok=818 'The'] The[00:14:06][INFO] executor_forward_moe.cu:1518: MoE prefill: legacy FP16 fallback path (n=1, expanded=8)
+ user[tok=2430 ' user'] [00:14:06][INFO] executor_forward_moe.cu:1518: MoE prefill: legacy FP16 fallback path (n=1, expanded=8)
+[tok=563 ' is']  is[00:14:06][INFO] executor_forward_moe.cu:1518: MoE prefill: legacy FP16 fallback path (n=1, expanded=8)
+[tok=10980 ' asking']  asking[00:14:06][INFO] executor_forward_moe.cu:1518: MoE prefill: legacy FP16 fallback path (n=1, expanded=8)
+ "[tok=623 ' "'] [00:14:06][INFO] executor_forward_moe.cu:1518: MoE prefill: legacy FP16 fallback path (n=1, expanded=8)
+[tok=3689 'What'] What[00:14:06][INFO] executor_forward_moe.cu:1518: MoE prefill: legacy FP16 fallback path (n=1, expanded=8)
+ is[tok=563 ' is'] [00:14:06][INFO] executor_forward_moe.cu:1518: MoE prefill: legacy FP16 fallback path (n=1, expanded=8)
+[tok=506 ' the']  the[00:14:06][INFO] executor_forward_moe.cu:1518: MoE prefill: legacy FP16 fallback path (n=1, expanded=8)
+ capital[00:14:06][INFO] executor_forward_moe.cu:1518: MoE prefill: legacy FP16 fallback path (n=1, expanded=8)
+ of[00:14:06][INFO] executor_forward_moe.cu:1518: MoE prefill: legacy FP16 fallback path (n=1, expanded=8)
+ France[00:14:07][INFO] executor_forward_moe.cu:1518: MoE prefill: legacy FP16 fallback path (n=1, expanded=8)
+?".[00:14:07][INFO] executor_forward_moe.cu:1518: MoE prefill: legacy FP16 fallback path (n=1, expanded=8)
+
+
+pp    23 tokens in   520.62 ms  (  44.18 tok/s)
+tg    16 tokens in   426.23 ms  (  35.19 tok/s)
+total     946.85 ms
+

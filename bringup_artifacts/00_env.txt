@@ -1,0 +1,91 @@
+=== Phase 0 Environment Sanity — 2026-04-29T01:41:37+02:00 ===
+
+=== nvidia-smi ===
+Wed Apr 29 01:41:37 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.54                 Driver Version: 595.79         CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 5090        On  |   00000000:01:00.0  On |                  N/A |
+|  0%   28C    P8             54W /  575W |     903MiB /  32607MiB |     11%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+
+=== nvcc --version ===
+/bin/bash: line 43: nvcc: command not found
+nvcc not on PATH; trying /usr/local/cuda/bin/nvcc
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2026 NVIDIA Corporation
+Built on Thu_Mar_19_11:12:51_PM_PDT_2026
+Cuda compilation tools, release 13.2, V13.2.78
+Build cuda_13.2.r13.2/compiler.37668154_0
+
+=== cmake --version ===
+/bin/bash: line 47: cmake: command not found
+
+=== ldd --version ===
+ldd (Debian GLIBC 2.41-12+deb13u2) 2.41
+Copyright (C) 2024 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+Written by Roland McGrath and Ulrich Drepper.
+
+=== gcc --version ===
+gcc (Debian 14.2.0-19) 14.2.0
+Copyright (C) 2024 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+
+=== g++ --version ===
+g++ (Debian 14.2.0-19) 14.2.0
+Copyright (C) 2024 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+
+=== clang --version ===
+/bin/bash: line 59: clang: command not found
+clang not present
+
+=== uname -a ===
+Linux P22-RF 6.6.87.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025 x86_64 GNU/Linux
+
+=== /usr/local/cuda symlink ===
+lrwxrwxrwx 1 root root 22 Mar  8 01:23 /usr/local/cuda -> /etc/alternatives/cuda
+cuda
+cuda-13
+cuda-13.2
+
+=== CUTLASS submodule / FetchContent pinned version (from CMakeLists) ===
+57:option(IMP_USE_CUTLASS "Use CUTLASS for MoE GEMM (requires sm_90+)" ON)
+58:if(IMP_USE_CUTLASS)
+59:    FetchContent_Declare(cutlass
+60:        GIT_REPOSITORY https://github.com/NVIDIA/cutlass.git
+65:    # CUTLASS is header-only for our use — disable all build targets
+66:    set(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "" FORCE)
+67:    set(CUTLASS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+68:    set(CUTLASS_ENABLE_TOOLS OFF CACHE BOOL "" FORCE)
+69:    set(CUTLASS_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+70:    FetchContent_MakeAvailable(cutlass)
+162:if(IMP_USE_CUTLASS)
+163:    list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_sm120.cu)
+164:    list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_mxfp4_sm120.cu)
+165:    list(APPEND IMP_COMPUTE_SOURCES src/compute/gemm_cutlass_grouped_3x.cu)
+265:if(IMP_USE_CUTLASS)
+267:        ${cutlass_SOURCE_DIR}/include
+268:        ${cutlass_SOURCE_DIR}/tools/util/include
+269:        ${cutlass_SOURCE_DIR}/examples/88_hopper_fmha
+271:    target_compile_definitions(imp PRIVATE IMP_USE_CUTLASS=1)
+419:        tests/test_cutlass_grouped_3x_nvfp4.cu

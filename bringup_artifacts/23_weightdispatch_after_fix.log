@@ -1,0 +1,34 @@
+Running main() from /src/build/_deps/googletest-src/googletest/src/gtest_main.cc
+Note: Google Test filter = WeightDispatchTest.*
+[==========] Running 10 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 10 tests from WeightDispatchTest
+[ RUN      ] WeightDispatchTest.FP16_GemmMatchesDirect
+[       OK ] WeightDispatchTest.FP16_GemmMatchesDirect (253 ms)
+[ RUN      ] WeightDispatchTest.FP16_GemvMatchesDirect
+[       OK ] WeightDispatchTest.FP16_GemvMatchesDirect (13 ms)
+[ RUN      ] WeightDispatchTest.FP8_GemmMatchesDirect
+[       OK ] WeightDispatchTest.FP8_GemmMatchesDirect (56 ms)
+[ RUN      ] WeightDispatchTest.FP8_GemvMatchesDirect
+[       OK ] WeightDispatchTest.FP8_GemvMatchesDirect (2 ms)
+[ RUN      ] WeightDispatchTest.NVFP4_GemmMatchesDirect
+[00:05:28][WARN] nvfp4_gemm.cu:1459: gemm_nvfp4: using slow dequant-to-FP16 fallback for M=8 (CUTLASS/cuBLASLt NVFP4 unavailable). Allocating 0.0 MiB dequant buffer for [16, 64] weight matrix
+[       OK ] WeightDispatchTest.NVFP4_GemmMatchesDirect (2 ms)
+[ RUN      ] WeightDispatchTest.NVFP4_GemvMatchesDirect
+[       OK ] WeightDispatchTest.NVFP4_GemvMatchesDirect (2 ms)
+[ RUN      ] WeightDispatchTest.CUTLASS_NVFP4_GemmMatchesDirect
+[       OK ] WeightDispatchTest.CUTLASS_NVFP4_GemmMatchesDirect (2 ms)
+[ RUN      ] WeightDispatchTest.CUTLASS_NVFP4_GemvIsStub
+[00:05:28][ERROR] weight_dispatch.cu:335: gemv_dispatch CUTLASS_NVFP4: not directly callable for decode (no FP8 micro_scales in payload); consumer should use NVFP4 tier
+[       OK ] WeightDispatchTest.CUTLASS_NVFP4_GemvIsStub (1 ms)
+[ RUN      ] WeightDispatchTest.MXFP4_GemmMatchesDirect
+[       OK ] WeightDispatchTest.MXFP4_GemmMatchesDirect (3 ms)
+[ RUN      ] WeightDispatchTest.MXFP4_GemvMatchesDirect
+[GEMV_DBG] N=16 K=64 W.N=16 W.K=64 data=0x1722a00a00 scales=0x1722a01000 x=0x1722a00800 y=0x1722a01200
+[GEMV_DBG] N=16 K=64 W.N=16 W.K=64 data=0x1722a00a00 scales=0x1722a01000 x=0x1722a00800 y=0x1722a01c00
+[       OK ] WeightDispatchTest.MXFP4_GemvMatchesDirect (2 ms)
+[----------] 10 tests from WeightDispatchTest (339 ms total)
+
+[----------] Global test environment tear-down
+[==========] 10 tests from 1 test suite ran. (339 ms total)
+[  PASSED  ] 10 tests.

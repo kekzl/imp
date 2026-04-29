@@ -1,0 +1,46 @@
+{
+  "build": "imp:bringup",
+  "build_type": "RelWithDebInfo (with perf-flag fix in cmake/CompilerFlags.cmake)",
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "cuda": "13.2.78",
+  "timestamp": "2026-04-29T08:30:00+02:00",
+  "comment": "Strategic precisions (NVFP4 + FP8 KV) on Mistral-Small-3.2-NVFP4 (24B). Q8_0 GGUF as legacy reference.",
+  "benchmarks": {
+    "mistral_small_32_nvfp4": {
+      "model": "Mistral-Small-3.2-24B-Instruct-2506-NVFP4",
+      "path": "NVFP4 weights + FP8 prefill auto + FP16 KV + NVFP4 decode mode 2",
+      "pp512_tok_per_s": 1218.19,
+      "tg256_tok_per_s": 93.96,
+      "reps": 10,
+      "log": "72_bench_nvfp4_postfix.log"
+    },
+    "mistral_small_32_fp8_kv": {
+      "model": "Mistral-Small-3.2-24B-Instruct-2506-NVFP4",
+      "path": "NVFP4 weights + FP8 prefill + FP8 E4M3 KV + FP8 FMHA",
+      "pp512_tok_per_s": 1220.32,
+      "tg256_tok_per_s": 93.91,
+      "reps": 10,
+      "log": "72_bench_fp8_postfix.log"
+    },
+    "qwen3_8b_q8_0_legacy": {
+      "model": "Qwen3-8B-Q8_0.gguf",
+      "path": "Q8 weights + FP8 prefill auto + NVFP4 decode auto + FP16 KV",
+      "pp512_tok_per_s": 13277.98,
+      "tg128_tok_per_s": 146.49,
+      "reps": 5,
+      "log": "71_bench_q8_postfix.log",
+      "baseline_pp512": 15648.35,
+      "baseline_tg128": 258.04,
+      "baseline_date": "2026-03-27",
+      "delta_pp512_pct": -15.1,
+      "delta_tg128_pct": -43.2,
+      "note": "pp delta is within memory-documented cuBLAS autotuning variance (up to 2.6x). tg delta is real-and-unexplained-this-bringup; legacy GGUF path, not a strategic priority. Could be a regression from one of ~50 commits since 2026-03-27, or a baseline-conditions drift. Phase-7 spec only requires regression tracking on NVFP4 + FP8."
+    }
+  },
+  "thresholds": {
+    "decode_regression_pct": 5,
+    "prefill_regression_pct": 5
+  },
+  "regressions_in_strategic_paths": "none — NVFP4 and FP8 KV are new baselines (no prior measurement)",
+  "summary_md": "73_perf_summary.md"
+}
