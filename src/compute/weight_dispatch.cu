@@ -92,9 +92,10 @@ void gemm_dispatch(cublasLtHandle_t, const WeightHandle& w,
             tmp.tensor_scale = (w.payload.nvfp4.tensor_scale != nullptr)
                               ? *w.payload.nvfp4.tensor_scale : 1.0f;
             tmp.N = w.shape[0];
-            // shape[1] holds the PACKED column count (K/2 for FP4).  Logical K
-            // is 2x that — the kernel needs the logical dimension.
-            tmp.K = w.shape[1] * 2;
+            // shape[1] holds LOGICAL K — matches MXFP4 dispatch (line ~348)
+            // and WeightRegistry::reserve(kind, t.shape[0], t.shape[1]) in
+            // executor_pre_dequant.cu where t.shape[1] is logical K.
+            tmp.K = w.shape[1];
 
             int M = static_cast<int>(x.shape[0]);
             if (M == 1) {
@@ -304,8 +305,8 @@ void gemv_dispatch(const WeightHandle& w, const Tensor& x, Tensor& y,
             tmp.tensor_scale = (w.payload.nvfp4.tensor_scale != nullptr)
                               ? *w.payload.nvfp4.tensor_scale : 1.0f;
             tmp.N = w.shape[0];
-            // shape[1] holds packed K/2 for FP4; kernel needs logical K.
-            tmp.K = w.shape[1] * 2;
+            // Logical K — matches MXFP4 dispatch + WeightRegistry::reserve.
+            tmp.K = w.shape[1];
             gemv_nvfp4_kpar(tmp,
                             reinterpret_cast<const half*>(x.data),
                             reinterpret_cast<half*>(y.data),
