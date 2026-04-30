@@ -1,12 +1,17 @@
 # Build
 build/
 build-*/
+build-docker/
 *.o
 *.so
 *.a
 *.d
 a.out
 compile_commands.json
+
+# Logs (debug runs, repro logs, smoke tests)
+*.log
+bringup_artifacts/
 
 # Model files
 models/
