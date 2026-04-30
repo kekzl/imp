@@ -231,7 +231,13 @@ static bool upload_weight(Tensor& weight, QType qtype,
                           QType compute_dtype,
                           cudaStream_t stream,
                           std::vector<void*>& gpu_allocs,
-                          bool raw_quant = true) {
+                          bool raw_quant = true,
+                          float weight_offset = 0.0f) {
+    // weight_offset: added to each FP32 element BEFORE FP16 conversion. Only
+    // applied on BF16-source paths (qtype==BF16 or qtype==F32/NONE with
+    // weight.qtype==BF16). F32-source paths leave it unused — GGUF norms
+    // already carry the offset baked in by the converter; SafeTensors stores
+    // the delta `W` (where actual gamma = 1 + W) for Qwen3.5/3.6 block norms.
     if (weight.data == nullptr || weight.on_device) return true;
     if (weight.ndim < 1) return true;
 
@@ -561,6 +567,7 @@ static bool upload_weight(Tensor& weight, QType qtype,
             uint32_t bits = static_cast<uint32_t>(src[i]) << 16;
             float f;
             std::memcpy(&f, &bits, sizeof(float));
+            f += weight_offset;
             h_fp16[i] = float_to_fp16(f);
         }
         size_t bytes = static_cast<size_t>(n_elem) * sizeof(uint16_t);
@@ -585,6 +592,7 @@ static bool upload_weight(Tensor& weight, QType qtype,
                 uint32_t bits = static_cast<uint32_t>(src[i]) << 16;
                 float f;
                 std::memcpy(&f, &bits, sizeof(float));
+                f += weight_offset;
                 h_fp16[i] = float_to_fp16(f);
             }
             size_t bytes = static_cast<size_t>(n_elem) * sizeof(uint16_t);
@@ -697,6 +705,11 @@ struct UploadCtx {
     std::vector<void*>& gpu_allocs;
     std::vector<void*>& host_pinned;
     std::vector<void*>& host_pinned_allocs;
+    // Architecture-specific norm-weight offset. Qwen3.5/3.6 SafeTensors stores
+    // block-norm gammas as deltas (gamma = 1 + W) while GGUF bakes the +1 in
+    // at conversion time. Applied only on BF16-source paths in upload_weight().
+    // Set to 1.0f for QWEN35[_MOE]/QWEN36_MOE, 0.0f otherwise.
+    float arch_norm_offset = 0.0f;
 };
 
 // ---------------------------------------------------------------------------
@@ -918,12 +931,34 @@ static bool upload_layer_attention_weights(TransformerLayer& L, int i,
         }
     }
 
-    // Attention norm (typically F32/F16, no quant)
-    UPLOAD_UNQUANT_OR_FAIL(L.attn_norm, "attn_norm", i, ctx);
+    // Attention norm (typically F32/F16, no quant). For Qwen3.5/3.6
+    // SafeTensors, the BF16 weight stores `W` (delta from 1.0) and the actual
+    // gamma is `1 + W`; ctx.arch_norm_offset bakes that +1 in during BF16→FP16
+    // conversion. GGUF F32 norms already carry the offset and are unaffected.
+    if (L.attn_norm.data && !L.attn_norm.on_device) {
+        if (!upload_weight(L.attn_norm, QType::NONE, ctx.compute_dtype,
+                           ctx.stream, ctx.gpu_allocs, true, ctx.arch_norm_offset)) {
+            IMP_LOG_ERROR("Failed to upload attn_norm for layer %d", i);
+            return false;
+        }
+    }
 
-    // QK-norm weights (Qwen3-style per-head RMSNorm, F32 [head_dim])
-    UPLOAD_UNQUANT_OR_FAIL(L.attn_q_norm, "attn_q_norm", i, ctx);
-    UPLOAD_UNQUANT_OR_FAIL(L.attn_k_norm, "attn_k_norm", i, ctx);
+    // QK-norm weights (Qwen3-style per-head RMSNorm, F32 [head_dim]).
+    // Qwen3.5/3.6 also use the `1 + W` convention here.
+    if (L.attn_q_norm.data && !L.attn_q_norm.on_device) {
+        if (!upload_weight(L.attn_q_norm, QType::NONE, ctx.compute_dtype,
+                           ctx.stream, ctx.gpu_allocs, true, ctx.arch_norm_offset)) {
+            IMP_LOG_ERROR("Failed to upload attn_q_norm for layer %d", i);
+            return false;
+        }
+    }
+    if (L.attn_k_norm.data && !L.attn_k_norm.on_device) {
+        if (!upload_weight(L.attn_k_norm, QType::NONE, ctx.compute_dtype,
+                           ctx.stream, ctx.gpu_allocs, true, ctx.arch_norm_offset)) {
+            IMP_LOG_ERROR("Failed to upload attn_k_norm for layer %d", i);
+            return false;
+        }
+    }
 
     // Attention biases (Qwen2-style Q/K/V biases, F32)
     for (auto* bias : {&L.q_bias, &L.k_bias, &L.v_bias}) {
@@ -1003,8 +1038,16 @@ static bool upload_layer_ffn_weights(TransformerLayer& L, int i,
         }
     }
 
-    // FFN norm (typically F32/F16, no quant)
-    UPLOAD_UNQUANT_OR_FAIL(L.ffn_norm, "ffn_norm", i, ctx);
+    // FFN norm (typically F32/F16, no quant). Qwen3.5/3.6 SafeTensors stores
+    // it as delta `W` (actual gamma = 1 + W); ctx.arch_norm_offset adds the +1
+    // during BF16→FP16 conversion. GGUF F32 norms unaffected.
+    if (L.ffn_norm.data && !L.ffn_norm.on_device) {
+        if (!upload_weight(L.ffn_norm, QType::NONE, ctx.compute_dtype,
+                           ctx.stream, ctx.gpu_allocs, true, ctx.arch_norm_offset)) {
+            IMP_LOG_ERROR("Failed to upload ffn_norm for layer %d", i);
+            return false;
+        }
+    }
 
     // MoE gate (routing weights, typically F32/F16)
     UPLOAD_UNQUANT_OR_FAIL(L.moe_gate, "moe_gate", i, ctx);
@@ -1064,8 +1107,18 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i,
     // as F32 (sign/exponent/mantissa all wrong) and produced NaN within the
     // first GDN layer. Convert on host before upload so the scan always sees
     // real FP32 values.
+    // ssm_a needs an extra HF-vs-GGUF transform: imp's GDN scan kernel computes
+    //   g = exp(A_log * softplus(alpha + dt_bias))
+    // which matches GGUF semantics — the Unsloth/llama.cpp converter pre-applies
+    // `-exp()` to the original HF A_log so kernel reads the post-transform value.
+    // HF SafeTensors carries the RAW HF `A_log` (mean ~3.3 positive). Without
+    // applying `-exp()` at load time, the kernel produces exp(positive*positive)
+    // and the recurrent state grows exponentially → garbage decode.
+    // Verified: GGUF[i] == -exp(NVFP4_A_log_HF[head_perm(i)]) elementwise on L0.
     for (Tensor* t : {&L.ssm_a, &L.ssm_d, &L.ssm_dt_b}) {
         if (!t->data || t->on_device) continue;
+        const bool is_ssm_a_hf = (t == &L.ssm_a) &&
+                                 (t->qtype == QType::BF16 || t->qtype == QType::F16);
         const int64_t n_elem = t->numel();
         const size_t fp32_bytes = static_cast<size_t>(n_elem) * sizeof(float);
         void* d_data = nullptr;
@@ -1075,32 +1128,44 @@ static bool upload_layer_ssm_weights(TransformerLayer& L, int i,
             return false;
         }
 
+        std::vector<float> h_fp32(static_cast<size_t>(n_elem));
         if (t->qtype == QType::F32 || t->qtype == QType::NONE) {
-            // GGUF path — already FP32.
+            // GGUF path — already FP32, ssm_a already pre-transformed by converter.
             h2d_copy(d_data, t->data, fp32_bytes, ctx.stream);
+            ctx.gpu_allocs.push_back(d_data);
+            t->data = d_data;
+            t->qtype = QType::F32;
+            t->on_device = true;
+            continue;
         } else if (t->qtype == QType::BF16) {
-            // SafeTensors path — convert BF16 → F32 on host.
-            std::vector<float> h_fp32(static_cast<size_t>(n_elem));
             const uint16_t* src = static_cast<const uint16_t*>(t->data);
             for (int64_t k = 0; k < n_elem; ++k) {
                 uint32_t bits = static_cast<uint32_t>(src[k]) << 16;
                 std::memcpy(&h_fp32[k], &bits, sizeof(float));
             }
-            h2d_copy(d_data, h_fp32.data(), fp32_bytes, ctx.stream);
         } else if (t->qtype == QType::F16) {
-            // Defensive: F16 weight → F32 (no model emits this for SSM scalars
-            // currently, but keep symmetric with BF16).
-            std::vector<float> h_fp32(static_cast<size_t>(n_elem));
             const uint16_t* src = static_cast<const uint16_t*>(t->data);
             for (int64_t k = 0; k < n_elem; ++k) {
                 h_fp32[k] = fp16_to_float(src[k]);
             }
-            h2d_copy(d_data, h_fp32.data(), fp32_bytes, ctx.stream);
         } else {
             IMP_LOG_ERROR("SSM scalar tensor has unexpected qtype %u (layer %d)",
                           static_cast<unsigned>(t->qtype), i);
             return false;
         }
+
+        // Apply HF-to-GGUF A_log transform: A_log_GGUF = -exp(A_log_HF).
+        // Only for ssm_a, only when source is BF16/F16 (= HF SafeTensors path).
+        if (is_ssm_a_hf) {
+            for (int64_t k = 0; k < n_elem; ++k) {
+                h_fp32[k] = -std::exp(h_fp32[k]);
+            }
+            if (i == 0) {
+                IMP_LOG_INFO("HF GDN A_log: applied -exp() transform to ssm_a (layer 0 first 4 values: %.4f %.4f %.4f %.4f)",
+                             h_fp32[0], h_fp32[1], h_fp32[2], h_fp32[3]);
+            }
+        }
+        h2d_copy(d_data, h_fp32.data(), fp32_bytes, ctx.stream);
 
         ctx.gpu_allocs.push_back(d_data);
         t->data = d_data;
@@ -1622,8 +1687,17 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream,
                       total_mem / (1024.0 * 1024.0 * 1024.0));
     }
 
+    // Qwen3.5/3.6 SafeTensors stores block-norm gammas as deltas (gamma = 1+W).
+    // GGUF stores the post-+1 values directly. We bake the +1 in during the
+    // BF16→FP16 upload conversion; F32-source norms (GGUF) are unaffected.
+    const float arch_norm_offset =
+        (config_.arch == ModelArch::QWEN35 ||
+         config_.arch == ModelArch::QWEN35_MOE ||
+         config_.arch == ModelArch::QWEN36_MOE)
+        ? 1.0f : 0.0f;
     UploadCtx ctx{compute_dtype, stream, gpu_allocations_,
-                  host_pinned_, host_pinned_allocs_};
+                  host_pinned_, host_pinned_allocs_,
+                  arch_norm_offset};
 
     // --- Embeddings, output norm, output projection ---
     if (!upload_embeddings_and_output(tok_emb_, out_norm_, out_proj_, ctx)) {

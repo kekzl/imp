@@ -37,6 +37,13 @@ struct ModelConfig {
     int ssm_group_count = 0;    // 8
     int ssm_inner_size = 0;     // 4096
     int ssm_dt_rank = 0;        // 64
+    // Asymmetric-head GDN (n_v_heads > n_k_heads) head storage layout.
+    // false (default): heads in tiled order (h % n_groups gives group_id).
+    //                  GGUF Qwen3.5/3.6 converters use this layout.
+    // true:            heads in grouped order (h / n_v_per_k gives group_id).
+    //                  HF SafeTensors Qwen3.5/3.6 use this. Set by the
+    //                  SafeTensors loader; GGUF loader leaves it false.
+    bool gdn_grouped_head_layout = false;
     int rope_dim = 0;           // 0 = full head_dim, 84 = partial
     bool rope_neox = true;      // true = NeoX/split (i, i+d/2), false = interleaved (2i, 2i+1)
 
