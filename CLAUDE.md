@@ -30,7 +30,7 @@ imp/
 │   ├── imp-server/       # OpenAI-compatible HTTP server (SSE streaming)
 │   └── imp-bench/        # Benchmark tool: GEMM, attention, end-to-end
 ├── third_party/stb/      # stb_image headers (image loading for vision)
-├── tests/                # Google Test suite (58 test files, 606 tests)
+├── tests/                # Google Test suite (63 test files, ~700 tests)
 ├── scripts/              # verify.sh, gen_perf_baseline.sh, pre-push.hook, imp-pull.py
 ├── docs/                 # SM120 status, MXFP4, Qwen3.6 roadmap, gemv plan, layer-diff dumps
 ├── cmake/                # Custom CMake modules (CompilerFlags, FindCUDAToolkit131)
@@ -145,8 +145,9 @@ make install-hooks       # install pre-push hook → runs verify-fast on src/inc
 
 # Host build (no Docker)
 cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
-./build/imp-tests                                  # 606 tests across 58 files
+./build/imp-tests                                  # ~700 tests across 63 files
 ./build/imp-tests --gtest_filter="TensorTest.*"    # specific suite
+./build/imp-tests --gtest_filter="LlmCompressorE2E.*"   # NVFP4 SafeTensors prequant (Mistral, Gemma-4, Qwen-Coder-30B, Qwen3.6)
 ```
 
 Test files live in `tests/` (Google Test). Most CUDA tests require sm_120; CPU-only tests are filtered by `make test-unit`.
@@ -242,7 +243,7 @@ Live baselines: `tests/perf_baseline.json` (consumed by the verify gate). Refres
 Runtime dispatch (SM120 only, no architecture checks):
 - **Prefill**: MXFP4 FMHA (`attention_fmha_mxfp4_sm120.cu`, if enabled) → FP8 FMHA (`attention_fmha_sm120.cu`) → FP16 FMHA → Blackwell WMMA 128x64 (`attention_blackwell.cu`)
 - **Decode**: Paged attention with split-K (`attention_paged.cu`, `attention_paged_fp8.cu`)
-- Environment overrides: `IMP_MXFP4_ATTENTION=1` (enable MXFP4), `IMP_NO_FP8_FMHA=1` (force FP16), `IMP_NO_FMHA_SM120=1` (force WMMA fallback)
+- Overrides via `imp.conf`: `attention.mxfp4 = "always"` (force MXFP4 prefill), `attention.fp8_fmha = "never"` (force FP16), `attention.fmha_sm120 = "never"` (force WMMA fallback). Per-run via `--set` CLI flag. Legacy `IMP_MXFP4_ATTENTION` / `IMP_NO_FP8_FMHA` / `IMP_NO_FMHA_SM120` env vars still work as dev escape hatches in `attention_dispatch.cu` but are no longer the supported interface.
 
 ### Quantization Support
 - **FP8 E4M3**: Per-tensor scale, FP8 GEMM via cuBLAS
@@ -250,6 +251,8 @@ Runtime dispatch (SM120 only, no architecture checks):
 - **INT4 (Q4_0, Q4_K_M)**: GGML-compatible block formats
 - **NVFP4 (FP4_E2M1)**: Blackwell-native, two-level micro-scale + tensor-scale
 - **NVFP4 Prequant (Model Optimizer)**: SafeTensors models with calibrated NVFP4 weights (AWQ/SmoothQuant). Loaded directly — no re-quantization. BF16 non-quantized weights (norms, router, embeddings) auto-converted to FP16.
+  - **Shape convention**: SafeTensors NVFP4 `weight` arrives as `U8` (loader → INT8 → Phase-0 promote → NVFP4) with `shape[1] = K_logical/2` (two FP4 nibbles per byte). Phase-0 promote in `executor_pre_dequant.cu` only changes qtype + populates `.scales` / `.tensor_scale` sidecars — it does **not** change shape. Existing dispatch in `executor_attention.cu` / `executor_ffn.cu` recovers logical K via `tmp.K = hw->shape[1] * 2`.
+  - **MoE path**: For SafeTensors prequant the loader writes per-expert tensors only (`expert_w_*[e]`); `expert_*_packed.data` is null. `cache_moe_native_nvfp4` (`executor_pre_dequant.cu`) builds one contiguous `[ne, N, K_packed]` packed buffer per layer per projection by D2D-memcpy from the per-expert tensors, populates `wcache_.nvfp4_moe`, and frees the per-expert allocations inline (the legacy fallback can't reach a layer where `nvfp4_moe_*_ptr` is non-null, and keeping both copies wouldn't fit in 32 GiB on Qwen3.6-35B-A3B). Without this path the legacy FP16 dequant + cuBLAS sm_80 WMMA fallback fires per layer per token, killing CUDA Graphs.
 
 ### Gated DeltaNet (GDN) — Qwen3.5
 Hybrid architecture: 24 GDN layers (recurrent) + 8 attention layers + 32 dense FFN layers.
