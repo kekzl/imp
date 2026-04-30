@@ -268,7 +268,7 @@ Hybrid architecture: 24 GDN layers (recurrent) + 8 attention layers + 32 dense F
 ### CUDA 13.2 Features
 - **Green Contexts**: SM partitioning for concurrent prefill/decode (`green_ctx.cu`)
 - **PDL (Programmatic Dependent Launch)**: Overlaps kernel tails with next kernel heads (`pdl.cu`)
-- **CUDA Graphs**: Captured decode iterations for reduced launch overhead (`cuda_graph.cu`). Disabled for MoE models (routing requires D2H memcpy incompatible with graph capture).
+- **CUDA Graphs**: Captured decode iterations for reduced launch overhead (`cuda_graph.cu`). NVFP4-prequant MoE models (Qwen3.6, Gemma-4 llm-compressor NVFP4) capture cleanly — `cache_moe_native_nvfp4` builds the contiguous per-layer expert buffer and the decode fast-path runs entirely device-side (no D2H expert-offsets sync). GGUF MoE decode still falls through the legacy expert-routing path with a D2H sync per layer per token and is graph-incompatible. Prefill is never captured (variable n).
 
 ### Supported Model Architectures
 - LLaMA (dense transformer)

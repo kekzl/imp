@@ -536,8 +536,27 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             config_.use_fp8_prefill = 0;
         }
         if (config_.use_nvfp4_decode) {
-            IMP_LOG_INFO("Gemma 4: disabling NVFP4 decode cache (per-layer head_dim not yet supported)");
-            config_.use_nvfp4_decode = 0;
+            // Prequant SafeTensors NVFP4 weights are already in NVFP4 layout on
+            // disk. Phase 3a (Q*_K → NVFP4 conversion) and Phase 3b
+            // (NVFP4 → CUTLASS sm_120) iterate `wcache_.nvfp4` which stays
+            // empty for prequant, so they are no-ops. Phase 3-MoE (the
+            // cache_moe_native_nvfp4 lambda in executor_pre_dequant.cu) IS
+            // load-bearing — it builds the contiguous per-layer expert buffer
+            // that lights up the M=1 decode fast path (gemv_nvfp4_*) and lets
+            // CUDA Graphs capture decode without D2H expert_offsets sync.
+            // Disabling it for Gemma-4 prequant forces the legacy FP16
+            // fallback (sm_80 WMMA + per-layer D2H sync), which both
+            // tanks decode tok/s and breaks graph capture. The "per-layer
+            // head_dim" caveat applies to attention CUTLASS paths, not MoE
+            // experts, so leaving the cache enabled is safe for prequant.
+            if (model_->config().is_nvfp4_prequant) {
+                IMP_LOG_INFO("Gemma 4 + NVFP4 prequant: keeping use_nvfp4_decode=%d "
+                             "(Phase 3-MoE cache build needed for fast-path decode)",
+                             config_.use_nvfp4_decode);
+            } else {
+                IMP_LOG_INFO("Gemma 4: disabling NVFP4 decode cache (per-layer head_dim not yet supported)");
+                config_.use_nvfp4_decode = 0;
+            }
         }
         if (config_.dual_path_quant) {
             IMP_LOG_INFO("Gemma 4: disabling dual_path_quant");
