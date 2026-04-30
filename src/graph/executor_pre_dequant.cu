@@ -1431,11 +1431,190 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             nvfp4_moe_count++;
         };
 
+        // NVFP4-prequant SafeTensors path: experts arrive as per-expert tensors
+        // (expert_w_gate[e] / expert_w_up[e] / expert_w_down[e]) with NVFP4
+        // qtype + .scales / .tensor_scale sidecars promoted in Phase 0. The 3D
+        // expert_*_packed tensors are NULL (the loader only stamps them for
+        // GGUF and Gemma-4). Without this branch, cache_moe_expert_nvfp4 would
+        // early-return at `!packed.data` and the legacy FP16 dequant + cuBLAS
+        // sm_80 WMMA fallback fires per layer per token, killing CUDA Graphs.
+        //
+        // We allocate one contiguous packed_data + micro_scales + tensor_scales
+        // buffer per layer per projection, copy the per-expert pointers in,
+        // and stamp `packed.data` so wcache lookups (line below the layer loop)
+        // and the consumer dispatch in executor_forward_moe.cu (lookup via
+        // expert_*_packed.data) wire up automatically. After a successful copy
+        // for a layer the per-expert allocations are freed inline — at 35B-A3B
+        // the duplicate (per-expert + contiguous) would peak at ~30 GiB which
+        // doesn't fit in 32 GiB, and the legacy fallback can't fire for layers
+        // where nvfp4_moe_*_ptr is non-null anyway.
+        auto cache_moe_native_nvfp4 = [&](Tensor& packed,
+                                          std::vector<Tensor>& experts) -> bool {
+            if (experts.empty() || !experts[0].data) return false;
+            if (experts[0].qtype != QType::NVFP4 || experts[0].scales == nullptr) return false;
+            if (packed.data && wcache_.nvfp4_moe.count(packed.data)) return false;
+            if (moe_budget_exhausted) return false;
+
+            int ne = static_cast<int>(experts.size());
+            // SafeTensors NVFP4 prequant: per-expert weight tensor on-disk
+            // dtype is U8 (loader → INT8 → Phase-0 promote → NVFP4) and shape
+            // is [N, K_packed] where K_packed = K_logical/2 (two FP4 nibbles
+            // per byte). The same packed-shape convention is what the
+            // existing executor_attention.cu / executor_ffn.cu NVFP4 dispatch
+            // expects when computing `tmp.K = hw->shape[1] * 2`. Match that.
+            int64_t N        = experts[0].shape[0];
+            int64_t K_packed = experts[0].shape[1];
+            int64_t K        = K_packed * 2;          // logical inner dim
+            if (K % 16 != 0) return false;
+
+            size_t expert_packed_bytes = static_cast<size_t>(N) * K_packed;
+            size_t expert_ms_bytes     = static_cast<size_t>(N) * (K / 16);
+            size_t total_packed = static_cast<size_t>(ne) * expert_packed_bytes;
+            size_t total_ms     = static_cast<size_t>(ne) * expert_ms_bytes;
+            size_t total_ts     = static_cast<size_t>(ne) * sizeof(float);
+            size_t add_bytes    = total_packed + total_ms + total_ts;
+
+            // Refresh free memory before each allocation. Per-layer free of
+            // expert_w_*[e] returns ~one-layer-worth back to the device pool
+            // after each successful build, but `moe_budget` was computed once
+            // at function entry. Re-read free memory to pick up the freed
+            // bytes; otherwise the contiguous cache stops at ~110/120 tensors
+            // (33 layers + partial 33) for Qwen3.6-35B-A3B.
+            {
+                size_t free_mem = 0, total_mem = 0;
+                IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total_mem));
+                constexpr size_t kMoeReserve = 128ULL * 1024 * 1024;
+                size_t avail = (free_mem > kMoeReserve) ? (free_mem - kMoeReserve) : 0;
+                if (add_bytes > avail) {
+                    moe_budget_exhausted = true;
+                    IMP_LOG_INFO("NVFP4 MoE native cache: VRAM budget reached after %d "
+                                 "tensors (%.1f MiB cached, %.1f MiB free, need %.1f MiB)",
+                                 nvfp4_moe_count,
+                                 nvfp4_moe_total / (1024.0 * 1024.0),
+                                 free_mem / (1024.0 * 1024.0),
+                                 add_bytes / (1024.0 * 1024.0));
+                    return false;
+                }
+            }
+
+            void* d_packed = vram_alloc(vram_alloc_, total_packed,
+                                         "nvfp4_moe_packed_native");
+            void* d_ms     = vram_alloc(vram_alloc_, total_ms,
+                                         "nvfp4_moe_ms_native");
+            void* d_ts_raw = vram_alloc(vram_alloc_, total_ts,
+                                         "nvfp4_moe_ts_native");
+            if (!d_packed || !d_ms || !d_ts_raw) {
+                if (d_packed) vram_free(vram_alloc_, d_packed);
+                if (d_ms)     vram_free(vram_alloc_, d_ms);
+                if (d_ts_raw) vram_free(vram_alloc_, d_ts_raw);
+                moe_budget_exhausted = true;
+                return false;
+            }
+            float* d_ts = static_cast<float*>(d_ts_raw);
+
+            std::vector<float> h_ts(ne);
+            for (int e = 0; e < ne; ++e) {
+                const auto& w = experts[e];
+                if (w.shape[0] != N || w.shape[1] != K_packed ||
+                    !w.data || !w.scales) {
+                    IMP_LOG_WARN("NVFP4 MoE native: expert %d shape/data mismatch, "
+                                 "rolling back layer", e);
+                    vram_free(vram_alloc_, d_packed);
+                    vram_free(vram_alloc_, d_ms);
+                    vram_free(vram_alloc_, d_ts_raw);
+                    return false;
+                }
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
+                    static_cast<char*>(d_packed) + static_cast<size_t>(e) * expert_packed_bytes,
+                    w.data, expert_packed_bytes,
+                    cudaMemcpyDeviceToDevice, stream));
+                IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(
+                    static_cast<char*>(d_ms) + static_cast<size_t>(e) * expert_ms_bytes,
+                    w.scales, expert_ms_bytes,
+                    cudaMemcpyDeviceToDevice, stream));
+                h_ts[e] = w.tensor_scale;
+            }
+            IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_ts, h_ts.data(), total_ts,
+                                                cudaMemcpyHostToDevice, stream));
+
+            NvFP4MoEQuantResult r;
+            r.packed_data = d_packed;
+            r.micro_scales = d_ms;
+            r.tensor_scales = d_ts;
+            r.n_experts = ne;
+            r.N = N;
+            r.K = K;
+            r.expert_stride_packed = expert_packed_bytes;
+            r.expert_stride_ms = expert_ms_bytes;
+
+            // Stamp the packed Tensor so wcache_.nvfp4_moe key + consumer
+            // wiring (expert_*_packed.data lookup) work uniformly with the
+            // GGUF path. Logical K (NOT K/2) per cache_moe_expert_nvfp4
+            // convention at shape[2].
+            int64_t shape[3] = {static_cast<int64_t>(ne), N, K};
+            packed = Tensor(d_packed, QType::NVFP4, 3, shape, /*on_device=*/true);
+
+            wcache_.nvfp4_moe[d_packed] = r;
+            nvfp4_moe_total += add_bytes;
+            nvfp4_moe_count++;
+
+            // Free per-expert GPU allocations now — the legacy fallback path
+            // (executor_forward_moe.cu:expert_gemm + chunked_dequant_gemm) can
+            // no longer fire for this layer because nvfp4_moe_*_ptr is non-null
+            // after the cache populates and stamps `packed`. Without freeing,
+            // we hold the same NVFP4 weights twice (per-expert + contiguous);
+            // the duplicate exhausts VRAM around layer 33 of Qwen3.6-35B-A3B
+            // and breaks layers 33-39's fast path. Per-layer free keeps total
+            // overhead bounded — only the just-copied 384 expert pointers are
+            // released, and only after the contiguous copy succeeded.
+            //
+            // Sync the stream so the in-flight D2D copies (which read from
+            // experts[e].data / .scales) finish before we cudaFree the source.
+            IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+            auto* mut_model = const_cast<Model*>(model_);
+            for (int e = 0; e < ne; ++e) {
+                auto& w = experts[e];
+                if (w.data) {
+                    mut_model->release_gpu_allocation(w.data);
+                    IMP_CUDA_CHECK_LOG(cudaFree(w.data));
+                    w.data = nullptr;
+                    w.on_device = false;
+                }
+                if (w.scales) {
+                    mut_model->release_gpu_allocation(w.scales);
+                    IMP_CUDA_CHECK_LOG(cudaFree(w.scales));
+                    w.scales = nullptr;
+                }
+            }
+            return true;
+        };
+
         for (int i = 0; i < cfg.n_layers; i++) {
-            const auto& L = model_->layer(i);
-            cache_moe_expert_nvfp4(L.expert_gate_packed, L.expert_gate_packed.qtype);
-            cache_moe_expert_nvfp4(L.expert_up_packed,   L.expert_up_packed.qtype);
-            cache_moe_expert_nvfp4(L.expert_down_packed,  L.expert_down_packed.qtype);
+            // Need mutable access to expert_*_packed for cache_moe_native_nvfp4
+            // to stamp the contiguous buffer pointer. const_cast follows the
+            // existing pattern at e.g. lines 1517 / 1598 of weight_upload.cu.
+            auto& L = const_cast<Model*>(model_)->layer(i);
+
+            bool g = false, u = false, d = false;
+            if (cfg.is_nvfp4_prequant) {
+                g = cache_moe_native_nvfp4(L.expert_gate_packed, L.expert_w_gate);
+                u = cache_moe_native_nvfp4(L.expert_up_packed,   L.expert_w_up);
+                d = cache_moe_native_nvfp4(L.expert_down_packed, L.expert_w_down);
+                if ((g || u || d) && !(g && u && d)) {
+                    IMP_LOG_WARN("Layer %d: partial NVFP4 MoE native cache "
+                                 "(g=%d u=%d d=%d) — fast path may not engage",
+                                 i, (int)g, (int)u, (int)d);
+                }
+            }
+
+            // GGUF / re-quant path: only run when native didn't populate.
+            // For GGUF NVFP4-target models the source qtype is Q*_K/Q8_0 and
+            // packed.data is non-null; for prequant SafeTensors all three
+            // native calls succeeded above and these are no-ops because
+            // packed.data now points into wcache_.nvfp4_moe.
+            if (!g) cache_moe_expert_nvfp4(L.expert_gate_packed, L.expert_gate_packed.qtype);
+            if (!u) cache_moe_expert_nvfp4(L.expert_up_packed,   L.expert_up_packed.qtype);
+            if (!d) cache_moe_expert_nvfp4(L.expert_down_packed, L.expert_down_packed.qtype);
         }
 
         if (nvfp4_moe_count > 0) {
