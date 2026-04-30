@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/src/build-docker/_deps/httplib-subbuild/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

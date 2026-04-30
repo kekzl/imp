@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/src/build-docker/_deps/cutlass-subbuild/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

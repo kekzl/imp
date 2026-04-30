@@ -1,5 +1,0 @@
-if(EXISTS "/src/build-docker/imp-tests[1]_tests.cmake")
-  include("/src/build-docker/imp-tests[1]_tests.cmake")
-else()
-  add_test(imp-tests_NOT_BUILT imp-tests_NOT_BUILT)
-endif()
