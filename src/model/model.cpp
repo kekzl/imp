@@ -38,6 +38,12 @@ Model::~Model() {
     }
     host_pinned_allocs_.clear();
 
+    // Free heap-allocated permuted weight buffers (Qwen3.5/3.6 GDN reorder).
+    for (void* ptr : host_owned_buffers_) {
+        if (ptr) std::free(ptr);
+    }
+    host_owned_buffers_.clear();
+
     gpu_weights_ready_ = false;
 
 #ifdef __linux__

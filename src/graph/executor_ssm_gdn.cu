@@ -447,6 +447,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
             // ~3-4 bits of per-element precision (root cause of Qwen 3.6 L0 drift).
             float* y_fp32 = conv_f32 + static_cast<size_t>(n) * conv_channels;
             float* y_fp32_postnorm = y_fp32 + static_cast<size_t>(n) * n_heads * head_dim_ssm;
+            const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
             gdn_scan_fused_fp32out(conv_f32, conv_channels,
                                 static_cast<const half*>(alpha_proj_out.data),
                                 static_cast<const half*>(beta_proj_out.data),
@@ -454,14 +455,18 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                                 static_cast<const float*>(ly.ssm_dt_b.data),
                                 static_cast<float*>(h_st),
                                 y_fp32,
-                                n, n_heads, head_dim_ssm, ssize, n_groups, stream);
+                                n, n_heads, head_dim_ssm, ssize, n_groups, stream, gl);
             // FP32-in, FP32-out RMSNorm+Gate+SiLU: preserves precision for the
-            // ssm_out matmul. Ancillary copy to FP16 y_buf only for debug prints.
+            // ssm_out matmul. The FP32→FP16 copy below is REQUIRED, not optional
+            // — the !use_fp32_out path of ssm_out reads y_buf as FP16 input. The
+            // older code gated this on debug_forward_enabled() which left y_buf
+            // uninitialized in production runs (= ssm_out fed zeros) and only
+            // appeared coherent under IMP_DEBUG_FORWARD=1.
             gdn_rmsnorm_gated_silu_fp32inout(y_fp32_postnorm, y_fp32,
                                               static_cast<const half*>(gate_out.data),
                                               static_cast<const half*>(ly.ssm_norm_w.data),
                                               eps, n, n_heads, head_dim_ssm, stream);
-            if (debug_forward_enabled()) {
+            {
                 int64_t total = static_cast<int64_t>(n) * n_heads * head_dim_ssm;
                 int threads_ = 256;
                 int blocks_ = static_cast<int>((total + threads_ - 1) / threads_);
@@ -469,6 +474,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                     y_fp32_postnorm, static_cast<__half*>(y_buf.data), total);
             }
         } else if (use_ref) {
+            const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
             gdn_scan_reference_f32(conv_f32, conv_channels,
                                 static_cast<const half*>(alpha_proj_out.data),
                                 static_cast<const half*>(beta_proj_out.data),
@@ -476,8 +482,9 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                                 static_cast<const float*>(ly.ssm_dt_b.data),
                                 static_cast<float*>(h_st),
                                 static_cast<half*>(y_buf.data),
-                                n, n_heads, head_dim_ssm, ssize, n_groups, stream);
+                                n, n_heads, head_dim_ssm, ssize, n_groups, stream, gl);
         } else {
+            const int gl = cfg.gdn_grouped_head_layout ? 1 : 0;
             gdn_scan_fused_f32(conv_f32, conv_channels,
                                 static_cast<const half*>(alpha_proj_out.data),
                                 static_cast<const half*>(beta_proj_out.data),
@@ -485,7 +492,7 @@ void GraphExecutor::run_gdn(int layer, const InferenceState& state,
                                 static_cast<const float*>(ly.ssm_dt_b.data),
                                 static_cast<float*>(h_st),
                                 static_cast<half*>(y_buf.data),
-                                n, n_heads, head_dim_ssm, ssize, n_groups, stream);
+                                n, n_heads, head_dim_ssm, ssize, n_groups, stream, gl);
         }
     }
 

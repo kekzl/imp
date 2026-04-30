@@ -123,8 +123,31 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         jobj_get_float(eff, "layer_norm_eps", cfg.rms_norm_eps);
     }
 
-    // RoPE
+    // RoPE. Newer HF configs (Qwen3.5/3.6, Qwen3-Next) move `rope_theta` and
+    // `partial_rotary_factor` under a nested `rope_parameters` object. Read the
+    // top-level keys first (older convention) then fall back to the nested
+    // `rope_parameters.*` to override. Without this, Qwen3.6 silently runs with
+    // theta=10000 instead of 10000000 (1000× wrong base) and full-dim RoPE.
     jobj_get_float(eff, "rope_theta", cfg.rope_theta);
+    float partial_factor = 0.0f;
+    jobj_get_float(eff, "partial_rotary_factor", partial_factor);
+    {
+        const JValue* rope_params = jobj_find(eff, "rope_parameters");
+        if (rope_params && rope_params->type == JType::OBJECT) {
+            jobj_get_float(*rope_params, "rope_theta", cfg.rope_theta);
+            jobj_get_float(*rope_params, "partial_rotary_factor", partial_factor);
+        }
+    }
+    if (partial_factor > 0.0f && partial_factor < 1.0f) {
+        int hd_for_rope = (cfg.head_dim > 0)
+                          ? cfg.head_dim
+                          : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
+        if (hd_for_rope > 0) {
+            cfg.rope_dim = static_cast<int>(hd_for_rope * partial_factor);
+            IMP_LOG_INFO("Partial RoPE: partial_rotary_factor=%.3f head_dim=%d → rope_dim=%d",
+                         partial_factor, hd_for_rope, cfg.rope_dim);
+        }
+    }
 
     // RoPE scaling (object with type, factor, and optional YaRN/LongRoPE params)
     const JValue* rope_scaling = jobj_find(eff, "rope_scaling");
@@ -221,6 +244,13 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
     //   linear_conv_kernel_dim                         → ssm_conv_kernel
     if (cfg.arch == ModelArch::QWEN36_MOE || cfg.arch == ModelArch::QWEN35_MOE ||
         cfg.arch == ModelArch::QWEN35) {
+        // HF SafeTensors stores GDN heads in grouped order (heads 0..n_v_per_k-1
+        // belong to group 0, etc). The scan kernel's default `g = h % n_groups`
+        // formula assumes the GGUF tiled layout (heads 0..n_groups-1 are replica
+        // 0). Set the flag so executor_ssm_gdn passes grouped_layout=1 to the
+        // kernel for HF-loaded checkpoints.
+        cfg.gdn_grouped_head_layout = true;
+
         int lin_v_heads = 0, lin_v_hdim = 0;
         int lin_k_heads = 0, lin_k_hdim = 0;
         int lin_conv = 0;

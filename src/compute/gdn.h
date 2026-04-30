@@ -11,13 +11,17 @@ namespace imp {
 // conv_f32: [n_tokens, conv_channels] FP32 — full conv+SiLU output per token
 //           layout per token: [Q(BC_size), K(BC_size), V(inner)]
 // ---------------------------------------------------------------------------
+// grouped_layout: 0 = GGUF/tiled (kernel uses g = h % n_groups; default).
+//                 1 = HF SafeTensors/grouped (g = h / (n_heads / n_groups);
+//                     used by Qwen3.5/3.6 NVFP4 SafeTensors).
 void gdn_scan_fused_f32(const float* conv_f32, int conv_channels,
                          const half* alpha, const half* beta,
                          const float* A_log, const float* dt_bias,
                          float* h_state, half* y,
                          int n_tokens, int n_heads, int head_dim_ssm,
                          int state_size, int n_groups,
-                         cudaStream_t stream);
+                         cudaStream_t stream,
+                         int grouped_layout = 0);
 
 // Fused RMSNormGated + SiLU: y = rmsnorm(y) * silu(gate)
 // Processes all tokens × heads in one launch.
@@ -49,7 +53,8 @@ void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels,
                              float* h_state, float* y_fp32,
                              int n_tokens, int n_heads, int head_dim_ssm,
                              int state_size, int n_groups,
-                             cudaStream_t stream);
+                             cudaStream_t stream,
+                             int grouped_layout = 0);
 
 // ---------------------------------------------------------------------------
 // Reference multi-token GDN scan.
@@ -64,7 +69,8 @@ void gdn_scan_reference_f32(const float* conv_f32, int conv_channels,
                              float* h_state, half* y,
                              int n_tokens, int n_heads, int head_dim_ssm,
                              int state_size, int n_groups,
-                             cudaStream_t stream);
+                             cudaStream_t stream,
+                             int grouped_layout = 0);
 
 // ---------------------------------------------------------------------------
 // Legacy per-token interfaces (kept for fallback / testing)
@@ -75,7 +81,8 @@ void gdn_scan_decode_f32(const float* x, const float* B, const float* C,
                          float* h_state, half* y, const half* z,
                          int n_heads, int head_dim_ssm,
                          int state_size, int n_groups,
-                         cudaStream_t stream);
+                         cudaStream_t stream,
+                         int grouped_layout = 0);
 
 void gdn_scan_prefill_f32(const float* x, const float* B, const float* C,
                           const half* alpha, const half* beta,
@@ -83,7 +90,8 @@ void gdn_scan_prefill_f32(const float* x, const float* B, const float* C,
                           float* h_state, half* y, const half* z,
                           int n_tokens, int n_heads, int head_dim_ssm,
                           int state_size, int n_groups,
-                          cudaStream_t stream);
+                          cudaStream_t stream,
+                          int grouped_layout = 0);
 
 // V-head reorder: tiled → grouped (FP16 variant, for post-scan y_buf).
 void vhead_tiled_to_grouped(const half* src, half* dst,

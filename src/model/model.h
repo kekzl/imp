@@ -80,6 +80,9 @@ public:
     std::vector<void*> gpu_allocations_;
     std::vector<void*> host_pinned_;        // mmap regions pinned via cudaHostRegister
     std::vector<void*> host_pinned_allocs_; // cudaHostAlloc'd expert buffers (WSL2 DMA path)
+    // Heap-allocated buffers used to hold permuted weight copies (e.g. Qwen3.5/3.6
+    // GDN head reordering grouped→tiled). Freed with std::free() in destructor.
+    std::vector<void*> host_owned_buffers_;
 };
 
 } // namespace imp
