@@ -859,13 +859,45 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         tokens = snap_tok->encode(raw);
     }
 
+    // Detect chat-template-injected <think> prefix (Qwen3 / Qwen3.5 / Qwen3.6
+    // / DeepSeek-R1 add `<think>\n` via add_generation_prompt by default). When
+    // present, the model output starts mid-thinking with no opener — only a
+    // closing `</think>` mid-stream. Matches vLLM's qwen3 reasoning_parser
+    // auto-detection (see vllm/reasoning/qwen3_reasoning_parser.py docstring).
+    // Treating these models as thinking-enabled lets the SSE stream emit
+    // `reasoning_content` chunks until `</think>` is seen, then `content`.
+    //
+    // Detection is done over decoded text (not token-ID equality) because
+    // Qwen3.6 ships `<think>`/`</think>` as `added_tokens` with `special=False`,
+    // so the BPE tokenizer breaks them into 3 pieces (`<`, `think`, `>`)
+    // rather than the single special-token id. vLLM's parser sidesteps this
+    // by promoting them at AutoTokenizer load; imp's tokenizer doesn't, so
+    // we match on the rendered string instead.
+    auto prompt_tail_contains = [&](const char* needle, int max_tail_tokens) -> bool {
+        int n = static_cast<int>(tokens.size());
+        int start = std::max(0, n - max_tail_tokens);
+        std::string tail_text;
+        for (int i = start; i < n; ++i) {
+            tail_text += snap_tok->decode_token(tokens[i]);
+        }
+        return tail_text.find(needle) != std::string::npos;
+    };
+    if (snap_is_think_model && snap_think_start_id >= 0 && !enable_thinking) {
+        if (prompt_tail_contains("<think>", 8)) {
+            enable_thinking = true;
+        }
+    }
+
     // Append <think>\n to trigger reasoning mode (matches llama.cpp behavior).
     // Without this prefix, think-trained models produce degenerate output.
+    // Skip if the chat template already added it (Qwen3.x default path).
     if (enable_thinking && snap_think_start_id >= 0) {
-        tokens.push_back(snap_think_start_id);
-        // Append newline after <think> — the model expects "\n" before reasoning
-        auto nl_ids = snap_tok->encode("\n");
-        tokens.insert(tokens.end(), nl_ids.begin(), nl_ids.end());
+        if (!prompt_tail_contains("<think>", 8)) {
+            tokens.push_back(snap_think_start_id);
+            // Append newline after <think> — the model expects "\n" before reasoning
+            auto nl_ids = snap_tok->encode("\n");
+            tokens.insert(tokens.end(), nl_ids.begin(), nl_ids.end());
+        }
     }
 
     int n_prompt_tokens = static_cast<int>(tokens.size());
