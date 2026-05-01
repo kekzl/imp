@@ -41,10 +41,20 @@ Originally numerical-hash garbage at ~95+ tokens with Lorem ipsum prefixes,
 **Partial fix shipped via PR #88**: `executor_pre_dequant.cu` now registers
 prequant-promoted NVFP4 weights in `wcache_.cutlass_nvfp4`, lighting up the
 native CUTLASS NVFP4×NVFP4 prefill path that previously fell through to
-`gemm_nvfp4` dequant→cuBLAS. Mistral-3.2-NVFP4 prefill 283 → 3122 tok/s
-(11×); Lorem×11 went from `a long established in 1999999999` (numerical
-garbage) to `a dolor sit amet, consectetur adipiscing elit, Quis...`
-(coherent Latin continuing the prefix). Memos:
+`gemm_nvfp4` dequant→cuBLAS. Standard `pp512/tg256` bench post-fix on RTX
+5090 (default flags, graphs ON):
+
+| Model | tg256 | pre-fix |
+|---|---|---|
+| Mistral-3.2-NVFP4 | 101 | 81 (+25%) |
+| Qwen3.6-NVFP4 | 217 | 117–142 (+50–85%) |
+| Gemma-4-NVFP4 | 213 | 157–180 (+18–35%) |
+| Qwen3-Coder-30B-NVFP4 | 272 | 51 (5.3×) |
+
+The Qwen3-Coder jump came from CUDA graphs becoming **safe by default**:
+the dequant fallback's per-prefill 40 MiB FP16 scratch alloc was
+graph-incompatible. Lorem×11 numerical-hash garbage → coherent Latin
+text. Memos:
 `memory/nvfp4_long_context_regression_2026_04_28.md`,
 `memory/nvfp4_prequant_cutlass_cache_2026_05_01.md`.
 

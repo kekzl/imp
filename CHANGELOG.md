@@ -4,10 +4,23 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ## [Unreleased] — post-v0.7.0 (2026-04-24 → current)
 
-41 PRs since v0.7.0. Highlights below; full list under each section.
+42+ PRs since v0.7.0. Highlights below; full list under each section.
 
 ### Fixed
 
+- **NVFP4 prequant CUTLASS prefill cache** (#88) — Phase 0 promotes set
+  `Tensor.qtype = NVFP4` directly on the main weight tensors but Phase 3b
+  (CUTLASS cache build) only iterated the legacy `wcache_.nvfp4` map.
+  Prequant SafeTensors prefill therefore fell through to `gemm_nvfp4`
+  dequant→cuBLAS, allocating ~40 MiB FP16 scratch per layer per prefill —
+  graph-incompatible AND noisy on SmoothQuant-calibrated Mistral-3.2-NVFP4.
+  Phase 0b loop registers all dense + `out_proj_` prequant tensors in
+  `cutlass_nvfp4` directly. Standard pp512/tg256 bench post-fix:
+  Mistral-3.2-NVFP4 tg 81→101, Qwen3.6-NVFP4 tg 117–142→217,
+  Gemma-4-NVFP4 tg 157–180→213, **Qwen3-Coder-30B-A3B-NVFP4 tg 51→272**
+  (`--no-cuda-graphs` no longer needed). Mistral-3.2-NVFP4 long-context
+  Lorem×11 numerical-hash garbage → coherent text. Memo:
+  `nvfp4_prequant_cutlass_cache_2026_05_01.md`.
 - **NVFP4 prequant MoE decode fast-path** (#85) — Qwen3.6-NVFP4 went 8.34 →
   117–142 tok/s (~14–17×); Gemma-4-NVFP4 went ~42 → 157–180 tok/s (~4×).
   Three bugs: `can_decode_fast` whitelist did not include NVFP4-prequant
@@ -126,11 +139,15 @@ Refresh mechanism documented in CLAUDE.md memory:
   out of the box even with the determ-cuBLAS gate. Default is FP16; opt-in
   per model after testing. See TODO.md.
 - **NVFP4 long-context regression** on Mistral-3.2-NVFP4 at ~500+ raw tokens
-  remains open. PR #79 ships diagnostics; PR #78 ships the
-  `use_default_system_prompt=false` workaround for the most common trigger.
-- **Qwen3-Coder-30B-A3B NVFP4** still requires `--no-cuda-graphs` for
-  coherence on the MoE routing path; Gemma-4 + NVFP4-prequant MoE excepted
-  via the decode fast-path post #85.
+  is **partially resolved** by PR #88 (CUTLASS NVFP4×NVFP4 prefill);
+  numerical-hash kernel garbage is gone. Residual model-behaviour issue
+  on long English prose remains. PR #79 ships diagnostics; PR #78 ships
+  the `use_default_system_prompt=false` workaround.
+- **CUDA graphs are now safe by default for prequant SafeTensors** (PR #88).
+  The previous `--no-cuda-graphs` requirement on Qwen3-Coder-30B-A3B-NVFP4
+  is **removed**: the dequant→cuBLAS fallback that allocated FP16 scratch
+  per prefill (graph-incompatible) doesn't fire anymore. Decode jumped 51 →
+  272 tok/s on Qwen3-Coder NVFP4 by enabling graphs.
 - **Prefill throughput** shows up to 2.6× variance between container restarts
   due to cuBLAS autotuning. Compare decode-only for reliable A/B.
 

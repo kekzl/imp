@@ -17,14 +17,14 @@ Tokens generated per second — the metric that determines how fast a model resp
 | Qwen3.5-4B (GDN) | 4.0B | Q8_0 | **220** | 180 | **+22%** |
 | Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **140** | — | — |
 | Llama-3.2-3B | 3.2B | Q8_0 | **208** | — | — |
-| Qwen3-Coder-30B-A3B | 30B (3B active) | NVFP4 | **51** | — | `--no-cuda-graphs` for coherence |
+| Qwen3-Coder-30B-A3B | 30B (3B active) | NVFP4 | **272** | — | post PR #88 (was 51 with `--no-graphs`) |
 | Qwen3-Coder-30B-A3B | 30B (3B active) | Q6_K | **234** | — | post moe_expert_offload_fix |
 | Qwen3.6-35B-A3B | 35B (3B active) | Q4_K_M | **143** | — | `moe.expert_overhead_pct=10` |
-| Qwen3.6-35B-A3B | 35B (3B active) | NVFP4 | **117–142** | — | post #85 fast-path (was 8.34) |
+| Qwen3.6-35B-A3B | 35B (3B active) | NVFP4 | **217** | — | post PR #88 (was 117–142) |
 | Gemma-4-26B-A4B-it | 26B (4B active) | Q4_K_M | **183** | 151 | **+21%** |
 | Gemma-4-26B-A4B-it | 26B (4B active) | Q5_K_M | **65** | — | best quality/speed |
-| Gemma-4-26B-A4B-it | 26B (4B active) | NVFP4 | **157–180** | — | post #85 fast-path (was ~42) |
-| Mistral-Small-3.2 | 24B | NVFP4 | **81** | — | llm-compressor Phase 2 Item 1 |
+| Gemma-4-26B-A4B-it | 26B (4B active) | NVFP4 | **213** | — | post PR #88 (was 157–180) |
+| Mistral-Small-3.2 | 24B | NVFP4 | **101** | — | post PR #88 (was 81) |
 
 ## Prefill Throughput (pp512)
 
@@ -37,9 +37,12 @@ Tokens processed per second during the prompt ingestion phase.
 | Qwen3.5-4B (GDN) | 4.0B | Q8_0 | **13676** | 11149 | **+23%** |
 | Qwen3.5-9B (GDN) | 9.2B | Q8_0 | **9483** | — | — |
 | Llama-3.2-3B | 3.2B | Q8_0 | **22544** | — | — |
-| Qwen3-Coder-30B-A3B | 30B (3B active) | NVFP4 | **2891** | — | CUTLASS 3.x grouped |
+| Qwen3-Coder-30B-A3B | 30B (3B active) | NVFP4 | **1299** | — | post PR #88 (cuBLAS variance ±2.6×) |
+| Qwen3.6-35B-A3B | 35B (3B active) | NVFP4 | **601** | — | post PR #88 |
 | Gemma-4-26B-A4B-it | 26B (4B active) | Q4_K_M | **1650** | 196 | **+742%** |
+| Gemma-4-26B-A4B-it | 26B (4B active) | NVFP4 | **1651** | — | post PR #88 |
 | Gemma-4-26B-A4B-it | 26B (4B active) | Q5_K_M | **88** | — | — |
+| Mistral-Small-3.2 | 24B | NVFP4 | **12804** | — | post PR #88 (CUTLASS NVFP4×NVFP4) |
 
 **Gemma-4 notes**: CUDA Graphs are now enabled (PRs #11–#14 unified `forward_decode_async`, PR #20 rope_freqs fix, 2026-04-20 SWA long-context fix). Decode is now **1.21× llama.cpp** on Q4_K_M. The previous gap was two separate bugs: pipeline kernel split-K only issued one 16-byte `cp.async` per load (missing half the data at head_dim=512 on global layers) and cuBLAS dispatch gate forced global layers through a broken FMHA fallback above n=1024. Prefill remains dominated by CUTLASS grouped-GEMM advantage vs llama.cpp's serial expert processing. Q5_K_M recommended when output quality matters on complex prompts — Q4_K_M can degenerate on code-gen (see `docs/BENCHMARKS.md` footnote).
 
