@@ -1,9 +1,17 @@
 # imp — GEMV Dispatch Reference
 
-Complete map of quantization type support across all decode (batch_size=1) dispatch points
-for Dense and MoE model architectures.
+Complete map of quantisation type support across all decode (batch_size=1) dispatch points
+for dense and MoE model architectures.
 
-Last updated: 2026-03-01
+> **Refresh status**: last full revision 2026-03-01. The kernel matrix and
+> the dense decode dispatch map (sections 1–4) are still accurate.
+> The type-system + config refactor (PR #72, 2026-04-XX) renamed
+> `gemm_dispatch` parameters and unified `QType`; some line numbers in the
+> "Dense Decode Dispatch" tables drift after that PR. NVFP4-prequant MoE
+> dispatch is described against the legacy expert path; the contiguous
+> `cache_moe_native_nvfp4` fast-path (PR #85) is documented in
+> CHANGELOG.md and `memory/qwen36_nvfp4_decode_underutil_2026_04_30.md`
+> rather than here.
 
 ---
 

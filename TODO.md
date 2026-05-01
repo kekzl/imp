@@ -1,274 +1,197 @@
 # TODO
 
-## Open Work
+Open work and tracked bugs. Completed work lives in [CHANGELOG.md](CHANGELOG.md);
+known historical dead ends in `memory/dead_ends.md`.
 
-### Qwen 3.5 GDN "Regression" — ROOT CAUSE FOUND: FP8-KV stride bug (2026-04-24)
-**Workaround available via `--kv-fp16` (PR #51).**
+---
 
-Originally reported as a GDN recurrent-state collapse: `" my my my my..."` / `"write a a a a..."` on Qwen3.5-4B and -9B Q8_0 regardless of `IMP_GDN_REF` or `IMP_DEBUG_RAW`. Same afternoon discovered that the bug is the same class that affects Mistral-Small-3.1 Q6_K and DeepSeek-R1-Distill-14B Q6_K: **FP8-E4M3 KV cache produces NaN logits** after the first decode token.
+## Open Bugs
 
-Verified 2026-04-24:
-```
-# broken (default auto-FP8 KV)
---model Qwen3.5-4B-Q8_0.gguf --prompt "What is 5+3?" --max-tokens 15
-→ tok=-1 tok=-1 tok=-1 ... / token repetition
+### FP8 KV cache stride / numerical instability — root cause unknown
+**Workaround live since PR #51**: default KV dtype is FP16; `--kv-fp8` (or
+`kv_cache.dtype=fp8` in `imp.conf`) opts in.
 
-# fixed (--kv-fp16, from PR #51)
-... --kv-fp16
-→ "<think> The user is asking for a question"
-```
+PR #52 added an auto-deterministic-cuBLAS gate that fixes the symptom on
+**Qwen3** and **Qwen3.5/3.6 GDN** with FP8 KV active. **Empirically retested
+2026-05-01 across 6 models with the gate engaged**: Llama-3.2-3B, Mistral-Small-3.1
+Q6_K, and DeepSeek-R1-Distill-14B Q6_K still break (degenerate output / illegal
+memory access in `sampling.cu:971` / `<think><｜User｜>` collapse). Therefore
+the "flip default to FP8" recommendation in older notes is refuted.
 
-Same fix works on Qwen3.5-9B:
-```
---model Qwen3.5-9B-Q8_0.gguf ... --kv-fp16
-→ "1. **Analyze the question: What is 5+3"
-```
+Per-arch behaviour at decode with default-FP8 KV (hypothetical):
 
-Qwen3.5-27B-Q4_K_M (same arch, different quant) never exhibited the bug — confirming it's a quant+KV-cache interaction, not an architectural GDN issue. PR #30's `launch_bounds` and partial-RoPE fixes remain valid; they just weren't the root cause of the symptom users saw in recent weeks.
+| Family | Status | Notes |
+|---|---|---|
+| Qwen3 dense | ✓ coherent | gate sufficient |
+| Qwen3.5/3.6 GDN | ✓ coherent | needs `α/β qtype` fix from PR #59 |
+| Gemma-4 | force-FP16 carve-out at `engine.cpp:547` | Real fix needs per-layer head_dim awareness in KV write/read |
+| Llama-3.2 | ✗ degraded | "is." instead of "is Paris." |
+| Mistral-Small-3.1 | ✗ illegal memory access | `sampling.cu:971` |
+| DeepSeek-R1-Distill | ✗ degenerate | tg=2, instant `<think><｜User｜>` |
 
-Underlying FP8-KV stride bug (same one that forces Gemma-4 onto FP16 KV via the hard-coded override at `engine.cpp:492`) is still a separate root-cause work item. The existing Gemma-4 override would need to be generalized; for now PR #51 exposes `--kv-fp16` / `IMP_KV_FP16=1` as user-facing escape hatches.
+Root cause is suspected to be a stride mismatch in the FP8 KV write/read path
+that interacts with specific head_dim / num_kv_heads layouts. The Gemma-4
+carve-out at `engine.cpp:547` is the existing escape hatch; generalising it
+needs storage-planner work, not a one-line fix.
 
-### MXFP4 Native GGUF Weight Format
-Plan documented in `docs/MXFP4_GGUF_PLAN.md`. Native MXFP4 weights would feed directly into Blackwell tensor cores via CUTLASS — zero dequant overhead, expected 2-4x prefill speedup vs Q4_K_M.
+### NVFP4 long-context regression (Mistral-3.2-NVFP4) — partial fix landed
+Originally numerical-hash garbage at ~95+ tokens with Lorem ipsum prefixes,
+~130 with `[SYSTEM_PROMPT]` markers, ~250+ with English prose.
 
-**Status:** CUTLASS MXFP4 GEMM path is fully implemented (`--mxfp4-prefill`), but only works when NVFP4 cache exists as source data. Native MXFP4 GGUF eliminates this dependency.
+**Partial fix shipped via PR #88**: `executor_pre_dequant.cu` now registers
+prequant-promoted NVFP4 weights in `wcache_.cutlass_nvfp4`, lighting up the
+native CUTLASS NVFP4×NVFP4 prefill path that previously fell through to
+`gemm_nvfp4` dequant→cuBLAS. Standard `pp512/tg256` bench post-fix on RTX
+5090 (default flags, graphs ON):
 
-**Quality caveat (measured 2026-04-23):** Qwen3-4B wikitext-2 PPL shows Q8_0 = 8.48, Q4_K_M = 8.67 (+2.2 %). MXFP4 round-to-nearest literature sits at +5–15 % — **worse than Q4_K_M** unless MR-GPTQ calibrated. The "Optional" calibration step (item 5 below) is effectively **required** for this project to be worth shipping.
+| Model | tg256 | pre-fix |
+|---|---|---|
+| Mistral-3.2-NVFP4 | 101 | 81 (+25%) |
+| Qwen3.6-NVFP4 | 217 | 117–142 (+50–85%) |
+| Gemma-4-NVFP4 | 213 | 157–180 (+18–35%) |
+| Qwen3-Coder-30B-NVFP4 | 272 | 51 (5.3×) |
 
-**Remaining:**
+The Qwen3-Coder jump came from CUDA graphs becoming **safe by default**:
+the dequant fallback's per-prefill 40 MiB FP16 scratch alloc was
+graph-incompatible. Lorem×11 numerical-hash garbage → coherent Latin
+text. Memos:
+`memory/nvfp4_long_context_regression_2026_04_28.md`,
+`memory/nvfp4_prequant_cutlass_cache_2026_05_01.md`.
+
+**Still open**: long English prose ≥250 tokens doesn't always reach the
+"Paris" answer — the model picks contextually-attracted continuations
+instead. Root cause is the SmoothQuant 0.9 + NVFP4 + FP16-activation
+mismatch (recipe expects dynamic NVFP4 input act-quant; imp uses FP16).
+The CUTLASS NVFP4×NVFP4 path quantizes activations dynamically per-block,
+which reduces but doesn't eliminate the noise. Final fix would
+implement the recipe-intended path: load the per-Linear `input_scale`
+from the SafeTensors and use it for static activation NVFP4 quant on top
+of the dynamic per-block scales (~1-2 days). PR #78
+(`use_default_system_prompt=false`) remains the practical workaround for
+typical chat prompts. Diagnostic env vars added in PR #79.
+
+### Qwen3.5-27B MXFP4 illegal memory access at load
+12 GiB MXFP4 weights + 48 GiB FP16 fallback oversubscribes VRAM on the
+32 GiB RTX 5090. PR #60 added a clear diagnostic ("MXFP4 FP16-fallback VRAM
+oversubscription"). Real fix needs host-dequant + StoragePlanner — ~1-2
+days of work. Workarounds: 9B Q8_0, 35B-A3B Q4_K_M.
+
+### Gemma-4 Q4_K_M output quality on complex prompts
+Q4_K_M decodes coherent for chat but degenerates on complex code-gen prompts
+(Fibonacci → backtick loop). Accumulated FP16 drift over 30 layers.
+FP32-router / FP32-expert-down env-var stacks insufficient. Practical fix:
+**use Q5_K_M or Q8_0** when output quality matters. Memo:
+`memory/gemma4_q4km_vs_q8_2026_04_19.md`.
+
+### General MoE D2H routing graph-incompatible
+Non-Gemma-4 / non-NVFP4-prequant MoE decode falls through the legacy
+expert-routing path with a D2H sync per layer per token. CUDA Graphs are
+disabled for these models. Gemma-4 and NVFP4-prequant MoE (Qwen3.6, Gemma-4
+llm-compressor) capture cleanly via the decode fast-path. Generalising the
+fast-path to GGUF MoE = open work item.
+
+---
+
+## Open Performance Work
+
+### MXFP4 native GGUF weight format
+Native MXFP4 weights would feed directly into Blackwell tensor cores via
+CUTLASS — zero dequant overhead, expected 2-4× prefill speedup vs Q4_K_M.
+
+CUTLASS MXFP4 GEMM is fully implemented (`attention.mxfp4 = "always"`
+prefill path). Only works today when an NVFP4 cache exists as source data.
+Native MXFP4 GGUF would eliminate that dependency.
+
+**Quality caveat (2026-04-23 measurement)**: Qwen3-4B wikitext-2 PPL is
+Q8_0 = 8.48, Q4_K_M = 8.67 (+2.2 %). MXFP4 round-to-nearest literature sits
+at +5–15 %  — **worse than Q4_K_M** unless MR-GPTQ calibrated. The
+calibration step is effectively required to make this worth shipping.
+
+Remaining work:
 1. GGUF type extension + loader (~50 lines)
-2. Python converter: SafeTensors → block-Hadamard → MXFP4 → GGUF (~200 lines)
-3. Weight upload: mmap → GPU-ready format (~30 lines)
+2. Python converter SafeTensors → block-Hadamard → MXFP4 → GGUF (~200 lines)
+3. Weight upload mmap → GPU-ready format (~30 lines)
 4. MXFP4 GEMV for decode (~100 lines CUDA)
 5. **Required** for competitive quality: MR-GPTQ calibration (~150 lines Python)
 
-### TurboQuant Optimization
-Current gap vs FP8 baseline: -23% decode (191 vs 248 tok/s). This is algorithm-inherent — QJL sketch computation adds per-token overhead.
+### TurboQuant — close the gap to FP8
+Current gap vs FP8 baseline: **-23% decode** (191 vs 248 tok/s on Qwen3-8B
+Q8_0). Algorithm-inherent — QJL sketch computation adds per-token overhead.
 
-**Optimized so far:**
-- Warp-cooperative Q sketch (eliminated per-thread atomicOr contention)
-- Warp-parallel QJL XNOR+popcount (32 lanes instead of lane-0 serial)
-- INT4 dequant: div→mul, L1 prefetch, dead code removal
-- PolarQuant INT4 symmetric clamp [-7,7] (was [-8,7])
+Already optimised: warp-cooperative Q sketch, warp-parallel QJL XNOR+popcount,
+INT4 dequant prefetch, PolarQuant symmetric clamp.
 
-**Remaining:** QJL overhead is inherent (~8% of decode). Only way to close the gap: remove QJL entirely (use MXFP4 K directions with group micro-scales instead).
+Only way to close the gap further: remove QJL entirely and use MXFP4 K
+directions with group micro-scales instead.
 
-### Speculative Decoding
-- **EAGLE-3**: Dead end on single GPU (56 tok/s vs 306 baseline). Draft model shares same weights = 78% cost per layer.
-- **Self-speculative**: Dead end (50% of baseline). Memory-bound decode can't amortize.
-- **DFlash**: Not feasible — no draft model for Qwen3-32B, training requires datacenter GPUs.
-- **N-gram speculation**: Implemented (`src/runtime/ngram_spec.cpp`), uses multi-sequence decode verify. +10% on repetitive content, ~0% overhead on non-repetitive. CLI: `--ngram-spec`.
-- **TurboDraft (PPM + Classifier)**: Dead end. PPM 0% acceptance on real text; SVD classifier too lossy.
-- **Pseudo-prefill verify bug**: Fixed in NgramSpec — now uses multi-sequence decode verify.
+### 1024→2048 prefill cliff on small dense models
+Qwen3-4B Q8_0 drops 27k → 19k tok/s at the dispatch boundary where cuBLAS
+attention hands off to FP8 FMHA. Output is correct; the kernel is just less
+tuned. Options: raise the cuBLAS cap past 1024, or tune FP8-FMHA occupancy /
+Bq for the small-model regime.
 
----
+### `pp=512` on large dense models
+Qwen3-32B Q4_K_M, Mistral-24B Q6_K: ~0.5–0.6× llama.cpp at pp=512.
+Suspected cuBLAS autotuning variance + launch-overhead-bound regime.
+Output correct; not gating any user.
 
-## Completed (v0.7) — 2026-04-23
+### Speculative decoding — abandoned options
+- **EAGLE-3**: 56 tok/s vs 306 baseline on single GPU. Draft model shares
+  weights → 78% cost per layer.
+- **Self-speculative**: 50% of baseline. Memory-bound decode can't amortise.
+- **DFlash**: No draft model for Qwen3-32B; training requires datacenter GPUs.
+- **TurboDraft (PPM + classifier)**: PPM 0% acceptance on real text; SVD
+  classifier too lossy.
+- **N-gram speculation**: Implemented, default off. CLI: `--ngram-spec`.
+  +10% on repetitive content, ~0% overhead on non-repetitive.
 
-### Long-context correctness
-- [x] FP8 FMHA S_tile smem overlap fix (PR #33) — pp>1024 now coherent across all tested models; up to ×1.70 vs llama.cpp at pp=8192
-- [x] Regression test `FmhaFP8Test.Qwen35LikeHD256_GQA41_SeqMultiTile` catches the bug class
-- [x] Audited MXFP4 / FP16 / WMMA FMHA kernels for the same pointer-vs-slot mismatch — only FP8 was affected
-- [x] Verified all FMHA variants on Qwen3-4B/8B, Qwen3.5-4B/9B GDN, Llama-3.2-3B, Qwen3-32B, Mistral-24B at pp=512/1024/2048/4096/8192
-
-### Qwen 3.5 / Qwen 3.6 GDN
-- [x] `gdn_scan_fused_kernel` launch_bounds fix (HD=128 miscompile) — PR #30
-- [x] Partial-RoPE pair-offset fix — PR #30
-- [x] `ssm_state_dtype` never auto-downgraded for GDN architectures — PR #28
-- [x] GDN L2-norm PyTorch-style `rsqrtf(fmaxf(sum_sq, 1e-12))`
-- [x] L2-window CUDA errors (clamped to `cudaDevAttrMaxAccessPolicyWindowSize`)
-- [x] GDN reference infrastructure + Qwen 3.6 cache preservation (PR #25)
-- [x] Qwen 3.6 `ModelArch::QWEN36_MOE` scaffold (PR #23)
-
-### Gemma-4
-- [x] SWA long-context degeneration (>1024 prompt tokens) — PR #21
-- [x] rope_freqs on global layers — PR #20
-- [x] Host-resident MoE fused gate_up split (e879bcd)
-- [x] CUDA graphs for decode fast-path (PRs #11–#14)
-- [x] Q4_K_M split-K pipeline cp.async loop (head_dim=512) — 55 → 183 tok/s
-- [x] 3120-token KV ceiling fix — now 11 242 tok with `--min-kv-tokens 14000`
-- [x] FP32 router + half rope_dim on global layers (5a1e844)
-
-### Platform
-- [x] CUDA 13.2.1 base images (PR #16)
-- [x] Stream priorities, mem-sync domains, cluster spread (PR #17)
-- [x] CUTLASS 3.x NVFP4 Grouped GEMM scaffold (PR #22)
-- [x] StreamingLLM smart KV cache — attention sinks + sliding window (PR #26)
-- [x] Weight-storage refactor: `TensorKind` + `StoragePlanner` + `gemm_dispatch` (PR #27)
-- [x] `IMP_DEBUG_RAW` meta-flag (PR #29), `IMP_EXPERT_OVERHEAD_PCT` hint (PR #32)
-- [x] `tools/analysis/layer_diff.py` for per-layer tensor diff vs llama.cpp
-- [x] `Gemma4GraphsTest` e2e regression
-
-### Known deferred
-- 1024→2048 throughput cliff on small dense models (Qwen3-4B: 27k → 19k tok/s at dispatch switch). Correct but unoptimized. Options: raise cuBLAS cap past 1024, or tune FP8 FMHA occupancy / Bq.
-- pp=512 on large dense models (Qwen3-32B, Mistral-24B): ~0.5–0.6× llama.cpp. Suspected cuBLAS autotuning variance + launch-overhead-bound regime.
-
----
-
-## Completed (v0.6)
-
-### NVFP4 Prequant SafeTensors Support
-- [x] NVIDIA Model Optimizer NVFP4 models load from SafeTensors (tested: Qwen3-Coder-30B-A3B-FP4)
-- [x] Phase 0 direct weight registration in `wcache_.nvfp4` (no re-quantization)
-- [x] CUTLASS NVFP4 conversion for prefill GEMM (Phase 3b)
-- [x] Per-expert NVFP4 GEMV in MoE legacy dispatch path
-- [x] LM head prequant scale support (weight_scale, weight_scale_2, input_scale)
-- [x] Shape bug fix: use `NvFP4QuantResult.N/.K` instead of packed tensor shape in GEMV dispatch
-- [x] BF16→FP16 host-side conversion for non-quantized weights (norms, router, embeddings, lm_head)
-- [x] CUDA graphs disabled for MoE models (D2H routing memcpy incompatible with graph capture)
-
-### Server & Format Support
-- [x] SafeTensors model loading in imp-server (was GGUF-only)
-- [x] `resolve_model_auto()` with format auto-detection (SafeTensors directory vs GGUF file)
-- [x] Server model list includes both GGUF files and SafeTensors directories
-- [x] ~~Server hot-swap between GGUF and SafeTensors models~~ (reverted post-v0.6: `--model` is now required at startup, POST/DELETE `/v1/models` removed)
-- [x] Chat template array-format support in `tokenizer_config.json` (HuggingFace convention)
-
-### Verified
-- [x] Qwen3-Coder-30B-A3B-FP4: single-turn, multi-turn, code gen, math — all correct
-- [x] Benchmark: 38 tok/s decode (tg256), 90 tok/s prefill (pp512) on RTX 5090
-- [x] 536/536 unit tests pass
-
-## Completed (v0.4)
-
-### Performance
-- [x] NVFP4 decode cache: 50% VRAM savings, all dense weights → FP4 E2M1
-- [x] FP8 prefill cache: FP8×FP8 cuBLASLt, 2x tensor core throughput
-- [x] SwiGLU+GEMV fusion: +33% Qwen3-8B, +5.5% Qwen3-4B
-- [x] GeGLU+GEMV fusion: +70% Gemma-3-12B
-- [x] NVFP4 prmt register LUT: +4.7% Qwen3-4B, +7.7% Qwen3-8B, +16% Gemma-3-12B
-- [x] RMSNorm vectorization: float4 loads, 100% cache line utilization
-- [x] rmsnorm_quantize_q8_1: 256→1024 threads, 2x speedup
-- [x] NVFP4 multi-row occupancy: __launch_bounds__ 6→8, +5% gate_up
-- [x] NVFP4 LM head in async graph loop: -47% LM head latency
-- [x] MoE fused TC kernel: persistent work-queue dispatch, -38% kernel time
-- [x] Fused token-centric MoE scatter: no atomics, +3.1% MoE prefill
-- [x] L2 cache tuning: streaming KV loads + persisting reservation, +2-4% decode
-
-### Architecture Support
-- [x] Qwen3.5 GDN (Gated DeltaNet): fused scan kernel, partial RoPE, output gate
-- [x] Nemotron-H (Mamba2 + Attention + MoE hybrid)
-- [x] Gemma-3 vision (SigLIP encoder, mmproj.gguf)
-
-### Infrastructure
-- [x] TurboQuant KV cache (PolarQuant + QJL + INT4 V)
-- [x] TurboQuant MXFP4 variant (FP4 E2M1 + UE8M0 micro-scales for K)
-- [x] CUTLASS MXFP4 prefill GEMM (sm_120 block-scaled tensor ops)
-- [x] CUTLASS MXFP4 prefill attention (Q·K^T only)
-- [x] Hadamard transform kernel (block-diagonal WHT, 16/32/64/128)
-- [x] NVFP4→MXFP4 scale conversion
-- [x] Code quality: 5 rounds refactoring, -1224 lines across 42 files
-
-### Dead Ends (confirmed no benefit)
-- RMSNorm+GEMV fusion, multi-row threshold >512, MoE SwiGLU+GEMV fusion
-- PDL registration, dp4a fused act+GEMV, CUTLASS FMHA HD=256
-- NVFP4 half2 FMA, split accumulators, __ldcs streaming weights
-- Self-speculative decoding, EAGLE-3 (single GPU)
-- NVFP4 prmt for SwiGLU/GeGLU, CUTLASS NVFP4 TC GEMM for M=1
-- Paged attention __launch_bounds__, RMSNorm+NVFP4 LM head fusion
-- cudaAccessPolicyWindow for decode activations
-
----
-
-## CUTLASS 4.4.2 (DONE) + PTX 9.2
-
-### CUTLASS 4.4.2 — Upgraded
-Already on v4.4.2. SM120 fixes (SMEM alignment, memory fence, PDL, Hopper FMHA perf) are automatic via headers.
-
-**Completed 2026-04-20:** CUTLASS 2.x `GemmGrouped` path removed. NVFP4 MoE now dispatches via CUTLASS 3.x `GroupProblemShape` (`gemm_cutlass_grouped_3x.cu`) with fused per-expert quantize — 30×+ prefill speedup on Qwen3-Coder-30B-A3B-FP4. FP16 MoE grouped path (Gemma-4 etc.) now goes directly to cuBLAS grouped, which is +24% faster than the retired 2.x wrapper on Gemma-4 Q5_K_M.
-
-SM120 GEMM architecture notes:
-- Pingpong (2×4 MMA warps) and Cooperative (1×8 MMA warps) schedules
-- Default: KernelTmaWarpSpecializedCooperative
-- GeForce: Cluster 1×1×1 only (no multicast), TN layout only
-- SM120 FMHA: exists but blocked by wiring issues in fmha_v2 (WIP upstream)
-
-### PTX ISA 9.2 Opportunities
-Available in CUDA 13.2 but not yet used in imp:
-
-**High value for attention/decode:**
-- **`cp.async.bulk` with `.ignore_oob`**: OOB reads return zero instead of crashing.
-  Eliminates bounds-checking in TMA descriptors for variable sequence lengths.
-  Major simplification for paged attention with partial last blocks.
-- **`st.async` with `.b128`**: 16-byte async stores. Perfect for KV cache writeback
-  (one instruction per FP16 KV vector slot at head_dim=64).
-- **`cvt .bf16x2` ↔ narrow types** (`.e2m1x2`, `.e4m3x2`): packed FP4/FP8 pair
-  conversion. 2x throughput for KV cache quantize/dequantize pipeline.
-
-**Medium value:**
-- **`u8x4`/`s8x4` SIMD** for add/sub/min/max: packed 4-byte integer ops.
-  Useful for index operations in KV cache management.
-- **`add.sat`** for u16x2/s16x2/u32: overflow-safe index arithmetic.
-- **`.scale_vec::4X` with `.ue8m0`** for MXFP4 MMA: finer scale granularity
-  (1 scale per 4 elements vs per block). Better quantization accuracy.
-
-**From PTX 9.1 (already available):**
-- **`cvt .f16x2`/`.bf16x2` → `.e2m1x2`**: online FP16→FP4 quantization.
-  Quantize K/V on-the-fly before KV cache write → 50% VRAM savings.
-
-### tcgen05 on SM120
-Tensor core instruction set for Blackwell. Available but constrained:
-- No multicast (cluster 1×1×1), TN layout only
-- Mixing tcgen05 with CUDA-core ops (softmax between MMA steps) requires
-  expensive sync between Generic and Async proxies
-- 256-bit loads available on SM120f (family feature)
-- Flash Attention 4 pattern (fused softmax + MMA) still research-grade
+The decode bottleneck is bandwidth, not compute. None of the speculation
+variants tested can amortise weight reads on a single 5090.
 
 ---
 
 ## Research / Future
 
-### BitDecoding (arxiv:2503.18773)
-Tensor-core-based decoding with low-bit KV cache. 8.6x vs FP16 FlashDecoding on Blackwell. Requires MXFP4 KV cache format — builds on TurboQuant MXFP4 infrastructure.
+### CUDA 13.2 / CCCL 3.2 features not yet used
+- **Grouped GEMM with CUDA Graphs + device-side shapes** (`cublasLtMatmulGrouped`
+  with NVFP4 input, sm_120 since CUDA 13.2 Update 1). Host-sync-free MoE
+  expert dispatch — expert routing stays on GPU, no D2H copy. Up to 4×
+  vs multi-stream GEMM. Direct unblock for the general MoE D2H bug above.
+- **`cub::DeviceTopK`** — O(n) top-k via AIR. 5× faster than radix sort for
+  `top_k > 128`.
+- **`cub::DeviceSegmentedReduce` (fixed-size)** — uniform segment_size variant,
+  up to 66× speedup for small segments. Per-head reductions in MHA.
+- **`cudaMemcpyWithAttributesAsync`** — L2 persistence hints on individual
+  transfers. Prefix-cache pinning without batched API.
+- **`add.f32x2` native PTX** (Blackwell) — softmax reductions, attention
+  accumulation. Reduces instruction count.
 
-### DeltaKV (arxiv:2602.08005)
-Residual-based KV compression. 187 tok/s at 128k context on Blackwell PRO 6000. Orthogonal to weight quantization.
+### PTX ISA 9.2 opportunities
+- **`cp.async.bulk` with `.ignore_oob`** — OOB reads return zero. Eliminates
+  bounds-checking in TMA descriptors for variable seq lengths. Big simplification
+  for paged attention with partial last blocks.
+- **`st.async.b128`** — 16-byte async stores for KV cache writeback.
+- **`cvt .bf16x2` ↔ narrow** (`.e2m1x2`, `.e4m3x2`) — packed FP4/FP8 pair
+  conversion, 2× throughput for KV cache quant pipeline.
+- **`.scale_vec::4X` with `.ue8m0`** for MXFP4 MMA — finer scale granularity
+  (1 per 4 elements vs per block). See PTX MMA survey memo.
+- **`mxf4nvf4.block_scale.scale_vec::4X.m16n8k64`** — Project B target,
+  Stage 4 layouts decoded byte-exact (PR #55), Stage 5 integration open.
 
-### CUDA 13.2 / CCCL 3.2 Features
-Available in our CUDA 13.2.1 toolkit but not yet used:
+### Long-context KV memory reduction
+Decode is bandwidth-bound and every sub-byte KV quantisation tested
+regresses decode (see `memory/kv_dtype_tradeoffs_2026_04_24.md`). Next wins
+come from reducing **token count**, not element precision:
+- **K2 MLA (DeepSeek)** — latent vector replaces full K/V, -90% KV-VRAM.
+- **K5 Token-eviction (H2O)** — drop 50–70% of tokens by attention score.
+- **K8 CPU-offload** — async prefetch for cold tokens, enables 100K+ ctx.
 
-**High Priority:**
-- **Grouped GEMM with CUDA Graphs + device-side shapes** (cuBLASLt):
-  Host-sync-free MoE expert dispatch — expert routing results stay on GPU,
-  no D2H copy needed. Up to 4x speedup over multi-stream GEMM for MoE.
-  Directly relevant for Qwen3-Coder-30B MoE and DeepSeek models.
-- **`cub::DeviceTopK`** (`device_topk.cuh`): O(n) top-k via AIR algorithm.
-  5x faster than radix sort for the top_k > 128 fallback path.
-  Warp/Block-scope variants on CCCL roadmap for fused sampling.
-- **`cub::DeviceSegmentedReduce` (fixed-size)**: uniform segment_size variant,
-  up to 66x speedup for small segments. Perfect for per-head reductions in MHA
-  where all heads have the same dimension.
+Or kernel-level rewrite of INT4 decode to eliminate dequant overhead
+(separate investigation; needs scale-in-register caching + fused dequant+MMA
+via `mma.sync.kind::f8f6f4` block-scaled variant).
 
-**Medium Priority:**
-- **`cudaMemcpyWithAttributesAsync`**: L2 persistence hints on individual transfers.
-  Could pin frequently-accessed prefix cache segments in L2 without batched API.
-- **Host Task Spin-Wait Dispatch** (`cudaLaunchHostFunc`): lower CPU-side callback
-  latency. Relevant for dynamic token routing in speculative decoding.
-- **`add.f32x2` native PTX** (Blackwell): native float2 ops for softmax reductions
-  and attention score accumulation — reduces instruction count.
-- **PTX ISA 9.2**: Extended FP4 cvt variants (.f16x2/.bf16x2 → FP4/FP8), `.scale_vec::4X`
-  for MXFP4 MMA. Could improve NVFP4 quantization pipeline throughput.
-
-**Investigate / Re-benchmark:**
-- **NVFP4/MXFP8 small M,N perf** (cuBLAS 13.2): cuBLAS improved block-scaled
-  kernels for M,N ≤ 32 on Blackwell. Previously, TC GEMM for M=1 (decode) was
-  a dead end due to setup overhead. Re-benchmark: could NVFP4 cuBLASLt M=1 now
-  beat the scalar prmt GEMV? If so, decode gets tensor core acceleration for free.
-- **Per-batch device-side alpha/beta** (`CUBLASLT_MATMUL_DESC_ALPHA_BATCH_STRIDE`):
-  enables per-head scaling in GQA attention without extra kernel launches.
-  Relevant for mixed-precision KV cache heads.
-
-**Low Priority / Already Fixed / Verified:**
-- **LMEM reduction on WDDM** (R595 driver): less local memory overhead on WSL2.
-- **cuBLASLt Algo 66 bugfix**: concurrent TMA matmul corruption on sm_120 — fixed in 13.2.
-- **NVCC GB202 CuTe GEMM corruption**: fixed in 13.1, we're on 13.2.
-- **FP8 illegal memory access on GeForce**: fixed in 13.2. We use FP8 prefill cache.
-- **Grouped GEMM k=0 gotcha**: our MoE code already filters empty experts (count==0 → skip)
-  before calling cublasGemmGroupedBatchedEx. No action needed.
-
-### sm_120f (Blackwell Family Feature Set)
-Switched from sm_120a to sm_120f in commit fa3ced6:
-- Enables TMA warp-specialized grouped GEMM tactics in CUTLASS/cuBLAS
-- Forward-compatible within Blackwell family (sm_120, sm_121)
-- Resolved ptxas C7600 register allocation bug for TurboQuant
-- +10% TurboQuant prefill, +7.6% MXFP4 prefill
+### BitDecoding / DeltaKV
+- **BitDecoding** (arxiv:2503.18773): 8.6× vs FP16 FlashDecoding on Blackwell
+  via MXFP4 KV cache. Builds on TurboQuant MXFP4 infrastructure.
+- **DeltaKV** (arxiv:2602.08005): residual-based KV compression. 187 tok/s
+  at 128K context on Blackwell PRO 6000. Orthogonal to weight quant.

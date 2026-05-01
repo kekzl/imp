@@ -2,6 +2,157 @@
 
 All notable changes since v0.6. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — post-v0.7.0 (2026-04-24 → current)
+
+42+ PRs since v0.7.0. Highlights below; full list under each section.
+
+### Fixed
+
+- **NVFP4 prequant CUTLASS prefill cache** (#88) — Phase 0 promotes set
+  `Tensor.qtype = NVFP4` directly on the main weight tensors but Phase 3b
+  (CUTLASS cache build) only iterated the legacy `wcache_.nvfp4` map.
+  Prequant SafeTensors prefill therefore fell through to `gemm_nvfp4`
+  dequant→cuBLAS, allocating ~40 MiB FP16 scratch per layer per prefill —
+  graph-incompatible AND noisy on SmoothQuant-calibrated Mistral-3.2-NVFP4.
+  Phase 0b loop registers all dense + `out_proj_` prequant tensors in
+  `cutlass_nvfp4` directly. Standard pp512/tg256 bench post-fix:
+  Mistral-3.2-NVFP4 tg 81→101, Qwen3.6-NVFP4 tg 117–142→217,
+  Gemma-4-NVFP4 tg 157–180→213, **Qwen3-Coder-30B-A3B-NVFP4 tg 51→272**
+  (`--no-cuda-graphs` no longer needed). Mistral-3.2-NVFP4 long-context
+  Lorem×11 numerical-hash garbage → coherent text. Memo:
+  `nvfp4_prequant_cutlass_cache_2026_05_01.md`.
+- **NVFP4 prequant MoE decode fast-path** (#85) — Qwen3.6-NVFP4 went 8.34 →
+  117–142 tok/s (~14–17×); Gemma-4-NVFP4 went ~42 → 157–180 tok/s (~4×).
+  Three bugs: `can_decode_fast` whitelist did not include NVFP4-prequant
+  models; `cache_moe_native_nvfp4` had to be added to build the contiguous
+  per-expert NVFP4 buffer for SafeTensors per-expert layouts; per-layer
+  free of per-expert allocations (32 GiB VRAM ceiling on 35B-A3B).
+  Memos: `qwen36_nvfp4_decode_underutil_2026_04_30.md`,
+  `gemma4_nvfp4_decode_fastpath_2026_05_01.md`.
+- **Six Qwen3.5/3.6-NVFP4 SafeTensors loader bugs** (#81) blocking coherent
+  decode: (1) RMSNorm `1+W` convention now honoured via
+  `UploadCtx::arch_norm_offset`, (2) GDN head layout HF-grouped vs
+  GGUF-tiled with kernel `grouped_layout` flag, (3) `partial_rotary_factor`
+  read from both top-level and nested `rope_parameters`,
+  (4) `rope_theta` from nested `rope_parameters.rope_theta`,
+  (5) `A_log → -exp(A_log)` transform applied to BF16/F16 SafeTensors path
+  only, (6) `fp32_scan` y_buf populated outside `debug_forward`. Per-layer
+  correlation vs GGUF Q4_K_M now ≥0.997 across all 40 layers; output
+  matches the GGUF oracle for the standard verification prompt.
+- **Qwen3.5 GDN Q8_0 α/β qtype mismatch** (#59) — `upload_weight` pre-dequanted
+  Q8 → FP16 without updating `qtype`. Dispatcher mis-interpreted bytes →
+  state collapse (` my my my…`). Memo: `qwen35_q8_alpha_beta_qtype_bug_2026_04_25.md`.
+- **MXFP4 GDN-fallback dequant** (#58) — replaced buggy CPU path with GPU kernel.
+- **MXFP4 FP16-fallback VRAM oversubscription diagnostic** (#60) — clear error
+  message for the Qwen3.5-27B-MXFP4 IMA-on-load case (was silent).
+- **Qwen3.5-MXFP4 `A_log` from `blk.X.ssm_dt.weight`** (#61).
+- **MoE expert-offload auto-pick** (#54) — defaults try 10 % overhead first
+  before falling back to 30 %. Qwen3-Coder-30B Q6_K 77 → 234 tok/s.
+  Memo: `moe_expert_offload_fix_2026_04_24.md`.
+- **Mistral-3.2-NVFP4 `use_default_system_prompt`** (#78) — honour the
+  tokenizer-config flag and skip the 600-token jinja default system prompt.
+  "I am the capital of France?" → "Paris". Memo:
+  `mistral_3_2_nvfp4_use_default_system_2026_04_28.md`.
+- **Server `<channel|>` swallowing answer body on Gemma-4** (#39).
+- **Gemma-4 byte-fallback on common names** (#37).
+- **Server `reasoning_content` for chat-template-injected `<think>`** (#86).
+- **`verify` auto re-execs in `imp:test` when host CMake is missing** (#70) —
+  unblocks `make verify-fast` for clean-host workflows.
+
+### Added
+
+- **KV-cache safety default flip** (#51) — default KV dtype is now FP16; FP8
+  is opt-in via `--kv-fp8` / `imp.conf:kv_cache.dtype="fp8"`. Fixes Mistral,
+  DeepSeek, and Qwen3.5-GDN out of the box on first decode.
+- **Auto-deterministic cuBLAS when FP8 KV active** (#52) — pins cuBLAS algo
+  selection to avoid quant-dequant noise → softmax NaN. Necessary fix; not
+  sufficient for all archs (see TODO.md "FP8 KV stride bug").
+- **CUDA Graph coverage expansion** (#53) — speculative-verify graphs, SigLIP
+  vision graph, default mem-pool retain, `cudaGraphExecUpdate` re-capture.
+  Memo: `cuda_graph_expansion_2026_04_24.md`.
+- **SM120 FMHA optimisation pass — Project B Stage 4** (#55, #56) — float4
+  tile loads + HW FP4 conversion. **+11–13 % prefill** on Qwen3-4B Q8_0 at
+  pp=8192. Stage 5 (`mxf4nvf4.block_scale.scale_vec::4X.m16n8k64`) layouts
+  verified byte-exact, integration is the next open Project B item.
+- **NVFP4 SafeTensors loader from llm-compressor** (Phase 1, #63; Phase 2
+  Item 1 Mistral3, #64; Phase 2 Item 2 Gemma-4 extras + per-row gemv
+  bypass, #65). Mistral3-NVFP4 decode tg ≈ 81 tok/s post Phase 2 Item 1.
+  Gemma-4-NVFP4 (llm-compressor) decodes coherent end-to-end at ~34 tok/s
+  with default flags after #65 routes M>1 expert GEMV through `gemm_nvfp4`
+  dequant→cuBLAS (legacy serial path's per-row `gemv_nvfp4_kpar` loop
+  produced wrong output at Gemma-4 expert dimensions; M=1 decode path is
+  unchanged).
+- **Qwen3.6-NVFP4 SafeTensors plumbing** (Phase 1 #71) — load-only.
+  Decode lit up later via #85.
+- **JSON config plumbing** (#74, #77) — `generation_config.json` sampling
+  defaults, `special_tokens_map.json`, Mistral V3 tokenizer-config flags.
+- **Tokenizer-config `use_default_system_prompt=false` honoured** (#78) — see
+  Fixed.
+- **Type-system + config refactor** (#72) — unified `QType`, `Tensor` sidecars,
+  `imp.conf` (TOML, ~50 former `IMP_*` env vars now keys). New top-level
+  `imp.conf.example`. CLI `--set kv_cache.dtype=fp8` for per-run overrides.
+- **NVFP4 collapsed load-time scratch** (#73) — single `Model` map.
+- **FP32 attention S-matrix + Qwen3.5 QK-norm split** (#66) — improves
+  numerical headroom on long-context attention.
+- **Diagnostic env vars for NVFP4 + attention** (#79) — reproducer support
+  for the long-context NVFP4 bug.
+- **Anthropic `/v1/messages` endpoint** (Phase 1 non-streaming #35,
+  Phase 2 streaming #36) — synthetic SSE stream over the OpenAI handler.
+- **Storage-planner enumerates shared-expert FFN + top-level embeddings/LM
+  head** (#38, #40) — fixes silent miss in MoE memory budget.
+- **Strengthened GDN coherence test** (#48) — detects recurrent-state collapse.
+- **Strengthened Gemma-4 NVFP4 e2e gate** (#68) — Paris coherence assertion.
+- **Synthetic `gemv_kpar` M>1 per-row-loop bug repro test** (#69).
+- **Split `imp-tests` into 8 per-module binaries** (#57) — speeds up filtered
+  test runs.
+- **`tools/analysis/` PTX survey scripts** (#67) — re-runnable cvt / MMA /
+  async-TMA / atomics / SFU / cluster surveys for `sm_120f` after CUDA upgrades.
+
+### Changed
+
+- **Default KV dtype is FP16** (#51) — see Added. Was implicit auto-FP8.
+- **`imp.conf` is now the configuration interface** (#72) — ~50 `IMP_*` env
+  vars retired; sectioned TOML keys (`runtime.cuda_graphs`, `kv_cache.dtype`,
+  `attention.fp8_fmha`, …). Loading precedence: `--config` → `$IMP_CONFIG` →
+  `./imp.conf` → `~/.config/imp/imp.conf` → embedded defaults. CLI overrides
+  via `--set section.key=value`.
+
+### Repository / build hygiene
+
+- **Untracked `build-docker/` and `bringup_artifacts/`** (#82) — debug dumps
+  no longer in VCS.
+- **Removed tracked binaries + stale Gemma-4 debug snapshots** (#83).
+- **Removed obsolete top-level docs + stale benchmarks dir** (#84).
+
+### Performance baseline refresh (2026-04-29)
+
+`tests/perf_baseline.json` refreshed during the autonomous bringup mission
+(#80). Drift was visible **before** the bringup branch's two code commits —
+i.e. not a regression introduced by the mission. Numbers reflect the
+RelWithDebInfo build with full GPU boost engaged (P1, 2880 MHz, 456 W).
+Refresh mechanism documented in CLAUDE.md memory:
+`scripts/gen_perf_baseline.sh`.
+
+### Known issues (carry-over)
+
+- **FP8 KV cache** still breaks Llama-3.2 / Mistral-Small-3.1 / DeepSeek-R1-Distill
+  out of the box even with the determ-cuBLAS gate. Default is FP16; opt-in
+  per model after testing. See TODO.md.
+- **NVFP4 long-context regression** on Mistral-3.2-NVFP4 at ~500+ raw tokens
+  is **partially resolved** by PR #88 (CUTLASS NVFP4×NVFP4 prefill);
+  numerical-hash kernel garbage is gone. Residual model-behaviour issue
+  on long English prose remains. PR #79 ships diagnostics; PR #78 ships
+  the `use_default_system_prompt=false` workaround.
+- **CUDA graphs are now safe by default for prequant SafeTensors** (PR #88).
+  The previous `--no-cuda-graphs` requirement on Qwen3-Coder-30B-A3B-NVFP4
+  is **removed**: the dequant→cuBLAS fallback that allocated FP16 scratch
+  per prefill (graph-incompatible) doesn't fire anymore. Decode jumped 51 →
+  272 tok/s on Qwen3-Coder NVFP4 by enabling graphs.
+- **Prefill throughput** shows up to 2.6× variance between container restarts
+  due to cuBLAS autotuning. Compare decode-only for reliable A/B.
+
+---
+
 ## [0.7.0] - 2026-04-23
 
 Big correctness + platform release: the long-context dispatch cliff is gone,

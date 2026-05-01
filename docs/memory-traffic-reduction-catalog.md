@@ -126,6 +126,6 @@ See `memory/nvfp4_vs_q6k_moe_2026_04_24.md`.
 ## Referenzen
 
 - `docs/SM120_OPTIMIZATION_STATUS.md` — Bottleneck-Analyse Decode/Prefill
-- `docs/cuda131-optimization-plan.md` — historischer Plan (teilweise realisiert)
+- `CHANGELOG.md` — frühere Optimierungsphasen, jetzt versions-getaggt
 - Memory: `perf_optimizations.md`, `dead_ends.md`, `turbodraft.md`,
   `nvfp4_prequant_status.md`, `gdn_debug_status.md`

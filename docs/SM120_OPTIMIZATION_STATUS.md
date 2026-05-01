@@ -45,15 +45,22 @@ This means:
 | BF16→FP16 weight conversion | ✅ Done | Norms, router, embeddings, LM head |
 | CUTLASS NVFP4 prefill GEMM | ✅ Done | Dense layers via gemm_dispatch() |
 | Per-expert NVFP4 GEMV (decode) | ✅ Done | Serial dispatch, legacy MoE path |
-| CUDA graphs for MoE | ⛔ Disabled | D2H routing memcpy incompatible |
-| Packed MoE NVFP4 dispatch | 🔲 TODO | Would enable fused gate+up MoE GEMV |
-| Tested: Qwen3-Coder-30B-A3B | ✅ 38 tok/s | 128 experts, single+multi-turn verified |
+| CUDA graphs for non-fast-path MoE | ⛔ Disabled | D2H routing memcpy incompatible |
+| CUDA graphs for NVFP4-prequant MoE fast-path | ✅ Done (PR #85) | `cache_moe_native_nvfp4` builds contiguous expert buffer device-side |
+| Packed MoE NVFP4 dispatch | ✅ Done (PR #85) | Contiguous `[ne, N, K_packed]` buffer per layer per projection |
+| Tested: Qwen3-Coder-30B-A3B (NVFP4) | ✅ 51 tok/s | `--no-cuda-graphs` for coherence |
+| Tested: Qwen3-Coder-30B-A3B (Q6_K) | ✅ 234 tok/s | post moe_expert_offload_fix (PR #54) |
+| Tested: Qwen3.6-35B-A3B (NVFP4) | ✅ 117–142 tok/s | post #85 fast-path (was 8.34) |
+| Tested: Gemma-4-26B-A4B (NVFP4) | ✅ 157–180 tok/s | post #85 fast-path (was ~42) |
 
 ## Open Items
 
 | Item | Impact | Feasibility |
 |------|--------|-------------|
-| Packed MoE NVFP4 (fused dispatch) | High for MoE prequant | Medium — pack per-expert into NvFP4MoEQuantResult |
+| Generalise NVFP4-prequant fast-path to GGUF MoE decode | High — removes D2H sync per layer per token | Medium-High — needs device-side expert routing for GGUF MoE |
+| Project B Stage 5 (`mxf4nvf4.block_scale.scale_vec::4X.m16n8k64`) | 2-4× MXFP4 prefill attention | Medium — layouts decoded byte-exact (PR #55), integration is the open item |
 | FP8 TC-GEMV for batch decode (M=2-16) | Medium (batch>1 only) | Medium |
 | TMA for contiguous KV (non-paged) | Small (~5%) | Medium |
-| Example 93 cluster decode pattern | High for long ctx | Very High effort, sm100a only |
+| `cublasLtMatmulGrouped` with NVFP4 + device-side shapes (CUDA 13.2 U1) | High for general MoE — host-sync-free expert dispatch | Medium |
+| `cub::DeviceTopK` (AIR algorithm) | Medium — 5× faster top_k>128 | Low |
+| Per-arch FP8 KV stride fix | High — remove `engine.cpp:547` Gemma-4 carve-out + unblock Llama / Mistral / DeepSeek | High — needs per-layer head_dim awareness in KV write/read kernels |
