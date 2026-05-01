@@ -107,7 +107,8 @@ static bool can_decode_fast(int n, const Tensor& expert_up_packed,
             (up_qtype == QType::Q6_K || up_qtype == QType::Q8_0 ||
              up_qtype == QType::Q4_0 || up_qtype == QType::Q4_K ||
              up_qtype == QType::Q5_K || up_qtype == QType::Q2_K ||
-             up_qtype == QType::Q3_K || up_qtype == QType::Q5_1));
+             up_qtype == QType::Q3_K || up_qtype == QType::Q5_1 ||
+             up_qtype == QType::NVFP4));
 }
 
 // ---------------------------------------------------------------------------
