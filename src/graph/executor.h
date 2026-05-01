@@ -370,6 +370,18 @@ public:
         kv_calibrated_.assign(n_kv, false);
     }
 
+    // Drop kv_calibrated_ flags so the next prefill (re-)calibrates the FP8
+    // KV per-layer scale and combines it with the existing high-water mark
+    // (kv_scales_) via std::max. Call this after warmup so the first real
+    // prefill can promote the scale if its activations need a wider range
+    // than the synthetic BOS-token warmup observed (broke Llama-3.2-3B with
+    // `--kv-fp8` until 2026-05-01: warmup absmax was too small, real
+    // generation overflowed FP8 dynamic range, output degenerated within
+    // ~30 tokens).
+    void reset_kv_calibration() {
+        std::fill(kv_calibrated_.begin(), kv_calibrated_.end(), false);
+    }
+
     // Set layer offload manager (optional, for weight offloading)
     void set_offload_manager(LayerOffloadManager* mgr) { offload_mgr_ = mgr; }
 

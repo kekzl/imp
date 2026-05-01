@@ -164,6 +164,16 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
             state.max_blocks_per_seq, state.n_sequences);
     } else if (use_fp8) {
         // FP8 E4M3 quantized KV cache write path with online calibration.
+        //
+        // Calibration strategy: high-water-mark per layer. The first prefill
+        // for a given kv_calibrated_ slot sets the initial scale; subsequent
+        // prefills (after Engine::warmup() resets the calibrated_ flag) only
+        // promote the scale if their absmax exceeds the stored value. The
+        // scale is never reduced, which avoids the warmup-pollution failure
+        // mode where synthetic BOS tokens produced a too-small scale and
+        // real generation overflowed FP8_MAX (was: Llama-3.2-3B with
+        // --kv-fp8 → " France, and, 2008, 201, …"; now: " The capital of
+        // Italy is Rome…").
         float inv_scale;
         if (!kv_calibrated_.empty() && kv_layer < static_cast<int>(kv_calibrated_.size()) &&
             !kv_calibrated_[kv_layer]) {
@@ -171,11 +181,13 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
             Tensor vv_cal = view_tokens(v_, n);
             float k_scale = calibrate_fp8_scale(kv_cal, stream);
             float v_scale = calibrate_fp8_scale(vv_cal, stream);
-            float scale = std::max(k_scale, v_scale);
-            if (scale < 1e-12f) scale = 1.0f;
-            kv_scales_[kv_layer] = scale;
+            float new_scale = std::max(k_scale, v_scale);
+            if (new_scale < 1e-12f) new_scale = 1.0f;
+            // Promote only — the high-water mark is the union of every
+            // prefill we've seen, so values fit FP8 dynamic range.
+            kv_scales_[kv_layer] = std::max(kv_scales_[kv_layer], new_scale);
             kv_calibrated_[kv_layer] = true;
-            inv_scale = 1.0f / scale;
+            inv_scale = 1.0f / kv_scales_[kv_layer];
         } else if (!kv_scales_.empty() && kv_layer < static_cast<int>(kv_scales_.size())) {
             inv_scale = 1.0f / kv_scales_[kv_layer];
         } else {

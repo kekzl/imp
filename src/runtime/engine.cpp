@@ -1407,6 +1407,16 @@ void Engine::warmup() {
     // failure on consumer GPUs — the error propagates to cuBLAS otherwise).
     cudaGetLastError();
     cudaDeviceSynchronize();  // ensure all weight upload/dequant kernels are done
+    // Drop FP8 KV calibrated_ flags so the first real prefill re-runs absmax
+    // and promotes the per-layer scale via high-water-mark. Warmup uses
+    // synthetic BOS tokens whose K/V absmax is unrepresentative; without this
+    // reset, Llama-3.2-3B with --kv-fp8 degenerated to " France, and, 2008,
+    // 201, 201, …" within 30 tokens. The high-water-mark logic in
+    // executor_kv_write.cu (FP8 path) keeps the scale monotonically
+    // non-decreasing, so warmup's contribution survives if it was already
+    // wider than real prefill (Qwen3 case), and real prefill widens it
+    // further when needed (Llama case).
+    if (executor_) executor_->reset_kv_calibration();
     IMP_LOG_INFO("Warmup complete");
 }
 
