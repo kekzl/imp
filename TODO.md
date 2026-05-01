@@ -98,6 +98,48 @@ disabled for these models. Gemma-4 and NVFP4-prequant MoE (Qwen3.6, Gemma-4
 llm-compressor) capture cleanly via the decode fast-path. Generalising the
 fast-path to GGUF MoE = open work item.
 
+### llm-compressor NVFP4 — degenerate output beyond ~30 tokens
+**Discovered via 2026-05-01 stress test battery.** Three llm-compressor
+SafeTensors models (Mistral-Small-3.2-NVFP4, Gemma-4-NVFP4, Qwen3.6-NVFP4)
+all fail at least one of these realistic test classes; the equivalent
+Modelopt-format model (Qwen3-Coder-30B-A3B-Instruct-FP4) passes them all.
+
+| Test (200-tok max) | Mistral-3.2 | Gemma-4 | Qwen3.6 | Qwen3-Coder (Modelopt) |
+|---|---|---|---|---|
+| 200-token coherence ("why sky blue") | ✗ repetition | empty content* | ✓ | ✓ |
+| Python recursion + docstring | ✗ degeneration | empty content* | ✓ | ✓ |
+| Multi-step math | ✗ loop | ✓ "240 km" | ✓ | ✓ |
+| Long-context retrieval (1500-tok prefix) | ✗ "111111…" | empty content* | ✗ "Apache Web Server" | ✓ "476 AD" |
+| Multi-turn name recall (Whiskers) | ✗ forgets | empty content* | ✓ partial | ✓ |
+
+*Gemma-4 returns empty `choices[0].message.content` for 4/5 tests via the
+OpenAI API. The model DOES generate coherent tokens (math test shows full
+output), but the chat-template wraps response in `<channel|>` markers
+that the server's content-extraction filters out. Probably an OpenAI-API
+emit issue, not the underlying model. Worth verifying separately.
+
+The simple "Capital of France" smoke prompts I had been using for
+verification are too short to trigger this — they finish in <30 tokens,
+which is BELOW the degeneration threshold. The "Mistral-3.2 long-context
+regression" memo predates this discovery and only documented the long-prose
+case; the actual regression is broader.
+
+Hypotheses (not yet investigated):
+- llm-compressor format passes through a different path than Modelopt
+  (`is_llm_compressor_nvfp4` reciprocal-flip on `tensor_scale`); maybe the
+  numerical convention difference accumulates over long sequences.
+- All four llm-compressor models tested were affected; Mistral-3.2's
+  SmoothQuant 0.9 hypothesis from `nvfp4_long_context_regression_2026_04_28.md`
+  doesn't apply to Gemma-4 / Qwen3.6 (no SmoothQuant). So a different /
+  broader issue.
+- Could be A/B against PR #88 (CUTLASS NVFP4×NVFP4 path lit up): pre-#88
+  the dequant→cuBLAS fallback had FP32 dequant accumulators that may have
+  masked the issue; post-#88 the native FP4×FP4 path may amplify quant
+  noise on these models. Verify before further investigation.
+
+Workaround until rooted: prefer Modelopt-format NVFP4 prequant where
+available. Memo: `stress_test_safetensors_2026_05_01.md`.
+
 ---
 
 ## Open Performance Work
