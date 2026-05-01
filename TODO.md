@@ -55,22 +55,6 @@ FP32-router / FP32-expert-down env-var stacks insufficient. Practical fix:
 **use Q5_K_M or Q8_0** when output quality matters. Memo:
 `memory/gemma4_q4km_vs_q8_2026_04_19.md`.
 
-### llm-compressor Phase 2 Item 2 (Gemma-4 NVFP4 from llm-compressor)
-PR #65 emits the right scaling tensors but the resulting decode is
-incoherent — likely a scale-semantics flip vs the GGUF NVFP4 path. Fallback:
-**Gemma-4 Q8_0 GGUF** (or Gemma-4 NVFP4 from Model Optimizer, which works
-post PR #85). Memo: `memory/llm_compressor_phase2_item2_2026_04_26.md`.
-
-### Qwen3.6-NVFP4 partial coherence
-Decode fast-path now lit up (PR #85, ~117–142 tok/s on RTX 5090), but two
-known root causes remain in long-form output: (1) RMSNorm `1+W` convention
-not honoured for some sidecars, (2) GDN heads in HF grouped vs GGUF tiled
-order. L0 correlation 0.40→0.95 vs GGUF after fixes, but compounding drift
-across 40 layers still produces incoherent long output. Workaround: use the
-**GGUF Q4_K_M** build (`Qwen3.6-35B-A3B-UD-Q4_K_M.gguf`, 143 tok/s with
-`moe.expert_overhead_pct=10`). Memo:
-`memory/qwen36_nvfp4_decode_partial_2026_04_30.md`.
-
 ### General MoE D2H routing graph-incompatible
 Non-Gemma-4 / non-NVFP4-prequant MoE decode falls through the legacy
 expert-routing path with a D2H sync per layer per token. CUDA Graphs are

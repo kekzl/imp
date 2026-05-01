@@ -17,7 +17,15 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   Memos: `qwen36_nvfp4_decode_underutil_2026_04_30.md`,
   `gemma4_nvfp4_decode_fastpath_2026_05_01.md`.
 - **Six Qwen3.5/3.6-NVFP4 SafeTensors loader bugs** (#81) blocking coherent
-  decode (head layout, RMSNorm `1+W` convention sidecars, etc.).
+  decode: (1) RMSNorm `1+W` convention now honoured via
+  `UploadCtx::arch_norm_offset`, (2) GDN head layout HF-grouped vs
+  GGUF-tiled with kernel `grouped_layout` flag, (3) `partial_rotary_factor`
+  read from both top-level and nested `rope_parameters`,
+  (4) `rope_theta` from nested `rope_parameters.rope_theta`,
+  (5) `A_log → -exp(A_log)` transform applied to BF16/F16 SafeTensors path
+  only, (6) `fp32_scan` y_buf populated outside `debug_forward`. Per-layer
+  correlation vs GGUF Q4_K_M now ≥0.997 across all 40 layers; output
+  matches the GGUF oracle for the standard verification prompt.
 - **Qwen3.5 GDN Q8_0 α/β qtype mismatch** (#59) — `upload_weight` pre-dequanted
   Q8 → FP16 without updating `qtype`. Dispatcher mis-interpreted bytes →
   state collapse (` my my my…`). Memo: `qwen35_q8_alpha_beta_qtype_bug_2026_04_25.md`.
@@ -54,9 +62,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   pp=8192. Stage 5 (`mxf4nvf4.block_scale.scale_vec::4X.m16n8k64`) layouts
   verified byte-exact, integration is the next open Project B item.
 - **NVFP4 SafeTensors loader from llm-compressor** (Phase 1, #63; Phase 2
-  Item 1 Mistral3, #64; Phase 2 Item 2 Gemma-4 partial, #65). Mistral3-NVFP4
-  decode tg ≈ 81 tok/s post Phase 2 Item 1. Gemma-4-NVFP4 from
-  llm-compressor still incoherent (use Model Optimizer NVFP4 instead).
+  Item 1 Mistral3, #64; Phase 2 Item 2 Gemma-4 extras + per-row gemv
+  bypass, #65). Mistral3-NVFP4 decode tg ≈ 81 tok/s post Phase 2 Item 1.
+  Gemma-4-NVFP4 (llm-compressor) decodes coherent end-to-end at ~34 tok/s
+  with default flags after #65 routes M>1 expert GEMV through `gemm_nvfp4`
+  dequant→cuBLAS (legacy serial path's per-row `gemv_nvfp4_kpar` loop
+  produced wrong output at Gemma-4 expert dimensions; M=1 decode path is
+  unchanged).
 - **Qwen3.6-NVFP4 SafeTensors plumbing** (Phase 1 #71) — load-only.
   Decode lit up later via #85.
 - **JSON config plumbing** (#74, #77) — `generation_config.json` sampling
