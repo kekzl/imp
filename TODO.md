@@ -34,13 +34,31 @@ that interacts with specific head_dim / num_kv_heads layouts. The Gemma-4
 carve-out at `engine.cpp:547` is the existing escape hatch; generalising it
 needs storage-planner work, not a one-line fix.
 
-### NVFP4 long-context regression (Mistral-3.2-NVFP4)
-Garbage in input-copy at ~500+ raw tokens (~130 with `[SYSTEM_PROMPT]`
-markers). NOT in the attention path, NOT in RoPE, NOT in token bans.
-Diagnostic env vars added in PR #79; partial workaround landed in PR #78
-(`use_default_system_prompt=false` skips the 600-token jinja default
-system prompt that triggered the cliff). Reproducer + next-step
-methodology: `memory/nvfp4_long_context_regression_2026_04_28.md`.
+### NVFP4 long-context regression (Mistral-3.2-NVFP4) — partial fix landed
+Originally numerical-hash garbage at ~95+ tokens with Lorem ipsum prefixes,
+~130 with `[SYSTEM_PROMPT]` markers, ~250+ with English prose.
+
+**Partial fix shipped via PR #88**: `executor_pre_dequant.cu` now registers
+prequant-promoted NVFP4 weights in `wcache_.cutlass_nvfp4`, lighting up the
+native CUTLASS NVFP4×NVFP4 prefill path that previously fell through to
+`gemm_nvfp4` dequant→cuBLAS. Mistral-3.2-NVFP4 prefill 283 → 3122 tok/s
+(11×); Lorem×11 went from `a long established in 1999999999` (numerical
+garbage) to `a dolor sit amet, consectetur adipiscing elit, Quis...`
+(coherent Latin continuing the prefix). Memos:
+`memory/nvfp4_long_context_regression_2026_04_28.md`,
+`memory/nvfp4_prequant_cutlass_cache_2026_05_01.md`.
+
+**Still open**: long English prose ≥250 tokens doesn't always reach the
+"Paris" answer — the model picks contextually-attracted continuations
+instead. Root cause is the SmoothQuant 0.9 + NVFP4 + FP16-activation
+mismatch (recipe expects dynamic NVFP4 input act-quant; imp uses FP16).
+The CUTLASS NVFP4×NVFP4 path quantizes activations dynamically per-block,
+which reduces but doesn't eliminate the noise. Final fix would
+implement the recipe-intended path: load the per-Linear `input_scale`
+from the SafeTensors and use it for static activation NVFP4 quant on top
+of the dynamic per-block scales (~1-2 days). PR #78
+(`use_default_system_prompt=false`) remains the practical workaround for
+typical chat prompts. Diagnostic env vars added in PR #79.
 
 ### Qwen3.5-27B MXFP4 illegal memory access at load
 12 GiB MXFP4 weights + 48 GiB FP16 fallback oversubscribes VRAM on the
