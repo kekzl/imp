@@ -8,7 +8,7 @@ imp was built entirely by [Claude Code](https://claude.ai/claude-code) (Claude O
 
 1. **Architecture first.** The project started with clean abstractions: a C API, modular source tree (`core/`, `compute/`, `memory/`, `model/`, `runtime/`), and a hardcoded forward pass instead of a runtime graph walker. These early decisions paid dividends throughout.
 
-2. **Kernel-by-kernel.** CUDA kernels were written one at a time, tested against reference implementations, and profiled with `nsys`. Flash Attention 2 (scalar) came first, then WMMA tensor-core variants for Hopper, then TCGEN05 systolic attention for Blackwell. Each kernel was benchmarked before moving on.
+2. **Kernel-by-kernel.** CUDA kernels were written one at a time, tested against reference implementations, and profiled with `nsys`. Flash Attention 2 (scalar) came first, then WMMA tensor-core variants, then CUTLASS SM120 FMHA (FP16/FP8/MXFP4 paths). Each kernel was benchmarked before moving on. (The repo is now `sm_120f`-only; older Hopper paths were removed.)
 
 3. **Quantization from GGUF.** Q8_0 support came first (simplest), then Q6_K, Q4_K, Q5_K, Q4_0. The GGUF parser, tokenizer, and weight upload pipeline were built to match llama.cpp's format exactly — so any GGUF model from Hugging Face works out of the box.
 
@@ -62,7 +62,7 @@ This project welcomes contributions from AI coding agents. If you're an AI agent
 
 6. **Don't break the C API.** The public API in `include/imp/` is stable. Don't change function signatures without updating all callers and the documentation.
 
-7. **CUDA compatibility.** All kernels must compile for sm_90a, sm_100, and sm_120. Use `#if __CUDA_ARCH__` guards for architecture-specific code. Test on actual hardware — the CUDA simulator doesn't catch shared memory sizing issues.
+7. **CUDA architecture.** The repo targets **`sm_120f` only** (RTX 5090, GB202 Blackwell). `CMakeLists.txt` pins `--generate-code=arch=compute_120f,code=sm_120` and disables `CMAKE_CUDA_ARCHITECTURES`. Don't reintroduce sm_80 / sm_90 / sm_100 paths without an explicit reason — they were removed deliberately. Test on actual hardware; the CUDA simulator doesn't catch shared memory sizing issues.
 
 8. **Minimal external dependencies.** The project is nearly self-contained (CUDA Toolkit + standard library + vendored stb_image for vision). Don't add third-party libraries without a very strong reason.
 
@@ -102,7 +102,7 @@ Engine::step()  ◄── called in loop until request complete
     │       │   ├─ QKV projection (fused GEMV for decode, cuBLAS for prefill)
     │       │   ├─ RoPE
     │       │   ├─ KV cache write
-    │       │   ├─ Attention (CUTLASS FMHA (pf) / Blackwell WMMA / Hopper WMMA / scalar)
+    │       │   ├─ Attention (CUTLASS SM120 FMHA prefill / Blackwell paged decode split-K)
     │       │   ├─ O-projection + residual
     │       │   ├─ RMSNorm
     │       │   └─ FFN (SwiGLU or MoE)
