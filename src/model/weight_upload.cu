@@ -1763,7 +1763,14 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream,
         float ws2_min = 1e30f, ws2_max = -1e30f, ws2_sum = 0.0f;
         int ws2_count = 0, ws2_zero = 0;
         std::vector<std::pair<std::string, float>> ws2_samples;
-        if (audit) ws2_samples.reserve(8);
+        // Same stats for input_scale (FP32 scalar per Linear, optional).
+        float is_min = 1e30f, is_max = -1e30f, is_sum = 0.0f;
+        int is_count = 0, is_zero = 0, is_present = 0;
+        std::vector<std::pair<std::string, float>> is_samples;
+        if (audit) {
+            ws2_samples.reserve(8);
+            is_samples.reserve(8);
+        }
         auto upload_scale = [&](Tensor& t) {
             if (!t.data || t.on_device || t.numel() == 0) return;
             size_t bytes = t.nbytes();
@@ -1792,6 +1799,22 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream,
                     ws2_samples.emplace_back(name, p[0]);
                 }
             }
+            if (audit && sc.input_scale.data && !sc.input_scale.on_device) {
+                is_present++;
+                size_t n = sc.input_scale.numel();
+                const float* p = static_cast<const float*>(sc.input_scale.data);
+                for (size_t i = 0; i < n; ++i) {
+                    float v = p[i];
+                    if (v == 0.0f) is_zero++;
+                    if (v < is_min) is_min = v;
+                    if (v > is_max) is_max = v;
+                    is_sum += v;
+                    is_count++;
+                }
+                if (is_samples.size() < 8) {
+                    is_samples.emplace_back(name, p[0]);
+                }
+            }
             upload_scale(sc.weight_scale);
             upload_scale(sc.weight_scale_2);
             upload_scale(sc.input_scale);
@@ -1803,6 +1826,20 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream,
                          ws2_sum / ws2_count);
             for (auto& [n, v] : ws2_samples) {
                 IMP_LOG_INFO("  sample: %s = %.6g", n.c_str(), v);
+            }
+        }
+        if (audit) {
+            if (is_count > 0) {
+                IMP_LOG_INFO("NVFP4 audit: input_scale present in %d/%zu Linears, "
+                             "stats — count=%d zeros=%d min=%.6g max=%.6g mean=%.6g",
+                             is_present, nvfp4_scratch_.size(),
+                             is_count, is_zero, is_min, is_max, is_sum / is_count);
+                for (auto& [n, v] : is_samples) {
+                    IMP_LOG_INFO("  sample: %s.input_scale = %.6g", n.c_str(), v);
+                }
+            } else {
+                IMP_LOG_INFO("NVFP4 audit: no input_scale tensors found "
+                             "(model uses purely dynamic input act-quant)");
             }
         }
         if (scale_count > 0)

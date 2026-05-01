@@ -314,6 +314,64 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             IMP_LOG_INFO("NVFP4 pre-quantized: promoted %d weights to Tensor sidecars",
                          prequant_count);
         }
+
+        // --- Phase 0b: register prequant-promoted NVFP4 weights in CUTLASS cache ---
+        //
+        // Phase 0 set qtype=NVFP4 directly on the main weight Tensor sidecars
+        // but did NOT populate wcache_.nvfp4 (the legacy decode-cache map that
+        // Phase 3b iterates to build the CUTLASS cache). Without this loop,
+        // prefill (M>1) for prequant SafeTensors models falls through to
+        // gemm_nvfp4 dequant→cuBLAS in executor_kernels.cu — slower AND
+        // noisier than native CUTLASS NVFP4×NVFP4. The FP16-act ×
+        // NVFP4-deq-FP16 round-trip amplifies SmoothQuant-induced per-block
+        // quant noise on long context (Mistral-3.2-NVFP4 breaks above ~90
+        // tokens; see memory/nvfp4_long_context_regression_2026_04_28.md).
+        //
+        // Build the CUTLASS cache directly from the Tensor sidecars (data
+        // pointer, scales, tensor_scale, shape) so the prefill dispatch
+        // at executor_kernels.cu:1975 zündet on the native FP4×FP4 path.
+        if (cutlass_sm120_nvfp4_available()) {
+            int ct_count = 0;
+            size_t ct_total = 0;
+            auto register_prequant = [&](const Tensor& w) {
+                if (w.qtype != QType::NVFP4 || !w.data || !w.scales) return;
+                if (wcache_.cutlass_nvfp4.count(w.data)) return;
+                NvFP4QuantResult tmp;
+                tmp.packed_data  = w.data;
+                tmp.micro_scales = w.scales;
+                tmp.tensor_scale = w.tensor_scale;
+                tmp.N            = w.shape[0];
+                tmp.K            = w.shape[1] * 2;  // packed K/2 → logical K
+                CutlassNvFP4Weight cw;
+                convert_nvfp4_to_cutlass(tmp, cw, stream);
+                if (cw.data) {
+                    wcache_.cutlass_nvfp4[w.data] = cw;
+                    ct_total += cw.sf_bytes;
+                    ct_count++;
+                }
+            };
+            for (int i = 0; i < cfg.n_layers; i++) {
+                const auto& L = mut_model->layer(i);
+                register_prequant(L.wq);
+                register_prequant(L.wk);
+                register_prequant(L.wv);
+                register_prequant(L.wo);
+                register_prequant(L.w_gate);
+                register_prequant(L.w_up);
+                register_prequant(L.w_down);
+                register_prequant(L.w_gate_shared);
+                register_prequant(L.w_up_shared);
+                register_prequant(L.w_down_shared);
+            }
+            register_prequant(mut_model->out_proj_);
+
+            if (ct_count > 0) {
+                IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
+                wcache_.cutlass_nvfp4_bytes += ct_total;
+                IMP_LOG_INFO("CUTLASS sm_120 NVFP4 cache (prequant): %d tensors, %.2f MiB",
+                             ct_count, ct_total / (1024.0 * 1024.0));
+            }
+        }
     }
 
     // Helper: does this qtype benefit from NVFP4 conversion? (> 4.5 bits/elem)
