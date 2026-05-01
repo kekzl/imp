@@ -7,32 +7,40 @@ known historical dead ends in `memory/dead_ends.md`.
 
 ## Open Bugs
 
-### FP8 KV cache stride / numerical instability — root cause unknown
-**Workaround live since PR #51**: default KV dtype is FP16; `--kv-fp8` (or
+### FP8 KV cache — Llama-class fix landed (PR #89), Gemma-4 carve-out remains
+**Default policy unchanged (PR #51)**: KV dtype is FP16; `--kv-fp8` (or
 `kv_cache.dtype=fp8` in `imp.conf`) opts in.
 
-PR #52 added an auto-deterministic-cuBLAS gate that fixes the symptom on
-**Qwen3** and **Qwen3.5/3.6 GDN** with FP8 KV active. **Empirically retested
-2026-05-01 across 6 models with the gate engaged**: Llama-3.2-3B, Mistral-Small-3.1
-Q6_K, and DeepSeek-R1-Distill-14B Q6_K still break (degenerate output / illegal
-memory access in `sampling.cu:971` / `<think><｜User｜>` collapse). Therefore
-the "flip default to FP8" recommendation in older notes is refuted.
+The previously-suspected "FP8 KV stride bug" turned out to be a **warmup
+calibration bug**: `Engine::warmup()` runs a forward with synthetic BOS
+tokens, the FP8 write path computed per-layer absmax over those tokens
+and locked the per-layer scale permanently. For Llama-3.2-3B Q8_0 and
+Qwen3.5-4B GDN Q8_0 the synthetic-token absmax was too small for real
+generation → values overflowed FP8 dynamic range → output degenerated
+within ~30 tokens. PR #89 ships:
+1. `Engine::warmup()` calls `executor_->reset_kv_calibration()` to drop
+   `kv_calibrated_` flags; preserves the high-water-mark `kv_scales_[]`.
+2. The FP8 write path promotes the scale monotonically via `std::max`,
+   so any later prefill with wider absmax widens the scale; never narrows.
 
-Per-arch behaviour at decode with default-FP8 KV (hypothetical):
+Per-arch status post #89 with `--kv-fp8`:
 
-| Family | Status | Notes |
-|---|---|---|
-| Qwen3 dense | ✓ coherent | gate sufficient |
-| Qwen3.5/3.6 GDN | ✓ coherent | needs `α/β qtype` fix from PR #59 |
-| Gemma-4 | force-FP16 carve-out at `engine.cpp:547` | Real fix needs per-layer head_dim awareness in KV write/read |
-| Llama-3.2 | ✗ degraded | "is." instead of "is Paris." |
-| Mistral-Small-3.1 | ✗ illegal memory access | `sampling.cu:971` |
-| DeepSeek-R1-Distill | ✗ degenerate | tg=2, instant `<think><｜User｜>` |
+| Family | Status |
+|---|---|
+| Qwen3 dense | ✓ coherent (was already OK; no regression) |
+| Qwen3.5/3.6 GDN | ✓ coherent on raw completions (was broken via memo) |
+| Llama-3.2 | ✓ coherent ("Italy is Rome. Spain is Madrid…") — fixed |
+| Gemma-4 | force-FP16 carve-out still at `engine.cpp:567` |
+| Mistral-Small-3.1 Q6_K | separate tokenizer-level bug (output `<unk>` on FP16 KV too); out of scope |
+| DeepSeek-R1-Distill-14B | not actually broken — chat-template marker artifact |
 
-Root cause is suspected to be a stride mismatch in the FP8 KV write/read path
-that interacts with specific head_dim / num_kv_heads layouts. The Gemma-4
-carve-out at `engine.cpp:547` is the existing escape hatch; generalising it
-needs storage-planner work, not a one-line fix.
+Memo: `memory/fp8_kv_warmup_calibration_2026_05_01.md`.
+
+Remaining open: **Gemma-4 dual head_dim** (256 SWA / 512 global) makes
+the FP8 KV write/read kernels' single-stride assumption fail. The
+`engine.cpp:567` force-FP16 carve-out is the existing escape hatch.
+Generalising it needs per-layer head_dim awareness in the KV write/read
+kernels — a separate, bigger work item from the calibration fix.
 
 ### NVFP4 long-context regression (Mistral-3.2-NVFP4) — partial fix landed
 Originally numerical-hash garbage at ~95+ tokens with Lorem ipsum prefixes,
