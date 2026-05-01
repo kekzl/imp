@@ -8,6 +8,18 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Fixed
 
+- **FP8 KV warmup-calibration bug** (#89) — `Engine::warmup()` ran a forward
+  pass with synthetic BOS tokens; the FP8 write path's online calibration
+  treated this as the FIRST prefill, locked `kv_scales_[layer]` to a
+  too-small absmax, and never recalibrated. Real generation then overflowed
+  FP8 dynamic range on Llama-3.2-3B Q8_0 and Qwen3.5-4B GDN Q8_0 (output
+  degenerated within ~30 tokens, e.g. `" France, and, 2008, 201, 201, …"`).
+  Fix: `Engine::warmup()` drops the `kv_calibrated_` flags at end-of-warmup;
+  the FP8 write path promotes the scale monotonically via `std::max` so
+  the warmup observation survives if it's already wider, and real prefill
+  widens it further when needed. Long generation (100 tokens) on
+  Llama-3.2-3B FP8 KV now produces a clean factually-correct list of world
+  capitals. Memo: `fp8_kv_warmup_calibration_2026_05_01.md`.
 - **NVFP4 prequant CUTLASS prefill cache** (#88) — Phase 0 promotes set
   `Tensor.qtype = NVFP4` directly on the main weight tensors but Phase 3b
   (CUTLASS cache build) only iterated the legacy `wcache_.nvfp4` map.
