@@ -562,11 +562,13 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
             IMP_LOG_INFO("Gemma 4: disabling dual_path_quant");
             config_.dual_path_quant = false;
         }
-        // Force FP16 KV cache (FP8 KV cache calibration reads narrow stride incorrectly)
-        if (config_.kv_cache_dtype == QType::FP8_E4M3) {
-            IMP_LOG_INFO("Gemma 4: forcing FP16 KV cache (FP8 stride mismatch)");
-            config_.kv_cache_dtype = QType::F16;
-        }
+        // (Gemma-4 force-FP16 KV carve-out removed 2026-05-01.) The original
+        // bug was the FP8 KV calibration reading garbage beyond the per-layer
+        // live K/V region — Gemma-4 has dual head_dim (256 SWA / 512 global)
+        // and the workspace is allocated for max_head_dim, leaving a
+        // tail-region of uninitialized memory on SWA layers. The fix in
+        // src/graph/executor_kv_write.cu narrows the calibration view to
+        // `nkv * hd` per layer; FP8 KV is now safe to opt into on Gemma-4.
         // Gemma 4 output_norm has extreme outliers (max=588). Small numeric jitter
         // from cuBLAS algo autotuning / split-K atomics amplifies into wildly
         // different top-1 picks (coherent " Paris" vs garbage "\n"). Force
