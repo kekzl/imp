@@ -88,25 +88,21 @@ std::vector<std::string> parse_bracket_array(std::string_view body) {
 
 } // namespace
 
+bool name_is_skipped(const std::string& in) {
+    return starts_with(in, "model.vision_tower.") ||
+           starts_with(in, "model.visual.") ||
+           starts_with(in, "vision_tower.") ||
+           starts_with(in, "multi_modal_projector.") ||
+           starts_with(in, "mtp.") ||
+           starts_with(in, "model.mtp.");
+}
+
 NameTranslation translate_name(const std::string& in, TranslationCounters& counters) {
     std::string out = in;
 
-    // Step 1: skip patterns (vision tower / multimodal projector). Cover both
-    // the Gemma-4 nesting (model.vision_tower.*) and the Mistral3-style raw
-    // top-level layout (vision_tower.* / multi_modal_projector.*).
-    if (starts_with(out, "model.vision_tower.") ||
-        starts_with(out, "model.visual.") ||
-        starts_with(out, "vision_tower.") ||
-        starts_with(out, "multi_modal_projector.")) {
+    // Step 1: skip patterns (vision tower / multimodal projector / MTP head).
+    if (name_is_skipped(out)) {
         counters.vision_skipped++;
-        return {NameTranslation::SKIP, ""};
-    }
-
-    // MTP head (Qwen3.6 multi-token-predictor — speculative-decoding helper).
-    // Phase 1 skips entirely; if/when we implement spec decode against the
-    // bundled MTP, we'll route these through a separate translate path.
-    if (starts_with(out, "mtp.") || starts_with(out, "model.mtp.")) {
-        counters.vision_skipped++;  // reuse counter; logged as "skipped tensors"
         return {NameTranslation::SKIP, ""};
     }
 

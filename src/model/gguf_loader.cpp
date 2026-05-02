@@ -619,7 +619,11 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
     }
     size_t file_size = static_cast<size_t>(st.st_size);
 
-    void* mmap_base = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    void* mmap_base = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
+    if (mmap_base == MAP_FAILED) {
+        // Retry without MAP_POPULATE (some FS / mount-options reject it).
+        mmap_base = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    }
     close(fd);
 
     if (mmap_base == MAP_FAILED) {
@@ -627,7 +631,8 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
         return nullptr;
     }
 
-    // Advise the kernel we'll read sequentially
+    // Hint kernel: sequential read pattern + load pages now.
+    madvise(mmap_base, file_size, MADV_WILLNEED);
     madvise(mmap_base, file_size, MADV_SEQUENTIAL);
 
     auto data = reinterpret_cast<const uint8_t*>(mmap_base);
@@ -740,7 +745,10 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                 struct stat sst;
                 fstat(sfd, &sst);
                 size_t shard_size = static_cast<size_t>(sst.st_size);
-                void* shard_mmap = mmap(nullptr, shard_size, PROT_READ, MAP_PRIVATE, sfd, 0);
+                void* shard_mmap = mmap(nullptr, shard_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, sfd, 0);
+                if (shard_mmap == MAP_FAILED) {
+                    shard_mmap = mmap(nullptr, shard_size, PROT_READ, MAP_PRIVATE, sfd, 0);
+                }
                 close(sfd);
 
                 if (shard_mmap == MAP_FAILED) {
@@ -749,6 +757,7 @@ std::unique_ptr<Model> load_gguf(const std::string& path) {
                     munmap(mmap_base, file_size);
                     return nullptr;
                 }
+                madvise(shard_mmap, shard_size, MADV_WILLNEED);
                 madvise(shard_mmap, shard_size, MADV_SEQUENTIAL);
                 extra_mmaps.emplace_back(shard_mmap, shard_size);
 

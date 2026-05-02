@@ -14,10 +14,14 @@
 #include <filesystem>
 #include <fstream>
 #include <set>
+#include <map>
 #include <unordered_map>
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <thread>
+#include <mutex>
+#include <atomic>
 
 namespace imp {
 
@@ -397,9 +401,17 @@ static bool load_shard(const std::string& path,
     size_t file_size = static_cast<size_t>(st.st_size);
     if (file_size < 8) { close(fd); return false; }
 
-    void* mmap_base = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    void* mmap_base = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
     close(fd);
-    if (mmap_base == MAP_FAILED) return false;
+    if (mmap_base == MAP_FAILED) {
+        // MAP_POPULATE may fail on some filesystems; retry without it.
+        int fd2 = open(path.c_str(), O_RDONLY);
+        if (fd2 < 0) return false;
+        mmap_base = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd2, 0);
+        close(fd2);
+        if (mmap_base == MAP_FAILED) return false;
+    }
+    madvise(mmap_base, file_size, MADV_WILLNEED);
     madvise(mmap_base, file_size, MADV_SEQUENTIAL);
 
     shard.mmap_base = mmap_base;
@@ -500,12 +512,29 @@ static bool load_sharded(const std::string& model_dir,
         return false;
     }
 
-    // Collect unique shard filenames
-    std::set<std::string> shard_files;
+    // Collect tensors per shard (need this to decide whether a shard is
+    // entirely skippable — e.g. an MTP-only shard when spec decode is off,
+    // or a vision-only shard when no mmproj is configured).
+    std::map<std::string, std::vector<std::string>> shard_tensors;
     for (const auto& kv : weight_map->obj) {
         if (kv.second.type == JType::STRING) {
-            shard_files.insert(kv.second.str_val);
+            shard_tensors[kv.second.str_val].push_back(kv.first);
         }
+    }
+
+    // Drop shards where every tensor would be skipped by translate_name.
+    // Saves the mmap + header parse + page cache pressure for an unused file.
+    std::set<std::string> shard_files;
+    for (auto& [fname, tensors] : shard_tensors) {
+        bool all_skip = !tensors.empty() &&
+                        std::all_of(tensors.begin(), tensors.end(),
+                                    imp::llm_compressor::name_is_skipped);
+        if (all_skip) {
+            IMP_LOG_INFO("Skipping shard %s (%zu tensors are MTP/vision-only and unused)",
+                         fname.c_str(), tensors.size());
+            continue;
+        }
+        shard_files.insert(fname);
     }
 
     IMP_LOG_INFO("Sharded SafeTensors: %zu shards", shard_files.size());
@@ -517,16 +546,43 @@ static bool load_sharded(const std::string& model_dir,
         probe_ok && probe_cfg.format == imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR;
     imp::llm_compressor::TranslationCounters tcounters{};
 
-    // Load each shard
-    for (const auto& filename : shard_files) {
-        std::string shard_path = model_dir + "/" + filename;
-        ShardInfo shard;
-        if (!load_shard(shard_path, tensor_map, shard, llm_compressor_format, tcounters)) {
+    // Parse shards in parallel (mmap + header decode are independent per file).
+    std::vector<std::string> shard_list(shard_files.begin(), shard_files.end());
+    std::vector<std::unordered_map<std::string, Tensor>> per_shard_maps(shard_list.size());
+    std::vector<ShardInfo> per_shard_info(shard_list.size());
+    std::vector<imp::llm_compressor::TranslationCounters> per_shard_counters(shard_list.size());
+    std::atomic<bool> any_failure{false};
+
+    auto worker = [&](size_t i) {
+        std::string shard_path = model_dir + "/" + shard_list[i];
+        if (!load_shard(shard_path, per_shard_maps[i], per_shard_info[i],
+                        llm_compressor_format, per_shard_counters[i])) {
             IMP_LOG_ERROR("Failed to load shard: %s", shard_path.c_str());
-            return false;
+            any_failure.store(true);
         }
-        shards.push_back(shard);
-        IMP_LOG_INFO("Loaded shard: %s (%zu tensors total)", filename.c_str(), tensor_map.size());
+    };
+
+    {
+        std::vector<std::thread> ts;
+        ts.reserve(shard_list.size());
+        for (size_t i = 0; i < shard_list.size(); ++i) ts.emplace_back(worker, i);
+        for (auto& t : ts) t.join();
+    }
+
+    if (any_failure.load()) return false;
+
+    // Merge per-shard results into the caller-owned aggregates.
+    for (size_t i = 0; i < shard_list.size(); ++i) {
+        for (auto& kv : per_shard_maps[i]) tensor_map.emplace(kv.first, kv.second);
+        shards.push_back(per_shard_info[i]);
+        const auto& c = per_shard_counters[i];
+        tcounters.suffix_renames += c.suffix_renames;
+        tcounters.prefix_strips  += c.prefix_strips;
+        tcounters.vision_skipped += c.vision_skipped;
+        tcounters.gemma4_extras  += c.gemma4_extras;
+        tcounters.passed_through += c.passed_through;
+        IMP_LOG_INFO("Loaded shard: %s (%zu tensors total)",
+                     shard_list[i].c_str(), tensor_map.size());
     }
 
     if (llm_compressor_format) {

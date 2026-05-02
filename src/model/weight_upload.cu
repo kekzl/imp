@@ -62,13 +62,17 @@ static cudaError_t checked_cuda_malloc(void** ptr, size_t size) {
 // Achieves true async DMA at full PCIe bandwidth (~25 GB/s on PCIe 5.0).
 // ---------------------------------------------------------------------------
 struct PinnedStager {
-    static constexpr size_t kChunkSize = 64 << 20;  // 64 MiB per buffer
-    void* buf[2] = {};
-    cudaEvent_t done[2] = {};
+    // Ring of N pinned buffers — deeper pipeline lets CPU memcpy stay ahead of
+    // queued DMAs, smoothing per-tensor stalls (each tensor wakes one DMA, ring
+    // depth N keeps N-1 DMAs queued while CPU fills the next).
+    static constexpr int kRing = 4;
+    static constexpr size_t kChunkSize = 128 << 20;  // 128 MiB per buffer (4 × 128 MiB = 512 MiB)
+    void* buf[kRing] = {};
+    cudaEvent_t done[kRing] = {};
     int idx = 0;
 
     bool init() {
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < kRing; i++) {
             if (cudaHostAlloc(&buf[i], kChunkSize, cudaHostAllocDefault) != cudaSuccess) {
                 destroy();
                 return false;
@@ -82,7 +86,7 @@ struct PinnedStager {
         cudaError_t last = cudaSuccess;
         for (size_t off = 0; off < n; ) {
             size_t chunk = std::min(n - off, kChunkSize);
-            int b = idx & 1;
+            int b = idx % kRing;
             cudaEventSynchronize(done[b]);
             memcpy(buf[b], static_cast<const char*>(src) + off, chunk);
             last = cudaMemcpyAsync(static_cast<char*>(dst) + off, buf[b],
@@ -95,7 +99,7 @@ struct PinnedStager {
     }
 
     void destroy() {
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < kRing; i++) {
             if (done[i]) { cudaEventSynchronize(done[i]); cudaEventDestroy(done[i]); done[i] = nullptr; }
             if (buf[i]) { IMP_CUDA_CHECK_LOG(cudaFreeHost(buf[i])); buf[i] = nullptr; }
         }
@@ -1340,6 +1344,17 @@ static bool upload_expert_weights(
                          free_mem / (1024.0*1024.0*1024.0),
                          expert_reserve_bytes / (1024.0*1024.0*1024.0));
         }
+
+        // Re-arm the cached free-memory window so per-expert checked_cuda_malloc
+        // calls don't fall back to a sync cudaMemGetInfo on every tensor.
+        // The budget we just computed is what we plan to spend; reflect that
+        // as headroom in the cached counter.
+        g_cached_free_mem = free_mem;
+        g_total_allocated = 0;
+        // We've already accounted for expert_reserve_bytes + overhead in the
+        // budget decision above, so for checked_cuda_malloc we drop the
+        // per-call reserve to avoid double-counting.
+        g_vram_reserve = 0;
     }
 
     // Upload expert weights for each layer
@@ -1670,7 +1685,8 @@ bool Model::upload_weights_gpu(QType compute_dtype, cudaStream_t stream,
 
     if (staging_guard.stager.init()) {
         g_stager = &staging_guard.stager;
-        IMP_LOG_INFO("Pinned staging enabled (2x %.0f MiB buffers)",
+        IMP_LOG_INFO("Pinned staging enabled (%dx %.0f MiB ring)",
+                     PinnedStager::kRing,
                      PinnedStager::kChunkSize / (1024.0 * 1024.0));
     } else {
         IMP_LOG_WARN("Pinned staging alloc failed, using default H2D path");
