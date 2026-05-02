@@ -594,6 +594,18 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // Gemma 4: FP8 prefill, NVFP4 prefill, CUTLASS paths, and CUDA graphs all have
     // incompatibilities with the per-layer head_dim + split MoE tensor layout.
     // Force plain FP16 paths for Gemma 4 until proper kernels are added.
+    // GDN models can't use FP8 prefill: recurrent state accumulates precision
+    // error per token, FP8 E4M3 (3-bit mantissa) amplifies it through the delta
+    // rule scan and degenerates output after ~50 multi-turn special tokens.
+    // Decide this BEFORE executor_->init() so the fp8_activation scratch
+    // buffer + d_act_scale / d_fp8_block_maxes / d_fp8_absmax aren't allocated
+    // and then never used (was happening when the disable lived inside
+    // init_kv_cache, ~3 MiB pure waste). Dual-path quant keeps the FP8 path
+    // for FFN even on GDN — only attention drops to FP16.
+    if (config_.use_fp8_prefill && !config_.dual_path_quant && n_gdn_auto > 0) {
+        IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)");
+        config_.use_fp8_prefill = 0;
+    }
     if (model_->config().arch == ModelArch::GEMMA4) {
         // CUDA graphs: enabled for Gemma-4 decode. The MoE decode fast path is fully
         // device-side (dp4a GEMV, no D2H memcpy), so graph capture works.
