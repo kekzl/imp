@@ -36,10 +36,14 @@ public:
     bool init(float headroom_fraction = 0.10f);
 
     // Allocate device memory. Returns nullptr if:
-    //  - allocation would violate headroom
+    //  - allocation would violate headroom (unless bypass_headroom=true)
     //  - cudaMalloc fails
     // tag: descriptive name for reporting (e.g. "kv_cache", "fp8_weights")
-    void* allocate(size_t bytes, const char* tag);
+    // bypass_headroom: skip the cudaMemGetInfo headroom pre-check. Use only
+    //   for paths that self-track a logical budget (e.g. NVFP4 MoE cache,
+    //   where per-call alloc/free is balanced but cudaMemGetInfo doesn't
+    //   reflect cudaFree's of upload-time per-expert weights in time).
+    void* allocate(size_t bytes, const char* tag, bool bypass_headroom = false);
 
     // Free a pointer previously returned by allocate().
     void free(void* ptr);

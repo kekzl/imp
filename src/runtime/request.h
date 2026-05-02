@@ -57,6 +57,19 @@ struct Request {
     float mirostat_mu = 0.0f;         // Running variable (persists across tokens, init = 2*tau)
     bool ignore_eos = false;   // Don't stop on EOS (benchmark mode)
     bool in_think_block = false; // Currently inside <think>...</think> (suppress stop tokens)
+    // Sliding-window decoded-text buffer for multi-token </think> detection.
+    // Required for tokenizers that ship <think>/</think> as added_tokens with
+    // special=False (Qwen3.6, Qwen3-Coder NVFP4 SafeTensors): the model emits
+    // </think> as multiple BPE tokens (e.g. ['</', 'think', '>']) so a single-
+    // token-id compare in track_think_state can never trip. We accumulate the
+    // last ~32 decoded chars and scan for the literal string instead.
+    std::string think_text_tail;
+    // Output-tokens index at which the think block was last exited, or -1 if
+    // we have never been in a think block. Used to enforce a minimum answer
+    // budget after </think> on numerically-noisy NVFP4 quants whose model
+    // sometimes closes an empty thinking block and would otherwise EOS to
+    // a 0-content completion.
+    int think_exit_idx = -1;
     float think_budget = 0.0f;  // Fraction of max_tokens for reasoning (0=unlimited)
     int prefill_offset = 0;    // Chunked prefill: tokens processed so far
     int cached_tokens = 0;     // Tokens served from prefix cache (skipped in prefill)

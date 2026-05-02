@@ -981,7 +981,14 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
             return;
         }
 
-        err = imp_prefill(state.ctx, imp_req->input_tokens.data(), n_prompt_tokens);
+        // Build params now so prefill's first-token sample also honours them
+        ImpGenerateParams prefill_params = imp_generate_params_default();
+        prefill_params.temperature = temperature;
+        prefill_params.top_p = top_p;
+        prefill_params.top_k = top_k;
+        prefill_params.seed = seed;
+        err = imp_prefill_with_params(state.ctx, imp_req->input_tokens.data(),
+                                      n_prompt_tokens, &prefill_params);
         if (err != IMP_SUCCESS) {
             state.ctx->engine->clear_image();
             state.batching->start(state.ctx);

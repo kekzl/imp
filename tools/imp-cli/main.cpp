@@ -198,7 +198,7 @@ int main(int argc, char** argv) {
         // Warmup: 1 full prefill+decode cycle (discarded)
         fprintf(stderr, "Warmup...\n");
         imp_context_reset(ctx);
-        imp_prefill(ctx, tokens.data(), args.bench_pp);
+        imp_prefill_with_params(ctx, tokens.data(), args.bench_pp, &bench_params);
         for (int s = 0; s < tg_tokens; s++) {
             int32_t tok = 0;
             imp_decode_step(ctx, &bench_params, &tok);
@@ -209,7 +209,7 @@ int main(int argc, char** argv) {
         for (int rep = 0; rep < args.bench_reps; rep++) {
             imp_context_reset(ctx);
             auto t0 = std::chrono::high_resolution_clock::now();
-            err = imp_prefill(ctx, tokens.data(), args.bench_pp);
+            err = imp_prefill_with_params(ctx, tokens.data(), args.bench_pp, &bench_params);
             auto t1 = std::chrono::high_resolution_clock::now();
             if (err != IMP_SUCCESS) {
                 fprintf(stderr, "Prefill error on rep %d: %s\n", rep, imp_error_string(err));
@@ -222,7 +222,7 @@ int main(int argc, char** argv) {
         double tg_total_ms = 0;
         for (int rep = 0; rep < args.bench_reps; rep++) {
             imp_context_reset(ctx);
-            err = imp_prefill(ctx, tokens.data(), args.bench_pp);
+            err = imp_prefill_with_params(ctx, tokens.data(), args.bench_pp, &bench_params);
             if (err != IMP_SUCCESS) {
                 fprintf(stderr, "Prefill error on tg rep %d: %s\n", rep, imp_error_string(err));
                 break;
@@ -331,8 +331,8 @@ int main(int argc, char** argv) {
                 // Reset context for fresh KV cache
                 imp_context_reset(ctx);
 
-                // Prefill with templated tokens
-                err = imp_prefill(ctx, tokens.data(), static_cast<int>(tokens.size()));
+                // Prefill with templated tokens (params apply to first sample)
+                err = imp_prefill_with_params(ctx, tokens.data(), static_cast<int>(tokens.size()), &params);
                 if (err != IMP_SUCCESS) {
                     fprintf(stderr, "Prefill error: %s\n", imp_error_string(err));
                     history.pop_back();
@@ -528,7 +528,7 @@ int main(int argc, char** argv) {
 
             // Prefill with timing
             auto t_prefill_start = std::chrono::high_resolution_clock::now();
-            err = imp_prefill(ctx, tokens.data(), n_prompt_tokens);
+            err = imp_prefill_with_params(ctx, tokens.data(), n_prompt_tokens, &params);
             auto t_prefill_end = std::chrono::high_resolution_clock::now();
             if (err != IMP_SUCCESS) {
                 fprintf(stderr, "Prefill error: %s\n", imp_error_string(err));
@@ -571,20 +571,30 @@ int main(int argc, char** argv) {
                 err = imp_decode_step(ctx, &params, &token);
                 if (err != IMP_SUCCESS) break;
 
-                if (token == tok->eos_id()) break;
-                if (have_template) {
-                    bool is_stop = false;
+                // Hide stop tokens from the user but DON'T break the loop —
+                // the engine has the authoritative stop logic (think-state
+                // suppression, max_tokens budget). When the engine actually
+                // finishes the request the next imp_decode_step returns
+                // IMP_ERROR_INTERNAL and we exit above. Bailing here on the
+                // first eos / im_end stops generation while the engine is
+                // still inside a <think> block on Qwen3.6-NVFP4 long-context
+                // (model emits <|im_end|> after empty thought; engine flips
+                // in_think to false implicitly and continues into the actual
+                // answer; CLI was previously cutting it off mid-recovery).
+                bool hide_token = (token == tok->eos_id());
+                if (have_template && !hide_token) {
                     for (int32_t stop_id : chat_tpl.stop_token_ids()) {
-                        if (token == stop_id) { is_stop = true; break; }
+                        if (token == stop_id) { hide_token = true; break; }
                     }
-                    if (is_stop) break;
                 }
 
                 output_ids.push_back(token);
                 std::string piece = tok->decode_token(token);
                 if (step < 10) fprintf(stderr, "[tok=%d '%s'] ", token, piece.c_str());
-                printf("%s", piece.c_str());
-                fflush(stdout);
+                if (!hide_token) {
+                    printf("%s", piece.c_str());
+                    fflush(stdout);
+                }
 
                 // Check text-level stop sequences
                 if (!args.stop_sequences.empty()) {
