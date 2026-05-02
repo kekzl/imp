@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <exception>
+#include <stdexcept>
 
 BatchingEngine::~BatchingEngine() {
     stop();
@@ -124,8 +126,47 @@ void BatchingEngine::worker_loop() {
             }
         }
 
-        // 3. Run one engine step (processes all scheduled requests)
-        (void)engine->step();
+        // 3. Run one engine step (processes all scheduled requests).
+        // Wrap in try/catch — a bug in any model/quant/cuda path that throws
+        // mid-forward used to call std::terminate and kill the container,
+        // taking every other in-flight request with it. Now we cancel all
+        // active requests with a clear reason and keep the worker alive.
+        try {
+            (void)engine->step();
+        } catch (const std::exception& e) {
+            IMP_LOG_ERROR("BatchingEngine: engine->step() threw %s — cancelling %zu active request(s)",
+                          e.what(), active_requests_.size());
+            for (auto& sr : active_requests_) {
+                if (sr->request->status != imp::RequestStatus::FINISHED &&
+                    sr->request->status != imp::RequestStatus::CANCELLED) {
+                    sr->request->status = imp::RequestStatus::CANCELLED;
+                    kv_mgr->free_sequence(sr->request->id);
+                    engine->reset_ssm_state(sr->request->id);
+                }
+                sr->push_finish("internal_error");
+            }
+            // Reset engine-level transient state so the next request starts clean.
+            engine->invalidate_graphs();
+            engine->reset_batch_pool_cache();
+            active_requests_.clear();
+            continue;
+        } catch (...) {
+            IMP_LOG_ERROR("BatchingEngine: engine->step() threw non-std exception — cancelling %zu active request(s)",
+                          active_requests_.size());
+            for (auto& sr : active_requests_) {
+                if (sr->request->status != imp::RequestStatus::FINISHED &&
+                    sr->request->status != imp::RequestStatus::CANCELLED) {
+                    sr->request->status = imp::RequestStatus::CANCELLED;
+                    kv_mgr->free_sequence(sr->request->id);
+                    engine->reset_ssm_state(sr->request->id);
+                }
+                sr->push_finish("internal_error");
+            }
+            engine->invalidate_graphs();
+            engine->reset_batch_pool_cache();
+            active_requests_.clear();
+            continue;
+        }
 
         // 4. Deliver new tokens and check for completion
         imp::Tokenizer* tok = engine->model()->tokenizer();

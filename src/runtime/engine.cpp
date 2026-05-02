@@ -1555,6 +1555,15 @@ bool Engine::step_schedule() {
 void Engine::step_prefill(cudaStream_t stream) {
     int effective_chunk = config_.prefill_chunk_size > 0
         ? config_.prefill_chunk_size : executor_->max_tokens();
+    // Hard cap: chunk size must never exceed the executor's max_tokens
+    // (which is itself capped to 256 for SSM/GDN+MoE hybrids and 512 for
+    // dense GDN to bound workspace VRAM). Without this clamp, a server-side
+    // prefill_chunk_size default of 512 (handlers.cpp) overflows the
+    // workspace and crashes with `n_tokens (X) exceeds max_tokens (Y)` →
+    // `terminate: reshape: numel mismatch` on long prompts to e.g. Qwen3.6.
+    if (effective_chunk > executor_->max_tokens()) {
+        effective_chunk = executor_->max_tokens();
+    }
     if (kv_manager_) {
         int bs = kv_manager_->kv_cache()->block_size();
         if (effective_chunk > bs)
@@ -2130,7 +2139,6 @@ void Engine::step_decode_forward(std::vector<std::shared_ptr<Request>>& valid_de
             graph_runner.invalidate_for_update();
             last_decode_max_blocks_per_graph_[graph_idx] = gpu_batch.max_blocks_per_seq;
         }
-
         // Graph captures ONLY forward_logits — sampling runs eager after
         Tensor logits_out;
         graph_runner.set_decode_fn(

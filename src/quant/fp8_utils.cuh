@@ -73,11 +73,18 @@ __device__ __forceinline__ uint8_t float_to_fp8_e4m3(float val)
             }
         }
         result = (uint8_t)((sign << 7) | m3);
-    } else if (e4 >= 15) {
-        // E4M3 has no Inf/NaN for saturation; clamp to max normal (e=14, m=7) = 448.
-        result = (uint8_t)((sign << 7) | (14 << 3) | 7);
+    } else if (e4 > 15) {
+        // True overflow (input > E4M3-fn max range): saturate to max normal
+        // 448 = (1 + 6/8) * 2^8, bits 0x7E.
+        // (Earlier code returned (14<<3)|7 = 0x77, decode 240 — a 0.536× squash
+        // for any value ≥ 256. This was the precision cliff that broke
+        // compressed-tensors NVFP4 prequant: outlier-block scales near 447
+        // got read back as 240, halving GEMM output on affected rows.)
+        result = (uint8_t)((sign << 7) | (15 << 3) | 6);
     } else {
-        // Normal: round-to-nearest-even.
+        // Normal range, including e4=15 (which is valid for m=0..6, encoding
+        // the [256, 448] range; m=7 is the only NaN slot in E4M3-fn).
+        // Round-to-nearest-even.
         uint32_t round_bit = (f_man >> 19) & 1;
         uint32_t sticky = (f_man & 0x7FFFF) ? 1 : 0;
         uint8_t m3 = (uint8_t)((f_man >> 20) & 0x07);
@@ -86,12 +93,15 @@ __device__ __forceinline__ uint8_t float_to_fp8_e4m3(float val)
             if (m3 > 7) {
                 m3 = 0;
                 e4 += 1;
-                if (e4 >= 15) {
-                    result = (uint8_t)((sign << 7) | (14 << 3) | 7);
+                if (e4 > 15) {
+                    // Round-up overflowed past the highest valid e_field.
+                    result = (uint8_t)((sign << 7) | (15 << 3) | 6);
                     return result;
                 }
             }
         }
+        // Saturate the NaN slot (e=15, m=7) to max normal (e=15, m=6).
+        if (e4 == 15 && m3 == 7) m3 = 6;
         result = (uint8_t)((sign << 7) | ((e4 & 0x0F) << 3) | (m3 & 0x07));
     }
     return result;

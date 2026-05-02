@@ -70,10 +70,21 @@ static int apply_pdl_edges(cudaGraph_t graph) {
         if (edge_data[i].type != cudaGraphDependencyTypeDefault) continue;
         if (!is_kernel(from[i]) || !is_kernel(to[i])) continue;
 
-        // Check if the source kernel has PDL enabled
+        // Check if the source kernel has PDL enabled.
+        // NOTE: cudaGraphKernelNodeGetParams returns kparams.func = nullptr
+        // for kernel nodes added via the driver-API form (CUkernel handle
+        // rather than a host __global__ symbol pointer) AND sets the global
+        // CUDA last-error to "invalid device function". That error is benign
+        // in our flow — we just want to look up the host pointer in the PDL
+        // registry, so a null func means "not in registry, skip it". We
+        // clear the error immediately so it doesn't surface as a stale
+        // error two function frames up at the start of the next forward
+        // pass (which used to log every request as
+        // "Cleared stale error before forward: invalid device function").
         cudaKernelNodeParams kparams{};
         cudaError_t kerr = cudaGraphKernelNodeGetParams(from[i], &kparams);
-        if (kerr != cudaSuccess || !pdl::is_enabled(kparams.func)) {
+        if (kerr != cudaSuccess || !kparams.func || !pdl::is_enabled(kparams.func)) {
+            (void)cudaGetLastError();  // swallow the per-edge "invalid device function"
             skipped_non_pdl++;
             continue;
         }

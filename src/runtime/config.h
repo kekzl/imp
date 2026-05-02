@@ -25,7 +25,7 @@ struct RuntimeConfig {
     struct Runtime {
         bool        deterministic_gemm = false;
         std::string cuda_graphs        = "auto";   // "auto" | "always" | "never"
-        bool        warmup             = true;
+        bool        warmup             = false;  // opt-in for prod rollout; off in dev/CI
         int         max_seq_len        = 0;        // 0 = use model default
         bool        no_pdl             = false;
         bool        debug_raw          = false;    // raw stream debug
