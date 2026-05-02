@@ -370,15 +370,18 @@ public:
         kv_calibrated_.assign(n_kv, false);
     }
 
-    // Drop kv_calibrated_ flags so the next prefill (re-)calibrates the FP8
-    // KV per-layer scale and combines it with the existing high-water mark
-    // (kv_scales_) via std::max. Call this after warmup so the first real
-    // prefill can promote the scale if its activations need a wider range
-    // than the synthetic BOS-token warmup observed (broke Llama-3.2-3B with
-    // `--kv-fp8` until 2026-05-01: warmup absmax was too small, real
-    // generation overflowed FP8 dynamic range, output degenerated within
-    // ~30 tokens).
+    // Drop both the calibrated_ flag and the per-layer scale so the next
+    // prefill recalibrates from a clean slate. Call this after warmup —
+    // synthetic BOS tokens produce unrepresentative K/V absmax statistics
+    // (Llama: too-small absmax, scale locked too tight, real data
+    // overflowed FP8_MAX → degenerate output; Gemma-4: too-large absmax
+    // from extreme output_norm outliers, scale locked too wide, real
+    // data quantized to too-coarse FP8 grid → "Federer" garbage).
+    // Resetting the scale value (not just the flag) avoids both failure
+    // modes. High-water-mark within a single generation still applies
+    // via the std::max in executor_kv_write.cu.
     void reset_kv_calibration() {
+        std::fill(kv_scales_.begin(), kv_scales_.end(), 1.0f);
         std::fill(kv_calibrated_.begin(), kv_calibrated_.end(), false);
     }
 

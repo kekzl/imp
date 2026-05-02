@@ -177,8 +177,24 @@ void GraphExecutor::write_kv_cache(int layer, const InferenceState& state,
         float inv_scale;
         if (!kv_calibrated_.empty() && kv_layer < static_cast<int>(kv_calibrated_.size()) &&
             !kv_calibrated_[kv_layer]) {
+            // Narrow the calibration view to the per-layer K/V shape. The k_/v_
+            // workspaces are sized for max_nkv * max_head_dim across all layers
+            // (Gemma-4 dual head_dim 256 SWA / 512 global; uniform on Llama / Qwen).
+            // Without narrowing, calibrate_fp8_scale would absmax-reduce over
+            // uninitialized memory beyond the live data region for layers with
+            // smaller head_dim, producing a scale derived from junk and
+            // permanently locking the FP8 dynamic range to the wrong value
+            // (was the root cause of the Gemma-4 force-FP16 carve-out at
+            // engine.cpp:567).
             Tensor kv_cal = view_tokens(k_, n);
             Tensor vv_cal = view_tokens(v_, n);
+            const int64_t live_cols = static_cast<int64_t>(nkv) * hd;
+            if (kv_cal.shape[1] != live_cols) {
+                kv_cal.shape[1] = live_cols; kv_cal.compute_strides();
+            }
+            if (vv_cal.shape[1] != live_cols) {
+                vv_cal.shape[1] = live_cols; vv_cal.compute_strides();
+            }
             float k_scale = calibrate_fp8_scale(kv_cal, stream);
             float v_scale = calibrate_fp8_scale(vv_cal, stream);
             float new_scale = std::max(k_scale, v_scale);
