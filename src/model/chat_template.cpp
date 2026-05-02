@@ -933,7 +933,19 @@ std::vector<int32_t> ChatTemplate::apply_jinja(
     jinja::Context ctx;
     ctx["messages"] = jinja::Value(build_jinja_messages(msgs, suppress_thinking));
     ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt);
-    ctx["enable_thinking"] = jinja::Value(!suppress_thinking);
+    // Only stamp `enable_thinking` when the caller is explicitly suppressing
+    // thinking. Different model families pick OPPOSITE defaults when the
+    // variable is undefined: Qwen3 / Qwen3.6 inject an open `<think>\n` and
+    // expect the model to write reasoning; Gemma-4's it template injects a
+    // pre-closed `<|channel>thought\n<channel|>` block (model writes the
+    // answer directly). Forcing `enable_thinking=true` on every render
+    // overrode Gemma-4's template default and put NVFP4 quants into a
+    // verbose-think loop with no exit ("* Wait, I should...", "* Let's try
+    // a simpler one:", repeating). Leaving the variable undefined for the
+    // default case lets each template author's default win.
+    if (suppress_thinking) {
+        ctx["enable_thinking"] = jinja::Value(false);
+    }
     ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
     ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
 
@@ -1000,7 +1012,11 @@ std::vector<int32_t> ChatTemplate::apply_jinja_with_tools(
     ctx["tools"] = jinja::Value(std::move(tools_arr));
     ctx["tool_choice"] = jinja::Value(tool_choice);
     ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt);
-    ctx["enable_thinking"] = jinja::Value(!suppress_thinking);
+    // See apply_jinja for the defaults rationale; same logic for the
+    // tools-aware path.
+    if (suppress_thinking) {
+        ctx["enable_thinking"] = jinja::Value(false);
+    }
     ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
     ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));
 
