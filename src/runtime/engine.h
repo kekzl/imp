@@ -7,9 +7,6 @@
 #include "runtime/batch.h"
 #include "runtime/green_ctx.h"
 #include "runtime/cuda_graph.h"
-#include "runtime/speculative.h"
-#include "runtime/self_speculative.h"
-#include "runtime/ngram_spec.h"
 #include "runtime/vision_pipeline.h"
 #include "runtime/constraint_manager.h"
 #include "memory/kv_cache.h"
@@ -81,25 +78,9 @@ struct EngineConfig {
     // FFN weights (gate/up/down) use NVFP4 for 2x bandwidth reduction during decode.
     bool dual_path_quant = false;
 
-    // Speculative decoding
-    bool enable_speculative = false;
-    std::string draft_model_path;
-    int spec_k = 4;
-
     // Prefix caching: reuse KV cache blocks for shared token prefixes
     bool use_prefix_caching = false;
     std::string prefix_cache_path;  // path to persist prefix cache (empty = disabled)
-
-    // Self-speculative decoding (layer-skip draft from same model)
-    bool enable_self_speculative = false;
-    int self_spec_k = 2;              // draft tokens per step
-    int self_spec_exit_layer = -1;    // layers to run in draft (-1 = auto)
-    int self_spec_skip_n = -1;        // layers to skip in draft (-1 = auto)
-
-    // N-gram speculative decoding (zero-cost draft from token history)
-    bool enable_ngram_spec = false;  // experimental, disabled by default
-    int ngram_spec_k = 5;          // max draft tokens per step
-    int ngram_n = 3;               // n-gram context window
 
     // Vision (multimodal)
     std::string mmproj_path;  // path to mmproj GGUF, empty = text-only
@@ -136,10 +117,6 @@ public:
                          float presence_penalty = 0.0f);
 
     void add_request(std::shared_ptr<Request> req);
-
-    // Set draft model for speculative decoding after init.
-    // Can only be called once, before any generate/decode_step calls.
-    [[nodiscard]] bool set_draft_model(const std::string& path, int spec_k = 4);
 
     // Reset SSM state for a sequence (call on context_reset for hybrid models)
     void reset_ssm_state(int seq_id);
@@ -220,13 +197,6 @@ private:
     VisionPipeline vision_;
     ConstraintManager constraints_;
 
-    // ── Speculative decoding ─────────────────────────────────────────
-    std::shared_ptr<Model> draft_model_;
-    std::unique_ptr<KVCacheManager> draft_kv_manager_;
-    std::unique_ptr<SpeculativeDecoder> spec_decoder_;
-    std::unique_ptr<SelfSpeculativeDecoder> self_spec_decoder_;
-    std::unique_ptr<NgramSpecDecoder> ngram_spec_decoder_;
-
     // ── Pre-allocated prefill metadata (eliminates per-request cudaMalloc) ──
     void* prefill_pool_ = nullptr;
     size_t prefill_pool_size_ = 0;
@@ -254,7 +224,6 @@ private:
     bool init_kv_cache();
     bool init_features();
     void warmup();
-    bool init_speculative();
 
     // ── Inference helpers ────────────────────────────────────────────
     bool is_stop_token(int32_t token) const;
@@ -273,10 +242,6 @@ private:
     void fill_recurrent_state(const Request& req, InferenceState& state,
                                bool reset, cudaStream_t stream);
     void finish_request(std::shared_ptr<Request>& req);
-
-    // Speculative decode shortcuts (self-spec, n-gram). Returns true if handled.
-    bool try_speculative_decode(std::vector<std::shared_ptr<Request>>& valid_decode,
-                                 cudaStream_t stream);
 
     // ── step() sub-phases ─────────────────────────────────────────────
     // Returns: 0 = no async graph active, 1 = still running (step returns true),

@@ -27,9 +27,6 @@ static EngineConfig test_engine_config() {
     cfg.kv_block_size = 16;
     cfg.use_green_contexts = false;
     cfg.gpu_layers = -1;
-    cfg.enable_speculative = false;
-    cfg.enable_self_speculative = false;
-    cfg.enable_ngram_spec = false;
     cfg.use_prefix_caching = false;
     cfg.use_mxfp4_prefill = false;
     cfg.dual_path_quant = false;

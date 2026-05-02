@@ -34,12 +34,6 @@ struct ServerArgs {
     std::string api_key;       // --api-key: require Bearer token auth
     std::string reasoning_format = "deepseek";  // --reasoning-format: deepseek or none
     float think_budget = 1.0f; // --think-budget: fraction of max_tokens for reasoning (1.0=unlimited, 0=disabled)
-    bool self_speculative = false;  // --self-speculative
-    int self_spec_k = 2;
-    int self_spec_exit_layer = -1;
-    int self_spec_skip_n = -1;
-    bool ngram_spec = false;        // --ngram-spec
-    int ngram_spec_k = 5;           // --ngram-spec-k
     int min_kv_tokens = 0;     // --min-kv-tokens: minimum KV cache capacity (0=auto)
     // Server limits
     int max_concurrent = 64;   // --max-concurrent: max simultaneous requests (0=unlimited)

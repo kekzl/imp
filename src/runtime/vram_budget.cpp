@@ -32,7 +32,6 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
     // Feature-aware reserve instead of flat 1 GiB.
     budget.reserve_bytes = 256ULL * 1024 * 1024;  // base: cuBLAS + driver
     if (config.use_cuda_graphs)       budget.reserve_bytes += 256ULL * 1024 * 1024;
-    if (config.enable_speculative)    budget.reserve_bytes += 256ULL * 1024 * 1024;
     if (config.use_green_contexts)    budget.reserve_bytes += 128ULL * 1024 * 1024;
     if (config.use_fp8_prefill)       budget.reserve_bytes += 128ULL * 1024 * 1024;
     budget.reserve_bytes = std::max(budget.reserve_bytes, static_cast<size_t>(512ULL * 1024 * 1024));

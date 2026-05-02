@@ -69,12 +69,6 @@ void print_usage(const char* prog) {
         "  --bench-reps <n>      Repetitions to average (default: 3)\n"
         "  --mmproj <path>       Path to vision encoder GGUF (mmproj) for multimodal\n"
         "  --image <path>        Input image for vision (requires --mmproj)\n"
-        "  --self-speculative    Self-speculative decoding (layer-skip draft, same model)\n"
-        "  --self-spec-k <n>     Draft tokens per self-spec step (default: 2)\n"
-        "  --self-spec-exit-layer <n>  Layers to run in draft (-1 = auto)\n"
-        "  --self-spec-skip-n <n>  Layers to skip in draft (-1 = auto)\n"
-        "  --ngram-spec          N-gram speculative decoding (draft from token history)\n"
-        "  --ngram-spec-k <n>    N-gram max draft tokens per step (default: 5)\n"
         "  --help                Show this help message\n",
         prog);
 }
@@ -211,18 +205,6 @@ CliArgs parse_args(int argc, char** argv) {
             args.mmproj_path = argv[++i];
         } else if (std::strcmp(arg, "--image") == 0 && i + 1 < argc) {
             args.image_path = argv[++i];
-        } else if (std::strcmp(arg, "--self-speculative") == 0) {
-            args.self_speculative = true;
-        } else if (std::strcmp(arg, "--self-spec-k") == 0 && i + 1 < argc) {
-            args.self_spec_k = std::atoi(argv[++i]);
-        } else if (std::strcmp(arg, "--self-spec-exit-layer") == 0 && i + 1 < argc) {
-            args.self_spec_exit_layer = std::atoi(argv[++i]);
-        } else if (std::strcmp(arg, "--self-spec-skip-n") == 0 && i + 1 < argc) {
-            args.self_spec_skip_n = std::atoi(argv[++i]);
-        } else if (std::strcmp(arg, "--ngram-spec") == 0) {
-            args.ngram_spec = true;
-        } else if (std::strcmp(arg, "--ngram-spec-k") == 0 && i + 1 < argc) {
-            args.ngram_spec_k = std::atoi(argv[++i]);
         } else {
             fprintf(stderr, "Unknown argument: %s\n", arg);
             print_usage(argv[0]);

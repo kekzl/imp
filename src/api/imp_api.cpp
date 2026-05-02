@@ -61,16 +61,6 @@ ImpConfig imp_config_default(void) {
     config.use_prefix_caching = 0;      // off by default
     config.prefix_cache_path[0] = '\0'; // no persistence by default
     config.num_cpu_threads = 0;         // auto
-    config.enable_speculative = 0;      // no speculative decoding
-    config.draft_model_path = NULL;     // no draft model
-    config.draft_model_format = IMP_FORMAT_GGUF;
-    config.spec_k = 4;                 // default draft tokens
-    config.enable_self_speculative = 0; // no self-speculative decoding
-    config.self_spec_k = 2;            // default draft tokens
-    config.self_spec_exit_layer = -1;   // auto
-    config.self_spec_skip_n = -1;       // auto
-    config.enable_ngram_spec = 0;       // no n-gram speculation
-    config.ngram_spec_k = 5;            // default draft tokens
     config.mmproj_path = NULL;          // no vision model
     config.turboquant_sketch_multiplier = 2; // sketch_dim = 2 * head_dim
     config.streaming_kv_enabled = 0;          // off by default (opt-in)
@@ -260,13 +250,7 @@ ImpError imp_context_create(ImpModel model, const ImpConfig* config,
         ecfg.use_prefix_caching = (config->use_prefix_caching != 0);
         if (config->prefix_cache_path[0] != '\0')
             ecfg.prefix_cache_path = config->prefix_cache_path;
-        ecfg.enable_self_speculative = (config->enable_self_speculative != 0);
-        ecfg.self_spec_k = config->self_spec_k;
-        ecfg.self_spec_exit_layer = config->self_spec_exit_layer;
-        ecfg.self_spec_skip_n = config->self_spec_skip_n;
         ecfg.turboquant_sketch_multiplier = config->turboquant_sketch_multiplier;
-        ecfg.enable_ngram_spec = (config->enable_ngram_spec != 0);
-        ecfg.ngram_spec_k = config->ngram_spec_k;
         if (config->mmproj_path)
             ecfg.mmproj_path = config->mmproj_path;
         ecfg.streaming_kv_enabled = (config->streaming_kv_enabled != 0);
@@ -773,38 +757,6 @@ ImpError imp_context_reset(ImpContext ctx) {
     ctx->engine->reset_batch_pool_cache();
 
     return IMP_SUCCESS;
-}
-
-// --- Speculative Decoding ---
-
-ImpError imp_set_draft_model(ImpContext ctx, const char* draft_model_path,
-                              ImpModelFormat format) {
-    if (!ctx || !draft_model_path) {
-        return IMP_ERROR_INVALID_ARG;
-    }
-    if (!ctx->engine) {
-        return IMP_ERROR_INTERNAL;
-    }
-
-    // Currently only GGUF is supported for draft models (same as init_speculative)
-    if (format != IMP_FORMAT_GGUF) {
-        return IMP_ERROR_UNSUPPORTED;
-    }
-
-    try {
-        if (!ctx->engine->set_draft_model(draft_model_path)) {
-            return IMP_ERROR_INTERNAL;
-        }
-
-        return IMP_SUCCESS;
-    } catch (const std::bad_alloc&) {
-        return IMP_ERROR_OUT_OF_MEMORY;
-    } catch (const std::exception& e) {
-        IMP_LOG_ERROR("imp_set_draft_model: %s", e.what());
-        return IMP_ERROR_INTERNAL;
-    } catch (...) {
-        return IMP_ERROR_INTERNAL;
-    }
 }
 
 // --- Vision (Multimodal) ---

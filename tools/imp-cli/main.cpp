@@ -113,16 +113,6 @@ int main(int argc, char** argv) {
     config.use_nvfp4_decode = args.decode_nvfp4;
     if (!args.mmproj_path.empty())
         config.mmproj_path = args.mmproj_path.c_str();
-    if (args.self_speculative) {
-        config.enable_self_speculative = 1;
-        config.self_spec_k = args.self_spec_k;
-        config.self_spec_exit_layer = args.self_spec_exit_layer;
-        config.self_spec_skip_n = args.self_spec_skip_n;
-    }
-    if (args.ngram_spec) {
-        config.enable_ngram_spec = 1;
-        config.ngram_spec_k = args.ngram_spec_k;
-    }
 
     // In bench mode, ensure KV cache matches what the benchmark needs.
     // Raises max_seq_len for long-context benchmarks, caps it for short ones.

@@ -1,9 +1,6 @@
 #include "runtime/engine.h"
-#include "runtime/speculative.h"
-#include "runtime/self_speculative.h"
 #include "runtime/cuda_graph.h"
 #include "memory/kv_cache.h"
-#include "model/gguf_loader.h"
 #include "model/chat_template.h"
 #include "compute/sampling.h"
 #include "core/logging.h"
@@ -15,123 +12,10 @@
 namespace imp {
 
 // =====================================================================
-// Speculative decoding init
-// =====================================================================
-
-bool Engine::init_speculative() {
-    if (config_.draft_model_path.empty()) {
-        IMP_LOG_ERROR("Speculative decoding enabled but no draft model path provided");
-        return false;
-    }
-
-    auto draft_unique = load_gguf(config_.draft_model_path);
-    if (!draft_unique) {
-        IMP_LOG_ERROR("Failed to load draft model: %s", config_.draft_model_path.c_str());
-        return false;
-    }
-    draft_model_ = std::move(draft_unique);
-
-    if (!draft_model_->upload_weights_gpu(config_.compute_dtype, stream_)) {
-        IMP_LOG_ERROR("Failed to upload draft model weights");
-        return false;
-    }
-
-    const auto& dcfg = draft_model_->config();
-    int hd = dcfg.head_dim > 0 ? dcfg.head_dim : (dcfg.d_model / dcfg.n_heads);
-    int draft_max_blocks = std::max(kv_cache_raw_->total_blocks() / 4, 64);
-    auto draft_kv = std::make_unique<KVCache>(
-        dcfg.n_layers, dcfg.n_kv_heads, hd,
-        config_.compute_dtype, draft_max_blocks);
-    draft_kv_manager_ = std::make_unique<KVCacheManager>(std::move(draft_kv));
-
-    auto draft_exec = std::make_unique<GraphExecutor>();
-    if (!draft_exec->init(*draft_model_, config_.compute_dtype, config_.use_pdl)) {
-        IMP_LOG_ERROR("Failed to init draft executor");
-        return false;
-    }
-
-    spec_decoder_ = std::make_unique<SpeculativeDecoder>();
-    SpeculativeConfig spec_cfg;
-    spec_cfg.spec_k = config_.spec_k;
-    if (!spec_decoder_->init(executor_.get(), draft_model_, std::move(draft_exec),
-                              kv_manager_.get(), draft_kv_manager_.get(), spec_cfg)) {
-        IMP_LOG_ERROR("Failed to init speculative decoder");
-        return false;
-    }
-
-    IMP_LOG_INFO("Speculative decoding enabled: draft=%s, k=%d",
-                 config_.draft_model_path.c_str(), config_.spec_k);
-    return true;
-}
-
-bool Engine::set_draft_model(const std::string& path, int spec_k) {
-    if (path.empty()) {
-        IMP_LOG_ERROR("set_draft_model: empty path");
-        return false;
-    }
-    if (spec_decoder_) {
-        IMP_LOG_ERROR("set_draft_model: draft model already set");
-        return false;
-    }
-    config_.draft_model_path = path;
-    config_.spec_k = spec_k;
-    config_.enable_speculative = true;
-    return init_speculative();
-}
-
-// =====================================================================
-// Speculative decode shortcut
-// =====================================================================
-
-bool Engine::try_speculative_decode(
-        std::vector<std::shared_ptr<Request>>& valid_decode, cudaStream_t stream) {
-    if (valid_decode.size() != 1) return false;
-    auto& req = valid_decode[0];
-
-    auto accept_tokens = [&](const std::vector<int32_t>& tokens) {
-        for (int32_t t : tokens) {
-            req->output_tokens.push_back(t);
-            track_think_state(*req, t);
-            if (should_stop(*req, t) ||
-                static_cast<int>(req->output_tokens.size()) >= req->max_tokens) {
-                finish_request(req);
-                break;
-            }
-        }
-        kv_manager_->touch(req->id);
-    };
-
-    // Self-speculative
-    if (self_spec_decoder_ && config_.enable_self_speculative) {
-        int32_t last_token = req->output_tokens.empty()
-            ? req->input_tokens.back() : req->output_tokens.back();
-        auto tokens = self_spec_decoder_->step(
-            last_token, req->context_len() - 1, req->id,
-            req->temperature, req->top_p, req->top_k, req->seed, stream);
-        accept_tokens(tokens);
-        return true;
-    }
-
-    // N-gram speculative
-    if (ngram_spec_decoder_ &&
-        static_cast<int>(req->output_tokens.size()) >= config_.ngram_n) {
-        int32_t last_token = req->output_tokens.back();
-        auto sr = ngram_spec_decoder_->step(
-            req, last_token, req->context_len() - 1, req->id, stream);
-        if (!sr.tokens.empty()) {
-            accept_tokens(sr.tokens);
-            IMP_LOG_DEBUG("N-gram spec: drafted=%d accepted=%d (rate=%.0f%%)",
-                          sr.n_drafted, sr.n_accepted,
-                          ngram_spec_decoder_->acceptance_rate() * 100.0f);
-            return true;
-        }
-    }
-
-    return false;
-}
-
-// =====================================================================
 // CUDA Graph decode helpers
+// (Filename is historical; the speculative-decode variants that originally
+// lived here were removed when proven broken/unused. The async-graph and
+// conditional-graph helpers below are the production decode path.)
 // =====================================================================
 
 int Engine::prepare_graph_loop(std::shared_ptr<Request>& req) {
