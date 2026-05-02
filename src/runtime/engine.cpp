@@ -238,7 +238,21 @@ bool Engine::should_stop(Request& req, int32_t token) const {
     // Inside <think>...</think>: suppress stop tokens so reasoning can complete.
     // The model may generate <|im_end|> during reasoning as part of its internal
     // monologue — stopping here produces empty content (llama.cpp ignores this).
-    if (req.in_think_block) return false;
+    if (req.in_think_block) {
+        // If the model emits a stop token while still inside thinking, treat
+        // it as an implicit </think>: NVFP4 quants on Qwen3.6 occasionally
+        // skip the explicit close marker and jump straight to <|im_end|>.
+        // Without this, generation freezes inside the suppressed-stop branch
+        // forever (in_think never flips, every EOS is masked). Flipping the
+        // flag here lets the next stop honour normal semantics so the
+        // request can actually finish.
+        if (is_stop_token(token)) {
+            req.in_think_block = false;
+            req.think_exit_idx = static_cast<int>(req.output_tokens.size());
+            req.think_text_tail.clear();
+        }
+        return false;
+    }
     // After </think>: enforce a minimum answer budget on the FIRST decoded
     // token if it would stop. NVFP4 quantization noise on Qwen3.6 lets the
     // model close an empty thinking block in ~3 tokens (`</`, `think`, `>`)
@@ -2303,7 +2317,21 @@ void Engine::step_decode_process_outputs(
             dreq->dry_multiplier == 0.0f &&
             dreq->min_p == 0.0f &&
             dreq->typical_p >= 1.0f;
+        // Text-fallback think tracking: when <think>/</think> are not single
+        // control-token IDs (NVFP4 SafeTensors for Qwen3 / Qwen3.5 / Qwen3.6
+        // ship them as added_tokens with special=False, leaving think_end_id_
+        // at -1), the graph kernel's device-side `in_think` predicate is
+        // permanently false. eos_id then terminates the loop the moment the
+        // model emits <|endoftext|> after an empty </think>, returning a
+        // 3-token completion ("<", "answer", ">") with the actual answer
+        // never sampled. Host-side track_think_state runs literal-string
+        // matching per token but only fires in the eager step_decode path,
+        // so route through it whenever the request started inside a think
+        // block on a model that lacks single-token think markers.
+        const bool needs_eager_for_text_think =
+            dreq->in_think_block && think_end_id_ < 0;
         if (async_compatible &&
+            !needs_eager_for_text_think &&
             dreq->status == RequestStatus::DECODING &&
             !dreq->output_tokens.empty()) {
             int32_t last_token = dreq->output_tokens.back();

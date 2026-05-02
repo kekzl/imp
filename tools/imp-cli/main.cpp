@@ -571,20 +571,30 @@ int main(int argc, char** argv) {
                 err = imp_decode_step(ctx, &params, &token);
                 if (err != IMP_SUCCESS) break;
 
-                if (token == tok->eos_id()) break;
-                if (have_template) {
-                    bool is_stop = false;
+                // Hide stop tokens from the user but DON'T break the loop —
+                // the engine has the authoritative stop logic (think-state
+                // suppression, max_tokens budget). When the engine actually
+                // finishes the request the next imp_decode_step returns
+                // IMP_ERROR_INTERNAL and we exit above. Bailing here on the
+                // first eos / im_end stops generation while the engine is
+                // still inside a <think> block on Qwen3.6-NVFP4 long-context
+                // (model emits <|im_end|> after empty thought; engine flips
+                // in_think to false implicitly and continues into the actual
+                // answer; CLI was previously cutting it off mid-recovery).
+                bool hide_token = (token == tok->eos_id());
+                if (have_template && !hide_token) {
                     for (int32_t stop_id : chat_tpl.stop_token_ids()) {
-                        if (token == stop_id) { is_stop = true; break; }
+                        if (token == stop_id) { hide_token = true; break; }
                     }
-                    if (is_stop) break;
                 }
 
                 output_ids.push_back(token);
                 std::string piece = tok->decode_token(token);
                 if (step < 10) fprintf(stderr, "[tok=%d '%s'] ", token, piece.c_str());
-                printf("%s", piece.c_str());
-                fflush(stdout);
+                if (!hide_token) {
+                    printf("%s", piece.c_str());
+                    fflush(stdout);
+                }
 
                 // Check text-level stop sequences
                 if (!args.stop_sequences.empty()) {
