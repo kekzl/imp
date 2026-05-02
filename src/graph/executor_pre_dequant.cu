@@ -1451,6 +1451,14 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                          ? (remaining_budget - wcache_.nvfp4_bytes) : 0;
         }
         bool moe_budget_exhausted = false;
+        // Self-tracked logical budget for cache_moe_native_nvfp4 (NVFP4 prequant
+        // SafeTensors). cudaMemGetInfo doesn't reflect the per-expert cudaFree's
+        // promptly on this driver, so we track allocations and frees logically.
+        // Initial value is moe_budget plus the per-expert weights that the
+        // function will swap out — those sum to the cached size, so net per
+        // call is zero and all 40 layers fit if the initial budget covers one
+        // layer's worth of overhead.
+        size_t moe_logical_avail = moe_budget;
 
         auto cache_moe_expert_nvfp4 = [&](const Tensor& packed, QType qtype) {
             if (!packed.data) return;
@@ -1532,42 +1540,47 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             size_t total_ts     = static_cast<size_t>(ne) * sizeof(float);
             size_t add_bytes    = total_packed + total_ms + total_ts;
 
-            // Refresh free memory before each allocation. Per-layer free of
-            // expert_w_*[e] returns ~one-layer-worth back to the device pool
-            // after each successful build, but `moe_budget` was computed once
-            // at function entry. Re-read free memory to pick up the freed
-            // bytes; otherwise the contiguous cache stops at ~110/120 tensors
-            // (33 layers + partial 33) for Qwen3.6-35B-A3B.
-            {
-                size_t free_mem = 0, total_mem = 0;
-                IMP_CUDA_CHECK_LOG(cudaMemGetInfo(&free_mem, &total_mem));
-                constexpr size_t kMoeReserve = 128ULL * 1024 * 1024;
-                size_t avail = (free_mem > kMoeReserve) ? (free_mem - kMoeReserve) : 0;
-                if (add_bytes > avail) {
-                    moe_budget_exhausted = true;
-                    IMP_LOG_INFO("NVFP4 MoE native cache: VRAM budget reached after %d "
-                                 "tensors (%.1f MiB cached, %.1f MiB free, need %.1f MiB)",
-                                 nvfp4_moe_count,
-                                 nvfp4_moe_total / (1024.0 * 1024.0),
-                                 free_mem / (1024.0 * 1024.0),
-                                 add_bytes / (1024.0 * 1024.0));
-                    return false;
-                }
+            // Self-tracked logical budget. cudaMemGetInfo does NOT reflect
+            // cudaFree's of upload-time per-expert weights in time on this
+            // driver — after ~5 layers it reports free=0 even though the
+            // heap has ~5 GiB freed but not yet reclaimed. The previous
+            // per-call cudaMemGetInfo gate aborted at ~7 layers (21/120
+            // entries) and left layers 7-39 on the legacy fallback path
+            // with D2H expert_offsets sync, killing CUDA graph capture and
+            // pinning decode at ~30 tok/s. Track the budget logically:
+            // initialised once from cudaMemGetInfo, decremented on alloc,
+            // incremented after per-expert frees below — net per-call
+            // change is zero so all 40 layers fit.
+            if (add_bytes > moe_logical_avail) {
+                moe_budget_exhausted = true;
+                IMP_LOG_INFO("NVFP4 MoE native cache: logical budget reached after %d "
+                             "tensors (%.1f MiB cached, %.1f MiB logical avail, need %.1f MiB)",
+                             nvfp4_moe_count,
+                             nvfp4_moe_total / (1024.0 * 1024.0),
+                             moe_logical_avail / (1024.0 * 1024.0),
+                             add_bytes / (1024.0 * 1024.0));
+                return false;
             }
 
-            void* d_packed = vram_alloc(vram_alloc_, total_packed,
-                                         "nvfp4_moe_packed_native");
-            void* d_ms     = vram_alloc(vram_alloc_, total_ms,
-                                         "nvfp4_moe_ms_native");
-            void* d_ts_raw = vram_alloc(vram_alloc_, total_ts,
-                                         "nvfp4_moe_ts_native");
+            void* d_packed = vram_alloc_force(vram_alloc_, total_packed,
+                                               "nvfp4_moe_packed_native");
+            void* d_ms     = vram_alloc_force(vram_alloc_, total_ms,
+                                               "nvfp4_moe_ms_native");
+            void* d_ts_raw = vram_alloc_force(vram_alloc_, total_ts,
+                                               "nvfp4_moe_ts_native");
             if (!d_packed || !d_ms || !d_ts_raw) {
                 if (d_packed) vram_free(vram_alloc_, d_packed);
                 if (d_ms)     vram_free(vram_alloc_, d_ms);
                 if (d_ts_raw) vram_free(vram_alloc_, d_ts_raw);
                 moe_budget_exhausted = true;
+                IMP_LOG_WARN("NVFP4 MoE native cache: cudaMalloc failed at %d "
+                             "tensors (%.1f MiB cached) — driver heap exhausted",
+                             nvfp4_moe_count,
+                             nvfp4_moe_total / (1024.0 * 1024.0));
                 return false;
             }
+            moe_logical_avail = (moe_logical_avail > add_bytes)
+                                ? (moe_logical_avail - add_bytes) : 0;
             float* d_ts = static_cast<float*>(d_ts_raw);
 
             std::vector<float> h_ts(ne);
@@ -1630,20 +1643,24 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
             // experts[e].data / .scales) finish before we cudaFree the source.
             IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
             auto* mut_model = const_cast<Model*>(model_);
+            size_t freed_bytes = 0;
             for (int e = 0; e < ne; ++e) {
                 auto& w = experts[e];
                 if (w.data) {
                     mut_model->release_gpu_allocation(w.data);
                     IMP_CUDA_CHECK_LOG(cudaFree(w.data));
+                    freed_bytes += expert_packed_bytes;
                     w.data = nullptr;
                     w.on_device = false;
                 }
                 if (w.scales) {
                     mut_model->release_gpu_allocation(w.scales);
                     IMP_CUDA_CHECK_LOG(cudaFree(w.scales));
+                    freed_bytes += expert_ms_bytes;
                     w.scales = nullptr;
                 }
             }
+            moe_logical_avail += freed_bytes;
             return true;
         };
 

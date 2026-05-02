@@ -28,6 +28,14 @@ static inline void* vram_alloc(VRAMAllocator* alloc, size_t bytes, const char* t
     return ptr;
 }
 
+static inline void* vram_alloc_force(VRAMAllocator* alloc, size_t bytes, const char* tag) {
+    if (bytes == 0) return nullptr;
+    if (alloc) return alloc->allocate(bytes, tag, /*bypass_headroom=*/true);
+    void* ptr = nullptr;
+    if (cudaMalloc(&ptr, bytes) != cudaSuccess) return nullptr;
+    return ptr;
+}
+
 static inline void vram_free(VRAMAllocator* alloc, void* ptr) {
     if (!ptr) return;
     if (alloc) alloc->free(ptr);

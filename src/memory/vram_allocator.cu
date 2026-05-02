@@ -30,10 +30,10 @@ bool VRAMAllocator::init(float headroom_fraction) {
     return true;
 }
 
-void* VRAMAllocator::allocate(size_t bytes, const char* tag) {
+void* VRAMAllocator::allocate(size_t bytes, const char* tag, bool bypass_headroom) {
     if (bytes == 0) return nullptr;
 
-    if (initialized_ && !can_allocate(bytes)) {
+    if (initialized_ && !bypass_headroom && !can_allocate(bytes)) {
         // Headroom check failed — but check if physical GPU memory suffices.
         // For models that use nearly all VRAM (e.g. Nemotron-30B at 29+ GiB),
         // the 10% headroom is too conservative. Critical allocations (workspace,
