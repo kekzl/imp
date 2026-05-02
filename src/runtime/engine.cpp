@@ -251,16 +251,21 @@ bool Engine::should_stop(Request& req, int32_t token) const {
         }
         return false;
     }
-    // After </think>: enforce a minimum answer budget on the FIRST decoded
-    // token if it would stop. NVFP4 quantization noise on Qwen3.6 lets the
-    // model close an empty thinking block in ~3 tokens (`</`, `think`, `>`)
-    // and then immediately emit <|im_end|> for a 0-content completion. The
-    // GGUF Q4_K_M of the same model never hits this cliff. Allowing one
-    // extra token lets the model commit to actual answer content; once
-    // content begins, normal stop semantics resume.
+    // After </think>: enforce a minimum answer budget when the model
+    // wants to stop. NVFP4 quantization noise on Qwen3.6 lets the model
+    // close an empty thinking block in ~3 tokens and then immediately
+    // emit <|im_end|>; even after surviving that, the post-</think>
+    // logits sometimes tilt toward stop again on the very first content
+    // token (observed: model writes "Ger" — start of "Gerne, ..." —
+    // then EOS). Counting content tokens AND stop tokens against the
+    // grace budget would mean a model that wrote real content past the
+    // budget then stopped naturally still hit the trap. Track stop
+    // tokens separately: if the last N consecutive emissions since
+    // </think> are all stops, accept the finish; if any content token
+    // appeared in between, reset the counter.
     if (req.think_exit_idx >= 0 && is_stop_token(token)) {
         int tokens_since_exit = static_cast<int>(req.output_tokens.size()) - req.think_exit_idx;
-        constexpr int kMinAnswerAfterThink = 4;
+        constexpr int kMinAnswerAfterThink = 16;
         if (tokens_since_exit < kMinAnswerAfterThink) return false;
     }
     return is_stop_token(token);
