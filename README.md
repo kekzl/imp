@@ -40,9 +40,9 @@ This is not a wrapper. imp implements its own GGUF parser, SafeTensors loader (N
 | Llama-3.2-3B | Q8_0 | **208** | &mdash; | &mdash; |
 | Qwen3-Coder-30B-A3B | Q6_K | **234** | &mdash; | MoE auto-offload |
 | Qwen3.6-35B-A3B | Q4_K_M | **143** | &mdash; | GDN+MoE hybrid |
-| Qwen3.6-35B-A3B | NVFP4 | **117–142** | &mdash; | post #85 fast-path |
+| Qwen3.6-35B-A3B | NVFP4 | **196** | &mdash; | post #95 (cache budget + thinking fixes) |
 | Gemma-4-26B-A4B-it | Q4_K_M | **183** | 151 | **+21%** |
-| Gemma-4-26B-A4B-it | NVFP4 | **157–180** | &mdash; | post #85 fast-path |
+| Gemma-4-26B-A4B-it | NVFP4 | **201** | &mdash; | post #95 (CUTLASS scratch + thinking fixes) |
 
 ### Prefill Throughput (tok/s)
 

@@ -191,9 +191,6 @@ set(IMP_RUNTIME_SOURCES
     src/runtime/vram_budget.cpp
     src/runtime/cuda_graph.cu
     src/runtime/pdl.cu
-    src/runtime/speculative.cpp
-    src/runtime/self_speculative.cpp
-    src/runtime/ngram_spec.cpp
     src/runtime/presets.cpp
     src/runtime/storage_planner.cpp
 )
@@ -445,7 +442,6 @@ if(IMP_BUILD_TESTS)
         tests/test_e2e.cpp
         tests/test_e2e_models.cpp
         tests/test_continuous_batching.cpp
-        tests/test_speculative.cpp
         tests/test_degeneration.cpp
         tests/test_weight_registry_preservation.cpp
         tests/test_e2e_llm_compressor.cpp

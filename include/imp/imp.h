@@ -169,17 +169,6 @@ ImpError imp_set_image(ImpContext ctx, const char* image_path);
 // Set image from raw memory (e.g. decoded base64). Pass NULL/0 to clear.
 ImpError imp_set_image_from_memory(ImpContext ctx, const uint8_t* data, size_t len);
 
-// --- Speculative Decoding ---
-
-// Set the draft model for speculative decoding. Must be called after
-// imp_context_create and before imp_generate or imp_decode_step.
-// The draft model should be a smaller/faster variant of the same architecture.
-ImpError imp_set_draft_model(
-    ImpContext ctx,
-    const char* draft_model_path,
-    ImpModelFormat format
-);
-
 // --- Version ---
 const char* imp_version(void);
 

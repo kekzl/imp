@@ -1,8 +1,6 @@
 #include "runtime/engine.h"
 #include "runtime/config.h"
 #include "runtime/vram_budget.h"
-#include "runtime/speculative.h"
-#include "runtime/self_speculative.h"
 #include "runtime/batch.h"
 #include "memory/kv_cache.h"
 #include "model/gguf_loader.h"
@@ -726,10 +724,6 @@ bool Engine::init_weights() {
     executor_->set_vram_allocator(&vram_alloc_);
     {
         int eff_batch = config_.max_batch_size;
-        if (config_.enable_self_speculative)
-            eff_batch = std::max(eff_batch, config_.self_spec_k + 1);
-        if (config_.enable_ngram_spec)
-            eff_batch = std::max(eff_batch, config_.ngram_spec_k + 1);
         if (!executor_->init(*model_, config_.compute_dtype, config_.use_pdl,
                              eff_batch, config_.max_seq_len,
                              config_.use_fp8_prefill, config_.use_nvfp4_decode,
@@ -849,7 +843,6 @@ bool Engine::init_weights() {
         size_t safety = 256ULL * 1024 * 1024;  // base safety
         // Only add safety for features that will actually allocate VRAM.
         // On tight VRAM models (Nemotron-30B), every MiB matters for expert coverage.
-        if (config_.enable_speculative) safety += 256ULL * 1024 * 1024;
         expert_reserve += safety;
 
         IMP_LOG_INFO("Expert upload reserve: %.2f MiB (workspace=%.2f, kv=%.2f, ssm+safety=rest)",
@@ -1199,46 +1192,6 @@ bool Engine::init_features() {
                 IMP_LOG_INFO("Concurrent prefill/decode overlap enabled");
     }
 
-    // Speculative decoding variants
-    if (config_.enable_speculative) {
-        if (!init_speculative()) {
-            IMP_LOG_WARN("Speculative decoding init failed, continuing without it");
-            config_.enable_speculative = false;
-        }
-    }
-    if (config_.enable_self_speculative) {
-        // CUDA graphs stay ON: draft has its own draft_graph_, verify uses a
-        // per-n_verify verify_graphs_ pool, and fallback decode uses the regular
-        // decode_graph_pool_. All three are independent.
-        self_spec_decoder_ = std::make_unique<SelfSpeculativeDecoder>();
-        SelfSpecConfig ssc;
-        ssc.spec_k = config_.self_spec_k;
-        ssc.exit_layer = config_.self_spec_exit_layer;
-        ssc.skip_n = config_.self_spec_skip_n;
-        int n_kv = 0;
-        for (int i = 0; i < mcfg.n_layers; i++)
-            if (model_->layer(i).wq.data && !model_->layer(i).gdn_gate.data) n_kv++;
-        if (n_kv == 0) n_kv = mcfg.n_layers;
-        if (!self_spec_decoder_->init(executor_.get(), kv_manager_.get(),
-                                       kv_cache_raw_, mcfg.n_layers, ssc)) {
-            IMP_LOG_WARN("Self-speculative init failed, continuing without it");
-            self_spec_decoder_.reset();
-            config_.enable_self_speculative = false;
-        }
-    }
-    if (config_.enable_ngram_spec && !config_.enable_speculative && !config_.enable_self_speculative) {
-        // CUDA graphs stay ON: verify uses a per-n_verify verify_graphs_ pool,
-        // fallback decode uses decode_graph_pool_.
-        int n_kv = 0;
-        for (int i = 0; i < mcfg.n_layers; i++)
-            if (model_->layer(i).wq.data && !model_->layer(i).gdn_gate.data) n_kv++;
-        if (n_kv == 0) n_kv = mcfg.n_layers;
-        ngram_spec_decoder_ = std::make_unique<NgramSpecDecoder>();
-        if (!ngram_spec_decoder_->init(executor_.get(), kv_manager_.get(),
-                                        kv_cache_raw_, n_kv, config_.ngram_spec_k, config_.ngram_n))
-            ngram_spec_decoder_.reset();
-    }
-
     // Chat template
     if (Tokenizer* tok = model_->tokenizer()) {
         auto family = ChatTemplate::detect_family(tok->chat_template_str());
@@ -1485,9 +1438,6 @@ void Engine::warmup() {
     if (executor_) executor_->reset_kv_calibration();
     IMP_LOG_INFO("Warmup complete");
 }
-
-// init_speculative: moved to engine_speculative.cpp
-// set_draft_model: moved to engine_speculative.cpp
 
 // =====================================================================
 // step() — main inference loop
@@ -2021,10 +1971,6 @@ void Engine::step_decode(cudaStream_t dec_stream) {
     }
 
     if (!valid_decode.empty()) {
-        // Speculative decode shortcut (self-spec, n-gram)
-        if (try_speculative_decode(valid_decode, dec_stream))
-            return;
-
         step_decode_forward(valid_decode, dec_stream);
     }
 }
@@ -2305,7 +2251,6 @@ void Engine::step_decode_process_outputs(
     // Think budget is now handled device-side in post_decode_step_kernel.
     if (decode_graph_pool_[0].is_ready() && valid_decode.size() == 1 &&
         !offload_mgr_ &&
-        !config_.enable_speculative &&
         config_.use_cuda_graphs && !async_graph_runner_.is_setup() &&
         !needs_logprobs && !needs_json_mode && !needs_schema_mode) {
         auto& dreq = valid_decode[0];
@@ -2420,8 +2365,7 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     // Think budget is now enforced device-side in post_decode_step_kernel.
     // Penalties are applied device-side via apply_penalties_device_count in the graph loop.
     if (req->status == RequestStatus::DECODING && !req->output_tokens.empty() &&
-        config_.use_cuda_graphs && !offload_mgr_ &&
-        !config_.enable_speculative) {
+        config_.use_cuda_graphs && !offload_mgr_) {
         int32_t first_token = req->output_tokens.back();
         auto graph_tokens = try_graph_loop_decode(req, first_token, decode_stream());
         if (!graph_tokens.empty()) {
@@ -2464,7 +2408,6 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
     return result;
 }
 
-// try_speculative_decode: moved to engine_speculative.cpp
 // prepare_graph_loop: moved to engine_speculative.cpp
 // build_graph_config: moved to engine_speculative.cpp
 // try_graph_loop_decode: moved to engine_speculative.cpp

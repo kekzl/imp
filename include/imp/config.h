@@ -33,22 +33,6 @@ typedef struct {
     int enable_pdl;                // Programmatic Dependent Launch
     int enable_cuda_graphs;        // CUDA Graph capture for decode
 
-    // Speculative decoding
-    int enable_speculative;        // 0 = off, 1 = on
-    const char* draft_model_path;  // path to draft model (GGUF/SafeTensors)
-    ImpModelFormat draft_model_format; // format of the draft model
-    int spec_k;                    // number of draft tokens (default 4)
-
-    // Self-speculative decoding (layer-skip draft from same model)
-    int enable_self_speculative;   // 0 = off, 1 = on
-    int self_spec_k;               // draft tokens per step (default 2)
-    int self_spec_exit_layer;      // layers to run in draft (-1 = auto)
-    int self_spec_skip_n;          // layers to skip in draft (-1 = auto)
-
-    // N-gram speculative decoding (draft from token history)
-    int enable_ngram_spec;         // 0 = off (default), 1 = on
-    int ngram_spec_k;              // max draft tokens per step (default 5)
-
     // Layer offloading
     int gpu_layers;                // Layers to keep on GPU (-1 = all, 0 = all offloaded)
 

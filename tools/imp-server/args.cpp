@@ -33,11 +33,6 @@ void print_server_usage(const char* prog) {
         "  --api-key <key>       Require Bearer token authentication\n"
         "  --reasoning-format <f> deepseek (default) or none\n"
         "  --think-budget <f>    Fraction of max_tokens for reasoning (default: 0.5, 0=disabled)\n"
-        "  --self-speculative    Self-speculative decoding (early-exit draft, same model)\n"
-        "  --self-spec-k <n>     Draft tokens per self-spec step (default: 4)\n"
-        "  --self-spec-exit-layer <n>  Early-exit layer (-1 = n_layers/2)\n"
-        "  --ngram-spec          N-gram speculative decoding (draft from token history)\n"
-        "  --ngram-spec-k <n>    N-gram max draft tokens per step (default: 5)\n"
         "  --max-concurrent <n>  Max simultaneous requests (default: 64, 0=unlimited)\n"
         "  --request-timeout <s> Per-request timeout in seconds (default: 300, 0=unlimited)\n"
         "  --rate-limit <n>      Max requests/minute per IP (default: 0=unlimited)\n"
@@ -114,18 +109,6 @@ ServerArgs parse_server_args(int argc, char** argv) {
             args.reasoning_format = argv[++i];
         } else if (std::strcmp(arg, "--think-budget") == 0 && i + 1 < argc) {
             args.think_budget = std::atof(argv[++i]);
-        } else if (std::strcmp(arg, "--self-speculative") == 0) {
-            args.self_speculative = true;
-        } else if (std::strcmp(arg, "--self-spec-k") == 0 && i + 1 < argc) {
-            args.self_spec_k = std::atoi(argv[++i]);
-        } else if (std::strcmp(arg, "--self-spec-exit-layer") == 0 && i + 1 < argc) {
-            args.self_spec_exit_layer = std::atoi(argv[++i]);
-        } else if (std::strcmp(arg, "--self-spec-skip-n") == 0 && i + 1 < argc) {
-            args.self_spec_skip_n = std::atoi(argv[++i]);
-        } else if (std::strcmp(arg, "--ngram-spec") == 0) {
-            args.ngram_spec = true;
-        } else if (std::strcmp(arg, "--ngram-spec-k") == 0 && i + 1 < argc) {
-            args.ngram_spec_k = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--max-concurrent") == 0 && i + 1 < argc) {
             args.max_concurrent = std::atoi(argv[++i]);
         } else if (std::strcmp(arg, "--request-timeout") == 0 && i + 1 < argc) {
