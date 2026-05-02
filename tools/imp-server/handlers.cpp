@@ -1219,6 +1219,21 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
                     int32_t token = evt.token_id;
 
+                    // Silently drop structural stop tokens that slipped through.
+                    // The engine's think-block implicit-close (Engine::should_stop)
+                    // passes ONE EOS-like token through to recover from empty
+                    // thinking. That token must not appear as user-visible content
+                    // (would render as "<|im_end|>" / "<|endoftext|>" in chat).
+                    if (!evt.is_last) {
+                        bool is_structural_stop = (token == snap_tok->eos_id());
+                        if (!is_structural_stop && snap_have_template) {
+                            for (int32_t stop_id : snap_stop_token_ids) {
+                                if (token == stop_id) { is_structural_stop = true; break; }
+                            }
+                        }
+                        if (is_structural_stop) continue;
+                    }
+
                     // Check stop conditions (EOS/stop tokens already detected by engine)
                     if (evt.is_last) {
                         // The engine marked this as the last token.
@@ -1348,9 +1363,22 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                             size_t complete = utf8_complete_len(reasoning_utf8_buf);
                             if (complete > kOverlap) {
                                 size_t emit_end = complete - kOverlap;
-                                std::string to_emit = reasoning_utf8_buf.substr(0, emit_end);
-                                reasoning_utf8_buf = reasoning_utf8_buf.substr(emit_end);
-                                if (!emit_reasoning(to_emit)) return false;
+                                // Walk emit_end back to a UTF-8 codepoint boundary —
+                                // the 7-byte overlap is geared to literal "</think>"
+                                // bytes, not codepoints, so it can land inside a
+                                // multibyte char (German umlauts, CJK, emoji), which
+                                // emits the lead byte alone and turns the trailing
+                                // continuation byte into a U+FFFD on the next flush
+                                // — visible to the user as "f��r" instead of "für".
+                                while (emit_end > 0 &&
+                                       (static_cast<unsigned char>(reasoning_utf8_buf[emit_end]) & 0xC0) == 0x80) {
+                                    --emit_end;
+                                }
+                                if (emit_end > 0) {
+                                    std::string to_emit = reasoning_utf8_buf.substr(0, emit_end);
+                                    reasoning_utf8_buf = reasoning_utf8_buf.substr(emit_end);
+                                    if (!emit_reasoning(to_emit)) return false;
+                                }
                             }
                             continue;
                         }
@@ -1727,11 +1755,17 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     reasoning_utf8_buf.clear();
                 }
 
-                // If model exhausted tokens while still reasoning and never
+                // If the model exhausted tokens while still reasoning and never
                 // produced content, emit a notice so the user sees something
-                // instead of a blank response.
+                // instead of a blank response. Only fire this when max_tokens
+                // was actually the cause (finish == "length") — a model that
+                // naturally hit EOS during thinking will already have its
+                // reasoning_content delivered, and the notice would be
+                // misleading ("increase max_tokens" doesn't help when the model
+                // chose to stop).
                 if (think_phase == ThinkPhase::REASONING
-                    && utf8_buf.empty() && pending_text.empty()) {
+                    && utf8_buf.empty() && pending_text.empty()
+                    && finish && std::strcmp(finish, "length") == 0) {
                     std::string notice =
                         "[Reasoning truncated — increase max_tokens for a complete answer]";
                     sse_writer.write_content(notice, sink);
@@ -1873,6 +1907,20 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 }
 
                 int32_t token = evt.token_id;
+
+                // Silently drop structural stop tokens that slipped through.
+                // The engine's think-block implicit-close passes ONE EOS-like
+                // token through to recover from empty thinking; it must not
+                // appear as user-visible content.
+                if (!evt.is_last) {
+                    bool is_structural_stop = (token == snap_tok->eos_id());
+                    if (!is_structural_stop && snap_have_template) {
+                        for (int32_t stop_id : snap_stop_token_ids) {
+                            if (token == stop_id) { is_structural_stop = true; break; }
+                        }
+                    }
+                    if (is_structural_stop) continue;
+                }
 
                 // Check stop conditions
                 if (evt.is_last) {
