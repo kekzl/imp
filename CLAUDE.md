@@ -310,7 +310,7 @@ imp-cli --set kv_cache.dtype=fp8 --set runtime.cuda_graphs=never \
 |---|---|---|
 | `runtime.cuda_graphs` | `"auto"` | `auto` / `always` / `never` |
 | `runtime.deterministic_gemm` | `false` | Pin cuBLAS algo for byte-stable runs |
-| `runtime.warmup` | `true` | Run warmup forward at engine init |
+| `runtime.warmup` | `false` | Run warmup forward at engine init (opt-in for prod rollout where first-request TTFT matters) |
 | `runtime.no_pdl` | `false` | Disable Programmatic Dependent Launch |
 | `kv_cache.dtype` | `"fp16"` | `fp16` / `fp8` / `int8` / `int4` / `nvfp4` |
 | `attention.fp8_prefill` | `"auto"` | `auto` / `never` |
