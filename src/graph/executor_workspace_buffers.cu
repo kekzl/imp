@@ -429,15 +429,59 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
     if (wcache_.nvfp4_decode_mode > 0 && cutlass_sm120_nvfp4_available()) {
         int max_k = 0;
         int max_n = 0;
+        // NVFP4 prequant tensors carry K_packed = K_logical/2 in shape[1].
+        // Phase 0b promote runs AFTER this scratch-sizing pass, so the
+        // Tensor.qtype is still the on-disk byte type (INT8/U8) here, not
+        // QType::NVFP4. Use the model-level cfg flag to detect the format
+        // and scale up K accordingly. Without this, layer 11's o_proj on
+        // Gemma-4 (K_packed=4096, K_logical=8192) blows past sf scratch
+        // (1 MiB) and cudaMemsetAsync poisons the stream with invalid
+        // argument, falling back to dequant→cuBLAS for the rest of the
+        // forward pass — output collapses to "<strong><strong>..." loops.
+        const bool nvfp4_prequant_2d_packed = cfg.is_nvfp4_prequant;
+        auto track_2d = [&](const Tensor& w) {
+            if (w.data && w.ndim >= 2) {
+                max_n = std::max(max_n, static_cast<int>(w.shape[0]));
+                int K_dim = static_cast<int>(w.shape[1]);
+                if (nvfp4_prequant_2d_packed || w.qtype == QType::NVFP4) {
+                    K_dim *= 2;
+                }
+                max_k = std::max(max_k, K_dim);
+            }
+        };
         for (int i = 0; i < cfg.n_layers; i++) {
             const auto& L = model_->layer(i);
             for (const auto* w : {&L.wq, &L.wk, &L.wv, &L.wo,
                                    &L.w_gate, &L.w_up, &L.w_down,
                                    &L.w_gate_shared, &L.w_up_shared, &L.w_down_shared,
                                    &L.ssm_in, &L.ssm_out}) {
-                if (w->data && w->ndim >= 2) {
-                    max_n = std::max(max_n, static_cast<int>(w->shape[0]));
-                    max_k = std::max(max_k, static_cast<int>(w->shape[1]));
+                track_2d(*w);
+            }
+            // MoE expert weights: per-expert tensors are [N, K] 2D. The 3D
+            // packed buffers expert_*_packed reshape to [n_experts, N, K] —
+            // we only care about (N, K) for activation scratch sizing.
+            // For Gemma-4-26B-A4B and similar MoE prequant SafeTensors, the
+            // expert down proj has K=8192 (d_ff) while the per-layer scan
+            // above only sees K=2816 (d_model) on attention/shared weights.
+            // Without this, M=3085+ prefill blows out the SF scratch buffer
+            // (sf_bytes=1.6 MiB > scratch=1 MiB), cudaMemsetAsync returns
+            // invalid argument, and the stream poisons every downstream
+            // kernel — output collapses to <strong><strong>... loops.
+            for (const auto* expert_vec : {&L.expert_w_gate, &L.expert_w_up,
+                                            &L.expert_w_down}) {
+                if (!expert_vec->empty()) track_2d((*expert_vec)[0]);
+            }
+            // 3D packed expert buffers: [n_experts, N, K] (or [n_experts, N, K_packed]
+            // for NVFP4 prequant where shape[2] is K_packed = K_logical/2).
+            for (const auto* w : {&L.expert_gate_packed, &L.expert_up_packed,
+                                   &L.expert_down_packed}) {
+                if (w->data && w->ndim >= 3) {
+                    max_n = std::max(max_n, static_cast<int>(w->shape[1]));
+                    int K_dim = static_cast<int>(w->shape[2]);
+                    // NVFP4 prequant packs two FP4 nibbles per byte, so the
+                    // logical K (and thus the GEMM activation K) is 2× shape[2].
+                    if (w->qtype == QType::NVFP4) K_dim *= 2;
+                    max_k = std::max(max_k, K_dim);
                 }
             }
         }
