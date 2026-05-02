@@ -191,8 +191,46 @@ bool Engine::is_stop_token(int32_t token) const {
 }
 
 void Engine::track_think_state(Request& req, int32_t token) const {
-    if (token == think_start_id_) req.in_think_block = true;
-    else if (token == think_end_id_) req.in_think_block = false;
+    // Fast path: single-token control IDs (GGUF metadata, or tokenizers that
+    // promote <think>/</think> to special tokens).
+    if (token == think_start_id_) { req.in_think_block = true; return; }
+    if (token == think_end_id_) {
+        req.in_think_block = false;
+        req.think_exit_idx = static_cast<int>(req.output_tokens.size());
+        return;
+    }
+
+    // Text-based fallback: NVFP4 SafeTensors loaders (Qwen3.6, Qwen3-Coder)
+    // ship <think>/</think> as added_tokens with `special=False`. think_*_id_
+    // stay -1 in that case, and the model emits </think> as a 3-token BPE
+    // sequence ['</', 'think', '>'] which the single-id compare above can
+    // never see. Append the decoded piece to a sliding window and match the
+    // literal string. Without this, a model that has been chat-template-
+    // primed with `<think>\n` (Qwen3.6 add_generation_prompt default) closes
+    // its empty thinking block and the next sampled token (typically im_end)
+    // hits should_stop with in_think_block=false → 0-content completion.
+    Tokenizer* ptok = model_ ? model_->tokenizer() : nullptr;
+    if (!ptok) return;
+    const std::string piece = ptok->decode_token(token);
+    if (piece.empty()) return;
+    req.think_text_tail += piece;
+    constexpr size_t kThinkTailWindow = 32;
+    if (req.think_text_tail.size() > kThinkTailWindow) {
+        req.think_text_tail.erase(0, req.think_text_tail.size() - kThinkTailWindow);
+    }
+    if (req.in_think_block) {
+        if (req.think_text_tail.find("</think>") != std::string::npos) {
+            req.in_think_block = false;
+            req.think_exit_idx = static_cast<int>(req.output_tokens.size());
+            req.think_text_tail.clear();
+        }
+    } else {
+        if (req.think_text_tail.find("<think>") != std::string::npos &&
+            req.think_text_tail.find("</think>") == std::string::npos) {
+            req.in_think_block = true;
+            req.think_text_tail.clear();
+        }
+    }
 }
 
 bool Engine::should_stop(Request& req, int32_t token) const {
@@ -201,6 +239,18 @@ bool Engine::should_stop(Request& req, int32_t token) const {
     // The model may generate <|im_end|> during reasoning as part of its internal
     // monologue — stopping here produces empty content (llama.cpp ignores this).
     if (req.in_think_block) return false;
+    // After </think>: enforce a minimum answer budget on the FIRST decoded
+    // token if it would stop. NVFP4 quantization noise on Qwen3.6 lets the
+    // model close an empty thinking block in ~3 tokens (`</`, `think`, `>`)
+    // and then immediately emit <|im_end|> for a 0-content completion. The
+    // GGUF Q4_K_M of the same model never hits this cliff. Allowing one
+    // extra token lets the model commit to actual answer content; once
+    // content begins, normal stop semantics resume.
+    if (req.think_exit_idx >= 0 && is_stop_token(token)) {
+        int tokens_since_exit = static_cast<int>(req.output_tokens.size()) - req.think_exit_idx;
+        constexpr int kMinAnswerAfterThink = 4;
+        if (tokens_since_exit < kMinAnswerAfterThink) return false;
+    }
     return is_stop_token(token);
 }
 
@@ -2393,6 +2443,34 @@ std::string Engine::generate(const std::string& prompt, int max_tokens,
 void Engine::add_request(std::shared_ptr<Request> req) {
     if (scheduler_) {
         req->id = next_request_id_++;
+        // Initialize in_think_block from the prompt tail. Chat templates for
+        // Qwen3 / Qwen3.5 / Qwen3.6 / DeepSeek-R1 inject `<think>\n` via
+        // add_generation_prompt by default — without seeding the flag here,
+        // a model that promptly closes its empty thinking block will hit
+        // should_stop with in_think_block=false on the trailing im_end and
+        // produce a 0-content completion. We scan the decoded text of the
+        // last few input tokens (covers both single-id and BPE multi-token
+        // forms) and look for whichever marker appears last.
+        Tokenizer* ptok = model_ ? model_->tokenizer() : nullptr;
+        if (ptok && !req->input_tokens.empty()) {
+            constexpr int kTailScan = 16;  // covers worst case BPE split + slack
+            int n = static_cast<int>(req->input_tokens.size());
+            int start = std::max(0, n - kTailScan);
+            std::string tail_text;
+            for (int i = start; i < n; ++i) {
+                tail_text += ptok->decode_token(req->input_tokens[i]);
+            }
+            size_t open_pos  = tail_text.rfind("<think>");
+            size_t close_pos = tail_text.rfind("</think>");
+            // </think> shares a suffix with <think>, so resolve precedence:
+            // open is "later" only if it appears AFTER any close.
+            bool open_is_last = (open_pos != std::string::npos) &&
+                                (close_pos == std::string::npos ||
+                                 open_pos > close_pos + 1);
+            if (open_is_last) {
+                req->in_think_block = true;
+            }
+        }
         scheduler_->add_request(std::move(req));
     }
 }
