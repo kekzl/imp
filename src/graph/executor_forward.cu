@@ -4,6 +4,8 @@
 #include "graph/executor_debug.h"
 #include "graph/gemm_context.h"
 #include "runtime/config.h"
+#include <cstdio>
+#include <stdexcept>
 #include "compute/embedding.h"
 #include "compute/layernorm.h"
 #include "compute/rope.h"
@@ -161,8 +163,17 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         return;
     }
     if (n > max_tokens_) {
-        IMP_LOG_ERROR("n_tokens (%d) exceeds max_tokens (%d)", n, max_tokens_);
-        return;
+        // Throwing here lets the BatchingEngine's try/catch cancel the
+        // request with HTTP 500 instead of silently returning an
+        // uninitialized logits tensor that the caller then reshapes
+        // (→ `terminate: reshape: numel mismatch` on the worker thread,
+        // which used to kill the entire imp-server container).
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "GraphExecutor::forward_logits: n_tokens (%d) exceeds max_tokens (%d)",
+                 n, max_tokens_);
+        IMP_LOG_ERROR("%s", msg);
+        throw std::invalid_argument(msg);
     }
 
     // Store for use by run_ffn (which doesn't receive the InferenceState).
