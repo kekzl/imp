@@ -489,6 +489,12 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     const bool top_p_explicit = body.contains("top_p");
     const bool top_k_explicit = body.contains("top_k");
     const bool rep_pen_explicit = body.contains("repetition_penalty");
+    // 1.05 default is mild — breaks pathological repetition loops on
+    // verbose-think models (Qwen3.6-NVFP4 falling into "Wie wär es mit
+    // diesem hier?" 40-iteration spirals on multi-turn sensitive prompts)
+    // without disrupting structurally-repetitive valid output (JSON keys,
+    // markdown lists, code idioms). Callers that need deterministic
+    // sampling (validation harness, perf tests) can pass 1.0 explicitly.
     float top_p = body.value("top_p", 0.95f);
     int top_k = body.value("top_k", 40);
     int max_tokens = body.value("max_tokens", state.default_max_tokens);
@@ -508,7 +514,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
     float min_p = body.value("min_p", 0.0f);
     float typical_p = body.value("typical_p", 1.0f);
-    float repetition_penalty = body.value("repetition_penalty", 1.0f);
+    float repetition_penalty = body.value("repetition_penalty", 1.05f);
     float frequency_penalty = body.value("frequency_penalty", 0.0f);
     float presence_penalty = body.value("presence_penalty", 0.0f);
     int repeat_last_n = body.value("repeat_last_n", 0);
@@ -2152,7 +2158,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
     bool echo = body.value("echo", false);
     float min_p = body.value("min_p", 0.0f);
     float typical_p = body.value("typical_p", 1.0f);
-    float repetition_penalty = body.value("repetition_penalty", 1.0f);
+    float repetition_penalty = body.value("repetition_penalty", 1.05f);
     float frequency_penalty = body.value("frequency_penalty", 0.0f);
     float presence_penalty = body.value("presence_penalty", 0.0f);
     int repeat_last_n = body.value("repeat_last_n", 0);
