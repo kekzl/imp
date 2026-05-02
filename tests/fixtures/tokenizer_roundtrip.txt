@@ -1,0 +1,27 @@
+Hello, world!
+The quick brown fox jumps over the lazy dog.
+1234567890
+Tabs:	one	two	three
+Newlines split: line1
+line2
+line3
+Mixed punctuation: it's a "quoted" string — em-dash, en–dash, ellipsis…
+Code: def f(x): return x * 2
+Unicode Latin-1: café, naïve, façade, jalapeño, résumé
+Greek: αβγδ ΑΒΓ
+Cyrillic: Привет, мир!
+CJK: 你好世界 こんにちは 안녕하세요
+Emoji: 🚀🔥✨
+RTL Hebrew: שלום עולם
+RTL Arabic: مرحبا بالعالم
+Math: ∑ ∫ ≈ ≠ ≤ ≥ ∞ √ π
+Combining: é (é via combining acute)
+Surrogate-pair emoji: 𝄞 𝕏 𝓪𝓫𝓬
+Zero-width: a‌b‍c (ZWNJ + ZWJ between letters)
+JSON-ish: {"k": 1, "v": [true, null, 3.14]}
+HTML-ish: <div class="foo">&amp;</div>
+URL: https://example.com/path?q=1&r=2
+Path: /home/user/file.txt
+Empty next line:
+
+End of file.

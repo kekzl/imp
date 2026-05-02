@@ -1,0 +1,6 @@
+model,verdict,failure_phase,failure_reason,arch,param_b,weight_gb,phase4_passed,phase4_total,det3_ok,logit_ok,graph_replay_identical,vram_peak_mb,long_gen_4gram_rep_rate,first_request_degenerate
+Gemma-4-26B-A4B-it-NVFP4,FAIL,3+4_or_5,"battery passed 8/20; logit_health_ok=True; det3=False; graph_replay=1/32",Gemma4ForConditionalGeneration,32.8,16.42,8,20,False,True,1/32,23066,,False
+Mistral-Small-3.2-24B-Instruct-2506-NVFP4,FAIL,4_or_5,"battery passed 7/20; logit_health_ok=True; det3=False; graph_replay=32/32",Mistral3ForConditionalGeneration,32.1,16.07,7,20,False,True,32/32,22688,0.9567779960707269,False
+Qwen3-30B-A3B-NVFP4-Modelopt,FAIL,3+4_or_5,"battery passed 9/20; logit_health_ok=True; det3=False; graph_replay=2/32",Qwen3MoeForCausalLM,36.2,18.10,9,20,False,True,2/32,22746,,False
+Qwen3-Coder-30B-A3B-Instruct-FP4,FAIL,3+4_or_5,"battery passed 16/20; logit_health_ok=True; det3=True; graph_replay=23/32",Qwen3MoeForCausalLM,36.2,18.10,16,20,True,True,23/32,23025,0.007858546168958742,False
+Qwen3.6-35B-A3B-NVFP4,FAIL,4_or_5,"battery passed 13/20; logit_health_ok=True; det3=True; graph_replay=32/32",Qwen3_5MoeForConditionalGeneration,50.1,25.04,13,20,True,True,32/32,26160,,False
