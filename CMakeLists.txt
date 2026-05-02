@@ -417,6 +417,7 @@ if(IMP_BUILD_TESTS)
         tests/test_nvfp4_gemv_kpar_loop.cu
         tests/test_turboquant.cu
         tests/test_cutlass_grouped_3x_nvfp4.cu
+        tests/test_cutlass_nvfp4_alpha.cu
         tests/test_mxf4nvf4_probe.cu
         tests/test_mxf4nvf4_mma_bench.cu
         tests/test_mxf4nvf4_mma_variants_bench.cu

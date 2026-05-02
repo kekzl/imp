@@ -330,23 +330,7 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
         // Build the CUTLASS cache directly from the Tensor sidecars (data
         // pointer, scales, tensor_scale, shape) so the prefill dispatch
         // at executor_kernels.cu:1975 zündet on the native FP4×FP4 path.
-        //
-        // EXCLUSION (added 2026-05-02): the llm-compressor format produces
-        // wrong output through the CUTLASS NVFP4×NVFP4 path. Layer-0 QKV
-        // gemm output blows up to FP16-saturating values (max=65k, Inf=836)
-        // even though dequant_to_fp16 produces correct weight magnitudes
-        // (max ~0.117). The same dequant→cuBLAS fallback path produces
-        // coherent output ("Your cat is called Whiskers" / "476 AD"
-        // retrievals work). Modelopt-format NVFP4 (`is_llm_compressor=false`)
-        // is unaffected and remains on CUTLASS.
-        //
-        // Net effect for llm-compressor: prefill drops from 12k tok/s
-        // (CUTLASS) back to ~280 tok/s (dequant→cuBLAS) but output is
-        // coherent. Decode is unchanged (M=1 GEMV path). Until the
-        // CUTLASS+llm-compressor numerical mismatch is rooted, prefer
-        // correctness over speed.
-        const bool skip_cutlass_for_llm_compressor = cfg.is_llm_compressor_nvfp4;
-        if (cutlass_sm120_nvfp4_available() && !skip_cutlass_for_llm_compressor) {
+        if (cutlass_sm120_nvfp4_available()) {
             int ct_count = 0;
             size_t ct_total = 0;
             auto register_prequant = [&](const Tensor& w) {
@@ -387,11 +371,6 @@ void GraphExecutor::pre_dequant_weights(cudaStream_t stream, const VRAMBudget& b
                 IMP_LOG_INFO("CUTLASS sm_120 NVFP4 cache (prequant): %d tensors, %.2f MiB",
                              ct_count, ct_total / (1024.0 * 1024.0));
             }
-        } else if (skip_cutlass_for_llm_compressor) {
-            IMP_LOG_INFO("CUTLASS sm_120 NVFP4 cache: skipped for llm-compressor "
-                         "format (uses dequant→cuBLAS fallback for prefill — "
-                         "CUTLASS path produces wrong output, see memory/"
-                         "stress_test_safetensors_2026_05_01.md)");
         }
     }
 
