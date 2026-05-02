@@ -613,7 +613,17 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         if (role == "tool") {
             // Tool response message — format for the model
             std::string content = format_tool_response(tpl_family, msg);
-            chat_msgs.push_back({"tool", content});
+            // Gemma's chat-template skips standalone role=tool messages and
+            // expects tool_response markers to be glued onto the assistant
+            // message that produced the call. Append to previous assistant
+            // entry instead of pushing a fresh ChatMessage; ChatML/Llama3
+            // templates render standalone tool messages so keep the push.
+            if (tpl_family == imp::ChatTemplateFamily::GEMMA &&
+                !chat_msgs.empty() && chat_msgs.back().role == "assistant") {
+                chat_msgs.back().content += content;
+            } else {
+                chat_msgs.push_back({"tool", content});
+            }
         } else if (role == "assistant" && msg.contains("tool_calls")) {
             // Assistant message with tool_calls — reconstruct model output format
             std::string content_str;
@@ -2045,9 +2055,13 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 logprobs_obj = {{"content", content_logprobs}};
             }
 
-            // Parse tool calls from model output
+            // Parse tool calls from model output. Run even on finish=length:
+            // the model may have emitted a complete tool_call and then kept
+            // generating until the budget ran out (common before we hook the
+            // family-specific close marker as a stop token). The parser is
+            // tolerant of trailing garbage after the closing marker.
             std::vector<ParsedToolCall> tool_calls;
-            if (has_tools && strcmp(finish, "length") != 0) {
+            if (has_tools) {
                 auto [pre_content, parsed_calls] = parse_tool_calls(tpl_family, content, state.next_tool_call_id);
                 if (!parsed_calls.empty()) {
                     tool_calls = std::move(parsed_calls);

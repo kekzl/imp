@@ -52,6 +52,33 @@ services:
       - OPENAI_API_KEY=not-needed
       - WEBUI_AUTH=false
       - ENABLE_OLLAMA_API=false
+
+      # --- Tool support ---
+      # Native function calling: model emits tool_calls JSON, Open WebUI dispatches.
+      # imp's chat-template plumbing already handles this; per-model toggle still
+      # lives in the UI (Settings → Models → [model] → Advanced → Function Calling).
+      - ENABLE_DIRECT_CONNECTIONS=true
+
+      # Built-in Web Search (DuckDuckGo — no API key needed). User toggles the
+      # globe icon in the chat input to enable per-message.
+      - ENABLE_RAG_WEB_SEARCH=true
+      - RAG_WEB_SEARCH_ENGINE=duckduckgo
+      - RAG_WEB_SEARCH_RESULT_COUNT=3
+      - RAG_WEB_SEARCH_CONCURRENT_REQUESTS=10
+      - ENABLE_SEARCH_QUERY_GENERATION=true
+
+      # URL fetching from chat (paste a URL, Open WebUI loads + indexes).
+      - ENABLE_RAG_LOCAL_WEB_FETCH=true
+      - RAG_WEB_LOADER_ENGINE=safe_web
+
+      # Code Interpreter — runs Python in the browser via Pyodide (no sandbox
+      # service needed, no host risk).
+      - ENABLE_CODE_INTERPRETER=true
+      - CODE_EXECUTION_ENGINE=pyodide
+      - CODE_INTERPRETER_ENGINE=pyodide
+
+      # User-defined Tools / Functions (admin UI: Workspace → Tools / Functions).
+      - ENABLE_COMMUNITY_SHARING=false
     depends_on:
       imp-server:
         condition: service_healthy

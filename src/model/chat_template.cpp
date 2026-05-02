@@ -1013,9 +1013,14 @@ std::vector<int32_t> ChatTemplate::apply_jinja_with_tools(
     ctx["tool_choice"] = jinja::Value(tool_choice);
     ctx["add_generation_prompt"] = jinja::Value(add_generation_prompt);
     // See apply_jinja for the defaults rationale; same logic for the
-    // tools-aware path.
+    // tools-aware path. When tools are present, default to enable_thinking=true:
+    // models like Gemma-4 emit tool_calls via a thought-channel-driven decision
+    // (template auto-closes the channel with empty content when thinking is off,
+    // which trains the model to skip tool selection and answer in plain text).
     if (suppress_thinking) {
         ctx["enable_thinking"] = jinja::Value(false);
+    } else if (family_ == ChatTemplateFamily::GEMMA) {
+        ctx["enable_thinking"] = jinja::Value(true);
     }
     ctx["bos_token"] = (bos_id_ >= 0) ? jinja::Value(tok.token_text(bos_id_)) : jinja::Value(std::string(""));
     ctx["eos_token"] = jinja::Value(tok.token_text(tok.eos_id()));

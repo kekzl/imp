@@ -28,6 +28,9 @@ std::pair<std::string, std::vector<ParsedToolCall>>
 parse_tool_calls_llama3(const std::string& text, std::atomic<int>& next_tool_call_id);
 
 std::pair<std::string, std::vector<ParsedToolCall>>
+parse_tool_calls_gemma(const std::string& text, std::atomic<int>& next_tool_call_id);
+
+std::pair<std::string, std::vector<ParsedToolCall>>
 parse_tool_calls(imp::ChatTemplateFamily family, const std::string& text,
                  std::atomic<int>& next_tool_call_id);
 
