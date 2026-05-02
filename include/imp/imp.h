@@ -125,11 +125,28 @@ ImpError imp_detokenize(
     size_t output_buf_size
 );
 
-// Prefill: process input tokens, populate KV cache
+// Prefill: process input tokens, populate KV cache.
+// NOTE: prefill samples the FIRST output token; without `params` the request
+// inherits Request struct defaults (top_p=1, top_k=0) and ignores caller
+// sampling choices for that first token. Quantized MoE models with noisy
+// logit tails (Gemma-4-NVFP4, Qwen3-Coder-NVFP4) can produce a degenerate
+// first token under those defaults. Use imp_prefill_with_params instead and
+// pass the same params you will hand to imp_decode_step.
 ImpError imp_prefill(
     ImpContext ctx,
     const int32_t* tokens,
     int n_tokens
+);
+
+// Prefill that applies caller-supplied sampling params to the first-token
+// sample at end of the last prefill chunk. Strongly preferred over
+// imp_prefill for any path that uses non-default temperature/top_p/top_k.
+// `params` may be NULL (degrades to imp_prefill semantics).
+ImpError imp_prefill_with_params(
+    ImpContext ctx,
+    const int32_t* tokens,
+    int n_tokens,
+    const ImpGenerateParams* params
 );
 
 // Decode: generate one token

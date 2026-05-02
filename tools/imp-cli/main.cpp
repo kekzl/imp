@@ -198,7 +198,7 @@ int main(int argc, char** argv) {
         // Warmup: 1 full prefill+decode cycle (discarded)
         fprintf(stderr, "Warmup...\n");
         imp_context_reset(ctx);
-        imp_prefill(ctx, tokens.data(), args.bench_pp);
+        imp_prefill_with_params(ctx, tokens.data(), args.bench_pp, &bench_params);
         for (int s = 0; s < tg_tokens; s++) {
             int32_t tok = 0;
             imp_decode_step(ctx, &bench_params, &tok);
@@ -209,7 +209,7 @@ int main(int argc, char** argv) {
         for (int rep = 0; rep < args.bench_reps; rep++) {
             imp_context_reset(ctx);
             auto t0 = std::chrono::high_resolution_clock::now();
-            err = imp_prefill(ctx, tokens.data(), args.bench_pp);
+            err = imp_prefill_with_params(ctx, tokens.data(), args.bench_pp, &bench_params);
             auto t1 = std::chrono::high_resolution_clock::now();
             if (err != IMP_SUCCESS) {
                 fprintf(stderr, "Prefill error on rep %d: %s\n", rep, imp_error_string(err));
@@ -222,7 +222,7 @@ int main(int argc, char** argv) {
         double tg_total_ms = 0;
         for (int rep = 0; rep < args.bench_reps; rep++) {
             imp_context_reset(ctx);
-            err = imp_prefill(ctx, tokens.data(), args.bench_pp);
+            err = imp_prefill_with_params(ctx, tokens.data(), args.bench_pp, &bench_params);
             if (err != IMP_SUCCESS) {
                 fprintf(stderr, "Prefill error on tg rep %d: %s\n", rep, imp_error_string(err));
                 break;
@@ -331,8 +331,8 @@ int main(int argc, char** argv) {
                 // Reset context for fresh KV cache
                 imp_context_reset(ctx);
 
-                // Prefill with templated tokens
-                err = imp_prefill(ctx, tokens.data(), static_cast<int>(tokens.size()));
+                // Prefill with templated tokens (params apply to first sample)
+                err = imp_prefill_with_params(ctx, tokens.data(), static_cast<int>(tokens.size()), &params);
                 if (err != IMP_SUCCESS) {
                     fprintf(stderr, "Prefill error: %s\n", imp_error_string(err));
                     history.pop_back();
@@ -528,7 +528,7 @@ int main(int argc, char** argv) {
 
             // Prefill with timing
             auto t_prefill_start = std::chrono::high_resolution_clock::now();
-            err = imp_prefill(ctx, tokens.data(), n_prompt_tokens);
+            err = imp_prefill_with_params(ctx, tokens.data(), n_prompt_tokens, &params);
             auto t_prefill_end = std::chrono::high_resolution_clock::now();
             if (err != IMP_SUCCESS) {
                 fprintf(stderr, "Prefill error: %s\n", imp_error_string(err));

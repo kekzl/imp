@@ -566,7 +566,8 @@ ImpError imp_detokenize(ImpModel model, const int32_t* tokens,
     }
 }
 
-ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
+ImpError imp_prefill_with_params(ImpContext ctx, const int32_t* tokens, int n_tokens,
+                                  const ImpGenerateParams* params) {
     if (!ctx || !tokens || n_tokens <= 0) {
         return IMP_ERROR_INVALID_ARG;
     }
@@ -589,6 +590,33 @@ ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
         auto req = std::make_shared<imp::Request>();
         req->input_tokens.assign(tokens, tokens + n_tokens);
         req->max_tokens = 4096;  // Large default; decode_step controls actual stopping
+        // Apply caller-supplied sampling params so the prefill last-chunk
+        // sampler honours top_p / top_k / temperature for the FIRST token.
+        // Without this Gemma-4-NVFP4 (and other noisy-logit-tail quants)
+        // can sample garbage like <|end_of_text|> on token #0 and never
+        // recover, even with temperature == 0.7 + properly-loaded
+        // generation_config.json defaults.
+        if (params) {
+            req->temperature = params->temperature;
+            req->top_p = params->top_p;
+            req->top_k = params->top_k;
+            req->seed = params->seed;
+            req->min_p = params->min_p;
+            req->typical_p = params->typical_p;
+            req->repetition_penalty = params->repetition_penalty;
+            req->frequency_penalty = params->frequency_penalty;
+            req->presence_penalty = params->presence_penalty;
+            req->repeat_last_n = params->repeat_last_n;
+            req->dry_multiplier = params->dry_multiplier;
+            req->dry_base = params->dry_base;
+            req->dry_allowed_length = params->dry_allowed_length;
+            req->dry_penalty_last_n = params->dry_penalty_last_n;
+            req->mirostat = params->mirostat;
+            req->mirostat_tau = params->mirostat_tau;
+            req->mirostat_eta = params->mirostat_eta;
+            if (params->mirostat == 2 && req->mirostat_mu == 0.0f)
+                req->mirostat_mu = 2.0f * params->mirostat_tau;
+        }
         req->ignore_eos = true;  // Don't stop during prefill — decode_step controls stopping
         req->status = imp::RequestStatus::PENDING;
 
@@ -623,6 +651,15 @@ ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
     } catch (...) {
         return IMP_ERROR_INTERNAL;
     }
+}
+
+// Legacy entry point — defaults to no caller-supplied sampling, leaves the
+// first-token sample at end of prefill on Request struct defaults
+// (top_p=1, top_k=0). Kept for ABI; new callers should use
+// imp_prefill_with_params and pass the same params they'll use in
+// imp_decode_step.
+ImpError imp_prefill(ImpContext ctx, const int32_t* tokens, int n_tokens) {
+    return imp_prefill_with_params(ctx, tokens, n_tokens, nullptr);
 }
 
 ImpError imp_decode_step(ImpContext ctx, const ImpGenerateParams* params,
