@@ -109,7 +109,7 @@ Full build options, test commands, and verify-gate setup: [`docs/usage.md`](docs
 | [MXFP4](docs/MXFP4_QUANTIZATION.md) | MXFP4 background and tooling |
 | [Recommended models](docs/RECOMMENDED_MODELS.md) | Quality-per-VRAM picks |
 | [Memory management](docs/memory-management-comparison.md) | VRAM/RAM strategy comparison |
-| [Roadmap](TODO.md) | Open bugs and in-flight performance work |
+| [Roadmap](docs/roadmap.md) | Open bugs and in-flight performance work |
 | [Changelog](CHANGELOG.md) | Per-release notes |
 
 ## Contributing
