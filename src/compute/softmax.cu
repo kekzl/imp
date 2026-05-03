@@ -13,7 +13,7 @@ namespace imp {
 // --------------------------------------------------------------------------
 __device__ float block_reduce_max(float val) {
     __shared__ float shared[8];
-    const int lane    = threadIdx.x & 31;
+    const int lane = threadIdx.x & 31;
     const int warp_id = threadIdx.x >> 5;
 
     val = warp_reduce_max(val);
@@ -36,7 +36,7 @@ __device__ float block_reduce_max(float val) {
 // --------------------------------------------------------------------------
 __device__ float block_reduce_sum_softmax(float val) {
     __shared__ float shared[8];
-    const int lane    = threadIdx.x & 31;
+    const int lane = threadIdx.x & 31;
     const int warp_id = threadIdx.x >> 5;
 
     val = warp_reduce_sum(val);
@@ -62,14 +62,10 @@ __device__ float block_reduce_sum_softmax(float val) {
 //
 // One block per row. Block: 256 threads.
 // --------------------------------------------------------------------------
-__global__ void softmax_fp32_kernel(
-    const float* __restrict__ input,
-    float* __restrict__ output,
-    int cols)
-{
+__global__ void softmax_fp32_kernel(const float* __restrict__ input, float* __restrict__ output, int cols) {
     const int row = blockIdx.x;
-    const float* in_row  = input  + static_cast<int64_t>(row) * cols;
-    float*       out_row = output + static_cast<int64_t>(row) * cols;
+    const float* in_row = input + static_cast<int64_t>(row) * cols;
+    float* out_row = output + static_cast<int64_t>(row) * cols;
 
     // ---- Online max + sum computation ----
     // Each thread maintains a local (max, sum) pair
@@ -118,14 +114,10 @@ __global__ void softmax_fp32_kernel(
 // --------------------------------------------------------------------------
 // Online softmax FP16 kernel (read half, compute in float, write half)
 // --------------------------------------------------------------------------
-__global__ void softmax_fp16_kernel(
-    const __half* __restrict__ input,
-    __half* __restrict__ output,
-    int cols)
-{
+__global__ void softmax_fp16_kernel(const __half* __restrict__ input, __half* __restrict__ output, int cols) {
     const int row = blockIdx.x;
-    const __half* in_row  = input  + static_cast<int64_t>(row) * cols;
-    __half*       out_row = output + static_cast<int64_t>(row) * cols;
+    const __half* in_row = input + static_cast<int64_t>(row) * cols;
+    __half* out_row = output + static_cast<int64_t>(row) * cols;
 
     float local_max = -FLT_MAX;
     float local_sum = 0.0f;
@@ -167,9 +159,7 @@ __global__ void softmax_fp16_kernel(
 // --------------------------------------------------------------------------
 // Host dispatch
 // --------------------------------------------------------------------------
-void softmax(const Tensor& input, Tensor& output,
-             cudaStream_t stream)
-{
+void softmax(const Tensor& input, Tensor& output, cudaStream_t stream) {
     // input/output: [rows, cols] -- softmax over last dimension
     // For higher-dim tensors, treat all leading dims as "rows"
     int64_t cols = input.shape[input.ndim - 1];
@@ -178,27 +168,26 @@ void softmax(const Tensor& input, Tensor& output,
         rows *= input.shape[i];
     }
 
-    if (rows == 0 || cols == 0) return;
+    if (rows == 0 || cols == 0)
+        return;
 
     const int block = 256;
-    const int grid  = static_cast<int>(rows);
+    const int grid = static_cast<int>(rows);
 
     switch (input.qtype) {
         case QType::F32:
-            softmax_fp32_kernel<<<grid, block, 0, stream>>>(
-                static_cast<const float*>(input.data),
-                static_cast<float*>(output.data),
-                static_cast<int>(cols));
+            softmax_fp32_kernel<<<grid, block, 0, stream>>>(static_cast<const float*>(input.data),
+                                                            static_cast<float*>(output.data),
+                                                            static_cast<int>(cols));
             break;
         case QType::F16:
-            softmax_fp16_kernel<<<grid, block, 0, stream>>>(
-                static_cast<const __half*>(input.data),
-                static_cast<__half*>(output.data),
-                static_cast<int>(cols));
+            softmax_fp16_kernel<<<grid, block, 0, stream>>>(static_cast<const __half*>(input.data),
+                                                            static_cast<__half*>(output.data),
+                                                            static_cast<int>(cols));
             break;
         default:
             break;
     }
 }
 
-} // namespace imp
+}  // namespace imp

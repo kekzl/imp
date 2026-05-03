@@ -7,14 +7,15 @@ namespace imp {
 
 GDNState::~GDNState() {
     if (pool_) {
-        if (alloc_) alloc_->free(pool_);
-        else IMP_CUDA_CHECK_LOG(cudaFree(pool_));
+        if (alloc_)
+            alloc_->free(pool_);
+        else
+            IMP_CUDA_CHECK_LOG(cudaFree(pool_));
         pool_ = nullptr;
     }
 }
 
-bool GDNState::init(int n_gdn_layers, int max_sequences,
-                    int n_heads, int head_dim, int state_dim,
+bool GDNState::init(int n_gdn_layers, int max_sequences, int n_heads, int head_dim, int state_dim,
                     VRAMAllocator* alloc) {
     n_gdn_layers_ = n_gdn_layers;
     max_sequences_ = max_sequences;
@@ -25,8 +26,7 @@ bool GDNState::init(int n_gdn_layers, int max_sequences,
 
     // State S[n_heads, head_dim, state_dim] in FP32
     auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
-    per_layer_bytes_ = align256(
-        static_cast<size_t>(n_heads) * head_dim * state_dim * sizeof(float));
+    per_layer_bytes_ = align256(static_cast<size_t>(n_heads) * head_dim * state_dim * sizeof(float));
     per_seq_bytes_ = per_layer_bytes_ * n_gdn_layers;
     total_bytes_ = per_seq_bytes_ * max_sequences;
 
@@ -34,7 +34,8 @@ bool GDNState::init(int n_gdn_layers, int max_sequences,
         pool_ = alloc_->allocate(total_bytes_, "gdn_state");
     } else {
         cudaError_t err = cudaMalloc(&pool_, total_bytes_);
-        if (err != cudaSuccess) pool_ = nullptr;
+        if (err != cudaSuccess)
+            pool_ = nullptr;
     }
     if (!pool_) {
         IMP_LOG_ERROR("Failed to allocate GDN state pool (%zu bytes)", total_bytes_);
@@ -43,12 +44,11 @@ bool GDNState::init(int n_gdn_layers, int max_sequences,
 
     IMP_CUDA_CHECK_LOG(cudaMemset(pool_, 0, total_bytes_));
 
-    IMP_LOG_INFO("GDN state: %d layers x %d sequences = %.2f MiB "
-                 "(S=[%d,%d,%d] FP32, %.1f KB per layer)",
-                 n_gdn_layers, max_sequences,
-                 total_bytes_ / (1024.0 * 1024.0),
-                 n_heads, head_dim, state_dim,
-                 per_layer_bytes_ / 1024.0);
+    IMP_LOG_INFO(
+        "GDN state: %d layers x %d sequences = %.2f MiB "
+        "(S=[%d,%d,%d] FP32, %.1f KB per layer)",
+        n_gdn_layers, max_sequences, total_bytes_ / (1024.0 * 1024.0), n_heads, head_dim, state_dim,
+        per_layer_bytes_ / 1024.0);
     return true;
 }
 
@@ -58,9 +58,10 @@ void* GDNState::s_state(int seq_id, int gdn_layer_idx) {
 }
 
 void GDNState::reset_sequence(int seq_id, cudaStream_t stream) {
-    if (!pool_ || seq_id < 0 || seq_id >= max_sequences_) return;
+    if (!pool_ || seq_id < 0 || seq_id >= max_sequences_)
+        return;
     char* base = static_cast<char*>(pool_) + seq_id * per_seq_bytes_;
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(base, 0, per_seq_bytes_, stream));
 }
 
-} // namespace imp
+}  // namespace imp

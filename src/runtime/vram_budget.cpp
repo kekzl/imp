@@ -6,17 +6,15 @@
 
 namespace imp {
 
-VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
-                                int n_kv_layers, int head_dim,
-                                size_t free_vram) {
+VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config, int n_kv_layers, int head_dim,
+                               size_t free_vram) {
     VRAMBudget budget;
     const auto& mcfg = model.config();
 
     // --- 1. Classify model quantization ---
     auto qtype = model.layer(0).wq.qtype;
-    bool sub_8bit = (qtype == QType::Q4_0 || qtype == QType::Q4_K ||
-                     qtype == QType::Q5_0 || qtype == QType::Q5_K ||
-                     qtype == QType::Q3_K || qtype == QType::Q2_K ||
+    bool sub_8bit = (qtype == QType::Q4_0 || qtype == QType::Q4_K || qtype == QType::Q5_0 ||
+                     qtype == QType::Q5_K || qtype == QType::Q3_K || qtype == QType::Q2_K ||
                      qtype == QType::Q4_1 || qtype == QType::Q5_1);
 
     // --- 2. Choose strategy ---
@@ -31,13 +29,19 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
     // --- 3. Compute available VRAM ---
     // Feature-aware reserve instead of flat 1 GiB.
     budget.reserve_bytes = 256ULL * 1024 * 1024;  // base: cuBLAS + driver
-    if (config.use_cuda_graphs)       budget.reserve_bytes += 256ULL * 1024 * 1024;
-    if (config.use_green_contexts)    budget.reserve_bytes += 128ULL * 1024 * 1024;
-    if (config.use_fp8_prefill)       budget.reserve_bytes += 128ULL * 1024 * 1024;
+    if (config.use_cuda_graphs)
+        budget.reserve_bytes += 256ULL * 1024 * 1024;
+    if (config.use_green_contexts)
+        budget.reserve_bytes += 128ULL * 1024 * 1024;
+    if (config.use_fp8_prefill)
+        budget.reserve_bytes += 128ULL * 1024 * 1024;
     budget.reserve_bytes = std::max(budget.reserve_bytes, static_cast<size_t>(512ULL * 1024 * 1024));
     // At least 10% of total VRAM as headroom
     size_t total_vram = 0;
-    { size_t f; cudaMemGetInfo(&f, &total_vram); }
+    {
+        size_t f;
+        cudaMemGetInfo(&f, &total_vram);
+    }
     budget.reserve_bytes = std::max(budget.reserve_bytes, total_vram / 10);
 
     // Estimate SSM footprint
@@ -45,14 +49,15 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
     if (mcfg.ssm_inner_size > 0) {
         int n_ssm = 0;
         for (int i = 0; i < mcfg.n_layers; i++)
-            if (model.layer(i).ssm_in.data != nullptr) n_ssm++;
+            if (model.layer(i).ssm_in.data != nullptr)
+                n_ssm++;
         if (n_ssm > 0) {
             int conv_ch = mcfg.ssm_inner_size + 2 * mcfg.ssm_group_count * mcfg.ssm_state_size;
             int n_heads = mcfg.ssm_dt_rank;
             int hd_ssm = (n_heads > 0) ? mcfg.ssm_inner_size / n_heads : 0;
             ssm_footprint = static_cast<size_t>(n_ssm) * config.max_batch_size *
-                (conv_ch * std::max(mcfg.ssm_conv_kernel - 1, 0) * sizeof(float) +
-                 n_heads * hd_ssm * mcfg.ssm_state_size * dtype_size(config.ssm_state_dtype));
+                            (conv_ch * std::max(mcfg.ssm_conv_kernel - 1, 0) * sizeof(float) +
+                             n_heads * hd_ssm * mcfg.ssm_state_size * dtype_size(config.ssm_state_dtype));
         }
     }
 
@@ -66,17 +71,15 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
     bool is_tq = (config.kv_cache_dtype == QType::TURBOQUANT);
     bool is_tql = (config.kv_cache_dtype == QType::TURBOQUANT_LITE);
     if (config.kv_cache_dtype == QType::INT4 || is_tq || is_tql) {
-        single_block_bytes = static_cast<size_t>(bs) *
-                             mcfg.n_kv_heads * head_dim / 2;
+        single_block_bytes = static_cast<size_t>(bs) * mcfg.n_kv_heads * head_dim / 2;
     } else {
-        single_block_bytes = static_cast<size_t>(bs) *
-                             mcfg.n_kv_heads * head_dim * dtype_size(config.kv_cache_dtype);
+        single_block_bytes = static_cast<size_t>(bs) * mcfg.n_kv_heads * head_dim *
+                             dtype_size(config.kv_cache_dtype);
     }
     // TURBOQUANT_LITE: V-only pool (1x), all others: K+V (2x)
     size_t pool_multiplier = is_tql ? 1 : 2;
     size_t per_block_total = single_block_bytes * pool_multiplier * n_kv_layers;
-    if (config.kv_cache_dtype == QType::INT8 || config.kv_cache_dtype == QType::INT4
-        || is_tq || is_tql) {
+    if (config.kv_cache_dtype == QType::INT8 || config.kv_cache_dtype == QType::INT4 || is_tq || is_tql) {
         size_t scale_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * sizeof(half);
         per_block_total += scale_per_block * 2 * n_kv_layers;  // K norms + V scales (always 2x)
     }
@@ -85,7 +88,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
         int sketch_dim = head_dim;
         if (is_tql) {
             int mult = config.turboquant_sketch_multiplier;
-            if (mult <= 0) mult = 2;
+            if (mult <= 0)
+                mult = 2;
             sketch_dim = head_dim * mult;
         }
         size_t sketch_per_block = static_cast<size_t>(bs) * mcfg.n_kv_heads * (sketch_dim / 8);
@@ -106,17 +110,22 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
     auto nvfp4_beneficial = [](QType qt) -> bool {
         using enum QType;
         switch (qt) {
-            case Q8_0: case Q8_K:
-            case Q6_K: case Q5_K:
+            case Q8_0:
+            case Q8_K:
+            case Q6_K:
+            case Q5_K:
                 return true;
-            default: return false;
+            default:
+                return false;
         }
     };
 
     size_t nvfp4_elems = 0;
     auto count_nvfp4 = [&](const Tensor& w, QType qt) {
-        if (!w.data || !nvfp4_beneficial(qt)) return;
-        if (w.shape[1] % 16 != 0) return;
+        if (!w.data || !nvfp4_beneficial(qt))
+            return;
+        if (w.shape[1] % 16 != 0)
+            return;
         nvfp4_elems += static_cast<size_t>(w.shape[0]) * w.shape[1];
     };
 
@@ -149,7 +158,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
             size_t kv_available = (available > weight_total) ? (available - weight_total) : 0;
             budget.kv_cache_bytes = static_cast<size_t>(kv_available * 0.8);
             budget.kv_max_blocks = (per_block_total > 0)
-                ? static_cast<int>(budget.kv_cache_bytes / per_block_total) : needed_blocks;
+                                       ? static_cast<int>(budget.kv_cache_bytes / per_block_total)
+                                       : needed_blocks;
             budget.nvfp4_second_pass = false;
             break;
         }
@@ -160,7 +170,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
             double kv_fraction = (config.use_nvfp4_decode == 2) ? 0.1 : 0.8;
             budget.kv_cache_bytes = static_cast<size_t>(available * kv_fraction);
             budget.kv_max_blocks = (per_block_total > 0)
-                ? static_cast<int>(budget.kv_cache_bytes / per_block_total) : needed_blocks;
+                                       ? static_cast<int>(budget.kv_cache_bytes / per_block_total)
+                                       : needed_blocks;
             if (config.use_nvfp4_decode != 2)
                 budget.kv_max_blocks = std::max(budget.kv_max_blocks, needed_blocks);
 
@@ -169,7 +180,8 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
             size_t kv_actual = static_cast<size_t>(budget.kv_max_blocks) * per_block_total;
             size_t nvfp4_actual = nvfp4_estimate + cutlass_sf_estimate;
             size_t remaining_for_fp8 = (available > kv_actual + nvfp4_actual)
-                ? (available - kv_actual - nvfp4_actual) : 0;
+                                           ? (available - kv_actual - nvfp4_actual)
+                                           : 0;
             budget.fp8_cache_bytes = std::min(nvfp4_elems, remaining_for_fp8);
             budget.nvfp4_second_pass = (config.use_nvfp4_decode == 2);
             break;
@@ -179,16 +191,17 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
             budget.nvfp4_cache_bytes = 0;
             budget.kv_cache_bytes = static_cast<size_t>(available * 0.8);
             budget.kv_max_blocks = (per_block_total > 0)
-                ? static_cast<int>(budget.kv_cache_bytes / per_block_total) : needed_blocks;
+                                       ? static_cast<int>(budget.kv_cache_bytes / per_block_total)
+                                       : needed_blocks;
             budget.nvfp4_second_pass = false;
             break;
         }
     }
     budget.kv_max_blocks = std::max(budget.kv_max_blocks, 16);
 
-    int target_blocks = (config.use_nvfp4_decode == 2 ||
-                         budget.strategy == VRAMBudget::NVFP4_DECODE_ONLY)
-                        ? needed_blocks : needed_blocks * 2;
+    int target_blocks = (config.use_nvfp4_decode == 2 || budget.strategy == VRAMBudget::NVFP4_DECODE_ONLY)
+                            ? needed_blocks
+                            : needed_blocks * 2;
     budget.kv_max_blocks = std::min(budget.kv_max_blocks, target_blocks);
     budget.kv_max_blocks = std::max(budget.kv_max_blocks, 16);
 
@@ -200,38 +213,35 @@ VRAMBudget compute_vram_budget(const Model& model, const EngineConfig& config,
         min_kv_tok = std::min(16384, config.max_seq_len * 4);
     }
     int min_kv_blocks = (min_kv_tok + bs - 1) / bs;
-    int max_affordable = (per_block_total > 0)
-        ? static_cast<int>(available / per_block_total) : budget.kv_max_blocks;
+    int max_affordable = (per_block_total > 0) ? static_cast<int>(available / per_block_total)
+                                               : budget.kv_max_blocks;
     // Defensive cap for auto mode (leaves room for weight caches). When the
     // user explicitly sets min_kv_tokens, respect their request up to the
     // physical max_affordable — they're opting into a tighter weight-cache
     // budget in exchange for more context.
-    int cap = user_requested_min ? max_affordable
-                                 : static_cast<int>(max_affordable * 0.8);
+    int cap = user_requested_min ? max_affordable : static_cast<int>(max_affordable * 0.8);
     min_kv_blocks = std::min(min_kv_blocks, cap);
     if (budget.kv_max_blocks < min_kv_blocks) {
-        IMP_LOG_INFO("VRAM budget: raising KV from %d to %d blocks (min_kv_tokens=%d)",
-                     budget.kv_max_blocks, min_kv_blocks, min_kv_tok);
+        IMP_LOG_INFO("VRAM budget: raising KV from %d to %d blocks (min_kv_tokens=%d)", budget.kv_max_blocks,
+                     min_kv_blocks, min_kv_tok);
         budget.kv_max_blocks = min_kv_blocks;
         budget.kv_cache_bytes = static_cast<size_t>(min_kv_blocks) * per_block_total;
     }
 
     const char* strat_name = (budget.strategy == VRAMBudget::FP8_PREFILL_NVFP4_DECODE)
-        ? "FP8_PREFILL_NVFP4_DECODE"
-        : (budget.strategy == VRAMBudget::NVFP4_DECODE_ONLY)
-        ? "NVFP4_DECODE_ONLY" : "FP16_ONLY";
-    IMP_LOG_INFO("VRAM budget: strategy=%s, available=%.1f MiB, "
-                 "kv=%d blocks (%.1f MiB), nvfp4=%.1f MiB, fp8=%.1f MiB, "
-                 "reserve=%.0f MiB, second_pass=%s",
-                 strat_name, available / (1024.0 * 1024.0),
-                 budget.kv_max_blocks,
-                 (per_block_total > 0 ? budget.kv_max_blocks * per_block_total : 0) / (1024.0 * 1024.0),
-                 nvfp4_estimate / (1024.0 * 1024.0),
-                 budget.fp8_cache_bytes / (1024.0 * 1024.0),
-                 budget.reserve_bytes / (1024.0 * 1024.0),
-                 budget.nvfp4_second_pass ? "yes" : "no");
+                                 ? "FP8_PREFILL_NVFP4_DECODE"
+                             : (budget.strategy == VRAMBudget::NVFP4_DECODE_ONLY) ? "NVFP4_DECODE_ONLY"
+                                                                                  : "FP16_ONLY";
+    IMP_LOG_INFO(
+        "VRAM budget: strategy=%s, available=%.1f MiB, "
+        "kv=%d blocks (%.1f MiB), nvfp4=%.1f MiB, fp8=%.1f MiB, "
+        "reserve=%.0f MiB, second_pass=%s",
+        strat_name, available / (1024.0 * 1024.0), budget.kv_max_blocks,
+        (per_block_total > 0 ? budget.kv_max_blocks * per_block_total : 0) / (1024.0 * 1024.0),
+        nvfp4_estimate / (1024.0 * 1024.0), budget.fp8_cache_bytes / (1024.0 * 1024.0),
+        budget.reserve_bytes / (1024.0 * 1024.0), budget.nvfp4_second_pass ? "yes" : "no");
 
     return budget;
 }
 
-} // namespace imp
+}  // namespace imp

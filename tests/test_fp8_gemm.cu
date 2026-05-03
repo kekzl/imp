@@ -12,12 +12,8 @@ namespace {
 
 class FP8GemmTest : public ::testing::Test {
 protected:
-    void SetUp() override {
-        cudaStreamCreate(&stream_);
-    }
-    void TearDown() override {
-        cudaStreamDestroy(stream_);
-    }
+    void SetUp() override { cudaStreamCreate(&stream_); }
+    void TearDown() override { cudaStreamDestroy(stream_); }
     cudaStream_t stream_ = nullptr;
 };
 
@@ -28,7 +24,9 @@ TEST_F(FP8GemmTest, GemmCublasLtFP16) {
     size_t b_bytes = N * K * sizeof(half);
     size_t c_bytes = M * N * sizeof(half);
 
-    void* d_a = nullptr; void* d_b = nullptr; void* d_c = nullptr;
+    void* d_a = nullptr;
+    void* d_b = nullptr;
+    void* d_c = nullptr;
     cudaMalloc(&d_a, a_bytes);
     cudaMalloc(&d_b, b_bytes);
     cudaMalloc(&d_c, c_bytes);
@@ -57,7 +55,9 @@ TEST_F(FP8GemmTest, GemmCublasLtFP16) {
     float actual = __half2float(h_c[0]);
     EXPECT_NEAR(actual, expected, 0.01f);
 
-    cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
+    cudaFree(d_a);
+    cudaFree(d_b);
+    cudaFree(d_c);
 }
 
 TEST_F(FP8GemmTest, GemvFP8Basic) {
@@ -65,7 +65,9 @@ TEST_F(FP8GemmTest, GemvFP8Basic) {
     const int M = 64, K = 128;
     float scale = 1.0f;
 
-    void* d_a = nullptr; void* d_x = nullptr; void* d_y = nullptr;
+    void* d_a = nullptr;
+    void* d_x = nullptr;
+    void* d_y = nullptr;
     cudaMalloc(&d_a, M * K);  // FP8: 1 byte per element
     cudaMalloc(&d_x, K * sizeof(half));
     cudaMalloc(&d_y, M * sizeof(half));
@@ -91,8 +93,10 @@ TEST_F(FP8GemmTest, GemvFP8Basic) {
     cudaMemcpy(h_y.data(), d_y, M * sizeof(half), cudaMemcpyDeviceToHost);
     EXPECT_NEAR(__half2float(h_y[0]), 0.0f, 0.001f);
 
-    cudaFree(d_a); cudaFree(d_x); cudaFree(d_y);
+    cudaFree(d_a);
+    cudaFree(d_x);
+    cudaFree(d_y);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

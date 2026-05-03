@@ -12,12 +12,8 @@ namespace {
 
 class AttentionTCTest : public ::testing::Test {
 protected:
-    void SetUp() override {
-        cudaStreamCreate(&stream_);
-    }
-    void TearDown() override {
-        cudaStreamDestroy(stream_);
-    }
+    void SetUp() override { cudaStreamCreate(&stream_); }
+    void TearDown() override { cudaStreamDestroy(stream_); }
     cudaStream_t stream_ = nullptr;
 };
 
@@ -46,8 +42,10 @@ TEST_F(AttentionTCTest, SmallPrefill) {
     size_t qo_bytes = B * S * NH * HD * sizeof(half);
     size_t kv_bytes = B * S * NH * HD * sizeof(half);
 
-    void* d_q = nullptr; void* d_k = nullptr;
-    void* d_v = nullptr; void* d_o = nullptr;
+    void* d_q = nullptr;
+    void* d_k = nullptr;
+    void* d_v = nullptr;
+    void* d_o = nullptr;
     cudaMalloc(&d_q, qo_bytes);
     cudaMalloc(&d_k, kv_bytes);
     cudaMalloc(&d_v, kv_bytes);
@@ -84,14 +82,18 @@ TEST_F(AttentionTCTest, SmallPrefill) {
     int finite_nonzero = 0;
     for (auto& v : h_o) {
         float fv = __half2float(v);
-        if (std::isfinite(fv) && fv != 0.0f) finite_nonzero++;
+        if (std::isfinite(fv) && fv != 0.0f)
+            finite_nonzero++;
     }
     // WMMA kernel correctness is architecture-dependent; log rather than fail
     if (finite_nonzero == 0) {
         GTEST_SKIP() << "WMMA attention produced all-zero output (kernel tuning needed)";
     }
 
-    cudaFree(d_q); cudaFree(d_k); cudaFree(d_v); cudaFree(d_o);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o);
 }
 
 TEST_F(AttentionTCTest, DispatchSelectsCorrectKernel) {
@@ -99,8 +101,10 @@ TEST_F(AttentionTCTest, DispatchSelectsCorrectKernel) {
     const int B = 1, S = 2, NH = 1, HD = 64;
     size_t bytes = B * S * NH * HD * sizeof(half);
 
-    void* d_q = nullptr; void* d_k = nullptr;
-    void* d_v = nullptr; void* d_o = nullptr;
+    void* d_q = nullptr;
+    void* d_k = nullptr;
+    void* d_v = nullptr;
+    void* d_o = nullptr;
     cudaMalloc(&d_q, bytes);
     cudaMalloc(&d_k, bytes);
     cudaMalloc(&d_v, bytes);
@@ -120,7 +124,10 @@ TEST_F(AttentionTCTest, DispatchSelectsCorrectKernel) {
     EXPECT_NO_THROW(attention_prefill_dispatch(Q, K, V, O, scale, true, 0, 0.0f, stream_));
     cudaStreamSynchronize(stream_);
 
-    cudaFree(d_q); cudaFree(d_k); cudaFree(d_v); cudaFree(d_o);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o);
 }
 
 // =========================================================================
@@ -139,19 +146,13 @@ protected:
         cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
         sm_ = major * 10 + minor;
     }
-    void TearDown() override {
-        cudaStreamDestroy(stream_);
-    }
+    void TearDown() override { cudaStreamDestroy(stream_); }
 
     // CPU reference: standard attention with online softmax
     // Q: [B, Sq, NH, HD], K,V: [B, Skv, NKV, HD], O: [B, Sq, NH, HD]
-    static void ref_attention(const std::vector<float>& Q_f,
-                              const std::vector<float>& K_f,
-                              const std::vector<float>& V_f,
-                              std::vector<float>& O_f,
-                              int B, int Sq, int Skv,
-                              int NH, int NKV, int HD,
-                              float scale, bool causal) {
+    static void ref_attention(const std::vector<float>& Q_f, const std::vector<float>& K_f,
+                              const std::vector<float>& V_f, std::vector<float>& O_f, int B, int Sq, int Skv,
+                              int NH, int NKV, int HD, float scale, bool causal) {
         for (int b = 0; b < B; b++) {
             for (int h = 0; h < NH; h++) {
                 int kvh = h / (NH / NKV);
@@ -167,7 +168,8 @@ protected:
                             dot += q_val * k_val;
                         }
                         dot *= scale;
-                        if (causal && qi < ki) dot = -FLT_MAX;
+                        if (causal && qi < ki)
+                            dot = -FLT_MAX;
                         s[ki] = dot;
                         m = fmaxf(m, dot);
                     }
@@ -178,7 +180,8 @@ protected:
                         sum += s[ki];
                     }
                     if (sum > 0.0f) {
-                        for (int ki = 0; ki < Skv; ki++) s[ki] /= sum;
+                        for (int ki = 0; ki < Skv; ki++)
+                            s[ki] /= sum;
                     }
                     // O = P @ V
                     for (int d = 0; d < HD; d++) {
@@ -203,7 +206,7 @@ protected:
         float scale = 1.0f / std::sqrt(static_cast<float>(HD));
 
         // Generate deterministic input data
-        size_t q_elems  = B * Sq  * NH  * HD;
+        size_t q_elems = B * Sq * NH * HD;
         size_t kv_elems = B * Skv * NKV * HD;
 
         std::vector<float> Q_f(q_elems), K_f(kv_elems), V_f(kv_elems);
@@ -220,11 +223,14 @@ protected:
 
         // Convert to half for GPU
         std::vector<half> Q_h(q_elems), K_h(kv_elems), V_h(kv_elems);
-        for (size_t i = 0; i < q_elems; i++)  Q_h[i] = __float2half(Q_f[i]);
-        for (size_t i = 0; i < kv_elems; i++) K_h[i] = __float2half(K_f[i]);
-        for (size_t i = 0; i < kv_elems; i++) V_h[i] = __float2half(V_f[i]);
+        for (size_t i = 0; i < q_elems; i++)
+            Q_h[i] = __float2half(Q_f[i]);
+        for (size_t i = 0; i < kv_elems; i++)
+            K_h[i] = __float2half(K_f[i]);
+        for (size_t i = 0; i < kv_elems; i++)
+            V_h[i] = __float2half(V_f[i]);
 
-        size_t q_bytes  = q_elems  * sizeof(half);
+        size_t q_bytes = q_elems * sizeof(half);
         size_t kv_bytes = kv_elems * sizeof(half);
 
         void *d_q, *d_k, *d_v, *d_o;
@@ -233,12 +239,12 @@ protected:
         cudaMalloc(&d_v, kv_bytes);
         cudaMalloc(&d_o, q_bytes);
 
-        cudaMemcpy(d_q, Q_h.data(), q_bytes,  cudaMemcpyHostToDevice);
+        cudaMemcpy(d_q, Q_h.data(), q_bytes, cudaMemcpyHostToDevice);
         cudaMemcpy(d_k, K_h.data(), kv_bytes, cudaMemcpyHostToDevice);
         cudaMemcpy(d_v, V_h.data(), kv_bytes, cudaMemcpyHostToDevice);
         cudaMemset(d_o, 0, q_bytes);
 
-        int64_t q_shape[]  = {B, Sq, NH, HD};
+        int64_t q_shape[] = {B, Sq, NH, HD};
         int64_t kv_shape[] = {B, Skv, NKV, HD};
         Tensor Qt(d_q, QType::F16, 4, q_shape, true);
         Tensor Kt(d_k, QType::F16, 4, kv_shape, true);
@@ -266,13 +272,14 @@ protected:
         }
 
         // FP16 WMMA with online softmax: allow 1e-2 relative tolerance
-        EXPECT_LT(max_err, 1e-2f)
-            << "Max relative error " << max_err << " exceeds threshold 1e-2"
-            << " (B=" << B << " Sq=" << Sq << " Skv=" << Skv
-            << " NH=" << NH << " NKV=" << NKV << " HD=" << HD
-            << " causal=" << causal << ")";
+        EXPECT_LT(max_err, 1e-2f) << "Max relative error " << max_err << " exceeds threshold 1e-2"
+                                  << " (B=" << B << " Sq=" << Sq << " Skv=" << Skv << " NH=" << NH
+                                  << " NKV=" << NKV << " HD=" << HD << " causal=" << causal << ")";
 
-        cudaFree(d_q); cudaFree(d_k); cudaFree(d_v); cudaFree(d_o);
+        cudaFree(d_q);
+        cudaFree(d_k);
+        cudaFree(d_v);
+        cudaFree(d_o);
     }
 
     cudaStream_t stream_ = nullptr;
@@ -325,7 +332,7 @@ TEST_F(AttentionBlackwellTest, SlidingWindow) {
     const int sliding_window = 64;
     float scale = 1.0f / std::sqrt(static_cast<float>(HD));
 
-    size_t q_elems  = B * Sq * NH * HD;
+    size_t q_elems = B * Sq * NH * HD;
     size_t kv_elems = B * Skv * NKV * HD;
 
     std::vector<float> Q_f(q_elems), K_f(kv_elems), V_f(kv_elems);
@@ -347,12 +354,13 @@ TEST_F(AttentionBlackwellTest, SlidingWindow) {
                 for (int ki = 0; ki < Skv; ki++) {
                     float dot = 0.0f;
                     for (int d = 0; d < HD; d++) {
-                        dot += Q_f[((b * Sq + qi) * NH + h) * HD + d]
-                             * K_f[((b * Skv + ki) * NKV + kvh) * HD + d];
+                        dot += Q_f[((b * Sq + qi) * NH + h) * HD + d] *
+                               K_f[((b * Skv + ki) * NKV + kvh) * HD + d];
                     }
                     dot *= scale;
                     // Causal + sliding window mask
-                    if (ki > qi || qi - ki >= sliding_window) dot = -FLT_MAX;
+                    if (ki > qi || qi - ki >= sliding_window)
+                        dot = -FLT_MAX;
                     s[ki] = dot;
                     m = fmaxf(m, dot);
                 }
@@ -362,7 +370,8 @@ TEST_F(AttentionBlackwellTest, SlidingWindow) {
                     sum += s[ki];
                 }
                 if (sum > 0.0f)
-                    for (int ki = 0; ki < Skv; ki++) s[ki] /= sum;
+                    for (int ki = 0; ki < Skv; ki++)
+                        s[ki] /= sum;
                 for (int d = 0; d < HD; d++) {
                     float acc = 0.0f;
                     for (int ki = 0; ki < Skv; ki++)
@@ -375,11 +384,14 @@ TEST_F(AttentionBlackwellTest, SlidingWindow) {
 
     // GPU
     std::vector<half> Q_h(q_elems), K_h(kv_elems), V_h(kv_elems);
-    for (size_t i = 0; i < q_elems; i++)  Q_h[i] = __float2half(Q_f[i]);
-    for (size_t i = 0; i < kv_elems; i++) K_h[i] = __float2half(K_f[i]);
-    for (size_t i = 0; i < kv_elems; i++) V_h[i] = __float2half(V_f[i]);
+    for (size_t i = 0; i < q_elems; i++)
+        Q_h[i] = __float2half(Q_f[i]);
+    for (size_t i = 0; i < kv_elems; i++)
+        K_h[i] = __float2half(K_f[i]);
+    for (size_t i = 0; i < kv_elems; i++)
+        V_h[i] = __float2half(V_f[i]);
 
-    size_t q_bytes  = q_elems * sizeof(half);
+    size_t q_bytes = q_elems * sizeof(half);
     size_t kv_bytes = kv_elems * sizeof(half);
 
     void *d_q, *d_k, *d_v, *d_o;
@@ -393,15 +405,14 @@ TEST_F(AttentionBlackwellTest, SlidingWindow) {
     cudaMemcpy(d_v, V_h.data(), kv_bytes, cudaMemcpyHostToDevice);
     cudaMemset(d_o, 0, q_bytes);
 
-    int64_t q_shape[]  = {B, Sq, NH, HD};
+    int64_t q_shape[] = {B, Sq, NH, HD};
     int64_t kv_shape[] = {B, Skv, NKV, HD};
     Tensor Qt(d_q, QType::F16, 4, q_shape, true);
     Tensor Kt(d_k, QType::F16, 4, kv_shape, true);
     Tensor Vt(d_v, QType::F16, 4, kv_shape, true);
     Tensor Ot(d_o, QType::F16, 4, q_shape, true);
 
-    flash_attention_blackwell(Qt, Kt, Vt, Ot, scale, /*causal=*/true,
-                              sliding_window, 0.0f, stream_);
+    flash_attention_blackwell(Qt, Kt, Vt, Ot, scale, /*causal=*/true, sliding_window, 0.0f, stream_);
     cudaStreamSynchronize(stream_);
 
     cudaError_t err = cudaGetLastError();
@@ -417,11 +428,13 @@ TEST_F(AttentionBlackwellTest, SlidingWindow) {
         float denom = std::max(std::abs(ref), 1e-6f);
         max_err = std::max(max_err, std::abs(got - ref) / denom);
     }
-    EXPECT_LT(max_err, 1e-2f)
-        << "Sliding window max relative error " << max_err;
+    EXPECT_LT(max_err, 1e-2f) << "Sliding window max relative error " << max_err;
 
-    cudaFree(d_q); cudaFree(d_k); cudaFree(d_v); cudaFree(d_o);
+    cudaFree(d_q);
+    cudaFree(d_k);
+    cudaFree(d_v);
+    cudaFree(d_o);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

@@ -14,7 +14,7 @@ namespace imp::jinja {
 namespace detail {
 struct Node;
 struct Expr;
-} // namespace detail
+}  // namespace detail
 
 // ---------------------------------------------------------------------------
 // Value — dynamically typed value used in template contexts
@@ -22,19 +22,18 @@ struct Expr;
 
 class Value {
 public:
-    using Array  = std::vector<Value>;
+    using Array = std::vector<Value>;
     using Object = std::shared_ptr<std::map<std::string, Value>>;
 
     // Underlying storage
-    using Storage = std::variant<
-        std::monostate,    // none
-        bool,              // boolean
-        int64_t,           // integer
-        double,            // floating point
-        std::string,       // string
-        Array,             // list
-        Object             // object / namespace
-    >;
+    using Storage = std::variant<std::monostate,  // none
+                                 bool,            // boolean
+                                 int64_t,         // integer
+                                 double,          // floating point
+                                 std::string,     // string
+                                 Array,           // list
+                                 Object           // object / namespace
+                                 >;
 
     // Constructors
     Value() : data_(std::monostate{}) {}
@@ -50,24 +49,24 @@ public:
     Value(Object v) : data_(std::move(v)) {}
 
     // Type checks
-    bool is_none()   const { return std::holds_alternative<std::monostate>(data_); }
-    bool is_bool()   const { return std::holds_alternative<bool>(data_); }
-    bool is_int()    const { return std::holds_alternative<int64_t>(data_); }
+    bool is_none() const { return std::holds_alternative<std::monostate>(data_); }
+    bool is_bool() const { return std::holds_alternative<bool>(data_); }
+    bool is_int() const { return std::holds_alternative<int64_t>(data_); }
     bool is_double() const { return std::holds_alternative<double>(data_); }
     bool is_string() const { return std::holds_alternative<std::string>(data_); }
-    bool is_array()  const { return std::holds_alternative<Array>(data_); }
+    bool is_array() const { return std::holds_alternative<Array>(data_); }
     bool is_object() const { return std::holds_alternative<Object>(data_); }
 
     bool is_number() const { return is_int() || is_double(); }
 
     // Accessors (unchecked — caller must verify type)
-    bool               as_bool()   const { return std::get<bool>(data_); }
-    int64_t            as_int()    const { return std::get<int64_t>(data_); }
-    double             as_double() const { return std::get<double>(data_); }
+    bool as_bool() const { return std::get<bool>(data_); }
+    int64_t as_int() const { return std::get<int64_t>(data_); }
+    double as_double() const { return std::get<double>(data_); }
     const std::string& as_string() const { return std::get<std::string>(data_); }
-    const Array&       as_array()  const { return std::get<Array>(data_); }
-    const Object&      as_object() const { return std::get<Object>(data_); }
-    Object&            as_object()       { return std::get<Object>(data_); }
+    const Array& as_array() const { return std::get<Array>(data_); }
+    const Object& as_object() const { return std::get<Object>(data_); }
+    Object& as_object() { return std::get<Object>(data_); }
 
     // Truthiness (Python/Jinja2 rules)
     bool truthy() const;
@@ -114,14 +113,13 @@ public:
     static Value make_object();
 
     // Convenience: create array from initializer list
-    static Value array(std::initializer_list<Value> items) {
-        return Value(Array(items));
-    }
+    static Value array(std::initializer_list<Value> items) { return Value(Array(items)); }
 
     // Convenience: create object from initializer list
     static Value object(std::initializer_list<std::pair<std::string, Value>> items) {
         auto obj = std::make_shared<std::map<std::string, Value>>();
-        for (auto& [k, v] : items) obj->emplace(k, v);
+        for (auto& [k, v] : items)
+            obj->emplace(k, v);
         return Value(obj);
     }
 
@@ -171,4 +169,4 @@ private:
     std::string error_;
 };
 
-} // namespace imp::jinja
+}  // namespace imp::jinja

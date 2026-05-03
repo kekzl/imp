@@ -30,12 +30,10 @@ namespace imp {
 // Output:
 //   d[4]  — FP32 accumulator, written to global out
 //
-__global__ void probe_mxf4nvf4_blockscale_kernel(
-    const uint32_t* __restrict__ a_in,   // [4]
-    const uint32_t* __restrict__ b_in,   // [2]
-    uint32_t sfa_in,
-    uint32_t sfb_in,
-    float* __restrict__ d_out)          // [4]
+__global__ void probe_mxf4nvf4_blockscale_kernel(const uint32_t* __restrict__ a_in,  // [4]
+                                                 const uint32_t* __restrict__ b_in,  // [2]
+                                                 uint32_t sfa_in, uint32_t sfb_in,
+                                                 float* __restrict__ d_out)  // [4]
 {
     // Each lane holds its fragment of the operands (CUTLASS convention).
     uint32_t a0 = a_in[0];
@@ -64,11 +62,8 @@ __global__ void probe_mxf4nvf4_blockscale_kernel(
         "{%17},"
         "{%18, %19};\n"
         : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-        : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-          "r"(b0), "r"(b1),
-          "f"(d0), "f"(d1), "f"(d2), "f"(d3),
-          "r"(sfa_in), "h"(bidA), "h"(tidA),
-          "r"(sfb_in), "h"(bidB), "h"(tidB0));
+        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(d0), "f"(d1), "f"(d2), "f"(d3),
+          "r"(sfa_in), "h"(bidA), "h"(tidA), "r"(sfb_in), "h"(bidB), "h"(tidB0));
 #else
     // Host-side or pre-sm_120 stub so the file compiles everywhere.
     d0 = static_cast<float>(a0 & 0xFF);
@@ -87,13 +82,9 @@ __global__ void probe_mxf4nvf4_blockscale_kernel(
 
 // Probe variant that writes the per-thread accumulator of thread 0 to out.
 // Used for numerical assertion tests where the expected output is known.
-__global__ void probe_mxf4nvf4_blockscale_dump_kernel(
-    const uint32_t* __restrict__ a_in,
-    const uint32_t* __restrict__ b_in,
-    uint32_t sfa_in,
-    uint32_t sfb_in,
-    float* __restrict__ d_out)
-{
+__global__ void probe_mxf4nvf4_blockscale_dump_kernel(const uint32_t* __restrict__ a_in,
+                                                      const uint32_t* __restrict__ b_in, uint32_t sfa_in,
+                                                      uint32_t sfb_in, float* __restrict__ d_out) {
     uint32_t a0 = a_in[0];
     uint32_t a1 = a_in[1];
     uint32_t a2 = a_in[2];
@@ -120,11 +111,8 @@ __global__ void probe_mxf4nvf4_blockscale_dump_kernel(
         "{%17},"
         "{%18, %19};\n"
         : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-        : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-          "r"(b0), "r"(b1),
-          "f"(d0), "f"(d1), "f"(d2), "f"(d3),
-          "r"(sfa_in), "h"(bidA), "h"(tidA),
-          "r"(sfb_in), "h"(bidB), "h"(tidB0));
+        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(d0), "f"(d1), "f"(d2), "f"(d3),
+          "r"(sfa_in), "h"(bidA), "h"(tidA), "r"(sfb_in), "h"(bidB), "h"(tidB0));
 #endif
 
     if (threadIdx.x == 0) {
@@ -141,23 +129,29 @@ bool probe_mxf4nvf4_allzero_a(cudaStream_t stream, float out_d[4]) {
     // A term zero, must collapse to exactly 0.
     static constexpr uint32_t kAZero[4] = {0u, 0u, 0u, 0u};
     // B with arbitrary non-zero content — output must stay 0 regardless.
-    static constexpr uint32_t kB[2]     = {0x55555555u, 0x55555555u};
+    static constexpr uint32_t kB[2] = {0x55555555u, 0x55555555u};
     // Scale factors = 1.0 in FP8 UE4M3 (0x38 per byte = exp=7, man=0).
-    static constexpr uint32_t kSFA      = 0x38383838u;
-    static constexpr uint32_t kSFB      = 0x38383838u;
+    static constexpr uint32_t kSFA = 0x38383838u;
+    static constexpr uint32_t kSFB = 0x38383838u;
 
     uint32_t* d_a = nullptr;
     uint32_t* d_b = nullptr;
-    float*    d_out = nullptr;
+    float* d_out = nullptr;
 
-    if (cudaMalloc(&d_a, sizeof(kAZero)) != cudaSuccess) return false;
-    if (cudaMalloc(&d_b, sizeof(kB))     != cudaSuccess) { cudaFree(d_a); return false; }
+    if (cudaMalloc(&d_a, sizeof(kAZero)) != cudaSuccess)
+        return false;
+    if (cudaMalloc(&d_b, sizeof(kB)) != cudaSuccess) {
+        cudaFree(d_a);
+        return false;
+    }
     if (cudaMalloc(&d_out, 4 * sizeof(float)) != cudaSuccess) {
-        cudaFree(d_a); cudaFree(d_b); return false;
+        cudaFree(d_a);
+        cudaFree(d_b);
+        return false;
     }
 
     cudaMemcpyAsync(d_a, kAZero, sizeof(kAZero), cudaMemcpyHostToDevice, stream);
-    cudaMemcpyAsync(d_b, kB,     sizeof(kB),     cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(d_b, kB, sizeof(kB), cudaMemcpyHostToDevice, stream);
 
     probe_mxf4nvf4_blockscale_dump_kernel<<<1, 32, 0, stream>>>(d_a, d_b, kSFA, kSFB, d_out);
 
@@ -178,17 +172,23 @@ bool probe_mxf4nvf4_allzero_a(cudaStream_t stream, float out_d[4]) {
 bool probe_mxf4nvf4_blockscale(cudaStream_t stream) {
     static constexpr uint32_t kA[4] = {0x44444444u, 0x44444444u, 0x44444444u, 0x44444444u};
     static constexpr uint32_t kB[2] = {0x44444444u, 0x44444444u};
-    static constexpr uint32_t kSFA  = 0x38383838u;  // ~1.0 in FP8 UE4M3
-    static constexpr uint32_t kSFB  = 0x38383838u;
+    static constexpr uint32_t kSFA = 0x38383838u;  // ~1.0 in FP8 UE4M3
+    static constexpr uint32_t kSFB = 0x38383838u;
 
     uint32_t* d_a = nullptr;
     uint32_t* d_b = nullptr;
-    float*    d_out = nullptr;
+    float* d_out = nullptr;
 
-    if (cudaMalloc(&d_a, sizeof(kA)) != cudaSuccess) return false;
-    if (cudaMalloc(&d_b, sizeof(kB)) != cudaSuccess) { cudaFree(d_a); return false; }
+    if (cudaMalloc(&d_a, sizeof(kA)) != cudaSuccess)
+        return false;
+    if (cudaMalloc(&d_b, sizeof(kB)) != cudaSuccess) {
+        cudaFree(d_a);
+        return false;
+    }
     if (cudaMalloc(&d_out, 4 * sizeof(float)) != cudaSuccess) {
-        cudaFree(d_a); cudaFree(d_b); return false;
+        cudaFree(d_a);
+        cudaFree(d_b);
+        return false;
     }
 
     cudaMemcpyAsync(d_a, kA, sizeof(kA), cudaMemcpyHostToDevice, stream);
@@ -207,4 +207,4 @@ bool probe_mxf4nvf4_blockscale(cudaStream_t stream) {
     return (launch_err == cudaSuccess) && (sync_err == cudaSuccess);
 }
 
-} // namespace imp
+}  // namespace imp

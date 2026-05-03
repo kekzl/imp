@@ -33,9 +33,7 @@ __device__ __forceinline__ uint32_t fp32x8_to_e2m1x8(const float2* vals /* [4] *
         "mov.b32 %0, {b0, b1, b2, b3};\n"
         "}"
         : "=r"(val)
-        : "f"(vals[0].x), "f"(vals[0].y),
-          "f"(vals[1].x), "f"(vals[1].y),
-          "f"(vals[2].x), "f"(vals[2].y),
+        : "f"(vals[0].x), "f"(vals[0].y), "f"(vals[1].x), "f"(vals[1].y), "f"(vals[2].x), "f"(vals[2].y),
           "f"(vals[3].x), "f"(vals[3].y));
     return val;
 }
@@ -56,29 +54,27 @@ __device__ __forceinline__ float e2m1_nibble_to_fp32(uint8_t nib) {
 // Quant kernel: each thread handles 16 FP16 elements.
 //   blockDim.x = threads; gridDim.x covers ceil(n_elements / (16 * blockDim.x))
 // ---------------------------------------------------------------------------
-__global__ void nvfp4_quant_linear_kernel(
-    const half* __restrict__ input,
-    uint8_t* __restrict__ nvfp4_out,   // [n_elements / 2]
-    uint8_t* __restrict__ sf_out,      // [n_elements / 16]
-    int n_elements)
-{
+__global__ void nvfp4_quant_linear_kernel(const half* __restrict__ input,
+                                          uint8_t* __restrict__ nvfp4_out,  // [n_elements / 2]
+                                          uint8_t* __restrict__ sf_out,     // [n_elements / 16]
+                                          int n_elements) {
     const int group_id = blockIdx.x * blockDim.x + threadIdx.x;  // one group = 16 FP16 elems
-    const int start    = group_id * 16;
-    if (start >= n_elements) return;
+    const int start = group_id * 16;
+    if (start >= n_elements)
+        return;
 
     // 1. Load 16 FP16 elements into 8 half2 (via vectorized cast).
     half2 h2[8];
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < 8; ++i) {
         int idx = start + i * 2;
-        h2[i] = __halves2half2(
-            (idx < n_elements)     ? input[idx]     : __float2half(0.0f),
-            (idx + 1 < n_elements) ? input[idx + 1] : __float2half(0.0f));
+        h2[i] = __halves2half2((idx < n_elements) ? input[idx] : __float2half(0.0f),
+                               (idx + 1 < n_elements) ? input[idx + 1] : __float2half(0.0f));
     }
 
     // 2. Per-group absmax (over 16 elements).
     half2 maxabs = __habs2(h2[0]);
-    #pragma unroll
+#pragma unroll
     for (int i = 1; i < 8; ++i) {
         maxabs = __hmax2(maxabs, __habs2(h2[i]));
     }
@@ -94,9 +90,9 @@ __global__ void nvfp4_quant_linear_kernel(
 
     // 4. Apply inverse scale and convert to float2 pairs.
     float2 fp2[8];
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < 8; ++i) {
-        fp2[i]   = __half22float2(h2[i]);
+        fp2[i] = __half22float2(h2[i]);
         fp2[i].x = fp2[i].x * inv_sc;
         fp2[i].y = fp2[i].y * inv_sc;
     }
@@ -117,25 +113,24 @@ __global__ void nvfp4_quant_linear_kernel(
 // ---------------------------------------------------------------------------
 // Dequant kernel: inverse, for round-trip testing.
 // ---------------------------------------------------------------------------
-__global__ void nvfp4_dequant_linear_kernel(
-    const uint8_t* __restrict__ nvfp4_in,
-    const uint8_t* __restrict__ sf_in,
-    half* __restrict__ output,
-    int n_elements)
-{
+__global__ void nvfp4_dequant_linear_kernel(const uint8_t* __restrict__ nvfp4_in,
+                                            const uint8_t* __restrict__ sf_in, half* __restrict__ output,
+                                            int n_elements) {
     const int group_id = blockIdx.x * blockDim.x + threadIdx.x;
-    const int start    = group_id * 16;
-    if (start >= n_elements) return;
+    const int start = group_id * 16;
+    if (start >= n_elements)
+        return;
 
     // Load scale (FP8 UE4M3 → FP32).
     uint8_t sc_fp8 = sf_in[group_id];
     float sc = float(reinterpret_cast<const __nv_fp8_e4m3&>(sc_fp8));
 
-    // Load 8 packed bytes (16 NVFP4 nibbles).
-    #pragma unroll
+// Load 8 packed bytes (16 NVFP4 nibbles).
+#pragma unroll
     for (int i = 0; i < 16; ++i) {
         int idx = start + i;
-        if (idx >= n_elements) break;
+        if (idx >= n_elements)
+            break;
         int byte_idx = idx / 2;
         uint8_t byte = nvfp4_in[byte_idx];
         uint8_t nib = (idx & 1) ? (byte >> 4) : (byte & 0xF);
@@ -147,32 +142,20 @@ __global__ void nvfp4_dequant_linear_kernel(
 // ---------------------------------------------------------------------------
 // Host entry points
 // ---------------------------------------------------------------------------
-void nvfp4_quant_linear_fp16(
-    const half* d_input,
-    uint8_t* d_nvfp4,
-    uint8_t* d_sf,
-    int n_elements,
-    cudaStream_t stream)
-{
+void nvfp4_quant_linear_fp16(const half* d_input, uint8_t* d_nvfp4, uint8_t* d_sf, int n_elements,
+                             cudaStream_t stream) {
     const int threads = 256;
-    const int groups  = (n_elements + 15) / 16;
-    const int blocks  = (groups + threads - 1) / threads;
-    nvfp4_quant_linear_kernel<<<blocks, threads, 0, stream>>>(
-        d_input, d_nvfp4, d_sf, n_elements);
+    const int groups = (n_elements + 15) / 16;
+    const int blocks = (groups + threads - 1) / threads;
+    nvfp4_quant_linear_kernel<<<blocks, threads, 0, stream>>>(d_input, d_nvfp4, d_sf, n_elements);
 }
 
-void nvfp4_dequant_linear_fp16(
-    const uint8_t* d_nvfp4,
-    const uint8_t* d_sf,
-    half* d_output,
-    int n_elements,
-    cudaStream_t stream)
-{
+void nvfp4_dequant_linear_fp16(const uint8_t* d_nvfp4, const uint8_t* d_sf, half* d_output, int n_elements,
+                               cudaStream_t stream) {
     const int threads = 256;
-    const int groups  = (n_elements + 15) / 16;
-    const int blocks  = (groups + threads - 1) / threads;
-    nvfp4_dequant_linear_kernel<<<blocks, threads, 0, stream>>>(
-        d_nvfp4, d_sf, d_output, n_elements);
+    const int groups = (n_elements + 15) / 16;
+    const int blocks = (groups + threads - 1) / threads;
+    nvfp4_dequant_linear_kernel<<<blocks, threads, 0, stream>>>(d_nvfp4, d_sf, d_output, n_elements);
 }
 
-} // namespace imp
+}  // namespace imp

@@ -18,7 +18,8 @@ Tensor make_gpu_fp16(const float* host_data, std::initializer_list<int64_t> shap
     t.qtype = QType::F16;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
-    for (auto s : shape_list) t.shape[i++] = s;
+    for (auto s : shape_list)
+        t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     std::vector<half> h(t.numel());
@@ -34,7 +35,8 @@ Tensor make_gpu_fp32(const float* host_data, std::initializer_list<int64_t> shap
     t.qtype = QType::F32;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
-    for (auto s : shape_list) t.shape[i++] = s;
+    for (auto s : shape_list)
+        t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
@@ -47,7 +49,8 @@ Tensor alloc_gpu(QType dtype, std::initializer_list<int64_t> shape_list) {
     t.qtype = dtype;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
-    for (auto s : shape_list) t.shape[i++] = s;
+    for (auto s : shape_list)
+        t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
@@ -71,7 +74,10 @@ std::vector<float> read_fp32(const Tensor& t) {
 }
 
 void free_tensor(Tensor& t) {
-    if (t.data) { cudaFree(t.data); t.data = nullptr; }
+    if (t.data) {
+        cudaFree(t.data);
+        t.data = nullptr;
+    }
 }
 
 // =========================================================================
@@ -95,8 +101,7 @@ TEST(ExecutorKernelsTest, ElementwiseAddFP16) {
     auto result = read_fp16(a);
     for (int i = 0; i < N; i++) {
         float expected = ha[i] + hb[i];
-        EXPECT_NEAR(result[i], expected, 0.05f)
-            << "Mismatch at index " << i;
+        EXPECT_NEAR(result[i], expected, 0.05f) << "Mismatch at index " << i;
     }
 
     free_tensor(a);
@@ -124,8 +129,7 @@ TEST(ExecutorKernelsTest, ElementwiseAddFP32) {
     auto result = read_fp32(a);
     for (int i = 0; i < N; i++) {
         float expected = ha[i] + hb[i];
-        EXPECT_NEAR(result[i], expected, 1e-6f)
-            << "Mismatch at index " << i;
+        EXPECT_NEAR(result[i], expected, 1e-6f) << "Mismatch at index " << i;
     }
 
     free_tensor(a);
@@ -154,8 +158,7 @@ TEST(ExecutorKernelsTest, ElementwiseAddStoreFP16) {
     auto result = read_fp16(out);
     for (int i = 0; i < N; i++) {
         float expected = ha[i] + hb[i];
-        EXPECT_NEAR(result[i], expected, 0.05f)
-            << "Mismatch at index " << i;
+        EXPECT_NEAR(result[i], expected, 0.05f) << "Mismatch at index " << i;
     }
 
     free_tensor(a);
@@ -171,7 +174,8 @@ TEST(ExecutorKernelsTest, AddBiasFP16) {
     const int rows = 4, cols = 128;
     std::vector<float> h_out(rows * cols, 1.0f);
     std::vector<float> h_bias(cols);
-    for (int j = 0; j < cols; j++) h_bias[j] = static_cast<float>(j) * 0.1f;
+    for (int j = 0; j < cols; j++)
+        h_bias[j] = static_cast<float>(j) * 0.1f;
 
     Tensor out = make_gpu_fp16(h_out.data(), {rows, cols});
     Tensor bias = make_gpu_fp16(h_bias.data(), {cols});
@@ -183,8 +187,7 @@ TEST(ExecutorKernelsTest, AddBiasFP16) {
     for (int r = 0; r < rows; r++) {
         for (int c = 0; c < cols; c++) {
             float expected = 1.0f + h_bias[c];
-            EXPECT_NEAR(result[r * cols + c], expected, 0.05f)
-                << "Mismatch at (" << r << ", " << c << ")";
+            EXPECT_NEAR(result[r * cols + c], expected, 0.05f) << "Mismatch at (" << r << ", " << c << ")";
         }
     }
 
@@ -199,22 +202,21 @@ TEST(ExecutorKernelsTest, AddBiasFP16) {
 TEST(ExecutorKernelsTest, ScaleFP16) {
     const int N = 256;
     std::vector<float> h_data(N);
-    for (int i = 0; i < N; i++) h_data[i] = static_cast<float>(i + 1);
+    for (int i = 0; i < N; i++)
+        h_data[i] = static_cast<float>(i + 1);
 
     Tensor data = make_gpu_fp16(h_data.data(), {N});
     half scale = __float2half(0.5f);
 
     int threads = 256;
     int blocks = (N / 2 + threads - 1) / threads;
-    scale_fp16_kernel<<<blocks, threads, 0, nullptr>>>(
-        static_cast<half*>(data.data), scale, N);
+    scale_fp16_kernel<<<blocks, threads, 0, nullptr>>>(static_cast<half*>(data.data), scale, N);
     cudaDeviceSynchronize();
 
     auto result = read_fp16(data);
     for (int i = 0; i < N; i++) {
         float expected = h_data[i] * 0.5f;
-        EXPECT_NEAR(result[i], expected, 0.1f)
-            << "Mismatch at index " << i;
+        EXPECT_NEAR(result[i], expected, 0.1f) << "Mismatch at index " << i;
     }
 
     free_tensor(data);
@@ -227,7 +229,8 @@ TEST(ExecutorKernelsTest, ScaleFP16) {
 TEST(ExecutorKernelsTest, FP16ToFP32Roundtrip) {
     const int N = 512;
     std::vector<float> h_data(N);
-    for (int i = 0; i < N; i++) h_data[i] = static_cast<float>(i) * 0.1f - 25.0f;
+    for (int i = 0; i < N; i++)
+        h_data[i] = static_cast<float>(i) * 0.1f - 25.0f;
 
     Tensor fp16_in = make_gpu_fp16(h_data.data(), {N});
     Tensor fp32_mid = alloc_gpu(QType::F32, {N});
@@ -237,21 +240,18 @@ TEST(ExecutorKernelsTest, FP16ToFP32Roundtrip) {
     int blocks = (N + threads - 1) / threads;
 
     // FP16 → FP32
-    fp16_to_fp32_kernel<<<blocks, threads, 0, nullptr>>>(
-        static_cast<const half*>(fp16_in.data),
-        static_cast<float*>(fp32_mid.data), N);
+    fp16_to_fp32_kernel<<<blocks, threads, 0, nullptr>>>(static_cast<const half*>(fp16_in.data),
+                                                         static_cast<float*>(fp32_mid.data), N);
 
     // FP32 → FP16
-    fp32_to_fp16_kernel<<<blocks, threads, 0, nullptr>>>(
-        static_cast<const float*>(fp32_mid.data),
-        static_cast<half*>(fp16_out.data), N);
+    fp32_to_fp16_kernel<<<blocks, threads, 0, nullptr>>>(static_cast<const float*>(fp32_mid.data),
+                                                         static_cast<half*>(fp16_out.data), N);
     cudaDeviceSynchronize();
 
     auto result = read_fp16(fp16_out);
     auto original = read_fp16(fp16_in);
     for (int i = 0; i < N; i++) {
-        EXPECT_FLOAT_EQ(result[i], original[i])
-            << "Roundtrip mismatch at index " << i;
+        EXPECT_FLOAT_EQ(result[i], original[i]) << "Roundtrip mismatch at index " << i;
     }
 
     free_tensor(fp16_in);
@@ -267,16 +267,16 @@ TEST(ExecutorKernelsTest, FP32AccumAddFP16) {
     const int N = 256;
     std::vector<float> h_accum(N, 10.0f);
     std::vector<float> h_branch(N);
-    for (int i = 0; i < N; i++) h_branch[i] = static_cast<float>(i) * 0.1f;
+    for (int i = 0; i < N; i++)
+        h_branch[i] = static_cast<float>(i) * 0.1f;
 
     Tensor accum = make_gpu_fp32(h_accum.data(), {N});
     Tensor branch = make_gpu_fp16(h_branch.data(), {N});
 
     int threads = 256;
     int blocks = (N + threads - 1) / threads;
-    fp32_accum_add_fp16_kernel<<<blocks, threads, 0, nullptr>>>(
-        static_cast<float*>(accum.data),
-        static_cast<const half*>(branch.data), N);
+    fp32_accum_add_fp16_kernel<<<blocks, threads, 0, nullptr>>>(static_cast<float*>(accum.data),
+                                                                static_cast<const half*>(branch.data), N);
     cudaDeviceSynchronize();
 
     auto result = read_fp32(accum);
@@ -284,8 +284,7 @@ TEST(ExecutorKernelsTest, FP32AccumAddFP16) {
         // branch values lose precision in FP16, so use FP16-rounded value
         float branch_fp16 = __half2float(__float2half(h_branch[i]));
         float expected = h_accum[i] + branch_fp16;
-        EXPECT_NEAR(result[i], expected, 1e-5f)
-            << "Mismatch at index " << i;
+        EXPECT_NEAR(result[i], expected, 1e-5f) << "Mismatch at index " << i;
     }
 
     free_tensor(accum);
@@ -308,8 +307,7 @@ TEST(ExecutorKernelsTest, ElementwiseAddOddLength) {
 
     auto result = read_fp16(a);
     for (int i = 0; i < N; i++) {
-        EXPECT_NEAR(result[i], 3.0f, 0.01f)
-            << "Mismatch at index " << i;
+        EXPECT_NEAR(result[i], 3.0f, 0.01f) << "Mismatch at index " << i;
     }
 
     free_tensor(a);
@@ -368,8 +366,12 @@ TEST(ExecutorKernelsTest, AddBias3Way) {
         EXPECT_NEAR(rc[i], 3.3f, 0.02f) << "c mismatch at " << i;
     }
 
-    free_tensor(a); free_tensor(b); free_tensor(c);
-    free_tensor(ba); free_tensor(bb); free_tensor(bc);
+    free_tensor(a);
+    free_tensor(b);
+    free_tensor(c);
+    free_tensor(ba);
+    free_tensor(bb);
+    free_tensor(bc);
 }
 
 // =========================================================================
@@ -403,8 +405,10 @@ TEST(ExecutorKernelsTest, ResidualAddRMSNorm) {
         EXPECT_NEAR(h_check[i], 2.0f, 0.01f) << "hidden not updated at " << i;
     }
 
-    free_tensor(hidden); free_tensor(residual);
-    free_tensor(weight); free_tensor(output);
+    free_tensor(hidden);
+    free_tensor(residual);
+    free_tensor(weight);
+    free_tensor(output);
 }
 
 // =========================================================================
@@ -430,7 +434,10 @@ TEST(ExecutorKernelsTest, AddRMSNormInplace) {
         EXPECT_NEAR(result[i], 1.0f, 0.01f) << "mismatch at " << i;
     }
 
-    free_tensor(a); free_tensor(b); free_tensor(h); free_tensor(w);
+    free_tensor(a);
+    free_tensor(b);
+    free_tensor(h);
+    free_tensor(w);
 }
 
 // =========================================================================
@@ -456,8 +463,11 @@ TEST(ExecutorKernelsTest, RMSNormAddResidual) {
         EXPECT_NEAR(result[i], 6.0f, 0.05f) << "mismatch at " << i;
     }
 
-    free_tensor(input); free_tensor(w); free_tensor(r); free_tensor(output);
+    free_tensor(input);
+    free_tensor(w);
+    free_tensor(r);
+    free_tensor(output);
 }
 
-} // anonymous namespace
-} // namespace imp
+}  // anonymous namespace
+}  // namespace imp

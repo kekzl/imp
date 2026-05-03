@@ -5,7 +5,8 @@ namespace imp {
 ThreadPool::ThreadPool(size_t n_threads) {
     if (n_threads == 0) {
         n_threads = std::thread::hardware_concurrency();
-        if (n_threads == 0) n_threads = 4;
+        if (n_threads == 0)
+            n_threads = 4;
     }
     workers_.reserve(n_threads);
     for (size_t i = 0; i < n_threads; ++i) {
@@ -17,7 +18,8 @@ ThreadPool::ThreadPool(size_t n_threads) {
                 {
                     std::unique_lock<std::mutex> lock(mu_);
                     cv_.wait(lock, [&] { return stoken.stop_requested() || !tasks_.empty(); });
-                    if (stoken.stop_requested() && tasks_.empty()) return;
+                    if (stoken.stop_requested() && tasks_.empty())
+                        return;
                     task = std::move(tasks_.front());
                     tasks_.pop();
                 }
@@ -32,4 +34,4 @@ ThreadPool::~ThreadPool() {
     // stop_callback in each worker wakes cv_.wait() on stop request.
 }
 
-} // namespace imp
+}  // namespace imp

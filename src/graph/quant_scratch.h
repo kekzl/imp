@@ -15,25 +15,24 @@ namespace imp {
 // All members are public for zero-overhead access in the forward pass.
 // ---------------------------------------------------------------------------
 struct QuantScratch {
-
     // --- Generic on-the-fly dequant scratch (Q8_0/Q6_K) ---
     void* dequant = nullptr;
     size_t dequant_size = 0;
 
     // --- FP8 activation quantization scratch ---
-    void* fp8_act = nullptr;            // max_tokens * max_dim bytes
+    void* fp8_act = nullptr;  // max_tokens * max_dim bytes
     size_t fp8_act_size = 0;
-    float* d_act_scale = nullptr;       // 1 float on device
-    float* d_fp8_block_maxes = nullptr; // pre-allocated reduction buffer
-    float* d_fp8_absmax = nullptr;      // pre-allocated absmax scalar
-    int fp8_max_grid = 0;               // max grid size for reduction
+    float* d_act_scale = nullptr;        // 1 float on device
+    float* d_fp8_block_maxes = nullptr;  // pre-allocated reduction buffer
+    float* d_fp8_absmax = nullptr;       // pre-allocated absmax scalar
+    int fp8_max_grid = 0;                // max grid size for reduction
 
     // --- CUTLASS NVFP4 prefill activation buffers ---
-    void* cutlass_act_data = nullptr;     // [max_tokens, max_K/2] packed FP4
-    void* cutlass_act_sf = nullptr;       // SfAtom scale factors (NVFP4: UE4M3)
+    void* cutlass_act_data = nullptr;  // [max_tokens, max_K/2] packed FP4
+    void* cutlass_act_sf = nullptr;    // SfAtom scale factors (NVFP4: UE4M3)
     size_t cutlass_act_data_size = 0;
     size_t cutlass_act_sf_size = 0;
-    void* cutlass_workspace = nullptr;    // CUTLASS GEMM workspace
+    void* cutlass_workspace = nullptr;  // CUTLASS GEMM workspace
     size_t cutlass_workspace_size = 0;
 
     // --- MXFP4 activation buffers (SfAtom UE8M0 scales) ---
@@ -44,9 +43,9 @@ struct QuantScratch {
     size_t mxfp4_workspace_size = 0;
 
     // --- dp4a (MMVQ) scratch for quantized input vector ---
-    void* q8_1_buf = nullptr;    // block_q8_1 array
-    float* d8_buf = nullptr;     // float scale array
-    int q8_1_max_blocks = 0;     // max K/32
+    void* q8_1_buf = nullptr;  // block_q8_1 array
+    float* d8_buf = nullptr;   // float scale array
+    int q8_1_max_blocks = 0;   // max K/32
 
     // --- Split-K paged attention scratch ---
     void* splitk = nullptr;
@@ -56,4 +55,4 @@ struct QuantScratch {
     void free(VRAMAllocator* alloc);
 };
 
-} // namespace imp
+}  // namespace imp

@@ -9,21 +9,31 @@ namespace imp {
 
 const char* chat_template_family_name(ChatTemplateFamily family) {
     switch (family) {
-        case ChatTemplateFamily::RAW:         return "raw";
-        case ChatTemplateFamily::CHATML:      return "chatml";
-        case ChatTemplateFamily::LLAMA2:      return "llama2";
-        case ChatTemplateFamily::MISTRAL_V3:  return "mistral_v3";
-        case ChatTemplateFamily::LLAMA3:      return "llama3";
-        case ChatTemplateFamily::NEMOTRON:    return "nemotron";
-        case ChatTemplateFamily::GEMMA:       return "gemma";
-        case ChatTemplateFamily::DEEPSEEK_R1: return "deepseek_r1";
-        case ChatTemplateFamily::PHI:          return "phi";
+        case ChatTemplateFamily::RAW:
+            return "raw";
+        case ChatTemplateFamily::CHATML:
+            return "chatml";
+        case ChatTemplateFamily::LLAMA2:
+            return "llama2";
+        case ChatTemplateFamily::MISTRAL_V3:
+            return "mistral_v3";
+        case ChatTemplateFamily::LLAMA3:
+            return "llama3";
+        case ChatTemplateFamily::NEMOTRON:
+            return "nemotron";
+        case ChatTemplateFamily::GEMMA:
+            return "gemma";
+        case ChatTemplateFamily::DEEPSEEK_R1:
+            return "deepseek_r1";
+        case ChatTemplateFamily::PHI:
+            return "phi";
     }
     return "unknown";
 }
 
 ChatTemplateFamily ChatTemplate::detect_family(const std::string& jinja2_str) {
-    if (jinja2_str.empty()) return ChatTemplateFamily::RAW;
+    if (jinja2_str.empty())
+        return ChatTemplateFamily::RAW;
 
     // Order matters: check more specific patterns first
     if (jinja2_str.find("<|im_start|>") != std::string::npos)
@@ -47,7 +57,9 @@ ChatTemplateFamily ChatTemplate::detect_family(const std::string& jinja2_str) {
     if (jinja2_str.find("<extra_id_0>") != std::string::npos)
         return ChatTemplateFamily::NEMOTRON;
     // DeepSeek R1: fullwidth vertical bars ｜ (U+FF5C = \xef\xbd\x9c)
-    if (jinja2_str.find("\xef\xbd\x9c" "User" "\xef\xbd\x9c") != std::string::npos)
+    if (jinja2_str.find("\xef\xbd\x9c"
+                        "User"
+                        "\xef\xbd\x9c") != std::string::npos)
         return ChatTemplateFamily::DEEPSEEK_R1;
     // Phi: <|end|> is literal in the Jinja2 template (role tags are dynamic)
     if (jinja2_str.find("<|end|>") != std::string::npos)
@@ -58,40 +70,62 @@ ChatTemplateFamily ChatTemplate::detect_family(const std::string& jinja2_str) {
 
 ChatTemplateFamily ChatTemplate::default_family_for_arch(ModelArch arch) {
     switch (arch) {
-        case ModelArch::LLAMA:          return ChatTemplateFamily::LLAMA3;
-        case ModelArch::MISTRAL:        return ChatTemplateFamily::LLAMA2;
-        case ModelArch::MIXTRAL:        return ChatTemplateFamily::LLAMA2;
-        case ModelArch::DEEPSEEK:       return ChatTemplateFamily::DEEPSEEK_R1;
-        case ModelArch::NEMOTRON_H_MOE: return ChatTemplateFamily::NEMOTRON;
-        case ModelArch::QWEN3:          return ChatTemplateFamily::CHATML;
-        case ModelArch::QWEN3_MOE:      return ChatTemplateFamily::CHATML;
-        case ModelArch::QWEN35:         return ChatTemplateFamily::CHATML;
-        case ModelArch::QWEN35_MOE:     return ChatTemplateFamily::CHATML;
-        case ModelArch::QWEN36_MOE:     return ChatTemplateFamily::CHATML;
-        case ModelArch::GEMMA3:         return ChatTemplateFamily::GEMMA;
-        case ModelArch::GEMMA4:         return ChatTemplateFamily::GEMMA;
-        case ModelArch::LLAMA4:         return ChatTemplateFamily::LLAMA3;
-        default:                        return ChatTemplateFamily::RAW;
+        case ModelArch::LLAMA:
+            return ChatTemplateFamily::LLAMA3;
+        case ModelArch::MISTRAL:
+            return ChatTemplateFamily::LLAMA2;
+        case ModelArch::MIXTRAL:
+            return ChatTemplateFamily::LLAMA2;
+        case ModelArch::DEEPSEEK:
+            return ChatTemplateFamily::DEEPSEEK_R1;
+        case ModelArch::NEMOTRON_H_MOE:
+            return ChatTemplateFamily::NEMOTRON;
+        case ModelArch::QWEN3:
+            return ChatTemplateFamily::CHATML;
+        case ModelArch::QWEN3_MOE:
+            return ChatTemplateFamily::CHATML;
+        case ModelArch::QWEN35:
+            return ChatTemplateFamily::CHATML;
+        case ModelArch::QWEN35_MOE:
+            return ChatTemplateFamily::CHATML;
+        case ModelArch::QWEN36_MOE:
+            return ChatTemplateFamily::CHATML;
+        case ModelArch::GEMMA3:
+            return ChatTemplateFamily::GEMMA;
+        case ModelArch::GEMMA4:
+            return ChatTemplateFamily::GEMMA;
+        case ModelArch::LLAMA4:
+            return ChatTemplateFamily::LLAMA3;
+        default:
+            return ChatTemplateFamily::RAW;
     }
 }
 
 ChatTemplateFamily ChatTemplate::parse_family(const std::string& name) {
-    if (name == "auto")     return ChatTemplateFamily::RAW;  // caller handles auto
-    if (name == "none")     return ChatTemplateFamily::RAW;
-    if (name == "chatml")   return ChatTemplateFamily::CHATML;
-    if (name == "llama2")   return ChatTemplateFamily::LLAMA2;
+    if (name == "auto")
+        return ChatTemplateFamily::RAW;  // caller handles auto
+    if (name == "none")
+        return ChatTemplateFamily::RAW;
+    if (name == "chatml")
+        return ChatTemplateFamily::CHATML;
+    if (name == "llama2")
+        return ChatTemplateFamily::LLAMA2;
     if (name == "mistral_v3" || name == "mistral-v3" || name == "mistralv3")
         return ChatTemplateFamily::MISTRAL_V3;
-    if (name == "llama3")   return ChatTemplateFamily::LLAMA3;
-    if (name == "nemotron") return ChatTemplateFamily::NEMOTRON;
-    if (name == "gemma")   return ChatTemplateFamily::GEMMA;
-    if (name == "deepseek_r1" || name == "deepseek-r1") return ChatTemplateFamily::DEEPSEEK_R1;
-    if (name == "phi") return ChatTemplateFamily::PHI;
+    if (name == "llama3")
+        return ChatTemplateFamily::LLAMA3;
+    if (name == "nemotron")
+        return ChatTemplateFamily::NEMOTRON;
+    if (name == "gemma")
+        return ChatTemplateFamily::GEMMA;
+    if (name == "deepseek_r1" || name == "deepseek-r1")
+        return ChatTemplateFamily::DEEPSEEK_R1;
+    if (name == "phi")
+        return ChatTemplateFamily::PHI;
     return ChatTemplateFamily::RAW;
 }
 
-bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer,
-                         const std::string& jinja_str) {
+bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer, const std::string& jinja_str) {
     family_ = family;
     stop_token_ids_.clear();
     use_jinja_ = false;
@@ -119,11 +153,12 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer,
     switch (family_) {
         case ChatTemplateFamily::CHATML: {
             im_start_id_ = tokenizer.find_token("<|im_start|>");
-            im_end_id_   = tokenizer.find_token("<|im_end|>");
+            im_end_id_ = tokenizer.find_token("<|im_end|>");
             if (im_start_id_ < 0 || im_end_id_ < 0) {
-                IMP_LOG_WARN("ChatML template: missing special tokens "
-                             "(im_start=%d, im_end=%d), falling back to raw",
-                             im_start_id_, im_end_id_);
+                IMP_LOG_WARN(
+                    "ChatML template: missing special tokens "
+                    "(im_start=%d, im_end=%d), falling back to raw",
+                    im_start_id_, im_end_id_);
                 family_ = ChatTemplateFamily::RAW;
                 return false;
             }
@@ -132,12 +167,13 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer,
         }
         case ChatTemplateFamily::LLAMA3: {
             start_header_id_ = tokenizer.find_token("<|start_header_id|>");
-            end_header_id_   = tokenizer.find_token("<|end_header_id|>");
-            eot_id_          = tokenizer.find_token("<|eot_id|>");
+            end_header_id_ = tokenizer.find_token("<|end_header_id|>");
+            eot_id_ = tokenizer.find_token("<|eot_id|>");
             if (start_header_id_ < 0 || end_header_id_ < 0 || eot_id_ < 0) {
-                IMP_LOG_WARN("Llama3 template: missing special tokens "
-                             "(start_header=%d, end_header=%d, eot=%d), falling back to raw",
-                             start_header_id_, end_header_id_, eot_id_);
+                IMP_LOG_WARN(
+                    "Llama3 template: missing special tokens "
+                    "(start_header=%d, end_header=%d, eot=%d), falling back to raw",
+                    start_header_id_, end_header_id_, eot_id_);
                 family_ = ChatTemplateFamily::RAW;
                 return false;
             }
@@ -151,11 +187,12 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer,
             // emitted via the Jinja2 path when present in chat_template.jinja
             // — the hardcoded apply method only handles the message-frame.
             inst_start_id_ = tokenizer.find_token("[INST]");
-            inst_end_id_   = tokenizer.find_token("[/INST]");
+            inst_end_id_ = tokenizer.find_token("[/INST]");
             if (inst_start_id_ < 0 || inst_end_id_ < 0) {
-                IMP_LOG_WARN("Mistral/Llama2 template: missing special tokens "
-                             "(inst_start=%d, inst_end=%d), falling back to raw",
-                             inst_start_id_, inst_end_id_);
+                IMP_LOG_WARN(
+                    "Mistral/Llama2 template: missing special tokens "
+                    "(inst_start=%d, inst_end=%d), falling back to raw",
+                    inst_start_id_, inst_end_id_);
                 family_ = ChatTemplateFamily::RAW;
                 return false;
             }
@@ -166,9 +203,10 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer,
             extra_id_0_ = tokenizer.find_token("<extra_id_0>");
             extra_id_1_ = tokenizer.find_token("<extra_id_1>");
             if (extra_id_0_ < 0 || extra_id_1_ < 0) {
-                IMP_LOG_WARN("Nemotron template: missing special tokens "
-                             "(extra_id_0=%d, extra_id_1=%d), falling back to raw",
-                             extra_id_0_, extra_id_1_);
+                IMP_LOG_WARN(
+                    "Nemotron template: missing special tokens "
+                    "(extra_id_0=%d, extra_id_1=%d), falling back to raw",
+                    extra_id_0_, extra_id_1_);
                 family_ = ChatTemplateFamily::RAW;
                 return false;
             }
@@ -177,14 +215,17 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer,
         }
         case ChatTemplateFamily::GEMMA: {
             start_of_turn_id_ = tokenizer.find_token("<start_of_turn>");
-            end_of_turn_id_   = tokenizer.find_token("<end_of_turn>");
+            end_of_turn_id_ = tokenizer.find_token("<end_of_turn>");
             // Gemma-4 uses different token names: <|turn> / <turn|>
-            if (start_of_turn_id_ < 0) start_of_turn_id_ = tokenizer.find_token("<|turn>");
-            if (end_of_turn_id_ < 0)   end_of_turn_id_   = tokenizer.find_token("<turn|>");
+            if (start_of_turn_id_ < 0)
+                start_of_turn_id_ = tokenizer.find_token("<|turn>");
+            if (end_of_turn_id_ < 0)
+                end_of_turn_id_ = tokenizer.find_token("<turn|>");
             if (start_of_turn_id_ < 0 || end_of_turn_id_ < 0) {
-                IMP_LOG_WARN("Gemma template: missing special tokens "
-                             "(start_of_turn=%d, end_of_turn=%d), falling back to raw",
-                             start_of_turn_id_, end_of_turn_id_);
+                IMP_LOG_WARN(
+                    "Gemma template: missing special tokens "
+                    "(start_of_turn=%d, end_of_turn=%d), falling back to raw",
+                    start_of_turn_id_, end_of_turn_id_);
                 family_ = ChatTemplateFamily::RAW;
                 return false;
             }
@@ -199,13 +240,22 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer,
             break;
         }
         case ChatTemplateFamily::DEEPSEEK_R1: {
-            ds_user_id_      = tokenizer.find_token("<\xef\xbd\x9c" "User\xef\xbd\x9c>");
-            ds_assistant_id_ = tokenizer.find_token("<\xef\xbd\x9c" "Assistant\xef\xbd\x9c>");
-            ds_eos_id_       = tokenizer.find_token("<\xef\xbd\x9c" "end\xe2\x96\x81" "of\xe2\x96\x81" "sentence\xef\xbd\x9c>");
+            ds_user_id_ = tokenizer.find_token(
+                "<\xef\xbd\x9c"
+                "User\xef\xbd\x9c>");
+            ds_assistant_id_ = tokenizer.find_token(
+                "<\xef\xbd\x9c"
+                "Assistant\xef\xbd\x9c>");
+            ds_eos_id_ = tokenizer.find_token(
+                "<\xef\xbd\x9c"
+                "end\xe2\x96\x81"
+                "of\xe2\x96\x81"
+                "sentence\xef\xbd\x9c>");
             if (ds_user_id_ < 0 || ds_assistant_id_ < 0 || ds_eos_id_ < 0) {
-                IMP_LOG_WARN("DeepSeek R1 template: missing tokens "
-                             "(user=%d, asst=%d, eos=%d), falling back to raw",
-                             ds_user_id_, ds_assistant_id_, ds_eos_id_);
+                IMP_LOG_WARN(
+                    "DeepSeek R1 template: missing tokens "
+                    "(user=%d, asst=%d, eos=%d), falling back to raw",
+                    ds_user_id_, ds_assistant_id_, ds_eos_id_);
                 family_ = ChatTemplateFamily::RAW;
                 return false;
             }
@@ -213,13 +263,14 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer,
             break;
         }
         case ChatTemplateFamily::PHI: {
-            phi_user_id_      = tokenizer.find_token("<|user|>");
+            phi_user_id_ = tokenizer.find_token("<|user|>");
             phi_assistant_id_ = tokenizer.find_token("<|assistant|>");
-            phi_end_id_       = tokenizer.find_token("<|end|>");
+            phi_end_id_ = tokenizer.find_token("<|end|>");
             if (phi_user_id_ < 0 || phi_assistant_id_ < 0 || phi_end_id_ < 0) {
-                IMP_LOG_WARN("Phi template: missing tokens "
-                             "(user=%d, asst=%d, end=%d), falling back to raw",
-                             phi_user_id_, phi_assistant_id_, phi_end_id_);
+                IMP_LOG_WARN(
+                    "Phi template: missing tokens "
+                    "(user=%d, asst=%d, end=%d), falling back to raw",
+                    phi_user_id_, phi_assistant_id_, phi_end_id_);
                 family_ = ChatTemplateFamily::RAW;
                 return false;
             }
@@ -240,17 +291,16 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer,
         while ((pos = jinja.find(sys_prefix, pos)) != std::string::npos) {
             size_t content_start = pos + sys_prefix.size();
             size_t content_end = jinja.find("<|im_end|>", content_start);
-            if (content_end == std::string::npos) break;
+            if (content_end == std::string::npos)
+                break;
 
             std::string candidate = jinja.substr(content_start, content_end - content_start);
             // Skip entries that reference Jinja variables (user-provided messages)
             if (candidate.find("messages") == std::string::npos &&
-                candidate.find("{{") == std::string::npos &&
-                candidate.find("content") == std::string::npos &&
+                candidate.find("{{") == std::string::npos && candidate.find("content") == std::string::npos &&
                 !candidate.empty()) {
                 default_system_message_ = candidate;
-                IMP_LOG_INFO("Default system message: %.40s%s",
-                             default_system_message_.c_str(),
+                IMP_LOG_INFO("Default system message: %.40s%s", default_system_message_.c_str(),
                              default_system_message_.size() > 40 ? "..." : "");
                 break;
             }
@@ -267,53 +317,57 @@ bool ChatTemplate::init(ChatTemplateFamily family, const Tokenizer& tokenizer,
 // message, prepend an empty one so the Jinja template's "if no system →
 // inject default_system_message" branch doesn't fire (Mistral-Small-3.2
 // otherwise auto-injects ~600 tokens of boilerplate).
-static std::vector<ChatMessage> maybe_suppress_default_system(
-    const Tokenizer& tok, const std::vector<ChatMessage>& messages)
-{
-    if (tok.use_default_system_prompt()) return messages;
-    if (!messages.empty() && messages.front().role == "system") return messages;
+static std::vector<ChatMessage> maybe_suppress_default_system(const Tokenizer& tok,
+                                                              const std::vector<ChatMessage>& messages) {
+    if (tok.use_default_system_prompt())
+        return messages;
+    if (!messages.empty() && messages.front().role == "system")
+        return messages;
     std::vector<ChatMessage> out;
     out.reserve(messages.size() + 1);
     out.push_back({"system", ""});
-    for (const auto& m : messages) out.push_back(m);
+    for (const auto& m : messages)
+        out.push_back(m);
     return out;
 }
 
-std::vector<int32_t> ChatTemplate::apply(
-    const Tokenizer& tok,
-    const std::vector<ChatMessage>& messages,
-    bool suppress_thinking) const
-{
+std::vector<int32_t> ChatTemplate::apply(const Tokenizer& tok, const std::vector<ChatMessage>& messages,
+                                         bool suppress_thinking) const {
     auto eff_msgs = maybe_suppress_default_system(tok, messages);
     // Prefer Jinja2 rendering when available (data-driven from GGUF).
     // Falls back to hardcoded families if Jinja rendering fails.
     if (use_jinja_ && jinja_tpl_) {
         auto tokens = apply_jinja(tok, eff_msgs, true, suppress_thinking);
-        if (!tokens.empty()) return tokens;
+        if (!tokens.empty())
+            return tokens;
         IMP_LOG_WARN("Jinja2 render produced empty result, falling back to hardcoded template");
     }
 
     switch (family_) {
-        case ChatTemplateFamily::CHATML:   return apply_chatml(tok, eff_msgs, suppress_thinking);
-        case ChatTemplateFamily::LLAMA3:   return apply_llama3(tok, eff_msgs);
+        case ChatTemplateFamily::CHATML:
+            return apply_chatml(tok, eff_msgs, suppress_thinking);
+        case ChatTemplateFamily::LLAMA3:
+            return apply_llama3(tok, eff_msgs);
         case ChatTemplateFamily::LLAMA2:
         case ChatTemplateFamily::MISTRAL_V3:
             return apply_llama2(tok, eff_msgs);
-        case ChatTemplateFamily::NEMOTRON:    return apply_nemotron(tok, eff_msgs);
-        case ChatTemplateFamily::GEMMA:       return apply_gemma(tok, eff_msgs);
-        case ChatTemplateFamily::DEEPSEEK_R1: return apply_deepseek_r1(tok, eff_msgs);
-        case ChatTemplateFamily::PHI:          return apply_phi(tok, eff_msgs);
-        default: break;
+        case ChatTemplateFamily::NEMOTRON:
+            return apply_nemotron(tok, eff_msgs);
+        case ChatTemplateFamily::GEMMA:
+            return apply_gemma(tok, eff_msgs);
+        case ChatTemplateFamily::DEEPSEEK_R1:
+            return apply_deepseek_r1(tok, eff_msgs);
+        case ChatTemplateFamily::PHI:
+            return apply_phi(tok, eff_msgs);
+        default:
+            break;
     }
     return {};
 }
 
 // ChatML: <|im_start|>role\ncontent<|im_end|>\n ... <|im_start|>assistant\n
-std::vector<int32_t> ChatTemplate::apply_chatml(
-    const Tokenizer& tok,
-    const std::vector<ChatMessage>& msgs,
-    bool suppress_thinking) const
-{
+std::vector<int32_t> ChatTemplate::apply_chatml(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
+                                                bool suppress_thinking) const {
     std::vector<int32_t> tokens;
 
     // Skip BOS if it's the same token as im_start (e.g. Nanbeige: bos = <|im_start|>)
@@ -337,8 +391,7 @@ std::vector<int32_t> ChatTemplate::apply_chatml(
             }
         }
         if (!found_system) {
-            effective_msgs.insert(effective_msgs.begin(),
-                ChatMessage{"system", "/no_think"});
+            effective_msgs.insert(effective_msgs.begin(), ChatMessage{"system", "/no_think"});
         }
         msgs_ptr = &effective_msgs;
     }
@@ -347,11 +400,15 @@ std::vector<int32_t> ChatTemplate::apply_chatml(
     // Inject default system message if the model has one and the user didn't provide one
     bool has_system = false;
     for (const auto& m : messages) {
-        if (m.role == "system") { has_system = true; break; }
+        if (m.role == "system") {
+            has_system = true;
+            break;
+        }
     }
     if (!has_system && !default_system_message_.empty()) {
         std::string sys_content = default_system_message_;
-        if (suppress_thinking) sys_content += " /no_think";
+        if (suppress_thinking)
+            sys_content += " /no_think";
         tokens.push_back(im_start_id_);
         // Encode role+content as one piece to match reference tokenization
         auto sys_ids = tok.encode("system\n" + sys_content);
@@ -389,10 +446,8 @@ std::vector<int32_t> ChatTemplate::apply_chatml(
 }
 
 // Llama3: <|start_header_id|>role<|end_header_id|>\n\ncontent<|eot_id|> ...
-std::vector<int32_t> ChatTemplate::apply_llama3(
-    const Tokenizer& tok,
-    const std::vector<ChatMessage>& msgs) const
-{
+std::vector<int32_t> ChatTemplate::apply_llama3(const Tokenizer& tok,
+                                                const std::vector<ChatMessage>& msgs) const {
     std::vector<int32_t> tokens;
 
     if (tok.add_bos()) {
@@ -421,10 +476,8 @@ std::vector<int32_t> ChatTemplate::apply_llama3(
 }
 
 // Llama2: <s>[INST] content [/INST]
-std::vector<int32_t> ChatTemplate::apply_llama2(
-    const Tokenizer& tok,
-    const std::vector<ChatMessage>& msgs) const
-{
+std::vector<int32_t> ChatTemplate::apply_llama2(const Tokenizer& tok,
+                                                const std::vector<ChatMessage>& msgs) const {
     std::vector<int32_t> tokens;
 
     if (tok.add_bos()) {
@@ -442,7 +495,8 @@ std::vector<int32_t> ChatTemplate::apply_llama2(
 
     bool first_user = true;
     for (const auto& msg : msgs) {
-        if (msg.role == "system") continue;
+        if (msg.role == "system")
+            continue;
 
         if (msg.role == "user") {
             tokens.push_back(inst_start_id_);
@@ -464,11 +518,10 @@ std::vector<int32_t> ChatTemplate::apply_llama2(
     return tokens;
 }
 
-// Nemotron: <extra_id_0>System\ncontent\n<extra_id_1>\n<extra_id_0>User\ncontent\n<extra_id_1>\n<extra_id_0>Assistant\n
-std::vector<int32_t> ChatTemplate::apply_nemotron(
-    const Tokenizer& tok,
-    const std::vector<ChatMessage>& msgs) const
-{
+// Nemotron:
+// <extra_id_0>System\ncontent\n<extra_id_1>\n<extra_id_0>User\ncontent\n<extra_id_1>\n<extra_id_0>Assistant\n
+std::vector<int32_t> ChatTemplate::apply_nemotron(const Tokenizer& tok,
+                                                  const std::vector<ChatMessage>& msgs) const {
     std::vector<int32_t> tokens;
 
     if (tok.add_bos()) {
@@ -477,7 +530,8 @@ std::vector<int32_t> ChatTemplate::apply_nemotron(
 
     // Capitalize role names for Nemotron format
     auto capitalize = [](const std::string& s) -> std::string {
-        if (s.empty()) return s;
+        if (s.empty())
+            return s;
         std::string result = s;
         result[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(result[0])));
         return result;
@@ -502,10 +556,8 @@ std::vector<int32_t> ChatTemplate::apply_nemotron(
 
 // Gemma: <start_of_turn>user\ncontent<end_of_turn>\n<start_of_turn>model\n
 // Note: Gemma uses "model" instead of "assistant" for the AI role.
-std::vector<int32_t> ChatTemplate::apply_gemma(
-    const Tokenizer& tok,
-    const std::vector<ChatMessage>& msgs) const
-{
+std::vector<int32_t> ChatTemplate::apply_gemma(const Tokenizer& tok,
+                                               const std::vector<ChatMessage>& msgs) const {
     std::vector<int32_t> tokens;
 
     if (tok.add_bos()) {
@@ -540,10 +592,8 @@ std::vector<int32_t> ChatTemplate::apply_gemma(
 }
 
 // DeepSeek R1: {bos}{system}<｜User｜>{content}<｜Assistant｜>{response}<｜end▁of▁sentence｜>
-std::vector<int32_t> ChatTemplate::apply_deepseek_r1(
-    const Tokenizer& tok,
-    const std::vector<ChatMessage>& msgs) const
-{
+std::vector<int32_t> ChatTemplate::apply_deepseek_r1(const Tokenizer& tok,
+                                                     const std::vector<ChatMessage>& msgs) const {
     std::vector<int32_t> tokens;
     tokens.push_back(bos_id_);
 
@@ -576,10 +626,8 @@ std::vector<int32_t> ChatTemplate::apply_deepseek_r1(
 }
 
 // Phi: <|user|>\ncontent<|end|>\n<|assistant|>\ncontent<|end|>\n ... <|assistant|>\n
-std::vector<int32_t> ChatTemplate::apply_phi(
-    const Tokenizer& tok,
-    const std::vector<ChatMessage>& msgs) const
-{
+std::vector<int32_t> ChatTemplate::apply_phi(const Tokenizer& tok,
+                                             const std::vector<ChatMessage>& msgs) const {
     std::vector<int32_t> tokens;
 
     if (tok.add_bos()) {
@@ -620,9 +668,12 @@ std::vector<int32_t> ChatTemplate::apply_phi(
             std::string piece = tok.decode_token(tokens[i]);
             // Escape control chars for readability
             for (char c : piece) {
-                if (c == '\n') fprintf(stderr, "\\n");
-                else if (c == '\r') fprintf(stderr, "\\r");
-                else fputc(c, stderr);
+                if (c == '\n')
+                    fprintf(stderr, "\\n");
+                else if (c == '\r')
+                    fprintf(stderr, "\\r");
+                else
+                    fputc(c, stderr);
             }
             fprintf(stderr, "|");
         }
@@ -632,16 +683,12 @@ std::vector<int32_t> ChatTemplate::apply_phi(
     return tokens;
 }
 
-std::vector<int32_t> ChatTemplate::apply_with_image(
-    const Tokenizer& tok,
-    const std::vector<ChatMessage>& messages,
-    int n_image_tokens,
-    bool suppress_thinking) const
-{
+std::vector<int32_t> ChatTemplate::apply_with_image(const Tokenizer& tok,
+                                                    const std::vector<ChatMessage>& messages,
+                                                    int n_image_tokens, bool suppress_thinking) const {
     // Currently only Gemma family supports vision tokens.
     // For other families, fall back to text-only apply.
-    if (family_ != ChatTemplateFamily::GEMMA ||
-        boi_id_ < 0 || eoi_id_ < 0 || img_soft_token_id_ < 0) {
+    if (family_ != ChatTemplateFamily::GEMMA || boi_id_ < 0 || eoi_id_ < 0 || img_soft_token_id_ < 0) {
         return apply(tok, messages, suppress_thinking);
     }
 
@@ -696,7 +743,8 @@ std::vector<int32_t> ChatTemplate::apply_with_image(
 
 void ChatTemplate::build_control_token_map(const Tokenizer& tok) {
     control_tokens_.clear();
-    if (!tok.has_token_types()) return;
+    if (!tok.has_token_types())
+        return;
 
     int vs = tok.vocab_size();
     for (int i = 0; i < vs; i++) {
@@ -716,10 +764,8 @@ void ChatTemplate::build_control_token_map(const Tokenizer& tok) {
 // Shared helper: split rendered Jinja2 output on control tokens and encode
 // ---------------------------------------------------------------------------
 
-std::vector<int32_t> ChatTemplate::tokenize_rendered(
-    const Tokenizer& tok,
-    const std::string& rendered) const
-{
+std::vector<int32_t> ChatTemplate::tokenize_rendered(const Tokenizer& tok,
+                                                     const std::string& rendered) const {
     // Split rendered string into tokens by finding control token boundaries.
     // Control tokens appear as literal text in the rendered output (e.g. "<|im_start|>").
     // We identify them via the control_tokens_ map (sorted longest-first).
@@ -748,7 +794,8 @@ std::vector<int32_t> ChatTemplate::tokenize_rendered(
                 break;
             }
         }
-        if (matched) continue;
+        if (matched)
+            continue;
 
         // Collect text until the next control token
         size_t next = rendered.size();
@@ -775,9 +822,8 @@ std::vector<int32_t> ChatTemplate::tokenize_rendered(
 // Build Jinja2 messages array from ChatMessages
 // ---------------------------------------------------------------------------
 
-static jinja::Value::Array build_jinja_messages(
-    const std::vector<ChatMessage>& msgs, bool suppress_thinking)
-{
+static jinja::Value::Array build_jinja_messages(const std::vector<ChatMessage>& msgs,
+                                                bool suppress_thinking) {
     jinja::Value::Array msg_arr;
     for (const auto& m : msgs) {
         std::string content = m.content;
@@ -802,68 +848,103 @@ static jinja::Value json_string_to_value(const std::string& json_str) {
     size_t pos = 0;
     auto skip_ws = [&]() {
         while (pos < json_str.size() && (json_str[pos] == ' ' || json_str[pos] == '\t' ||
-               json_str[pos] == '\n' || json_str[pos] == '\r'))
+                                         json_str[pos] == '\n' || json_str[pos] == '\r'))
             pos++;
     };
 
     std::function<jinja::Value()> parse_value;
 
     auto parse_string = [&]() -> std::string {
-        if (pos >= json_str.size() || json_str[pos] != '"') return "";
-        pos++; // skip opening "
+        if (pos >= json_str.size() || json_str[pos] != '"')
+            return "";
+        pos++;  // skip opening "
         std::string result;
         while (pos < json_str.size() && json_str[pos] != '"') {
             if (json_str[pos] == '\\' && pos + 1 < json_str.size()) {
                 pos++;
                 switch (json_str[pos]) {
-                    case '"':  result += '"';  break;
-                    case '\\': result += '\\'; break;
-                    case '/':  result += '/';  break;
-                    case 'n':  result += '\n'; break;
-                    case 't':  result += '\t'; break;
-                    case 'r':  result += '\r'; break;
-                    default:   result += json_str[pos]; break;
+                    case '"':
+                        result += '"';
+                        break;
+                    case '\\':
+                        result += '\\';
+                        break;
+                    case '/':
+                        result += '/';
+                        break;
+                    case 'n':
+                        result += '\n';
+                        break;
+                    case 't':
+                        result += '\t';
+                        break;
+                    case 'r':
+                        result += '\r';
+                        break;
+                    default:
+                        result += json_str[pos];
+                        break;
                 }
             } else {
                 result += json_str[pos];
             }
             pos++;
         }
-        if (pos < json_str.size()) pos++; // skip closing "
+        if (pos < json_str.size())
+            pos++;  // skip closing "
         return result;
     };
 
     auto parse_object = [&]() -> jinja::Value {
-        pos++; // skip {
+        pos++;  // skip {
         auto obj = jinja::Value::make_object();
         skip_ws();
-        if (pos < json_str.size() && json_str[pos] == '}') { pos++; return obj; }
+        if (pos < json_str.size() && json_str[pos] == '}') {
+            pos++;
+            return obj;
+        }
         while (pos < json_str.size()) {
             skip_ws();
             std::string key = parse_string();
             skip_ws();
-            if (pos < json_str.size() && json_str[pos] == ':') pos++;
+            if (pos < json_str.size() && json_str[pos] == ':')
+                pos++;
             skip_ws();
             obj.set(key, parse_value());
             skip_ws();
-            if (pos < json_str.size() && json_str[pos] == ',') { pos++; continue; }
-            if (pos < json_str.size() && json_str[pos] == '}') { pos++; break; }
+            if (pos < json_str.size() && json_str[pos] == ',') {
+                pos++;
+                continue;
+            }
+            if (pos < json_str.size() && json_str[pos] == '}') {
+                pos++;
+                break;
+            }
             break;
         }
         return obj;
     };
 
     auto parse_array = [&]() -> jinja::Value {
-        pos++; // skip [
+        pos++;  // skip [
         jinja::Value::Array arr;
         skip_ws();
-        if (pos < json_str.size() && json_str[pos] == ']') { pos++; return jinja::Value(std::move(arr)); }
+        if (pos < json_str.size() && json_str[pos] == ']') {
+            pos++;
+            return jinja::Value(std::move(arr));
+        }
         while (pos < json_str.size()) {
             skip_ws();
             arr.push_back(parse_value());
             skip_ws();
-            if (pos < json_str.size() && json_str[pos] == ',') { pos++; continue; }
-            if (pos < json_str.size() && json_str[pos] == ']') { pos++; break; }
+            if (pos < json_str.size() && json_str[pos] == ',') {
+                pos++;
+                continue;
+            }
+            if (pos < json_str.size() && json_str[pos] == ']') {
+                pos++;
+                break;
+            }
             break;
         }
         return jinja::Value(std::move(arr));
@@ -871,29 +952,53 @@ static jinja::Value json_string_to_value(const std::string& json_str) {
 
     parse_value = [&]() -> jinja::Value {
         skip_ws();
-        if (pos >= json_str.size()) return jinja::Value();
+        if (pos >= json_str.size())
+            return jinja::Value();
         char c = json_str[pos];
-        if (c == '"') return jinja::Value(parse_string());
-        if (c == '{') return parse_object();
-        if (c == '[') return parse_array();
-        if (c == 't' && json_str.compare(pos, 4, "true") == 0)  { pos += 4; return jinja::Value(true); }
-        if (c == 'f' && json_str.compare(pos, 5, "false") == 0) { pos += 5; return jinja::Value(false); }
-        if (c == 'n' && json_str.compare(pos, 4, "null") == 0)  { pos += 4; return jinja::Value(); }
+        if (c == '"')
+            return jinja::Value(parse_string());
+        if (c == '{')
+            return parse_object();
+        if (c == '[')
+            return parse_array();
+        if (c == 't' && json_str.compare(pos, 4, "true") == 0) {
+            pos += 4;
+            return jinja::Value(true);
+        }
+        if (c == 'f' && json_str.compare(pos, 5, "false") == 0) {
+            pos += 5;
+            return jinja::Value(false);
+        }
+        if (c == 'n' && json_str.compare(pos, 4, "null") == 0) {
+            pos += 4;
+            return jinja::Value();
+        }
         // Number
         size_t start = pos;
         bool is_float = false;
-        if (c == '-') pos++;
-        while (pos < json_str.size() && json_str[pos] >= '0' && json_str[pos] <= '9') pos++;
-        if (pos < json_str.size() && json_str[pos] == '.') { is_float = true; pos++; }
-        while (pos < json_str.size() && json_str[pos] >= '0' && json_str[pos] <= '9') pos++;
+        if (c == '-')
+            pos++;
+        while (pos < json_str.size() && json_str[pos] >= '0' && json_str[pos] <= '9')
+            pos++;
+        if (pos < json_str.size() && json_str[pos] == '.') {
+            is_float = true;
+            pos++;
+        }
+        while (pos < json_str.size() && json_str[pos] >= '0' && json_str[pos] <= '9')
+            pos++;
         if (pos < json_str.size() && (json_str[pos] == 'e' || json_str[pos] == 'E')) {
-            is_float = true; pos++;
-            if (pos < json_str.size() && (json_str[pos] == '+' || json_str[pos] == '-')) pos++;
-            while (pos < json_str.size() && json_str[pos] >= '0' && json_str[pos] <= '9') pos++;
+            is_float = true;
+            pos++;
+            if (pos < json_str.size() && (json_str[pos] == '+' || json_str[pos] == '-'))
+                pos++;
+            while (pos < json_str.size() && json_str[pos] >= '0' && json_str[pos] <= '9')
+                pos++;
         }
         std::string num_str = json_str.substr(start, pos - start);
-        if (num_str.empty()) return jinja::Value();
-        if (is_float) return jinja::Value(std::stod(num_str));
+        if (num_str.empty())
+            return jinja::Value();
+        if (is_float)
+            return jinja::Value(std::stod(num_str));
         return jinja::Value(static_cast<int64_t>(std::stoll(num_str)));
     };
 
@@ -905,7 +1010,8 @@ static jinja::Value json_string_to_value(const std::string& json_str) {
 // ---------------------------------------------------------------------------
 
 void ChatTemplate::auto_detect_stop_tokens(const jinja::Context& ctx) const {
-    if (!stop_token_ids_.empty() || control_tokens_.empty()) return;
+    if (!stop_token_ids_.empty() || control_tokens_.empty())
+        return;
 
     jinja::Context ctx_no_gen = ctx;
     ctx_no_gen["add_generation_prompt"] = jinja::Value(false);
@@ -921,13 +1027,10 @@ void ChatTemplate::auto_detect_stop_tokens(const jinja::Context& ctx) const {
     }
 }
 
-std::vector<int32_t> ChatTemplate::apply_jinja(
-    const Tokenizer& tok,
-    const std::vector<ChatMessage>& msgs,
-    bool add_generation_prompt,
-    bool suppress_thinking) const
-{
-    if (!jinja_tpl_) return {};
+std::vector<int32_t> ChatTemplate::apply_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
+                                               bool add_generation_prompt, bool suppress_thinking) const {
+    if (!jinja_tpl_)
+        return {};
 
     // Build Jinja2 context
     jinja::Context ctx;
@@ -959,8 +1062,10 @@ std::vector<int32_t> ChatTemplate::apply_jinja(
     if (RuntimeConfig::current().diagnostics.debug_template) {
         std::string escaped;
         for (char c : rendered) {
-            if (c == '\n') escaped += "\\n";
-            else escaped += c;
+            if (c == '\n')
+                escaped += "\\n";
+            else
+                escaped += c;
         }
         fprintf(stderr, "[DEBUG_TPL_JINJA] rendered: \"%s\"\n", escaped.c_str());
     }
@@ -978,31 +1083,26 @@ std::vector<int32_t> ChatTemplate::apply_jinja(
 // ---------------------------------------------------------------------------
 
 std::vector<int32_t> ChatTemplate::apply_jinja_with_tools(
-    const Tokenizer& tok,
-    const std::vector<ChatMessage>& msgs,
-    const std::vector<ToolFunction>& tools,
-    const std::string& tool_choice,
-    bool add_generation_prompt,
-    bool suppress_thinking) const
-{
-    if (!jinja_tpl_) return {};
+    const Tokenizer& tok, const std::vector<ChatMessage>& msgs, const std::vector<ToolFunction>& tools,
+    const std::string& tool_choice, bool add_generation_prompt, bool suppress_thinking) const {
+    if (!jinja_tpl_)
+        return {};
 
     // Build tools array as Jinja2 values (OpenAI format: {type, function: {name, description, parameters}})
     jinja::Value::Array tools_arr;
     for (const auto& t : tools) {
         // Parse parameters JSON into a proper Jinja2 object so templates can
         // traverse properties, use tojson, etc.
-        jinja::Value params = t.parameters_json.empty()
-            ? jinja::Value::make_object()
-            : json_string_to_value(t.parameters_json);
+        jinja::Value params = t.parameters_json.empty() ? jinja::Value::make_object()
+                                                        : json_string_to_value(t.parameters_json);
 
         tools_arr.push_back(jinja::Value::object({
             {"type", jinja::Value(std::string("function"))},
             {"function", jinja::Value::object({
-                {"name", jinja::Value(t.name)},
-                {"description", jinja::Value(t.description)},
-                {"parameters", std::move(params)},
-            })},
+                             {"name", jinja::Value(t.name)},
+                             {"description", jinja::Value(t.description)},
+                             {"parameters", std::move(params)},
+                         })},
         }));
     }
 
@@ -1040,28 +1140,24 @@ std::vector<int32_t> ChatTemplate::apply_jinja_with_tools(
 // Public: apply_with_tools — try Jinja2 tools path, fallback to standard apply
 // ---------------------------------------------------------------------------
 
-std::vector<int32_t> ChatTemplate::apply_with_tools(
-    const Tokenizer& tok,
-    const std::vector<ChatMessage>& messages,
-    const std::vector<ToolFunction>& tools,
-    const std::string& tool_choice,
-    bool suppress_thinking) const
-{
+std::vector<int32_t> ChatTemplate::apply_with_tools(const Tokenizer& tok,
+                                                    const std::vector<ChatMessage>& messages,
+                                                    const std::vector<ToolFunction>& tools,
+                                                    const std::string& tool_choice,
+                                                    bool suppress_thinking) const {
     // Try Jinja2 tools-aware path. Returns empty if Jinja2 is unavailable or
     // rendering fails, signaling the caller to fall back to text-based tool injection.
     if (use_jinja_ && jinja_tpl_ && !tools.empty()) {
         auto eff_msgs = maybe_suppress_default_system(tok, messages);
-        auto tokens = apply_jinja_with_tools(tok, eff_msgs, tools, tool_choice,
-                                              true, suppress_thinking);
-        if (!tokens.empty()) return tokens;
+        auto tokens = apply_jinja_with_tools(tok, eff_msgs, tools, tool_choice, true, suppress_thinking);
+        if (!tokens.empty())
+            return tokens;
         IMP_LOG_WARN("Jinja2 tools render failed, caller should inject text-based tool prompt");
     }
 
     return {};
 }
 
-bool ChatTemplate::supports_tools() const {
-    return use_jinja_ && jinja_tpl_ != nullptr;
-}
+bool ChatTemplate::supports_tools() const { return use_jinja_ && jinja_tpl_ != nullptr; }
 
-} // namespace imp
+}  // namespace imp

@@ -25,16 +25,16 @@ bool cutlass_grouped_3x_nvfp4_available();
 // K and N must be identical across all experts.  M_i varies.
 bool gemm_grouped_cutlass_3x_nvfp4(
     int n_experts,
-    const int* host_M,                     // [n_experts] M_i per expert
+    const int* host_M,  // [n_experts] M_i per expert
     int N, int K,
-    const void* const* host_ptr_A,         // [n_experts] device pointers to packed A
-    const void* const* host_ptr_SFA,       // [n_experts] device pointers to SFA
-    const void* const* host_ptr_B,         // [n_experts] device pointers to packed B weight
-    const void* const* host_ptr_SFB,       // [n_experts] device pointers to SFB
-    void*       const* host_ptr_D,         // [n_experts] device pointers to FP16 output
-    const float*       host_alpha,         // [n_experts] per-expert tensor_scale (alpha)
+    const void* const* host_ptr_A,    // [n_experts] device pointers to packed A
+    const void* const* host_ptr_SFA,  // [n_experts] device pointers to SFA
+    const void* const* host_ptr_B,    // [n_experts] device pointers to packed B weight
+    const void* const* host_ptr_SFB,  // [n_experts] device pointers to SFB
+    void* const* host_ptr_D,          // [n_experts] device pointers to FP16 output
+    const float* host_alpha,          // [n_experts] per-expert tensor_scale (alpha)
     cudaStream_t stream);
 
 void gemm_grouped_3x_nvfp4_cleanup();
 
-} // namespace imp
+}  // namespace imp

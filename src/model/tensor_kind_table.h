@@ -6,11 +6,11 @@
 namespace imp {
 
 struct KindCapabilities {
-    TierMask    supported;
+    TierMask supported;
     StorageTier required_floor;
-    bool        fusable;
+    bool fusable;
 };
 
 const KindCapabilities& capabilities_of(TensorKind k);
 
-} // namespace imp
+}  // namespace imp

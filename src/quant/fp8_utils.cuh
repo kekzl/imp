@@ -30,12 +30,12 @@ static constexpr float kFP8E4M3MaxVal = 448.0f;
 // FP32 -> FP8 E4M3 software conversion with saturation (no Inf in E4M3).
 // Round-to-nearest-even.
 // ---------------------------------------------------------------------------
-__device__ __forceinline__ uint8_t float_to_fp8_e4m3(float val)
-{
+__device__ __forceinline__ uint8_t float_to_fp8_e4m3(float val) {
     const uint32_t sign = (val < 0.0f) ? 1u : 0u;
     float abs_val = fabsf(val);
 
-    if (abs_val > kFP8E4M3MaxVal) abs_val = kFP8E4M3MaxVal;  // clamp
+    if (abs_val > kFP8E4M3MaxVal)
+        abs_val = kFP8E4M3MaxVal;  // clamp
 
     // Smallest E4M3 subnormal: 2^(-9)
     if (abs_val < (1.0f / 512.0f)) {
@@ -62,8 +62,7 @@ __device__ __forceinline__ uint8_t float_to_fp8_e4m3(float val)
             uint32_t shifted = full_man >> right_shift;
             uint32_t remainder = full_man & ((1u << right_shift) - 1);
             uint32_t half_point = 1u << (right_shift - 1);
-            if (remainder > half_point ||
-                (remainder == half_point && (shifted & 1))) {
+            if (remainder > half_point || (remainder == half_point && (shifted & 1))) {
                 shifted += 1;
             }
             m3 = (uint8_t)(shifted & 0x07);
@@ -101,7 +100,8 @@ __device__ __forceinline__ uint8_t float_to_fp8_e4m3(float val)
             }
         }
         // Saturate the NaN slot (e=15, m=7) to max normal (e=15, m=6).
-        if (e4 == 15 && m3 == 7) m3 = 6;
+        if (e4 == 15 && m3 == 7)
+            m3 = 6;
         result = (uint8_t)((sign << 7) | ((e4 & 0x0F) << 3) | (m3 & 0x07));
     }
     return result;
@@ -118,11 +118,10 @@ __device__ __forceinline__ uint8_t float_to_fp8_e4m3(float val)
 // bit-repack version in nvfp4_gemm.cu. The bit-repack version produced wrong
 // denorm values until the NVFP4 prequant debug (50× inflation) forced a fix;
 // now both are consolidated into this single correct fast implementation.
-__device__ __forceinline__ float fp8_e4m3_to_float_fast(uint8_t bits)
-{
+__device__ __forceinline__ float fp8_e4m3_to_float_fast(uint8_t bits) {
     uint32_t sign = (bits >> 7) & 1;
-    uint32_t exp  = (bits >> 3) & 0x0F;
-    uint32_t man  = bits & 0x07;
+    uint32_t exp = (bits >> 3) & 0x0F;
+    uint32_t man = bits & 0x07;
     uint32_t fp32;
     if (exp == 0) {
         float v = (float)man * (1.0f / 512.0f);
@@ -135,8 +134,6 @@ __device__ __forceinline__ float fp8_e4m3_to_float_fast(uint8_t bits)
 
 // Alias for code that used the slow exp2f-based name. Both refer to the same
 // fast implementation now.
-__device__ __forceinline__ float fp8_e4m3_to_float(uint8_t bits) {
-    return fp8_e4m3_to_float_fast(bits);
-}
+__device__ __forceinline__ float fp8_e4m3_to_float(uint8_t bits) { return fp8_e4m3_to_float_fast(bits); }
 
-} // namespace imp
+}  // namespace imp

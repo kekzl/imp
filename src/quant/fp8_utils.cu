@@ -25,11 +25,10 @@ namespace imp {
 // ---- Software fallback helpers (always compiled for host-side unit tests) --
 
 // FP16 -> FP8 E4M3: software conversion with saturation (no Inf in E4M3).
-__device__ __forceinline__ uint8_t fp16_bits_to_fp8_e4m3(uint16_t h)
-{
+__device__ __forceinline__ uint8_t fp16_bits_to_fp8_e4m3(uint16_t h) {
     const uint16_t sign = (h >> 15) & 1;
-    int            exp  = (int)((h >> 10) & 0x1F);  // biased exponent (bias 15)
-    uint16_t       man  = h & 0x03FF;                // 10-bit mantissa
+    int exp = (int)((h >> 10) & 0x1F);  // biased exponent (bias 15)
+    uint16_t man = h & 0x03FF;          // 10-bit mantissa
 
     // --- Handle special FP16 values -----------------------------------------
     // FP16 Inf/NaN -> FP8 NaN (0x7F with sign)
@@ -51,7 +50,8 @@ __device__ __forceinline__ uint8_t fp16_bits_to_fp8_e4m3(uint16_t h)
     float abs_val = fabsf(val);
 
     // Clamp to E4M3 max representable magnitude: 448.0
-    if (abs_val > 448.0f) abs_val = 448.0f;
+    if (abs_val > 448.0f)
+        abs_val = 448.0f;
 
     // Clamp to smallest E4M3 subnormal: 2^-9 = 1/512
     if (abs_val < (1.0f / 512.0f) && abs_val != 0.0f) {
@@ -62,7 +62,7 @@ __device__ __forceinline__ uint8_t fp16_bits_to_fp8_e4m3(uint16_t h)
     // Extract float fields.
     uint32_t fbits;
     memcpy(&fbits, &abs_val, sizeof(float));
-    int f_exp = (int)((fbits >> 23) & 0xFF) - 127; // unbiased
+    int f_exp = (int)((fbits >> 23) & 0xFF) - 127;  // unbiased
     uint32_t f_man = fbits & 0x7FFFFF;              // 23-bit mantissa
 
     int e4 = f_exp + 7;  // bias for E4M3
@@ -84,8 +84,7 @@ __device__ __forceinline__ uint8_t fp16_bits_to_fp8_e4m3(uint16_t h)
             uint32_t shifted = full_man >> right_shift;
             uint32_t remainder = full_man & ((1u << right_shift) - 1);
             uint32_t half_point = 1u << (right_shift - 1);
-            if (remainder > half_point ||
-                (remainder == half_point && (shifted & 1))) {
+            if (remainder > half_point || (remainder == half_point && (shifted & 1))) {
                 shifted += 1;
             }
             m3 = (uint8_t)(shifted & 0x07);
@@ -119,11 +118,10 @@ __device__ __forceinline__ uint8_t fp16_bits_to_fp8_e4m3(uint16_t h)
 }
 
 // FP8 E4M3 -> FP16: software conversion.
-__device__ __forceinline__ uint16_t fp8_e4m3_to_fp16_bits(uint8_t x)
-{
+__device__ __forceinline__ uint16_t fp8_e4m3_to_fp16_bits(uint8_t x) {
     const uint16_t sign = (uint16_t)((x >> 7) & 1);
-    int            exp  = (int)((x >> 3) & 0x0F);  // 4-bit biased exponent (bias 7)
-    uint16_t       man  = x & 0x07;                 // 3-bit mantissa
+    int exp = (int)((x >> 3) & 0x0F);  // 4-bit biased exponent (bias 7)
+    uint16_t man = x & 0x07;           // 3-bit mantissa
 
     // Zero.
     if (exp == 0 && man == 0) {
@@ -148,7 +146,8 @@ __device__ __forceinline__ uint16_t fp8_e4m3_to_fp16_bits(uint8_t x)
         // Normal: value = (-1)^s * 2^(exp-7) * (1 + m/8)
         val = ldexpf(1.0f + (float)man / 8.0f, exp - 7);
     }
-    if (sign) val = -val;
+    if (sign)
+        val = -val;
 
     half h = __float2half(val);
     uint16_t bits;
@@ -163,13 +162,10 @@ __device__ __forceinline__ uint16_t fp8_e4m3_to_fp16_bits(uint8_t x)
 static constexpr int kBlockSize = 256;
 static constexpr int kElemsPerThread = 4;
 
-__global__ void cast_fp16_to_fp8_kernel(
-    const half*    __restrict__ input,
-    uint8_t*       __restrict__ output,
-    int n)
-{
+__global__ void cast_fp16_to_fp8_kernel(const half* __restrict__ input, uint8_t* __restrict__ output, int n) {
     const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
-    if (base >= n) return;
+    if (base >= n)
+        return;
 
     for (int i = 0; i < kElemsPerThread && base + i < n; ++i) {
         __nv_fp8_e4m3 fp8_val = __nv_fp8_e4m3(__half2float(input[base + i]));
@@ -177,13 +173,10 @@ __global__ void cast_fp16_to_fp8_kernel(
     }
 }
 
-__global__ void cast_fp8_to_fp16_kernel(
-    const uint8_t* __restrict__ input,
-    half*          __restrict__ output,
-    int n)
-{
+__global__ void cast_fp8_to_fp16_kernel(const uint8_t* __restrict__ input, half* __restrict__ output, int n) {
     const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
-    if (base >= n) return;
+    if (base >= n)
+        return;
 
     for (int i = 0; i < kElemsPerThread && base + i < n; ++i) {
         __nv_fp8_e4m3 fp8_val;
@@ -196,44 +189,36 @@ __global__ void cast_fp8_to_fp16_kernel(
 // Host-side launch wrappers
 // ---------------------------------------------------------------------------
 
-void cast_fp16_to_fp8(const void* input, void* output, int n,
-                      cudaStream_t stream)
-{
-    if (n <= 0) return;
+void cast_fp16_to_fp8(const void* input, void* output, int n, cudaStream_t stream) {
+    if (n <= 0)
+        return;
 
     const int threads_needed = (n + kElemsPerThread - 1) / kElemsPerThread;
     const int grid = (threads_needed + kBlockSize - 1) / kBlockSize;
 
-    cast_fp16_to_fp8_kernel<<<grid, kBlockSize, 0, stream>>>(
-        static_cast<const half*>(input),
-        static_cast<uint8_t*>(output),
-        n);
+    cast_fp16_to_fp8_kernel<<<grid, kBlockSize, 0, stream>>>(static_cast<const half*>(input),
+                                                             static_cast<uint8_t*>(output), n);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        fprintf(stderr, "cast_fp16_to_fp8 launch failed: %s\n",
-                cudaGetErrorString(err));
+        fprintf(stderr, "cast_fp16_to_fp8 launch failed: %s\n", cudaGetErrorString(err));
     }
 }
 
-void cast_fp8_to_fp16(const void* input, void* output, int n,
-                      cudaStream_t stream)
-{
-    if (n <= 0) return;
+void cast_fp8_to_fp16(const void* input, void* output, int n, cudaStream_t stream) {
+    if (n <= 0)
+        return;
 
     const int threads_needed = (n + kElemsPerThread - 1) / kElemsPerThread;
     const int grid = (threads_needed + kBlockSize - 1) / kBlockSize;
 
-    cast_fp8_to_fp16_kernel<<<grid, kBlockSize, 0, stream>>>(
-        static_cast<const uint8_t*>(input),
-        static_cast<half*>(output),
-        n);
+    cast_fp8_to_fp16_kernel<<<grid, kBlockSize, 0, stream>>>(static_cast<const uint8_t*>(input),
+                                                             static_cast<half*>(output), n);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        fprintf(stderr, "cast_fp8_to_fp16 launch failed: %s\n",
-                cudaGetErrorString(err));
+        fprintf(stderr, "cast_fp8_to_fp16 launch failed: %s\n", cudaGetErrorString(err));
     }
 }
 
-} // namespace imp
+}  // namespace imp

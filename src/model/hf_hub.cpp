@@ -12,7 +12,8 @@ static std::string exec_cmd(const std::string& cmd) {
     std::array<char, 4096> buffer;
     std::string result;
     FILE* pipe = popen(cmd.c_str(), "r");
-    if (!pipe) return "";
+    if (!pipe)
+        return "";
     while (fgets(buffer.data(), buffer.size(), pipe) != nullptr)
         result += buffer.data();
     pclose(pipe);
@@ -22,9 +23,7 @@ static std::string exec_cmd(const std::string& cmd) {
     return result;
 }
 
-bool hf_cli_available() {
-    return system("which huggingface-cli > /dev/null 2>&1") == 0;
-}
+bool hf_cli_available() { return system("which huggingface-cli > /dev/null 2>&1") == 0; }
 
 // Convert HF repo ID to cache directory name: org/model -> models--org--model
 static std::string repo_to_cache_name(const std::string& repo_id) {
@@ -39,7 +38,8 @@ static std::string repo_to_cache_name(const std::string& repo_id) {
 }
 
 static std::string resolve_hf_cache_dir() {
-    if (const char* v = std::getenv("HUGGINGFACE_HUB_CACHE")) return v;
+    if (const char* v = std::getenv("HUGGINGFACE_HUB_CACHE"))
+        return v;
     if (const char* v = std::getenv("HF_HOME"))
         return std::string(v) + "/hub";
     if (const char* v = std::getenv("HOME"))
@@ -47,8 +47,7 @@ static std::string resolve_hf_cache_dir() {
     return "";
 }
 
-std::string resolve_model_path(const std::string& model_id,
-                                const std::string& revision) {
+std::string resolve_model_path(const std::string& model_id, const std::string& revision) {
     // 1. If it's already a valid local path, return it
     if (fs::exists(model_id)) {
         return model_id;
@@ -81,8 +80,7 @@ std::string resolve_model_path(const std::string& model_id,
                     }
                 }
                 if (!latest.empty()) {
-                    IMP_LOG_INFO("Found cached model: %s -> %s",
-                                 model_id.c_str(), latest.c_str());
+                    IMP_LOG_INFO("Found cached model: %s -> %s", model_id.c_str(), latest.c_str());
                     return latest;
                 }
             }
@@ -92,8 +90,7 @@ std::string resolve_model_path(const std::string& model_id,
     // 4. Try to download via huggingface-cli
     if (!hf_cli_available()) {
         IMP_LOG_ERROR("huggingface-cli not found. Install with: pip install huggingface-hub");
-        IMP_LOG_ERROR("Or download the model manually: huggingface-cli download %s",
-                      model_id.c_str());
+        IMP_LOG_ERROR("Or download the model manually: huggingface-cli download %s", model_id.c_str());
         return "";
     }
 
@@ -116,20 +113,25 @@ std::string resolve_model_path(const std::string& model_id,
 }
 
 std::string find_gguf_in_dir(const std::string& dir) {
-    if (!fs::is_directory(dir)) return "";
+    if (!fs::is_directory(dir))
+        return "";
 
     std::string best;
     std::uintmax_t best_size = 0;
 
     std::error_code ec;
     for (const auto& entry : fs::directory_iterator(dir, ec)) {
-        if (!entry.is_regular_file() && !entry.is_symlink()) continue;
+        if (!entry.is_regular_file() && !entry.is_symlink())
+            continue;
         auto path = entry.path();
-        if (path.extension() != ".gguf") continue;
+        if (path.extension() != ".gguf")
+            continue;
         // Skip mmproj files (vision encoder weights, not the main model)
-        if (path.filename().string().find("mmproj") != std::string::npos) continue;
+        if (path.filename().string().find("mmproj") != std::string::npos)
+            continue;
         auto sz = entry.file_size(ec);
-        if (ec) continue;
+        if (ec)
+            continue;
         if (best.empty() || sz > best_size) {
             best = path.string();
             best_size = sz;
@@ -139,20 +141,17 @@ std::string find_gguf_in_dir(const std::string& dir) {
 }
 
 bool is_safetensors_dir(const std::string& dir) {
-    if (!fs::is_directory(dir)) return false;
-    return fs::exists(dir + "/model.safetensors.index.json") ||
-           fs::exists(dir + "/model.safetensors");
+    if (!fs::is_directory(dir))
+        return false;
+    return fs::exists(dir + "/model.safetensors.index.json") || fs::exists(dir + "/model.safetensors");
 }
 
-std::string resolve_model_auto(const std::string& model_id,
-                                ImpModelFormat& out_format,
-                                const std::string& revision) {
+std::string resolve_model_auto(const std::string& model_id, ImpModelFormat& out_format,
+                               const std::string& revision) {
     out_format = IMP_FORMAT_GGUF;
 
     // Direct .gguf file
-    if (model_id.size() > 5 &&
-        model_id.substr(model_id.size() - 5) == ".gguf" &&
-        fs::exists(model_id)) {
+    if (model_id.size() > 5 && model_id.substr(model_id.size() - 5) == ".gguf" && fs::exists(model_id)) {
         return model_id;
     }
 
@@ -165,16 +164,19 @@ std::string resolve_model_auto(const std::string& model_id,
         }
         // GGUF in directory?
         std::string gguf = find_gguf_in_dir(model_id);
-        if (!gguf.empty()) return gguf;
+        if (!gguf.empty())
+            return gguf;
         IMP_LOG_ERROR("No model files found in: %s", model_id.c_str());
         return "";
     }
 
     // Try HuggingFace resolution
     std::string resolved = resolve_model_path(model_id, revision);
-    if (resolved.empty()) return "";
+    if (resolved.empty())
+        return "";
 
-    if (fs::is_regular_file(resolved)) return resolved;
+    if (fs::is_regular_file(resolved))
+        return resolved;
 
     if (fs::is_directory(resolved)) {
         if (is_safetensors_dir(resolved)) {
@@ -182,7 +184,8 @@ std::string resolve_model_auto(const std::string& model_id,
             return resolved;
         }
         std::string gguf = find_gguf_in_dir(resolved);
-        if (!gguf.empty()) return gguf;
+        if (!gguf.empty())
+            return gguf;
         IMP_LOG_ERROR("No model files found in: %s", resolved.c_str());
         return "";
     }
@@ -190,20 +193,19 @@ std::string resolve_model_auto(const std::string& model_id,
     return resolved;
 }
 
-std::string resolve_model_gguf(const std::string& model_id,
-                                const std::string& revision) {
+std::string resolve_model_gguf(const std::string& model_id, const std::string& revision) {
     // If it already ends with .gguf and exists, use directly
-    if (model_id.size() > 5 &&
-        model_id.substr(model_id.size() - 5) == ".gguf" &&
-        fs::exists(model_id)) {
+    if (model_id.size() > 5 && model_id.substr(model_id.size() - 5) == ".gguf" && fs::exists(model_id)) {
         return model_id;
     }
 
     std::string resolved = resolve_model_path(model_id, revision);
-    if (resolved.empty()) return "";
+    if (resolved.empty())
+        return "";
 
     // If resolved path is a file, return it
-    if (fs::is_regular_file(resolved)) return resolved;
+    if (fs::is_regular_file(resolved))
+        return resolved;
 
     // If it's a directory, find the GGUF inside
     if (fs::is_directory(resolved)) {
@@ -219,4 +221,4 @@ std::string resolve_model_gguf(const std::string& model_id,
     return resolved;
 }
 
-} // namespace imp
+}  // namespace imp

@@ -15,9 +15,9 @@ namespace imp {
 namespace {
 
 using test::DenseTestModel;
-using test::MoETestModel;
-using test::make_random_weight;
 using test::free_tensor;
+using test::make_random_weight;
+using test::MoETestModel;
 
 // ============================================================================
 // Test 1: MoE executor initializes successfully
@@ -90,8 +90,10 @@ TEST(MoEExecutorTest, ForwardProducesValidOutput) {
     int inf_count = 0;
     for (int64_t i = 0; i < numel; i++) {
         float v = h_logits[i];
-        if (std::isnan(v)) nan_count++;
-        if (std::isinf(v)) inf_count++;
+        if (std::isnan(v))
+            nan_count++;
+        if (std::isinf(v))
+            inf_count++;
     }
     EXPECT_EQ(nan_count, 0) << "Found NaN values in logits";
     EXPECT_EQ(inf_count, 0) << "Found Inf values in logits";
@@ -392,10 +394,8 @@ TEST(MoEExecutorTest, MoEVsDenseDiffer) {
     int total = 1 * vocab;
     std::vector<float> h_dense(total), h_moe(total);
 
-    cudaMemcpy(h_dense.data(), dense_logits.data,
-               total * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_moe.data(), moe_logits.data,
-               total * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_dense.data(), dense_logits.data, total * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_moe.data(), moe_logits.data, total * sizeof(float), cudaMemcpyDeviceToHost);
 
     // Check that both outputs are non-zero (sanity check)
     float dense_sum = 0.0f, moe_sum = 0.0f;
@@ -411,15 +411,15 @@ TEST(MoEExecutorTest, MoEVsDenseDiffer) {
     for (int i = 0; i < total; i++) {
         float dv = h_dense[i];
         float mv = h_moe[i];
-        if (std::abs(dv - mv) > 0.01f) diff_count++;
+        if (std::abs(dv - mv) > 0.01f)
+            diff_count++;
     }
     // With different random seeds, the embedding + projection weights differ,
     // so the logits must differ. Even a small fraction differing proves the
     // paths are distinct.
-    EXPECT_GT(diff_count, total / 10)
-        << "MoE and Dense should produce substantially different logits"
-        << " (dense_sum=" << dense_sum << ", moe_sum=" << moe_sum
-        << ", diff_count=" << diff_count << "/" << total << ")";
+    EXPECT_GT(diff_count, total / 10) << "MoE and Dense should produce substantially different logits"
+                                      << " (dense_sum=" << dense_sum << ", moe_sum=" << moe_sum
+                                      << ", diff_count=" << diff_count << "/" << total << ")";
 
     cudaFree(d_tokens);
     cudaFree(d_positions);
@@ -497,9 +497,12 @@ TEST(MoEExecutorTest, MixedMoEDense) {
     // Make layer 0 a dense layer by clearing expert weights and adding dense FFN weights
     auto& ly0 = tm.model->layers_[0];
     // Free expert weights for layer 0
-    for (auto& t : ly0.expert_w_gate) free_tensor(t);
-    for (auto& t : ly0.expert_w_up) free_tensor(t);
-    for (auto& t : ly0.expert_w_down) free_tensor(t);
+    for (auto& t : ly0.expert_w_gate)
+        free_tensor(t);
+    for (auto& t : ly0.expert_w_up)
+        free_tensor(t);
+    for (auto& t : ly0.expert_w_down)
+        free_tensor(t);
     ly0.expert_w_gate.clear();
     ly0.expert_w_up.clear();
     ly0.expert_w_down.clear();
@@ -551,5 +554,5 @@ TEST(MoEExecutorTest, MixedMoEDense) {
     tm.cleanup();
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

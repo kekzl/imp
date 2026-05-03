@@ -21,53 +21,40 @@ __device__ __forceinline__ float fp8_e4m3_to_float(uint8_t bits) {
 // Pipelined Split-K: FP8 E4M3 variant
 // ---------------------------------------------------------------------------
 
-template<int HEAD_DIM>
+template <int HEAD_DIM>
 __global__ void paged_attention_splitk_fp8_pipeline_kernel(
-    const half* __restrict__ Q,
-    const uint8_t* __restrict__ K_cache,
-    const uint8_t* __restrict__ V_cache,
-    float* __restrict__ partial_out,
-    const int* __restrict__ block_tables,
-    const int* __restrict__ context_lens,
-    int batch_size,
-    int n_heads,
-    int n_kv_heads,
-    int block_size,
-    float scale,
-    float kv_scale,
-    int max_num_blocks,
-    int num_splits,
-    int sliding_window,
-    float softcap)
-{
+    const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
+    float* __restrict__ partial_out, const int* __restrict__ block_tables,
+    const int* __restrict__ context_lens, int batch_size, int n_heads, int n_kv_heads, int block_size,
+    float scale, float kv_scale, int max_num_blocks, int num_splits, int sliding_window, float softcap) {
     static_assert(HEAD_DIM % WARP_SIZE == 0, "HEAD_DIM must be divisible by WARP_SIZE");
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
     constexpr int FP8_VEC4 = ELEMS / 4;
-    constexpr int FP8_REM  = ELEMS % 4;
+    constexpr int FP8_REM = ELEMS % 4;
 
     const int batch_idx = blockIdx.x;
-    const int head_idx  = blockIdx.y;
+    const int head_idx = blockIdx.y;
     const int split_idx = blockIdx.z;
-    const int kv_head   = head_idx / (n_heads / n_kv_heads);
+    const int kv_head = head_idx / (n_heads / n_kv_heads);
 
     const int ctx_len = context_lens[batch_idx];
-    if (ctx_len <= 0) return;
+    if (ctx_len <= 0)
+        return;
 
     const int warp_id = threadIdx.x / WARP_SIZE;
     const int lane_id = threadIdx.x % WARP_SIZE;
     const int lane_offset = lane_id * ELEMS;
 
-    const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * HEAD_DIM
-                          + (int64_t)head_idx  * HEAD_DIM;
+    const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * HEAD_DIM + (int64_t)head_idx * HEAD_DIM;
 
     float q_reg[ELEMS];
     {
         const half2* Q_ptr2 = reinterpret_cast<const half2*>(Q_ptr + lane_offset);
-        #pragma unroll
+#pragma unroll
         for (int i = 0; i < ELEMS / 2; i++) {
             half2 h2 = Q_ptr2[i];
-            q_reg[2*i]   = __half2float(h2.x);
-            q_reg[2*i+1] = __half2float(h2.y);
+            q_reg[2 * i] = __half2float(h2.x);
+            q_reg[2 * i + 1] = __half2float(h2.y);
         }
     }
 
@@ -80,19 +67,19 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
 
     int blocks_per_split = (total_blocks + num_splits - 1) / num_splits;
     int split_start = first_block + split_idx * blocks_per_split;
-    int split_end   = split_start + blocks_per_split;
-    if (split_end > num_ctx_blocks) split_end = num_ctx_blocks;
+    int split_end = split_start + blocks_per_split;
+    if (split_end > num_ctx_blocks)
+        split_end = num_ctx_blocks;
 
     if (split_start >= split_end) {
-        write_empty_split_sentinel<HEAD_DIM>(
-            partial_out, batch_idx, n_heads, head_idx,
-            num_splits, split_idx, lane_offset);
+        write_empty_split_sentinel<HEAD_DIM>(partial_out, batch_idx, n_heads, head_idx, num_splits, split_idx,
+                                             lane_offset);
         return;
     }
 
     const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
     const int kv_block_stride = block_size * n_kv_heads * HEAD_DIM;
-    const int kv_slot_stride  = n_kv_heads * HEAD_DIM;
+    const int kv_slot_stride = n_kv_heads * HEAD_DIM;
     const float fused_scale = scale * kv_scale;
 
     // Per-warp smem: k_buf[2][ELEMS] + v_buf[ELEMS] bytes (FP8: 1 byte each)
@@ -102,13 +89,14 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
     uint8_t* my_smem = reinterpret_cast<uint8_t*>(smem_pipe_fp8) + warp_id * WARP_SMEM_BYTES;
     uint8_t* k_buf0 = my_smem;
     uint8_t* k_buf1 = my_smem + HEAD_DIM;
-    uint8_t* v_buf  = my_smem + 2 * HEAD_DIM;
+    uint8_t* v_buf = my_smem + 2 * HEAD_DIM;
 
     float m_w = -FLT_MAX;
     float l_w = 0.0f;
     float o_reg[ELEMS];
-    #pragma unroll
-    for (int i = 0; i < ELEMS; i++) o_reg[i] = 0.0f;
+#pragma unroll
+    for (int i = 0; i < ELEMS; i++)
+        o_reg[i] = 0.0f;
 
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
         int phys_block = bt[blk];
@@ -116,13 +104,16 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
         const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
 
         int tok_start = blk * block_size;
-        int tok_end   = tok_start + block_size;
-        if (tok_end > ctx_len) tok_end = ctx_len;
+        int tok_end = tok_start + block_size;
+        if (tok_end > ctx_len)
+            tok_end = ctx_len;
 
         int first_tok = 0;
-        if (tok_start < effective_start) first_tok = effective_start - tok_start;
+        if (tok_start < effective_start)
+            first_tok = effective_start - tok_start;
         int n_toks = (tok_end - tok_start) - first_tok;
-        if (n_toks <= 0) continue;
+        if (n_toks <= 0)
+            continue;
 
         // Prime: async load K[first_tok] into k_buf0
         // FP8: ELEMS bytes per thread (4 for HD=128, 8 for HD=256)
@@ -131,10 +122,9 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
             if constexpr (ELEMS >= 8) {
                 cp_async_ca_8(&k_buf0[lane_offset], &K_tok[lane_offset]);
             } else {
-                asm volatile(
-                    "cp.async.ca.shared.global [%0], [%1], 4;\n"
-                    :: "r"(static_cast<uint32_t>(__cvta_generic_to_shared(&k_buf0[lane_offset]))),
-                       "l"(&K_tok[lane_offset]));
+                asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(
+                                 static_cast<uint32_t>(__cvta_generic_to_shared(&k_buf0[lane_offset]))),
+                             "l"(&K_tok[lane_offset]));
             }
             cp_async_commit();
         }
@@ -153,14 +143,12 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
                 cp_async_ca_8(&v_buf[lane_offset], &V_tok[lane_offset]);
                 cp_async_ca_8(&k_bufs[1 - cur][lane_offset], &K_next[lane_offset]);
             } else {
-                asm volatile(
-                    "cp.async.ca.shared.global [%0], [%1], 4;\n"
-                    :: "r"(static_cast<uint32_t>(__cvta_generic_to_shared(&v_buf[lane_offset]))),
-                       "l"(&V_tok[lane_offset]));
-                asm volatile(
-                    "cp.async.ca.shared.global [%0], [%1], 4;\n"
-                    :: "r"(static_cast<uint32_t>(__cvta_generic_to_shared(&k_bufs[1 - cur][lane_offset]))),
-                       "l"(&K_next[lane_offset]));
+                asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(
+                                 static_cast<uint32_t>(__cvta_generic_to_shared(&v_buf[lane_offset]))),
+                             "l"(&V_tok[lane_offset]));
+                asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" ::"r"(static_cast<uint32_t>(
+                                 __cvta_generic_to_shared(&k_bufs[1 - cur][lane_offset]))),
+                             "l"(&K_next[lane_offset]));
             }
             cp_async_commit();
             cp_async_wait_group<1>();
@@ -171,18 +159,18 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
             {
                 if constexpr (FP8_VEC4 > 0) {
                     const uint32_t* K_v = reinterpret_cast<const uint32_t*>(k_cur + lane_offset);
-                    #pragma unroll
+#pragma unroll
                     for (int i = 0; i < FP8_VEC4; i++) {
                         uint32_t packed = K_v[i];
-                        dot += q_reg[i*4 + 0] * fp8_e4m3_to_float(packed & 0xFF);
-                        dot += q_reg[i*4 + 1] * fp8_e4m3_to_float((packed >> 8) & 0xFF);
-                        dot += q_reg[i*4 + 2] * fp8_e4m3_to_float((packed >> 16) & 0xFF);
-                        dot += q_reg[i*4 + 3] * fp8_e4m3_to_float((packed >> 24) & 0xFF);
+                        dot += q_reg[i * 4 + 0] * fp8_e4m3_to_float(packed & 0xFF);
+                        dot += q_reg[i * 4 + 1] * fp8_e4m3_to_float((packed >> 8) & 0xFF);
+                        dot += q_reg[i * 4 + 2] * fp8_e4m3_to_float((packed >> 16) & 0xFF);
+                        dot += q_reg[i * 4 + 3] * fp8_e4m3_to_float((packed >> 24) & 0xFF);
                     }
                 }
                 if constexpr (FP8_REM > 0) {
                     constexpr int done = FP8_VEC4 * 4;
-                    #pragma unroll
+#pragma unroll
                     for (int i = 0; i < FP8_REM; i++)
                         dot += q_reg[done + i] * fp8_e4m3_to_float(k_cur[lane_offset + done + i]);
                 }
@@ -200,21 +188,25 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
             {
                 if constexpr (FP8_VEC4 > 0) {
                     const uint32_t* V_v = reinterpret_cast<const uint32_t*>(v_buf + lane_offset);
-                    #pragma unroll
+#pragma unroll
                     for (int i = 0; i < FP8_VEC4; i++) {
                         uint32_t packed = V_v[i];
-                        o_reg[i*4 + 0] = rescale * o_reg[i*4 + 0] + w_new_scaled * fp8_e4m3_to_float(packed & 0xFF);
-                        o_reg[i*4 + 1] = rescale * o_reg[i*4 + 1] + w_new_scaled * fp8_e4m3_to_float((packed >> 8) & 0xFF);
-                        o_reg[i*4 + 2] = rescale * o_reg[i*4 + 2] + w_new_scaled * fp8_e4m3_to_float((packed >> 16) & 0xFF);
-                        o_reg[i*4 + 3] = rescale * o_reg[i*4 + 3] + w_new_scaled * fp8_e4m3_to_float((packed >> 24) & 0xFF);
+                        o_reg[i * 4 + 0] = rescale * o_reg[i * 4 + 0] +
+                                           w_new_scaled * fp8_e4m3_to_float(packed & 0xFF);
+                        o_reg[i * 4 + 1] = rescale * o_reg[i * 4 + 1] +
+                                           w_new_scaled * fp8_e4m3_to_float((packed >> 8) & 0xFF);
+                        o_reg[i * 4 + 2] = rescale * o_reg[i * 4 + 2] +
+                                           w_new_scaled * fp8_e4m3_to_float((packed >> 16) & 0xFF);
+                        o_reg[i * 4 + 3] = rescale * o_reg[i * 4 + 3] +
+                                           w_new_scaled * fp8_e4m3_to_float((packed >> 24) & 0xFF);
                     }
                 }
                 if constexpr (FP8_REM > 0) {
                     constexpr int done = FP8_VEC4 * 4;
-                    #pragma unroll
+#pragma unroll
                     for (int i = 0; i < FP8_REM; i++)
-                        o_reg[done + i] = rescale * o_reg[done + i]
-                            + w_new_scaled * fp8_e4m3_to_float(v_buf[lane_offset + done + i]);
+                        o_reg[done + i] = rescale * o_reg[done + i] +
+                                          w_new_scaled * fp8_e4m3_to_float(v_buf[lane_offset + done + i]);
                 }
             }
 
@@ -224,12 +216,9 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
 
     // ---- Cross-warp reduction ----
     __syncthreads();
-    crosswarp_reduce_splitk<HEAD_DIM>(
-        reinterpret_cast<float*>(smem_pipe_fp8),
-        m_w, l_w, o_reg,
-        warp_id, lane_id, lane_offset,
-        partial_out, batch_idx, n_heads, head_idx,
-        num_splits, split_idx);
+    crosswarp_reduce_splitk<HEAD_DIM>(reinterpret_cast<float*>(smem_pipe_fp8), m_w, l_w, o_reg, warp_id,
+                                      lane_id, lane_offset, partial_out, batch_idx, n_heads, head_idx,
+                                      num_splits, split_idx);
 }
 
 // ---------------------------------------------------------------------------
@@ -244,39 +233,28 @@ __global__ void paged_attention_splitk_fp8_pipeline_kernel(
 //      folded into w_new (V), eliminating 2*HEAD_DIM scalar muls per token
 // ---------------------------------------------------------------------------
 
-template<int HEAD_DIM>
+template <int HEAD_DIM>
 __global__ void paged_attention_splitk_fp8_kernel(
-    const half* __restrict__ Q,
-    const uint8_t* __restrict__ K_cache,
-    const uint8_t* __restrict__ V_cache,
-    float* __restrict__ partial_out,     // [batch, n_heads, num_splits, (2 + HEAD_DIM)]
-    const int* __restrict__ block_tables,
-    const int* __restrict__ context_lens,
-    int batch_size,
-    int n_heads,
-    int n_kv_heads,
-    int block_size,
-    float scale,
-    float kv_scale,
-    int max_num_blocks,
-    int num_splits,
-    int sliding_window,
-    float softcap)
-{
+    const half* __restrict__ Q, const uint8_t* __restrict__ K_cache, const uint8_t* __restrict__ V_cache,
+    float* __restrict__ partial_out,  // [batch, n_heads, num_splits, (2 + HEAD_DIM)]
+    const int* __restrict__ block_tables, const int* __restrict__ context_lens, int batch_size, int n_heads,
+    int n_kv_heads, int block_size, float scale, float kv_scale, int max_num_blocks, int num_splits,
+    int sliding_window, float softcap) {
     static_assert(HEAD_DIM % WARP_SIZE == 0, "HEAD_DIM must be divisible by WARP_SIZE");
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
 
     // FP8 vectorization: 4 bytes per uint32_t load
-    constexpr int FP8_VEC4 = ELEMS / 4;   // # of uint32_t loads per thread
-    constexpr int FP8_REM  = ELEMS % 4;   // remaining bytes
+    constexpr int FP8_VEC4 = ELEMS / 4;  // # of uint32_t loads per thread
+    constexpr int FP8_REM = ELEMS % 4;   // remaining bytes
 
     const int batch_idx = blockIdx.x;
-    const int head_idx  = blockIdx.y;
+    const int head_idx = blockIdx.y;
     const int split_idx = blockIdx.z;
-    const int kv_head   = head_idx / (n_heads / n_kv_heads);  // GQA
+    const int kv_head = head_idx / (n_heads / n_kv_heads);  // GQA
 
     const int ctx_len = context_lens[batch_idx];
-    if (ctx_len <= 0) return;
+    if (ctx_len <= 0)
+        return;
 
     const int warp_id = threadIdx.x / WARP_SIZE;
     const int lane_id = threadIdx.x % WARP_SIZE;
@@ -285,17 +263,16 @@ __global__ void paged_attention_splitk_fp8_kernel(
     const int lane_offset = lane_id * ELEMS;
 
     // ---- Load Q vector into registers using half2 vectorized loads ----
-    const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * HEAD_DIM
-                          + (int64_t)head_idx  * HEAD_DIM;
+    const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * HEAD_DIM + (int64_t)head_idx * HEAD_DIM;
 
     float q_reg[ELEMS];
     {
         const half2* Q_ptr2 = reinterpret_cast<const half2*>(Q_ptr + lane_offset);
-        #pragma unroll
+#pragma unroll
         for (int i = 0; i < ELEMS / 2; i++) {
             half2 h2 = Q_ptr2[i];
-            q_reg[2*i]   = __half2float(h2.x);
-            q_reg[2*i+1] = __half2float(h2.y);
+            q_reg[2 * i] = __half2float(h2.x);
+            q_reg[2 * i + 1] = __half2float(h2.y);
         }
     }
 
@@ -311,20 +288,20 @@ __global__ void paged_attention_splitk_fp8_kernel(
     // Divide blocks among splits
     int blocks_per_split = (total_blocks + num_splits - 1) / num_splits;
     int split_start = first_block + split_idx * blocks_per_split;
-    int split_end   = split_start + blocks_per_split;
-    if (split_end > num_ctx_blocks) split_end = num_ctx_blocks;
+    int split_end = split_start + blocks_per_split;
+    if (split_end > num_ctx_blocks)
+        split_end = num_ctx_blocks;
 
     // Early exit if this split has no work
     if (split_start >= split_end) {
-        write_empty_split_sentinel<HEAD_DIM>(
-            partial_out, batch_idx, n_heads, head_idx,
-            num_splits, split_idx, lane_offset);
+        write_empty_split_sentinel<HEAD_DIM>(partial_out, batch_idx, n_heads, head_idx, num_splits, split_idx,
+                                             lane_offset);
         return;
     }
 
     const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
     const int kv_block_stride = block_size * n_kv_heads * HEAD_DIM;
-    const int kv_slot_stride  = n_kv_heads * HEAD_DIM;
+    const int kv_slot_stride = n_kv_heads * HEAD_DIM;
 
     // Fused scale: apply kv_scale together with softmax scale after dot product
     const float fused_scale = scale * kv_scale;
@@ -333,8 +310,9 @@ __global__ void paged_attention_splitk_fp8_kernel(
     float m_w = -FLT_MAX;
     float l_w = 0.0f;
     float o_reg[ELEMS];
-    #pragma unroll
-    for (int i = 0; i < ELEMS; i++) o_reg[i] = 0.0f;
+#pragma unroll
+    for (int i = 0; i < ELEMS; i++)
+        o_reg[i] = 0.0f;
 
     // ---- Iterate over assigned KV blocks ----
     for (int blk = split_start + warp_id; blk < split_end; blk += NUM_WARPS) {
@@ -343,11 +321,13 @@ __global__ void paged_attention_splitk_fp8_kernel(
         const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
 
         int tok_start = blk * block_size;
-        int tok_end   = tok_start + block_size;
-        if (tok_end > ctx_len) tok_end = ctx_len;
+        int tok_end = tok_start + block_size;
+        if (tok_end > ctx_len)
+            tok_end = ctx_len;
 
         int first_tok = 0;
-        if (tok_start < effective_start) first_tok = effective_start - tok_start;
+        if (tok_start < effective_start)
+            first_tok = effective_start - tok_start;
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
             const uint8_t* K_tok = K_block + t * kv_slot_stride + kv_head * HEAD_DIM;
@@ -357,24 +337,24 @@ __global__ void paged_attention_splitk_fp8_kernel(
             {
                 if constexpr (FP8_VEC4 > 0) {
                     const uint32_t* K_v = reinterpret_cast<const uint32_t*>(K_tok + lane_offset);
-                    #pragma unroll
+#pragma unroll
                     for (int i = 0; i < FP8_VEC4; i++) {
                         uint32_t packed = __ldcs(&K_v[i]);
                         uint8_t b0 = packed & 0xFF;
                         uint8_t b1 = (packed >> 8) & 0xFF;
                         uint8_t b2 = (packed >> 16) & 0xFF;
                         uint8_t b3 = (packed >> 24) & 0xFF;
-                        dot += q_reg[i*4 + 0] * fp8_e4m3_to_float(b0);
-                        dot += q_reg[i*4 + 1] * fp8_e4m3_to_float(b1);
-                        dot += q_reg[i*4 + 2] * fp8_e4m3_to_float(b2);
-                        dot += q_reg[i*4 + 3] * fp8_e4m3_to_float(b3);
+                        dot += q_reg[i * 4 + 0] * fp8_e4m3_to_float(b0);
+                        dot += q_reg[i * 4 + 1] * fp8_e4m3_to_float(b1);
+                        dot += q_reg[i * 4 + 2] * fp8_e4m3_to_float(b2);
+                        dot += q_reg[i * 4 + 3] * fp8_e4m3_to_float(b3);
                     }
                 }
                 // Handle remainder for ELEMS not divisible by 4 (e.g. HD=64, ELEMS=2)
                 if constexpr (FP8_REM > 0) {
                     constexpr int done = FP8_VEC4 * 4;
                     const uint8_t* K_rem = K_tok + lane_offset + done;
-                    #pragma unroll
+#pragma unroll
                     for (int i = 0; i < FP8_REM; i++) {
                         dot += q_reg[done + i] * fp8_e4m3_to_float(K_rem[i]);
                     }
@@ -394,25 +374,26 @@ __global__ void paged_attention_splitk_fp8_kernel(
             {
                 if constexpr (FP8_VEC4 > 0) {
                     const uint32_t* V_v = reinterpret_cast<const uint32_t*>(V_tok + lane_offset);
-                    #pragma unroll
+#pragma unroll
                     for (int i = 0; i < FP8_VEC4; i++) {
                         uint32_t packed = __ldcs(&V_v[i]);
                         uint8_t b0 = packed & 0xFF;
                         uint8_t b1 = (packed >> 8) & 0xFF;
                         uint8_t b2 = (packed >> 16) & 0xFF;
                         uint8_t b3 = (packed >> 24) & 0xFF;
-                        o_reg[i*4 + 0] = rescale * o_reg[i*4 + 0] + w_new_scaled * fp8_e4m3_to_float(b0);
-                        o_reg[i*4 + 1] = rescale * o_reg[i*4 + 1] + w_new_scaled * fp8_e4m3_to_float(b1);
-                        o_reg[i*4 + 2] = rescale * o_reg[i*4 + 2] + w_new_scaled * fp8_e4m3_to_float(b2);
-                        o_reg[i*4 + 3] = rescale * o_reg[i*4 + 3] + w_new_scaled * fp8_e4m3_to_float(b3);
+                        o_reg[i * 4 + 0] = rescale * o_reg[i * 4 + 0] + w_new_scaled * fp8_e4m3_to_float(b0);
+                        o_reg[i * 4 + 1] = rescale * o_reg[i * 4 + 1] + w_new_scaled * fp8_e4m3_to_float(b1);
+                        o_reg[i * 4 + 2] = rescale * o_reg[i * 4 + 2] + w_new_scaled * fp8_e4m3_to_float(b2);
+                        o_reg[i * 4 + 3] = rescale * o_reg[i * 4 + 3] + w_new_scaled * fp8_e4m3_to_float(b3);
                     }
                 }
                 if constexpr (FP8_REM > 0) {
                     constexpr int done = FP8_VEC4 * 4;
                     const uint8_t* V_rem = V_tok + lane_offset + done;
-                    #pragma unroll
+#pragma unroll
                     for (int i = 0; i < FP8_REM; i++) {
-                        o_reg[done + i] = rescale * o_reg[done + i] + w_new_scaled * fp8_e4m3_to_float(V_rem[i]);
+                        o_reg[done + i] = rescale * o_reg[done + i] +
+                                          w_new_scaled * fp8_e4m3_to_float(V_rem[i]);
                     }
                 }
             }
@@ -421,75 +402,62 @@ __global__ void paged_attention_splitk_fp8_kernel(
 
     // ---- Cross-warp reduction within this block ----
     extern __shared__ char smem_sk_fp8[];
-    crosswarp_reduce_splitk<HEAD_DIM>(
-        reinterpret_cast<float*>(smem_sk_fp8),
-        m_w, l_w, o_reg,
-        warp_id, lane_id, lane_offset,
-        partial_out, batch_idx, n_heads, head_idx,
-        num_splits, split_idx);
+    crosswarp_reduce_splitk<HEAD_DIM>(reinterpret_cast<float*>(smem_sk_fp8), m_w, l_w, o_reg, warp_id,
+                                      lane_id, lane_offset, partial_out, batch_idx, n_heads, head_idx,
+                                      num_splits, split_idx);
 }
 
-
-template<int HEAD_DIM>
-__global__ void paged_attention_decode_fp8_kernel(
-    const half* __restrict__ Q,
-    const uint8_t* __restrict__ K_cache,   // FP8 E4M3 raw bytes
-    const uint8_t* __restrict__ V_cache,   // FP8 E4M3 raw bytes
-    half* __restrict__ O,
-    const int* __restrict__ block_tables,
-    const int* __restrict__ context_lens,
-    int batch_size,
-    int n_heads,
-    int n_kv_heads,
-    int block_size,
-    float scale,
-    float kv_scale,
-    int max_context_len,
-    int max_num_blocks,
-    int sliding_window,
-    float softcap)
-{
+template <int HEAD_DIM>
+__global__ void paged_attention_decode_fp8_kernel(const half* __restrict__ Q,
+                                                  const uint8_t* __restrict__ K_cache,  // FP8 E4M3 raw bytes
+                                                  const uint8_t* __restrict__ V_cache,  // FP8 E4M3 raw bytes
+                                                  half* __restrict__ O, const int* __restrict__ block_tables,
+                                                  const int* __restrict__ context_lens, int batch_size,
+                                                  int n_heads, int n_kv_heads, int block_size, float scale,
+                                                  float kv_scale, int max_context_len, int max_num_blocks,
+                                                  int sliding_window, float softcap) {
     static_assert(HEAD_DIM % WARP_SIZE == 0, "HEAD_DIM must be divisible by WARP_SIZE");
     constexpr int ELEMS = HEAD_DIM / WARP_SIZE;
     constexpr int FP8_VEC4 = ELEMS / 4;
-    constexpr int FP8_REM  = ELEMS % 4;
+    constexpr int FP8_REM = ELEMS % 4;
 
     const int batch_idx = blockIdx.x;
-    const int head_idx  = blockIdx.y;
-    const int kv_head   = head_idx / (n_heads / n_kv_heads);  // GQA
+    const int head_idx = blockIdx.y;
+    const int kv_head = head_idx / (n_heads / n_kv_heads);  // GQA
 
     const int ctx_len = context_lens[batch_idx];
-    if (ctx_len <= 0) return;
+    if (ctx_len <= 0)
+        return;
 
     const int warp_id = threadIdx.x / WARP_SIZE;
     const int lane_id = threadIdx.x % WARP_SIZE;
     const int lane_offset = lane_id * ELEMS;
 
     // ---- Load Q vector into registers using half2 vectorized loads ----
-    const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * HEAD_DIM
-                          + (int64_t)head_idx  * HEAD_DIM;
+    const half* Q_ptr = Q + (int64_t)batch_idx * n_heads * HEAD_DIM + (int64_t)head_idx * HEAD_DIM;
 
     float q_reg[ELEMS];
     {
         const half2* Q_ptr2 = reinterpret_cast<const half2*>(Q_ptr + lane_offset);
-        #pragma unroll
+#pragma unroll
         for (int i = 0; i < ELEMS / 2; i++) {
             half2 h2 = Q_ptr2[i];
-            q_reg[2*i]   = __half2float(h2.x);
-            q_reg[2*i+1] = __half2float(h2.y);
+            q_reg[2 * i] = __half2float(h2.x);
+            q_reg[2 * i + 1] = __half2float(h2.y);
         }
     }
 
     const int* bt = block_tables + (int64_t)batch_idx * max_num_blocks;
     const int kv_block_stride = block_size * n_kv_heads * HEAD_DIM;
-    const int kv_slot_stride  = n_kv_heads * HEAD_DIM;
+    const int kv_slot_stride = n_kv_heads * HEAD_DIM;
     const float fused_scale = scale * kv_scale;
 
     float m_w = -FLT_MAX;
     float l_w = 0.0f;
     float o_reg[ELEMS];
-    #pragma unroll
-    for (int i = 0; i < ELEMS; i++) o_reg[i] = 0.0f;
+#pragma unroll
+    for (int i = 0; i < ELEMS; i++)
+        o_reg[i] = 0.0f;
 
     int effective_start = 0;
     if (sliding_window > 0 && ctx_len > sliding_window)
@@ -503,11 +471,13 @@ __global__ void paged_attention_decode_fp8_kernel(
         const uint8_t* V_block = V_cache + (int64_t)phys_block * kv_block_stride;
 
         int tok_start = blk * block_size;
-        int tok_end   = tok_start + block_size;
-        if (tok_end > ctx_len) tok_end = ctx_len;
+        int tok_end = tok_start + block_size;
+        if (tok_end > ctx_len)
+            tok_end = ctx_len;
 
         int first_tok = 0;
-        if (tok_start < effective_start) first_tok = effective_start - tok_start;
+        if (tok_start < effective_start)
+            first_tok = effective_start - tok_start;
 
         for (int t = first_tok; t < (tok_end - tok_start); t++) {
             const uint8_t* K_tok = K_block + t * kv_slot_stride + kv_head * HEAD_DIM;
@@ -517,19 +487,19 @@ __global__ void paged_attention_decode_fp8_kernel(
             {
                 if constexpr (FP8_VEC4 > 0) {
                     const uint32_t* K_v = reinterpret_cast<const uint32_t*>(K_tok + lane_offset);
-                    #pragma unroll
+#pragma unroll
                     for (int i = 0; i < FP8_VEC4; i++) {
                         uint32_t packed = __ldcs(&K_v[i]);
-                        dot += q_reg[i*4 + 0] * fp8_e4m3_to_float(packed & 0xFF);
-                        dot += q_reg[i*4 + 1] * fp8_e4m3_to_float((packed >> 8) & 0xFF);
-                        dot += q_reg[i*4 + 2] * fp8_e4m3_to_float((packed >> 16) & 0xFF);
-                        dot += q_reg[i*4 + 3] * fp8_e4m3_to_float((packed >> 24) & 0xFF);
+                        dot += q_reg[i * 4 + 0] * fp8_e4m3_to_float(packed & 0xFF);
+                        dot += q_reg[i * 4 + 1] * fp8_e4m3_to_float((packed >> 8) & 0xFF);
+                        dot += q_reg[i * 4 + 2] * fp8_e4m3_to_float((packed >> 16) & 0xFF);
+                        dot += q_reg[i * 4 + 3] * fp8_e4m3_to_float((packed >> 24) & 0xFF);
                     }
                 }
                 if constexpr (FP8_REM > 0) {
                     constexpr int done = FP8_VEC4 * 4;
                     const uint8_t* K_rem = K_tok + lane_offset + done;
-                    #pragma unroll
+#pragma unroll
                     for (int i = 0; i < FP8_REM; i++)
                         dot += q_reg[done + i] * fp8_e4m3_to_float(K_rem[i]);
                 }
@@ -546,21 +516,26 @@ __global__ void paged_attention_decode_fp8_kernel(
             {
                 if constexpr (FP8_VEC4 > 0) {
                     const uint32_t* V_v = reinterpret_cast<const uint32_t*>(V_tok + lane_offset);
-                    #pragma unroll
+#pragma unroll
                     for (int i = 0; i < FP8_VEC4; i++) {
                         uint32_t packed = __ldcs(&V_v[i]);
-                        o_reg[i*4 + 0] = rescale * o_reg[i*4 + 0] + w_new_scaled * fp8_e4m3_to_float(packed & 0xFF);
-                        o_reg[i*4 + 1] = rescale * o_reg[i*4 + 1] + w_new_scaled * fp8_e4m3_to_float((packed >> 8) & 0xFF);
-                        o_reg[i*4 + 2] = rescale * o_reg[i*4 + 2] + w_new_scaled * fp8_e4m3_to_float((packed >> 16) & 0xFF);
-                        o_reg[i*4 + 3] = rescale * o_reg[i*4 + 3] + w_new_scaled * fp8_e4m3_to_float((packed >> 24) & 0xFF);
+                        o_reg[i * 4 + 0] = rescale * o_reg[i * 4 + 0] +
+                                           w_new_scaled * fp8_e4m3_to_float(packed & 0xFF);
+                        o_reg[i * 4 + 1] = rescale * o_reg[i * 4 + 1] +
+                                           w_new_scaled * fp8_e4m3_to_float((packed >> 8) & 0xFF);
+                        o_reg[i * 4 + 2] = rescale * o_reg[i * 4 + 2] +
+                                           w_new_scaled * fp8_e4m3_to_float((packed >> 16) & 0xFF);
+                        o_reg[i * 4 + 3] = rescale * o_reg[i * 4 + 3] +
+                                           w_new_scaled * fp8_e4m3_to_float((packed >> 24) & 0xFF);
                     }
                 }
                 if constexpr (FP8_REM > 0) {
                     constexpr int done = FP8_VEC4 * 4;
                     const uint8_t* V_rem = V_tok + lane_offset + done;
-                    #pragma unroll
+#pragma unroll
                     for (int i = 0; i < FP8_REM; i++)
-                        o_reg[done + i] = rescale * o_reg[done + i] + w_new_scaled * fp8_e4m3_to_float(V_rem[i]);
+                        o_reg[done + i] = rescale * o_reg[done + i] +
+                                          w_new_scaled * fp8_e4m3_to_float(V_rem[i]);
                 }
             }
         }
@@ -569,44 +544,36 @@ __global__ void paged_attention_decode_fp8_kernel(
     // ---- Cross-warp reduction ----
     extern __shared__ char smem_fp8[];
     __syncthreads();
-    crosswarp_reduce_and_write<HEAD_DIM>(
-        reinterpret_cast<float*>(smem_fp8),
-        m_w, l_w, o_reg,
-        warp_id, lane_id, lane_offset,
-        O, batch_idx, n_heads, head_idx);
+    crosswarp_reduce_and_write<HEAD_DIM>(reinterpret_cast<float*>(smem_fp8), m_w, l_w, o_reg, warp_id,
+                                         lane_id, lane_offset, O, batch_idx, n_heads, head_idx);
 }
-
 
 // ---------------------------------------------------------------------------
 // Host launcher -- FP8 E4M3 variant (with Split-K support)
 // ---------------------------------------------------------------------------
-void paged_attention_decode_fp8(
-    const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache,
-    Tensor& O, const int* block_tables, const int* context_lens,
-    int block_size, float scale, float kv_scale,
-    int max_context_len, int sliding_window,
-    float softcap, cudaStream_t stream,
-    int max_blocks_per_seq, int n_sinks)
-{
+void paged_attention_decode_fp8(const Tensor& Q, const Tensor& K_cache, const Tensor& V_cache, Tensor& O,
+                                const int* block_tables, const int* context_lens, int block_size, float scale,
+                                float kv_scale, int max_context_len, int sliding_window, float softcap,
+                                cudaStream_t stream, int max_blocks_per_seq, int n_sinks) {
     // StreamingLLM (n_sinks > 0) is not yet wired into FP8 kernels; this launcher
     // silently falls back to classical sliding-window. See attention_paged.cu
     // (GQA FP16 path) for the reference streaming implementation.
     (void)n_sinks;
     const int batch_size = static_cast<int>(Q.shape[0]);
-    const int n_heads    = static_cast<int>(Q.shape[2]);
-    const int head_dim   = static_cast<int>(Q.shape[3]);
+    const int n_heads = static_cast<int>(Q.shape[2]);
+    const int head_dim = static_cast<int>(Q.shape[3]);
     const int n_kv_heads = static_cast<int>(K_cache.shape[2]);
 
-    const int max_num_blocks = (max_blocks_per_seq > 0) ? max_blocks_per_seq : (max_context_len + block_size - 1) / block_size;
+    const int max_num_blocks = (max_blocks_per_seq > 0) ? max_blocks_per_seq
+                                                        : (max_context_len + block_size - 1) / block_size;
 
-    size_t smem_bytes = NUM_WARPS * sizeof(float)
-                      + NUM_WARPS * sizeof(float)
-                      + NUM_WARPS * head_dim * sizeof(float);
+    size_t smem_bytes = NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(float) +
+                        NUM_WARPS * head_dim * sizeof(float);
 
     // ---- Split-K decision ----
     void* scratch_ptr = nullptr;
-    int num_splits = compute_splitk_splits(
-        batch_size, n_heads, head_dim, max_context_len, block_size, &scratch_ptr);
+    int num_splits = compute_splitk_splits(batch_size, n_heads, head_dim, max_context_len, block_size,
+                                           &scratch_ptr);
 
     if (num_splits > 1) {
         // Split-K Phase 1: FP8 kernel
@@ -621,86 +588,108 @@ void paged_attention_decode_fp8(
             size_t pipe_smem = NUM_WARPS * 3 * head_dim;
             size_t launch_smem = (pipe_smem > smem_bytes) ? pipe_smem : smem_bytes;
 
-            #define LAUNCH_SPLITK_FP8_PIPE(HD) \
-                paged_attention_splitk_fp8_pipeline_kernel<HD><<<grid1, block1, launch_smem, stream>>>( \
-                    reinterpret_cast<const half*>(Q.data), \
-                    reinterpret_cast<const uint8_t*>(K_cache.data), \
-                    reinterpret_cast<const uint8_t*>(V_cache.data), \
-                    partial, \
-                    block_tables, context_lens, \
-                    batch_size, n_heads, n_kv_heads, \
-                    block_size, scale, kv_scale, \
-                    max_num_blocks, num_splits, \
-                    sliding_window, softcap)
+#define LAUNCH_SPLITK_FP8_PIPE(HD)                                                                        \
+    paged_attention_splitk_fp8_pipeline_kernel<HD>                                                        \
+        <<<grid1, block1, launch_smem, stream>>>(reinterpret_cast<const half*>(Q.data),                   \
+                                                 reinterpret_cast<const uint8_t*>(K_cache.data),          \
+                                                 reinterpret_cast<const uint8_t*>(V_cache.data), partial, \
+                                                 block_tables, context_lens, batch_size, n_heads,         \
+                                                 n_kv_heads, block_size, scale, kv_scale, max_num_blocks, \
+                                                 num_splits, sliding_window, softcap)
 
             switch (head_dim) {
-                case 64:  LAUNCH_SPLITK_FP8_PIPE(64);  break;
-                case 96:  LAUNCH_SPLITK_FP8_PIPE(96);  break;
-                case 128: LAUNCH_SPLITK_FP8_PIPE(128); break;
-                case 256: LAUNCH_SPLITK_FP8_PIPE(256); break;
-                case 512: LAUNCH_SPLITK_FP8_PIPE(512); break;  // Gemma 4 global
+                case 64:
+                    LAUNCH_SPLITK_FP8_PIPE(64);
+                    break;
+                case 96:
+                    LAUNCH_SPLITK_FP8_PIPE(96);
+                    break;
+                case 128:
+                    LAUNCH_SPLITK_FP8_PIPE(128);
+                    break;
+                case 256:
+                    LAUNCH_SPLITK_FP8_PIPE(256);
+                    break;
+                case 512:
+                    LAUNCH_SPLITK_FP8_PIPE(512);
+                    break;  // Gemma 4 global
                 default:
                     IMP_LOG_ERROR("paged_attention_splitk_fp8_pipeline: unsupported head_dim %d", head_dim);
                     return;
             }
-            #undef LAUNCH_SPLITK_FP8_PIPE
+#undef LAUNCH_SPLITK_FP8_PIPE
         } else {
-            #define LAUNCH_SPLITK_FP8(HD) \
-                paged_attention_splitk_fp8_kernel<HD><<<grid1, block1, smem_bytes, stream>>>( \
-                    reinterpret_cast<const half*>(Q.data), \
-                    reinterpret_cast<const uint8_t*>(K_cache.data), \
-                    reinterpret_cast<const uint8_t*>(V_cache.data), \
-                    partial, \
-                    block_tables, context_lens, \
-                    batch_size, n_heads, n_kv_heads, \
-                    block_size, scale, kv_scale, \
-                    max_num_blocks, num_splits, \
-                    sliding_window, softcap)
+#define LAUNCH_SPLITK_FP8(HD)                                                                                \
+    paged_attention_splitk_fp8_kernel<HD>                                                                    \
+        <<<grid1, block1, smem_bytes, stream>>>(reinterpret_cast<const half*>(Q.data),                       \
+                                                reinterpret_cast<const uint8_t*>(K_cache.data),              \
+                                                reinterpret_cast<const uint8_t*>(V_cache.data), partial,     \
+                                                block_tables, context_lens, batch_size, n_heads, n_kv_heads, \
+                                                block_size, scale, kv_scale, max_num_blocks, num_splits,     \
+                                                sliding_window, softcap)
 
             switch (head_dim) {
-                case 64:  LAUNCH_SPLITK_FP8(64);  break;
-                case 96:  LAUNCH_SPLITK_FP8(96);  break;
-                case 128: LAUNCH_SPLITK_FP8(128); break;
-                case 256: LAUNCH_SPLITK_FP8(256); break;
-                case 512: LAUNCH_SPLITK_FP8(512); break;  // Gemma 4 global
+                case 64:
+                    LAUNCH_SPLITK_FP8(64);
+                    break;
+                case 96:
+                    LAUNCH_SPLITK_FP8(96);
+                    break;
+                case 128:
+                    LAUNCH_SPLITK_FP8(128);
+                    break;
+                case 256:
+                    LAUNCH_SPLITK_FP8(256);
+                    break;
+                case 512:
+                    LAUNCH_SPLITK_FP8(512);
+                    break;  // Gemma 4 global
                 default:
                     IMP_LOG_ERROR("paged_attention_splitk_fp8: unsupported head_dim %d", head_dim);
                     return;
             }
-            #undef LAUNCH_SPLITK_FP8
+#undef LAUNCH_SPLITK_FP8
         }
 
         // Split-K Phase 2: reuse shared reduce launcher
-        paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data),
-                                      batch_size, n_heads, head_dim, num_splits, stream);
+        paged_attention_launch_reduce(partial, reinterpret_cast<half*>(O.data), batch_size, n_heads, head_dim,
+                                      num_splits, stream);
     } else {
         // Fallback: non-Split-K FP8 kernel (templated + vectorized)
         dim3 grid(batch_size, n_heads);
         dim3 block(BLOCK_THREADS);
 
-        #define LAUNCH_FP8_FALLBACK(HD) \
-            paged_attention_decode_fp8_kernel<HD><<<grid, block, smem_bytes, stream>>>( \
-                reinterpret_cast<const half*>(Q.data), \
-                reinterpret_cast<const uint8_t*>(K_cache.data), \
-                reinterpret_cast<const uint8_t*>(V_cache.data), \
-                reinterpret_cast<half*>(O.data), \
-                block_tables, context_lens, \
-                batch_size, n_heads, n_kv_heads, \
-                block_size, scale, kv_scale, max_context_len, max_num_blocks, \
-                sliding_window, softcap)
+#define LAUNCH_FP8_FALLBACK(HD)                                                                             \
+    paged_attention_decode_fp8_kernel<HD>                                                                   \
+        <<<grid, block, smem_bytes, stream>>>(reinterpret_cast<const half*>(Q.data),                        \
+                                              reinterpret_cast<const uint8_t*>(K_cache.data),               \
+                                              reinterpret_cast<const uint8_t*>(V_cache.data),               \
+                                              reinterpret_cast<half*>(O.data), block_tables, context_lens,  \
+                                              batch_size, n_heads, n_kv_heads, block_size, scale, kv_scale, \
+                                              max_context_len, max_num_blocks, sliding_window, softcap)
 
         switch (head_dim) {
-            case 64:  LAUNCH_FP8_FALLBACK(64);  break;
-            case 96:  LAUNCH_FP8_FALLBACK(96);  break;
-            case 128: LAUNCH_FP8_FALLBACK(128); break;
-            case 256: LAUNCH_FP8_FALLBACK(256); break;
-            case 512: LAUNCH_FP8_FALLBACK(512); break;  // Gemma 4 global attention
+            case 64:
+                LAUNCH_FP8_FALLBACK(64);
+                break;
+            case 96:
+                LAUNCH_FP8_FALLBACK(96);
+                break;
+            case 128:
+                LAUNCH_FP8_FALLBACK(128);
+                break;
+            case 256:
+                LAUNCH_FP8_FALLBACK(256);
+                break;
+            case 512:
+                LAUNCH_FP8_FALLBACK(512);
+                break;  // Gemma 4 global attention
             default:
                 IMP_LOG_ERROR("paged_attention_decode_fp8: unsupported head_dim %d", head_dim);
                 return;
         }
-        #undef LAUNCH_FP8_FALLBACK
+#undef LAUNCH_FP8_FALLBACK
     }
 }
 
-} // namespace imp
+}  // namespace imp

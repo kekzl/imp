@@ -24,4 +24,4 @@ bool probe_mxf4nvf4_blockscale(cudaStream_t stream);
 // layout assumption is wrong and Project B needs re-investigation.
 bool probe_mxf4nvf4_allzero_a(cudaStream_t stream, float out_d[4]);
 
-} // namespace imp
+}  // namespace imp

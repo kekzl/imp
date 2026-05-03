@@ -14,12 +14,13 @@
 #include <unordered_map>
 #include <mutex>
 
-#define CUBLASLT_CHECK(call) do { \
-    cublasStatus_t _st = (call); \
-    if (_st != CUBLAS_STATUS_SUCCESS) { \
-        fprintf(stderr, "imp::gemm: %s failed (status %d)\n", #call, (int)_st); \
-    } \
-} while(0)
+#define CUBLASLT_CHECK(call)                                                        \
+    do {                                                                            \
+        cublasStatus_t _st = (call);                                                \
+        if (_st != CUBLAS_STATUS_SUCCESS) {                                         \
+            fprintf(stderr, "imp::gemm: %s failed (status %d)\n", #call, (int)_st); \
+        }                                                                           \
+    } while (0)
 
 namespace imp {
 
@@ -39,9 +40,7 @@ static constexpr int kGemvThreads = 256;
 static constexpr int kGemvWarps = kGemvThreads / 32;
 
 // Compute the number of blocks needed to cover M rows at kGemvWarps rows/block.
-static inline int gemv_blocks(int M) {
-    return (M + kGemvWarps - 1) / kGemvWarps;
-}
+static inline int gemv_blocks(int M) { return (M + kGemvWarps - 1) / kGemvWarps; }
 
 static constexpr auto kGemmAlgo = CUBLAS_GEMM_AUTOTUNE;
 
@@ -99,10 +98,10 @@ void gemm_init() {
     // Pre-allocate cuBLASLt workspace while GPU memory is still available.
     if (!s_workspace) {
         constexpr size_t kTrySizes[] = {
-            64ULL << 20,   // 64 MiB — RTX 5090 (32 GB) has headroom
-            32ULL << 20,   // 32 MiB
-             8ULL << 20,   //  8 MiB
-             2ULL << 20,   //  2 MiB
+            64ULL << 20,  // 64 MiB — RTX 5090 (32 GB) has headroom
+            32ULL << 20,  // 32 MiB
+            8ULL << 20,   //  8 MiB
+            2ULL << 20,   //  2 MiB
         };
         for (size_t sz : kTrySizes) {
             cudaError_t err = cudaMalloc(&s_workspace, sz);
@@ -132,13 +131,20 @@ void gemm_init() {
 // ---------------------------------------------------------------------------
 static cudaDataType_t dtype_to_cuda(QType dt) {
     switch (dt) {
-        case QType::F32:     return CUDA_R_32F;
-        case QType::F16:     return CUDA_R_16F;
-        case QType::BF16:     return CUDA_R_16BF;
-        case QType::FP8_E4M3: return CUDA_R_8F_E4M3;
-        case QType::FP8_E5M2: return CUDA_R_8F_E5M2;
-        case QType::INT8:     return CUDA_R_8I;
-        case QType::INT32:    return CUDA_R_32I;
+        case QType::F32:
+            return CUDA_R_32F;
+        case QType::F16:
+            return CUDA_R_16F;
+        case QType::BF16:
+            return CUDA_R_16BF;
+        case QType::FP8_E4M3:
+            return CUDA_R_8F_E4M3;
+        case QType::FP8_E5M2:
+            return CUDA_R_8F_E5M2;
+        case QType::INT8:
+            return CUDA_R_8I;
+        case QType::INT32:
+            return CUDA_R_32I;
         default:
             fprintf(stderr, "imp::gemm: unsupported dtype %d\n", (int)dt);
             return CUDA_R_16F;  // fallback (caller guard should prevent reaching here)
@@ -150,13 +156,20 @@ static cudaDataType_t dtype_to_cuda(QType dt) {
 // ---------------------------------------------------------------------------
 static cublasComputeType_t dtype_to_compute(QType dt) {
     switch (dt) {
-        case QType::F32:     return CUBLAS_COMPUTE_32F;
-        case QType::F16:     return CUBLAS_COMPUTE_32F;   // accumulate in FP32 for accuracy
-        case QType::BF16:     return CUBLAS_COMPUTE_32F;
-        case QType::FP8_E4M3: return CUBLAS_COMPUTE_32F;
-        case QType::FP8_E5M2: return CUBLAS_COMPUTE_32F;
-        case QType::INT8:     return CUBLAS_COMPUTE_32I;
-        default:              return CUBLAS_COMPUTE_32F;
+        case QType::F32:
+            return CUBLAS_COMPUTE_32F;
+        case QType::F16:
+            return CUBLAS_COMPUTE_32F;  // accumulate in FP32 for accuracy
+        case QType::BF16:
+            return CUBLAS_COMPUTE_32F;
+        case QType::FP8_E4M3:
+            return CUBLAS_COMPUTE_32F;
+        case QType::FP8_E5M2:
+            return CUBLAS_COMPUTE_32F;
+        case QType::INT8:
+            return CUBLAS_COMPUTE_32I;
+        default:
+            return CUBLAS_COMPUTE_32F;
     }
 }
 
@@ -165,11 +178,16 @@ static cublasComputeType_t dtype_to_compute(QType dt) {
 // cuBLASLt algorithm selection is stable across nearby M values.
 // ---------------------------------------------------------------------------
 static int64_t bucket_m(int64_t m) {
-    if (m <= 1) return m;   // decode: exact
-    if (m <= 64) return 64;
-    if (m <= 128) return 128;
-    if (m <= 256) return 256;
-    if (m <= 512) return 512;
+    if (m <= 1)
+        return m;  // decode: exact
+    if (m <= 64)
+        return 64;
+    if (m <= 128)
+        return 128;
+    if (m <= 256)
+        return 256;
+    if (m <= 512)
+        return 512;
     // For larger M, round up to next multiple of 128
     return ((m + 127) / 128) * 128;
 }
@@ -184,16 +202,18 @@ struct GemmCacheKey {
     bool has_scales;  // FP8 scale pointers present (affects opDesc attributes)
 
     bool operator==(const GemmCacheKey& o) const {
-        return dtA == o.dtA && dtB == o.dtB && dtC == o.dtC &&
-               compute == o.compute && M == o.M && K == o.K && N == o.N &&
-               has_scales == o.has_scales;
+        return dtA == o.dtA && dtB == o.dtB && dtC == o.dtC && compute == o.compute && M == o.M && K == o.K &&
+               N == o.N && has_scales == o.has_scales;
     }
 };
 
 struct GemmCacheKeyHash {
     size_t operator()(const GemmCacheKey& k) const {
         size_t h = 14695981039346656037ULL;
-        auto mix = [&](uint64_t v) { h ^= v; h *= 1099511628211ULL; };
+        auto mix = [&](uint64_t v) {
+            h ^= v;
+            h *= 1099511628211ULL;
+        };
         mix(static_cast<uint64_t>(k.dtA));
         mix(static_cast<uint64_t>(k.dtB));
         mix(static_cast<uint64_t>(k.dtC));
@@ -224,18 +244,15 @@ static std::mutex s_gemm_cache_mutex;
 
 // Create matmul descriptor + 3 matrix layouts for C^T = B @ A^T (row-major convention).
 // B [K,N] col-major with TRANSA=T, A [K,M] col-major with TRANSB=N, C [N,M] col-major.
-static void create_gemm_descriptors(GemmCacheEntry& entry,
-    cublasComputeType_t compute_type, cudaDataType_t scale_type,
-    cudaDataType_t dtype_A, cudaDataType_t dtype_B, cudaDataType_t dtype_C,
-    int K, int M, int N) {
+static void create_gemm_descriptors(GemmCacheEntry& entry, cublasComputeType_t compute_type,
+                                    cudaDataType_t scale_type, cudaDataType_t dtype_A, cudaDataType_t dtype_B,
+                                    cudaDataType_t dtype_C, int K, int M, int N) {
     cublasLtMatmulDescCreate(&entry.opDesc, compute_type, scale_type);
 
     cublasOperation_t transA = CUBLAS_OP_T;
     cublasOperation_t transB = CUBLAS_OP_N;
-    cublasLtMatmulDescSetAttribute(entry.opDesc, CUBLASLT_MATMUL_DESC_TRANSA,
-                                    &transA, sizeof(transA));
-    cublasLtMatmulDescSetAttribute(entry.opDesc, CUBLASLT_MATMUL_DESC_TRANSB,
-                                    &transB, sizeof(transB));
+    cublasLtMatmulDescSetAttribute(entry.opDesc, CUBLASLT_MATMUL_DESC_TRANSA, &transA, sizeof(transA));
+    cublasLtMatmulDescSetAttribute(entry.opDesc, CUBLASLT_MATMUL_DESC_TRANSB, &transB, sizeof(transB));
 
     CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&entry.Bdesc, dtype_B, K, N, K));
     CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&entry.Adesc, dtype_A, K, M, K));
@@ -244,9 +261,8 @@ static void create_gemm_descriptors(GemmCacheEntry& entry,
 
 // Rebuild A and C layout descriptors when actual M differs from cached M.
 // Cheap CPU-only operation (no GPU sync).
-static void rebuild_layouts_for_m(GemmCacheEntry& entry,
-    cudaDataType_t dtype_A, cudaDataType_t dtype_C,
-    int K, int M, int N) {
+static void rebuild_layouts_for_m(GemmCacheEntry& entry, cudaDataType_t dtype_A, cudaDataType_t dtype_C,
+                                  int K, int M, int N) {
     cublasLtMatrixLayoutDestroy(entry.Adesc);
     cublasLtMatrixLayoutDestroy(entry.Cdesc);
     CUBLASLT_CHECK(cublasLtMatrixLayoutCreate(&entry.Adesc, dtype_A, K, M, K));
@@ -262,21 +278,18 @@ static void reselect_algo_for_entry(GemmCacheEntry& entry) {
     cublasLtHandle_t lt = get_cublaslt_handle();
     cublasLtMatmulPreference_t pref = nullptr;
     cublasLtMatmulPreferenceCreate(&pref);
-    cublasLtMatmulPreferenceSetAttribute(pref,
-        CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-        &s_workspace_size, sizeof(s_workspace_size));
+    cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &s_workspace_size,
+                                         sizeof(s_workspace_size));
 
     cublasLtMatmulHeuristicResult_t results[1];
     int nresults = 0;
-    cublasLtMatmulAlgoGetHeuristic(lt, entry.opDesc, entry.Bdesc,
-        entry.Adesc, entry.Cdesc, entry.Cdesc,
-        pref, 1, results, &nresults);
+    cublasLtMatmulAlgoGetHeuristic(lt, entry.opDesc, entry.Bdesc, entry.Adesc, entry.Cdesc, entry.Cdesc, pref,
+                                   1, results, &nresults);
     cublasLtMatmulPreferenceDestroy(pref);
 
     if (nresults > 0) {
         entry.algo = results[0].algo;
-        entry.workspace_size = (results[0].workspaceSize <= s_workspace_size)
-                                   ? results[0].workspaceSize : 0;
+        entry.workspace_size = (results[0].workspaceSize <= s_workspace_size) ? results[0].workspaceSize : 0;
         entry.has_algo = true;
     } else {
         entry.has_algo = false;
@@ -285,15 +298,13 @@ static void reselect_algo_for_entry(GemmCacheEntry& entry) {
 }
 
 // Set per-call FP8 scale pointers on a matmul descriptor.
-static inline void set_gemm_scale_pointers(cublasLtMatmulDesc_t opDesc,
-    const float* aScale, const float* bScale) {
+static inline void set_gemm_scale_pointers(cublasLtMatmulDesc_t opDesc, const float* aScale,
+                                           const float* bScale) {
     if (aScale) {
-        cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER,
-                                        &aScale, sizeof(aScale));
+        cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &aScale, sizeof(aScale));
     }
     if (bScale) {
-        cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
-                                        &bScale, sizeof(bScale));
+        cublasLtMatmulDescSetAttribute(opDesc, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &bScale, sizeof(bScale));
     }
 }
 
@@ -305,31 +316,31 @@ static inline void set_gemm_scale_pointers(cublasLtMatmulDesc_t opDesc,
 static constexpr int kMaxAlgoCandidates = 8;
 static constexpr int kBenchmarkIters = 5;
 
-static void benchmark_and_select_algo(
-        cublasLtHandle_t lt, GemmCacheEntry& entry,
-        const void* A_data, const void* B_data, size_t C_bytes,
-        float alpha, float beta, bool is_int_compute, cudaStream_t stream) {
+static void benchmark_and_select_algo(cublasLtHandle_t lt, GemmCacheEntry& entry, const void* A_data,
+                                      const void* B_data, size_t C_bytes, float alpha, float beta,
+                                      bool is_int_compute, cudaStream_t stream) {
     cublasLtMatmulPreference_t pref = nullptr;
     CUBLASLT_CHECK(cublasLtMatmulPreferenceCreate(&pref));
-    CUBLASLT_CHECK(cublasLtMatmulPreferenceSetAttribute(pref,
-        CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
-        &s_workspace_size, sizeof(s_workspace_size)));
+    CUBLASLT_CHECK(cublasLtMatmulPreferenceSetAttribute(pref, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+                                                        &s_workspace_size, sizeof(s_workspace_size)));
 
     cublasLtMatmulHeuristicResult_t results[kMaxAlgoCandidates];
     int nresults = 0;
-    cublasLtMatmulAlgoGetHeuristic(lt, entry.opDesc, entry.Bdesc,
-        entry.Adesc, entry.Cdesc, entry.Cdesc,
-        pref, kMaxAlgoCandidates, results, &nresults);
+    cublasLtMatmulAlgoGetHeuristic(lt, entry.opDesc, entry.Bdesc, entry.Adesc, entry.Cdesc, entry.Cdesc, pref,
+                                   kMaxAlgoCandidates, results, &nresults);
     cublasLtMatmulPreferenceDestroy(pref);
 
-    if (nresults <= 0) { entry.has_algo = false; entry.workspace_size = 0; return; }
+    if (nresults <= 0) {
+        entry.has_algo = false;
+        entry.workspace_size = 0;
+        return;
+    }
     // [runtime] deterministic_gemm = true skips timing-based selection so
     // repeat runs produce bitwise-identical prefill outputs.
     const bool s_deterministic_gemm = RuntimeConfig::current().runtime.deterministic_gemm;
     if (s_deterministic_gemm || nresults == 1) {
         entry.algo = results[0].algo;
-        entry.workspace_size = (results[0].workspaceSize <= s_workspace_size)
-                                   ? results[0].workspaceSize : 0;
+        entry.workspace_size = (results[0].workspaceSize <= s_workspace_size) ? results[0].workspaceSize : 0;
         entry.has_algo = true;
         return;
     }
@@ -337,8 +348,7 @@ static void benchmark_and_select_algo(
     // Use pre-allocated scratch buffer to avoid fragmenting GPU memory
     if (!s_bench_scratch || C_bytes > s_bench_scratch_size) {
         entry.algo = results[0].algo;
-        entry.workspace_size = (results[0].workspaceSize <= s_workspace_size)
-                                   ? results[0].workspaceSize : 0;
+        entry.workspace_size = (results[0].workspaceSize <= s_workspace_size) ? results[0].workspaceSize : 0;
         entry.has_algo = true;
         return;
     }
@@ -351,25 +361,27 @@ static void benchmark_and_select_algo(
     int best_idx = 0;
 
     for (int i = 0; i < nresults; i++) {
-        if (results[i].workspaceSize > s_workspace_size) continue;
+        if (results[i].workspaceSize > s_workspace_size)
+            continue;
         float zero = 0.0f;
         // Warmup
-        cublasLtMatmul(lt, entry.opDesc, &alpha, B_data, entry.Bdesc,
-            A_data, entry.Adesc, &zero, temp_c, entry.Cdesc,
-            temp_c, entry.Cdesc, &results[i].algo,
-            s_workspace, results[i].workspaceSize, stream);
+        cublasLtMatmul(lt, entry.opDesc, &alpha, B_data, entry.Bdesc, A_data, entry.Adesc, &zero, temp_c,
+                       entry.Cdesc, temp_c, entry.Cdesc, &results[i].algo, s_workspace,
+                       results[i].workspaceSize, stream);
         // Timed
         cudaEventRecord(start, stream);
         for (int r = 0; r < kBenchmarkIters; r++)
-            cublasLtMatmul(lt, entry.opDesc, &alpha, B_data, entry.Bdesc,
-                A_data, entry.Adesc, &zero, temp_c, entry.Cdesc,
-                temp_c, entry.Cdesc, &results[i].algo,
-                s_workspace, results[i].workspaceSize, stream);
+            cublasLtMatmul(lt, entry.opDesc, &alpha, B_data, entry.Bdesc, A_data, entry.Adesc, &zero, temp_c,
+                           entry.Cdesc, temp_c, entry.Cdesc, &results[i].algo, s_workspace,
+                           results[i].workspaceSize, stream);
         cudaEventRecord(stop, stream);
         cudaEventSynchronize(stop);
         float ms = 0;
         cudaEventElapsedTime(&ms, start, stop);
-        if (ms < best_ms) { best_ms = ms; best_idx = i; }
+        if (ms < best_ms) {
+            best_ms = ms;
+            best_idx = i;
+        }
     }
 
     cudaEventDestroy(start);
@@ -405,12 +417,15 @@ void gemm_cleanup() {
 // --- GEMV fast path for M=1 decode (memory-bandwidth-bound) ---
 // Applies when all operands share the same dtype (excludes LM head: FP16→FP32).
 // Returns true if handled.
-static bool gemm_try_gemv(const Tensor& A, const Tensor& B, Tensor& C,
-                           float alpha, float beta, cudaStream_t stream) {
+static bool gemm_try_gemv(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta,
+                          cudaStream_t stream) {
     const int64_t M = A.shape[0];
-    if (M != 1 || alpha != 1.0f || beta != 0.0f) return false;
-    if (A.qtype != B.qtype || A.qtype != C.qtype) return false;
-    if (A.qtype != QType::F16 && A.qtype != QType::F32 && A.qtype != QType::BF16) return false;
+    if (M != 1 || alpha != 1.0f || beta != 0.0f)
+        return false;
+    if (A.qtype != B.qtype || A.qtype != C.qtype)
+        return false;
+    if (A.qtype != QType::F16 && A.qtype != QType::F32 && A.qtype != QType::BF16)
+        return false;
 
     const int64_t K = A.shape[1];
     const int64_t N = B.shape[0];
@@ -439,8 +454,8 @@ static bool gemm_try_gemv(const Tensor& A, const Tensor& B, Tensor& C,
 // B is [N,K] row-major = [K,N] col-major. We need B transposed → CUBLAS_OP_T.
 // A is [M,K] row-major = [K,M] col-major. We need A as-is    → CUBLAS_OP_N.
 // Returns true if handled.
-static bool gemm_try_sgemm(const Tensor& A, const Tensor& B, Tensor& C,
-                             float alpha, float beta, cudaStream_t stream) {
+static bool gemm_try_sgemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta,
+                           cudaStream_t stream) {
     if (A.qtype != QType::F32 || B.qtype != QType::F32 || C.qtype != QType::F32)
         return false;
 
@@ -451,18 +466,16 @@ static bool gemm_try_sgemm(const Tensor& A, const Tensor& B, Tensor& C,
     cublasHandle_t handle = get_cublas_handle();
     cublasSetStream(handle, stream);
 
-    cublasStatus_t st = cublasSgemm(
-        handle,
-        CUBLAS_OP_T,    // transa: transpose B_col [K,N] → [N,K]
-        CUBLAS_OP_N,    // transb: A_col [K,M] used as-is
-        (int)N,         // m
-        (int)M,         // n
-        (int)K,         // k
-        &alpha,
-        static_cast<const float*>(B.data), (int)K,  // lda = K (leading dim of B before transpose)
-        static_cast<const float*>(A.data), (int)K,  // ldb = K (leading dim of A)
-        &beta,
-        static_cast<float*>(C.data),       (int)N   // ldc = N
+    cublasStatus_t st = cublasSgemm(handle,
+                                    CUBLAS_OP_T,  // transa: transpose B_col [K,N] → [N,K]
+                                    CUBLAS_OP_N,  // transb: A_col [K,M] used as-is
+                                    (int)N,       // m
+                                    (int)M,       // n
+                                    (int)K,       // k
+                                    &alpha, static_cast<const float*>(B.data),
+                                    (int)K,  // lda = K (leading dim of B before transpose)
+                                    static_cast<const float*>(A.data), (int)K,  // ldb = K (leading dim of A)
+                                    &beta, static_cast<float*>(C.data), (int)N  // ldc = N
     );
     if (st != CUBLAS_STATUS_SUCCESS) {
         fprintf(stderr, "imp::gemm: cublasSgemm failed (status %d)\n", (int)st);
@@ -471,8 +484,8 @@ static bool gemm_try_sgemm(const Tensor& A, const Tensor& B, Tensor& C,
 }
 
 // --- Generic path via cuBLASLt (uses pre-allocated static workspace + descriptor cache) ---
-static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C,
-                                   float alpha, float beta, cudaStream_t stream) {
+static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta,
+                                  cudaStream_t stream) {
     const int64_t M = A.shape[0];
     const int64_t K = A.shape[1];
     const int64_t N = B.shape[0];
@@ -492,22 +505,16 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C,
     // FP16→FP32 dimensions on sm_120 (sums in the billions while real
     // attention output is ±100). cublasGemmEx is the legacy, well-tested API
     // that handles FP16×FP16→FP32 with CUBLAS_COMPUTE_32F correctly.
-    if (A.qtype != C.qtype && A.qtype == QType::F16 && B.qtype == QType::F16
-        && C.qtype == QType::F32) {
+    if (A.qtype != C.qtype && A.qtype == QType::F16 && B.qtype == QType::F16 && C.qtype == QType::F32) {
         cublasHandle_t fb_handle = get_cublas_handle();
         cublasSetStream(fb_handle, stream);
-        cublasStatus_t st = cublasGemmEx(fb_handle,
-            CUBLAS_OP_T, CUBLAS_OP_N,
-            (int)N, (int)M, (int)K,
-            &alpha,
-            B.data, cuda_dtype_B, (int)K,
-            A.data, cuda_dtype_A, (int)K,
-            &beta,
-            C.data, cuda_dtype_C, (int)N,
-            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        cublasStatus_t st = cublasGemmEx(fb_handle, CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &alpha,
+                                         B.data, cuda_dtype_B, (int)K, A.data, cuda_dtype_A, (int)K, &beta,
+                                         C.data, cuda_dtype_C, (int)N, CUBLAS_COMPUTE_32F,
+                                         CUBLAS_GEMM_DEFAULT);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            IMP_LOG_WARN("gemm: cublasGemmEx FP16→FP32 failed status=%d M=%ld K=%ld N=%ld",
-                         (int)st, (long)M, (long)K, (long)N);
+            IMP_LOG_WARN("gemm: cublasGemmEx FP16→FP32 failed status=%d M=%ld K=%ld N=%ld", (int)st, (long)M,
+                         (long)K, (long)N);
         }
         return;
     }
@@ -525,16 +532,14 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C,
         } else {
             GemmCacheEntry new_entry{};
             new_entry.desc_M = M;
-            cudaDataType_t scale_type = (compute_type == CUBLAS_COMPUTE_32I)
-                                            ? CUDA_R_32I : CUDA_R_32F;
+            cudaDataType_t scale_type = (compute_type == CUBLAS_COMPUTE_32I) ? CUDA_R_32I : CUDA_R_32F;
 
-            create_gemm_descriptors(new_entry, compute_type, scale_type,
-                cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, (int)K, (int)M, (int)N);
+            create_gemm_descriptors(new_entry, compute_type, scale_type, cuda_dtype_A, cuda_dtype_B,
+                                    cuda_dtype_C, (int)K, (int)M, (int)N);
 
             size_t c_bytes = (size_t)M * N * dtype_size(C.qtype);
-            benchmark_and_select_algo(lt, new_entry,
-                A.data, B.data, c_bytes, alpha, beta,
-                (compute_type == CUBLAS_COMPUTE_32I), stream);
+            benchmark_and_select_algo(lt, new_entry, A.data, B.data, c_bytes, alpha, beta,
+                                      (compute_type == CUBLAS_COMPUTE_32I), stream);
 
             auto [inserted_it, _] = s_gemm_cache.emplace(cache_key, new_entry);
             entry = &inserted_it->second;
@@ -549,33 +554,27 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C,
 
     if (compute_type == CUBLAS_COMPUTE_32I) {
         int32_t ialpha = (int32_t)alpha;
-        int32_t ibeta  = (int32_t)beta;
-        cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc,
-            &ialpha, B.data, entry->Bdesc, A.data, entry->Adesc,
-            &ibeta,  C.data, entry->Cdesc, C.data, entry->Cdesc,
-            entry->has_algo ? &entry->algo : nullptr,
-            s_workspace, entry->workspace_size, stream);
+        int32_t ibeta = (int32_t)beta;
+        cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc, &ialpha, B.data, entry->Bdesc, A.data,
+                                           entry->Adesc, &ibeta, C.data, entry->Cdesc, C.data, entry->Cdesc,
+                                           entry->has_algo ? &entry->algo : nullptr, s_workspace,
+                                           entry->workspace_size, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
-            IMP_LOG_WARN("gemm: cublasLtMatmul (INT) failed (status %d) M=%ld K=%ld N=%ld, "
-                         "falling back to cublasGemmEx",
-                         (int)st, (long)M, (long)K, (long)N);
+            IMP_LOG_WARN(
+                "gemm: cublasLtMatmul (INT) failed (status %d) M=%ld K=%ld N=%ld, "
+                "falling back to cublasGemmEx",
+                (int)st, (long)M, (long)K, (long)N);
             cublasHandle_t fb_handle = get_cublas_handle();
             cublasSetStream(fb_handle, stream);
-            cublasGemmEx(fb_handle, CUBLAS_OP_T, CUBLAS_OP_N,
-                (int)N, (int)M, (int)K,
-                &ialpha,
-                B.data, cuda_dtype_B, (int)K,
-                A.data, cuda_dtype_A, (int)K,
-                &ibeta,
-                C.data, cuda_dtype_C, (int)N,
-                CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT);
+            cublasGemmEx(fb_handle, CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K, &ialpha, B.data,
+                         cuda_dtype_B, (int)K, A.data, cuda_dtype_A, (int)K, &ibeta, C.data, cuda_dtype_C,
+                         (int)N, CUBLAS_COMPUTE_32I, CUBLAS_GEMM_DEFAULT);
         }
     } else {
-        cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc,
-            &alpha, B.data, entry->Bdesc, A.data, entry->Adesc,
-            &beta,  C.data, entry->Cdesc, C.data, entry->Cdesc,
-            entry->has_algo ? &entry->algo : nullptr,
-            s_workspace, entry->workspace_size, stream);
+        cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc, &alpha, B.data, entry->Bdesc, A.data,
+                                           entry->Adesc, &beta, C.data, entry->Cdesc, C.data, entry->Cdesc,
+                                           entry->has_algo ? &entry->algo : nullptr, s_workspace,
+                                           entry->workspace_size, stream);
         if (st != CUBLAS_STATUS_SUCCESS) {
             // Stale algo from a different M within the same bucket.
             // Re-select via heuristic and retry before falling back.
@@ -583,47 +582,41 @@ static void gemm_cublaslt_generic(const Tensor& A, const Tensor& B, Tensor& C,
                 std::lock_guard<std::mutex> lock(s_gemm_cache_mutex);
                 reselect_algo_for_entry(*entry);
             }
-            st = cublasLtMatmul(lt, entry->opDesc,
-                &alpha, B.data, entry->Bdesc, A.data, entry->Adesc,
-                &beta,  C.data, entry->Cdesc, C.data, entry->Cdesc,
-                entry->has_algo ? &entry->algo : nullptr,
-                s_workspace, entry->workspace_size, stream);
+            st = cublasLtMatmul(lt, entry->opDesc, &alpha, B.data, entry->Bdesc, A.data, entry->Adesc, &beta,
+                                C.data, entry->Cdesc, C.data, entry->Cdesc,
+                                entry->has_algo ? &entry->algo : nullptr, s_workspace, entry->workspace_size,
+                                stream);
             if (st != CUBLAS_STATUS_SUCCESS) {
                 static int fallback_count = 0;
                 if (++fallback_count <= 10) {
-                    IMP_LOG_WARN("gemm: cublasLtMatmul failed (status %d) M=%ld K=%ld N=%ld "
-                                 "after algo reselect, falling back to cublasGemmEx",
-                                 (int)st, (long)M, (long)K, (long)N);
+                    IMP_LOG_WARN(
+                        "gemm: cublasLtMatmul failed (status %d) M=%ld K=%ld N=%ld "
+                        "after algo reselect, falling back to cublasGemmEx",
+                        (int)st, (long)M, (long)K, (long)N);
                 }
                 cublasHandle_t fb_handle = get_cublas_handle();
                 cublasSetStream(fb_handle, stream);
-                cublasStatus_t fb_st = cublasGemmEx(fb_handle,
-                    CUBLAS_OP_T, CUBLAS_OP_N,
-                    (int)N, (int)M, (int)K,
-                    &alpha,
-                    B.data, cuda_dtype_B, (int)K,
-                    A.data, cuda_dtype_A, (int)K,
-                    &beta,
-                    C.data, cuda_dtype_C, (int)N,
-                    CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+                cublasStatus_t fb_st = cublasGemmEx(fb_handle, CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M,
+                                                    (int)K, &alpha, B.data, cuda_dtype_B, (int)K, A.data,
+                                                    cuda_dtype_A, (int)K, &beta, C.data, cuda_dtype_C, (int)N,
+                                                    CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
                 if (fb_st != CUBLAS_STATUS_SUCCESS) {
                     // Both cublasLt and cublasGemmEx failed. Output buffer holds
                     // garbage; downstream kernels will likely IMA on its values
                     // or produce silent NaN. Surface the failure here instead.
-                    IMP_LOG_ERROR("gemm: cublasGemmEx fallback also failed (status %d) "
-                                  "M=%ld K=%ld N=%ld dtA=%d dtB=%d dtC=%d. Output "
-                                  "buffer is garbage; expect downstream IMA.",
-                                  (int)fb_st, (long)M, (long)K, (long)N,
-                                  (int)cuda_dtype_A, (int)cuda_dtype_B,
-                                  (int)cuda_dtype_C);
+                    IMP_LOG_ERROR(
+                        "gemm: cublasGemmEx fallback also failed (status %d) "
+                        "M=%ld K=%ld N=%ld dtA=%d dtB=%d dtC=%d. Output "
+                        "buffer is garbage; expect downstream IMA.",
+                        (int)fb_st, (long)M, (long)K, (long)N, (int)cuda_dtype_A, (int)cuda_dtype_B,
+                        (int)cuda_dtype_C);
                 }
             }
         }
     }
 }
 
-void gemm(const Tensor& A, const Tensor& B, Tensor& C,
-          float alpha, float beta, cudaStream_t stream) {
+void gemm(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, cudaStream_t stream) {
     // Guard against quantized weight tensors (e.g. MXFP4 with dtype=INT4)
     // that should have been handled by the FP16 weight cache path.
     // Passing raw quantized data to cuBLAS causes illegal memory access
@@ -633,8 +626,10 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C,
         // handle quantized weights. If we get here, output will be zero (safe).
         return;
     }
-    if (gemm_try_gemv(A, B, C, alpha, beta, stream)) return;
-    if (gemm_try_sgemm(A, B, C, alpha, beta, stream)) return;
+    if (gemm_try_gemv(A, B, C, alpha, beta, stream))
+        return;
+    if (gemm_try_sgemm(A, B, C, alpha, beta, stream))
+        return;
     gemm_cublaslt_generic(A, B, C, alpha, beta, stream);
 }
 
@@ -643,17 +638,16 @@ void gemm(const Tensor& A, const Tensor& B, Tensor& C,
 // ---------------------------------------------------------------------------
 
 // --- FP32 GEMV kernel ---
-__global__ void gemv_fp32_kernel(const float* __restrict__ A,
-                                  const float* __restrict__ x,
-                                  float* __restrict__ y,
-                                  int M, int K) {
+__global__ void gemv_fp32_kernel(const float* __restrict__ A, const float* __restrict__ x,
+                                 float* __restrict__ y, int M, int K) {
     // Each warp handles one row of A.
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row     = blockIdx.x * warps_per_block + warp_id;
+    const int lane = threadIdx.x % 32;
+    const int row = blockIdx.x * warps_per_block + warp_id;
 
-    if (row >= M) return;
+    if (row >= M)
+        return;
 
     const float* A_row = A + (int64_t)row * K;
 
@@ -662,7 +656,7 @@ __global__ void gemv_fp32_kernel(const float* __restrict__ A,
     // Vectorized loads: float4 = 4 floats per load.
     const int K_vec = K / 4;
     const float4* A_row_v = reinterpret_cast<const float4*>(A_row);
-    const float4* x_v     = reinterpret_cast<const float4*>(x);
+    const float4* x_v = reinterpret_cast<const float4*>(x);
 
     for (int i = lane; i < K_vec; i += 32) {
         float4 a = A_row_v[i];
@@ -685,16 +679,15 @@ __global__ void gemv_fp32_kernel(const float* __restrict__ A,
 }
 
 // --- FP16 GEMV kernel ---
-__global__ void gemv_fp16_kernel(const half* __restrict__ A,
-                                  const half* __restrict__ x,
-                                  half* __restrict__ y,
-                                  int M, int K) {
+__global__ void gemv_fp16_kernel(const half* __restrict__ A, const half* __restrict__ x, half* __restrict__ y,
+                                 int M, int K) {
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row     = blockIdx.x * warps_per_block + warp_id;
+    const int lane = threadIdx.x % 32;
+    const int row = blockIdx.x * warps_per_block + warp_id;
 
-    if (row >= M) return;
+    if (row >= M)
+        return;
 
     const half* A_row = A + (int64_t)row * K;
 
@@ -705,25 +698,25 @@ __global__ void gemv_fp16_kernel(const half* __restrict__ A,
     // 2× wider than the default 128-bit path, better saturating memory bandwidth.
     const int K_vec16 = K / 16;  // 16 halves = 32 bytes = 2 × sizeof(float4)
     const float4* A_row_v = reinterpret_cast<const float4*>(A_row);
-    const float4* x_v     = reinterpret_cast<const float4*>(x);
+    const float4* x_v = reinterpret_cast<const float4*>(x);
 
     for (int i = lane; i < K_vec16; i += 32) {
-        float4 a0 = A_row_v[2*i];
-        float4 a1 = A_row_v[2*i + 1];
-        float4 x0 = x_v[2*i];
-        float4 x1 = x_v[2*i + 1];
+        float4 a0 = A_row_v[2 * i];
+        float4 a1 = A_row_v[2 * i + 1];
+        float4 x0 = x_v[2 * i];
+        float4 x1 = x_v[2 * i + 1];
 
         const half2* a_h2_0 = reinterpret_cast<const half2*>(&a0);
         const half2* x_h2_0 = reinterpret_cast<const half2*>(&x0);
         const half2* a_h2_1 = reinterpret_cast<const half2*>(&a1);
         const half2* x_h2_1 = reinterpret_cast<const half2*>(&x1);
 
-        #pragma unroll
+#pragma unroll
         for (int j = 0; j < 4; ++j) {
             half2 prod = __hmul2(a_h2_0[j], x_h2_0[j]);
             sum += __half2float(prod.x) + __half2float(prod.y);
         }
-        #pragma unroll
+#pragma unroll
         for (int j = 0; j < 4; ++j) {
             half2 prod = __hmul2(a_h2_1[j], x_h2_1[j]);
             sum += __half2float(prod.x) + __half2float(prod.y);
@@ -757,7 +750,7 @@ __global__ void gemv_fp16_kernel(const half* __restrict__ A,
     // Default path: 128-bit loads (8 halves per float4).
     const int K_vec = K / 8;  // 8 halves = 16 bytes = sizeof(float4)
     const float4* A_row_v = reinterpret_cast<const float4*>(A_row);
-    const float4* x_v     = reinterpret_cast<const float4*>(x);
+    const float4* x_v = reinterpret_cast<const float4*>(x);
 
     for (int i = lane; i < K_vec; i += 32) {
         float4 a_raw = A_row_v[i];
@@ -789,16 +782,15 @@ __global__ void gemv_fp16_kernel(const half* __restrict__ A,
 }
 
 // --- BF16 GEMV kernel ---
-__global__ void gemv_bf16_kernel(const __nv_bfloat16* __restrict__ A,
-                                  const __nv_bfloat16* __restrict__ x,
-                                  __nv_bfloat16* __restrict__ y,
-                                  int M, int K) {
+__global__ void gemv_bf16_kernel(const __nv_bfloat16* __restrict__ A, const __nv_bfloat16* __restrict__ x,
+                                 __nv_bfloat16* __restrict__ y, int M, int K) {
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row     = blockIdx.x * warps_per_block + warp_id;
+    const int lane = threadIdx.x % 32;
+    const int row = blockIdx.x * warps_per_block + warp_id;
 
-    if (row >= M) return;
+    if (row >= M)
+        return;
 
     const __nv_bfloat16* A_row = A + (int64_t)row * K;
 
@@ -807,7 +799,7 @@ __global__ void gemv_bf16_kernel(const __nv_bfloat16* __restrict__ A,
     // Vectorized loads: 8 bf16 per float4.
     const int K_vec = K / 8;
     const float4* A_row_v = reinterpret_cast<const float4*>(A_row);
-    const float4* x_v     = reinterpret_cast<const float4*>(x);
+    const float4* x_v = reinterpret_cast<const float4*>(x);
 
     for (int i = lane; i < K_vec; i += 32) {
         float4 a_raw = A_row_v[i];
@@ -842,8 +834,7 @@ __global__ void gemv_bf16_kernel(const __nv_bfloat16* __restrict__ A,
 //   Custom CUDA kernels for the memory-bandwidth-bound case.
 //   For batched case (x has 2 dims), we loop over batch columns.
 // ---------------------------------------------------------------------------
-void gemv(const Tensor& A, const Tensor& x, Tensor& y,
-          cudaStream_t stream) {
+void gemv(const Tensor& A, const Tensor& x, Tensor& y, cudaStream_t stream) {
     const int M = (int)A.shape[0];
     const int K = (int)A.shape[1];
 
@@ -860,25 +851,22 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y,
             case QType::F32: {
                 const float* A_ptr = static_cast<const float*>(A.data);
                 const float* x_ptr = static_cast<const float*>(x.data) + (int64_t)b * K;
-                float* y_ptr       = static_cast<float*>(y.data)       + (int64_t)b * M;
-                gemv_fp32_kernel<<<blocks, kGemvThreads, 0, stream>>>(
-                    A_ptr, x_ptr, y_ptr, M, K);
+                float* y_ptr = static_cast<float*>(y.data) + (int64_t)b * M;
+                gemv_fp32_kernel<<<blocks, kGemvThreads, 0, stream>>>(A_ptr, x_ptr, y_ptr, M, K);
                 break;
             }
             case QType::F16: {
                 const half* A_ptr = static_cast<const half*>(A.data);
                 const half* x_ptr = static_cast<const half*>(x.data) + (int64_t)b * K;
-                half* y_ptr       = static_cast<half*>(y.data)       + (int64_t)b * M;
-                gemv_fp16_kernel<<<blocks, kGemvThreads, 0, stream>>>(
-                    A_ptr, x_ptr, y_ptr, M, K);
+                half* y_ptr = static_cast<half*>(y.data) + (int64_t)b * M;
+                gemv_fp16_kernel<<<blocks, kGemvThreads, 0, stream>>>(A_ptr, x_ptr, y_ptr, M, K);
                 break;
             }
             case QType::BF16: {
                 const __nv_bfloat16* A_ptr = static_cast<const __nv_bfloat16*>(A.data);
                 const __nv_bfloat16* x_ptr = static_cast<const __nv_bfloat16*>(x.data) + (int64_t)b * K;
-                __nv_bfloat16* y_ptr       = static_cast<__nv_bfloat16*>(y.data)       + (int64_t)b * M;
-                gemv_bf16_kernel<<<blocks, kGemvThreads, 0, stream>>>(
-                    A_ptr, x_ptr, y_ptr, M, K);
+                __nv_bfloat16* y_ptr = static_cast<__nv_bfloat16*>(y.data) + (int64_t)b * M;
+                gemv_bf16_kernel<<<blocks, kGemvThreads, 0, stream>>>(A_ptr, x_ptr, y_ptr, M, K);
                 break;
             }
             default: {
@@ -915,10 +903,8 @@ void gemv(const Tensor& A, const Tensor& x, Tensor& y,
 // gemm_cublaslt: cuBLASLt GEMM with explicit algorithm selection + FP8 scales
 //   Uses the same static workspace as gemm().
 // ---------------------------------------------------------------------------
-void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
-                   float alpha, float beta,
-                   const float* aScale, const float* bScale,
-                   cudaStream_t stream) {
+void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C, float alpha, float beta, const float* aScale,
+                   const float* bScale, cudaStream_t stream) {
     const int64_t M = A.shape[0];
     const int64_t K = A.shape[1];
     const int64_t N = B.shape[0];
@@ -930,8 +916,8 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
     cudaDataType_t cuda_dtype_A = dtype_to_cuda(A.qtype);
     cudaDataType_t cuda_dtype_B = dtype_to_cuda(B.qtype);
     cudaDataType_t cuda_dtype_C = dtype_to_cuda(C.qtype);
-    GemmCacheKey cache_key{cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, CUBLAS_COMPUTE_32F,
-                           bucket_m(M), K, N, (aScale != nullptr)};
+    GemmCacheKey cache_key{
+        cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, CUBLAS_COMPUTE_32F, bucket_m(M), K, N, (aScale != nullptr)};
 
     GemmCacheEntry* entry = nullptr;
     {
@@ -943,15 +929,14 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
             GemmCacheEntry new_entry{};
             new_entry.desc_M = M;
 
-            create_gemm_descriptors(new_entry, CUBLAS_COMPUTE_32F, CUDA_R_32F,
-                cuda_dtype_A, cuda_dtype_B, cuda_dtype_C, (int)K, (int)M, (int)N);
+            create_gemm_descriptors(new_entry, CUBLAS_COMPUTE_32F, CUDA_R_32F, cuda_dtype_A, cuda_dtype_B,
+                                    cuda_dtype_C, (int)K, (int)M, (int)N);
 
             // Set scale pointers before benchmarking so FP8 algos run correctly
             set_gemm_scale_pointers(new_entry.opDesc, aScale, bScale);
 
             size_t c_bytes = (size_t)M * N * dtype_size(C.qtype);
-            benchmark_and_select_algo(lt, new_entry,
-                A.data, B.data, c_bytes, alpha, beta, false, stream);
+            benchmark_and_select_algo(lt, new_entry, A.data, B.data, c_bytes, alpha, beta, false, stream);
 
             auto [ins_it, _] = s_gemm_cache.emplace(cache_key, new_entry);
             entry = &ins_it->second;
@@ -972,11 +957,10 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
     // section must be protected by the mutex (or opDesc must be duplicated per-call).
     set_gemm_scale_pointers(entry->opDesc, aScale, bScale);
 
-    cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc,
-        &alpha, B.data, entry->Bdesc, A.data, entry->Adesc,
-        &beta,  C.data, entry->Cdesc, C.data, entry->Cdesc,
-        entry->has_algo ? &entry->algo : nullptr,
-        s_workspace, entry->workspace_size, stream);
+    cublasStatus_t st = cublasLtMatmul(lt, entry->opDesc, &alpha, B.data, entry->Bdesc, A.data, entry->Adesc,
+                                       &beta, C.data, entry->Cdesc, C.data, entry->Cdesc,
+                                       entry->has_algo ? &entry->algo : nullptr, s_workspace,
+                                       entry->workspace_size, stream);
 
     if (st != CUBLAS_STATUS_SUCCESS) {
         // The cached algo (benchmarked for a different M within the same bucket)
@@ -986,30 +970,25 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
             reselect_algo_for_entry(*entry);
         }
         set_gemm_scale_pointers(entry->opDesc, aScale, bScale);
-        st = cublasLtMatmul(lt, entry->opDesc,
-            &alpha, B.data, entry->Bdesc, A.data, entry->Adesc,
-            &beta,  C.data, entry->Cdesc, C.data, entry->Cdesc,
-            entry->has_algo ? &entry->algo : nullptr,
-            s_workspace, entry->workspace_size, stream);
+        st = cublasLtMatmul(lt, entry->opDesc, &alpha, B.data, entry->Bdesc, A.data, entry->Adesc, &beta,
+                            C.data, entry->Cdesc, C.data, entry->Cdesc,
+                            entry->has_algo ? &entry->algo : nullptr, s_workspace, entry->workspace_size,
+                            stream);
 
         if (st != CUBLAS_STATUS_SUCCESS) {
             static int fallback_count = 0;
             if (++fallback_count <= 10) {
-                IMP_LOG_WARN("gemm_cublaslt: cublasLtMatmul failed (status %d) M=%ld K=%ld N=%ld "
-                             "after algo reselect, falling back to cublasGemmEx",
-                             (int)st, (long)M, (long)K, (long)N);
+                IMP_LOG_WARN(
+                    "gemm_cublaslt: cublasLtMatmul failed (status %d) M=%ld K=%ld N=%ld "
+                    "after algo reselect, falling back to cublasGemmEx",
+                    (int)st, (long)M, (long)K, (long)N);
             }
             cublasHandle_t fb_handle = get_cublas_handle();
             cublasSetStream(fb_handle, stream);
-            cublasStatus_t fb_st = cublasGemmEx(fb_handle,
-                CUBLAS_OP_T, CUBLAS_OP_N,
-                (int)N, (int)M, (int)K,
-                &alpha,
-                B.data, cuda_dtype_B, (int)K,
-                A.data, cuda_dtype_A, (int)K,
-                &beta,
-                C.data, cuda_dtype_C, (int)N,
-                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+            cublasStatus_t fb_st = cublasGemmEx(fb_handle, CUBLAS_OP_T, CUBLAS_OP_N, (int)N, (int)M, (int)K,
+                                                &alpha, B.data, cuda_dtype_B, (int)K, A.data, cuda_dtype_A,
+                                                (int)K, &beta, C.data, cuda_dtype_C, (int)N,
+                                                CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
             if (fb_st != CUBLAS_STATUS_SUCCESS) {
                 IMP_LOG_ERROR("gemm_cublaslt: cublasGemmEx fallback also failed (status %d)", (int)fb_st);
             }
@@ -1021,16 +1000,15 @@ void gemm_cublaslt(const Tensor& A, const Tensor& B, Tensor& C,
 // FP8 E4M3 GEMV kernel -- 16 FP8 values per load (16 bytes)
 // Each warp handles one row. Dequant on-the-fly with per-tensor scale.
 // ---------------------------------------------------------------------------
-__global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A,
-                                      const half* __restrict__ x,
-                                      half* __restrict__ y,
-                                      int M, int K, float scale) {
+__global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A, const half* __restrict__ x,
+                                     half* __restrict__ y, int M, int K, float scale) {
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row     = blockIdx.x * warps_per_block + warp_id;
+    const int lane = threadIdx.x % 32;
+    const int row = blockIdx.x * warps_per_block + warp_id;
 
-    if (row >= M) return;
+    if (row >= M)
+        return;
 
     const uint8_t* A_row = A + (int64_t)row * K;
 
@@ -1055,16 +1033,16 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A,
         const half* x_lo = reinterpret_cast<const half*>(&x_raw0);  // x[0..7]
         const half* x_hi = reinterpret_cast<const half*>(&x_raw1);  // x[8..15]
 
-        // Dequant and accumulate 16 FP8 values in two groups of 8,
-        // avoiding per-element j<8 branch for x_lo vs x_hi selection.
-        #pragma unroll
+// Dequant and accumulate 16 FP8 values in two groups of 8,
+// avoiding per-element j<8 branch for x_lo vs x_hi selection.
+#pragma unroll
         for (int j = 0; j < 8; ++j) {
             __nv_fp8_e4m3 fp8_val;
             memcpy(&fp8_val, &a_bytes[j], 1);
             float a_val = (float)fp8_val * scale;
             sum += a_val * __half2float(x_lo[j]);
         }
-        #pragma unroll
+#pragma unroll
         for (int j = 0; j < 8; ++j) {
             __nv_fp8_e4m3 fp8_val;
             memcpy(&fp8_val, &a_bytes[8 + j], 1);
@@ -1095,16 +1073,15 @@ __global__ void gemv_fp8_e4m3_kernel(const uint8_t* __restrict__ A,
 // Q6_K block = 210 bytes for 256 elements: ql[128] + qh[64] + scales[16] + d[2].
 // Each warp computes one output row's dot product.
 // ---------------------------------------------------------------------------
-__global__ void gemv_q6k_kernel(const uint8_t* __restrict__ W,
-                                 const half* __restrict__ x,
-                                 half* __restrict__ y,
-                                 int M, int K) {
+__global__ void gemv_q6k_kernel(const uint8_t* __restrict__ W, const half* __restrict__ x,
+                                half* __restrict__ y, int M, int K) {
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row     = blockIdx.x * warps_per_block + warp_id;
+    const int lane = threadIdx.x % 32;
+    const int row = blockIdx.x * warps_per_block + warp_id;
 
-    if (row >= M) return;
+    if (row >= M)
+        return;
 
     const int blocks_per_row = K / 256;
     const size_t row_bytes = (size_t)blocks_per_row * 210;
@@ -1113,19 +1090,19 @@ __global__ void gemv_q6k_kernel(const uint8_t* __restrict__ W,
 
     for (int b = 0; b < blocks_per_row; ++b) {
         const uint8_t* bp = W_row + b * 210;
-        const uint8_t* ql = bp;          // ql[128]
-        const uint8_t* qh = bp + 128;    // qh[64]
-        const int8_t* sc  = (const int8_t*)(bp + 192);  // scales[16]
-        float d = __half2float(*(const half*)(bp + 208)); // d[2]
+        const uint8_t* ql = bp;                            // ql[128]
+        const uint8_t* qh = bp + 128;                      // qh[64]
+        const int8_t* sc = (const int8_t*)(bp + 192);      // scales[16]
+        float d = __half2float(*(const half*)(bp + 208));  // d[2]
         const int base = b * 256;
 
         // Coalesced loads: 4 ql bytes + 2 qh bytes per thread
-        uint8_t ql_a = ql[lane];           // [0..31]
-        uint8_t ql_b = ql[lane + 32];      // [32..63]
-        uint8_t ql_c = ql[64 + lane];      // [64..95]
-        uint8_t ql_d = ql[64 + lane + 32]; // [96..127]
-        uint8_t qh0  = qh[lane];           // [0..31]
-        uint8_t qh1  = qh[32 + lane];      // [32..63]
+        uint8_t ql_a = ql[lane];            // [0..31]
+        uint8_t ql_b = ql[lane + 32];       // [32..63]
+        uint8_t ql_c = ql[64 + lane];       // [64..95]
+        uint8_t ql_d = ql[64 + lane + 32];  // [96..127]
+        uint8_t qh0 = qh[lane];             // [0..31]
+        uint8_t qh1 = qh[32 + lane];        // [32..63]
 
         // Dequant 8 values per thread (elements at lane, lane+32, ..., lane+224)
         int q0 = (int)(((qh0 & 0x03) << 4) | (ql_a & 0x0F)) - 32;
@@ -1140,26 +1117,25 @@ __global__ void gemv_q6k_kernel(const uint8_t* __restrict__ W,
         // Scale lookups: 16 scales per block, 2 sub-blocks of 32 elements each
         // lane/16 selects between two scale groups within each 32-lane sub-block
         int sc_idx = lane >> 4;  // 0 or 1
-        sum += d * (
-            (float)sc[sc_idx]      * (float)q0 * __half2float(x[base + lane]) +
-            (float)sc[sc_idx + 2]  * (float)q1 * __half2float(x[base + lane + 32]) +
-            (float)sc[sc_idx + 4]  * (float)q2 * __half2float(x[base + lane + 64]) +
-            (float)sc[sc_idx + 6]  * (float)q3 * __half2float(x[base + lane + 96]) +
-            (float)sc[sc_idx + 8]  * (float)q4 * __half2float(x[base + lane + 128]) +
-            (float)sc[sc_idx + 10] * (float)q5 * __half2float(x[base + lane + 160]) +
-            (float)sc[sc_idx + 12] * (float)q6 * __half2float(x[base + lane + 192]) +
-            (float)sc[sc_idx + 14] * (float)q7 * __half2float(x[base + lane + 224]));
+        sum += d * ((float)sc[sc_idx] * (float)q0 * __half2float(x[base + lane]) +
+                    (float)sc[sc_idx + 2] * (float)q1 * __half2float(x[base + lane + 32]) +
+                    (float)sc[sc_idx + 4] * (float)q2 * __half2float(x[base + lane + 64]) +
+                    (float)sc[sc_idx + 6] * (float)q3 * __half2float(x[base + lane + 96]) +
+                    (float)sc[sc_idx + 8] * (float)q4 * __half2float(x[base + lane + 128]) +
+                    (float)sc[sc_idx + 10] * (float)q5 * __half2float(x[base + lane + 160]) +
+                    (float)sc[sc_idx + 12] * (float)q6 * __half2float(x[base + lane + 192]) +
+                    (float)sc[sc_idx + 14] * (float)q7 * __half2float(x[base + lane + 224]));
     }
 
     // Warp shuffle reduction
     sum = warp_reduce_sum(sum);
 
-    if (lane == 0) y[row] = __float2half(sum);
+    if (lane == 0)
+        y[row] = __float2half(sum);
 }
 
 void gemv_q6k(const void* W, const half* x, half* y, int M, int K, cudaStream_t stream) {
-    gemv_q6k_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(
-        static_cast<const uint8_t*>(W), x, y, M, K);
+    gemv_q6k_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(static_cast<const uint8_t*>(W), x, y, M, K);
 }
 
 // ---------------------------------------------------------------------------
@@ -1168,16 +1144,15 @@ void gemv_q6k(const void* W, const half* x, half* y, int M, int K, cudaStream_t 
 // Each warp computes one output row's dot product. Each thread handles one
 // element per block (32 threads = 32 elements = 1 block).
 // ---------------------------------------------------------------------------
-__global__ void gemv_q8_0_kernel(const uint8_t* __restrict__ W,
-                                  const half* __restrict__ x,
-                                  half* __restrict__ y,
-                                  int M, int K) {
+__global__ void gemv_q8_0_kernel(const uint8_t* __restrict__ W, const half* __restrict__ x,
+                                 half* __restrict__ y, int M, int K) {
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row     = blockIdx.x * warps_per_block + warp_id;
+    const int lane = threadIdx.x % 32;
+    const int row = blockIdx.x * warps_per_block + warp_id;
 
-    if (row >= M) return;
+    if (row >= M)
+        return;
 
     const int blocks_per_row = K / 32;
     const size_t row_bytes = (size_t)blocks_per_row * 34;
@@ -1194,12 +1169,12 @@ __global__ void gemv_q8_0_kernel(const uint8_t* __restrict__ W,
     // Warp shuffle reduction
     sum = warp_reduce_sum(sum);
 
-    if (lane == 0) y[row] = __float2half(sum);
+    if (lane == 0)
+        y[row] = __float2half(sum);
 }
 
 void gemv_q8_0(const void* W, const half* x, half* y, int M, int K, cudaStream_t stream) {
-    gemv_q8_0_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(
-        static_cast<const uint8_t*>(W), x, y, M, K);
+    gemv_q8_0_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(static_cast<const uint8_t*>(W), x, y, M, K);
 }
 
 // ---------------------------------------------------------------------------
@@ -1209,24 +1184,20 @@ void gemv_q8_0(const void* W, const half* x, half* y, int M, int K, cudaStream_t
 // x_stride: 0 = shared input for all experts (gate/up), >0 = per-expert input (down).
 // ---------------------------------------------------------------------------
 
-__global__ void gemv_q6k_moe_decode_kernel(
-        const uint8_t* __restrict__ packed_weights,
-        const int32_t* __restrict__ expert_indices,
-        const half* __restrict__ x,
-        half* __restrict__ y,
-        int rows, int K,
-        size_t expert_stride_bytes,
-        int x_stride,
-        int blocks_per_expert) {
+__global__ void gemv_q6k_moe_decode_kernel(const uint8_t* __restrict__ packed_weights,
+                                           const int32_t* __restrict__ expert_indices,
+                                           const half* __restrict__ x, half* __restrict__ y, int rows, int K,
+                                           size_t expert_stride_bytes, int x_stride, int blocks_per_expert) {
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
+    const int lane = threadIdx.x % 32;
 
     const int expert_slot = blockIdx.x / blocks_per_expert;
     const int local_block = blockIdx.x % blocks_per_expert;
     const int row = local_block * warps_per_block + warp_id;
 
-    if (row >= rows) return;
+    if (row >= rows)
+        return;
 
     const int expert_id = expert_indices[expert_slot];
     const uint8_t* W = packed_weights + (size_t)expert_id * expert_stride_bytes;
@@ -1242,7 +1213,7 @@ __global__ void gemv_q6k_moe_decode_kernel(
         const uint8_t* bp = W_row + b * 210;
         const uint8_t* ql = bp;
         const uint8_t* qh = bp + 128;
-        const int8_t* sc  = (const int8_t*)(bp + 192);
+        const int8_t* sc = (const int8_t*)(bp + 192);
         float d = __half2float(*(const half*)(bp + 208));
         const int base = b * 256;
 
@@ -1250,8 +1221,8 @@ __global__ void gemv_q6k_moe_decode_kernel(
         uint8_t ql_b = ql[lane + 32];
         uint8_t ql_c = ql[64 + lane];
         uint8_t ql_d = ql[64 + lane + 32];
-        uint8_t qh0  = qh[lane];
-        uint8_t qh1  = qh[32 + lane];
+        uint8_t qh0 = qh[lane];
+        uint8_t qh1 = qh[32 + lane];
 
         int q0 = (int)(((qh0 & 0x03) << 4) | (ql_a & 0x0F)) - 32;
         int q1 = (int)((((qh0 >> 2) & 0x03) << 4) | (ql_b & 0x0F)) - 32;
@@ -1263,54 +1234,45 @@ __global__ void gemv_q6k_moe_decode_kernel(
         int q7 = (int)((((qh1 >> 6) & 0x03) << 4) | ((ql_d >> 4) & 0x0F)) - 32;
 
         int sc_idx = lane >> 4;
-        sum += d * (
-            (float)sc[sc_idx]      * (float)q0 * __half2float(x_ptr[base + lane]) +
-            (float)sc[sc_idx + 2]  * (float)q1 * __half2float(x_ptr[base + lane + 32]) +
-            (float)sc[sc_idx + 4]  * (float)q2 * __half2float(x_ptr[base + lane + 64]) +
-            (float)sc[sc_idx + 6]  * (float)q3 * __half2float(x_ptr[base + lane + 96]) +
-            (float)sc[sc_idx + 8]  * (float)q4 * __half2float(x_ptr[base + lane + 128]) +
-            (float)sc[sc_idx + 10] * (float)q5 * __half2float(x_ptr[base + lane + 160]) +
-            (float)sc[sc_idx + 12] * (float)q6 * __half2float(x_ptr[base + lane + 192]) +
-            (float)sc[sc_idx + 14] * (float)q7 * __half2float(x_ptr[base + lane + 224]));
+        sum += d * ((float)sc[sc_idx] * (float)q0 * __half2float(x_ptr[base + lane]) +
+                    (float)sc[sc_idx + 2] * (float)q1 * __half2float(x_ptr[base + lane + 32]) +
+                    (float)sc[sc_idx + 4] * (float)q2 * __half2float(x_ptr[base + lane + 64]) +
+                    (float)sc[sc_idx + 6] * (float)q3 * __half2float(x_ptr[base + lane + 96]) +
+                    (float)sc[sc_idx + 8] * (float)q4 * __half2float(x_ptr[base + lane + 128]) +
+                    (float)sc[sc_idx + 10] * (float)q5 * __half2float(x_ptr[base + lane + 160]) +
+                    (float)sc[sc_idx + 12] * (float)q6 * __half2float(x_ptr[base + lane + 192]) +
+                    (float)sc[sc_idx + 14] * (float)q7 * __half2float(x_ptr[base + lane + 224]));
     }
 
     sum = warp_reduce_sum(sum);
 
-    if (lane == 0) y[expert_slot * rows + row] = __float2half(sum);
+    if (lane == 0)
+        y[expert_slot * rows + row] = __float2half(sum);
 }
 
-void gemv_q6k_moe_decode(const void* packed_weights,
-                          const int32_t* expert_indices,
-                          const half* x, half* y,
-                          int rows, int K,
-                          size_t expert_stride_bytes,
-                          int x_stride, int top_k,
-                          cudaStream_t stream) {
+void gemv_q6k_moe_decode(const void* packed_weights, const int32_t* expert_indices, const half* x, half* y,
+                         int rows, int K, size_t expert_stride_bytes, int x_stride, int top_k,
+                         cudaStream_t stream) {
     const int blocks_per_expert = gemv_blocks(rows);
     gemv_q6k_moe_decode_kernel<<<top_k * blocks_per_expert, kGemvThreads, 0, stream>>>(
-        static_cast<const uint8_t*>(packed_weights),
-        expert_indices, x, y, rows, K,
-        expert_stride_bytes, x_stride, blocks_per_expert);
+        static_cast<const uint8_t*>(packed_weights), expert_indices, x, y, rows, K, expert_stride_bytes,
+        x_stride, blocks_per_expert);
 }
 
-__global__ void gemv_q8_0_moe_decode_kernel(
-        const uint8_t* __restrict__ packed_weights,
-        const int32_t* __restrict__ expert_indices,
-        const half* __restrict__ x,
-        half* __restrict__ y,
-        int rows, int K,
-        size_t expert_stride_bytes,
-        int x_stride,
-        int blocks_per_expert) {
+__global__ void gemv_q8_0_moe_decode_kernel(const uint8_t* __restrict__ packed_weights,
+                                            const int32_t* __restrict__ expert_indices,
+                                            const half* __restrict__ x, half* __restrict__ y, int rows, int K,
+                                            size_t expert_stride_bytes, int x_stride, int blocks_per_expert) {
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
+    const int lane = threadIdx.x % 32;
 
     const int expert_slot = blockIdx.x / blocks_per_expert;
     const int local_block = blockIdx.x % blocks_per_expert;
     const int row = local_block * warps_per_block + warp_id;
 
-    if (row >= rows) return;
+    if (row >= rows)
+        return;
 
     const int expert_id = expert_indices[expert_slot];
     const uint8_t* W = packed_weights + (size_t)expert_id * expert_stride_bytes;
@@ -1331,23 +1293,18 @@ __global__ void gemv_q8_0_moe_decode_kernel(
 
     sum = warp_reduce_sum(sum);
 
-    if (lane == 0) y[expert_slot * rows + row] = __float2half(sum);
+    if (lane == 0)
+        y[expert_slot * rows + row] = __float2half(sum);
 }
 
-void gemv_q8_0_moe_decode(const void* packed_weights,
-                           const int32_t* expert_indices,
-                           const half* x, half* y,
-                           int rows, int K,
-                           size_t expert_stride_bytes,
-                           int x_stride, int top_k,
-                           cudaStream_t stream) {
+void gemv_q8_0_moe_decode(const void* packed_weights, const int32_t* expert_indices, const half* x, half* y,
+                          int rows, int K, size_t expert_stride_bytes, int x_stride, int top_k,
+                          cudaStream_t stream) {
     const int blocks_per_expert = gemv_blocks(rows);
     gemv_q8_0_moe_decode_kernel<<<top_k * blocks_per_expert, kGemvThreads, 0, stream>>>(
-        static_cast<const uint8_t*>(packed_weights),
-        expert_indices, x, y, rows, K,
-        expert_stride_bytes, x_stride, blocks_per_expert);
+        static_cast<const uint8_t*>(packed_weights), expert_indices, x, y, rows, K, expert_stride_bytes,
+        x_stride, blocks_per_expert);
 }
-
 
 // ---------------------------------------------------------------------------
 // FP16 GEMV with FP32 output for MoE gate logits: y = W @ x
@@ -1356,16 +1313,15 @@ void gemv_q8_0_moe_decode(const void* packed_weights,
 // Replaces cuBLAS gemm() + fp16_to_fp32 cast for tiny M=1 GEMMs.
 // Each warp handles one output row. Uses half2 vectorized loads for 2x bandwidth.
 // ---------------------------------------------------------------------------
-__global__ void gemv_gate_fp32_kernel(const half* __restrict__ W,
-                                       const half* __restrict__ x,
-                                       float* __restrict__ y,
-                                       int M, int K) {
+__global__ void gemv_gate_fp32_kernel(const half* __restrict__ W, const half* __restrict__ x,
+                                      float* __restrict__ y, int M, int K) {
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row     = blockIdx.x * warps_per_block + warp_id;
+    const int lane = threadIdx.x % 32;
+    const int row = blockIdx.x * warps_per_block + warp_id;
 
-    if (row >= M) return;
+    if (row >= M)
+        return;
 
     const half* W_row = W + (size_t)row * K;
     float sum = 0.0f;
@@ -1390,25 +1346,24 @@ __global__ void gemv_gate_fp32_kernel(const half* __restrict__ W,
     // Warp shuffle reduction
     sum = warp_reduce_sum(sum);
 
-    if (lane == 0) y[row] = sum;
+    if (lane == 0)
+        y[row] = sum;
 }
 
-void gemv_gate_fp32(const half* W, const half* x, float* y,
-                    int M, int K, cudaStream_t stream) {
+void gemv_gate_fp32(const half* W, const half* x, float* y, int M, int K, cudaStream_t stream) {
     gemv_gate_fp32_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(W, x, y, M, K);
 }
 
 // FP32-input variant: avoids FP16 truncation of router input for MoE precision.
-__global__ void gemv_gate_fp32_fp32input_kernel(const half* __restrict__ W,
-                                                 const float* __restrict__ x,
-                                                 float* __restrict__ y,
-                                                 int M, int K) {
+__global__ void gemv_gate_fp32_fp32input_kernel(const half* __restrict__ W, const float* __restrict__ x,
+                                                float* __restrict__ y, int M, int K) {
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int row     = blockIdx.x * warps_per_block + warp_id;
+    const int lane = threadIdx.x % 32;
+    const int row = blockIdx.x * warps_per_block + warp_id;
 
-    if (row >= M) return;
+    if (row >= M)
+        return;
 
     const half* W_row = W + (size_t)row * K;
     float sum = 0.0f;
@@ -1428,20 +1383,17 @@ __global__ void gemv_gate_fp32_fp32input_kernel(const half* __restrict__ W,
     }
 
     sum = warp_reduce_sum(sum);
-    if (lane == 0) y[row] = sum;
+    if (lane == 0)
+        y[row] = sum;
 }
 
-void gemv_gate_fp32_fp32input(const half* W, const float* x, float* y,
-                               int M, int K, cudaStream_t stream) {
+void gemv_gate_fp32_fp32input(const half* W, const float* x, float* y, int M, int K, cudaStream_t stream) {
     gemv_gate_fp32_fp32input_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(W, x, y, M, K);
 }
-
-
 
 // ---------------------------------------------------------------------------
 // Fused gate+up MoE GEMV (scalar FP16 variants — NOT dp4a, kept as-is)
 // ---------------------------------------------------------------------------
-
 
 // ---------------------------------------------------------------------------
 // Fused gate+up MoE GEMV: computes both gate and up projections in a single
@@ -1449,27 +1401,23 @@ void gemv_gate_fp32_fp32input(const half* W, const float* x, float* y,
 // Saves one kernel launch per MoE layer (48 launches for Qwen3-Coder).
 // ---------------------------------------------------------------------------
 
-__global__ void gemv_q6k_moe_gate_up_fused_kernel(
-        const uint8_t* __restrict__ gate_weights,
-        const uint8_t* __restrict__ up_weights,
-        const int32_t* __restrict__ expert_indices,
-        const half* __restrict__ x,
-        half* __restrict__ y_gate,
-        half* __restrict__ y_up,
-        int rows, int K,
-        size_t gate_stride_bytes,
-        size_t up_stride_bytes,
-        int x_stride,
-        int blocks_per_expert) {
+__global__ void gemv_q6k_moe_gate_up_fused_kernel(const uint8_t* __restrict__ gate_weights,
+                                                  const uint8_t* __restrict__ up_weights,
+                                                  const int32_t* __restrict__ expert_indices,
+                                                  const half* __restrict__ x, half* __restrict__ y_gate,
+                                                  half* __restrict__ y_up, int rows, int K,
+                                                  size_t gate_stride_bytes, size_t up_stride_bytes,
+                                                  int x_stride, int blocks_per_expert) {
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
+    const int lane = threadIdx.x % 32;
 
     const int expert_slot = blockIdx.x / blocks_per_expert;
     const int local_block = blockIdx.x % blocks_per_expert;
     const int row = local_block * warps_per_block + warp_id;
 
-    if (row >= rows) return;
+    if (row >= rows)
+        return;
 
     // blockIdx.y: 0 = gate, 1 = up
     const bool is_up = (blockIdx.y == 1);
@@ -1491,7 +1439,7 @@ __global__ void gemv_q6k_moe_gate_up_fused_kernel(
         const uint8_t* bp = W_row + b * 210;
         const uint8_t* ql = bp;
         const uint8_t* qh = bp + 128;
-        const int8_t* sc  = (const int8_t*)(bp + 192);
+        const int8_t* sc = (const int8_t*)(bp + 192);
         float d = __half2float(*(const half*)(bp + 208));
         const int base = b * 256;
 
@@ -1499,8 +1447,8 @@ __global__ void gemv_q6k_moe_gate_up_fused_kernel(
         uint8_t ql_b = ql[lane + 32];
         uint8_t ql_c = ql[64 + lane];
         uint8_t ql_d = ql[64 + lane + 32];
-        uint8_t qh0  = qh[lane];
-        uint8_t qh1  = qh[32 + lane];
+        uint8_t qh0 = qh[lane];
+        uint8_t qh1 = qh[32 + lane];
 
         int q0 = (int)(((qh0 & 0x03) << 4) | (ql_a & 0x0F)) - 32;
         int q1 = (int)((((qh0 >> 2) & 0x03) << 4) | (ql_b & 0x0F)) - 32;
@@ -1512,59 +1460,50 @@ __global__ void gemv_q6k_moe_gate_up_fused_kernel(
         int q7 = (int)((((qh1 >> 6) & 0x03) << 4) | ((ql_d >> 4) & 0x0F)) - 32;
 
         int sc_idx = lane >> 4;
-        sum += d * (
-            (float)sc[sc_idx]      * (float)q0 * __half2float(x_ptr[base + lane]) +
-            (float)sc[sc_idx + 2]  * (float)q1 * __half2float(x_ptr[base + lane + 32]) +
-            (float)sc[sc_idx + 4]  * (float)q2 * __half2float(x_ptr[base + lane + 64]) +
-            (float)sc[sc_idx + 6]  * (float)q3 * __half2float(x_ptr[base + lane + 96]) +
-            (float)sc[sc_idx + 8]  * (float)q4 * __half2float(x_ptr[base + lane + 128]) +
-            (float)sc[sc_idx + 10] * (float)q5 * __half2float(x_ptr[base + lane + 160]) +
-            (float)sc[sc_idx + 12] * (float)q6 * __half2float(x_ptr[base + lane + 192]) +
-            (float)sc[sc_idx + 14] * (float)q7 * __half2float(x_ptr[base + lane + 224]));
+        sum += d * ((float)sc[sc_idx] * (float)q0 * __half2float(x_ptr[base + lane]) +
+                    (float)sc[sc_idx + 2] * (float)q1 * __half2float(x_ptr[base + lane + 32]) +
+                    (float)sc[sc_idx + 4] * (float)q2 * __half2float(x_ptr[base + lane + 64]) +
+                    (float)sc[sc_idx + 6] * (float)q3 * __half2float(x_ptr[base + lane + 96]) +
+                    (float)sc[sc_idx + 8] * (float)q4 * __half2float(x_ptr[base + lane + 128]) +
+                    (float)sc[sc_idx + 10] * (float)q5 * __half2float(x_ptr[base + lane + 160]) +
+                    (float)sc[sc_idx + 12] * (float)q6 * __half2float(x_ptr[base + lane + 192]) +
+                    (float)sc[sc_idx + 14] * (float)q7 * __half2float(x_ptr[base + lane + 224]));
     }
 
     sum = warp_reduce_sum(sum);
 
-    if (lane == 0) y[expert_slot * rows + row] = __float2half(sum);
+    if (lane == 0)
+        y[expert_slot * rows + row] = __float2half(sum);
 }
 
-void gemv_q6k_moe_gate_up_fused(
-        const void* gate_weights, const void* up_weights,
-        const int32_t* expert_indices, const half* x,
-        half* y_gate, half* y_up,
-        int rows, int K,
-        size_t gate_stride_bytes, size_t up_stride_bytes,
-        int x_stride, int top_k, cudaStream_t stream) {
+void gemv_q6k_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
+                                const int32_t* expert_indices, const half* x, half* y_gate, half* y_up,
+                                int rows, int K, size_t gate_stride_bytes, size_t up_stride_bytes,
+                                int x_stride, int top_k, cudaStream_t stream) {
     const int blocks_per_expert = gemv_blocks(rows);
     dim3 grid(top_k * blocks_per_expert, 2);
     gemv_q6k_moe_gate_up_fused_kernel<<<grid, kGemvThreads, 0, stream>>>(
-        static_cast<const uint8_t*>(gate_weights),
-        static_cast<const uint8_t*>(up_weights),
-        expert_indices, x, y_gate, y_up, rows, K,
-        gate_stride_bytes, up_stride_bytes, x_stride, blocks_per_expert);
+        static_cast<const uint8_t*>(gate_weights), static_cast<const uint8_t*>(up_weights), expert_indices, x,
+        y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes, x_stride, blocks_per_expert);
 }
 
-__global__ void gemv_q8_0_moe_gate_up_fused_kernel(
-        const uint8_t* __restrict__ gate_weights,
-        const uint8_t* __restrict__ up_weights,
-        const int32_t* __restrict__ expert_indices,
-        const half* __restrict__ x,
-        half* __restrict__ y_gate,
-        half* __restrict__ y_up,
-        int rows, int K,
-        size_t gate_stride_bytes,
-        size_t up_stride_bytes,
-        int x_stride,
-        int blocks_per_expert) {
+__global__ void gemv_q8_0_moe_gate_up_fused_kernel(const uint8_t* __restrict__ gate_weights,
+                                                   const uint8_t* __restrict__ up_weights,
+                                                   const int32_t* __restrict__ expert_indices,
+                                                   const half* __restrict__ x, half* __restrict__ y_gate,
+                                                   half* __restrict__ y_up, int rows, int K,
+                                                   size_t gate_stride_bytes, size_t up_stride_bytes,
+                                                   int x_stride, int blocks_per_expert) {
     const int warps_per_block = blockDim.x / 32;
     const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
+    const int lane = threadIdx.x % 32;
 
     const int expert_slot = blockIdx.x / blocks_per_expert;
     const int local_block = blockIdx.x % blocks_per_expert;
     const int row = local_block * warps_per_block + warp_id;
 
-    if (row >= rows) return;
+    if (row >= rows)
+        return;
 
     const bool is_up = (blockIdx.y == 1);
     const uint8_t* packed = is_up ? up_weights : gate_weights;
@@ -1590,51 +1529,44 @@ __global__ void gemv_q8_0_moe_gate_up_fused_kernel(
 
     sum = warp_reduce_sum(sum);
 
-    if (lane == 0) y[expert_slot * rows + row] = __float2half(sum);
+    if (lane == 0)
+        y[expert_slot * rows + row] = __float2half(sum);
 }
 
-void gemv_q8_0_moe_gate_up_fused(
-        const void* gate_weights, const void* up_weights,
-        const int32_t* expert_indices, const half* x,
-        half* y_gate, half* y_up,
-        int rows, int K,
-        size_t gate_stride_bytes, size_t up_stride_bytes,
-        int x_stride, int top_k, cudaStream_t stream) {
+void gemv_q8_0_moe_gate_up_fused(const void* gate_weights, const void* up_weights,
+                                 const int32_t* expert_indices, const half* x, half* y_gate, half* y_up,
+                                 int rows, int K, size_t gate_stride_bytes, size_t up_stride_bytes,
+                                 int x_stride, int top_k, cudaStream_t stream) {
     const int blocks_per_expert = gemv_blocks(rows);
     dim3 grid(top_k * blocks_per_expert, 2);
     gemv_q8_0_moe_gate_up_fused_kernel<<<grid, kGemvThreads, 0, stream>>>(
-        static_cast<const uint8_t*>(gate_weights),
-        static_cast<const uint8_t*>(up_weights),
-        expert_indices, x, y_gate, y_up, rows, K,
-        gate_stride_bytes, up_stride_bytes, x_stride, blocks_per_expert);
+        static_cast<const uint8_t*>(gate_weights), static_cast<const uint8_t*>(up_weights), expert_indices, x,
+        y_gate, y_up, rows, K, gate_stride_bytes, up_stride_bytes, x_stride, blocks_per_expert);
 }
-
 
 // ---------------------------------------------------------------------------
 // FP8 E4M3 GEMV
 // ---------------------------------------------------------------------------
 
-void gemv_fp8(const Tensor& A, const Tensor& x, Tensor& y,
-              float scale, cudaStream_t stream) {
+void gemv_fp8(const Tensor& A, const Tensor& x, Tensor& y, float scale, cudaStream_t stream) {
     const int M = (int)A.shape[0];
     const int K = (int)A.shape[1];
 
-    gemv_fp8_e4m3_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(
-        static_cast<const uint8_t*>(A.data),
-        static_cast<const half*>(x.data),
-        static_cast<half*>(y.data),
-        M, K, scale);
+    gemv_fp8_e4m3_kernel<<<gemv_blocks(M), kGemvThreads, 0, stream>>>(static_cast<const uint8_t*>(A.data),
+                                                                      static_cast<const half*>(x.data),
+                                                                      static_cast<half*>(y.data), M, K,
+                                                                      scale);
 }
 
 // ---------------------------------------------------------------------------
 // Batched K/V projection via cublasGemmStridedBatchedEx
 // ---------------------------------------------------------------------------
 
-void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv,
-                     Tensor& k_out, Tensor& v_out, cudaStream_t stream) {
-    int M = static_cast<int>(input.shape[0]);       // n_tokens
-    int K = static_cast<int>(input.shape[1]);       // d_model
-    int N = static_cast<int>(k_out.shape[1]);       // nkv * hd
+void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv, Tensor& k_out, Tensor& v_out,
+                     cudaStream_t stream) {
+    int M = static_cast<int>(input.shape[0]);  // n_tokens
+    int K = static_cast<int>(input.shape[1]);  // d_model
+    int N = static_cast<int>(k_out.shape[1]);  // nkv * hd
 
     cublasHandle_t handle = get_cublas_handle();
     cublasSetStream(handle, stream);
@@ -1649,33 +1581,27 @@ void gemm_kv_batched(const Tensor& input, const Tensor& weight_kv,
     long long weight_stride = static_cast<long long>(N) * K;  // stride between wk and wv in weight_kv
     long long output_stride = static_cast<long long>(M) * N;  // stride between k_out and v_out
 
-    cublasStatus_t st = cublasGemmStridedBatchedEx(
-        handle,
-        CUBLAS_OP_T, CUBLAS_OP_N,
-        N, M, K,                                    // cuBLAS m, n, k
-        &alpha,
-        weight_kv.data, dt, K,                      // A (weight), lda=K
-        weight_stride,                               // strideA: offset to wv
-        input.data, dt, K,                           // B (input), ldb=K
-        0,                                           // strideB: 0 (same input for both)
-        &beta,
-        k_out.data, dt, N,                           // C (output), ldc=N
-        output_stride,                               // strideC: offset to v_out
-        2,                                           // batch_count = 2 (K and V)
-        CUBLAS_COMPUTE_32F,
-        kGemmAlgo);
+    cublasStatus_t st = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, N, M,
+                                                   K,                              // cuBLAS m, n, k
+                                                   &alpha, weight_kv.data, dt, K,  // A (weight), lda=K
+                                                   weight_stride,                  // strideA: offset to wv
+                                                   input.data, dt, K,              // B (input), ldb=K
+                                                   0,  // strideB: 0 (same input for both)
+                                                   &beta, k_out.data, dt, N,  // C (output), ldc=N
+                                                   output_stride,             // strideC: offset to v_out
+                                                   2,                         // batch_count = 2 (K and V)
+                                                   CUBLAS_COMPUTE_32F, kGemmAlgo);
 
     if (st != CUBLAS_STATUS_SUCCESS) {
-        fprintf(stderr, "imp::gemm_kv_batched: cublasGemmStridedBatchedEx failed (status %d)\n",
-                (int)st);
+        fprintf(stderr, "imp::gemm_kv_batched: cublasGemmStridedBatchedEx failed (status %d)\n", (int)st);
     }
 }
 
-void gemm_pair_batched(const Tensor& input, const Tensor& weight_fused,
-                       Tensor& out1, Tensor& out2, cudaStream_t stream) {
-    int M = static_cast<int>(input.shape[0]);       // n_tokens
-    int K = static_cast<int>(input.shape[1]);       // d_model
-    int N = static_cast<int>(out1.shape[1]);        // d_ff (or nkv*hd)
+void gemm_pair_batched(const Tensor& input, const Tensor& weight_fused, Tensor& out1, Tensor& out2,
+                       cudaStream_t stream) {
+    int M = static_cast<int>(input.shape[0]);  // n_tokens
+    int K = static_cast<int>(input.shape[1]);  // d_model
+    int N = static_cast<int>(out1.shape[1]);   // d_ff (or nkv*hd)
 
     cublasHandle_t handle = get_cublas_handle();
     cublasSetStream(handle, stream);
@@ -1685,31 +1611,17 @@ void gemm_pair_batched(const Tensor& input, const Tensor& weight_fused,
 
     long long weight_stride = static_cast<long long>(N) * K;
     // Compute actual byte offset between out1 and out2, then convert to element offset
-    long long output_stride = (static_cast<const char*>(out2.data) -
-                               static_cast<const char*>(out1.data)) /
+    long long output_stride = (static_cast<const char*>(out2.data) - static_cast<const char*>(out1.data)) /
                               dtype_size(input.qtype);
 
-    cublasStatus_t st = cublasGemmStridedBatchedEx(
-        handle,
-        CUBLAS_OP_T, CUBLAS_OP_N,
-        N, M, K,
-        &alpha,
-        weight_fused.data, dt, K,
-        weight_stride,
-        input.data, dt, K,
-        0,
-        &beta,
-        out1.data, dt, N,
-        output_stride,
-        2,
-        CUBLAS_COMPUTE_32F,
-        kGemmAlgo);
+    cublasStatus_t st = cublasGemmStridedBatchedEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, N, M, K, &alpha,
+                                                   weight_fused.data, dt, K, weight_stride, input.data, dt, K,
+                                                   0, &beta, out1.data, dt, N, output_stride, 2,
+                                                   CUBLAS_COMPUTE_32F, kGemmAlgo);
 
     if (st != CUBLAS_STATUS_SUCCESS) {
-        fprintf(stderr, "imp::gemm_pair_batched: cublasGemmStridedBatchedEx failed (status %d)\n",
-                (int)st);
+        fprintf(stderr, "imp::gemm_pair_batched: cublasGemmStridedBatchedEx failed (status %d)\n", (int)st);
     }
 }
 
-
-} // namespace imp
+}  // namespace imp

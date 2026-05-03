@@ -6,9 +6,12 @@ namespace imp {
 
 void MoEWorkspace::free(VRAMAllocator* alloc) {
     auto vfree = [alloc](void*& p) {
-        if (!p) return;
-        if (alloc) alloc->free(p);
-        else IMP_CUDA_CHECK_LOG(cudaFree(p));
+        if (!p)
+            return;
+        if (alloc)
+            alloc->free(p);
+        else
+            IMP_CUDA_CHECK_LOG(cudaFree(p));
         p = nullptr;
     };
 
@@ -51,4 +54,4 @@ void MoEWorkspace::free(VRAMAllocator* alloc) {
     }
 }
 
-} // namespace imp
+}  // namespace imp

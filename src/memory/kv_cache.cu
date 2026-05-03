@@ -31,29 +31,27 @@ namespace imp {
 //   Total = n_layers * max_blocks * block_bytes_  (1x, not 2x)
 // ---------------------------------------------------------------------------
 
-KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype,
-                 int max_blocks, int block_size, VRAMAllocator* alloc, int sketch_dim,
-                 bool use_mxfp4)
-    : n_layers_(n_layers)
-    , n_kv_heads_(n_kv_heads)
-    , head_dim_(head_dim)
-    , max_blocks_(max_blocks)
-    , block_size_(block_size)
-    , sketch_dim_(sketch_dim)
-    , use_mxfp4_(use_mxfp4)
-    , dtype_(dtype)
-    , alloc_(alloc)
-    , block_bytes_((dtype == QType::INT4 || dtype == QType::TURBOQUANT
-                    || dtype == QType::TURBOQUANT_LITE)
-                   ? (static_cast<size_t>(block_size_) * n_kv_heads * head_dim / 2)
-                   : (static_cast<size_t>(block_size_) * n_kv_heads * head_dim *
-                      dtype_size(dtype))) {
-
+KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype, int max_blocks, int block_size,
+                 VRAMAllocator* alloc, int sketch_dim, bool use_mxfp4)
+    : n_layers_(n_layers),
+      n_kv_heads_(n_kv_heads),
+      head_dim_(head_dim),
+      max_blocks_(max_blocks),
+      block_size_(block_size),
+      sketch_dim_(sketch_dim),
+      use_mxfp4_(use_mxfp4),
+      dtype_(dtype),
+      alloc_(alloc),
+      block_bytes_((dtype == QType::INT4 || dtype == QType::TURBOQUANT || dtype == QType::TURBOQUANT_LITE)
+                       ? (static_cast<size_t>(block_size_) * n_kv_heads * head_dim / 2)
+                       : (static_cast<size_t>(block_size_) * n_kv_heads * head_dim * dtype_size(dtype))) {
     bool lite = (dtype == QType::TURBOQUANT_LITE);
 
     // Resolve sketch_dim default: head_dim for TURBOQUANT, 0 for non-TQ modes
-    if (dtype == QType::TURBOQUANT && sketch_dim_ <= 0) sketch_dim_ = head_dim;
-    if (dtype == QType::TURBOQUANT_LITE && sketch_dim_ <= 0) sketch_dim_ = 2 * head_dim;
+    if (dtype == QType::TURBOQUANT && sketch_dim_ <= 0)
+        sketch_dim_ = head_dim;
+    if (dtype == QType::TURBOQUANT_LITE && sketch_dim_ <= 0)
+        sketch_dim_ = 2 * head_dim;
 
     // Allocate contiguous GPU pool
     // TURBOQUANT_LITE: V-only (1x), all others: K+V (2x)
@@ -63,12 +61,12 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype,
         pool_ = alloc_->allocate(total, "kv_cache");
     } else {
         cudaError_t err = cudaMalloc(&pool_, total);
-        if (err != cudaSuccess) pool_ = nullptr;
+        if (err != cudaSuccess)
+            pool_ = nullptr;
     }
     if (!pool_) {
         char msg[256];
-        std::snprintf(msg, sizeof(msg),
-                      "KVCache: cudaMalloc failed for %.2f MiB (out of memory)",
+        std::snprintf(msg, sizeof(msg), "KVCache: cudaMalloc failed for %.2f MiB (out of memory)",
                       static_cast<double>(total) / (1024.0 * 1024.0));
         throw std::runtime_error(msg);
     }
@@ -78,8 +76,8 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype,
 
     // Allocate separate scale buffer for INT8/INT4/TURBOQUANT/TURBOQUANT_LITE KV cache
     // For TURBOQUANT_LITE: K scales = FP16 norms, V scales = INT4 per-head scales
-    if (dtype == QType::INT8 || dtype == QType::INT4
-        || dtype == QType::TURBOQUANT || dtype == QType::TURBOQUANT_LITE) {
+    if (dtype == QType::INT8 || dtype == QType::INT4 || dtype == QType::TURBOQUANT ||
+        dtype == QType::TURBOQUANT_LITE) {
         scale_block_bytes_ = static_cast<size_t>(block_size_) * n_kv_heads * sizeof(half);
         // Always 2x: K scales region + V scales region (even for TURBOQUANT_LITE)
         size_t scale_total = static_cast<size_t>(n_layers_) * max_blocks_ * 2 * scale_block_bytes_;
@@ -87,16 +85,18 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype,
             scale_pool_ = alloc_->allocate(scale_total, "kv_cache_scales");
         } else {
             cudaError_t serr = cudaMalloc(&scale_pool_, scale_total);
-            if (serr != cudaSuccess) scale_pool_ = nullptr;
+            if (serr != cudaSuccess)
+                scale_pool_ = nullptr;
         }
         if (!scale_pool_) {
-            if (alloc_) alloc_->free(pool_); else IMP_CUDA_CHECK_LOG(cudaFree(pool_));
+            if (alloc_)
+                alloc_->free(pool_);
+            else
+                IMP_CUDA_CHECK_LOG(cudaFree(pool_));
             pool_ = nullptr;
             char msg[256];
-            std::snprintf(msg, sizeof(msg),
-                          "KVCache: allocation failed for %s scale pool %.2f MiB",
-                          dtype_name(dtype),
-                          static_cast<double>(scale_total) / (1024.0 * 1024.0));
+            std::snprintf(msg, sizeof(msg), "KVCache: allocation failed for %s scale pool %.2f MiB",
+                          dtype_name(dtype), static_cast<double>(scale_total) / (1024.0 * 1024.0));
             throw std::runtime_error(msg);
         }
         IMP_CUDA_CHECK_LOG(cudaMemset(scale_pool_, 0, scale_total));
@@ -111,24 +111,31 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype,
             sketch_pool_ = alloc_->allocate(sketch_total, "kv_cache_sketches");
         } else {
             cudaError_t serr = cudaMalloc(&sketch_pool_, sketch_total);
-            if (serr != cudaSuccess) sketch_pool_ = nullptr;
+            if (serr != cudaSuccess)
+                sketch_pool_ = nullptr;
         }
         if (!sketch_pool_) {
-            if (scale_pool_) { if (alloc_) alloc_->free(scale_pool_); else IMP_CUDA_CHECK_LOG(cudaFree(scale_pool_)); scale_pool_ = nullptr; }
-            if (alloc_) alloc_->free(pool_); else IMP_CUDA_CHECK_LOG(cudaFree(pool_));
+            if (scale_pool_) {
+                if (alloc_)
+                    alloc_->free(scale_pool_);
+                else
+                    IMP_CUDA_CHECK_LOG(cudaFree(scale_pool_));
+                scale_pool_ = nullptr;
+            }
+            if (alloc_)
+                alloc_->free(pool_);
+            else
+                IMP_CUDA_CHECK_LOG(cudaFree(pool_));
             pool_ = nullptr;
             char msg[256];
-            std::snprintf(msg, sizeof(msg),
-                          "KVCache: allocation failed for %s sketch pool %.2f MiB",
-                          dtype_name(dtype),
-                          static_cast<double>(sketch_total) / (1024.0 * 1024.0));
+            std::snprintf(msg, sizeof(msg), "KVCache: allocation failed for %s sketch pool %.2f MiB",
+                          dtype_name(dtype), static_cast<double>(sketch_total) / (1024.0 * 1024.0));
             throw std::runtime_error(msg);
         }
         IMP_CUDA_CHECK_LOG(cudaMemset(sketch_pool_, 0, sketch_total));
 
         IMP_LOG_INFO("KVCache: %s sketch_dim=%d, sketch pool %.2f MiB (%d layers, %d blocks)",
-                     dtype_name(dtype), sketch_dim_,
-                     static_cast<double>(sketch_total) / (1024.0 * 1024.0),
+                     dtype_name(dtype), sketch_dim_, static_cast<double>(sketch_total) / (1024.0 * 1024.0),
                      n_layers_, max_blocks_);
     }
 
@@ -143,19 +150,21 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype,
             mscale_pool_ = alloc_->allocate(mscale_total, "kv_cache_mscales");
         } else {
             cudaError_t merr = cudaMalloc(&mscale_pool_, mscale_total);
-            if (merr != cudaSuccess) mscale_pool_ = nullptr;
+            if (merr != cudaSuccess)
+                mscale_pool_ = nullptr;
         }
         if (!mscale_pool_) {
-            IMP_LOG_WARN("KVCache: MXFP4 micro-scale pool allocation failed (%.2f KiB), "
-                         "falling back to uniform INT4 quantization",
-                         static_cast<double>(mscale_total) / 1024.0);
+            IMP_LOG_WARN(
+                "KVCache: MXFP4 micro-scale pool allocation failed (%.2f KiB), "
+                "falling back to uniform INT4 quantization",
+                static_cast<double>(mscale_total) / 1024.0);
             use_mxfp4_ = false;
         } else {
             IMP_CUDA_CHECK_LOG(cudaMemset(mscale_pool_, 0, mscale_total));
-            IMP_LOG_INFO("KVCache: MXFP4 micro-scales enabled for K directions "
-                         "(%d groups/head, %.1f KiB)",
-                         n_groups_per_head,
-                         static_cast<double>(mscale_total) / 1024.0);
+            IMP_LOG_INFO(
+                "KVCache: MXFP4 micro-scales enabled for K directions "
+                "(%d groups/head, %.1f KiB)",
+                n_groups_per_head, static_cast<double>(mscale_total) / 1024.0);
         }
     }
 
@@ -170,27 +179,18 @@ KVCache::KVCache(int n_layers, int n_kv_heads, int head_dim, QType dtype,
 // ---------------------------------------------------------------------------
 // Per-layer shape constructor (Gemma 4 dual attention geometry)
 // ---------------------------------------------------------------------------
-KVCache::KVCache(int n_layers,
-                 const std::vector<int>& n_kv_heads_per_layer,
-                 const std::vector<int>& head_dim_per_layer,
-                 QType dtype,
-                 int max_blocks, int block_size,
+KVCache::KVCache(int n_layers, const std::vector<int>& n_kv_heads_per_layer,
+                 const std::vector<int>& head_dim_per_layer, QType dtype, int max_blocks, int block_size,
                  VRAMAllocator* alloc)
-    : n_layers_(n_layers)
-    , max_blocks_(max_blocks)
-    , block_size_(block_size)
-    , dtype_(dtype)
-    , alloc_(alloc)
-{
+    : n_layers_(n_layers), max_blocks_(max_blocks), block_size_(block_size), dtype_(dtype), alloc_(alloc) {
     // Only FP16, BF16, FP8, INT8, INT4 supported for per-layer variant.
     // (TurboQuant / sketches / mscales aren't per-layer aware yet.)
     if (dtype == QType::TURBOQUANT || dtype == QType::TURBOQUANT_LITE) {
         throw std::runtime_error("KVCache per-layer shape: TurboQuant variants not supported");
     }
 
-    size_t elem_size = (dtype == QType::INT4)
-        ? 0  // INT4 uses /2 below
-        : dtype_size(dtype);
+    size_t elem_size = (dtype == QType::INT4) ? 0  // INT4 uses /2 below
+                                              : dtype_size(dtype);
 
     // Compute per-layer block bytes and offsets.
     layer_block_bytes_.resize(n_layers_);
@@ -200,7 +200,7 @@ KVCache::KVCache(int n_layers,
     int max_nkv = 0, max_hd = 0;
     for (int l = 0; l < n_layers_; l++) {
         int nkv = (l < (int)n_kv_heads_per_layer.size()) ? n_kv_heads_per_layer[l] : 0;
-        int hd  = (l < (int)head_dim_per_layer.size()) ? head_dim_per_layer[l] : 0;
+        int hd = (l < (int)head_dim_per_layer.size()) ? head_dim_per_layer[l] : 0;
         if (nkv <= 0 || hd <= 0) {
             // Layer has no attention (e.g. hybrid SSM layer). Still reserve 0 bytes.
             layer_block_bytes_[l] = 0;
@@ -209,11 +209,10 @@ KVCache::KVCache(int n_layers,
             continue;
         }
         max_nkv = std::max(max_nkv, nkv);
-        max_hd  = std::max(max_hd, hd);
+        max_hd = std::max(max_hd, hd);
 
-        size_t bb = (dtype == QType::INT4)
-            ? (static_cast<size_t>(block_size_) * nkv * hd / 2)
-            : (static_cast<size_t>(block_size_) * nkv * hd * elem_size);
+        size_t bb = (dtype == QType::INT4) ? (static_cast<size_t>(block_size_) * nkv * hd / 2)
+                                           : (static_cast<size_t>(block_size_) * nkv * hd * elem_size);
         layer_block_bytes_[l] = bb;
 
         // Layout: K region then V region for this layer.
@@ -226,22 +225,21 @@ KVCache::KVCache(int n_layers,
 
     // Populate scalar fallback fields with max values (for external queries)
     n_kv_heads_ = max_nkv;
-    head_dim_   = max_hd;
-    block_bytes_ = (dtype == QType::INT4)
-        ? (static_cast<size_t>(block_size_) * max_nkv * max_hd / 2)
-        : (static_cast<size_t>(block_size_) * max_nkv * max_hd * elem_size);
+    head_dim_ = max_hd;
+    block_bytes_ = (dtype == QType::INT4) ? (static_cast<size_t>(block_size_) * max_nkv * max_hd / 2)
+                                          : (static_cast<size_t>(block_size_) * max_nkv * max_hd * elem_size);
 
     // Allocate single contiguous pool
     if (alloc_) {
         pool_ = alloc_->allocate(total, "kv_cache");
     } else {
         cudaError_t err = cudaMalloc(&pool_, total);
-        if (err != cudaSuccess) pool_ = nullptr;
+        if (err != cudaSuccess)
+            pool_ = nullptr;
     }
     if (!pool_) {
         char msg[256];
-        std::snprintf(msg, sizeof(msg),
-                      "KVCache(per-layer): cudaMalloc failed for %.2f MiB",
+        std::snprintf(msg, sizeof(msg), "KVCache(per-layer): cudaMalloc failed for %.2f MiB",
                       static_cast<double>(total) / (1024.0 * 1024.0));
         throw std::runtime_error(msg);
     }
@@ -259,25 +257,37 @@ KVCache::KVCache(int n_layers,
         free_list_.push_back(i);
     }
 
-    IMP_LOG_INFO("KVCache (per-layer): %zu layers, pool %.2f MiB, max nkv=%d, max hd=%d",
-                 (size_t)n_layers_, total / (1024.0 * 1024.0), max_nkv, max_hd);
+    IMP_LOG_INFO("KVCache (per-layer): %zu layers, pool %.2f MiB, max nkv=%d, max hd=%d", (size_t)n_layers_,
+                 total / (1024.0 * 1024.0), max_nkv, max_hd);
 }
 
 KVCache::~KVCache() {
     if (mscale_pool_) {
-        if (alloc_) alloc_->free(mscale_pool_); else IMP_CUDA_CHECK_LOG(cudaFree(mscale_pool_));
+        if (alloc_)
+            alloc_->free(mscale_pool_);
+        else
+            IMP_CUDA_CHECK_LOG(cudaFree(mscale_pool_));
         mscale_pool_ = nullptr;
     }
     if (sketch_pool_) {
-        if (alloc_) alloc_->free(sketch_pool_); else IMP_CUDA_CHECK_LOG(cudaFree(sketch_pool_));
+        if (alloc_)
+            alloc_->free(sketch_pool_);
+        else
+            IMP_CUDA_CHECK_LOG(cudaFree(sketch_pool_));
         sketch_pool_ = nullptr;
     }
     if (scale_pool_) {
-        if (alloc_) alloc_->free(scale_pool_); else IMP_CUDA_CHECK_LOG(cudaFree(scale_pool_));
+        if (alloc_)
+            alloc_->free(scale_pool_);
+        else
+            IMP_CUDA_CHECK_LOG(cudaFree(scale_pool_));
         scale_pool_ = nullptr;
     }
     if (pool_) {
-        if (alloc_) alloc_->free(pool_); else IMP_CUDA_CHECK_LOG(cudaFree(pool_));
+        if (alloc_)
+            alloc_->free(pool_);
+        else
+            IMP_CUDA_CHECK_LOG(cudaFree(pool_));
         pool_ = nullptr;
     }
 }
@@ -304,20 +314,23 @@ int KVCache::allocate_block() {
         // Allocations during replay are the smoking gun for Hypothesis H1
         // (KV-block boundary crossed mid-replay with stale block_tables).
         if (p == graph_diag::Phase::REPLAY) {
-            IMP_LOG_ERROR("[graph_diag:kv_alloc] allocate_block id=%d free_left=%zu "
-                          "phase=REPLAY  <-- H1 smoking gun",
-                          block_id, free_list_.size());
+            IMP_LOG_ERROR(
+                "[graph_diag:kv_alloc] allocate_block id=%d free_left=%zu "
+                "phase=REPLAY  <-- H1 smoking gun",
+                block_id, free_list_.size());
         } else {
-            IMP_LOG_INFO("[graph_diag:kv_alloc] allocate_block id=%d free_left=%zu phase=%s",
-                         block_id, free_list_.size(), graph_diag::phase_name(p));
+            IMP_LOG_INFO("[graph_diag:kv_alloc] allocate_block id=%d free_left=%zu phase=%s", block_id,
+                         free_list_.size(), graph_diag::phase_name(p));
         }
     }
     return block_id;
 }
 
 void KVCache::free_block(int block_id) {
-    if (block_id < 0 || block_id >= max_blocks_) return;
-    if (ref_counts_[block_id] <= 0) return;
+    if (block_id < 0 || block_id >= max_blocks_)
+        return;
+    if (ref_counts_[block_id] <= 0)
+        return;
 
     --ref_counts_[block_id];
     if (ref_counts_[block_id] == 0) {
@@ -330,12 +343,14 @@ void KVCache::free_block(int block_id) {
 // ---------------------------------------------------------------------------
 
 int KVCache::ref_count(int block_id) const {
-    if (block_id < 0 || block_id >= max_blocks_) return 0;
+    if (block_id < 0 || block_id >= max_blocks_)
+        return 0;
     return ref_counts_[block_id];
 }
 
 void KVCache::inc_ref(int block_id) {
-    if (block_id < 0 || block_id >= max_blocks_) return;
+    if (block_id < 0 || block_id >= max_blocks_)
+        return;
     ++ref_counts_[block_id];
 }
 
@@ -345,48 +360,48 @@ void KVCache::inc_ref(int block_id) {
 
 void* KVCache::k_ptr(int layer, int block_id) {
     // TURBOQUANT_LITE: no K directions in pool, K is represented by sketches only
-    if (dtype_ == QType::TURBOQUANT_LITE) return nullptr;
+    if (dtype_ == QType::TURBOQUANT_LITE)
+        return nullptr;
 
 #ifdef IMP_DEBUG
     if (layer < 0 || layer >= n_layers_ || block_id < 0 || block_id >= max_blocks_) {
-        IMP_LOG_ERROR("KV cache k_ptr bounds violation: layer=%d/%d, block=%d/%d",
-                      layer, n_layers_, block_id, max_blocks_);
+        IMP_LOG_ERROR("KV cache k_ptr bounds violation: layer=%d/%d, block=%d/%d", layer, n_layers_, block_id,
+                      max_blocks_);
     }
 #endif
     // Per-layer shape path: use precomputed per-layer offsets and block bytes.
     if (!layer_block_bytes_.empty()) {
-        size_t offset = layer_k_offset_[layer] +
-                        static_cast<size_t>(block_id) * layer_block_bytes_[layer];
+        size_t offset = layer_k_offset_[layer] + static_cast<size_t>(block_id) * layer_block_bytes_[layer];
         return static_cast<char*>(pool_) + offset;
     }
     // K blocks: [layer * 2 * max_blocks + block_id] * block_bytes
-    size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ +
-                     static_cast<size_t>(block_id)) * block_bytes_;
+    size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ + static_cast<size_t>(block_id)) *
+                    block_bytes_;
     return static_cast<char*>(pool_) + offset;
 }
 
 void* KVCache::v_ptr(int layer, int block_id) {
 #ifdef IMP_DEBUG
     if (layer < 0 || layer >= n_layers_ || block_id < 0 || block_id >= max_blocks_) {
-        IMP_LOG_ERROR("KV cache v_ptr bounds violation: layer=%d/%d, block=%d/%d",
-                      layer, n_layers_, block_id, max_blocks_);
+        IMP_LOG_ERROR("KV cache v_ptr bounds violation: layer=%d/%d, block=%d/%d", layer, n_layers_, block_id,
+                      max_blocks_);
     }
 #endif
     if (dtype_ == QType::TURBOQUANT_LITE) {
         // V-only pool: [layer * max_blocks + block_id] * block_bytes
-        size_t offset = (static_cast<size_t>(layer) * max_blocks_ +
-                         static_cast<size_t>(block_id)) * block_bytes_;
+        size_t offset = (static_cast<size_t>(layer) * max_blocks_ + static_cast<size_t>(block_id)) *
+                        block_bytes_;
         return static_cast<char*>(pool_) + offset;
     }
     // Per-layer shape path
     if (!layer_block_bytes_.empty()) {
-        size_t offset = layer_v_offset_[layer] +
-                        static_cast<size_t>(block_id) * layer_block_bytes_[layer];
+        size_t offset = layer_v_offset_[layer] + static_cast<size_t>(block_id) * layer_block_bytes_[layer];
         return static_cast<char*>(pool_) + offset;
     }
     // Standard K+V pool: V blocks follow K blocks per layer
-    size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ +
-                     max_blocks_ + static_cast<size_t>(block_id)) * block_bytes_;
+    size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ + max_blocks_ +
+                     static_cast<size_t>(block_id)) *
+                    block_bytes_;
     return static_cast<char*>(pool_) + offset;
 }
 
@@ -394,115 +409,100 @@ void* KVCache::v_ptr(int layer, int block_id) {
 // Capacity queries
 // ---------------------------------------------------------------------------
 
-int KVCache::num_free_blocks() const {
-    return static_cast<int>(free_list_.size());
-}
+int KVCache::num_free_blocks() const { return static_cast<int>(free_list_.size()); }
 
-int KVCache::total_blocks() const {
-    return max_blocks_;
-}
+int KVCache::total_blocks() const { return max_blocks_; }
 
 // ---------------------------------------------------------------------------
 // Accessors
 // ---------------------------------------------------------------------------
 
-size_t KVCache::block_bytes() const {
-    return block_bytes_;
-}
+size_t KVCache::block_bytes() const { return block_bytes_; }
 
-int KVCache::n_layers() const {
-    return n_layers_;
-}
+int KVCache::n_layers() const { return n_layers_; }
 
-int KVCache::n_kv_heads() const {
-    return n_kv_heads_;
-}
+int KVCache::n_kv_heads() const { return n_kv_heads_; }
 
-int KVCache::head_dim() const {
-    return head_dim_;
-}
+int KVCache::head_dim() const { return head_dim_; }
 
-QType KVCache::qtype() const {
-    return dtype_;
-}
+QType KVCache::qtype() const { return dtype_; }
 
 // ---------------------------------------------------------------------------
 // Scale pointer computation (same layout for all quantized modes)
 // ---------------------------------------------------------------------------
 
 void* KVCache::k_scale_ptr(int layer, int block_id) {
-    if (!scale_pool_) return nullptr;
+    if (!scale_pool_)
+        return nullptr;
 #ifdef IMP_DEBUG
     if (layer < 0 || layer >= n_layers_ || block_id < 0 || block_id >= max_blocks_) {
-        IMP_LOG_ERROR("KV cache k_scale_ptr bounds violation: layer=%d/%d, block=%d/%d",
-                      layer, n_layers_, block_id, max_blocks_);
+        IMP_LOG_ERROR("KV cache k_scale_ptr bounds violation: layer=%d/%d, block=%d/%d", layer, n_layers_,
+                      block_id, max_blocks_);
     }
 #endif
     // Scale pool always uses 2x layout (K scales region + V scales region)
-    size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ +
-                     static_cast<size_t>(block_id)) * scale_block_bytes_;
+    size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ + static_cast<size_t>(block_id)) *
+                    scale_block_bytes_;
     return static_cast<char*>(scale_pool_) + offset;
 }
 
 void* KVCache::v_scale_ptr(int layer, int block_id) {
-    if (!scale_pool_) return nullptr;
+    if (!scale_pool_)
+        return nullptr;
 #ifdef IMP_DEBUG
     if (layer < 0 || layer >= n_layers_ || block_id < 0 || block_id >= max_blocks_) {
-        IMP_LOG_ERROR("KV cache v_scale_ptr bounds violation: layer=%d/%d, block=%d/%d",
-                      layer, n_layers_, block_id, max_blocks_);
+        IMP_LOG_ERROR("KV cache v_scale_ptr bounds violation: layer=%d/%d, block=%d/%d", layer, n_layers_,
+                      block_id, max_blocks_);
     }
 #endif
-    size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ +
-                     max_blocks_ + static_cast<size_t>(block_id)) * scale_block_bytes_;
+    size_t offset = (static_cast<size_t>(layer) * 2 * max_blocks_ + max_blocks_ +
+                     static_cast<size_t>(block_id)) *
+                    scale_block_bytes_;
     return static_cast<char*>(scale_pool_) + offset;
 }
 
-size_t KVCache::scale_block_bytes() const {
-    return scale_block_bytes_;
-}
+size_t KVCache::scale_block_bytes() const { return scale_block_bytes_; }
 
 // ---------------------------------------------------------------------------
 // TurboQuant / TurboQuant Lite QJL sketch pointer computation
 // ---------------------------------------------------------------------------
 
 void* KVCache::k_sketch_ptr(int layer, int block_id) {
-    if (!sketch_pool_) return nullptr;
+    if (!sketch_pool_)
+        return nullptr;
 #ifdef IMP_DEBUG
     if (layer < 0 || layer >= n_layers_ || block_id < 0 || block_id >= max_blocks_) {
-        IMP_LOG_ERROR("KV cache k_sketch_ptr bounds violation: layer=%d/%d, block=%d/%d",
-                      layer, n_layers_, block_id, max_blocks_);
+        IMP_LOG_ERROR("KV cache k_sketch_ptr bounds violation: layer=%d/%d, block=%d/%d", layer, n_layers_,
+                      block_id, max_blocks_);
     }
 #endif
     // Sketch pool layout: [layer, block_id] * sketch_block_bytes_ (K only, no V sketches)
-    size_t offset = (static_cast<size_t>(layer) * max_blocks_ +
-                     static_cast<size_t>(block_id)) * sketch_block_bytes_;
+    size_t offset = (static_cast<size_t>(layer) * max_blocks_ + static_cast<size_t>(block_id)) *
+                    sketch_block_bytes_;
     return static_cast<char*>(sketch_pool_) + offset;
 }
 
-size_t KVCache::sketch_block_bytes() const {
-    return sketch_block_bytes_;
-}
+size_t KVCache::sketch_block_bytes() const { return sketch_block_bytes_; }
 
 // ---------------------------------------------------------------------------
 // TurboQuant MXFP4 micro-scale pointer computation
 // ---------------------------------------------------------------------------
 
 void* KVCache::k_mscale_ptr(int layer, int block_id) {
-    if (!mscale_pool_) return nullptr;
+    if (!mscale_pool_)
+        return nullptr;
 #ifdef IMP_DEBUG
     if (layer < 0 || layer >= n_layers_ || block_id < 0 || block_id >= max_blocks_) {
-        IMP_LOG_ERROR("KV cache k_mscale_ptr bounds violation: layer=%d/%d, block=%d/%d",
-                      layer, n_layers_, block_id, max_blocks_);
+        IMP_LOG_ERROR("KV cache k_mscale_ptr bounds violation: layer=%d/%d, block=%d/%d", layer, n_layers_,
+                      block_id, max_blocks_);
     }
 #endif
     // Same indexing as sketch pool: [layer, block_id] * mscale_block_bytes_ (K only)
-    size_t offset = (static_cast<size_t>(layer) * max_blocks_ +
-                     static_cast<size_t>(block_id)) * mscale_block_bytes_;
+    size_t offset = (static_cast<size_t>(layer) * max_blocks_ + static_cast<size_t>(block_id)) *
+                    mscale_block_bytes_;
     return static_cast<char*>(mscale_pool_) + offset;
 }
 
-size_t KVCache::mscale_block_bytes() const {
-    return mscale_block_bytes_;
-}
+size_t KVCache::mscale_block_bytes() const { return mscale_block_bytes_; }
 
-} // namespace imp
+}  // namespace imp

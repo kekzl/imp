@@ -15,13 +15,13 @@ namespace {
 // ---------------------------------------------------------------------------
 // Helper: create a GPU tensor from host float data, with optional FP16 conversion
 // ---------------------------------------------------------------------------
-Tensor make_gpu_tensor(const float* host_data, QType dtype,
-                       std::initializer_list<int64_t> shape_list) {
+Tensor make_gpu_tensor(const float* host_data, QType dtype, std::initializer_list<int64_t> shape_list) {
     Tensor t;
     t.qtype = dtype;
-    t.ndim  = static_cast<int>(shape_list.size());
+    t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
-    for (auto s : shape_list) t.shape[i++] = s;
+    for (auto s : shape_list)
+        t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
@@ -43,9 +43,10 @@ Tensor make_gpu_tensor(const float* host_data, QType dtype,
 Tensor alloc_gpu_tensor(QType dtype, std::initializer_list<int64_t> shape_list) {
     Tensor t;
     t.qtype = dtype;
-    t.ndim  = static_cast<int>(shape_list.size());
+    t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
-    for (auto s : shape_list) t.shape[i++] = s;
+    for (auto s : shape_list)
+        t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
@@ -84,8 +85,7 @@ void free_gpu_tensor(Tensor& t) {
 //   out[r][c] = (x[r][c] / rms) * weight[c]
 //   rms = sqrt( mean(x[r][:]^2) + eps )
 // ---------------------------------------------------------------------------
-void cpu_rmsnorm(const float* x, const float* weight, float* out,
-                 int rows, int cols, float eps) {
+void cpu_rmsnorm(const float* x, const float* weight, float* out, int rows, int cols, float eps) {
     for (int r = 0; r < rows; r++) {
         float ss = 0.0f;
         for (int c = 0; c < cols; c++) {
@@ -105,9 +105,8 @@ void cpu_rmsnorm(const float* x, const float* weight, float* out,
 //   out[r][c] = (tmp[r][c] / rms) * weight[c]
 //   rms = sqrt( mean(tmp[r][:]^2) + eps )
 // ---------------------------------------------------------------------------
-void cpu_rmsnorm_residual(const float* x, const float* residual,
-                          const float* weight, float* out,
-                          int rows, int cols, float eps) {
+void cpu_rmsnorm_residual(const float* x, const float* residual, const float* weight, float* out, int rows,
+                          int cols, float eps) {
     for (int r = 0; r < rows; r++) {
         float ss = 0.0f;
         for (int c = 0; c < cols; c++) {
@@ -132,7 +131,7 @@ TEST(LayerNormTest, RMSNormBasic) {
 
     // Input data
     std::vector<float> h_x = {
-        1.0f, 2.0f, 3.0f, 4.0f,   // row 0
+        1.0f, 2.0f,  3.0f, 4.0f,  // row 0
         0.5f, -1.0f, 1.5f, -2.0f  // row 1
     };
     std::vector<float> h_w = {1.0f, 0.5f, 2.0f, 0.1f};
@@ -142,8 +141,8 @@ TEST(LayerNormTest, RMSNormBasic) {
     cpu_rmsnorm(h_x.data(), h_w.data(), h_ref.data(), rows, cols, eps);
 
     // GPU computation
-    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
-    Tensor d_w   = make_gpu_tensor(h_w.data(), QType::F32, {cols});
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
+    Tensor d_w = make_gpu_tensor(h_w.data(), QType::F32, {cols});
     Tensor d_out = alloc_gpu_tensor(QType::F32, {rows, cols});
 
     rmsnorm(d_x, d_w, d_out, eps, nullptr);
@@ -153,8 +152,7 @@ TEST(LayerNormTest, RMSNormBasic) {
     auto h_out = read_gpu_tensor(d_out);
     for (int i = 0; i < rows * cols; i++) {
         EXPECT_NEAR(h_out[i], h_ref[i], 1e-4f)
-            << "Mismatch at index " << i
-            << ": got " << h_out[i] << ", expected " << h_ref[i];
+            << "Mismatch at index " << i << ": got " << h_out[i] << ", expected " << h_ref[i];
     }
 
     free_gpu_tensor(d_x);
@@ -170,27 +168,20 @@ TEST(LayerNormTest, RMSNormResidual) {
     constexpr int cols = 4;
     constexpr float eps = 1e-5f;
 
-    std::vector<float> h_x = {
-        1.0f,  2.0f,  3.0f,  4.0f,
-        0.5f, -1.0f,  1.5f, -2.0f
-    };
-    std::vector<float> h_residual = {
-        0.1f, -0.2f, 0.3f, -0.4f,
-        1.0f,  2.0f, 0.0f,  0.5f
-    };
+    std::vector<float> h_x = {1.0f, 2.0f, 3.0f, 4.0f, 0.5f, -1.0f, 1.5f, -2.0f};
+    std::vector<float> h_residual = {0.1f, -0.2f, 0.3f, -0.4f, 1.0f, 2.0f, 0.0f, 0.5f};
     std::vector<float> h_w = {1.0f, 0.5f, 2.0f, 0.1f};
 
     // CPU reference
     std::vector<float> h_ref(rows * cols);
-    cpu_rmsnorm_residual(h_x.data(), h_residual.data(), h_w.data(),
-                         h_ref.data(), rows, cols, eps);
+    cpu_rmsnorm_residual(h_x.data(), h_residual.data(), h_w.data(), h_ref.data(), rows, cols, eps);
 
     // GPU computation
     // Note: the kernel modifies x in-place (x <- x + residual), so we use
     // a separate copy for x.
-    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
     Tensor d_res = make_gpu_tensor(h_residual.data(), QType::F32, {rows, cols});
-    Tensor d_w   = make_gpu_tensor(h_w.data(), QType::F32, {cols});
+    Tensor d_w = make_gpu_tensor(h_w.data(), QType::F32, {cols});
     Tensor d_out = alloc_gpu_tensor(QType::F32, {rows, cols});
 
     rmsnorm_residual(d_x, d_res, d_w, d_out, eps, nullptr);
@@ -200,16 +191,14 @@ TEST(LayerNormTest, RMSNormResidual) {
     auto h_out = read_gpu_tensor(d_out);
     for (int i = 0; i < rows * cols; i++) {
         EXPECT_NEAR(h_out[i], h_ref[i], 1e-4f)
-            << "Mismatch at index " << i
-            << ": got " << h_out[i] << ", expected " << h_ref[i];
+            << "Mismatch at index " << i << ": got " << h_out[i] << ", expected " << h_ref[i];
     }
 
     // Also verify that x was updated to x + residual
     auto h_x_after = read_gpu_tensor(d_x);
     for (int i = 0; i < rows * cols; i++) {
         float expected_sum = h_x[i] + h_residual[i];
-        EXPECT_NEAR(h_x_after[i], expected_sum, 1e-5f)
-            << "x not updated in-place at index " << i;
+        EXPECT_NEAR(h_x_after[i], expected_sum, 1e-5f) << "x not updated in-place at index " << i;
     }
 
     free_gpu_tensor(d_x);
@@ -248,8 +237,8 @@ TEST(LayerNormTest, RMSNormFP16) {
     cpu_rmsnorm(h_x_fp16.data(), h_w_fp16.data(), h_ref.data(), rows, cols, eps);
 
     // GPU computation in FP16
-    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F16, {rows, cols});
-    Tensor d_w   = make_gpu_tensor(h_w.data(), QType::F16, {cols});
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F16, {rows, cols});
+    Tensor d_w = make_gpu_tensor(h_w.data(), QType::F16, {cols});
     Tensor d_out = alloc_gpu_tensor(QType::F16, {rows, cols});
 
     rmsnorm(d_x, d_w, d_out, eps, nullptr);
@@ -258,8 +247,7 @@ TEST(LayerNormTest, RMSNormFP16) {
     auto h_out = read_gpu_tensor(d_out);
     for (int i = 0; i < rows * cols; i++) {
         EXPECT_NEAR(h_out[i], h_ref[i], 1e-2f)
-            << "FP16 mismatch at index " << i
-            << ": got " << h_out[i] << ", expected " << h_ref[i];
+            << "FP16 mismatch at index " << i << ": got " << h_out[i] << ", expected " << h_ref[i];
     }
 
     free_gpu_tensor(d_x);
@@ -291,8 +279,8 @@ TEST(LayerNormTest, RMSNormLargeRow) {
     cpu_rmsnorm(h_x.data(), h_w.data(), h_ref.data(), rows, cols, eps);
 
     // GPU
-    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
-    Tensor d_w   = make_gpu_tensor(h_w.data(), QType::F32, {cols});
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
+    Tensor d_w = make_gpu_tensor(h_w.data(), QType::F32, {cols});
     Tensor d_out = alloc_gpu_tensor(QType::F32, {rows, cols});
 
     rmsnorm(d_x, d_w, d_out, eps, nullptr);
@@ -301,8 +289,7 @@ TEST(LayerNormTest, RMSNormLargeRow) {
     auto h_out = read_gpu_tensor(d_out);
     for (int i = 0; i < rows * cols; i++) {
         EXPECT_NEAR(h_out[i], h_ref[i], 1e-4f)
-            << "LargeRow mismatch at index " << i
-            << " (row " << (i / cols) << ", col " << (i % cols) << ")"
+            << "LargeRow mismatch at index " << i << " (row " << (i / cols) << ", col " << (i % cols) << ")"
             << ": got " << h_out[i] << ", expected " << h_ref[i];
     }
 
@@ -339,20 +326,19 @@ TEST(LayerNormTest, EpsilonEffect) {
             break;
         }
     }
-    ASSERT_TRUE(refs_differ)
-        << "CPU references for different eps values should differ on near-zero input";
+    ASSERT_TRUE(refs_differ) << "CPU references for different eps values should differ on near-zero input";
 
     // GPU with small eps
-    Tensor d_x_s   = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
-    Tensor d_w_s   = make_gpu_tensor(h_w.data(), QType::F32, {cols});
+    Tensor d_x_s = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
+    Tensor d_w_s = make_gpu_tensor(h_w.data(), QType::F32, {cols});
     Tensor d_out_s = alloc_gpu_tensor(QType::F32, {rows, cols});
     rmsnorm(d_x_s, d_w_s, d_out_s, eps_small, nullptr);
     cudaDeviceSynchronize();
     auto h_out_small = read_gpu_tensor(d_out_s);
 
     // GPU with large eps
-    Tensor d_x_l   = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
-    Tensor d_w_l   = make_gpu_tensor(h_w.data(), QType::F32, {cols});
+    Tensor d_x_l = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
+    Tensor d_w_l = make_gpu_tensor(h_w.data(), QType::F32, {cols});
     Tensor d_out_l = alloc_gpu_tensor(QType::F32, {rows, cols});
     rmsnorm(d_x_l, d_w_l, d_out_l, eps_large, nullptr);
     cudaDeviceSynchronize();
@@ -360,10 +346,8 @@ TEST(LayerNormTest, EpsilonEffect) {
 
     // Verify each GPU run matches its CPU reference
     for (int i = 0; i < rows * cols; i++) {
-        EXPECT_NEAR(h_out_small[i], ref_small[i], 1e-4f)
-            << "Small-eps mismatch at index " << i;
-        EXPECT_NEAR(h_out_large[i], ref_large[i], 1e-4f)
-            << "Large-eps mismatch at index " << i;
+        EXPECT_NEAR(h_out_small[i], ref_small[i], 1e-4f) << "Small-eps mismatch at index " << i;
+        EXPECT_NEAR(h_out_large[i], ref_large[i], 1e-4f) << "Large-eps mismatch at index " << i;
     }
 
     // Verify the two GPU outputs differ from each other
@@ -374,8 +358,7 @@ TEST(LayerNormTest, EpsilonEffect) {
             break;
         }
     }
-    EXPECT_TRUE(gpu_outputs_differ)
-        << "GPU outputs with different eps should differ for near-zero input";
+    EXPECT_TRUE(gpu_outputs_differ) << "GPU outputs with different eps should differ for near-zero input";
 
     // With large eps and near-zero input, the output magnitude should be small
     // because rms ~ sqrt(eps) is large relative to the input values.
@@ -392,5 +375,5 @@ TEST(LayerNormTest, EpsilonEffect) {
     free_gpu_tensor(d_out_l);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

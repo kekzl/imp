@@ -32,9 +32,8 @@ __device__ __forceinline__ uint32_t cvt_e4m3x2_to_f16x2(uint16_t e4m3x2) {
 }
 
 // Convenience: convert 4 packed FP8 (uint32_t) → 4 floats via 2 paired cvt ops.
-__device__ __forceinline__ void cvt_e4m3x4_to_f32x4(
-    uint32_t packed_fp8, float& f0, float& f1, float& f2, float& f3)
-{
+__device__ __forceinline__ void cvt_e4m3x4_to_f32x4(uint32_t packed_fp8, float& f0, float& f1, float& f2,
+                                                    float& f3) {
     uint32_t f16x2_lo = cvt_e4m3x2_to_f16x2(static_cast<uint16_t>(packed_fp8 & 0xFFFF));
     uint32_t f16x2_hi = cvt_e4m3x2_to_f16x2(static_cast<uint16_t>((packed_fp8 >> 16) & 0xFFFF));
     const half2* h2_lo = reinterpret_cast<const half2*>(&f16x2_lo);
@@ -65,4 +64,4 @@ __device__ __forceinline__ uint16_t cvt_f16x2_to_e2m1x2(uint32_t f16x2) {
 }
 #endif
 
-} // namespace imp
+}  // namespace imp

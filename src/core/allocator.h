@@ -29,10 +29,10 @@ public:
     bool on_device() const noexcept { return on_device_; }
 
 private:
-    void* base_      = nullptr;
+    void* base_ = nullptr;
     size_t capacity_ = 0;
-    size_t offset_   = 0;
-    bool on_device_  = false;
+    size_t offset_ = 0;
+    bool on_device_ = false;
     mutable std::mutex mu_;
 };
 
@@ -58,12 +58,12 @@ public:
     bool on_device() const noexcept { return on_device_; }
 
 private:
-    void* base_         = nullptr;
-    size_t block_size_  = 0;
-    size_t num_blocks_  = 0;
-    bool on_device_     = false;
+    void* base_ = nullptr;
+    size_t block_size_ = 0;
+    size_t num_blocks_ = 0;
+    bool on_device_ = false;
     std::vector<void*> free_list_;
     mutable std::mutex mu_;
 };
 
-} // namespace imp
+}  // namespace imp

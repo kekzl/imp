@@ -29,23 +29,51 @@ static Tokenizer make_spm_tokenizer() {
     //  29-30: ▁-prefixed full words (▁Hello, ▁world)
     //  31-286: byte fallback <0x00>..<0xFF>
     std::vector<std::string> tokens = {
-        "<unk>", "<s>", "</s>",
+        "<unk>",
+        "<s>",
+        "</s>",
         "\xe2\x96\x81",  // ▁ (bare space)
-        "H", "e", "l", "o", "w", "r", "d", "t", "h", "c", "a",  // 4-14
-        "He", "ll", "or", "ld", "th", "ca",                       // 15-20
-        "llo", "wor",                                               // 21-22
-        "\xe2\x96\x81" "th", "\xe2\x96\x81" "ca",                 // 23-24 (▁th, ▁ca)
-        "Hello", "world",                                           // 25-26
-        "\xe2\x96\x81" "the", "\xe2\x96\x81" "cat",               // 27-28 (▁the, ▁cat)
-        "\xe2\x96\x81" "Hello", "\xe2\x96\x81" "world",           // 29-30 (▁Hello, ▁world)
+        "H",
+        "e",
+        "l",
+        "o",
+        "w",
+        "r",
+        "d",
+        "t",
+        "h",
+        "c",
+        "a",  // 4-14
+        "He",
+        "ll",
+        "or",
+        "ld",
+        "th",
+        "ca",  // 15-20
+        "llo",
+        "wor",  // 21-22
+        "\xe2\x96\x81"
+        "th",
+        "\xe2\x96\x81"
+        "ca",  // 23-24 (▁th, ▁ca)
+        "Hello",
+        "world",  // 25-26
+        "\xe2\x96\x81"
+        "the",
+        "\xe2\x96\x81"
+        "cat",  // 27-28 (▁the, ▁cat)
+        "\xe2\x96\x81"
+        "Hello",
+        "\xe2\x96\x81"
+        "world",  // 29-30 (▁Hello, ▁world)
     };
     // Scores: higher (less negative) = merge first. The BPE algorithm picks the
     // highest-scoring pair at each step, so longer tokens need higher scores.
     std::vector<float> scores = {
-        0.0f, 0.0f, 0.0f,
-        -8.0f,  // ▁
-        -8.0f, -8.0f, -8.0f, -8.0f, -8.0f, -8.0f, -8.0f, -8.0f, -8.0f, -8.0f, -8.0f, // chars
-        -6.0f, -6.0f, -6.0f, -6.0f, -6.0f, -6.0f, // pair merges
+        0.0f,  0.0f,  0.0f,
+        -8.0f,                                                                        // ▁
+        -8.0f, -8.0f, -8.0f, -8.0f, -8.0f, -8.0f, -8.0f, -8.0f, -8.0f, -8.0f, -8.0f,  // chars
+        -6.0f, -6.0f, -6.0f, -6.0f, -6.0f, -6.0f,                                     // pair merges
         -5.0f, -5.0f,  // triple merges (llo, wor)
         -5.0f, -5.0f,  // ▁th, ▁ca
         -4.0f, -4.0f,  // Hello, world
@@ -75,9 +103,12 @@ static Tokenizer make_gpt2_tokenizer() {
     std::vector<float> scores;
 
     // Token 0: <unk>, 1: <s> (BOS), 2: </s> (EOS)
-    tokens.push_back("<unk>"); scores.push_back(0.0f);
-    tokens.push_back("<s>");   scores.push_back(0.0f);
-    tokens.push_back("</s>"); scores.push_back(0.0f);
+    tokens.push_back("<unk>");
+    scores.push_back(0.0f);
+    tokens.push_back("<s>");
+    scores.push_back(0.0f);
+    tokens.push_back("</s>");
+    scores.push_back(0.0f);
 
     auto codepoint_to_utf8 = [](uint32_t cp) -> std::string {
         std::string s;
@@ -96,32 +127,19 @@ static Tokenizer make_gpt2_tokenizer() {
 
     // GPT2 byte-to-codepoint table (matches tokenizer.cpp)
     static const uint32_t BYTE_TO_CP[256] = {
-        256, 257, 258, 259, 260, 261, 262, 263, 264, 265,
-        266, 267, 268, 269, 270, 271, 272, 273, 274, 275,
-        276, 277, 278, 279, 280, 281, 282, 283, 284, 285,
-        286, 287, 288,
-        33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
-        48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62,
-        63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77,
-        78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92,
-        93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
-        107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
-        120, 121, 122, 123, 124, 125, 126,
-        289, 290, 291, 292, 293, 294, 295, 296, 297, 298,
-        299, 300, 301, 302, 303, 304, 305, 306, 307, 308,
-        309, 310, 311, 312, 313, 314, 315, 316, 317, 318,
-        319, 320, 321, 322,
-        161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172,
-        323,
-        174, 175, 176, 177, 178, 179, 180, 181, 182, 183,
-        184, 185, 186, 187, 188, 189, 190, 191, 192, 193,
-        194, 195, 196, 197, 198, 199, 200, 201, 202, 203,
-        204, 205, 206, 207, 208, 209, 210, 211, 212, 213,
-        214, 215, 216, 217, 218, 219, 220, 221, 222, 223,
-        224, 225, 226, 227, 228, 229, 230, 231, 232, 233,
-        234, 235, 236, 237, 238, 239, 240, 241, 242, 243,
-        244, 245, 246, 247, 248, 249, 250, 251, 252, 253,
-        254, 255,
+        256, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271, 272, 273, 274, 275,
+        276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 33,  34,  35,  36,  37,  38,  39,
+        40,  41,  42,  43,  44,  45,  46,  47,  48,  49,  50,  51,  52,  53,  54,  55,  56,  57,  58,  59,
+        60,  61,  62,  63,  64,  65,  66,  67,  68,  69,  70,  71,  72,  73,  74,  75,  76,  77,  78,  79,
+        80,  81,  82,  83,  84,  85,  86,  87,  88,  89,  90,  91,  92,  93,  94,  95,  96,  97,  98,  99,
+        100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+        120, 121, 122, 123, 124, 125, 126, 289, 290, 291, 292, 293, 294, 295, 296, 297, 298, 299, 300, 301,
+        302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312, 313, 314, 315, 316, 317, 318, 319, 320, 321,
+        322, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 323, 174, 175, 176, 177, 178, 179,
+        180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199,
+        200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219,
+        220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238, 239,
+        240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255,
     };
 
     // Tokens 3-258: individual byte tokens in GPT2 encoding
@@ -143,17 +161,24 @@ static Tokenizer make_gpt2_tokenizer() {
     std::string Hello_tok = He_tok + llo_tok;
 
     int He_id = static_cast<int>(tokens.size());
-    tokens.push_back(He_tok); scores.push_back(0.0f);
+    tokens.push_back(He_tok);
+    scores.push_back(0.0f);
 
     int ll_id = static_cast<int>(tokens.size());
-    tokens.push_back(ll_tok); scores.push_back(0.0f);
+    tokens.push_back(ll_tok);
+    scores.push_back(0.0f);
 
     int llo_id = static_cast<int>(tokens.size());
-    tokens.push_back(llo_tok); scores.push_back(0.0f);
+    tokens.push_back(llo_tok);
+    scores.push_back(0.0f);
 
     int Hello_id = static_cast<int>(tokens.size());
-    tokens.push_back(Hello_tok); scores.push_back(0.0f);
-    (void)He_id; (void)ll_id; (void)llo_id; (void)Hello_id;
+    tokens.push_back(Hello_tok);
+    scores.push_back(0.0f);
+    (void)He_id;
+    (void)ll_id;
+    (void)llo_id;
+    (void)Hello_id;
 
     Tokenizer tok;
     tok.load_vocab(tokens, scores, /*bos_id=*/1, /*eos_id=*/2);
@@ -430,21 +455,32 @@ TEST(TokenizerDispatchTest, MaxLength) {
 //   18-273: byte fallback <0x00>..<0xFF>
 static Tokenizer make_gemma4_tokenizer() {
     std::vector<std::string> tokens = {
-        "<unk>", "<s>", "</s>",
+        "<unk>",
+        "<s>",
+        "</s>",
         "\xe2\x96\x81",  // ▁ (id 3)
-        "L", "i", "n", "u", "s",   // 4-8
-        " ", "\t", "\n",           // 9-11 (raw whitespace, rarely used)
+        "L",
+        "i",
+        "n",
+        "u",
+        "s",  // 4-8
+        " ",
+        "\t",
+        "\n",  // 9-11 (raw whitespace, rarely used)
     };
     std::vector<float> scores(tokens.size(), 0.0f);
 
     int Li_id = static_cast<int>(tokens.size());
-    tokens.push_back("Li"); scores.push_back(0.0f);
+    tokens.push_back("Li");
+    scores.push_back(0.0f);
 
     int Lin_id = static_cast<int>(tokens.size());
-    tokens.push_back("Lin"); scores.push_back(0.0f);
+    tokens.push_back("Lin");
+    scores.push_back(0.0f);
 
     int us_id = static_cast<int>(tokens.size());
-    tokens.push_back("us"); scores.push_back(0.0f);
+    tokens.push_back("us");
+    scores.push_back(0.0f);
     (void)Li_id;
 
     // Byte fallback <0x00>..<0xFF>
@@ -466,13 +502,15 @@ static Tokenizer make_gemma4_tokenizer() {
     // "Lin u" → "Linu" is an intermediate merge; "Linu" is NOT in vocab.
     // A correct BPE implementation (like llama.cpp) skips this merge.
     std::vector<std::string> merges = {
-        "L i",     // rank 0 → Li   (in vocab)
-        "Li n",    // rank 1 → Lin  (in vocab)
-        "Lin u",   // rank 2 → Linu (NOT in vocab — trigger for bug)
-        "u s",     // rank 3 → us   (in vocab)
+        "L i",    // rank 0 → Li   (in vocab)
+        "Li n",   // rank 1 → Lin  (in vocab)
+        "Lin u",  // rank 2 → Linu (NOT in vocab — trigger for bug)
+        "u s",    // rank 3 → us   (in vocab)
     };
     tok.load_merges(merges);
-    (void)Lin_id; (void)us_id; (void)byte_base;
+    (void)Lin_id;
+    (void)us_id;
+    (void)byte_base;
     return tok;
 }
 
@@ -508,7 +546,7 @@ TEST(TokenizerGemma4Test, TruncatedUTF8AtEndDoesNotCrash) {
     // on a truncated multi-byte sequence, producing a partial codepoint.
     // Ensure encoding a truncated UTF-8 tail terminates cleanly.
     Tokenizer tok = make_gemma4_tokenizer();
-    std::string truncated = "Lin\xe2\x96";   // UTF-8 ▁ missing its 3rd byte
+    std::string truncated = "Lin\xe2\x96";  // UTF-8 ▁ missing its 3rd byte
     auto ids = tok.encode(truncated);
     EXPECT_GT(ids.size(), 0u);
 }
@@ -526,8 +564,7 @@ TEST(TokenizerGemma4Test, DecodeByteFallbackFormsValidUTF8) {
 
     std::vector<int32_t> ids = {
         byte_base + 0xE2, byte_base + 0x96, byte_base + 0x81,  // ▁
-        byte_base + 'L', byte_base + 'i', byte_base + 'n',
-        byte_base + 'u', byte_base + 's',
+        byte_base + 'L',  byte_base + 'i',  byte_base + 'n',  byte_base + 'u', byte_base + 's',
     };
     std::string decoded = tok.decode(ids);
     EXPECT_EQ(decoded, " Linus");
@@ -540,16 +577,16 @@ TEST(TokenizerControlTest, MarkAsControlAllocatesAndSets) {
     // Fixture has no token_types yet → has_token_types() is false.
     EXPECT_FALSE(tok.has_token_types());
 
-    int32_t id_unk = 0;  // <unk> in the fixture
+    int32_t id_unk = 0;                          // <unk> in the fixture
     EXPECT_FALSE(tok.is_control_token(id_unk));  // empty types → false
 
     tok.mark_as_control(id_unk);
-    EXPECT_TRUE(tok.has_token_types());      // lazy alloc
+    EXPECT_TRUE(tok.has_token_types());  // lazy alloc
     EXPECT_TRUE(tok.is_control_token(id_unk));
 
     // Other vocab entries default to NORMAL=1 (not CONTROL).
-    EXPECT_FALSE(tok.is_control_token(4));  // 'H'
-    EXPECT_FALSE(tok.is_control_token(25)); // 'Hello'
+    EXPECT_FALSE(tok.is_control_token(4));   // 'H'
+    EXPECT_FALSE(tok.is_control_token(25));  // 'Hello'
 }
 
 TEST(TokenizerControlTest, MarkAsControlIsIdempotent) {
@@ -561,17 +598,17 @@ TEST(TokenizerControlTest, MarkAsControlIsIdempotent) {
 
 TEST(TokenizerControlTest, MarkAsControlIgnoresInvalidIds) {
     Tokenizer tok = make_spm_tokenizer();
-    tok.mark_as_control(-1);                 // invalid
-    tok.mark_as_control(tok.vocab_size());   // out of range
-    EXPECT_FALSE(tok.has_token_types());     // no allocation triggered
+    tok.mark_as_control(-1);                // invalid
+    tok.mark_as_control(tok.vocab_size());  // out of range
+    EXPECT_FALSE(tok.has_token_types());    // no allocation triggered
 }
 
 TEST(TokenizerControlTest, PreservesExistingTypes) {
     Tokenizer tok = make_spm_tokenizer();
     // Pre-populate with a custom type vector (e.g. simulating GGUF metadata).
     std::vector<int32_t> types(tok.vocab_size(), 1);  // all NORMAL
-    types[1] = 3;  // <s> = CONTROL
-    types[2] = 3;  // </s> = CONTROL
+    types[1] = 3;                                     // <s> = CONTROL
+    types[2] = 3;                                     // </s> = CONTROL
     tok.load_token_types(types);
 
     // Patching a previously-NORMAL token must not clobber the others.
@@ -582,5 +619,5 @@ TEST(TokenizerControlTest, PreservesExistingTypes) {
     EXPECT_FALSE(tok.is_control_token(4));  // 'H' still normal
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

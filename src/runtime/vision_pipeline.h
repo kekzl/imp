@@ -22,16 +22,14 @@ public:
     ~VisionPipeline();
 
     // Initialize vision encoder from mmproj GGUF. Returns false on failure.
-    [[nodiscard]] bool init(const std::string& mmproj_path, int lm_d_model,
-                            Model* model, VRAMAllocator& alloc,
-                            cudaStream_t stream);
+    [[nodiscard]] bool init(const std::string& mmproj_path, int lm_d_model, Model* model,
+                            VRAMAllocator& alloc, cudaStream_t stream);
 
     // Encode an image from file path. Blocks on stream sync.
     [[nodiscard]] bool set_image(const std::string& path, cudaStream_t stream);
 
     // Encode an image from memory buffer. Blocks on stream sync.
-    [[nodiscard]] bool set_image_from_memory(const uint8_t* data, size_t len,
-                                              cudaStream_t stream);
+    [[nodiscard]] bool set_image_from_memory(const uint8_t* data, size_t len, cudaStream_t stream);
 
     void clear_image() { has_input_ = false; }
 
@@ -39,9 +37,7 @@ public:
     bool is_available() const noexcept { return encoder_ != nullptr; }
     bool has_input() const noexcept { return has_input_; }
     half* embeddings() const noexcept { return d_embeddings_; }
-    int num_image_tokens() const noexcept {
-        return model_ ? model_->config.num_image_tokens : 0;
-    }
+    int num_image_tokens() const noexcept { return model_ ? model_->config.num_image_tokens : 0; }
     int32_t soft_token_id() const noexcept { return soft_token_id_; }
     int32_t boi_id() const noexcept { return boi_id_; }
     int32_t eoi_id() const noexcept { return eoi_id_; }
@@ -65,4 +61,4 @@ private:
     bool encode_image(const half* h_pixels, int n_pixels, cudaStream_t stream);
 };
 
-} // namespace imp
+}  // namespace imp

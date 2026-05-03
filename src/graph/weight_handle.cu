@@ -34,15 +34,15 @@ const WeightHandle& WeightRegistry::handle(TensorID id) const {
     return handles_[id];
 }
 
-void WeightRegistry::clear() {
-    handles_.clear();
-}
+void WeightRegistry::clear() { handles_.clear(); }
 
 size_t WeightRegistry::free_owned_storage(VRAMAllocator* alloc) {
-    if (!alloc) return 0;
+    if (!alloc)
+        return 0;
     size_t freed_bytes = 0;
     for (auto& h : handles_) {
-        if (h.owned_bytes == 0) continue;
+        if (h.owned_bytes == 0)
+            continue;
         // Free the primary-tier payload pointer. Tiers with auxiliary buffers
         // (NVFP4 scales, CUTLASS sf, MXFP4 scales) are freed by their native
         // free_nvfp4_result / free_cutlass_nvfp4_weight / etc. helpers in
@@ -66,16 +66,16 @@ size_t WeightRegistry::free_owned_storage(VRAMAllocator* alloc) {
             case StorageTier::Undefined:
                 // Not currently owned by the registry — fall through to
                 // legacy free paths.
-                IMP_LOG_WARN("WeightRegistry::free_owned_storage: handle id=%d "
-                             "kind=%d tier=%d has owned_bytes=%lld but no "
-                             "type-specific free is wired; skipping.",
-                             h.id, static_cast<int>(h.kind),
-                             static_cast<int>(h.primary_tier),
-                             static_cast<long long>(h.owned_bytes));
+                IMP_LOG_WARN(
+                    "WeightRegistry::free_owned_storage: handle id=%d "
+                    "kind=%d tier=%d has owned_bytes=%lld but no "
+                    "type-specific free is wired; skipping.",
+                    h.id, static_cast<int>(h.kind), static_cast<int>(h.primary_tier),
+                    static_cast<long long>(h.owned_bytes));
                 break;
         }
     }
     return freed_bytes;
 }
 
-} // namespace imp
+}  // namespace imp

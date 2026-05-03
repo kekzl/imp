@@ -9,4 +9,4 @@ namespace imp {
 // Returns TensorKind::UNKNOWN if no rule matches.
 TensorKind match_tensor_kind(std::string_view name);
 
-} // namespace imp
+}  // namespace imp

@@ -15,16 +15,15 @@ namespace imp {
 // All members are public for zero-overhead access in the forward pass.
 // ---------------------------------------------------------------------------
 struct MoEWorkspace {
-
     // --- Phase tensors (views into shared_workspace_, set by configure_moe_workspace) ---
     MoeRoutingBuffers routing_buffers;
-    Tensor gate_logits;        // [max_tokens, n_experts] FP32
-    Tensor gathered;           // [max_tokens * top_k, d_model] compute_dtype
-    Tensor expert_gate;        // [max_tokens * top_k, expert_d_ff] compute_dtype
-    Tensor expert_up;          // [max_tokens * top_k, expert_d_ff] compute_dtype
-    Tensor expert_swiglu;      // [max_tokens * top_k, expert_d_ff] compute_dtype
-    Tensor expert_down;        // [max_tokens * top_k, d_model] compute_dtype
-    Tensor scatter_out;        // [max_tokens, d_model] FP32 (scatter output)
+    Tensor gate_logits;    // [max_tokens, n_experts] FP32
+    Tensor gathered;       // [max_tokens * top_k, d_model] compute_dtype
+    Tensor expert_gate;    // [max_tokens * top_k, expert_d_ff] compute_dtype
+    Tensor expert_up;      // [max_tokens * top_k, expert_d_ff] compute_dtype
+    Tensor expert_swiglu;  // [max_tokens * top_k, expert_d_ff] compute_dtype
+    Tensor expert_down;    // [max_tokens * top_k, d_model] compute_dtype
+    Tensor scatter_out;    // [max_tokens, d_model] FP32 (scatter output)
 
     // --- Separately allocated buffers ---
 
@@ -61,11 +60,11 @@ struct MoEWorkspace {
     size_t cutlass3x_packed_size = 0;
     void* cutlass3x_sf = nullptr;
     size_t cutlass3x_sf_size = 0;
-    uint8_t** cutlass3x_sfa_ptrs = nullptr;   // device [ne] uint8_t* array
+    uint8_t** cutlass3x_sfa_ptrs = nullptr;  // device [ne] uint8_t* array
     int cutlass3x_sfa_ptrs_count = 0;
 
     // Free all separately allocated buffers (NOT the phase tensor views).
     void free(VRAMAllocator* alloc);
 };
 
-} // namespace imp
+}  // namespace imp

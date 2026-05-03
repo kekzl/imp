@@ -17,7 +17,8 @@ void GPUBatch::upload(const Batch& batch, cudaStream_t stream) {
     total_tokens = batch.total_tokens;
     max_blocks_per_seq = batch.max_blocks_per_seq;
 
-    if (total_tokens <= 0 || n_sequences <= 0) return;
+    if (total_tokens <= 0 || n_sequences <= 0)
+        return;
 
     // Allocate device memory
     IMP_CUDA_CHECK_LOG(cudaMalloc(&d_token_ids, total_tokens * sizeof(int32_t)));
@@ -33,35 +34,46 @@ void GPUBatch::upload(const Batch& batch, cudaStream_t stream) {
     }
 
     // Async copy
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_ids, batch.token_ids.data(),
-                    total_tokens * sizeof(int32_t),
-                    cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_positions, batch.positions.data(),
-                    total_tokens * sizeof(int),
-                    cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_context_lens, batch.context_lens.data(),
-                    n_sequences * sizeof(int),
-                    cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_ids, batch.token_ids.data(), total_tokens * sizeof(int32_t),
+                                       cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_positions, batch.positions.data(), total_tokens * sizeof(int),
+                                       cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_context_lens, batch.context_lens.data(), n_sequences * sizeof(int),
+                                       cudaMemcpyHostToDevice, stream));
 
     if (d_seq_offsets && !batch.seq_offsets.empty()) {
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_seq_offsets, batch.seq_offsets.data(),
-                        (n_sequences + 1) * sizeof(int),
-                        cudaMemcpyHostToDevice, stream));
+                                           (n_sequences + 1) * sizeof(int), cudaMemcpyHostToDevice, stream));
     }
 
     if (d_block_tables && !batch.block_tables.empty()) {
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_tables, batch.block_tables.data(),
-                        n_sequences * max_blocks_per_seq * sizeof(int),
-                        cudaMemcpyHostToDevice, stream));
+                                           n_sequences * max_blocks_per_seq * sizeof(int),
+                                           cudaMemcpyHostToDevice, stream));
     }
 }
 
 void GPUBatch::free() {
-    if (d_token_ids)   { IMP_CUDA_CHECK_LOG(cudaFree(d_token_ids));   d_token_ids = nullptr; }
-    if (d_positions)   { IMP_CUDA_CHECK_LOG(cudaFree(d_positions));    d_positions = nullptr; }
-    if (d_seq_offsets) { IMP_CUDA_CHECK_LOG(cudaFree(d_seq_offsets));  d_seq_offsets = nullptr; }
-    if (d_block_tables){ IMP_CUDA_CHECK_LOG(cudaFree(d_block_tables)); d_block_tables = nullptr; }
-    if (d_context_lens){ IMP_CUDA_CHECK_LOG(cudaFree(d_context_lens)); d_context_lens = nullptr; }
+    if (d_token_ids) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_token_ids));
+        d_token_ids = nullptr;
+    }
+    if (d_positions) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_positions));
+        d_positions = nullptr;
+    }
+    if (d_seq_offsets) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_seq_offsets));
+        d_seq_offsets = nullptr;
+    }
+    if (d_block_tables) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_block_tables));
+        d_block_tables = nullptr;
+    }
+    if (d_context_lens) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_context_lens));
+        d_context_lens = nullptr;
+    }
     n_sequences = 0;
     total_tokens = 0;
     max_blocks_per_seq = 0;
@@ -86,9 +98,8 @@ void BatchBuilder::reset() {
     batch_.seq_offsets.push_back(0);
 }
 
-void BatchBuilder::add_prefill_sequence(const int32_t* tokens, int n_tokens,
-                                        const int* block_table, int n_blocks,
-                                        int start_pos) {
+void BatchBuilder::add_prefill_sequence(const int32_t* tokens, int n_tokens, const int* block_table,
+                                        int n_blocks, int start_pos) {
     for (int i = 0; i < n_tokens; ++i) {
         batch_.token_ids.push_back(tokens[i]);
         batch_.positions.push_back(start_pos + i);
@@ -102,8 +113,7 @@ void BatchBuilder::add_prefill_sequence(const int32_t* tokens, int n_tokens,
     batch_.seq_offsets.push_back(batch_.total_tokens);
 }
 
-void BatchBuilder::add_decode_sequence(int32_t token, int position,
-                                       const int* block_table, int n_blocks,
+void BatchBuilder::add_decode_sequence(int32_t token, int position, const int* block_table, int n_blocks,
                                        int context_len) {
     batch_.token_ids.push_back(token);
     batch_.positions.push_back(position);
@@ -142,12 +152,9 @@ Batch BatchBuilder::build() {
 // GPUBatchPool -- pre-allocated device memory for stable CUDA Graph pointers
 // ---------------------------------------------------------------------------
 
-GPUBatchPool::~GPUBatchPool() {
-    free_pool();
-}
+GPUBatchPool::~GPUBatchPool() { free_pool(); }
 
-void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq,
-                            VRAMAllocator* alloc) {
+void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq, VRAMAllocator* alloc) {
     free_pool();
     alloc_ = alloc;
 
@@ -159,21 +166,21 @@ void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq,
     // Compute sizes with 256-byte alignment per sub-buffer
     auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
 
-    size_t token_ids_sz   = align256(static_cast<size_t>(max_batch_size) * sizeof(int32_t));
-    size_t positions_sz   = align256(static_cast<size_t>(max_batch_size) * sizeof(int));
+    size_t token_ids_sz = align256(static_cast<size_t>(max_batch_size) * sizeof(int32_t));
+    size_t positions_sz = align256(static_cast<size_t>(max_batch_size) * sizeof(int));
     size_t seq_offsets_sz = align256(static_cast<size_t>(max_batch_size + 1) * sizeof(int));
-    size_t block_tab_sz   = align256(static_cast<size_t>(max_batch_size) * max_blocks_per_seq * sizeof(int));
-    size_t ctx_lens_sz    = align256(static_cast<size_t>(max_batch_size) * sizeof(int));
-    size_t sample_res_sz  = align256(sizeof(int32_t));
+    size_t block_tab_sz = align256(static_cast<size_t>(max_batch_size) * max_blocks_per_seq * sizeof(int));
+    size_t ctx_lens_sz = align256(static_cast<size_t>(max_batch_size) * sizeof(int));
+    size_t sample_res_sz = align256(sizeof(int32_t));
 
-    pool_size_ = token_ids_sz + positions_sz + seq_offsets_sz +
-                 block_tab_sz + ctx_lens_sz + sample_res_sz;
+    pool_size_ = token_ids_sz + positions_sz + seq_offsets_sz + block_tab_sz + ctx_lens_sz + sample_res_sz;
 
     if (alloc_) {
         pool_ = alloc_->allocate(pool_size_, "batch_pool");
     } else {
         cudaError_t err = cudaMalloc(&pool_, pool_size_);
-        if (err != cudaSuccess) pool_ = nullptr;
+        if (err != cudaSuccess)
+            pool_ = nullptr;
     }
     if (!pool_) {
         pool_size_ = 0;
@@ -181,44 +188,48 @@ void GPUBatchPool::allocate(int max_batch_size, int max_blocks_per_seq,
     }
 
     char* ptr = static_cast<char*>(pool_);
-    d_token_ids_    = reinterpret_cast<int32_t*>(ptr); ptr += token_ids_sz;
-    d_positions_    = reinterpret_cast<int*>(ptr);     ptr += positions_sz;
-    d_seq_offsets_  = reinterpret_cast<int*>(ptr);     ptr += seq_offsets_sz;
-    d_block_tables_ = reinterpret_cast<int*>(ptr);     ptr += block_tab_sz;
-    d_context_lens_ = reinterpret_cast<int*>(ptr);     ptr += ctx_lens_sz;
-    d_sample_result_= reinterpret_cast<int32_t*>(ptr); ptr += sample_res_sz;
+    d_token_ids_ = reinterpret_cast<int32_t*>(ptr);
+    ptr += token_ids_sz;
+    d_positions_ = reinterpret_cast<int*>(ptr);
+    ptr += positions_sz;
+    d_seq_offsets_ = reinterpret_cast<int*>(ptr);
+    ptr += seq_offsets_sz;
+    d_block_tables_ = reinterpret_cast<int*>(ptr);
+    ptr += block_tab_sz;
+    d_context_lens_ = reinterpret_cast<int*>(ptr);
+    ptr += ctx_lens_sz;
+    d_sample_result_ = reinterpret_cast<int32_t*>(ptr);
+    ptr += sample_res_sz;
 }
 
 GPUBatch GPUBatchPool::upload_into_pool(const Batch& batch, cudaStream_t stream) {
     GPUBatch gpu;
-    if (!pool_ || batch.n_sequences <= 0) return gpu;
+    if (!pool_ || batch.n_sequences <= 0)
+        return gpu;
 
     gpu.n_sequences = batch.n_sequences;
     gpu.total_tokens = batch.total_tokens;
     gpu.max_blocks_per_seq = batch.max_blocks_per_seq;
 
     // Point to pre-allocated memory (stable addresses)
-    gpu.d_token_ids   = d_token_ids_;
-    gpu.d_positions   = d_positions_;
+    gpu.d_token_ids = d_token_ids_;
+    gpu.d_positions = d_positions_;
     gpu.d_seq_offsets = d_seq_offsets_;
     gpu.d_block_tables = d_block_tables_;
     gpu.d_context_lens = d_context_lens_;
 
     // Async copy data into pool
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_ids_, batch.token_ids.data(),
-                    batch.total_tokens * sizeof(int32_t),
-                    cudaMemcpyHostToDevice, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_positions_, batch.positions.data(),
-                    batch.total_tokens * sizeof(int),
-                    cudaMemcpyHostToDevice, stream));
+                                       batch.total_tokens * sizeof(int32_t), cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_positions_, batch.positions.data(), batch.total_tokens * sizeof(int),
+                                       cudaMemcpyHostToDevice, stream));
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_context_lens_, batch.context_lens.data(),
-                    batch.n_sequences * sizeof(int),
-                    cudaMemcpyHostToDevice, stream));
+                                       batch.n_sequences * sizeof(int), cudaMemcpyHostToDevice, stream));
 
     if (batch.n_sequences > 1 && !batch.seq_offsets.empty()) {
         IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_seq_offsets_, batch.seq_offsets.data(),
-                        (batch.n_sequences + 1) * sizeof(int),
-                        cudaMemcpyHostToDevice, stream));
+                                           (batch.n_sequences + 1) * sizeof(int), cudaMemcpyHostToDevice,
+                                           stream));
     }
 
     if (batch.max_blocks_per_seq > 0 && !batch.block_tables.empty()) {
@@ -227,16 +238,16 @@ GPUBatch GPUBatchPool::upload_into_pool(const Batch& batch, cudaStream_t stream)
         // stable (only new blocks appended). Between requests, the first block ID
         // changes (different physical page), forcing a re-upload.
         int n_blocks = batch.actual_blocks_per_seq > 0
-                     ? batch.actual_blocks_per_seq
-                     : static_cast<int>(batch.block_tables.size()) / batch.n_sequences;
+                           ? batch.actual_blocks_per_seq
+                           : static_cast<int>(batch.block_tables.size()) / batch.n_sequences;
         int first_block = batch.block_tables[0];
         if (batch.n_sequences == 1 && n_blocks == last_upload_n_blocks_ &&
             first_block == last_upload_first_block_) {
             // Skip — block_table content is identical to last upload
         } else {
             IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_block_tables_, batch.block_tables.data(),
-                            batch.n_sequences * batch.max_blocks_per_seq * sizeof(int),
-                            cudaMemcpyHostToDevice, stream));
+                                               batch.n_sequences * batch.max_blocks_per_seq * sizeof(int),
+                                               cudaMemcpyHostToDevice, stream));
             last_upload_n_blocks_ = (batch.n_sequences == 1) ? n_blocks : -1;
             last_upload_first_block_ = (batch.n_sequences == 1) ? first_block : -1;
         }
@@ -247,8 +258,10 @@ GPUBatch GPUBatchPool::upload_into_pool(const Batch& batch, cudaStream_t stream)
 
 void GPUBatchPool::free_pool() {
     if (pool_) {
-        if (alloc_) alloc_->free(pool_);
-        else IMP_CUDA_CHECK_LOG(cudaFree(pool_));
+        if (alloc_)
+            alloc_->free(pool_);
+        else
+            IMP_CUDA_CHECK_LOG(cudaFree(pool_));
         pool_ = nullptr;
     }
     pool_size_ = 0;
@@ -262,4 +275,4 @@ void GPUBatchPool::free_pool() {
     last_upload_first_block_ = -1;
 }
 
-} // namespace imp
+}  // namespace imp

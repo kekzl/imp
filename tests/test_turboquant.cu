@@ -20,11 +20,11 @@ static bool HasCudaDevice() {
     return err == cudaSuccess && count > 0;
 }
 
-#define SKIP_IF_NO_CUDA()                                                     \
-    do {                                                                       \
-        if (!HasCudaDevice()) {                                                \
-            GTEST_SKIP() << "No CUDA device available";                        \
-        }                                                                      \
+#define SKIP_IF_NO_CUDA()                               \
+    do {                                                \
+        if (!HasCudaDevice()) {                         \
+            GTEST_SKIP() << "No CUDA device available"; \
+        }                                               \
     } while (0)
 
 // ============================================================================
@@ -175,16 +175,19 @@ TEST(TurboQuantTest, PolarQuantAccuracy) {
 
     // Generate random K vector
     std::vector<float> k(head_dim);
-    for (auto& v : k) v = dist(rng);
+    for (auto& v : k)
+        v = dist(rng);
 
     // Compute norm
     float norm_sq = 0.0f;
-    for (auto v : k) norm_sq += v * v;
+    for (auto v : k)
+        norm_sq += v * v;
     float norm = std::sqrt(norm_sq);
 
     // Normalize
     std::vector<float> dir(head_dim);
-    for (int i = 0; i < head_dim; i++) dir[i] = k[i] / norm;
+    for (int i = 0; i < head_dim; i++)
+        dir[i] = k[i] / norm;
 
     // Quantize direction to INT4 (uniform [-1,1] → [-7,7], symmetric)
     std::vector<int8_t> q_dir(head_dim);
@@ -215,7 +218,8 @@ TEST(TurboQuantTest, PolarQuantAccuracy) {
 
     // Check dot product preservation with random Q
     std::vector<float> q(head_dim);
-    for (auto& v : q) v = dist(rng);
+    for (auto& v : q)
+        v = dist(rng);
 
     float true_dot = 0.0f;
     float recon_dot = 0.0f;
@@ -244,12 +248,15 @@ TEST(TurboQuantTest, QJLDotProductEstimate) {
 
     // Generate random vectors
     std::vector<float> q(head_dim), k(head_dim);
-    for (auto& v : q) v = dist(rng);
-    for (auto& v : k) v = dist(rng);
+    for (auto& v : q)
+        v = dist(rng);
+    for (auto& v : k)
+        v = dist(rng);
 
     // True dot product
     float true_dot = 0.0f;
-    for (int i = 0; i < head_dim; i++) true_dot += q[i] * k[i];
+    for (int i = 0; i < head_dim; i++)
+        true_dot += q[i] * k[i];
 
     // Compute norms
     float q_norm = 0.0f, k_norm = 0.0f;
@@ -282,13 +289,13 @@ TEST(TurboQuantTest, QJLDotProductEstimate) {
     // XNOR count
     int match_count = 0;
     for (int i = 0; i < sketch_dim; i++) {
-        if (sketch_q[i] == sketch_k[i]) match_count++;
+        if (sketch_q[i] == sketch_k[i])
+            match_count++;
     }
 
     // QJL estimator
-    float qjl_dot = q_norm * k_norm *
-                     static_cast<float>(2 * match_count - sketch_dim) /
-                     static_cast<float>(sketch_dim);
+    float qjl_dot = q_norm * k_norm * static_cast<float>(2 * match_count - sketch_dim) /
+                    static_cast<float>(sketch_dim);
 
     // QJL estimate should be in the right ballpark (within 50% for dim=128)
     // The estimate is unbiased but has variance
@@ -340,8 +347,8 @@ TEST(TurboQuantLiteTest, CacheConstruction) {
     const int block_size = 16;
     const int sketch_dim = 2 * head_dim;  // multiplier = 2
 
-    KVCache tql_cache(n_layers, n_kv_heads, head_dim, QType::TURBOQUANT_LITE,
-                      max_blocks, block_size, nullptr, sketch_dim);
+    KVCache tql_cache(n_layers, n_kv_heads, head_dim, QType::TURBOQUANT_LITE, max_blocks, block_size, nullptr,
+                      sketch_dim);
 
     // Block bytes should match INT4 V (same as standard INT4)
     size_t expected_block_bytes = static_cast<size_t>(block_size) * n_kv_heads * head_dim / 2;
@@ -387,8 +394,8 @@ TEST(TurboQuantLiteTest, VPointerOffsets) {
     const int block_size = 16;
     const int sketch_dim = 2 * head_dim;
 
-    KVCache cache(n_layers, n_kv_heads, head_dim, QType::TURBOQUANT_LITE,
-                  max_blocks, block_size, nullptr, sketch_dim);
+    KVCache cache(n_layers, n_kv_heads, head_dim, QType::TURBOQUANT_LITE, max_blocks, block_size, nullptr,
+                  sketch_dim);
 
     // V pointers should differ between blocks
     void* v0_0 = cache.v_ptr(0, 0);
@@ -425,22 +432,20 @@ TEST(TurboQuantLiteTest, MemorySavings) {
 
     // TQ Lite with mult=2: sketch_dim = 256
     const int sketch_dim_lite = 2 * head_dim;
-    KVCache tql_cache(n_layers, n_kv_heads, head_dim, QType::TURBOQUANT_LITE,
-                      max_blocks, block_size, nullptr, sketch_dim_lite);
+    KVCache tql_cache(n_layers, n_kv_heads, head_dim, QType::TURBOQUANT_LITE, max_blocks, block_size, nullptr,
+                      sketch_dim_lite);
 
     // TQ Lite should use less VRAM than TQ (no INT4 K directions in pool)
     // FP16 total per block: block_bytes * 2 (K+V)
     size_t fp16_per_block = fp16_cache.block_bytes() * 2;
 
     // TQ per block: block_bytes * 2 (K+V INT4) + 2*scale + sketch(head_dim)
-    size_t tq_per_block = tq_cache.block_bytes() * 2
-                          + tq_cache.scale_block_bytes() * 2
-                          + tq_cache.sketch_block_bytes();
+    size_t tq_per_block = tq_cache.block_bytes() * 2 + tq_cache.scale_block_bytes() * 2 +
+                          tq_cache.sketch_block_bytes();
 
     // TQ Lite per block: block_bytes * 1 (V-only INT4) + 2*scale + sketch(2*head_dim)
-    size_t tql_per_block = tql_cache.block_bytes() * 1
-                           + tql_cache.scale_block_bytes() * 2
-                           + tql_cache.sketch_block_bytes();
+    size_t tql_per_block = tql_cache.block_bytes() * 1 + tql_cache.scale_block_bytes() * 2 +
+                           tql_cache.sketch_block_bytes();
 
     // TQ Lite should use less than TQ
     EXPECT_LT(tql_per_block, tq_per_block);
@@ -507,12 +512,15 @@ TEST(TurboQuantLiteTest, QJLAccuracyVsSketchDim) {
 
     // Generate random Q and K
     std::vector<float> q(head_dim), k(head_dim);
-    for (auto& v : q) v = dist(rng);
-    for (auto& v : k) v = dist(rng);
+    for (auto& v : q)
+        v = dist(rng);
+    for (auto& v : k)
+        v = dist(rng);
 
     // True dot product
     float true_dot = 0.0f;
-    for (int i = 0; i < head_dim; i++) true_dot += q[i] * k[i];
+    for (int i = 0; i < head_dim; i++)
+        true_dot += q[i] * k[i];
 
     float q_norm = 0.0f, k_norm = 0.0f;
     for (int i = 0; i < head_dim; i++) {
@@ -548,10 +556,10 @@ TEST(TurboQuantLiteTest, QJLAccuracyVsSketchDim) {
 
             int match_count = 0;
             for (int i = 0; i < sketch_dim; i++)
-                if (sketch_q[i] == sketch_k[i]) match_count++;
+                if (sketch_q[i] == sketch_k[i])
+                    match_count++;
 
-            float qjl_dot = q_norm * k_norm *
-                            static_cast<float>(2 * match_count - sketch_dim) /
+            float qjl_dot = q_norm * k_norm * static_cast<float>(2 * match_count - sketch_dim) /
                             static_cast<float>(sketch_dim);
             total_error += std::abs(true_dot - qjl_dot);
         }
@@ -565,5 +573,5 @@ TEST(TurboQuantLiteTest, QJLAccuracyVsSketchDim) {
     EXPECT_LT(error_3x, error_1x);
 }
 
-} // anonymous namespace
-} // namespace imp
+}  // anonymous namespace
+}  // namespace imp

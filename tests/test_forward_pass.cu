@@ -13,18 +13,18 @@ namespace imp {
 namespace {
 
 using test::DenseTestModel;
-using test::verify_logits_finite;
 using test::read_logits;
+using test::verify_logits_finite;
 
 // ---------------------------------------------------------------------------
 // Helper: run prefill and return logits
 // ---------------------------------------------------------------------------
-static Tensor run_prefill(GraphExecutor& executor, KVCache& cache,
-                          const std::vector<int32_t>& tokens,
+static Tensor run_prefill(GraphExecutor& executor, KVCache& cache, const std::vector<int32_t>& tokens,
                           int max_blocks_per_seq = 1) {
     int n = static_cast<int>(tokens.size());
     std::vector<int> positions(n);
-    for (int i = 0; i < n; i++) positions[i] = i;
+    for (int i = 0; i < n; i++)
+        positions[i] = i;
 
     int32_t* d_tokens;
     int* d_positions;
@@ -34,7 +34,8 @@ static Tensor run_prefill(GraphExecutor& executor, KVCache& cache,
     cudaMemcpy(d_positions, positions.data(), n * sizeof(int), cudaMemcpyHostToDevice);
 
     std::vector<int> h_bt(max_blocks_per_seq);
-    for (int i = 0; i < max_blocks_per_seq; i++) h_bt[i] = i;
+    for (int i = 0; i < max_blocks_per_seq; i++)
+        h_bt[i] = i;
     int* d_bt;
     cudaMalloc(&d_bt, max_blocks_per_seq * sizeof(int));
     cudaMemcpy(d_bt, h_bt.data(), max_blocks_per_seq * sizeof(int), cudaMemcpyHostToDevice);
@@ -70,9 +71,8 @@ static Tensor run_prefill(GraphExecutor& executor, KVCache& cache,
 // ---------------------------------------------------------------------------
 // Helper: run a single decode step and return logits
 // ---------------------------------------------------------------------------
-static Tensor run_decode(GraphExecutor& executor, KVCache& cache,
-                         int32_t token, int position, int context_len,
-                         int max_blocks_per_seq = 1) {
+static Tensor run_decode(GraphExecutor& executor, KVCache& cache, int32_t token, int position,
+                         int context_len, int max_blocks_per_seq = 1) {
     int32_t* d_token;
     int* d_pos;
     cudaMalloc(&d_token, sizeof(int32_t));
@@ -81,7 +81,8 @@ static Tensor run_decode(GraphExecutor& executor, KVCache& cache,
     cudaMemcpy(d_pos, &position, sizeof(int), cudaMemcpyHostToDevice);
 
     std::vector<int> h_bt(max_blocks_per_seq);
-    for (int i = 0; i < max_blocks_per_seq; i++) h_bt[i] = i;
+    for (int i = 0; i < max_blocks_per_seq; i++)
+        h_bt[i] = i;
     int* d_bt;
     cudaMalloc(&d_bt, max_blocks_per_seq * sizeof(int));
     cudaMemcpy(d_bt, h_bt.data(), max_blocks_per_seq * sizeof(int), cudaMemcpyHostToDevice);
@@ -238,14 +239,12 @@ TEST(ForwardPassTest, MultiStepDecode) {
         int position = 4 + step;
         int context_len = 5 + step;
         Tensor logits = run_decode(executor, cache, next_token, position, context_len);
-        ASSERT_EQ(cudaGetLastError(), cudaSuccess)
-            << "Decode step " << step << " failed";
+        ASSERT_EQ(cudaGetLastError(), cudaSuccess) << "Decode step " << step << " failed";
         verify_logits_finite(logits, 256);
 
         // Use argmax for next token (deterministic)
         auto h = read_logits(logits, 256);
-        next_token = static_cast<int32_t>(
-            std::max_element(h.begin(), h.end()) - h.begin());
+        next_token = static_cast<int32_t>(std::max_element(h.begin(), h.end()) - h.begin());
     }
 
     tm.cleanup();
@@ -279,8 +278,8 @@ TEST(ForwardPassTest, DeterministicLogits) {
 
     // Compare bitwise
     for (int i = 0; i < 256; i++) {
-        EXPECT_EQ(h1[i], h2[i]) << "Logit mismatch at index " << i
-            << " (run1=" << h1[i] << ", run2=" << h2[i] << ")";
+        EXPECT_EQ(h1[i], h2[i]) << "Logit mismatch at index " << i << " (run1=" << h1[i] << ", run2=" << h2[i]
+                                << ")";
     }
 
     tm.cleanup();
@@ -302,7 +301,8 @@ TEST(ForwardPassTest, LongSequencePrefill) {
     KVCache cache(1, 4, 32, QType::F16, 8);
 
     std::vector<int32_t> tokens(32);
-    for (int i = 0; i < 32; i++) tokens[i] = (i + 1) % 256;
+    for (int i = 0; i < 32; i++)
+        tokens[i] = (i + 1) % 256;
 
     Tensor logits = run_prefill(executor, cache, tokens, /*max_blocks_per_seq=*/2);
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);
@@ -312,5 +312,5 @@ TEST(ForwardPassTest, LongSequencePrefill) {
     tm.cleanup();
 }
 
-} // anonymous namespace
-} // namespace imp
+}  // anonymous namespace
+}  // namespace imp

@@ -1,7 +1,8 @@
 #pragma once
 #include <string>
 
-namespace imp { namespace test {
+namespace imp {
+namespace test {
 
 // Generate a minimal valid GGUF file for testing.
 // Returns path to temp file (caller must unlink after use).
@@ -11,4 +12,5 @@ namespace imp { namespace test {
 // Tokenizer: minimal BPE with 256 single-byte tokens
 std::string generate_gguf_stub(const std::string& arch = "llama");
 
-}} // namespace imp::test
+}  // namespace test
+}  // namespace imp

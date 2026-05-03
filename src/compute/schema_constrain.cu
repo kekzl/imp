@@ -15,14 +15,18 @@ namespace imp {
 // ---------------------------------------------------------------------------
 
 SchemaConstrainer::~SchemaConstrainer() {
-    if (d_token_categories_) IMP_CUDA_CHECK_LOG(cudaFree(d_token_categories_));
-    if (d_token_allow_) IMP_CUDA_CHECK_LOG(cudaFree(d_token_allow_));
-    if (d_allowed_mask_) IMP_CUDA_CHECK_LOG(cudaFree(d_allowed_mask_));
+    if (d_token_categories_)
+        IMP_CUDA_CHECK_LOG(cudaFree(d_token_categories_));
+    if (d_token_allow_)
+        IMP_CUDA_CHECK_LOG(cudaFree(d_token_allow_));
+    if (d_allowed_mask_)
+        IMP_CUDA_CHECK_LOG(cudaFree(d_allowed_mask_));
 }
 
 bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> schema) {
     schema_ = std::move(schema);
-    if (!schema_) return false;
+    if (!schema_)
+        return false;
 
     vocab_size_ = tok.vocab_size();
 
@@ -40,7 +44,7 @@ bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> s
     // Upload to GPU
     IMP_CUDA_CHECK_LOG(cudaMalloc(&d_token_categories_, vocab_size_ * sizeof(uint16_t)));
     IMP_CUDA_CHECK_LOG(cudaMemcpy(d_token_categories_, token_categories_.data(),
-               vocab_size_ * sizeof(uint16_t), cudaMemcpyHostToDevice));
+                                  vocab_size_ * sizeof(uint16_t), cudaMemcpyHostToDevice));
 
     IMP_CUDA_CHECK_LOG(cudaMalloc(&d_token_allow_, vocab_size_ * sizeof(uint8_t)));
     IMP_CUDA_CHECK_LOG(cudaMalloc(&d_allowed_mask_, sizeof(uint16_t)));
@@ -48,8 +52,8 @@ bool SchemaConstrainer::init(const Tokenizer& tok, std::unique_ptr<SchemaNode> s
     reset();
     initialized_ = true;
 
-    IMP_LOG_INFO("SchemaConstrainer: initialized with %d tokens, schema type=%d",
-                 vocab_size_, static_cast<int>(schema_->type));
+    IMP_LOG_INFO("SchemaConstrainer: initialized with %d tokens, schema type=%d", vocab_size_,
+                 static_cast<int>(schema_->type));
     return true;
 }
 
@@ -75,18 +79,19 @@ void SchemaConstrainer::push_value_frame(const SchemaNode* node) {
 // Property / enum helpers
 // ---------------------------------------------------------------------------
 
-const SchemaNode* SchemaConstrainer::find_property(const SchemaNode* obj,
-                                                     const std::string& key) const {
+const SchemaNode* SchemaConstrainer::find_property(const SchemaNode* obj, const std::string& key) const {
     for (auto& [name, schema] : obj->properties) {
-        if (name == key) return schema.get();
+        if (name == key)
+            return schema.get();
     }
     return nullptr;
 }
 
 bool SchemaConstrainer::is_valid_key_prefix(const SchemaNode* obj, const std::string& prefix,
-                                             const std::set<std::string>& emitted) const {
+                                            const std::set<std::string>& emitted) const {
     for (auto& [name, _] : obj->properties) {
-        if (emitted.count(name)) continue;
+        if (emitted.count(name))
+            continue;
         if (name.size() >= prefix.size() && name.compare(0, prefix.size(), prefix) == 0)
             return true;
     }
@@ -94,7 +99,7 @@ bool SchemaConstrainer::is_valid_key_prefix(const SchemaNode* obj, const std::st
 }
 
 bool SchemaConstrainer::is_valid_enum_prefix(const std::vector<std::string>& values,
-                                              const std::string& prefix) const {
+                                             const std::string& prefix) const {
     for (auto& v : values) {
         if (v.size() >= prefix.size() && v.compare(0, prefix.size(), prefix) == 0)
             return true;
@@ -107,24 +112,44 @@ bool SchemaConstrainer::is_valid_enum_prefix(const std::vector<std::string>& val
 // ---------------------------------------------------------------------------
 
 uint16_t SchemaConstrainer::compute_category_mask() const {
-    if (stack_.empty()) return CAT_WHITESPACE;
+    if (stack_.empty())
+        return CAT_WHITESPACE;
 
     const auto& f = top();
     switch (f.phase) {
         case SchemaPhase::VALUE_START: {
             uint16_t mask = CAT_WHITESPACE;
-            if (!f.node) return mask | CAT_VALUE_START;
+            if (!f.node)
+                return mask | CAT_VALUE_START;
             switch (f.node->type) {
-                case SchemaType::OBJECT:  mask |= CAT_OPEN_BRACE; break;
-                case SchemaType::ARRAY:   mask |= CAT_OPEN_BRACKET; break;
-                case SchemaType::STRING:  mask |= CAT_QUOTE; break;
+                case SchemaType::OBJECT:
+                    mask |= CAT_OPEN_BRACE;
+                    break;
+                case SchemaType::ARRAY:
+                    mask |= CAT_OPEN_BRACKET;
+                    break;
+                case SchemaType::STRING:
+                    mask |= CAT_QUOTE;
+                    break;
                 case SchemaType::NUMBER:
-                case SchemaType::INTEGER: mask |= CAT_NUMBER_START; break;
-                case SchemaType::BOOLEAN: mask |= CAT_TRUE_START | CAT_FALSE_START; break;
-                case SchemaType::NULL_TYPE: mask |= CAT_NULL_START; break;
-                case SchemaType::ENUM:    mask |= CAT_QUOTE; break;  // enum values are strings
-                case SchemaType::ANY_OF:  mask |= CAT_VALUE_START; break;
-                default: mask |= CAT_VALUE_START; break;
+                case SchemaType::INTEGER:
+                    mask |= CAT_NUMBER_START;
+                    break;
+                case SchemaType::BOOLEAN:
+                    mask |= CAT_TRUE_START | CAT_FALSE_START;
+                    break;
+                case SchemaType::NULL_TYPE:
+                    mask |= CAT_NULL_START;
+                    break;
+                case SchemaType::ENUM:
+                    mask |= CAT_QUOTE;
+                    break;  // enum values are strings
+                case SchemaType::ANY_OF:
+                    mask |= CAT_VALUE_START;
+                    break;
+                default:
+                    mask |= CAT_VALUE_START;
+                    break;
             }
             return mask;
         }
@@ -135,10 +160,14 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
             bool all_required = true;
             if (f.node) {
                 for (auto& req : f.node->required) {
-                    if (!f.emitted_keys.count(req)) { all_required = false; break; }
+                    if (!f.emitted_keys.count(req)) {
+                        all_required = false;
+                        break;
+                    }
                 }
             }
-            if (all_required) mask |= CAT_CLOSE_BRACE;
+            if (all_required)
+                mask |= CAT_CLOSE_BRACE;
             return mask;
         }
 
@@ -156,10 +185,14 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
             bool all_required = true;
             if (f.node) {
                 for (auto& req : f.node->required) {
-                    if (!f.emitted_keys.count(req)) { all_required = false; break; }
+                    if (!f.emitted_keys.count(req)) {
+                        all_required = false;
+                        break;
+                    }
                 }
             }
-            if (all_required) mask |= CAT_CLOSE_BRACE;
+            if (all_required)
+                mask |= CAT_CLOSE_BRACE;
             return mask;
         }
 
@@ -168,13 +201,25 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
             // Allow value start for first item
             if (f.node && f.node->items) {
                 switch (f.node->items->type) {
-                    case SchemaType::STRING: mask |= CAT_QUOTE; break;
+                    case SchemaType::STRING:
+                        mask |= CAT_QUOTE;
+                        break;
                     case SchemaType::NUMBER:
-                    case SchemaType::INTEGER: mask |= CAT_NUMBER_START; break;
-                    case SchemaType::BOOLEAN: mask |= CAT_TRUE_START | CAT_FALSE_START; break;
-                    case SchemaType::OBJECT: mask |= CAT_OPEN_BRACE; break;
-                    case SchemaType::ARRAY: mask |= CAT_OPEN_BRACKET; break;
-                    default: mask |= CAT_VALUE_START; break;
+                    case SchemaType::INTEGER:
+                        mask |= CAT_NUMBER_START;
+                        break;
+                    case SchemaType::BOOLEAN:
+                        mask |= CAT_TRUE_START | CAT_FALSE_START;
+                        break;
+                    case SchemaType::OBJECT:
+                        mask |= CAT_OPEN_BRACE;
+                        break;
+                    case SchemaType::ARRAY:
+                        mask |= CAT_OPEN_BRACKET;
+                        break;
+                    default:
+                        mask |= CAT_VALUE_START;
+                        break;
                 }
             } else {
                 mask |= CAT_VALUE_START;
@@ -192,8 +237,7 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
             return 0xFFFF;  // any char valid after backslash
 
         case SchemaPhase::NUMBER_VALUE:
-            return CAT_NUMBER_CONT | CAT_WHITESPACE | CAT_COMMA |
-                   CAT_CLOSE_BRACE | CAT_CLOSE_BRACKET;
+            return CAT_NUMBER_CONT | CAT_WHITESPACE | CAT_COMMA | CAT_CLOSE_BRACE | CAT_CLOSE_BRACKET;
 
         case SchemaPhase::LITERAL_VALUE:
             return CAT_LITERAL_CONT;
@@ -214,7 +258,8 @@ uint16_t SchemaConstrainer::compute_category_mask() const {
 void SchemaConstrainer::compute_token_allow_mask() {
     need_token_allow_ = false;
 
-    if (stack_.empty()) return;
+    if (stack_.empty())
+        return;
     const auto& f = top();
 
     if (f.phase == SchemaPhase::OBJECT_KEY && f.node) {
@@ -224,7 +269,10 @@ void SchemaConstrainer::compute_token_allow_mask() {
 
         for (int i = 0; i < vocab_size_; i++) {
             const auto& text = token_texts_[i];
-            if (text.empty()) { token_allow_[i] = 0; continue; }
+            if (text.empty()) {
+                token_allow_[i] = 0;
+                continue;
+            }
 
             // Check if this token could be part of a valid key
             std::string extended = prefix + text;
@@ -267,13 +315,19 @@ void SchemaConstrainer::compute_token_allow_mask() {
 
         for (int i = 0; i < vocab_size_; i++) {
             const auto& text = token_texts_[i];
-            if (text.empty()) { token_allow_[i] = 0; continue; }
+            if (text.empty()) {
+                token_allow_[i] = 0;
+                continue;
+            }
 
             if (text == "\"") {
                 // Allow closing quote only if prefix is a complete enum value
                 bool complete = false;
                 for (auto& v : f.node->enum_values) {
-                    if (v == prefix) { complete = true; break; }
+                    if (v == prefix) {
+                        complete = true;
+                        break;
+                    }
                 }
                 token_allow_[i] = complete ? 1 : 0;
             } else {
@@ -294,32 +348,31 @@ void SchemaConstrainer::compute_token_allow_mask() {
 // ---------------------------------------------------------------------------
 
 void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t stream) {
-    if (!initialized_ || stack_.empty()) return;
+    if (!initialized_ || stack_.empty())
+        return;
 
     // Compute masks
     uint16_t cat_mask = compute_category_mask();
     compute_token_allow_mask();
 
     IMP_LOG_DEBUG("SchemaConstrainer::apply_mask phase=%d cat_mask=0x%04x need_allow=%d stack=%zu",
-                  static_cast<int>(top().phase), cat_mask, need_token_allow_,
-                  stack_.size());
+                  static_cast<int>(top().phase), cat_mask, need_token_allow_, stack_.size());
 
     // Upload category mask
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_allowed_mask_, &cat_mask, sizeof(uint16_t),
-                    cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(
+        cudaMemcpyAsync(d_allowed_mask_, &cat_mask, sizeof(uint16_t), cudaMemcpyHostToDevice, stream));
 
     // Upload token allow mask if needed
     if (need_token_allow_) {
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_allow_, token_allow_.data(),
-                        vocab_size_ * sizeof(uint8_t),
-                        cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_token_allow_, token_allow_.data(), vocab_size_ * sizeof(uint8_t),
+                                           cudaMemcpyHostToDevice, stream));
     }
 
     int threads = 256;
     int blocks = (vocab_size + threads - 1) / threads;
-    constrain_mask_allow_kernel<<<blocks, threads, 0, stream>>>(
-        d_logits, d_token_categories_, d_token_allow_, d_allowed_mask_,
-        vocab_size, need_token_allow_);
+    constrain_mask_allow_kernel<<<blocks, threads, 0, stream>>>(d_logits, d_token_categories_, d_token_allow_,
+                                                                d_allowed_mask_, vocab_size,
+                                                                need_token_allow_);
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +380,8 @@ void SchemaConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t
 // ---------------------------------------------------------------------------
 
 void SchemaConstrainer::update(int32_t token) {
-    if (token < 0 || token >= vocab_size_ || stack_.empty()) return;
+    if (token < 0 || token >= vocab_size_ || stack_.empty())
+        return;
 
     const auto& text = token_texts_[token];
     SchemaPhase before = top().phase;
@@ -335,31 +389,44 @@ void SchemaConstrainer::update(int32_t token) {
         advance_char(c);
     }
     if (!stack_.empty()) {
-        IMP_LOG_DEBUG("SchemaConstrainer::update token=%d [%s] phase %d->%d stack=%zu",
-                      token, text.c_str(), static_cast<int>(before),
-                      static_cast<int>(top().phase), stack_.size());
+        IMP_LOG_DEBUG("SchemaConstrainer::update token=%d [%s] phase %d->%d stack=%zu", token, text.c_str(),
+                      static_cast<int>(before), static_cast<int>(top().phase), stack_.size());
     }
 }
 
 void SchemaConstrainer::advance_char(char c) {
-    if (stack_.empty()) return;
+    if (stack_.empty())
+        return;
 
     auto& f = top();
 
     switch (f.phase) {
         case SchemaPhase::VALUE_START: {
-            if (std::isspace(static_cast<unsigned char>(c))) return;
-            if (!f.node) { stack_.pop_back(); return; }
+            if (std::isspace(static_cast<unsigned char>(c)))
+                return;
+            if (!f.node) {
+                stack_.pop_back();
+                return;
+            }
 
             switch (f.node->type) {
                 case SchemaType::OBJECT:
-                    if (c == '{') { f.phase = SchemaPhase::OBJECT_OPEN; return; }
+                    if (c == '{') {
+                        f.phase = SchemaPhase::OBJECT_OPEN;
+                        return;
+                    }
                     break;
                 case SchemaType::ARRAY:
-                    if (c == '[') { f.phase = SchemaPhase::ARRAY_OPEN; return; }
+                    if (c == '[') {
+                        f.phase = SchemaPhase::ARRAY_OPEN;
+                        return;
+                    }
                     break;
                 case SchemaType::STRING:
-                    if (c == '"') { f.phase = SchemaPhase::STRING_VALUE; return; }
+                    if (c == '"') {
+                        f.phase = SchemaPhase::STRING_VALUE;
+                        return;
+                    }
                     break;
                 case SchemaType::NUMBER:
                 case SchemaType::INTEGER:
@@ -401,13 +468,15 @@ void SchemaConstrainer::advance_char(char c) {
                     // For anyOf, we can't easily constrain — treat as unconstrained value
                     f.phase = SchemaPhase::STRING_VALUE;
                     return;
-                default: break;
+                default:
+                    break;
             }
             break;
         }
 
         case SchemaPhase::OBJECT_OPEN: {
-            if (std::isspace(static_cast<unsigned char>(c))) return;
+            if (std::isspace(static_cast<unsigned char>(c)))
+                return;
             if (c == '}') {
                 stack_.pop_back();  // object complete
                 if (!stack_.empty()) {
@@ -436,13 +505,15 @@ void SchemaConstrainer::advance_char(char c) {
                 f.phase = SchemaPhase::OBJECT_AFTER_KEY;
                 return;
             }
-            if (c == '\\') return;  // escape in key (rare but valid)
+            if (c == '\\')
+                return;  // escape in key (rare but valid)
             f.key_buffer += c;
             return;
         }
 
         case SchemaPhase::OBJECT_AFTER_KEY: {
-            if (std::isspace(static_cast<unsigned char>(c))) return;
+            if (std::isspace(static_cast<unsigned char>(c)))
+                return;
             if (c == ':') {
                 f.phase = SchemaPhase::OBJECT_COLON;
                 // Push value frame for this property
@@ -461,7 +532,8 @@ void SchemaConstrainer::advance_char(char c) {
         case SchemaPhase::OBJECT_COLON: {
             // Value was pushed as a sub-frame — this phase is re-entered
             // when the value completes and the sub-frame is popped.
-            if (std::isspace(static_cast<unsigned char>(c))) return;
+            if (std::isspace(static_cast<unsigned char>(c)))
+                return;
             // Should not reach here in normal flow (value frame handles it)
             // but handle comma/brace for robustness
             if (c == ',') {
@@ -481,7 +553,8 @@ void SchemaConstrainer::advance_char(char c) {
         }
 
         case SchemaPhase::OBJECT_AFTER_VALUE: {
-            if (std::isspace(static_cast<unsigned char>(c))) return;
+            if (std::isspace(static_cast<unsigned char>(c)))
+                return;
             if (c == ',') {
                 f.phase = SchemaPhase::OBJECT_OPEN;  // back to expecting key
                 return;
@@ -502,7 +575,8 @@ void SchemaConstrainer::advance_char(char c) {
         }
 
         case SchemaPhase::ARRAY_OPEN: {
-            if (std::isspace(static_cast<unsigned char>(c))) return;
+            if (std::isspace(static_cast<unsigned char>(c)))
+                return;
             if (c == ']') {
                 stack_.pop_back();
                 if (!stack_.empty()) {
@@ -522,7 +596,8 @@ void SchemaConstrainer::advance_char(char c) {
         }
 
         case SchemaPhase::ARRAY_AFTER_ITEM: {
-            if (std::isspace(static_cast<unsigned char>(c))) return;
+            if (std::isspace(static_cast<unsigned char>(c)))
+                return;
             if (c == ',') {
                 f.item_count++;
                 // Push next item frame
@@ -544,7 +619,10 @@ void SchemaConstrainer::advance_char(char c) {
         }
 
         case SchemaPhase::STRING_VALUE: {
-            if (c == '\\') { f.phase = SchemaPhase::STRING_ESCAPE; return; }
+            if (c == '\\') {
+                f.phase = SchemaPhase::STRING_ESCAPE;
+                return;
+            }
             if (c == '"') {
                 // String value complete
                 stack_.pop_back();
@@ -567,8 +645,7 @@ void SchemaConstrainer::advance_char(char c) {
         }
 
         case SchemaPhase::NUMBER_VALUE: {
-            if ((c >= '0' && c <= '9') || c == '.' || c == 'e' ||
-                c == 'E' || c == '+' || c == '-')
+            if ((c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-')
                 return;  // continue number
             // Number ended — pop and re-process char in parent
             stack_.pop_back();
@@ -626,4 +703,4 @@ void SchemaConstrainer::advance_char(char c) {
     }
 }
 
-} // namespace imp
+}  // namespace imp

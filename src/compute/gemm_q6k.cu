@@ -36,38 +36,37 @@ static constexpr int Q6K_BLOCK_ELEMS = 256;
 
 static constexpr int FUSED_WARPS_PER_CTA = 4;
 static constexpr int FUSED_BLOCK_SIZE = FUSED_WARPS_PER_CTA * 32;  // 128 threads
-static constexpr int TILE_M = 32;  // tokens per shared memory tile
+static constexpr int TILE_M = 32;                                  // tokens per shared memory tile
 
-__global__ void __launch_bounds__(128, 2)
-gemm_q6k_moe_fused_kernel(
-    const uint8_t* __restrict__ packed_weight,
-    const block_q8_1* __restrict__ q8_base,
-    const float* __restrict__ d8_base,
-    half* __restrict__ c_base,
-    const int32_t* __restrict__ offsets,
-    int K, int N,
-    size_t weight_stride,
-    int q8_per_row  // K / 32
+__global__ void __launch_bounds__(128, 2) gemm_q6k_moe_fused_kernel(const uint8_t* __restrict__ packed_weight,
+                                                                    const block_q8_1* __restrict__ q8_base,
+                                                                    const float* __restrict__ d8_base,
+                                                                    half* __restrict__ c_base,
+                                                                    const int32_t* __restrict__ offsets,
+                                                                    int K, int N, size_t weight_stride,
+                                                                    int q8_per_row  // K / 32
 ) {
     const int warp_id = threadIdx.x / 32;
-    const int lane    = threadIdx.x % 32;
-    const int tid     = threadIdx.x;
-    const int expert  = blockIdx.y;
+    const int lane = threadIdx.x % 32;
+    const int tid = threadIdx.x;
+    const int expert = blockIdx.y;
 
     // Read this expert's token range from device memory
     const int m_start = offsets[expert];
     const int M_e = offsets[expert + 1] - m_start;
-    if (M_e <= 0) return;
+    if (M_e <= 0)
+        return;
 
     // My output column
     const int n_col = blockIdx.x * FUSED_WARPS_PER_CTA + warp_id;
-    if (n_col >= N) return;
+    if (n_col >= N)
+        return;
 
     // Weight row pointer for this expert and output column
     const int blocks_per_row = K / Q6K_BLOCK_ELEMS;
     const size_t row_bytes = static_cast<size_t>(blocks_per_row) * Q6K_BLOCK_BYTES;
-    const uint8_t* w_row = packed_weight + static_cast<size_t>(expert) * weight_stride
-                         + static_cast<size_t>(n_col) * row_bytes;
+    const uint8_t* w_row = packed_weight + static_cast<size_t>(expert) * weight_stride +
+                           static_cast<size_t>(n_col) * row_bytes;
 
     // Shared memory layout:
     //   smem_qs: [TILE_M][q8_per_row][32] int8_t  — Q8_1 quantized values
@@ -111,7 +110,8 @@ gemm_q6k_moe_fused_kernel(
 
         // Phase 2: Each warp computes its output column using smem Q8_1 data.
         float acc[TILE_M];
-        for (int i = 0; i < TILE_M; i++) acc[i] = 0.0f;
+        for (int i = 0; i < TILE_M; i++)
+            acc[i] = 0.0f;
 
         // K-loop: weight loaded once per pass
         for (int q8_idx = lane; q8_idx < q8_per_row; q8_idx += 32) {
@@ -133,9 +133,9 @@ gemm_q6k_moe_fused_kernel(
 
             // Pre-load Q6K ql and qh values for this group
             uint32_t ql_reg[8], qh_reg[8];
-            #pragma unroll
+#pragma unroll
             for (int sb = 0; sb < 2; sb++) {
-                #pragma unroll
+#pragma unroll
                 for (int d4 = 0; d4 < 4; d4++) {
                     const int k = sb * 16 + d4 * 4;
                     memcpy(&ql_reg[sb * 4 + d4], bp + ql_base + k, 4);
@@ -159,7 +159,7 @@ gemm_q6k_moe_fused_kernel(
                 // dp4a with pre-loaded Q6K weights — sub-block 0
                 {
                     int32_t sumi = 0;
-                    #pragma unroll
+#pragma unroll
                     for (int d4 = 0; d4 < 4; d4++) {
                         const uint32_t lo4 = is_high ? ((ql_reg[d4] >> 4) & 0x0F0F0F0FU)
                                                      : (ql_reg[d4] & 0x0F0F0F0FU);
@@ -173,7 +173,7 @@ gemm_q6k_moe_fused_kernel(
                 // dp4a with pre-loaded Q6K weights — sub-block 1
                 {
                     int32_t sumi = 0;
-                    #pragma unroll
+#pragma unroll
                     for (int d4 = 0; d4 < 4; d4++) {
                         const uint32_t lo4 = is_high ? ((ql_reg[4 + d4] >> 4) & 0x0F0F0F0FU)
                                                      : (ql_reg[4 + d4] & 0x0F0F0F0FU);
@@ -188,7 +188,7 @@ gemm_q6k_moe_fused_kernel(
 
         // Phase 3: Warp shuffle reduction + output
         for (int mi = 0; mi < m_count; mi++) {
-            #pragma unroll
+#pragma unroll
             for (int off = 16; off > 0; off >>= 1)
                 acc[mi] += __shfl_down_sync(0xFFFFFFFF, acc[mi], off);
         }
@@ -205,18 +205,11 @@ gemm_q6k_moe_fused_kernel(
 }
 
 // Host launcher
-void gemm_q6k_moe_fused(
-    const void* packed_weight,
-    const block_q8_1* q8_base,
-    const float* d8_base,
-    void* c_base,
-    const int32_t* offsets,
-    int K, int N,
-    int n_experts,
-    size_t weight_stride,
-    cudaStream_t stream)
-{
-    if (n_experts <= 0 || K <= 0 || N <= 0) return;
+void gemm_q6k_moe_fused(const void* packed_weight, const block_q8_1* q8_base, const float* d8_base,
+                        void* c_base, const int32_t* offsets, int K, int N, int n_experts,
+                        size_t weight_stride, cudaStream_t stream) {
+    if (n_experts <= 0 || K <= 0 || N <= 0)
+        return;
 
     const int q8_per_row = K / 32;
     const int n_col_blocks = (N + FUSED_WARPS_PER_CTA - 1) / FUSED_WARPS_PER_CTA;
@@ -231,19 +224,15 @@ void gemm_q6k_moe_fused(
     // Request extended shared memory if needed
     static bool smem_configured = false;
     if (!smem_configured && smem_bytes > 48 * 1024) {
-        cudaFuncSetAttribute(gemm_q6k_moe_fused_kernel,
-                             cudaFuncAttributeMaxDynamicSharedMemorySize,
+        cudaFuncSetAttribute(gemm_q6k_moe_fused_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                              static_cast<int>(smem_bytes));
         smem_configured = true;
     }
 
-    gemm_q6k_moe_fused_kernel<<<grid, block, smem_bytes, stream>>>(
-        static_cast<const uint8_t*>(packed_weight),
-        q8_base,
-        d8_base,
-        static_cast<half*>(c_base),
-        offsets,
-        K, N, weight_stride, q8_per_row);
+    gemm_q6k_moe_fused_kernel<<<grid, block, smem_bytes, stream>>>(static_cast<const uint8_t*>(packed_weight),
+                                                                   q8_base, d8_base,
+                                                                   static_cast<half*>(c_base), offsets, K, N,
+                                                                   weight_stride, q8_per_row);
 }
 
-} // namespace imp
+}  // namespace imp

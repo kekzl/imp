@@ -13,9 +13,7 @@ namespace {
 
 // Helper: get model path from environment variable IMP_TEST_MODEL.
 // Tests that require a model are skipped if not set.
-static const char* test_model_path() {
-    return std::getenv("IMP_TEST_MODEL");
-}
+static const char* test_model_path() { return std::getenv("IMP_TEST_MODEL"); }
 
 // --- API sanity tests (no model required) ---
 
@@ -97,7 +95,8 @@ TEST(EndToEndTest, NullArguments) {
 
 TEST(EndToEndModelTest, LoadModel) {
     const char* path = test_model_path();
-    if (!path) GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
+    if (!path)
+        GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
 
     ImpModel model = nullptr;
     ImpError err = imp_model_load(path, IMP_FORMAT_GGUF, &model);
@@ -113,7 +112,8 @@ TEST(EndToEndModelTest, LoadModel) {
 
 TEST(EndToEndModelTest, Tokenize) {
     const char* path = test_model_path();
-    if (!path) GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
+    if (!path)
+        GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
 
     ImpModel model = nullptr;
     ASSERT_EQ(imp_model_load(path, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
@@ -134,7 +134,8 @@ TEST(EndToEndModelTest, Tokenize) {
 
 TEST(EndToEndModelTest, CreateContextAndGenerate) {
     const char* path = test_model_path();
-    if (!path) GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
+    if (!path)
+        GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
 
     ImpModel model = nullptr;
     ASSERT_EQ(imp_model_load(path, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
@@ -156,8 +157,8 @@ TEST(EndToEndModelTest, CreateContextAndGenerate) {
 
     char output[4096];
     size_t output_len = 0;
-    ImpError err = imp_generate(ctx, "The capital of France is", &params,
-                                 output, sizeof(output), &output_len);
+    ImpError err = imp_generate(ctx, "The capital of France is", &params, output, sizeof(output),
+                                &output_len);
     ASSERT_EQ(err, IMP_SUCCESS);
     EXPECT_GT(output_len, 0u);
 
@@ -167,7 +168,8 @@ TEST(EndToEndModelTest, CreateContextAndGenerate) {
 
 TEST(EndToEndModelTest, PrefillDecodeStep) {
     const char* path = test_model_path();
-    if (!path) GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
+    if (!path)
+        GTEST_SKIP() << "Set IMP_TEST_MODEL to run model tests";
 
     ImpModel model = nullptr;
     ASSERT_EQ(imp_model_load(path, IMP_FORMAT_GGUF, &model), IMP_SUCCESS);
@@ -197,7 +199,8 @@ TEST(EndToEndModelTest, PrefillDecodeStep) {
     for (int i = 0; i < 4; i++) {
         int32_t token = 0;
         ImpError err = imp_decode_step(ctx, &params, &token);
-        if (err != IMP_SUCCESS) break;  // Request may finish early (EOS)
+        if (err != IMP_SUCCESS)
+            break;  // Request may finish early (EOS)
         EXPECT_GT(token, 0);
     }
 
@@ -218,7 +221,8 @@ protected:
     }
 
     void TearDown() override {
-        if (!stub_path_.empty()) unlink(stub_path_.c_str());
+        if (!stub_path_.empty())
+            unlink(stub_path_.c_str());
         stub_path_.clear();
     }
 
@@ -271,8 +275,7 @@ TEST_F(StubModelTest, CreateContextAndInfer) {
     // acceptable — the key check is no crash.
     if (err != IMP_SUCCESS) {
         imp_model_free(model);
-        GTEST_SKIP() << "Context creation failed (expected without GPU): "
-                     << imp_error_string(err);
+        GTEST_SKIP() << "Context creation failed (expected without GPU): " << imp_error_string(err);
     }
     ASSERT_NE(ctx, nullptr);
 
@@ -330,7 +333,8 @@ TEST_F(StubModelTest, PrefillDecodeStub) {
     for (int i = 0; i < 2; i++) {
         int32_t token = 0;
         err = imp_decode_step(ctx, &params, &token);
-        if (err != IMP_SUCCESS) break;
+        if (err != IMP_SUCCESS)
+            break;
     }
 
     // Reset should always succeed
@@ -382,7 +386,8 @@ TEST_F(StubModelTest, VRAMLeakDetection) {
     for (int i = 0; i < kNumRequests; i++) {
         int32_t tokens[] = {1, 2, 3, 4, 5};
         err = imp_prefill(ctx, tokens, 5);
-        if (err != IMP_SUCCESS) break;
+        if (err != IMP_SUCCESS)
+            break;
 
         ImpGenerateParams params = imp_generate_params_default();
         params.max_tokens = 4;
@@ -392,11 +397,13 @@ TEST_F(StubModelTest, VRAMLeakDetection) {
         for (int j = 0; j < 2; j++) {
             int32_t out_token = 0;
             err = imp_decode_step(ctx, &params, &out_token);
-            if (err != IMP_SUCCESS) break;
+            if (err != IMP_SUCCESS)
+                break;
         }
 
         err = imp_context_reset(ctx);
-        if (err != IMP_SUCCESS) break;
+        if (err != IMP_SUCCESS)
+            break;
     }
 
     // Measure VRAM after all requests
@@ -406,13 +413,12 @@ TEST_F(StubModelTest, VRAMLeakDetection) {
 
     size_t leak = (free_before > free_after) ? (free_before - free_after) : 0;
     float leak_pct = 100.0f * static_cast<float>(leak) / static_cast<float>(total);
-    EXPECT_LT(leak_pct, 5.0f)
-        << "VRAM leak detected: " << (leak / (1024 * 1024)) << " MiB after "
-        << kNumRequests << " requests (" << leak_pct << "% of total "
-        << (total / (1024 * 1024)) << " MiB)";
+    EXPECT_LT(leak_pct, 5.0f) << "VRAM leak detected: " << (leak / (1024 * 1024)) << " MiB after "
+                              << kNumRequests << " requests (" << leak_pct << "% of total "
+                              << (total / (1024 * 1024)) << " MiB)";
 
     imp_context_free(ctx);
     imp_model_free(model);
 }
 
-} // namespace
+}  // namespace

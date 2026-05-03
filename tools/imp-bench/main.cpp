@@ -7,7 +7,7 @@ void bench_gemm();
 void bench_attention();
 void bench_paged_attention();
 void bench_e2e();
-} // namespace imp
+}  // namespace imp
 
 static void print_usage(const char* prog) {
     printf("Usage: %s [benchmark] [--help]\n\n", prog);

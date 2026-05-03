@@ -16,34 +16,35 @@ namespace imp {
 
 ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
     static const std::unordered_map<std::string, ModelArch> arch_map = {
-        {"LlamaForCausalLM",        ModelArch::LLAMA},
-        {"MistralForCausalLM",      ModelArch::MISTRAL},
+        {"LlamaForCausalLM", ModelArch::LLAMA},
+        {"MistralForCausalLM", ModelArch::MISTRAL},
         {"Mistral3ForConditionalGeneration", ModelArch::MISTRAL},
-        {"MixtralForCausalLM",      ModelArch::MIXTRAL},
-        {"Qwen2ForCausalLM",        ModelArch::QWEN3},
-        {"Qwen2MoeForCausalLM",     ModelArch::QWEN3_MOE},
-        {"Qwen3ForCausalLM",        ModelArch::QWEN3},
-        {"Qwen3MoeForCausalLM",     ModelArch::QWEN3_MOE},
-        {"Qwen3_5MoeForCausalLM",   ModelArch::QWEN36_MOE},
+        {"MixtralForCausalLM", ModelArch::MIXTRAL},
+        {"Qwen2ForCausalLM", ModelArch::QWEN3},
+        {"Qwen2MoeForCausalLM", ModelArch::QWEN3_MOE},
+        {"Qwen3ForCausalLM", ModelArch::QWEN3},
+        {"Qwen3MoeForCausalLM", ModelArch::QWEN3_MOE},
+        {"Qwen3_5MoeForCausalLM", ModelArch::QWEN36_MOE},
         {"Qwen3_5MoeForConditionalGeneration", ModelArch::QWEN36_MOE},
-        {"Gemma2ForCausalLM",       ModelArch::GEMMA3},
-        {"GemmaForCausalLM",        ModelArch::GEMMA3},
-        {"Gemma3ForCausalLM",       ModelArch::GEMMA3},
+        {"Gemma2ForCausalLM", ModelArch::GEMMA3},
+        {"GemmaForCausalLM", ModelArch::GEMMA3},
+        {"Gemma3ForCausalLM", ModelArch::GEMMA3},
         {"Gemma3ForConditionalGeneration", ModelArch::GEMMA3},
-        {"Gemma4ForCausalLM",       ModelArch::GEMMA4},
+        {"Gemma4ForCausalLM", ModelArch::GEMMA4},
         {"Gemma4ForConditionalGeneration", ModelArch::GEMMA4},
-        {"DeepseekV2ForCausalLM",   ModelArch::DEEPSEEK},
-        {"DeepseekV3ForCausalLM",   ModelArch::DEEPSEEK},
-        {"PhiForCausalLM",          ModelArch::LLAMA},
-        {"Phi3ForCausalLM",         ModelArch::LLAMA},
-        {"Phi3SmallForCausalLM",    ModelArch::LLAMA},
-        {"InternLM2ForCausalLM",    ModelArch::LLAMA},
-        {"Starcoder2ForCausalLM",   ModelArch::LLAMA},
-        {"CohereForCausalLM",       ModelArch::LLAMA},
+        {"DeepseekV2ForCausalLM", ModelArch::DEEPSEEK},
+        {"DeepseekV3ForCausalLM", ModelArch::DEEPSEEK},
+        {"PhiForCausalLM", ModelArch::LLAMA},
+        {"Phi3ForCausalLM", ModelArch::LLAMA},
+        {"Phi3SmallForCausalLM", ModelArch::LLAMA},
+        {"InternLM2ForCausalLM", ModelArch::LLAMA},
+        {"Starcoder2ForCausalLM", ModelArch::LLAMA},
+        {"CohereForCausalLM", ModelArch::LLAMA},
     };
 
     auto it = arch_map.find(hf_arch);
-    if (it != arch_map.end()) return it->second;
+    if (it != arch_map.end())
+        return it->second;
 
     IMP_LOG_WARN("unknown HF architecture: %s, falling back to GENERIC", hf_arch.c_str());
     return ModelArch::GENERIC;
@@ -54,7 +55,8 @@ ModelArch HFConfigLoader::map_architecture(const std::string& hf_arch) {
 bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg) {
     std::string path = model_dir + "/config.json";
     JValue root;
-    if (!parse_json_file(path, root)) return false;
+    if (!parse_json_file(path, root))
+        return false;
 
     IMP_LOG_INFO("loading HF config from %s", path.c_str());
 
@@ -68,24 +70,24 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         if (jobj_get_string(root, "model_type", model_type)) {
             // Common model_type values → architecture class names
             static const std::unordered_map<std::string, std::string> type_to_class = {
-                {"llama",     "LlamaForCausalLM"},
-                {"mistral",   "MistralForCausalLM"},
-                {"mixtral",   "MixtralForCausalLM"},
-                {"qwen2",     "Qwen2ForCausalLM"},
+                {"llama", "LlamaForCausalLM"},
+                {"mistral", "MistralForCausalLM"},
+                {"mixtral", "MixtralForCausalLM"},
+                {"qwen2", "Qwen2ForCausalLM"},
                 {"qwen2_moe", "Qwen2MoeForCausalLM"},
-                {"qwen3",     "Qwen3ForCausalLM"},
+                {"qwen3", "Qwen3ForCausalLM"},
                 {"qwen3_moe", "Qwen3MoeForCausalLM"},
-                {"qwen3_5_moe",      "Qwen3_5MoeForCausalLM"},
+                {"qwen3_5_moe", "Qwen3_5MoeForCausalLM"},
                 {"qwen3_5_moe_text", "Qwen3_5MoeForCausalLM"},
-                {"gemma",     "GemmaForCausalLM"},
-                {"gemma2",    "Gemma2ForCausalLM"},
-                {"gemma3",    "Gemma3ForCausalLM"},
-                {"gemma4",    "Gemma4ForCausalLM"},
+                {"gemma", "GemmaForCausalLM"},
+                {"gemma2", "Gemma2ForCausalLM"},
+                {"gemma3", "Gemma3ForCausalLM"},
+                {"gemma4", "Gemma4ForCausalLM"},
                 {"deepseek_v2", "DeepseekV2ForCausalLM"},
                 {"deepseek_v3", "DeepseekV3ForCausalLM"},
-                {"phi",       "PhiForCausalLM"},
-                {"phi3",      "Phi3ForCausalLM"},
-                {"cohere",    "CohereForCausalLM"},
+                {"phi", "PhiForCausalLM"},
+                {"phi3", "Phi3ForCausalLM"},
+                {"cohere", "CohereForCausalLM"},
                 {"starcoder2", "Starcoder2ForCausalLM"},
             };
             auto it = type_to_class.find(model_type);
@@ -139,13 +141,12 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         }
     }
     if (partial_factor > 0.0f && partial_factor < 1.0f) {
-        int hd_for_rope = (cfg.head_dim > 0)
-                          ? cfg.head_dim
-                          : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
+        int hd_for_rope = (cfg.head_dim > 0) ? cfg.head_dim
+                                             : (cfg.n_heads > 0 ? cfg.d_model / cfg.n_heads : 0);
         if (hd_for_rope > 0) {
             cfg.rope_dim = static_cast<int>(hd_for_rope * partial_factor);
-            IMP_LOG_INFO("Partial RoPE: partial_rotary_factor=%.3f head_dim=%d → rope_dim=%d",
-                         partial_factor, hd_for_rope, cfg.rope_dim);
+            IMP_LOG_INFO("Partial RoPE: partial_rotary_factor=%.3f head_dim=%d → rope_dim=%d", partial_factor,
+                         hd_for_rope, cfg.rope_dim);
         }
     }
 
@@ -169,14 +170,12 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
             jobj_get_float(*rope_scaling, "attn_factor", cfg.yarn_attn_factor);
             jobj_get_float(*rope_scaling, "beta_fast", cfg.yarn_beta_fast);
             jobj_get_float(*rope_scaling, "beta_slow", cfg.yarn_beta_slow);
-            jobj_get_int(*rope_scaling, "original_max_position_embeddings",
-                         cfg.rope_n_ctx_orig);
+            jobj_get_int(*rope_scaling, "original_max_position_embeddings", cfg.rope_n_ctx_orig);
             // YaRN uses ext_factor=1.0 by default
             cfg.yarn_ext_factor = 1.0f;
         } else if (rope_type == "longrope" || rope_type == "long_rope") {
             // LongRoPE: per-dimension frequency scaling factors
-            jobj_get_int(*rope_scaling, "original_max_position_embeddings",
-                         cfg.rope_scaling_orig_max_pos);
+            jobj_get_int(*rope_scaling, "original_max_position_embeddings", cfg.rope_scaling_orig_max_pos);
 
             const JValue* short_f = jobj_find(*rope_scaling, "short_factor");
             if (short_f && short_f->type == JType::ARRAY) {
@@ -214,8 +213,7 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         jobj_get_string(eff, "hidden_activation", hidden_act)) {
         if (hidden_act == "silu" || hidden_act == "swiglu") {
             cfg.ffn_activation = FFNActivation::SWIGLU;
-        } else if (hidden_act == "gelu" || hidden_act == "gelu_pytorch_tanh" ||
-                   hidden_act == "geglu") {
+        } else if (hidden_act == "gelu" || hidden_act == "gelu_pytorch_tanh" || hidden_act == "geglu") {
             cfg.ffn_activation = FFNActivation::GEGLU;
         }
     }
@@ -255,18 +253,21 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         int lin_k_heads = 0, lin_k_hdim = 0;
         int lin_conv = 0;
         jobj_get_int(eff, "linear_num_value_heads", lin_v_heads);
-        jobj_get_int(eff, "linear_value_head_dim",  lin_v_hdim);
-        jobj_get_int(eff, "linear_num_key_heads",   lin_k_heads);
-        jobj_get_int(eff, "linear_key_head_dim",    lin_k_hdim);
+        jobj_get_int(eff, "linear_value_head_dim", lin_v_hdim);
+        jobj_get_int(eff, "linear_num_key_heads", lin_k_heads);
+        jobj_get_int(eff, "linear_key_head_dim", lin_k_hdim);
         jobj_get_int(eff, "linear_conv_kernel_dim", lin_conv);
 
         if (lin_v_heads > 0 && lin_v_hdim > 0) {
             cfg.ssm_inner_size = lin_v_heads * lin_v_hdim;
-            cfg.ssm_dt_rank    = lin_v_heads;
+            cfg.ssm_dt_rank = lin_v_heads;
         }
-        if (lin_k_hdim > 0)  cfg.ssm_state_size  = lin_k_hdim;
-        if (lin_k_heads > 0) cfg.ssm_group_count = lin_k_heads;
-        if (lin_conv > 0)    cfg.ssm_conv_kernel = lin_conv;
+        if (lin_k_hdim > 0)
+            cfg.ssm_state_size = lin_k_hdim;
+        if (lin_k_heads > 0)
+            cfg.ssm_group_count = lin_k_heads;
+        if (lin_conv > 0)
+            cfg.ssm_conv_kernel = lin_conv;
 
         // layer_types[] decides per-layer GDN-vs-attention. The GGUF Qwen3.6
         // loader infers this from tensor presence; on the HF side we surface
@@ -284,8 +285,8 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
         }
 
         IMP_LOG_INFO("  GDN config: inner=%d state=%d groups=%d n_heads=%d conv_kernel=%d",
-                     cfg.ssm_inner_size, cfg.ssm_state_size,
-                     cfg.ssm_group_count, cfg.ssm_dt_rank, cfg.ssm_conv_kernel);
+                     cfg.ssm_inner_size, cfg.ssm_state_size, cfg.ssm_group_count, cfg.ssm_dt_rank,
+                     cfg.ssm_conv_kernel);
     }
 
     // Gemma 4: per-layer geometry. layer_types[] tells SWA vs global, and
@@ -294,21 +295,23 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
     // executor_attention.cu picks up the right shapes/theta per layer.
     if (cfg.arch == ModelArch::GEMMA4) {
         int global_head_dim = 0;
-        int num_global_kv   = 0;
+        int num_global_kv = 0;
         jobj_get_int(eff, "global_head_dim", global_head_dim);
         jobj_get_int(eff, "num_global_key_value_heads", num_global_kv);
 
         // rope params nested under rope_parameters.{full_attention,sliding_attention}
         const JValue* rp = jobj_find(eff, "rope_parameters");
         float theta_full = cfg.rope_theta > 0.0f ? cfg.rope_theta : 1e6f;
-        float theta_swa  = 1e4f;
+        float theta_swa = 1e4f;
         if (rp && rp->type == JType::OBJECT) {
             const JValue* fa = jobj_find(*rp, "full_attention");
-            if (fa && fa->type == JType::OBJECT) jobj_get_float(*fa, "rope_theta", theta_full);
+            if (fa && fa->type == JType::OBJECT)
+                jobj_get_float(*fa, "rope_theta", theta_full);
             const JValue* sa = jobj_find(*rp, "sliding_attention");
-            if (sa && sa->type == JType::OBJECT) jobj_get_float(*sa, "rope_theta", theta_swa);
+            if (sa && sa->type == JType::OBJECT)
+                jobj_get_float(*sa, "rope_theta", theta_swa);
         }
-        cfg.rope_theta     = theta_full;
+        cfg.rope_theta = theta_full;
         cfg.rope_theta_swa = theta_swa;
 
         const JValue* lt = jobj_find(eff, "layer_types");
@@ -323,11 +326,9 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
                 bool is_swa = (v.str_val == "sliding_attention");
                 cfg.swa_layers.push_back(is_swa ? 1 : 0);
                 cfg.head_dim_per_layer.push_back(
-                    is_swa ? cfg.head_dim
-                           : (global_head_dim > 0 ? global_head_dim : cfg.head_dim));
+                    is_swa ? cfg.head_dim : (global_head_dim > 0 ? global_head_dim : cfg.head_dim));
                 cfg.n_kv_heads_per_layer.push_back(
-                    is_swa ? cfg.n_kv_heads
-                           : (num_global_kv > 0 ? num_global_kv : cfg.n_kv_heads));
+                    is_swa ? cfg.n_kv_heads : (num_global_kv > 0 ? num_global_kv : cfg.n_kv_heads));
             }
             // Scalar head_dim = max(per-layer head_dim) so KV-cache buffers and
             // attention workspace are sized for the *largest* head_dim, not the
@@ -337,18 +338,20 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
             // cache → garbage attention output. Symptom: L0 attention output
             // diverges from GGUF reference even though Q/K/V projections agree.
             int max_hd = 0;
-            for (int v : cfg.head_dim_per_layer) max_hd = std::max(max_hd, v);
+            for (int v : cfg.head_dim_per_layer)
+                max_hd = std::max(max_hd, v);
             if (max_hd > cfg.head_dim) {
-                IMP_LOG_INFO("Gemma 4 (HF): scalar head_dim %d → %d (max of per-layer)",
-                             cfg.head_dim, max_hd);
+                IMP_LOG_INFO("Gemma 4 (HF): scalar head_dim %d → %d (max of per-layer)", cfg.head_dim,
+                             max_hd);
                 cfg.head_dim = max_hd;
             }
             // Same for n_kv_heads — sizing the cache for the largest layer.
             int max_nkv = 0;
-            for (int v : cfg.n_kv_heads_per_layer) max_nkv = std::max(max_nkv, v);
+            for (int v : cfg.n_kv_heads_per_layer)
+                max_nkv = std::max(max_nkv, v);
             if (max_nkv > cfg.n_kv_heads) {
-                IMP_LOG_INFO("Gemma 4 (HF): scalar n_kv_heads %d → %d (max of per-layer)",
-                             cfg.n_kv_heads, max_nkv);
+                IMP_LOG_INFO("Gemma 4 (HF): scalar n_kv_heads %d → %d (max of per-layer)", cfg.n_kv_heads,
+                             max_nkv);
                 cfg.n_kv_heads = max_nkv;
             }
         }
@@ -361,19 +364,19 @@ bool HFConfigLoader::load_config(const std::string& model_dir, ModelConfig& cfg)
     }
 
     IMP_LOG_INFO("  arch=%s layers=%d d_model=%d heads=%d kv_heads=%d d_ff=%d vocab=%d",
-                 model_arch_name(cfg.arch), cfg.n_layers, cfg.d_model,
-                 cfg.n_heads, cfg.n_kv_heads, cfg.d_ff, cfg.vocab_size);
+                 model_arch_name(cfg.arch), cfg.n_layers, cfg.d_model, cfg.n_heads, cfg.n_kv_heads, cfg.d_ff,
+                 cfg.vocab_size);
 
     return true;
 }
 
 // ---- load_generation_config ----
 
-bool HFConfigLoader::load_generation_config(const std::string& model_dir,
-                                             GenerationConfig& cfg) {
+bool HFConfigLoader::load_generation_config(const std::string& model_dir, GenerationConfig& cfg) {
     std::string path = model_dir + "/generation_config.json";
     JValue root;
-    if (!parse_json_file(path, root)) return false;
+    if (!parse_json_file(path, root))
+        return false;
 
     // EOS IDs (single number or array)
     if (const JValue* eos = jobj_find(root, "eos_token_id")) {
@@ -390,9 +393,9 @@ bool HFConfigLoader::load_generation_config(const std::string& model_dir,
 
     // Sampling defaults. Each field is only overwritten if the JSON has it;
     // otherwise the struct's sentinel survives.
-    jobj_get_float(root, "temperature",        cfg.temperature);
-    jobj_get_float(root, "top_p",              cfg.top_p);
-    jobj_get_int  (root, "top_k",              cfg.top_k);
+    jobj_get_float(root, "temperature", cfg.temperature);
+    jobj_get_float(root, "top_p", cfg.top_p);
+    jobj_get_int(root, "top_k", cfg.top_k);
     jobj_get_float(root, "repetition_penalty", cfg.repetition_penalty);
 
     // do_sample=false → force greedy. Authors set this when they want
@@ -403,10 +406,10 @@ bool HFConfigLoader::load_generation_config(const std::string& model_dir,
         }
     }
 
-    IMP_LOG_INFO("generation_config.json: eos=%zu temp=%.3g top_p=%.3g top_k=%d "
-                 "rep_penalty=%.3g",
-                 cfg.eos_token_ids.size(),
-                 cfg.temperature, cfg.top_p, cfg.top_k, cfg.repetition_penalty);
+    IMP_LOG_INFO(
+        "generation_config.json: eos=%zu temp=%.3g top_p=%.3g top_k=%d "
+        "rep_penalty=%.3g",
+        cfg.eos_token_ids.size(), cfg.temperature, cfg.top_p, cfg.top_k, cfg.repetition_penalty);
     return true;
 }
 
@@ -415,13 +418,13 @@ bool HFConfigLoader::load_generation_config(const std::string& model_dir,
 std::string HFConfigLoader::load_chat_template(const std::string& model_dir) {
     std::string path = model_dir + "/tokenizer_config.json";
     JValue root;
-    if (!parse_json_file(path, root)) return "";
+    if (!parse_json_file(path, root))
+        return "";
 
     // Case 1: chat_template is a plain string in tokenizer_config.json
     std::string chat_template;
     if (jobj_get_string(root, "chat_template", chat_template) && !chat_template.empty()) {
-        IMP_LOG_INFO("loaded chat_template from tokenizer_config.json (%zu chars)",
-                     chat_template.size());
+        IMP_LOG_INFO("loaded chat_template from tokenizer_config.json (%zu chars)", chat_template.size());
         return chat_template;
     }
 
@@ -431,9 +434,11 @@ std::string HFConfigLoader::load_chat_template(const std::string& model_dir) {
     if (ct && ct->type == JType::ARRAY) {
         // Prefer "default" entry
         for (const auto& entry : ct->arr) {
-            if (entry.type != JType::OBJECT) continue;
+            if (entry.type != JType::OBJECT)
+                continue;
             std::string name;
-            if (!jobj_get_string(entry, "name", name)) continue;
+            if (!jobj_get_string(entry, "name", name))
+                continue;
             if (name == "default") {
                 if (jobj_get_string(entry, "template", chat_template) && !chat_template.empty()) {
                     IMP_LOG_INFO("loaded chat_template (default) from tokenizer_config.json (%zu chars)",
@@ -444,7 +449,8 @@ std::string HFConfigLoader::load_chat_template(const std::string& model_dir) {
         }
         // Fallback: first entry with a valid template string
         for (const auto& entry : ct->arr) {
-            if (entry.type != JType::OBJECT) continue;
+            if (entry.type != JType::OBJECT)
+                continue;
             if (jobj_get_string(entry, "template", chat_template) && !chat_template.empty()) {
                 std::string name;
                 jobj_get_string(entry, "name", name);
@@ -467,8 +473,7 @@ std::string HFConfigLoader::load_chat_template(const std::string& model_dir) {
         buf << in.rdbuf();
         chat_template = buf.str();
         if (!chat_template.empty()) {
-            IMP_LOG_INFO("loaded chat_template from chat_template.jinja (%zu chars)",
-                         chat_template.size());
+            IMP_LOG_INFO("loaded chat_template from chat_template.jinja (%zu chars)", chat_template.size());
             return chat_template;
         }
     }
@@ -478,18 +483,20 @@ std::string HFConfigLoader::load_chat_template(const std::string& model_dir) {
 
 // ---- load_added_tokens ----
 
-std::vector<HFConfigLoader::AddedToken> HFConfigLoader::load_added_tokens(
-        const std::string& model_dir) {
+std::vector<HFConfigLoader::AddedToken> HFConfigLoader::load_added_tokens(const std::string& model_dir) {
     std::vector<AddedToken> result;
     std::string path = model_dir + "/tokenizer_config.json";
     JValue root;
-    if (!parse_json_file(path, root)) return result;
+    if (!parse_json_file(path, root))
+        return result;
 
     const JValue* added = jobj_find(root, "added_tokens_decoder");
-    if (!added || added->type != JType::OBJECT) return result;
+    if (!added || added->type != JType::OBJECT)
+        return result;
 
     for (const auto& [id_str, val] : added->obj) {
-        if (val.type != JType::OBJECT) continue;
+        if (val.type != JType::OBJECT)
+            continue;
         AddedToken tok;
         tok.id = std::atoi(id_str.c_str());
         jobj_get_string(val, "content", tok.content);
@@ -516,7 +523,8 @@ namespace {
 //   {"content": "<s>", "lstrip": false, ...}   (object with metadata)
 // Extract the content string from either; returns empty if neither matches.
 std::string extract_token_content(const JValue& v) {
-    if (v.type == JType::STRING) return v.str_val;
+    if (v.type == JType::STRING)
+        return v.str_val;
     if (v.type == JType::OBJECT) {
         std::string s;
         jobj_get_string(v, "content", s);
@@ -525,43 +533,47 @@ std::string extract_token_content(const JValue& v) {
     return {};
 }
 
-} // namespace
+}  // namespace
 
-bool HFConfigLoader::load_special_tokens_map(const std::string& model_dir,
-                                              SpecialTokensMap& out) {
+bool HFConfigLoader::load_special_tokens_map(const std::string& model_dir, SpecialTokensMap& out) {
     std::string path = model_dir + "/special_tokens_map.json";
     JValue root;
-    if (!parse_json_file(path, root)) return false;
+    if (!parse_json_file(path, root))
+        return false;
 
-    if (const JValue* arr = jobj_find(root, "additional_special_tokens");
-        arr && arr->type == JType::ARRAY) {
+    if (const JValue* arr = jobj_find(root, "additional_special_tokens"); arr && arr->type == JType::ARRAY) {
         out.additional_special_tokens.reserve(arr->arr.size());
         for (const auto& v : arr->arr) {
             std::string s = extract_token_content(v);
-            if (!s.empty()) out.additional_special_tokens.push_back(std::move(s));
+            if (!s.empty())
+                out.additional_special_tokens.push_back(std::move(s));
         }
     }
 
-    if (const JValue* bos = jobj_find(root, "bos_token"))   out.bos_token = extract_token_content(*bos);
-    if (const JValue* eos = jobj_find(root, "eos_token"))   out.eos_token = extract_token_content(*eos);
-    if (const JValue* pad = jobj_find(root, "pad_token"))   out.pad_token = extract_token_content(*pad);
-    if (const JValue* unk = jobj_find(root, "unk_token"))   out.unk_token = extract_token_content(*unk);
+    if (const JValue* bos = jobj_find(root, "bos_token"))
+        out.bos_token = extract_token_content(*bos);
+    if (const JValue* eos = jobj_find(root, "eos_token"))
+        out.eos_token = extract_token_content(*eos);
+    if (const JValue* pad = jobj_find(root, "pad_token"))
+        out.pad_token = extract_token_content(*pad);
+    if (const JValue* unk = jobj_find(root, "unk_token"))
+        out.unk_token = extract_token_content(*unk);
 
-    IMP_LOG_INFO("special_tokens_map.json: %zu additional_special_tokens, "
-                 "bos='%s' eos='%s' pad='%s' unk='%s'",
-                 out.additional_special_tokens.size(),
-                 out.bos_token.c_str(), out.eos_token.c_str(),
-                 out.pad_token.c_str(), out.unk_token.c_str());
+    IMP_LOG_INFO(
+        "special_tokens_map.json: %zu additional_special_tokens, "
+        "bos='%s' eos='%s' pad='%s' unk='%s'",
+        out.additional_special_tokens.size(), out.bos_token.c_str(), out.eos_token.c_str(),
+        out.pad_token.c_str(), out.unk_token.c_str());
     return true;
 }
 
 // ---- load_tokenizer_flags ----
 
-bool HFConfigLoader::load_tokenizer_flags(const std::string& model_dir,
-                                           TokenizerFlags& out) {
+bool HFConfigLoader::load_tokenizer_flags(const std::string& model_dir, TokenizerFlags& out) {
     std::string path = model_dir + "/tokenizer_config.json";
     JValue root;
-    if (!parse_json_file(path, root)) return false;
+    if (!parse_json_file(path, root))
+        return false;
 
     auto read_bool = [&](const char* key, int& field) {
         const JValue* v = jobj_find(root, key);
@@ -570,18 +582,18 @@ bool HFConfigLoader::load_tokenizer_flags(const std::string& model_dir,
         }
     };
 
-    read_bool("add_bos_token",             out.add_bos_token);
-    read_bool("add_eos_token",             out.add_eos_token);
-    read_bool("add_prefix_space",          out.add_prefix_space);
+    read_bool("add_bos_token", out.add_bos_token);
+    read_bool("add_eos_token", out.add_eos_token);
+    read_bool("add_prefix_space", out.add_prefix_space);
     read_bool("use_default_system_prompt", out.use_default_system_prompt);
 
-    IMP_LOG_INFO("tokenizer_config.json: add_bos=%s add_eos=%s add_prefix_space=%s "
-                 "use_default_system_prompt=%s",
-                 out.add_bos_token < 0    ? "unset" : (out.add_bos_token    ? "true" : "false"),
-                 out.add_eos_token < 0    ? "unset" : (out.add_eos_token    ? "true" : "false"),
-                 out.add_prefix_space < 0 ? "unset" : (out.add_prefix_space ? "true" : "false"),
-                 out.use_default_system_prompt < 0 ? "unset"
-                     : (out.use_default_system_prompt ? "true" : "false"));
+    IMP_LOG_INFO(
+        "tokenizer_config.json: add_bos=%s add_eos=%s add_prefix_space=%s "
+        "use_default_system_prompt=%s",
+        out.add_bos_token < 0 ? "unset" : (out.add_bos_token ? "true" : "false"),
+        out.add_eos_token < 0 ? "unset" : (out.add_eos_token ? "true" : "false"),
+        out.add_prefix_space < 0 ? "unset" : (out.add_prefix_space ? "true" : "false"),
+        out.use_default_system_prompt < 0 ? "unset" : (out.use_default_system_prompt ? "true" : "false"));
     return true;
 }
 
@@ -590,7 +602,8 @@ bool HFConfigLoader::load_tokenizer_flags(const std::string& model_dir,
 bool HFConfigLoader::load_gptq_config(const std::string& model_dir, GPTQConfig& cfg) {
     std::string path = model_dir + "/quantize_config.json";
     JValue root;
-    if (!parse_json_file(path, root)) return false;
+    if (!parse_json_file(path, root))
+        return false;
 
     IMP_LOG_INFO("loading GPTQ config from %s", path.c_str());
 
@@ -600,8 +613,8 @@ bool HFConfigLoader::load_gptq_config(const std::string& model_dir, GPTQConfig& 
     const JValue* da = jobj_find(root, "desc_act");
     cfg.desc_act = da && da->type == JType::NUMBER && da->num_val != 0.0;
 
-    IMP_LOG_INFO("  GPTQ: bits=%d group_size=%d desc_act=%s",
-                 cfg.bits, cfg.group_size, cfg.desc_act ? "true" : "false");
+    IMP_LOG_INFO("  GPTQ: bits=%d group_size=%d desc_act=%s", cfg.bits, cfg.group_size,
+                 cfg.desc_act ? "true" : "false");
     return true;
 }
 
@@ -614,29 +627,32 @@ bool file_exists_at(const std::string& path) {
     return f.good();
 }
 
-} // namespace
+}  // namespace
 
 bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config& cfg) {
     bool has_modelopt = file_exists_at(model_dir + "/hf_quant_config.json");
     bool has_compressor = file_exists_at(model_dir + "/recipe.yaml");
 
     if (has_modelopt && has_compressor) {
-        IMP_LOG_WARN("Both quant config files present in %s — preferring modelopt",
-                     model_dir.c_str());
+        IMP_LOG_WARN("Both quant config files present in %s — preferring modelopt", model_dir.c_str());
     }
 
     if (has_modelopt) {
         // Existing modelopt parsing (unchanged from before).
         std::string path = model_dir + "/hf_quant_config.json";
         JValue root;
-        if (!parse_json_file(path, root)) return false;
+        if (!parse_json_file(path, root))
+            return false;
 
         const JValue* quant = jobj_find(root, "quantization");
-        if (!quant || quant->type != JType::OBJECT) return false;
+        if (!quant || quant->type != JType::OBJECT)
+            return false;
 
         const JValue* algo = jobj_find(*quant, "quant_algo");
-        if (!algo || algo->type != JType::STRING) return false;
-        if (algo->str_val != "NVFP4" && algo->str_val != "nvfp4") return false;
+        if (!algo || algo->type != JType::STRING)
+            return false;
+        if (algo->str_val != "NVFP4" && algo->str_val != "nvfp4")
+            return false;
 
         jobj_get_int(*quant, "group_size", cfg.group_size);
 
@@ -666,4 +682,4 @@ bool HFConfigLoader::load_nvfp4_config(const std::string& model_dir, NvFP4Config
     return false;
 }
 
-} // namespace imp
+}  // namespace imp

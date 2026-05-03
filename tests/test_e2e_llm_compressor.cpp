@@ -12,15 +12,13 @@ bool dir_exists(const std::string& p) {
     return ::stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
 }
 
-} // namespace
+}  // namespace
 
 class LlmCompressorE2E : public ::testing::Test {
 protected:
     static constexpr const char* kGemma4Dir = "/models/Gemma-4-26B-A4B-it-NVFP4";
-    static constexpr const char* kMistralDir =
-        "/models/Mistral-Small-3.2-24B-Instruct-2506-NVFP4";
-    static constexpr const char* kModeloptCoderDir =
-        "/models/Qwen3-Coder-30B-A3B-FP4";
+    static constexpr const char* kMistralDir = "/models/Mistral-Small-3.2-24B-Instruct-2506-NVFP4";
+    static constexpr const char* kModeloptCoderDir = "/models/Qwen3-Coder-30B-A3B-FP4";
 };
 
 TEST_F(LlmCompressorE2E, Gemma4_LoadsWithoutIMA) {
@@ -80,11 +78,10 @@ TEST_F(LlmCompressorE2E, Gemma4_LoadsAndGeneratesCoherent) {
 
     char output[2048];
     size_t len = 0;
-    ASSERT_EQ(imp_generate(ctx, "What is the capital of France?", &params,
-                           output, sizeof(output), &len), IMP_SUCCESS);
+    ASSERT_EQ(imp_generate(ctx, "What is the capital of France?", &params, output, sizeof(output), &len),
+              IMP_SUCCESS);
     std::string result(output, len);
-    EXPECT_NE(result.find("Paris"), std::string::npos)
-        << "Generated text: " << result;
+    EXPECT_NE(result.find("Paris"), std::string::npos) << "Generated text: " << result;
 
     imp_context_free(ctx);
     imp_model_free(model);
@@ -120,11 +117,10 @@ TEST_F(LlmCompressorE2E, MistralSmall_LoadsAndGeneratesCoherent) {
     params.apply_chat_template = 0;
     char output[2048];
     size_t len = 0;
-    ASSERT_EQ(imp_generate(ctx, "The capital of France is", &params,
-                           output, sizeof(output), &len), IMP_SUCCESS);
+    ASSERT_EQ(imp_generate(ctx, "The capital of France is", &params, output, sizeof(output), &len),
+              IMP_SUCCESS);
     std::string result(output, len);
-    EXPECT_NE(result.find("Paris"), std::string::npos)
-        << "Generated text: " << result;
+    EXPECT_NE(result.find("Paris"), std::string::npos) << "Generated text: " << result;
     imp_context_free(ctx);
     imp_model_free(model);
 }
@@ -158,8 +154,7 @@ TEST_F(LlmCompressorE2E, Modelopt_QwenCoder30B_StillWorks) {
 
     char output[2048];
     size_t len = 0;
-    ASSERT_EQ(imp_generate(ctx, "def factorial(n):", &params,
-                           output, sizeof(output), &len), IMP_SUCCESS);
+    ASSERT_EQ(imp_generate(ctx, "def factorial(n):", &params, output, sizeof(output), &len), IMP_SUCCESS);
     EXPECT_GT(len, 5u) << "Output unexpectedly short";
 
     imp_context_free(ctx);

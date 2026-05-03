@@ -9,8 +9,7 @@ namespace imp {
 // If it looks like a HF repo ID (contains '/'), tries to download via huggingface-cli.
 // Returns empty string on failure.
 // Optional: revision can be "main", a branch name, or a commit hash.
-std::string resolve_model_path(const std::string& model_id,
-                                const std::string& revision = "");
+std::string resolve_model_path(const std::string& model_id, const std::string& revision = "");
 
 // Check if huggingface-cli is available on the system.
 bool hf_cli_available();
@@ -25,19 +24,17 @@ std::string find_gguf_in_dir(const std::string& dir);
 //   - If model_id points to a .gguf file directly, returns it.
 //   - If model_id is a directory or HF repo ID, resolves and finds the .gguf inside.
 // Returns empty string on failure.
-std::string resolve_model_gguf(const std::string& model_id,
-                                const std::string& revision = "");
+std::string resolve_model_gguf(const std::string& model_id, const std::string& revision = "");
 
 // Resolve a model identifier to a path and auto-detect format.
 // Checks for SafeTensors first (directory with model.safetensors[.index.json]),
 // then falls back to GGUF resolution.
 // Sets out_format to the detected format.
 // Returns empty string on failure.
-std::string resolve_model_auto(const std::string& model_id,
-                                ImpModelFormat& out_format,
-                                const std::string& revision = "");
+std::string resolve_model_auto(const std::string& model_id, ImpModelFormat& out_format,
+                               const std::string& revision = "");
 
 // Check if a directory contains SafeTensors model files.
 bool is_safetensors_dir(const std::string& dir);
 
-} // namespace imp
+}  // namespace imp

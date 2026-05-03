@@ -3,15 +3,14 @@
 
 namespace imp {
 
-VisionModel::~VisionModel() {
-    free_gpu();
-}
+VisionModel::~VisionModel() { free_gpu(); }
 
 void VisionModel::free_gpu() {
     for (void* ptr : gpu_allocs) {
-        if (ptr) cudaFree(ptr);
+        if (ptr)
+            cudaFree(ptr);
     }
     gpu_allocs.clear();
 }
 
-} // namespace imp
+}  // namespace imp

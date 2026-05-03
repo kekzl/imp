@@ -51,25 +51,39 @@ namespace imp {
 // Layer methods: executor_attention.cu, executor_ffn.cu, executor_ssm_gdn.cu
 
 // LM head dp4a GEMV dispatch: y = W @ x (FP32 output for logits).
-static void dispatch_gemv_fp32(QType qtype,
-                                const void* W, const block_q8_1* q8_1, const float* d8,
-                                float* y, int M, int K, cudaStream_t stream) {
+static void dispatch_gemv_fp32(QType qtype, const void* W, const block_q8_1* q8_1, const float* d8, float* y,
+                               int M, int K, cudaStream_t stream) {
     switch (qtype) {
-        case QType::Q6_K: gemv_q6k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
-        case QType::Q4_0: gemv_q4_0_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
-        case QType::Q4_K: gemv_q4_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
-        case QType::Q5_K: gemv_q5_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
-        case QType::Q2_K: gemv_q2_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
-        case QType::Q3_K: gemv_q3_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
-        default:                  gemv_q8_0_q8_1_fp32(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q6_K:
+            gemv_q6k_q8_1_fp32(W, q8_1, d8, y, M, K, stream);
+            break;
+        case QType::Q4_0:
+            gemv_q4_0_q8_1_fp32(W, q8_1, d8, y, M, K, stream);
+            break;
+        case QType::Q4_K:
+            gemv_q4_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream);
+            break;
+        case QType::Q5_K:
+            gemv_q5_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream);
+            break;
+        case QType::Q2_K:
+            gemv_q2_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream);
+            break;
+        case QType::Q3_K:
+            gemv_q3_k_q8_1_fp32(W, q8_1, d8, y, M, K, stream);
+            break;
+        default:
+            gemv_q8_0_q8_1_fp32(W, q8_1, d8, y, M, K, stream);
+            break;
     }
 }
 
 // Gemma 4: per-layer output scale. Multiplies all elements of `data` by the
 // scalar half stored at `scale_ptr` (device memory). Used at end of each layer
 // to keep the residual stream bounded.
-__global__ __launch_bounds__(256) void scale_fp16_by_fp16ptr_kernel(
-    half* __restrict__ data, const half* __restrict__ scale_ptr, int64_t n) {
+__global__ __launch_bounds__(256) void scale_fp16_by_fp16ptr_kernel(half* __restrict__ data,
+                                                                    const half* __restrict__ scale_ptr,
+                                                                    int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t n2 = n / 2;
     if (idx < n2) {
@@ -79,8 +93,9 @@ __global__ __launch_bounds__(256) void scale_fp16_by_fp16ptr_kernel(
     }
 }
 
-__global__ __launch_bounds__(256) void scale_fp32_by_fp16ptr_kernel(
-    float* __restrict__ data, const half* __restrict__ scale_ptr, int64_t n) {
+__global__ __launch_bounds__(256) void scale_fp32_by_fp16ptr_kernel(float* __restrict__ data,
+                                                                    const half* __restrict__ scale_ptr,
+                                                                    int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) {
         float s = __half2float(*scale_ptr);
@@ -98,7 +113,8 @@ __global__ __launch_bounds__(256) void scale_fp32_by_fp16ptr_kernel(
 
 // Print top-k logits with token IDs
 void debug_top_logits(const Tensor& logits, cudaStream_t stream, int topk = 10) {
-    if (!debug_forward_enabled()) return;
+    if (!debug_forward_enabled())
+        return;
     int vocab = static_cast<int>(logits.shape[logits.ndim - 1]);
     int nrows = (logits.ndim >= 2) ? static_cast<int>(logits.shape[0]) : 1;
     // Dump the LAST row (the one that actually gets sampled from for the next token).
@@ -109,36 +125,41 @@ void debug_top_logits(const Tensor& logits, cudaStream_t stream, int topk = 10) 
     std::vector<float> host(vocab);
 
     if (logits.qtype == QType::F32) {
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(host.data(), src, vocab * sizeof(float),
-                         cudaMemcpyDeviceToHost, stream));
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpyAsync(host.data(), src, vocab * sizeof(float), cudaMemcpyDeviceToHost, stream));
     } else if (logits.qtype == QType::F16) {
         std::vector<half> tmp(vocab);
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(tmp.data(), src, vocab * sizeof(half),
-                         cudaMemcpyDeviceToHost, stream));
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpyAsync(tmp.data(), src, vocab * sizeof(half), cudaMemcpyDeviceToHost, stream));
         cudaStreamSynchronize(stream);
-        for (int i = 0; i < vocab; i++) host[i] = __half2float(tmp[i]);
+        for (int i = 0; i < vocab; i++)
+            host[i] = __half2float(tmp[i]);
     }
     cudaStreamSynchronize(stream);
     // Also print min/max/L2 over the dumped row for cross-impl comparison.
-    float mn = host[0], mx = host[0]; double ss = 0.0;
-    for (int i = 0; i < vocab; i++) { mn = std::min(mn, host[i]); mx = std::max(mx, host[i]); ss += (double)host[i]*host[i]; }
-    fprintf(stderr, "[DEBUG_FWD] logits row=%d/%d  min=%+.4f max=%+.4f L2=%.4f\n",
-            row, nrows, mn, mx, std::sqrt(ss));
+    float mn = host[0], mx = host[0];
+    double ss = 0.0;
+    for (int i = 0; i < vocab; i++) {
+        mn = std::min(mn, host[i]);
+        mx = std::max(mx, host[i]);
+        ss += (double)host[i] * host[i];
+    }
+    fprintf(stderr, "[DEBUG_FWD] logits row=%d/%d  min=%+.4f max=%+.4f L2=%.4f\n", row, nrows, mn, mx,
+            std::sqrt(ss));
 
     // Find top-k by partial sort
     std::vector<std::pair<float, int>> scored(vocab);
-    for (int i = 0; i < vocab; i++) scored[i] = {host[i], i};
-    std::partial_sort(scored.begin(), scored.begin() + std::min(topk, vocab),
-                      scored.end(), [](auto& a, auto& b) { return a.first > b.first; });
+    for (int i = 0; i < vocab; i++)
+        scored[i] = {host[i], i};
+    std::partial_sort(scored.begin(), scored.begin() + std::min(topk, vocab), scored.end(),
+                      [](auto& a, auto& b) { return a.first > b.first; });
     fprintf(stderr, "[DEBUG_FWD] Top-%d logits:\n", topk);
     for (int i = 0; i < std::min(topk, vocab); i++) {
-        fprintf(stderr, "  [%2d] token_id=%6d  logit=%+.6f\n",
-                i, scored[i].second, scored[i].first);
+        fprintf(stderr, "  [%2d] token_id=%6d  logit=%+.6f\n", i, scored[i].second, scored[i].first);
     }
 }
 
 // run_attention: moved to executor_attention.cu
-
 
 // run_ffn: moved to executor_ffn.cu
 
@@ -148,9 +169,7 @@ void debug_top_logits(const Tensor& logits, cudaStream_t stream, int topk = 10) 
 // Full forward pass
 // ---------------------------------------------------------------------------
 
-void GraphExecutor::forward_logits(const InferenceState& state,
-                                   Tensor& logits_out,
-                                   cudaStream_t stream) {
+void GraphExecutor::forward_logits(const InferenceState& state, Tensor& logits_out, cudaStream_t stream) {
     if (!initialized_) {
         IMP_LOG_ERROR("GraphExecutor::forward_logits called before init()");
         return;
@@ -169,9 +188,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         // (→ `terminate: reshape: numel mismatch` on the worker thread,
         // which used to kill the entire imp-server container).
         char msg[128];
-        snprintf(msg, sizeof(msg),
-                 "GraphExecutor::forward_logits: n_tokens (%d) exceeds max_tokens (%d)",
-                 n, max_tokens_);
+        snprintf(msg, sizeof(msg), "GraphExecutor::forward_logits: n_tokens (%d) exceeds max_tokens (%d)", n,
+                 max_tokens_);
         IMP_LOG_ERROR("%s", msg);
         throw std::invalid_argument(msg);
     }
@@ -181,15 +199,19 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     // Decode step counter for debug dump tagging. Shared with GDN path via
     // debug_decode_step() so run_gdn can tag its dumps with the same step.
     int& s_decode_step = debug_decode_step();
-    if (n == 1) s_decode_step++;
+    if (n == 1)
+        s_decode_step++;
     const int decode_step = (n == 1) ? s_decode_step : 0;
     cur_decode_step_ = decode_step;
     cur_force_fp16_ = state.force_fp16_gemm;
     cur_per_row_lm_ = state.per_row_lm_head;
 
     // Clear any stale CUDA error state before starting the forward pass.
-    { cudaError_t e_ = cudaGetLastError();
-      if (e_ != cudaSuccess) IMP_LOG_WARN("Cleared stale error before forward: %s", cudaGetErrorString(e_)); }
+    {
+        cudaError_t e_ = cudaGetLastError();
+        if (e_ != cudaSuccess)
+            IMP_LOG_WARN("Cleared stale error before forward: %s", cudaGetErrorString(e_));
+    }
 
     // ---- Optional per-component profiling (IMP_PROFILE=1) ----
     // Profiling disables CUDA graph capture (they are incompatible).
@@ -208,20 +230,28 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         std::vector<cudaEvent_t> ev_attn, ev_ffn;
         bool active = false;
         ~ProfileEvents() {
-            if (!active) return;
-            if (ev_start) cudaEventDestroy(ev_start);
-            if (ev_emb) cudaEventDestroy(ev_emb);
-            if (ev_lm) cudaEventDestroy(ev_lm);
-            for (auto e : ev_attn) if (e) cudaEventDestroy(e);
-            for (auto e : ev_ffn) if (e) cudaEventDestroy(e);
+            if (!active)
+                return;
+            if (ev_start)
+                cudaEventDestroy(ev_start);
+            if (ev_emb)
+                cudaEventDestroy(ev_emb);
+            if (ev_lm)
+                cudaEventDestroy(ev_lm);
+            for (auto e : ev_attn)
+                if (e)
+                    cudaEventDestroy(e);
+            for (auto e : ev_ffn)
+                if (e)
+                    cudaEventDestroy(e);
         }
     } prof;
     // Alias references for minimal churn in the rest of the function.
     auto& ev_start = prof.ev_start;
-    auto& ev_emb   = prof.ev_emb;
-    auto& ev_lm    = prof.ev_lm;
-    auto& ev_attn  = prof.ev_attn;
-    auto& ev_ffn   = prof.ev_ffn;
+    auto& ev_emb = prof.ev_emb;
+    auto& ev_lm = prof.ev_lm;
+    auto& ev_attn = prof.ev_attn;
+    auto& ev_ffn = prof.ev_ffn;
     if (profile_active) {
         prof.active = true;
         cudaEventCreate(&ev_start);
@@ -243,40 +273,43 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     //    For Q8_0/Q6_K embeddings, dequantizes only the needed rows on the fly.
     if (debug_forward_enabled()) {
         std::vector<int32_t> h_ids(n);
-        IMP_CUDA_CHECK_LOG(cudaMemcpy(h_ids.data(), state.token_ids, n * sizeof(int32_t), cudaMemcpyDeviceToHost));
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpy(h_ids.data(), state.token_ids, n * sizeof(int32_t), cudaMemcpyDeviceToHost));
         fprintf(stderr, "[DEBUG_FWD] [step=%d] input_tokens (%d):", decode_step, n);
-        for (int i = 0; i < n; i++) fprintf(stderr, " %d", h_ids[i]);
+        for (int i = 0; i < n; i++)
+            fprintf(stderr, " %d", h_ids[i]);
         fprintf(stderr, "\n");
         // Dump positions
         std::vector<int> h_pos(n);
-        IMP_CUDA_CHECK_LOG(cudaMemcpy(h_pos.data(), state.positions, n * sizeof(int), cudaMemcpyDeviceToHost));
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpy(h_pos.data(), state.positions, n * sizeof(int), cudaMemcpyDeviceToHost));
         fprintf(stderr, "[DEBUG_FWD] [step=%d] positions (%d):", decode_step, n);
-        for (int i = 0; i < std::min(n, 30); i++) fprintf(stderr, " %d", h_pos[i]);
+        for (int i = 0; i < std::min(n, 30); i++)
+            fprintf(stderr, " %d", h_pos[i]);
         fprintf(stderr, "\n");
     }
     Tensor h = view_tokens(hidden_, n);
-    embedding_lookup(model_->token_embedding(), state.token_ids, n, h,
-                     model_->tok_emb_.qtype, stream);
+    embedding_lookup(model_->token_embedding(), state.token_ids, n, h, model_->tok_emb_.qtype, stream);
 
     // Gemma: scale embeddings by sqrt(d_model)
     if (cfg.embed_scale > 0.0f && h.qtype == QType::F16) {
         int64_t total = static_cast<int64_t>(n) * cfg.d_model;
         int threads = 256;
         int blocks = static_cast<int>((total / 2 + threads - 1) / threads);
-        scale_fp16_kernel<<<blocks, threads, 0, stream>>>(
-            static_cast<half*>(h.data), __float2half(cfg.embed_scale), total);
+        scale_fp16_kernel<<<blocks, threads, 0, stream>>>(static_cast<half*>(h.data),
+                                                          __float2half(cfg.embed_scale), total);
     }
 
     // Replace vision token positions with vision embeddings (multimodal)
     if (state.vision_embeddings && state.vision_token_id >= 0 && state.n_vision_tokens > 0) {
         // Declared in vision/vision_encoder.cu
-        extern void launch_replace_vision_embeddings(
-            half* hidden, const int32_t* token_ids, const half* vision_emb,
-            int vision_token_id, int n_tokens, int d_model, int n_vision_tokens,
-            cudaStream_t stream);
-        launch_replace_vision_embeddings(
-            static_cast<half*>(h.data), state.token_ids, state.vision_embeddings,
-            state.vision_token_id, n, cfg.d_model, state.n_vision_tokens, stream);
+        extern void launch_replace_vision_embeddings(half * hidden, const int32_t* token_ids,
+                                                     const half* vision_emb, int vision_token_id,
+                                                     int n_tokens, int d_model, int n_vision_tokens,
+                                                     cudaStream_t stream);
+        launch_replace_vision_embeddings(static_cast<half*>(h.data), state.token_ids, state.vision_embeddings,
+                                         state.vision_token_id, n, cfg.d_model, state.n_vision_tokens,
+                                         stream);
     }
 
     debug_tensor_stats("after_embedding", h, stream);
@@ -288,18 +321,17 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         int threads = 256;
         int blocks = static_cast<int>((total + threads - 1) / threads);
         fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(
-            static_cast<const half*>(h.data),
-            static_cast<float*>(view_tokens(fp32_hidden_, n).data), total);
+            static_cast<const half*>(h.data), static_cast<float*>(view_tokens(fp32_hidden_, n).data), total);
     }
 
     // Dump FP32 accumulator for decode debugging
     if (fp32_accum_buf_ && n == 1 && debug_forward_enabled()) {
         float tmp[4];
-        cudaMemcpyAsync(tmp, view_tokens(fp32_hidden_, n).data, 4*sizeof(float),
-                        cudaMemcpyDeviceToHost, stream);
+        cudaMemcpyAsync(tmp, view_tokens(fp32_hidden_, n).data, 4 * sizeof(float), cudaMemcpyDeviceToHost,
+                        stream);
         cudaStreamSynchronize(stream);
-        fprintf(stderr, "[DEBUG_FWD] [step=%d] fp32_accum_init: [%.4f %.4f %.4f %.4f]\n",
-                decode_step, tmp[0], tmp[1], tmp[2], tmp[3]);
+        fprintf(stderr, "[DEBUG_FWD] [step=%d] fp32_accum_init: [%.4f %.4f %.4f %.4f]\n", decode_step, tmp[0],
+                tmp[1], tmp[2], tmp[3]);
     }
     // Binary dump: write the full FP16 hidden state to file
     if (!RuntimeConfig::current().diagnostics.dump_hidden_dir.empty()) {
@@ -308,23 +340,26 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         char fname[256];
         snprintf(fname, sizeof(fname), "/tmp/imp_embed_step%d.bin", decode_step);
         FILE* f = fopen(fname, "wb");
-        if (f) { fwrite(h_buf.data(), sizeof(half), h_buf.size(), f); fclose(f); }
+        if (f) {
+            fwrite(h_buf.data(), sizeof(half), h_buf.size(), f);
+            fclose(f);
+        }
         fprintf(stderr, "[DUMP_BIN] Wrote %s (%zu halfs)\n", fname, h_buf.size());
     }
 
-    if (profile_active) cudaEventRecord(ev_emb, stream);
+    if (profile_active)
+        cudaEventRecord(ev_emb, stream);
 
     // ---- Step 2: Transformer/Hybrid layers ----
-    int max_layer = (state.exit_layer > 0)
-                    ? std::min(state.exit_layer, cfg.n_layers)
-                    : cfg.n_layers;
+    int max_layer = (state.exit_layer > 0) ? std::min(state.exit_layer, cfg.n_layers) : cfg.n_layers;
     // [diagnostics] exit_layer = N runs only N layers (-1 = full forward).
     {
         const int s_exit = RuntimeConfig::current().diagnostics.exit_layer;
-        if (s_exit > 0) max_layer = std::min(max_layer, s_exit);
+        if (s_exit > 0)
+            max_layer = std::min(max_layer, s_exit);
     }
     const int skip_start = state.skip_layer_start;
-    const int skip_end   = state.skip_layer_end;
+    const int skip_end = state.skip_layer_end;
     for (int i = 0; i < max_layer; ++i) {
         // Layer skipping: skip layers in [skip_start, skip_end)
         if (skip_start >= 0 && skip_end > skip_start && i >= skip_start && i < skip_end)
@@ -356,8 +391,9 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         {
             char buf[64];
             snprintf(buf, sizeof(buf), "[step=%d] after_layer%02d_%s", decode_step, i,
-                     layer_has_gdn(i) ? "gdn" :
-                     layer_has_attention(i) ? "attn" : "ssm");
+                     layer_has_gdn(i)         ? "gdn"
+                     : layer_has_attention(i) ? "attn"
+                                              : "ssm");
             debug_tensor_stats_all(buf, view_tokens(h, n), stream);
             const bool dump_this_layer = debug_forward_enabled();
             if (dump_this_layer) {
@@ -366,8 +402,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 debug_tensor_rows(rbuf, view_tokens(h, n), stream);
             }
         }
-        if (profile_active) cudaEventRecord(ev_attn[i], stream);
-
+        if (profile_active)
+            cudaEventRecord(ev_attn[i], stream);
 
         // FFN: MoE, dense, or none (attention-only layers may have no FFN)
         const bool skip_moe = RuntimeConfig::current().moe.skip;
@@ -396,15 +432,12 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         // next layer reads it. Without it, the residual stream grows unbounded.
         {
             const auto& ly = model_->layer(i);
-            if (ly.layer_out_scale.data != nullptr && ly.layer_out_scale.on_device &&
-                h.qtype == QType::F16) {
+            if (ly.layer_out_scale.data != nullptr && ly.layer_out_scale.on_device && h.qtype == QType::F16) {
                 int64_t total = static_cast<int64_t>(n) * cfg.d_model;
                 int threads = 256;
                 int blocks = static_cast<int>((total / 2 + threads - 1) / threads);
                 scale_fp16_by_fp16ptr_kernel<<<blocks, threads, 0, stream>>>(
-                    static_cast<half*>(h.data),
-                    static_cast<const half*>(ly.layer_out_scale.data),
-                    total);
+                    static_cast<half*>(h.data), static_cast<const half*>(ly.layer_out_scale.data), total);
                 // Also scale the FP32 residual accumulator so next layer's
                 // attention sees the correctly-scaled residual stream.
                 // Without this the FP32 accum grows unbounded (layer_out_scale
@@ -413,14 +446,13 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                     int blocks_f32 = static_cast<int>((total + threads - 1) / threads);
                     scale_fp32_by_fp16ptr_kernel<<<blocks_f32, threads, 0, stream>>>(
                         static_cast<float*>(view_tokens(fp32_hidden_, n).data),
-                        static_cast<const half*>(ly.layer_out_scale.data),
-                        total);
+                        static_cast<const half*>(ly.layer_out_scale.data), total);
                 }
                 if (debug_forward_enabled()) {
                     float sval = 0.0f;
                     half h_scale;
-                    cudaMemcpyAsync(&h_scale, ly.layer_out_scale.data, sizeof(half),
-                                    cudaMemcpyDeviceToHost, stream);
+                    cudaMemcpyAsync(&h_scale, ly.layer_out_scale.data, sizeof(half), cudaMemcpyDeviceToHost,
+                                    stream);
                     cudaStreamSynchronize(stream);
                     sval = __half2float(h_scale);
                     if (i == 0 || i == 29)
@@ -428,15 +460,13 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                     // Dump FP16 hidden after scale for all layers (decode only)
                     if (n == 1 && debug_forward_enabled()) {
                         half h_tmp[8];
-                        cudaMemcpyAsync(h_tmp, view_tokens(h, n).data, 8*sizeof(half),
+                        cudaMemcpyAsync(h_tmp, view_tokens(h, n).data, 8 * sizeof(half),
                                         cudaMemcpyDeviceToHost, stream);
                         cudaStreamSynchronize(stream);
                         fprintf(stderr, "[DUMP] step=%d L%02d h=[%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f]\n",
-                                decode_step, i,
-                                __half2float(h_tmp[0]), __half2float(h_tmp[1]),
-                                __half2float(h_tmp[2]), __half2float(h_tmp[3]),
-                                __half2float(h_tmp[4]), __half2float(h_tmp[5]),
-                                __half2float(h_tmp[6]), __half2float(h_tmp[7]));
+                                decode_step, i, __half2float(h_tmp[0]), __half2float(h_tmp[1]),
+                                __half2float(h_tmp[2]), __half2float(h_tmp[3]), __half2float(h_tmp[4]),
+                                __half2float(h_tmp[5]), __half2float(h_tmp[6]), __half2float(h_tmp[7]));
                     }
                     // Binary dump: full hidden state for selected layers.
                     // [diagnostics] dump_hidden_dir = "<path>"  → layers 0/5/15/29.
@@ -447,11 +477,15 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                         bool sel = dump_all || (i == 0 || i == 5 || i == 15 || i == 29);
                         if (sel) {
                             std::vector<half> h_buf(n * cfg.d_model);
-                            cudaMemcpy(h_buf.data(), view_tokens(h, n).data, h_buf.size() * sizeof(half), cudaMemcpyDeviceToHost);
+                            cudaMemcpy(h_buf.data(), view_tokens(h, n).data, h_buf.size() * sizeof(half),
+                                       cudaMemcpyDeviceToHost);
                             char fname[256];
                             snprintf(fname, sizeof(fname), "/tmp/imp_L%02d_step%d.bin", i, decode_step);
                             FILE* f = fopen(fname, "wb");
-                            if (f) { fwrite(h_buf.data(), sizeof(half), h_buf.size(), f); fclose(f); }
+                            if (f) {
+                                fwrite(h_buf.data(), sizeof(half), h_buf.size(), f);
+                                fclose(f);
+                            }
                         }
                     }
                 }
@@ -480,9 +514,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
             int64_t total = static_cast<int64_t>(n) * cfg.d_model;
             int threads = 256;
             int blocks = static_cast<int>((total + threads - 1) / threads);
-            fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(
-                static_cast<const half*>(h.data),
-                static_cast<float*>(fp32_h.data), total);
+            fp16_to_fp32_kernel<<<blocks, threads, 0, stream>>>(static_cast<const half*>(h.data),
+                                                                static_cast<float*>(fp32_h.data), total);
         }
 
         // Layer-diff dump: Snapshot C — end-of-layer state (input to next layer).
@@ -491,14 +524,14 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         dump_tensor_npy("C_post_layer", view_tokens(h, n), stream, i, decode_step);
         // Also dump the FP32 shadow so we can diff FP32-truth vs FP16-view vs llama.cpp.
         if (fp32_accum_buf_) {
-            dump_tensor_npy("C_fp32_shadow", view_tokens(fp32_hidden_, n), stream,
-                            i, decode_step);
+            dump_tensor_npy("C_fp32_shadow", view_tokens(fp32_hidden_, n), stream, i, decode_step);
         }
 
         if (i == max_layer - 1) {
             debug_tensor_stats("after_last_layer", h, stream);
         }
-        if (profile_active) cudaEventRecord(ev_ffn[i], stream);
+        if (profile_active)
+            cudaEventRecord(ev_ffn[i], stream);
 
         // Release offloaded layer (restore host pointers)
         if (offload_mgr_) {
@@ -518,8 +551,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     }
     if (fp32_accum_buf_) {
         fp32_to_fp16_rowscale_kernel<<<n, 256, 256 * sizeof(float), stream>>>(
-            static_cast<const float*>(view_tokens(fp32_hidden_, n).data),
-            static_cast<half*>(h.data), n, cfg.d_model);
+            static_cast<const float*>(view_tokens(fp32_hidden_, n).data), static_cast<half*>(h.data), n,
+            cfg.d_model);
     }
 
     // ---- Step 3+4: Final RMSNorm + LM head projection ----
@@ -531,16 +564,16 @@ void GraphExecutor::forward_logits(const InferenceState& state,
     // use fused RMSNorm→Q8_1 + dp4a GEMV with FP32 output. Saves ~2.45x VRAM
     // bandwidth vs cuBLAS FP16 path (reads quantized weights directly).
     const auto out_qtype = model_->out_proj_.qtype;
-    const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 &&
-        is_dp4a_qtype(out_qtype) && !RuntimeConfig::current().gemm.no_dp4a_lm;
+    const bool use_dp4a_lm = qscratch_.q8_1_buf && compute_dtype_ == QType::F16 && is_dp4a_qtype(out_qtype) &&
+                             !RuntimeConfig::current().gemm.no_dp4a_lm;
 
     // GemmContext for LM head GEMM dispatches.
     auto ctx = GemmContext::make(stream, wcache_, qscratch_, cur_force_fp16_);
 
     // Registry handle for LM head — replaces wcache_ probe per call (Task 3.5).
     const WeightHandle* lm_h = (model_->out_proj_id != kInvalidTensorID)
-                                    ? &registry_.handle(model_->out_proj_id)
-                                    : nullptr;
+                                   ? &registry_.handle(model_->out_proj_id)
+                                   : nullptr;
     const StorageTier lm_tier = lm_h ? lm_h->primary_tier : StorageTier::Undefined;
 
     if (state.is_prefill && !state.all_logits) {
@@ -555,29 +588,26 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 hadamard_transform_fp16(static_cast<const half*>(no_last.data),
                                         static_cast<half*>(no_last.data), 1, cfg.d_model, hbs, stream);
             CutlassMxFP4Weight mxfp4_lm_w{};
-            mxfp4_lm_w.data          = lm_h->payload.mxfp4.weight;
+            mxfp4_lm_w.data = lm_h->payload.mxfp4.weight;
             mxfp4_lm_w.scale_factors = lm_h->payload.mxfp4.scales;
             mxfp4_lm_w.linear_scales = lm_h->payload.mxfp4.linear_scales;
-            mxfp4_lm_w.hadamard_bs   = lm_h->payload.mxfp4.hadamard_bs;
-            gemv_mxfp4_kpar_fp32(mxfp4_lm_w,
-                                  static_cast<const half*>(no_last.data),
-                                  static_cast<float*>(lg.data),
-                                  cfg.vocab_size, cfg.d_model, stream);
+            mxfp4_lm_w.hadamard_bs = lm_h->payload.mxfp4.hadamard_bs;
+            gemv_mxfp4_kpar_fp32(mxfp4_lm_w, static_cast<const half*>(no_last.data),
+                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         } else if (lm_tier == StorageTier::NVFP4) {
             Tensor no_last = view_tokens(norm_out_, 1);
             rmsnorm(h_last, model_->output_norm(), no_last, cfg.rms_norm_eps, stream, norm_w_off_);
             debug_tensor_stats("after_final_rmsnorm", no_last, stream);
             NvFP4QuantResult nvfp4_lm_r;
-            nvfp4_lm_r.packed_data  = lm_h->payload.nvfp4.data;
+            nvfp4_lm_r.packed_data = lm_h->payload.nvfp4.data;
             nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
             nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
-                ? *lm_h->payload.nvfp4.tensor_scale : 1.0f;
+                                          ? *lm_h->payload.nvfp4.tensor_scale
+                                          : 1.0f;
             nvfp4_lm_r.N = cfg.vocab_size;
             nvfp4_lm_r.K = cfg.d_model;
-            gemv_nvfp4_kpar_fp32(nvfp4_lm_r,
-                                  static_cast<const half*>(no_last.data),
-                                  static_cast<float*>(lg.data),
-                                  cfg.vocab_size, cfg.d_model, stream);
+            gemv_nvfp4_kpar_fp32(nvfp4_lm_r, static_cast<const half*>(no_last.data),
+                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         } else if (use_dp4a_lm) {
             if (debug_forward_enabled()) {
                 Tensor no_last = view_tokens(norm_out_, 1);
@@ -608,10 +638,10 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 fprintf(stderr, "[DEBUG_FWD] LM head via dequant->FP16->cuBLAS path\n");
             } else {
                 auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
-                rmsnorm_quantize_q8_1(
-                    static_cast<const half*>(h_last.data),
-                    static_cast<const half*>(model_->output_norm().data),
-                    q8, qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
+                rmsnorm_quantize_q8_1(static_cast<const half*>(h_last.data),
+                                      static_cast<const half*>(model_->output_norm().data), q8,
+                                      qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream,
+                                      norm_w_off_);
                 dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
                                    static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
             }
@@ -638,29 +668,26 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 hadamard_transform_fp16(static_cast<const half*>(no_final.data),
                                         static_cast<half*>(no_final.data), 1, cfg.d_model, hbs, stream);
             CutlassMxFP4Weight mxfp4_lm_w{};
-            mxfp4_lm_w.data          = lm_h->payload.mxfp4.weight;
+            mxfp4_lm_w.data = lm_h->payload.mxfp4.weight;
             mxfp4_lm_w.scale_factors = lm_h->payload.mxfp4.scales;
             mxfp4_lm_w.linear_scales = lm_h->payload.mxfp4.linear_scales;
-            mxfp4_lm_w.hadamard_bs   = lm_h->payload.mxfp4.hadamard_bs;
-            gemv_mxfp4_kpar_fp32(mxfp4_lm_w,
-                                  static_cast<const half*>(no_final.data),
-                                  static_cast<float*>(lg.data),
-                                  cfg.vocab_size, cfg.d_model, stream);
+            mxfp4_lm_w.hadamard_bs = lm_h->payload.mxfp4.hadamard_bs;
+            gemv_mxfp4_kpar_fp32(mxfp4_lm_w, static_cast<const half*>(no_final.data),
+                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         } else if (n == 1 && lm_tier == StorageTier::NVFP4) {
             Tensor no_final = view_tokens(norm_out_, 1);
             rmsnorm(h_final, model_->output_norm(), no_final, cfg.rms_norm_eps, stream, norm_w_off_);
             debug_tensor_stats("after_final_rmsnorm", no_final, stream);
             NvFP4QuantResult nvfp4_lm_r;
-            nvfp4_lm_r.packed_data  = lm_h->payload.nvfp4.data;
+            nvfp4_lm_r.packed_data = lm_h->payload.nvfp4.data;
             nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
             nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
-                ? *lm_h->payload.nvfp4.tensor_scale : 1.0f;
+                                          ? *lm_h->payload.nvfp4.tensor_scale
+                                          : 1.0f;
             nvfp4_lm_r.N = cfg.vocab_size;
             nvfp4_lm_r.K = cfg.d_model;
-            gemv_nvfp4_kpar_fp32(nvfp4_lm_r,
-                                  static_cast<const half*>(no_final.data),
-                                  static_cast<float*>(lg.data),
-                                  cfg.vocab_size, cfg.d_model, stream);
+            gemv_nvfp4_kpar_fp32(nvfp4_lm_r, static_cast<const half*>(no_final.data),
+                                 static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         } else if (n == 1 && use_dp4a_lm) {
             if (debug_forward_enabled()) {
                 Tensor no_final = view_tokens(norm_out_, 1);
@@ -668,20 +695,20 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 debug_tensor_stats("after_final_rmsnorm", no_final, stream);
             }
             auto* q8 = static_cast<block_q8_1*>(qscratch_.q8_1_buf);
-            rmsnorm_quantize_q8_1(
-                static_cast<const half*>(h_final.data),
-                static_cast<const half*>(model_->output_norm().data),
-                q8, qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
+            rmsnorm_quantize_q8_1(static_cast<const half*>(h_final.data),
+                                  static_cast<const half*>(model_->output_norm().data), q8, qscratch_.d8_buf,
+                                  nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
             dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
                                static_cast<float*>(lg.data), cfg.vocab_size, cfg.d_model, stream);
         } else if (n > 1 && lm_tier == StorageTier::NVFP4) {
             // Per-row NVFP4 GEMV LM head for batched decode.
             // NVFP4 GEMV is M=1 only — loop over rows.
             NvFP4QuantResult nvfp4_lm_r;
-            nvfp4_lm_r.packed_data  = lm_h->payload.nvfp4.data;
+            nvfp4_lm_r.packed_data = lm_h->payload.nvfp4.data;
             nvfp4_lm_r.micro_scales = lm_h->payload.nvfp4.block_scales;
             nvfp4_lm_r.tensor_scale = (lm_h->payload.nvfp4.tensor_scale != nullptr)
-                ? *lm_h->payload.nvfp4.tensor_scale : 1.0f;
+                                          ? *lm_h->payload.nvfp4.tensor_scale
+                                          : 1.0f;
             nvfp4_lm_r.N = cfg.vocab_size;
             nvfp4_lm_r.K = cfg.d_model;
             Tensor no_row = view_tokens(norm_out_, 1);
@@ -689,10 +716,8 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 Tensor h_row = h_final.slice(row, row + 1);
                 Tensor lg_row = lg.slice(row, row + 1);
                 rmsnorm(h_row, model_->output_norm(), no_row, cfg.rms_norm_eps, stream, norm_w_off_);
-                gemv_nvfp4_kpar_fp32(nvfp4_lm_r,
-                                      static_cast<const half*>(no_row.data),
-                                      static_cast<float*>(lg_row.data),
-                                      cfg.vocab_size, cfg.d_model, stream);
+                gemv_nvfp4_kpar_fp32(nvfp4_lm_r, static_cast<const half*>(no_row.data),
+                                     static_cast<float*>(lg_row.data), cfg.vocab_size, cfg.d_model, stream);
             }
         } else if (use_dp4a_lm && n > 1) {
             // Per-row Q8_1 GEMV LM head for batched decode.
@@ -711,10 +736,10 @@ void GraphExecutor::forward_logits(const InferenceState& state,
                 int64_t lg_flat[1] = {static_cast<int64_t>(cfg.vocab_size)};
                 Tensor lg_1d = lg_row.reshape(1, lg_flat);
 
-                rmsnorm_quantize_q8_1(
-                    static_cast<const half*>(h_row.data),
-                    static_cast<const half*>(model_->output_norm().data),
-                    q8, qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream, norm_w_off_);
+                rmsnorm_quantize_q8_1(static_cast<const half*>(h_row.data),
+                                      static_cast<const half*>(model_->output_norm().data), q8,
+                                      qscratch_.d8_buf, nullptr, cfg.d_model, cfg.rms_norm_eps, stream,
+                                      norm_w_off_);
                 dispatch_gemv_fp32(out_qtype, model_->output_proj().data, q8, qscratch_.d8_buf,
                                    static_cast<float*>(lg_1d.data), cfg.vocab_size, cfg.d_model, stream);
             }
@@ -727,14 +752,16 @@ void GraphExecutor::forward_logits(const InferenceState& state,
 
             // For n>1 decode with quantized output weights, use FP8 GEMM or FP16 cache.
             // Raw gemm() can't handle Q8_0/Q6_K weights with cuBLAS.
-            if (lm_tier == StorageTier::FP8 && qscratch_.fp8_act != nullptr && qscratch_.d_act_scale != nullptr) {
+            if (lm_tier == StorageTier::FP8 && qscratch_.fp8_act != nullptr &&
+                qscratch_.d_act_scale != nullptr) {
                 int64_t wshape[2] = {lm_h->shape[0], lm_h->shape[1]};
                 Tensor fp8_lm_w(lm_h->payload.fp8.data, QType::FP8_E4M3, 2, wshape, true);
                 Tensor fp8_no(qscratch_.fp8_act, QType::FP8_E4M3, no_final.ndim, no_final.shape, true);
                 quantize_fp16_to_fp8_e4m3(no_final, fp8_no, qscratch_.d_act_scale, stream,
-                                          qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax, qscratch_.fp8_max_grid);
-                gemm_cublaslt(fp8_no, fp8_lm_w, lg, 1.0f, 0.0f,
-                              qscratch_.d_act_scale, lm_h->payload.fp8.d_scale, stream);
+                                          qscratch_.d_fp8_block_maxes, qscratch_.d_fp8_absmax,
+                                          qscratch_.fp8_max_grid);
+                gemm_cublaslt(fp8_no, fp8_lm_w, lg, 1.0f, 0.0f, qscratch_.d_act_scale,
+                              lm_h->payload.fp8.d_scale, stream);
             } else {
                 // Fallback: gemm_dispatch handles FP16 cache, MXFP4, quantized, etc.
                 gemm_dispatch(no_final, model_->output_proj(), lg, ctx);
@@ -751,9 +778,9 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         int64_t n_logits = static_cast<int64_t>(logits_out.shape[0]) * cfg.vocab_size;
         int threads = 256;
         int blocks = static_cast<int>((n_logits + threads - 1) / threads);
-        logit_softcap_fp32_kernel<<<blocks, threads, 0, stream>>>(
-            static_cast<float*>(logits_out.data),
-            cfg.final_logit_softcap, 1.0f / cfg.final_logit_softcap, n_logits);
+        logit_softcap_fp32_kernel<<<blocks, threads, 0, stream>>>(static_cast<float*>(logits_out.data),
+                                                                  cfg.final_logit_softcap,
+                                                                  1.0f / cfg.final_logit_softcap, n_logits);
     }
 
     // ---- Profile summary ----
@@ -786,24 +813,18 @@ void GraphExecutor::forward_logits(const InferenceState& state,
         int steps_profiled = profile_idx - 1;  // subtract warmup steps
         // Print every 32 steps
         if ((profile_idx & 31) == 0) {
-            IMP_LOG_INFO("PROFILE avg over %d steps: total=%.2fms  attn=%.2fms (%.0f%%)  "
-                         "ffn/moe=%.2fms (%.0f%%)  lm_head=%.2fms (%.0f%%)  "
-                         "(per-layer: attn=%.3fms  ffn=%.3fms)",
-                         steps_profiled,
-                         acc_total / steps_profiled,
-                         acc_attn / steps_profiled,
-                         100.0f * acc_attn / acc_total,
-                         acc_ffn / steps_profiled,
-                         100.0f * acc_ffn / acc_total,
-                         acc_lm / steps_profiled,
-                         100.0f * acc_lm / acc_total,
-                         acc_attn / steps_profiled / cfg.n_layers,
-                         acc_ffn / steps_profiled / cfg.n_layers);
+            IMP_LOG_INFO(
+                "PROFILE avg over %d steps: total=%.2fms  attn=%.2fms (%.0f%%)  "
+                "ffn/moe=%.2fms (%.0f%%)  lm_head=%.2fms (%.0f%%)  "
+                "(per-layer: attn=%.3fms  ffn=%.3fms)",
+                steps_profiled, acc_total / steps_profiled, acc_attn / steps_profiled,
+                100.0f * acc_attn / acc_total, acc_ffn / steps_profiled, 100.0f * acc_ffn / acc_total,
+                acc_lm / steps_profiled, 100.0f * acc_lm / acc_total,
+                acc_attn / steps_profiled / cfg.n_layers, acc_ffn / steps_profiled / cfg.n_layers);
         }
 
         // Cleanup handled by ProfileEvents RAII destructor.
     }
 }
 
-
-} // namespace imp
+}  // namespace imp

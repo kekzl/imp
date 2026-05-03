@@ -72,13 +72,11 @@ static void* make_random_packed_weights(int N, int K, int block_bytes, int block
     return dev;
 }
 
-static void compare_dp4a_vs_mmvq(
-    const char* name,
-    void* W, int N, int K,
-    half* x_fp16,
-    void (*mmvq_fn)(const void*, const half*, half*, int, int, int, void*, size_t, cudaStream_t),
-    void (*dp4a_fn)(const void*, const block_q8_1*, const float*, half*, int, int, cudaStream_t))
-{
+static void compare_dp4a_vs_mmvq(const char* name, void* W, int N, int K, half* x_fp16,
+                                 void (*mmvq_fn)(const void*, const half*, half*, int, int, int, void*,
+                                                 size_t, cudaStream_t),
+                                 void (*dp4a_fn)(const void*, const block_q8_1*, const float*, half*, int,
+                                                 int, cudaStream_t)) {
     half *out_dp4a = nullptr, *out_mmvq = nullptr;
     cudaMalloc(&out_dp4a, N * sizeof(half));
     cudaMalloc(&out_mmvq, N * sizeof(half));
@@ -119,17 +117,20 @@ static void compare_dp4a_vs_mmvq(
         }
     }
 
-    printf("[%s] N=%d K=%d max_abs_err=%.6f max_rel_err=%.4f%% at idx=%d (dp4a=%.4f mmvq=%.4f)\n",
-           name, N, K, max_abs_err, max_rel_err * 100.0f, worst_idx,
-           __half2float(h_dp4a[worst_idx]), __half2float(h_mmvq[worst_idx]));
+    printf("[%s] N=%d K=%d max_abs_err=%.6f max_rel_err=%.4f%% at idx=%d (dp4a=%.4f mmvq=%.4f)\n", name, N, K,
+           max_abs_err, max_rel_err * 100.0f, worst_idx, __half2float(h_dp4a[worst_idx]),
+           __half2float(h_mmvq[worst_idx]));
 
     EXPECT_LT(max_rel_err, 0.002f) << name << ": relative error too large";
     // abs_err threshold 2.0 allows FP16 rounding at large magnitudes (~1024+);
     // the relative error check above is the meaningful correctness gate.
     EXPECT_LE(max_abs_err, 2.0f) << name << ": absolute error too large";
 
-    cudaFree(out_dp4a); cudaFree(out_mmvq);
-    cudaFree(q8_buf); cudaFree(d8_buf); cudaFree(scratch);
+    cudaFree(out_dp4a);
+    cudaFree(out_mmvq);
+    cudaFree(q8_buf);
+    cudaFree(d8_buf);
+    cudaFree(scratch);
 }
 
 TEST(MMVQ, Q4_K_MatchesDp4a) {
@@ -137,7 +138,8 @@ TEST(MMVQ, Q4_K_MatchesDp4a) {
     void* W = make_random_packed_weights(N, K, 144, 256);
     half* x = make_random_fp16(K);
     compare_dp4a_vs_mmvq("Q4_K", W, N, K, x, ggml_mmvq_q4k, gemv_q4_k_q8_1);
-    cudaFree(W); cudaFree(x);
+    cudaFree(W);
+    cudaFree(x);
 }
 
 TEST(MMVQ, Q5_K_MatchesDp4a) {
@@ -145,7 +147,8 @@ TEST(MMVQ, Q5_K_MatchesDp4a) {
     void* W = make_random_packed_weights(N, K, 176, 256);
     half* x = make_random_fp16(K);
     compare_dp4a_vs_mmvq("Q5_K", W, N, K, x, ggml_mmvq_q5k, gemv_q5_k_q8_1);
-    cudaFree(W); cudaFree(x);
+    cudaFree(W);
+    cudaFree(x);
 }
 
 TEST(MMVQ, Q8_0_MatchesDp4a) {
@@ -153,7 +156,8 @@ TEST(MMVQ, Q8_0_MatchesDp4a) {
     void* W = make_q8_0_weights(N, K);
     half* x = make_random_fp16(K);
     compare_dp4a_vs_mmvq("Q8_0", W, N, K, x, ggml_mmvq_q8_0, gemv_q8_0_q8_1);
-    cudaFree(W); cudaFree(x);
+    cudaFree(W);
+    cudaFree(x);
 }
 
 TEST(MMVQ, Q4_K_LargerDims) {
@@ -161,7 +165,8 @@ TEST(MMVQ, Q4_K_LargerDims) {
     void* W = make_random_packed_weights(N, K, 144, 256);
     half* x = make_random_fp16(K);
     compare_dp4a_vs_mmvq("Q4_K_large", W, N, K, x, ggml_mmvq_q4k, gemv_q4_k_q8_1);
-    cudaFree(W); cudaFree(x);
+    cudaFree(W);
+    cudaFree(x);
 }
 
 TEST(MMVQ, Q5_K_LargerDims) {
@@ -169,7 +174,8 @@ TEST(MMVQ, Q5_K_LargerDims) {
     void* W = make_random_packed_weights(N, K, 176, 256);
     half* x = make_random_fp16(K);
     compare_dp4a_vs_mmvq("Q5_K_large", W, N, K, x, ggml_mmvq_q5k, gemv_q5_k_q8_1);
-    cudaFree(W); cudaFree(x);
+    cudaFree(W);
+    cudaFree(x);
 }
 
 TEST(MMVQ, Q8_0_LargerDims) {
@@ -177,7 +183,8 @@ TEST(MMVQ, Q8_0_LargerDims) {
     void* W = make_q8_0_weights(N, K);
     half* x = make_random_fp16(K);
     compare_dp4a_vs_mmvq("Q8_0_large", W, N, K, x, ggml_mmvq_q8_0, gemv_q8_0_q8_1);
-    cudaFree(W); cudaFree(x);
+    cudaFree(W);
+    cudaFree(x);
 }
 
-} // namespace imp
+}  // namespace imp

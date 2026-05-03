@@ -11,21 +11,21 @@
 namespace imp {
 
 enum class ChatTemplateFamily {
-    RAW,        // No template — pass raw text
-    CHATML,     // <|im_start|>...<|im_end|> (Qwen3, etc.)
-    LLAMA2,     // [INST]...[/INST] (Llama 2, older Mistral V1/V2)
-    MISTRAL_V3, // [INST]...[/INST] + [TOOL_CALLS]/[AVAILABLE_TOOLS] (Mistral V3-Tekken: 3.x family)
-    LLAMA3,     // <|start_header_id|>...<|end_header_id|>...<|eot_id|>
-    NEMOTRON,   // <extra_id_0>System\n...<extra_id_1>\n<extra_id_0>User\n...
-    GEMMA,      // <start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n
-    DEEPSEEK_R1,// <｜User｜>...<｜Assistant｜>...<｜end▁of▁sentence｜>
-    PHI,        // <|user|>...<|end|>...<|assistant|>
+    RAW,          // No template — pass raw text
+    CHATML,       // <|im_start|>...<|im_end|> (Qwen3, etc.)
+    LLAMA2,       // [INST]...[/INST] (Llama 2, older Mistral V1/V2)
+    MISTRAL_V3,   // [INST]...[/INST] + [TOOL_CALLS]/[AVAILABLE_TOOLS] (Mistral V3-Tekken: 3.x family)
+    LLAMA3,       // <|start_header_id|>...<|end_header_id|>...<|eot_id|>
+    NEMOTRON,     // <extra_id_0>System\n...<extra_id_1>\n<extra_id_0>User\n...
+    GEMMA,        // <start_of_turn>user\n...<end_of_turn>\n<start_of_turn>model\n
+    DEEPSEEK_R1,  // <｜User｜>...<｜Assistant｜>...<｜end▁of▁sentence｜>
+    PHI,          // <|user|>...<|end|>...<|assistant|>
 };
 
 const char* chat_template_family_name(ChatTemplateFamily family);
 
 struct ChatMessage {
-    std::string role;     // "system", "user", "assistant"
+    std::string role;  // "system", "user", "assistant"
     std::string content;
 };
 
@@ -51,29 +51,24 @@ public:
     // Initialize: resolve special token IDs via tokenizer.
     // jinja_str: raw Jinja2 template from GGUF (optional). When provided and
     // parseable, the engine renders via Jinja2 instead of hardcoded families.
-    bool init(ChatTemplateFamily family, const Tokenizer& tokenizer,
-              const std::string& jinja_str = "");
+    bool init(ChatTemplateFamily family, const Tokenizer& tokenizer, const std::string& jinja_str = "");
 
     // Build token ID vector: special tokens as raw IDs, text segments encoded
     // suppress_thinking: inject /no_think for Qwen3 models to prevent thinking
-    std::vector<int32_t> apply(const Tokenizer& tok,
-                               const std::vector<ChatMessage>& messages,
+    std::vector<int32_t> apply(const Tokenizer& tok, const std::vector<ChatMessage>& messages,
                                bool suppress_thinking = false) const;
 
     // Build token ID vector with tool definitions passed to Jinja2 context.
     // Falls back to standard apply() if Jinja2 doesn't handle tools.
-    std::vector<int32_t> apply_with_tools(const Tokenizer& tok,
-                                           const std::vector<ChatMessage>& messages,
-                                           const std::vector<ToolFunction>& tools,
-                                           const std::string& tool_choice = "auto",
-                                           bool suppress_thinking = false) const;
+    std::vector<int32_t> apply_with_tools(const Tokenizer& tok, const std::vector<ChatMessage>& messages,
+                                          const std::vector<ToolFunction>& tools,
+                                          const std::string& tool_choice = "auto",
+                                          bool suppress_thinking = false) const;
 
     // Build token ID vector with image tokens inserted before the first user message.
     // Produces: <boi> <img_soft_token>*n_image_tokens <eoi> \n {text}
-    std::vector<int32_t> apply_with_image(const Tokenizer& tok,
-                                           const std::vector<ChatMessage>& messages,
-                                           int n_image_tokens,
-                                           bool suppress_thinking = false) const;
+    std::vector<int32_t> apply_with_image(const Tokenizer& tok, const std::vector<ChatMessage>& messages,
+                                          int n_image_tokens, bool suppress_thinking = false) const;
 
     const std::vector<int32_t>& stop_token_ids() const { return stop_token_ids_; }
     ChatTemplateFamily family() const { return family_; }
@@ -116,9 +111,9 @@ private:
     int32_t end_of_turn_id_ = -1;
 
     // DeepSeek R1 tokens
-    int32_t ds_user_id_ = -1;        // <｜User｜>
-    int32_t ds_assistant_id_ = -1;   // <｜Assistant｜>
-    int32_t ds_eos_id_ = -1;         // <｜end▁of▁sentence｜>
+    int32_t ds_user_id_ = -1;       // <｜User｜>
+    int32_t ds_assistant_id_ = -1;  // <｜Assistant｜>
+    int32_t ds_eos_id_ = -1;        // <｜end▁of▁sentence｜>
 
     // Phi tokens
     int32_t phi_user_id_ = -1;       // <|user|>
@@ -126,55 +121,44 @@ private:
     int32_t phi_end_id_ = -1;        // <|end|>
 
     // Vision tokens (Gemma-3)
-    int32_t boi_id_ = -1;           // <start_of_image>
-    int32_t eoi_id_ = -1;           // <end_of_image>
-    int32_t img_soft_token_id_ = -1; // <image_soft_token>
+    int32_t boi_id_ = -1;             // <start_of_image>
+    int32_t eoi_id_ = -1;             // <end_of_image>
+    int32_t img_soft_token_id_ = -1;  // <image_soft_token>
 
     // Jinja2 engine (set during init if template string provided)
     std::shared_ptr<jinja::Template> jinja_tpl_;
     bool use_jinja_ = false;
 
     // Jinja2-based apply: render template, split on control tokens, encode
-    std::vector<int32_t> apply_jinja(const Tokenizer& tok,
-                                      const std::vector<ChatMessage>& msgs,
-                                      bool add_generation_prompt = true,
-                                      bool suppress_thinking = false) const;
+    std::vector<int32_t> apply_jinja(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
+                                     bool add_generation_prompt = true, bool suppress_thinking = false) const;
 
     // Jinja2-based apply with tool definitions in context
-    std::vector<int32_t> apply_jinja_with_tools(const Tokenizer& tok,
-                                                 const std::vector<ChatMessage>& msgs,
-                                                 const std::vector<ToolFunction>& tools,
-                                                 const std::string& tool_choice,
-                                                 bool add_generation_prompt = true,
-                                                 bool suppress_thinking = false) const;
+    std::vector<int32_t> apply_jinja_with_tools(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
+                                                const std::vector<ToolFunction>& tools,
+                                                const std::string& tool_choice,
+                                                bool add_generation_prompt = true,
+                                                bool suppress_thinking = false) const;
 
     // Shared helper: split rendered string on control tokens and encode
-    std::vector<int32_t> tokenize_rendered(const Tokenizer& tok,
-                                            const std::string& rendered) const;
+    std::vector<int32_t> tokenize_rendered(const Tokenizer& tok, const std::string& rendered) const;
 
     // Auto-detect stop tokens from a rendered Jinja2 context
     void auto_detect_stop_tokens(const jinja::Context& ctx) const;
 
     // Build control token lookup table for splitting rendered output
     void build_control_token_map(const Tokenizer& tok);
-    std::vector<std::pair<std::string, int32_t>> control_tokens_; // sorted longest-first
+    std::vector<std::pair<std::string, int32_t>> control_tokens_;  // sorted longest-first
 
     // Template-specific apply methods
-    std::vector<int32_t> apply_chatml(const Tokenizer& tok,
-                                       const std::vector<ChatMessage>& msgs,
-                                       bool suppress_thinking = false) const;
-    std::vector<int32_t> apply_llama3(const Tokenizer& tok,
-                                       const std::vector<ChatMessage>& msgs) const;
-    std::vector<int32_t> apply_llama2(const Tokenizer& tok,
-                                       const std::vector<ChatMessage>& msgs) const;
-    std::vector<int32_t> apply_nemotron(const Tokenizer& tok,
-                                         const std::vector<ChatMessage>& msgs) const;
-    std::vector<int32_t> apply_gemma(const Tokenizer& tok,
-                                      const std::vector<ChatMessage>& msgs) const;
-    std::vector<int32_t> apply_deepseek_r1(const Tokenizer& tok,
-                                            const std::vector<ChatMessage>& msgs) const;
-    std::vector<int32_t> apply_phi(const Tokenizer& tok,
-                                    const std::vector<ChatMessage>& msgs) const;
+    std::vector<int32_t> apply_chatml(const Tokenizer& tok, const std::vector<ChatMessage>& msgs,
+                                      bool suppress_thinking = false) const;
+    std::vector<int32_t> apply_llama3(const Tokenizer& tok, const std::vector<ChatMessage>& msgs) const;
+    std::vector<int32_t> apply_llama2(const Tokenizer& tok, const std::vector<ChatMessage>& msgs) const;
+    std::vector<int32_t> apply_nemotron(const Tokenizer& tok, const std::vector<ChatMessage>& msgs) const;
+    std::vector<int32_t> apply_gemma(const Tokenizer& tok, const std::vector<ChatMessage>& msgs) const;
+    std::vector<int32_t> apply_deepseek_r1(const Tokenizer& tok, const std::vector<ChatMessage>& msgs) const;
+    std::vector<int32_t> apply_phi(const Tokenizer& tok, const std::vector<ChatMessage>& msgs) const;
 };
 
-} // namespace imp
+}  // namespace imp

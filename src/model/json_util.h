@@ -64,10 +64,11 @@ const JValue* jobj_find(const JValue& obj, const std::string& key);
 
 // Typed field accessors. Return false (and leave `out` untouched) on missing
 // key or wrong type.
-template<typename T>
+template <typename T>
 bool jobj_get_int(const JValue& obj, const std::string& key, T& out) {
     const JValue* v = jobj_find(obj, key);
-    if (!v || v->type != JType::NUMBER) return false;
+    if (!v || v->type != JType::NUMBER)
+        return false;
     out = static_cast<T>(v->num_val);
     return true;
 }
@@ -82,4 +83,4 @@ std::string read_file(const std::string& path);
 // the root is not an object.
 bool parse_json_file(const std::string& path, JValue& out);
 
-} // namespace imp
+}  // namespace imp

@@ -39,29 +39,43 @@ namespace imp {
 
 // Helper: stable input registers (different per thread to defeat any
 // constant-folding) plus 0x38 UE4M3 / 0x7f UE8M0 ≈ 1.0 scales.
-#define BENCH_PREAMBLE \
-    uint32_t a0 = threadIdx.x * 37u + 1u; \
-    uint32_t a1 = threadIdx.x * 41u + 2u; \
-    uint32_t a2 = threadIdx.x * 43u + 3u; \
-    uint32_t a3 = threadIdx.x * 47u + 4u; \
-    uint32_t b0 = threadIdx.x * 53u + 5u; \
-    uint32_t b1 = threadIdx.x * 59u + 6u; \
-    uint32_t b2 = threadIdx.x * 61u + 7u; \
-    uint32_t b3 = threadIdx.x * 67u + 8u; \
-    uint32_t sfa_e4m3 = 0x38383838u; /* UE4M3 ≈ 1.0 */ \
-    uint32_t sfb_e4m3 = 0x38383838u; \
-    uint32_t sfa_e8m0 = 0x7f7f7f7fu; /* UE8M0 = 2^0 = 1.0 */ \
-    uint32_t sfb_e8m0 = 0x7f7f7f7fu; \
-    uint32_t metadata = 0x44444444u;  /* 2:4 sparse: select positions 0,1 of every 4 */ \
-    float d0 = 0.0f, d1 = 0.0f, d2 = 0.0f, d3 = 0.0f; \
-    constexpr uint16_t bidA = 0, tidA = 0, bidB = 0, tidB = 0; \
-    (void)a0; (void)a1; (void)a2; (void)a3; \
-    (void)b0; (void)b1; (void)b2; (void)b3; \
-    (void)sfa_e4m3; (void)sfb_e4m3; (void)sfa_e8m0; (void)sfb_e8m0; \
-    (void)metadata; (void)bidA; (void)tidA; (void)bidB; (void)tidB
+#define BENCH_PREAMBLE                                                                 \
+    uint32_t a0 = threadIdx.x * 37u + 1u;                                              \
+    uint32_t a1 = threadIdx.x * 41u + 2u;                                              \
+    uint32_t a2 = threadIdx.x * 43u + 3u;                                              \
+    uint32_t a3 = threadIdx.x * 47u + 4u;                                              \
+    uint32_t b0 = threadIdx.x * 53u + 5u;                                              \
+    uint32_t b1 = threadIdx.x * 59u + 6u;                                              \
+    uint32_t b2 = threadIdx.x * 61u + 7u;                                              \
+    uint32_t b3 = threadIdx.x * 67u + 8u;                                              \
+    uint32_t sfa_e4m3 = 0x38383838u; /* UE4M3 ≈ 1.0 */                               \
+    uint32_t sfb_e4m3 = 0x38383838u;                                                   \
+    uint32_t sfa_e8m0 = 0x7f7f7f7fu; /* UE8M0 = 2^0 = 1.0 */                           \
+    uint32_t sfb_e8m0 = 0x7f7f7f7fu;                                                   \
+    uint32_t metadata = 0x44444444u; /* 2:4 sparse: select positions 0,1 of every 4 */ \
+    float d0 = 0.0f, d1 = 0.0f, d2 = 0.0f, d3 = 0.0f;                                  \
+    constexpr uint16_t bidA = 0, tidA = 0, bidB = 0, tidB = 0;                         \
+    (void)a0;                                                                          \
+    (void)a1;                                                                          \
+    (void)a2;                                                                          \
+    (void)a3;                                                                          \
+    (void)b0;                                                                          \
+    (void)b1;                                                                          \
+    (void)b2;                                                                          \
+    (void)b3;                                                                          \
+    (void)sfa_e4m3;                                                                    \
+    (void)sfb_e4m3;                                                                    \
+    (void)sfa_e8m0;                                                                    \
+    (void)sfb_e8m0;                                                                    \
+    (void)metadata;                                                                    \
+    (void)bidA;                                                                        \
+    (void)tidA;                                                                        \
+    (void)bidB;                                                                        \
+    (void)tidB
 
-#define BENCH_SINK_STORE \
-    if (threadIdx.x == 0 && blockIdx.x == 0) sink[0] = d0 + d1 + d2 + d3
+#define BENCH_SINK_STORE                     \
+    if (threadIdx.x == 0 && blockIdx.x == 0) \
+    sink[0] = d0 + d1 + d2 + d3
 
 // ---------------------------------------------------------------------------
 // (1) DENSE_F8F6F4_K32 — legacy baseline (no scaling)
@@ -69,15 +83,13 @@ namespace imp {
 __global__ void bench_v_dense_f8f6f4_k32(int iterations, float* sink) {
     BENCH_PREAMBLE;
 #if __CUDA_ARCH__ >= 1200
-    #pragma unroll 1
+#pragma unroll 1
     for (int i = 0; i < iterations; ++i) {
         asm volatile(
             "mma.sync.aligned.kind::f8f6f4.m16n8k32.row.col.f32.e2m1.e2m1.f32 "
             "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13};\n"
             : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-            : "r"(a0), "r"(a1), "r"(0), "r"(0),
-              "r"(b0), "r"(0),
-              "f"(d0), "f"(d1), "f"(d2), "f"(d3));
+            : "r"(a0), "r"(a1), "r"(0), "r"(0), "r"(b0), "r"(0), "f"(d0), "f"(d1), "f"(d2), "f"(d3));
     }
 #endif
     BENCH_SINK_STORE;
@@ -89,17 +101,15 @@ __global__ void bench_v_dense_f8f6f4_k32(int iterations, float* sink) {
 __global__ void bench_v_nvfp4_4x_e4m3(int iterations, float* sink) {
     BENCH_PREAMBLE;
 #if __CUDA_ARCH__ >= 1200
-    #pragma unroll 1
+#pragma unroll 1
     for (int i = 0; i < iterations; ++i) {
         asm volatile(
-            "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 "
+            "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32."
+            "ue4m3 "
             "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13},{%14},{%15,%16},{%17},{%18,%19};\n"
             : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-            : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-              "r"(b0), "r"(b1),
-              "f"(d0), "f"(d1), "f"(d2), "f"(d3),
-              "r"(sfa_e4m3), "h"(bidA), "h"(tidA),
-              "r"(sfb_e4m3), "h"(bidB), "h"(tidB));
+            : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(d0), "f"(d1), "f"(d2), "f"(d3),
+              "r"(sfa_e4m3), "h"(bidA), "h"(tidA), "r"(sfb_e4m3), "h"(bidB), "h"(tidB));
     }
 #endif
     BENCH_SINK_STORE;
@@ -111,17 +121,15 @@ __global__ void bench_v_nvfp4_4x_e4m3(int iterations, float* sink) {
 __global__ void bench_v_nvfp4_4x_e8m0(int iterations, float* sink) {
     BENCH_PREAMBLE;
 #if __CUDA_ARCH__ >= 1200
-    #pragma unroll 1
+#pragma unroll 1
     for (int i = 0; i < iterations; ++i) {
         asm volatile(
-            "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::4X.f32.e2m1.e2m1.f32.ue8m0 "
+            "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::4X.f32.e2m1.e2m1.f32."
+            "ue8m0 "
             "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13},{%14},{%15,%16},{%17},{%18,%19};\n"
             : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-            : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-              "r"(b0), "r"(b1),
-              "f"(d0), "f"(d1), "f"(d2), "f"(d3),
-              "r"(sfa_e8m0), "h"(bidA), "h"(tidA),
-              "r"(sfb_e8m0), "h"(bidB), "h"(tidB));
+            : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(d0), "f"(d1), "f"(d2), "f"(d3),
+              "r"(sfa_e8m0), "h"(bidA), "h"(tidA), "r"(sfb_e8m0), "h"(bidB), "h"(tidB));
     }
 #endif
     BENCH_SINK_STORE;
@@ -133,17 +141,15 @@ __global__ void bench_v_nvfp4_4x_e8m0(int iterations, float* sink) {
 __global__ void bench_v_mxfp4_2x_e8m0(int iterations, float* sink) {
     BENCH_PREAMBLE;
 #if __CUDA_ARCH__ >= 1200
-    #pragma unroll 1
+#pragma unroll 1
     for (int i = 0; i < iterations; ++i) {
         asm volatile(
-            "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::2X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue8m0 "
+            "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::2X.m16n8k64.row.col.f32.e2m1.e2m1.f32."
+            "ue8m0 "
             "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13},{%14},{%15,%16},{%17},{%18,%19};\n"
             : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-            : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-              "r"(b0), "r"(b1),
-              "f"(d0), "f"(d1), "f"(d2), "f"(d3),
-              "r"(sfa_e8m0), "h"(bidA), "h"(tidA),
-              "r"(sfb_e8m0), "h"(bidB), "h"(tidB));
+            : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(d0), "f"(d1), "f"(d2), "f"(d3),
+              "r"(sfa_e8m0), "h"(bidA), "h"(tidA), "r"(sfb_e8m0), "h"(bidB), "h"(tidB));
     }
 #endif
     BENCH_SINK_STORE;
@@ -156,17 +162,15 @@ __global__ void bench_v_mxfp4_2x_e8m0(int iterations, float* sink) {
 __global__ void bench_v_mxf8f6f4_1x_e2m1(int iterations, float* sink) {
     BENCH_PREAMBLE;
 #if __CUDA_ARCH__ >= 1200
-    #pragma unroll 1
+#pragma unroll 1
     for (int i = 0; i < iterations; ++i) {
         asm volatile(
-            "mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e2m1.e2m1.f32.ue8m0 "
+            "mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e2m1.e2m1.f32."
+            "ue8m0 "
             "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13},{%14},{%15,%16},{%17},{%18,%19};\n"
             : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-            : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-              "r"(b0), "r"(b1),
-              "f"(d0), "f"(d1), "f"(d2), "f"(d3),
-              "r"(sfa_e8m0), "h"(bidA), "h"(tidA),
-              "r"(sfb_e8m0), "h"(bidB), "h"(tidB));
+            : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(d0), "f"(d1), "f"(d2), "f"(d3),
+              "r"(sfa_e8m0), "h"(bidA), "h"(tidA), "r"(sfb_e8m0), "h"(bidB), "h"(tidB));
     }
 #endif
     BENCH_SINK_STORE;
@@ -178,17 +182,15 @@ __global__ void bench_v_mxf8f6f4_1x_e2m1(int iterations, float* sink) {
 __global__ void bench_v_mxf8f6f4_1x_e4m3(int iterations, float* sink) {
     BENCH_PREAMBLE;
 #if __CUDA_ARCH__ >= 1200
-    #pragma unroll 1
+#pragma unroll 1
     for (int i = 0; i < iterations; ++i) {
         asm volatile(
-            "mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e4m3.e4m3.f32.ue8m0 "
+            "mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e4m3.e4m3.f32."
+            "ue8m0 "
             "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13},{%14},{%15,%16},{%17},{%18,%19};\n"
             : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-            : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-              "r"(b0), "r"(b1),
-              "f"(d0), "f"(d1), "f"(d2), "f"(d3),
-              "r"(sfa_e8m0), "h"(bidA), "h"(tidA),
-              "r"(sfb_e8m0), "h"(bidB), "h"(tidB));
+            : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(d0), "f"(d1), "f"(d2), "f"(d3),
+              "r"(sfa_e8m0), "h"(bidA), "h"(tidA), "r"(sfb_e8m0), "h"(bidB), "h"(tidB));
     }
 #endif
     BENCH_SINK_STORE;
@@ -200,17 +202,15 @@ __global__ void bench_v_mxf8f6f4_1x_e4m3(int iterations, float* sink) {
 __global__ void bench_v_mxf8f6f4_1x_e4m3_e2m1(int iterations, float* sink) {
     BENCH_PREAMBLE;
 #if __CUDA_ARCH__ >= 1200
-    #pragma unroll 1
+#pragma unroll 1
     for (int i = 0; i < iterations; ++i) {
         asm volatile(
-            "mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e4m3.e2m1.f32.ue8m0 "
+            "mma.sync.aligned.kind::mxf8f6f4.block_scale.scale_vec::1X.m16n8k32.row.col.f32.e4m3.e2m1.f32."
+            "ue8m0 "
             "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13},{%14},{%15,%16},{%17},{%18,%19};\n"
             : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-            : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-              "r"(b0), "r"(b1),
-              "f"(d0), "f"(d1), "f"(d2), "f"(d3),
-              "r"(sfa_e8m0), "h"(bidA), "h"(tidA),
-              "r"(sfb_e8m0), "h"(bidB), "h"(tidB));
+            : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(d0), "f"(d1), "f"(d2), "f"(d3),
+              "r"(sfa_e8m0), "h"(bidA), "h"(tidA), "r"(sfb_e8m0), "h"(bidB), "h"(tidB));
     }
 #endif
     BENCH_SINK_STORE;
@@ -222,16 +222,14 @@ __global__ void bench_v_mxf8f6f4_1x_e4m3_e2m1(int iterations, float* sink) {
 __global__ void bench_v_sparse_f8f6f4_k64(int iterations, float* sink) {
     BENCH_PREAMBLE;
 #if __CUDA_ARCH__ >= 1200
-    #pragma unroll 1
+#pragma unroll 1
     for (int i = 0; i < iterations; ++i) {
         asm volatile(
             "mma.sync.aligned.kind::f8f6f4.sp::ordered_metadata.m16n8k64.row.col.f32.e2m1.e2m1.f32 "
             "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9,%10,%11},{%12,%13,%14,%15},%16,0x0;\n"
             : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-            : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-              "r"(b0), "r"(b1), "r"(b2), "r"(b3),
-              "f"(d0), "f"(d1), "f"(d2), "f"(d3),
-              "r"(metadata));
+            : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(b2), "r"(b3), "f"(d0), "f"(d1),
+              "f"(d2), "f"(d3), "r"(metadata));
     }
 #endif
     BENCH_SINK_STORE;
@@ -252,10 +250,10 @@ __global__ void bench_v_sparse_nvfp4_k128(int iterations, float* sink) {
 // ---------------------------------------------------------------------------
 // Host launcher
 // ---------------------------------------------------------------------------
-static float run_one(void(*kernel)(int, float*), int warps, int iterations,
-                     cudaStream_t stream) {
+static float run_one(void (*kernel)(int, float*), int warps, int iterations, cudaStream_t stream) {
     float* d_sink = nullptr;
-    if (cudaMalloc(&d_sink, sizeof(float)) != cudaSuccess) return -1.0f;
+    if (cudaMalloc(&d_sink, sizeof(float)) != cudaSuccess)
+        return -1.0f;
 
     kernel<<<warps, 32, 0, stream>>>(iterations / 10, d_sink);
     cudaStreamSynchronize(stream);
@@ -286,8 +284,7 @@ static float run_one(void(*kernel)(int, float*), int warps, int iterations,
     return total_ms / NUM_REPS;
 }
 
-MmaVariantsBenchResult bench_mma_variants(int warps, int iterations,
-                                           cudaStream_t stream) {
+MmaVariantsBenchResult bench_mma_variants(int warps, int iterations, cudaStream_t stream) {
     MmaVariantsBenchResult r{};
 
     struct Entry {
@@ -296,19 +293,20 @@ MmaVariantsBenchResult bench_mma_variants(int warps, int iterations,
         double ops_per_mma;  // FMAs * 2 = m * n * k * 2 for dense; sparse same since metadata selects
     };
     Entry entries[] = {
-        {"dense_f8f6f4_k32",      bench_v_dense_f8f6f4_k32,      16.0 * 8.0 * 32.0  * 2.0},
-        {"bs_nvfp4_4x_e4m3_k64",  bench_v_nvfp4_4x_e4m3,         16.0 * 8.0 * 64.0  * 2.0},
-        {"bs_nvfp4_4x_e8m0_k64",  bench_v_nvfp4_4x_e8m0,         16.0 * 8.0 * 64.0  * 2.0},
-        {"bs_mxfp4_2x_e8m0_k64",  bench_v_mxfp4_2x_e8m0,         16.0 * 8.0 * 64.0  * 2.0},
-        {"bs_mxf8f6f4_1x_e2m1",   bench_v_mxf8f6f4_1x_e2m1,      16.0 * 8.0 * 32.0  * 2.0},
-        {"bs_mxf8f6f4_1x_e4m3",   bench_v_mxf8f6f4_1x_e4m3,      16.0 * 8.0 * 32.0  * 2.0},
+        {"dense_f8f6f4_k32", bench_v_dense_f8f6f4_k32, 16.0 * 8.0 * 32.0 * 2.0},
+        {"bs_nvfp4_4x_e4m3_k64", bench_v_nvfp4_4x_e4m3, 16.0 * 8.0 * 64.0 * 2.0},
+        {"bs_nvfp4_4x_e8m0_k64", bench_v_nvfp4_4x_e8m0, 16.0 * 8.0 * 64.0 * 2.0},
+        {"bs_mxfp4_2x_e8m0_k64", bench_v_mxfp4_2x_e8m0, 16.0 * 8.0 * 64.0 * 2.0},
+        {"bs_mxf8f6f4_1x_e2m1", bench_v_mxf8f6f4_1x_e2m1, 16.0 * 8.0 * 32.0 * 2.0},
+        {"bs_mxf8f6f4_1x_e4m3", bench_v_mxf8f6f4_1x_e4m3, 16.0 * 8.0 * 32.0 * 2.0},
         {"bs_mxf8f6f4_1x_e4m3xe2m1", bench_v_mxf8f6f4_1x_e4m3_e2m1, 16.0 * 8.0 * 32.0 * 2.0},
-        {"sp_f8f6f4_k64",         bench_v_sparse_f8f6f4_k64,     16.0 * 8.0 * 64.0  * 2.0},
+        {"sp_f8f6f4_k64", bench_v_sparse_f8f6f4_k64, 16.0 * 8.0 * 64.0 * 2.0},
         // sp_nvfp4_4x_k128: ptxas rejects on sm_120f. See comment above kernel.
     };
 
     int n = sizeof(entries) / sizeof(entries[0]);
-    if (n > MmaVariantsBenchResult::kMaxEntries) n = MmaVariantsBenchResult::kMaxEntries;
+    if (n > MmaVariantsBenchResult::kMaxEntries)
+        n = MmaVariantsBenchResult::kMaxEntries;
     r.count = n;
 
     const double total_mmas = static_cast<double>(warps) * iterations;
@@ -317,8 +315,7 @@ MmaVariantsBenchResult bench_mma_variants(int warps, int iterations,
         r.entries[i].label = entries[i].label;
         r.entries[i].ms = ms;
         if (ms > 0.0f) {
-            r.entries[i].tops =
-                (entries[i].ops_per_mma * total_mmas) / (ms * 1e-3) / 1e12;
+            r.entries[i].tops = (entries[i].ops_per_mma * total_mmas) / (ms * 1e-3) / 1e12;
         } else {
             r.entries[i].tops = -1.0;  // launch failed
         }
@@ -326,4 +323,4 @@ MmaVariantsBenchResult bench_mma_variants(int warps, int iterations,
     return r;
 }
 
-} // namespace imp
+}  // namespace imp

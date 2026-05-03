@@ -12,13 +12,13 @@
 namespace imp {
 namespace {
 
-Tensor make_gpu_tensor(const float* host_data, QType dtype,
-                       std::initializer_list<int64_t> shape_list) {
+Tensor make_gpu_tensor(const float* host_data, QType dtype, std::initializer_list<int64_t> shape_list) {
     Tensor t;
     t.qtype = dtype;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
-    for (auto s : shape_list) t.shape[i++] = s;
+    for (auto s : shape_list)
+        t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
@@ -38,7 +38,8 @@ Tensor alloc_gpu_tensor(QType dtype, std::initializer_list<int64_t> shape_list) 
     t.qtype = dtype;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
-    for (auto s : shape_list) t.shape[i++] = s;
+    for (auto s : shape_list)
+        t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
@@ -60,14 +61,15 @@ std::vector<float> read_gpu_tensor(const Tensor& t) {
 }
 
 void free_gpu_tensor(Tensor& t) {
-    if (t.data) { cudaFree(t.data); t.data = nullptr; }
+    if (t.data) {
+        cudaFree(t.data);
+        t.data = nullptr;
+    }
 }
 
 // ── CPU references ──────────────────────────────────────────────────────────
 
-float cpu_silu(float x) {
-    return x / (1.0f + std::exp(-x));
-}
+float cpu_silu(float x) { return x / (1.0f + std::exp(-x)); }
 
 float cpu_gelu(float x) {
     constexpr float sqrt_2_over_pi = 0.7978845608028654f;
@@ -83,7 +85,7 @@ float cpu_gelu(float x) {
 TEST(ActivationTest, SwiGLUBasicFP32) {
     constexpr int N = 8;
     std::vector<float> h_gate = {-2.0f, -1.0f, 0.0f, 0.5f, 1.0f, 2.0f, 3.0f, 4.0f};
-    std::vector<float> h_up   = { 1.0f,  2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
+    std::vector<float> h_up = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
 
     // CPU reference
     std::vector<float> h_ref(N);
@@ -91,16 +93,15 @@ TEST(ActivationTest, SwiGLUBasicFP32) {
         h_ref[i] = cpu_silu(h_gate[i]) * h_up[i];
 
     Tensor d_gate = make_gpu_tensor(h_gate.data(), QType::F32, {N});
-    Tensor d_up   = make_gpu_tensor(h_up.data(), QType::F32, {N});
-    Tensor d_out  = alloc_gpu_tensor(QType::F32, {N});
+    Tensor d_up = make_gpu_tensor(h_up.data(), QType::F32, {N});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {N});
 
     swiglu(d_gate, d_up, d_out);
     cudaDeviceSynchronize();
 
     auto h_out = read_gpu_tensor(d_out);
     for (int i = 0; i < N; i++) {
-        EXPECT_NEAR(h_out[i], h_ref[i], 1e-4f)
-            << "SwiGLU FP32 mismatch at " << i;
+        EXPECT_NEAR(h_out[i], h_ref[i], 1e-4f) << "SwiGLU FP32 mismatch at " << i;
     }
 
     free_gpu_tensor(d_gate);
@@ -115,8 +116,8 @@ TEST(ActivationTest, SwiGLUZeroGate) {
     std::vector<float> h_up = {1.0f, 2.0f, 3.0f, 4.0f};
 
     Tensor d_gate = make_gpu_tensor(h_gate.data(), QType::F32, {N});
-    Tensor d_up   = make_gpu_tensor(h_up.data(), QType::F32, {N});
-    Tensor d_out  = alloc_gpu_tensor(QType::F32, {N});
+    Tensor d_up = make_gpu_tensor(h_up.data(), QType::F32, {N});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {N});
 
     swiglu(d_gate, d_up, d_out);
     cudaDeviceSynchronize();
@@ -134,7 +135,7 @@ TEST(ActivationTest, SwiGLUZeroGate) {
 TEST(ActivationTest, SwiGLUFP16) {
     constexpr int N = 8;
     std::vector<float> h_gate = {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 2.5f};
-    std::vector<float> h_up   = { 0.5f,  1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.0f};
+    std::vector<float> h_up = {0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.0f};
 
     // FP16 roundtrip reference
     std::vector<float> h_ref(N);
@@ -145,16 +146,15 @@ TEST(ActivationTest, SwiGLUFP16) {
     }
 
     Tensor d_gate = make_gpu_tensor(h_gate.data(), QType::F16, {N});
-    Tensor d_up   = make_gpu_tensor(h_up.data(), QType::F16, {N});
-    Tensor d_out  = alloc_gpu_tensor(QType::F16, {N});
+    Tensor d_up = make_gpu_tensor(h_up.data(), QType::F16, {N});
+    Tensor d_out = alloc_gpu_tensor(QType::F16, {N});
 
     swiglu(d_gate, d_up, d_out);
     cudaDeviceSynchronize();
 
     auto h_out = read_gpu_tensor(d_out);
     for (int i = 0; i < N; i++) {
-        EXPECT_NEAR(h_out[i], h_ref[i], 1e-2f)
-            << "SwiGLU FP16 mismatch at " << i;
+        EXPECT_NEAR(h_out[i], h_ref[i], 1e-2f) << "SwiGLU FP16 mismatch at " << i;
     }
 
     free_gpu_tensor(d_gate);
@@ -173,16 +173,15 @@ TEST(ActivationTest, SwiGLULargeVector) {
     }
 
     Tensor d_gate = make_gpu_tensor(h_gate.data(), QType::F32, {N});
-    Tensor d_up   = make_gpu_tensor(h_up.data(), QType::F32, {N});
-    Tensor d_out  = alloc_gpu_tensor(QType::F32, {N});
+    Tensor d_up = make_gpu_tensor(h_up.data(), QType::F32, {N});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {N});
 
     swiglu(d_gate, d_up, d_out);
     cudaDeviceSynchronize();
 
     auto h_out = read_gpu_tensor(d_out);
     for (int i = 0; i < N; i++) {
-        EXPECT_NEAR(h_out[i], h_ref[i], 1e-4f)
-            << "SwiGLU large mismatch at " << i;
+        EXPECT_NEAR(h_out[i], h_ref[i], 1e-4f) << "SwiGLU large mismatch at " << i;
     }
 
     free_gpu_tensor(d_gate);
@@ -194,23 +193,22 @@ TEST(ActivationTest, SwiGLUNonAligned) {
     // N=5 not divisible by 4 — tests scalar fallback path
     constexpr int N = 5;
     std::vector<float> h_gate = {-1.0f, 0.0f, 1.0f, 2.0f, 3.0f};
-    std::vector<float> h_up   = { 2.0f, 2.0f, 2.0f, 2.0f, 2.0f};
+    std::vector<float> h_up = {2.0f, 2.0f, 2.0f, 2.0f, 2.0f};
 
     std::vector<float> h_ref(N);
     for (int i = 0; i < N; i++)
         h_ref[i] = cpu_silu(h_gate[i]) * h_up[i];
 
     Tensor d_gate = make_gpu_tensor(h_gate.data(), QType::F32, {N});
-    Tensor d_up   = make_gpu_tensor(h_up.data(), QType::F32, {N});
-    Tensor d_out  = alloc_gpu_tensor(QType::F32, {N});
+    Tensor d_up = make_gpu_tensor(h_up.data(), QType::F32, {N});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {N});
 
     swiglu(d_gate, d_up, d_out);
     cudaDeviceSynchronize();
 
     auto h_out = read_gpu_tensor(d_out);
     for (int i = 0; i < N; i++) {
-        EXPECT_NEAR(h_out[i], h_ref[i], 1e-4f)
-            << "SwiGLU non-aligned mismatch at " << i;
+        EXPECT_NEAR(h_out[i], h_ref[i], 1e-4f) << "SwiGLU non-aligned mismatch at " << i;
     }
 
     free_gpu_tensor(d_gate);
@@ -230,7 +228,7 @@ TEST(ActivationTest, GELUBasicFP32) {
     for (int i = 0; i < N; i++)
         h_ref[i] = cpu_gelu(h_x[i]);
 
-    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {N});
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F32, {N});
     Tensor d_out = alloc_gpu_tensor(QType::F32, {N});
 
     gelu(d_x, d_out);
@@ -238,8 +236,7 @@ TEST(ActivationTest, GELUBasicFP32) {
 
     auto h_out = read_gpu_tensor(d_out);
     for (int i = 0; i < N; i++) {
-        EXPECT_NEAR(h_out[i], h_ref[i], 1e-4f)
-            << "GELU FP32 mismatch at " << i;
+        EXPECT_NEAR(h_out[i], h_ref[i], 1e-4f) << "GELU FP32 mismatch at " << i;
     }
 
     free_gpu_tensor(d_x);
@@ -249,7 +246,7 @@ TEST(ActivationTest, GELUBasicFP32) {
 TEST(ActivationTest, GELUZero) {
     // gelu(0) = 0
     std::vector<float> h_x = {0.0f};
-    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {1});
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F32, {1});
     Tensor d_out = alloc_gpu_tensor(QType::F32, {1});
 
     gelu(d_x, d_out);
@@ -266,7 +263,7 @@ TEST(ActivationTest, GELUSymmetry) {
     // gelu(-x) should be close to -x * sigmoid(-1.702*x) for the tanh approx
     // More practically: gelu(large_positive) ≈ x, gelu(large_negative) ≈ 0
     std::vector<float> h_x = {10.0f, -10.0f};
-    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {2});
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F32, {2});
     Tensor d_out = alloc_gpu_tensor(QType::F32, {2});
 
     gelu(d_x, d_out);
@@ -274,7 +271,7 @@ TEST(ActivationTest, GELUSymmetry) {
 
     auto h_out = read_gpu_tensor(d_out);
     EXPECT_NEAR(h_out[0], 10.0f, 1e-3f) << "gelu(10) should ≈ 10";
-    EXPECT_NEAR(h_out[1], 0.0f, 1e-3f)  << "gelu(-10) should ≈ 0";
+    EXPECT_NEAR(h_out[1], 0.0f, 1e-3f) << "gelu(-10) should ≈ 0";
 
     free_gpu_tensor(d_x);
     free_gpu_tensor(d_out);
@@ -290,7 +287,7 @@ TEST(ActivationTest, GELUFP16) {
         h_ref[i] = cpu_gelu(x);
     }
 
-    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F16, {N});
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F16, {N});
     Tensor d_out = alloc_gpu_tensor(QType::F16, {N});
 
     gelu(d_x, d_out);
@@ -298,8 +295,7 @@ TEST(ActivationTest, GELUFP16) {
 
     auto h_out = read_gpu_tensor(d_out);
     for (int i = 0; i < N; i++) {
-        EXPECT_NEAR(h_out[i], h_ref[i], 1e-2f)
-            << "GELU FP16 mismatch at " << i;
+        EXPECT_NEAR(h_out[i], h_ref[i], 1e-2f) << "GELU FP16 mismatch at " << i;
     }
 
     free_gpu_tensor(d_x);
@@ -313,7 +309,7 @@ TEST(ActivationTest, GELUFP16) {
 TEST(ActivationTest, GeGLUBasicFP16) {
     constexpr int N = 8;
     std::vector<float> h_gate = {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 2.5f};
-    std::vector<float> h_up   = { 0.5f,  1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.0f};
+    std::vector<float> h_up = {0.5f, 1.0f, 1.5f, 2.0f, 2.5f, 3.0f, 3.5f, 4.0f};
 
     // FP16 roundtrip reference
     std::vector<float> h_ref(N);
@@ -324,16 +320,15 @@ TEST(ActivationTest, GeGLUBasicFP16) {
     }
 
     Tensor d_gate = make_gpu_tensor(h_gate.data(), QType::F16, {N});
-    Tensor d_up   = make_gpu_tensor(h_up.data(), QType::F16, {N});
-    Tensor d_out  = alloc_gpu_tensor(QType::F16, {N});
+    Tensor d_up = make_gpu_tensor(h_up.data(), QType::F16, {N});
+    Tensor d_out = alloc_gpu_tensor(QType::F16, {N});
 
     geglu(d_gate, d_up, d_out);
     cudaDeviceSynchronize();
 
     auto h_out = read_gpu_tensor(d_out);
     for (int i = 0; i < N; i++) {
-        EXPECT_NEAR(h_out[i], h_ref[i], 1e-2f)
-            << "GeGLU FP16 mismatch at " << i;
+        EXPECT_NEAR(h_out[i], h_ref[i], 1e-2f) << "GeGLU FP16 mismatch at " << i;
     }
 
     free_gpu_tensor(d_gate);
@@ -344,23 +339,22 @@ TEST(ActivationTest, GeGLUBasicFP16) {
 TEST(ActivationTest, GeGLUBasicFP32) {
     constexpr int N = 8;
     std::vector<float> h_gate = {-2.0f, -1.0f, 0.0f, 0.5f, 1.0f, 2.0f, 3.0f, 4.0f};
-    std::vector<float> h_up   = { 1.0f,  2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
+    std::vector<float> h_up = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f};
 
     std::vector<float> h_ref(N);
     for (int i = 0; i < N; i++)
         h_ref[i] = cpu_gelu(h_gate[i]) * h_up[i];
 
     Tensor d_gate = make_gpu_tensor(h_gate.data(), QType::F32, {N});
-    Tensor d_up   = make_gpu_tensor(h_up.data(), QType::F32, {N});
-    Tensor d_out  = alloc_gpu_tensor(QType::F32, {N});
+    Tensor d_up = make_gpu_tensor(h_up.data(), QType::F32, {N});
+    Tensor d_out = alloc_gpu_tensor(QType::F32, {N});
 
     geglu(d_gate, d_up, d_out);
     cudaDeviceSynchronize();
 
     auto h_out = read_gpu_tensor(d_out);
     for (int i = 0; i < N; i++) {
-        EXPECT_NEAR(h_out[i], h_ref[i], 1e-4f)
-            << "GeGLU FP32 mismatch at " << i;
+        EXPECT_NEAR(h_out[i], h_ref[i], 1e-4f) << "GeGLU FP32 mismatch at " << i;
     }
 
     free_gpu_tensor(d_gate);
@@ -374,7 +368,7 @@ TEST(ActivationTest, GeluInfInput) {
     float inf = std::numeric_limits<float>::infinity();
     std::vector<float> h_x = {inf, -inf, 0.0f, 1.0f};
 
-    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {N});
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F32, {N});
     Tensor d_out = alloc_gpu_tensor(QType::F32, {N});
 
     gelu(d_x, d_out);
@@ -404,7 +398,7 @@ TEST(SoftmaxTest, BasicFP32) {
         1.0f, 1.0f, 1.0f, 1.0f   // row 1: uniform => all 0.25
     };
 
-    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F32, {rows, cols});
     Tensor d_out = alloc_gpu_tensor(QType::F32, {rows, cols});
 
     softmax(d_x, d_out);
@@ -414,7 +408,8 @@ TEST(SoftmaxTest, BasicFP32) {
 
     // Row 0: verify sum = 1 and monotonically increasing
     float sum0 = 0.0f;
-    for (int c = 0; c < cols; c++) sum0 += h_out[c];
+    for (int c = 0; c < cols; c++)
+        sum0 += h_out[c];
     EXPECT_NEAR(sum0, 1.0f, 1e-5f);
     for (int c = 1; c < cols; c++) {
         EXPECT_GT(h_out[c], h_out[c - 1]) << "Row 0 should be monotonically increasing";
@@ -422,8 +417,7 @@ TEST(SoftmaxTest, BasicFP32) {
 
     // Row 1: all equal logits => uniform distribution
     for (int c = 0; c < cols; c++) {
-        EXPECT_NEAR(h_out[rows * 0 + cols + c], 0.25f, 1e-5f)
-            << "Row 1 should be uniform at col " << c;
+        EXPECT_NEAR(h_out[rows * 0 + cols + c], 0.25f, 1e-5f) << "Row 1 should be uniform at col " << c;
     }
 
     free_gpu_tensor(d_x);
@@ -443,9 +437,10 @@ TEST(SoftmaxTest, NumericalStability) {
         h_ref[i] = std::exp(h_x[i] - max_val);
         sum += h_ref[i];
     }
-    for (int i = 0; i < N; i++) h_ref[i] /= sum;
+    for (int i = 0; i < N; i++)
+        h_ref[i] /= sum;
 
-    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {1, N});
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F32, {1, N});
     Tensor d_out = alloc_gpu_tensor(QType::F32, {1, N});
 
     softmax(d_x, d_out);
@@ -453,8 +448,7 @@ TEST(SoftmaxTest, NumericalStability) {
 
     auto h_out = read_gpu_tensor(d_out);
     for (int i = 0; i < N; i++) {
-        EXPECT_NEAR(h_out[i], h_ref[i], 1e-5f)
-            << "Numerical stability issue at " << i;
+        EXPECT_NEAR(h_out[i], h_ref[i], 1e-5f) << "Numerical stability issue at " << i;
         EXPECT_FALSE(std::isnan(h_out[i])) << "NaN at index " << i;
         EXPECT_FALSE(std::isinf(h_out[i])) << "Inf at index " << i;
     }
@@ -465,7 +459,7 @@ TEST(SoftmaxTest, NumericalStability) {
 
 TEST(SoftmaxTest, SingleElement) {
     std::vector<float> h_x = {5.0f};
-    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {1, 1});
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F32, {1, 1});
     Tensor d_out = alloc_gpu_tensor(QType::F32, {1, 1});
 
     softmax(d_x, d_out);
@@ -483,7 +477,7 @@ TEST(SoftmaxTest, FP16) {
     constexpr int cols = 8;
     std::vector<float> h_x = {0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f};
 
-    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F16, {rows, cols});
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F16, {rows, cols});
     Tensor d_out = alloc_gpu_tensor(QType::F16, {rows, cols});
 
     softmax(d_x, d_out);
@@ -510,7 +504,7 @@ TEST(SoftmaxTest, LargeRow) {
     for (int i = 0; i < cols; i++)
         h_x[i] = std::sin(static_cast<float>(i) * 0.01f);
 
-    Tensor d_x   = make_gpu_tensor(h_x.data(), QType::F32, {1, cols});
+    Tensor d_x = make_gpu_tensor(h_x.data(), QType::F32, {1, cols});
     Tensor d_out = alloc_gpu_tensor(QType::F32, {1, cols});
 
     softmax(d_x, d_out);
@@ -530,5 +524,5 @@ TEST(SoftmaxTest, LargeRow) {
     free_gpu_tensor(d_out);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

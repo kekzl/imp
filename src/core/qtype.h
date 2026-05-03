@@ -13,33 +13,33 @@ namespace imp {
 // no on-disk representation.
 enum class QType : uint16_t {
     // Wire-stable 0..31 (kompatibel mit GGUF block-quant Wire-Format)
-    F32   = 0,
-    F16   = 1,
-    Q4_0  = 2,
-    Q4_1  = 3,
-    Q5_0  = 6,
-    Q5_1  = 7,
-    Q8_0  = 8,
-    Q8_1  = 9,
-    Q2_K  = 10,
-    Q3_K  = 11,
-    Q4_K  = 12,
-    Q5_K  = 13,
-    Q6_K  = 14,
-    Q8_K  = 15,
-    BF16  = 30,
+    F32 = 0,
+    F16 = 1,
+    Q4_0 = 2,
+    Q4_1 = 3,
+    Q5_0 = 6,
+    Q5_1 = 7,
+    Q8_0 = 8,
+    Q8_1 = 9,
+    Q2_K = 10,
+    Q3_K = 11,
+    Q4_K = 12,
+    Q5_K = 13,
+    Q6_K = 14,
+    Q8_K = 15,
+    BF16 = 30,
     MXFP4 = 31,
 
     // Engine-internal (>= 64, kollidiert nie mit künftigen Wire-Werten)
-    NONE      = 64,
-    FP8_E4M3  = 65,
-    FP8_E5M2  = 66,
-    INT8      = 67,
-    INT4      = 68,
-    INT32     = 69,
-    FP4_E2M1  = 70,
-    NVFP4     = 71,
-    TURBOQUANT      = 80,
+    NONE = 64,
+    FP8_E4M3 = 65,
+    FP8_E5M2 = 66,
+    INT8 = 67,
+    INT4 = 68,
+    INT32 = 69,
+    FP4_E2M1 = 70,
+    NVFP4 = 71,
+    TURBOQUANT = 80,
     TURBOQUANT_LITE = 81,
 };
 
@@ -83,13 +83,13 @@ const char* qtype_name(QType q);
 
 // Compile-time wire-format stability assertions. If a future change shifts
 // any value, the assert fires at build time.
-static_assert(static_cast<uint16_t>(QType::F32)   == 0,  "QType::F32 wire value");
-static_assert(static_cast<uint16_t>(QType::F16)   == 1,  "QType::F16 wire value");
-static_assert(static_cast<uint16_t>(QType::Q4_0)  == 2,  "QType::Q4_0 wire value");
-static_assert(static_cast<uint16_t>(QType::Q4_K)  == 12, "QType::Q4_K wire value");
-static_assert(static_cast<uint16_t>(QType::Q6_K)  == 14, "QType::Q6_K wire value");
-static_assert(static_cast<uint16_t>(QType::Q8_0)  == 8,  "QType::Q8_0 wire value");
-static_assert(static_cast<uint16_t>(QType::BF16)  == 30, "QType::BF16 wire value");
+static_assert(static_cast<uint16_t>(QType::F32) == 0, "QType::F32 wire value");
+static_assert(static_cast<uint16_t>(QType::F16) == 1, "QType::F16 wire value");
+static_assert(static_cast<uint16_t>(QType::Q4_0) == 2, "QType::Q4_0 wire value");
+static_assert(static_cast<uint16_t>(QType::Q4_K) == 12, "QType::Q4_K wire value");
+static_assert(static_cast<uint16_t>(QType::Q6_K) == 14, "QType::Q6_K wire value");
+static_assert(static_cast<uint16_t>(QType::Q8_0) == 8, "QType::Q8_0 wire value");
+static_assert(static_cast<uint16_t>(QType::BF16) == 30, "QType::BF16 wire value");
 static_assert(static_cast<uint16_t>(QType::MXFP4) == 31, "QType::MXFP4 wire value");
 
-} // namespace imp
+}  // namespace imp

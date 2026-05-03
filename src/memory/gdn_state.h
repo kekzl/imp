@@ -20,8 +20,7 @@ public:
     // n_heads: number of recurrence heads (= ssm_dt_rank from GGUF)
     // head_dim: dimension per head (= ssm_inner_size / n_heads)
     // state_dim: state matrix second dimension (= ssm_state_size from GGUF)
-    bool init(int n_gdn_layers, int max_sequences,
-              int n_heads, int head_dim, int state_dim,
+    bool init(int n_gdn_layers, int max_sequences, int n_heads, int head_dim, int state_dim,
               VRAMAllocator* alloc = nullptr);
 
     // Get pointer to S state for a given sequence and GDN layer.
@@ -50,4 +49,4 @@ private:
     size_t total_bytes_ = 0;
 };
 
-} // namespace imp
+}  // namespace imp

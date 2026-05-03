@@ -37,10 +37,10 @@ namespace imp {
 // Constants
 // =============================================================================
 
-static constexpr int MX_WARP_SIZE     = 32;
-static constexpr int MX_NUM_WARPS     = 8;
-static constexpr int MX_BLOCK_THREADS = MX_WARP_SIZE * MX_NUM_WARPS; // 256
-static constexpr int MX_Bkv           = 64;  // KV tile columns
+static constexpr int MX_WARP_SIZE = 32;
+static constexpr int MX_NUM_WARPS = 8;
+static constexpr int MX_BLOCK_THREADS = MX_WARP_SIZE * MX_NUM_WARPS;  // 256
+static constexpr int MX_Bkv = 64;                                     // KV tile columns
 
 // FP4 MMA tile dimensions: m16n8k32 (same shape as FP8, halved registers)
 // FP4 A uses 2 uint32 (vs 4 for FP8), B uses 1 uint32 (vs 2 for FP8).
@@ -83,8 +83,8 @@ __device__ __forceinline__ uint8_t pack_fp4_pair(float v0, float v1) {
     // Software fallback: branchless compare cascade (E2M1 magnitudes
     // {0, 0.5, 1, 1.5, 2, 3, 4, 6} with midpoint thresholds).
     auto quant_abs = [](float a) -> uint8_t {
-        return (a >= 0.25f) + (a >= 0.75f) + (a >= 1.25f) + (a >= 1.75f)
-             + (a >= 2.5f)  + (a >= 3.5f)  + (a >= 5.0f);
+        return (a >= 0.25f) + (a >= 0.75f) + (a >= 1.25f) + (a >= 1.75f) + (a >= 2.5f) + (a >= 3.5f) +
+               (a >= 5.0f);
     };
     uint8_t sign0 = (v0 < 0.0f) ? 1u : 0u;
     uint8_t code0 = (sign0 << 3) | quant_abs(fabsf(v0));
@@ -105,22 +105,10 @@ __device__ __forceinline__ uint8_t pack_fp4_pair(float v0, float v1) {
 //                         preserving local precision vs per-row. Post-MMA manual
 //                         scaling is dropped — HW scales during the dot product.
 template <int Bq, int HD, bool UseBlockScaleMma = false>
-__global__ void __launch_bounds__(MX_BLOCK_THREADS, 1)
-fmha_sm120_mxfp4_kernel(
-    const half* __restrict__ Q,
-    const half* __restrict__ K,
-    const half* __restrict__ V,
-    half*       __restrict__ O,
-    int   batch_size,
-    int   seq_q,
-    int   seq_kv,
-    int   n_heads,
-    int   n_kv_heads,
-    float scale,
-    bool  causal,
-    int   sliding_window,
-    float softcap)
-{
+__global__ void __launch_bounds__(MX_BLOCK_THREADS, 1) fmha_sm120_mxfp4_kernel(
+    const half* __restrict__ Q, const half* __restrict__ K, const half* __restrict__ V, half* __restrict__ O,
+    int batch_size, int seq_q, int seq_kv, int n_heads, int n_kv_heads, float scale, bool causal,
+    int sliding_window, float softcap) {
     constexpr int Bkv = MX_Bkv;
     constexpr int head_dim = HD;
     constexpr int hd_half = HD / 2;  // packed FP4 data bytes per row
@@ -135,33 +123,29 @@ fmha_sm120_mxfp4_kernel(
     static_assert(TPR >= 1 && (TPR & (TPR - 1)) == 0, "TPR must be power of 2");
 
     // ---- index computation --------------------------------------------------
-    const int tile_q     = blockIdx.x;
+    const int tile_q = blockIdx.x;
     const int batch_head = blockIdx.y;
-    const int batch_idx  = batch_head / n_heads;
-    const int head_idx   = batch_head % n_heads;
-    const int kv_head    = head_idx / (n_heads / n_kv_heads);
+    const int batch_idx = batch_head / n_heads;
+    const int head_idx = batch_head % n_heads;
+    const int kv_head = head_idx / (n_heads / n_kv_heads);
 
-    const int tid     = threadIdx.x + threadIdx.y * blockDim.x;
+    const int tid = threadIdx.x + threadIdx.y * blockDim.x;
     const int warp_id = tid / MX_WARP_SIZE;
     const int lane_id = tid % MX_WARP_SIZE;
     const int q_start = tile_q * Bq;
 
-    const int sm_row  = tid / TPR;
+    const int sm_row = tid / TPR;
     const int sm_lane = tid % TPR;
 
-    const int64_t q_row_stride  = (int64_t)n_heads    * head_dim;
+    const int64_t q_row_stride = (int64_t)n_heads * head_dim;
     const int64_t kv_row_stride = (int64_t)n_kv_heads * head_dim;
 
-    const half* Q_ptr = Q + (int64_t)batch_idx * seq_q  * q_row_stride
-                          + (int64_t)q_start   * q_row_stride
-                          + (int64_t)head_idx  * head_dim;
-    const half* K_ptr = K + (int64_t)batch_idx * seq_kv * kv_row_stride
-                          + (int64_t)kv_head   * head_dim;
-    const half* V_ptr = V + (int64_t)batch_idx * seq_kv * kv_row_stride
-                          + (int64_t)kv_head   * head_dim;
-    half* O_ptr       = O + (int64_t)batch_idx * seq_q  * q_row_stride
-                          + (int64_t)q_start   * q_row_stride
-                          + (int64_t)head_idx  * head_dim;
+    const half* Q_ptr = Q + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
+                        (int64_t)head_idx * head_dim;
+    const half* K_ptr = K + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
+    const half* V_ptr = V + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
+    half* O_ptr = O + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
+                  (int64_t)head_idx * head_dim;
 
     // ---- shared memory layout -----------------------------------------------
     //
@@ -176,19 +160,19 @@ fmha_sm120_mxfp4_kernel(
     //
     extern __shared__ char smem[];
 
-    uint8_t* Q_fp4    = reinterpret_cast<uint8_t*>(smem);
-    float*   q_scales = reinterpret_cast<float*>(Q_fp4 + Bq * hd_half_padded);
+    uint8_t* Q_fp4 = reinterpret_cast<uint8_t*>(smem);
+    float* q_scales = reinterpret_cast<float*>(Q_fp4 + Bq * hd_half_padded);
     // KV_buf is aligned to 16 bytes for vectorized loads
-    char*    KV_raw   = reinterpret_cast<char*>(q_scales + Bq);
+    char* KV_raw = reinterpret_cast<char*>(q_scales + Bq);
     // Align KV_raw to 16 bytes
     KV_raw = reinterpret_cast<char*>((reinterpret_cast<uintptr_t>(KV_raw) + 15) & ~15ULL);
-    uint8_t* KV_fp4   = reinterpret_cast<uint8_t*>(KV_raw);  // K as FP4
-    half*    KV_fp16  = reinterpret_cast<half*>(KV_raw);      // V as FP16 (same slot)
-    float*   k_scales = reinterpret_cast<float*>(KV_raw + Bkv * head_dim * sizeof(half));
-    float*   S_tile   = k_scales + Bkv;
-    float*   O_acc    = S_tile + Bq * Bkv;
-    float*   row_m    = O_acc + Bq * head_dim;
-    float*   row_l    = row_m + Bq;
+    uint8_t* KV_fp4 = reinterpret_cast<uint8_t*>(KV_raw);  // K as FP4
+    half* KV_fp16 = reinterpret_cast<half*>(KV_raw);       // V as FP16 (same slot)
+    float* k_scales = reinterpret_cast<float*>(KV_raw + Bkv * head_dim * sizeof(half));
+    float* S_tile = k_scales + Bkv;
+    float* O_acc = S_tile + Bq * Bkv;
+    float* row_m = O_acc + Bq * head_dim;
+    float* row_l = row_m + Bq;
     // Per-k_group UE4M3 scales for blockscale-MMA sfa/sfb operands.
     // Each row has n_k_groups = HD/16 scales (one per 16-K-block).
     // Only populated when UseBlockScaleMma=true. Placed at the tail.
@@ -240,7 +224,7 @@ fmha_sm120_mxfp4_kernel(
                 int kg = idx % n_k_groups;
                 float absmax = 0.0f;
                 const half* row_start = &Q_stage[r * head_dim + kg * 16];
-                #pragma unroll
+#pragma unroll
                 for (int i = 0; i < 16; i++)
                     absmax = fmaxf(absmax, fabsf(__half2float(row_start[i])));
                 float raw = absmax / 6.0f;
@@ -254,7 +238,7 @@ fmha_sm120_mxfp4_kernel(
                 for (int d = sm_lane; d < head_dim; d += TPR)
                     local_max = fmaxf(local_max, fabsf(__half2float(Q_stage[r * head_dim + d])));
             }
-            #pragma unroll
+#pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1)
                 local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
             if (sm_lane == 0 && r < Bq)
@@ -285,17 +269,12 @@ fmha_sm120_mxfp4_kernel(
                 half2 h23 = reinterpret_cast<const half2*>(src)[1];
                 half2 h45 = reinterpret_cast<const half2*>(src)[2];
                 half2 h67 = reinterpret_cast<const half2*>(src)[3];
-                uint32_t b0 = pack_fp4_pair(__half2float(h01.x) * inv_scale,
-                                             __half2float(h01.y) * inv_scale);
-                uint32_t b1 = pack_fp4_pair(__half2float(h23.x) * inv_scale,
-                                             __half2float(h23.y) * inv_scale);
-                uint32_t b2 = pack_fp4_pair(__half2float(h45.x) * inv_scale,
-                                             __half2float(h45.y) * inv_scale);
-                uint32_t b3 = pack_fp4_pair(__half2float(h67.x) * inv_scale,
-                                             __half2float(h67.y) * inv_scale);
+                uint32_t b0 = pack_fp4_pair(__half2float(h01.x) * inv_scale, __half2float(h01.y) * inv_scale);
+                uint32_t b1 = pack_fp4_pair(__half2float(h23.x) * inv_scale, __half2float(h23.y) * inv_scale);
+                uint32_t b2 = pack_fp4_pair(__half2float(h45.x) * inv_scale, __half2float(h45.y) * inv_scale);
+                uint32_t b3 = pack_fp4_pair(__half2float(h67.x) * inv_scale, __half2float(h67.y) * inv_scale);
                 uint32_t packed = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-                *reinterpret_cast<uint32_t*>(
-                    &Q_fp4[r * hd_half_padded + b4 * 4]) = packed;
+                *reinterpret_cast<uint32_t*>(&Q_fp4[r * hd_half_padded + b4 * 4]) = packed;
             }
         }
     } else {
@@ -310,7 +289,7 @@ fmha_sm120_mxfp4_kernel(
                 float absmax = 0.0f;
                 if (q_start + r < seq_q) {
                     const half* row = &Q_ptr[(int64_t)r * q_row_stride + kg * 16];
-                    #pragma unroll
+#pragma unroll
                     for (int i = 0; i < 16; i++)
                         absmax = fmaxf(absmax, fabsf(__half2float(row[i])));
                 }
@@ -324,7 +303,7 @@ fmha_sm120_mxfp4_kernel(
                 for (int d = sm_lane; d < head_dim; d += TPR)
                     local_max = fmaxf(local_max, fabsf(__half2float(Q_ptr[(int64_t)r * q_row_stride + d])));
             }
-            #pragma unroll
+#pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1)
                 local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
             if (sm_lane == 0 && r < Bq)
@@ -342,8 +321,7 @@ fmha_sm120_mxfp4_kernel(
                     float inv_scale;
                     if constexpr (UseBlockScaleMma) {
                         int kg = d / 16;
-                        float dequant = fp8_e4m3_to_float_fast(
-                            q_scales_fp8[r * n_k_groups + kg]);
+                        float dequant = fp8_e4m3_to_float_fast(q_scales_fp8[r * n_k_groups + kg]);
                         inv_scale = (dequant > 0.0f) ? (sqrt_scale / dequant) : 0.0f;
                     } else {
                         inv_scale = (q_scales[r] > 0.0f) ? (sqrt_scale / q_scales[r]) : 0.0f;
@@ -367,28 +345,31 @@ fmha_sm120_mxfp4_kernel(
             reinterpret_cast<float4*>(O_acc)[vi] = zero;
         }
     }
-    if (tid < Bq) { row_m[tid] = -FLT_MAX; row_l[tid] = 0.0f; }
+    if (tid < Bq) {
+        row_m[tid] = -FLT_MAX;
+        row_l[tid] = 0.0f;
+    }
     bool first_kv_iter = true;  // skip O_acc rescale on first tile (l_old=0 → rescale=0)
     __syncthreads();
 
     // ---- KV tile loop bounds ----
     int num_kv_tiles, first_kv_tile;
-    compute_kv_tile_bounds(q_start, Bq, Bkv, seq_q, seq_kv,
-                           causal, sliding_window, first_kv_tile, num_kv_tiles);
+    compute_kv_tile_bounds(q_start, Bq, Bkv, seq_q, seq_kv, causal, sliding_window, first_kv_tile,
+                           num_kv_tiles);
 
     // FP4 MMA tiling: m16n8k32 E2M1
-    constexpr int FP4_K = MX_MMA_K;                // 32
-    constexpr int FP4_K_BYTES = FP4_K / 2;         // 16 bytes per k-chunk (packed nibbles)
-    const int hd_chunks_fp4 = head_dim / FP4_K;    // k-loop iterations (same count as FP8)
+    constexpr int FP4_K = MX_MMA_K;              // 32
+    constexpr int FP4_K_BYTES = FP4_K / 2;       // 16 bytes per k-chunk (packed nibbles)
+    const int hd_chunks_fp4 = head_dim / FP4_K;  // k-loop iterations (same count as FP8)
     const int s_row_tiles = Bq / MX_MMA_M;
-    const int s_col_tiles_half = Bkv / MX_MMA_N;   // each m16n8 tile
+    const int s_col_tiles_half = Bkv / MX_MMA_N;  // each m16n8 tile
     const int s_total_tiles = s_row_tiles * s_col_tiles_half;
 
     // FP16 WMMA for P·V
-    const int o_row_tiles   = Bq / MX_WMMA_M;
-    const int o_col_tiles   = head_dim / MX_WMMA_N;
+    const int o_row_tiles = Bq / MX_WMMA_M;
+    const int o_col_tiles = head_dim / MX_WMMA_N;
     const int o_total_tiles = o_row_tiles * o_col_tiles;
-    const int pv_chunks     = Bkv / MX_WMMA_K;
+    const int pv_chunks = Bkv / MX_WMMA_K;
 
     // ================================================================
     // Main KV tile loop
@@ -427,7 +408,7 @@ fmha_sm120_mxfp4_kernel(
                     int kg = idx % n_k_groups;
                     float absmax = 0.0f;
                     const half* row_start = &K_stage[r * head_dim + kg * 16];
-                    #pragma unroll
+#pragma unroll
                     for (int i = 0; i < 16; i++)
                         absmax = fmaxf(absmax, fabsf(__half2float(row_start[i])));
                     float raw = absmax / 6.0f;
@@ -441,7 +422,7 @@ fmha_sm120_mxfp4_kernel(
                     for (int d = sm_lane; d < head_dim; d += TPR)
                         local_max = fmaxf(local_max, fabsf(__half2float(K_stage[r * head_dim + d])));
                 }
-                #pragma unroll
+#pragma unroll
                 for (int offset = TPR / 2; offset >= 1; offset >>= 1)
                     local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
                 if (sm_lane == 0 && r < Bkv)
@@ -470,16 +451,15 @@ fmha_sm120_mxfp4_kernel(
                     half2 h45 = reinterpret_cast<const half2*>(src)[2];
                     half2 h67 = reinterpret_cast<const half2*>(src)[3];
                     uint32_t b0 = pack_fp4_pair(__half2float(h01.x) * inv_scale,
-                                                 __half2float(h01.y) * inv_scale);
+                                                __half2float(h01.y) * inv_scale);
                     uint32_t b1 = pack_fp4_pair(__half2float(h23.x) * inv_scale,
-                                                 __half2float(h23.y) * inv_scale);
+                                                __half2float(h23.y) * inv_scale);
                     uint32_t b2 = pack_fp4_pair(__half2float(h45.x) * inv_scale,
-                                                 __half2float(h45.y) * inv_scale);
+                                                __half2float(h45.y) * inv_scale);
                     uint32_t b3 = pack_fp4_pair(__half2float(h67.x) * inv_scale,
-                                                 __half2float(h67.y) * inv_scale);
+                                                __half2float(h67.y) * inv_scale);
                     uint32_t packed = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-                    *reinterpret_cast<uint32_t*>(
-                        &KV_fp4[r * hd_half_padded + b4 * 4]) = packed;
+                    *reinterpret_cast<uint32_t*>(&KV_fp4[r * hd_half_padded + b4 * 4]) = packed;
                 }
             }
             __syncthreads();
@@ -494,7 +474,7 @@ fmha_sm120_mxfp4_kernel(
                     float absmax = 0.0f;
                     if (kv_start + r < seq_kv) {
                         const half* row = &K_ptr[(int64_t)(kv_start + r) * kv_row_stride + kg * 16];
-                        #pragma unroll
+#pragma unroll
                         for (int i = 0; i < 16; i++)
                             absmax = fmaxf(absmax, fabsf(__half2float(row[i])));
                     }
@@ -506,9 +486,11 @@ fmha_sm120_mxfp4_kernel(
                 float local_max = 0.0f;
                 if (r < Bkv && kv_start + r < seq_kv) {
                     for (int d = sm_lane; d < head_dim; d += TPR)
-                        local_max = fmaxf(local_max, fabsf(__half2float(K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d])));
+                        local_max = fmaxf(local_max,
+                                          fabsf(__half2float(
+                                              K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d])));
                 }
-                #pragma unroll
+#pragma unroll
                 for (int offset = TPR / 2; offset >= 1; offset >>= 1)
                     local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
                 if (sm_lane == 0 && r < Bkv)
@@ -526,14 +508,15 @@ fmha_sm120_mxfp4_kernel(
                         float inv_scale;
                         if constexpr (UseBlockScaleMma) {
                             int kg = d / 16;
-                            float dequant = fp8_e4m3_to_float_fast(
-                                k_scales_fp8[r * n_k_groups + kg]);
+                            float dequant = fp8_e4m3_to_float_fast(k_scales_fp8[r * n_k_groups + kg]);
                             inv_scale = (dequant > 0.0f) ? (sqrt_scale / dequant) : 0.0f;
                         } else {
                             inv_scale = (k_scales[r] > 0.0f) ? (sqrt_scale / k_scales[r]) : 0.0f;
                         }
-                        float v0 = __half2float(K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]) * inv_scale;
-                        float v1 = __half2float(K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d + 1]) * inv_scale;
+                        float v0 = __half2float(K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]) *
+                                   inv_scale;
+                        float v1 = __half2float(K_ptr[(int64_t)(kv_start + r) * kv_row_stride + d + 1]) *
+                                   inv_scale;
                         KV_fp4[r * hd_half_padded + d_byte] = pack_fp4_pair(v0, v1);
                     } else {
                         KV_fp4[r * hd_half_padded + d_byte] = 0;
@@ -603,23 +586,21 @@ fmha_sm120_mxfp4_kernel(
                 const int m_sfa = (lane_id / 4) + (lane_id % 2) * 8;
                 const int n_sfb = lane_id / 4;
                 constexpr uint16_t bidA = 0, tidA = 0, bidB = 0, tidB = 0;
-                #define MXF4_MMA(d_a, d_b, d_c, d_d, b_lo, b_hi, sfb_) \
-                    asm volatile( \
-                        "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 " \
-                        "{%0, %1, %2, %3}," \
-                        "{%4, %5, %6, %7}," \
-                        "{%8, %9}," \
-                        "{%10, %11, %12, %13}," \
-                        "{%14}," \
-                        "{%15, %16}," \
-                        "{%17}," \
-                        "{%18, %19};\n" \
-                        : "=f"(d_a), "=f"(d_b), "=f"(d_c), "=f"(d_d) \
-                        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), \
-                          "r"(b_lo), "r"(b_hi), \
-                          "f"(d_a), "f"(d_b), "f"(d_c), "f"(d_d), \
-                          "r"(sfa), "h"(bidA), "h"(tidA), \
-                          "r"(sfb_), "h"(bidB), "h"(tidB))
+#define MXF4_MMA(d_a, d_b, d_c, d_d, b_lo, b_hi, sfb_)                                                      \
+    asm volatile(                                                                                           \
+        "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32."     \
+        "ue4m3 "                                                                                            \
+        "{%0, %1, %2, %3},"                                                                                 \
+        "{%4, %5, %6, %7},"                                                                                 \
+        "{%8, %9},"                                                                                         \
+        "{%10, %11, %12, %13},"                                                                             \
+        "{%14},"                                                                                            \
+        "{%15, %16},"                                                                                       \
+        "{%17},"                                                                                            \
+        "{%18, %19};\n"                                                                                     \
+        : "=f"(d_a), "=f"(d_b), "=f"(d_c), "=f"(d_d)                                                        \
+        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b_lo), "r"(b_hi), "f"(d_a), "f"(d_b), "f"(d_c), "f"(d_d), \
+          "r"(sfa), "h"(bidA), "h"(tidA), "r"(sfb_), "h"(bidB), "h"(tidB))
 
                 for (int k = 0; k < k_pairs; k++) {
                     const int k0 = 2 * k;
@@ -627,12 +608,12 @@ fmha_sm120_mxfp4_kernel(
                     const uint8_t* q_base0 = Q_fp4 + ri * MX_MMA_M * hd_half_padded + k0 * FP4_K_BYTES;
                     const uint8_t* q_base1 = Q_fp4 + ri * MX_MMA_M * hd_half_padded + k1 * FP4_K_BYTES;
                     // A loaded once, reused for all 4 ci's
-                    uint32_t a0 = *reinterpret_cast<const uint32_t*>(
-                        q_base0 + group_id * hd_half_padded + byte_offset);
+                    uint32_t a0 = *reinterpret_cast<const uint32_t*>(q_base0 + group_id * hd_half_padded +
+                                                                     byte_offset);
                     uint32_t a1 = *reinterpret_cast<const uint32_t*>(
                         q_base0 + (group_id + 8) * hd_half_padded + byte_offset);
-                    uint32_t a2 = *reinterpret_cast<const uint32_t*>(
-                        q_base1 + group_id * hd_half_padded + byte_offset);
+                    uint32_t a2 = *reinterpret_cast<const uint32_t*>(q_base1 + group_id * hd_half_padded +
+                                                                     byte_offset);
                     uint32_t a3 = *reinterpret_cast<const uint32_t*>(
                         q_base1 + (group_id + 8) * hd_half_padded + byte_offset);
 
@@ -641,63 +622,69 @@ fmha_sm120_mxfp4_kernel(
                     uint32_t sfa = *reinterpret_cast<const uint32_t*>(
                         &q_scales_fp8[(ri * MX_MMA_M + m_sfa) * n_k_groups + kg_base]);
 
-                    // 4 MMAs for ci_meta_base + 0..3, all sharing A and sfa
-                    #pragma unroll
+// 4 MMAs for ci_meta_base + 0..3, all sharing A and sfa
+#pragma unroll
                     for (int co = 0; co < CI_PER_META; co++) {
                         int ci_local = ci_meta_base + co;
-                        const uint8_t* k_base0 = KV_fp4 + ci_local * MX_MMA_N * hd_half_padded + k0 * FP4_K_BYTES;
-                        const uint8_t* k_base1 = KV_fp4 + ci_local * MX_MMA_N * hd_half_padded + k1 * FP4_K_BYTES;
-                        uint32_t b0 = *reinterpret_cast<const uint32_t*>(
-                            k_base0 + group_id * hd_half_padded + byte_offset);
-                        uint32_t b1 = *reinterpret_cast<const uint32_t*>(
-                            k_base1 + group_id * hd_half_padded + byte_offset);
+                        const uint8_t* k_base0 = KV_fp4 + ci_local * MX_MMA_N * hd_half_padded +
+                                                 k0 * FP4_K_BYTES;
+                        const uint8_t* k_base1 = KV_fp4 + ci_local * MX_MMA_N * hd_half_padded +
+                                                 k1 * FP4_K_BYTES;
+                        uint32_t b0 = *reinterpret_cast<const uint32_t*>(k_base0 + group_id * hd_half_padded +
+                                                                         byte_offset);
+                        uint32_t b1 = *reinterpret_cast<const uint32_t*>(k_base1 + group_id * hd_half_padded +
+                                                                         byte_offset);
                         uint32_t sfb = *reinterpret_cast<const uint32_t*>(
                             &k_scales_fp8[(ci_local * MX_MMA_N + n_sfb) * n_k_groups + kg_base]);
 #if __CUDA_ARCH__ >= 1200
-                        if (co == 0)      { MXF4_MMA(d0, d1, d2, d3, b0, b1, sfb); }
-                        else if (co == 1) { MXF4_MMA(d4, d5, d6, d7, b0, b1, sfb); }
-                        else if (co == 2) { MXF4_MMA(d8, d9, dA, dB, b0, b1, sfb); }
-                        else              { MXF4_MMA(dC, dD, dE, dF, b0, b1, sfb); }
+                        if (co == 0) {
+                            MXF4_MMA(d0, d1, d2, d3, b0, b1, sfb);
+                        } else if (co == 1) {
+                            MXF4_MMA(d4, d5, d6, d7, b0, b1, sfb);
+                        } else if (co == 2) {
+                            MXF4_MMA(d8, d9, dA, dB, b0, b1, sfb);
+                        } else {
+                            MXF4_MMA(dC, dD, dE, dF, b0, b1, sfb);
+                        }
 #endif
                     }
                 }
-                #undef MXF4_MMA
+#undef MXF4_MMA
             } else {
-            for (int k = 0; k < hd_chunks_fp4; k++) {
-                // Load A fragment: a0=row[groupID], a1=row[groupID+8], a2=a3=0
-                uint32_t a0, a1;
-                {
-                    const uint8_t* q_base = Q_fp4 + ri * MX_MMA_M * hd_half_padded + k * FP4_K_BYTES;
-                    a0 = *reinterpret_cast<const uint32_t*>(
-                        q_base + group_id * hd_half_padded + byte_offset);
-                    a1 = *reinterpret_cast<const uint32_t*>(
-                        q_base + (group_id + 8) * hd_half_padded + byte_offset);
-                }
-                uint32_t a2 = 0, a3 = 0;  // padding for uniform register encoding
+                for (int k = 0; k < hd_chunks_fp4; k++) {
+                    // Load A fragment: a0=row[groupID], a1=row[groupID+8], a2=a3=0
+                    uint32_t a0, a1;
+                    {
+                        const uint8_t* q_base = Q_fp4 + ri * MX_MMA_M * hd_half_padded + k * FP4_K_BYTES;
+                        a0 = *reinterpret_cast<const uint32_t*>(q_base + group_id * hd_half_padded +
+                                                                byte_offset);
+                        a1 = *reinterpret_cast<const uint32_t*>(q_base + (group_id + 8) * hd_half_padded +
+                                                                byte_offset);
+                    }
+                    uint32_t a2 = 0, a3 = 0;  // padding for uniform register encoding
 
-                // Load B fragment: b0=col[groupID], b1=0
-                uint32_t b0;
-                {
-                    const uint8_t* k_base = KV_fp4 + ci * MX_MMA_N * hd_half_padded + k * FP4_K_BYTES;
-                    b0 = *reinterpret_cast<const uint32_t*>(
-                        k_base + group_id * hd_half_padded + byte_offset);
-                }
-                uint32_t b1 = 0;  // padding
+                    // Load B fragment: b0=col[groupID], b1=0
+                    uint32_t b0;
+                    {
+                        const uint8_t* k_base = KV_fp4 + ci * MX_MMA_N * hd_half_padded + k * FP4_K_BYTES;
+                        b0 = *reinterpret_cast<const uint32_t*>(k_base + group_id * hd_half_padded +
+                                                                byte_offset);
+                    }
+                    uint32_t b1 = 0;  // padding
 
-                // FP4 E2M1 MMA: d += A_e2m1 × B_e2m1^T
+                    // FP4 E2M1 MMA: d += A_e2m1 × B_e2m1^T
 #if __CUDA_ARCH__ >= 1200
-                asm volatile(
-                    "mma.sync.aligned.kind::f8f6f4.m16n8k32.row.col.f32.e2m1.e2m1.f32 "
-                    "{%0, %1, %2, %3},"
-                    "{%4, %5, %6, %7},"
-                    "{%8, %9},"
-                    "{%10, %11, %12, %13};\n"
-                    : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-                    : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-                      "r"(b0), "r"(b1),
-                      "f"(d0), "f"(d1), "f"(d2), "f"(d3));
+                    asm volatile(
+                        "mma.sync.aligned.kind::f8f6f4.m16n8k32.row.col.f32.e2m1.e2m1.f32 "
+                        "{%0, %1, %2, %3},"
+                        "{%4, %5, %6, %7},"
+                        "{%8, %9},"
+                        "{%10, %11, %12, %13};\n"
+                        : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
+                        : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(d0), "f"(d1), "f"(d2),
+                          "f"(d3));
 #endif
-            }
+                }
             }
 
             // Store 16×8 (or 16×16 for 2-issue blockscale) result to S_tile.
@@ -707,34 +694,40 @@ fmha_sm120_mxfp4_kernel(
                 int r0 = (lane_id / 4) % 8;
                 int c0 = (lane_id % 4) * 2;
 
-                #define FUSED_STORE(val, gq, gk, qs, ks, idx) do { \
-                    float s = (val) * (qs) * (ks); \
-                    if (softcap > 0.0f) s = softcap * tanhf(s / softcap); \
-                    if ((gq) >= seq_q || (gk) >= seq_kv) s = -FLT_MAX; \
-                    else if (causal && (gq) < (gk)) s = -FLT_MAX; \
-                    else if (sliding_window > 0 && ((gq) - (gk)) >= sliding_window) s = -FLT_MAX; \
-                    S_tile[idx] = s; \
-                } while (0)
+#define FUSED_STORE(val, gq, gk, qs, ks, idx)                           \
+    do {                                                                \
+        float s = (val) * (qs) * (ks);                                  \
+        if (softcap > 0.0f)                                             \
+            s = softcap * tanhf(s / softcap);                           \
+        if ((gq) >= seq_q || (gk) >= seq_kv)                            \
+            s = -FLT_MAX;                                               \
+        else if (causal && (gq) < (gk))                                 \
+            s = -FLT_MAX;                                               \
+        else if (sliding_window > 0 && ((gq) - (gk)) >= sliding_window) \
+            s = -FLT_MAX;                                               \
+        S_tile[idx] = s;                                                \
+    } while (0)
 
                 int gq0 = q_start + base_row + r0;
                 int gq1 = q_start + base_row + r0 + 8;
 
                 if constexpr (UseBlockScaleMma) {
-                    // 4-issue path: store 4 ci's, scales already HW-applied
-                    #define STORE_CI(d_a, d_b, d_c, d_d, ci_off) do { \
-                        int base_col_x = (ci_meta_base + ci_off) * MX_MMA_N; \
-                        int gk0_x = kv_start + base_col_x + c0; \
-                        int gk1_x = kv_start + base_col_x + c0 + 1; \
-                        FUSED_STORE(d_a, gq0, gk0_x, 1.0f, 1.0f, (base_row + r0)     * Bkv + base_col_x + c0); \
-                        FUSED_STORE(d_b, gq0, gk1_x, 1.0f, 1.0f, (base_row + r0)     * Bkv + base_col_x + c0 + 1); \
-                        FUSED_STORE(d_c, gq1, gk0_x, 1.0f, 1.0f, (base_row + r0 + 8) * Bkv + base_col_x + c0); \
-                        FUSED_STORE(d_d, gq1, gk1_x, 1.0f, 1.0f, (base_row + r0 + 8) * Bkv + base_col_x + c0 + 1); \
-                    } while (0)
+// 4-issue path: store 4 ci's, scales already HW-applied
+#define STORE_CI(d_a, d_b, d_c, d_d, ci_off)                                                       \
+    do {                                                                                           \
+        int base_col_x = (ci_meta_base + ci_off) * MX_MMA_N;                                       \
+        int gk0_x = kv_start + base_col_x + c0;                                                    \
+        int gk1_x = kv_start + base_col_x + c0 + 1;                                                \
+        FUSED_STORE(d_a, gq0, gk0_x, 1.0f, 1.0f, (base_row + r0) * Bkv + base_col_x + c0);         \
+        FUSED_STORE(d_b, gq0, gk1_x, 1.0f, 1.0f, (base_row + r0) * Bkv + base_col_x + c0 + 1);     \
+        FUSED_STORE(d_c, gq1, gk0_x, 1.0f, 1.0f, (base_row + r0 + 8) * Bkv + base_col_x + c0);     \
+        FUSED_STORE(d_d, gq1, gk1_x, 1.0f, 1.0f, (base_row + r0 + 8) * Bkv + base_col_x + c0 + 1); \
+    } while (0)
                     STORE_CI(d0, d1, d2, d3, 0);
                     STORE_CI(d4, d5, d6, d7, 1);
                     STORE_CI(d8, d9, dA, dB, 2);
                     STORE_CI(dC, dD, dE, dF, 3);
-                    #undef STORE_CI
+#undef STORE_CI
                 } else {
                     // Legacy single-tile path
                     int base_col = ci * MX_MMA_N;
@@ -749,7 +742,7 @@ fmha_sm120_mxfp4_kernel(
                     FUSED_STORE(d2, gq1, gk0, qs1, ks0, (base_row + r0 + 8) * Bkv + base_col + c0);
                     FUSED_STORE(d3, gq1, gk1, qs1, ks1, (base_row + r0 + 8) * Bkv + base_col + c0 + 1);
                 }
-                #undef FUSED_STORE
+#undef FUSED_STORE
             }
         }
         __syncthreads();
@@ -767,13 +760,12 @@ fmha_sm120_mxfp4_kernel(
                 int r = elem / head_dim;
                 int d = elem % head_dim;
                 if (kv_start + r < seq_kv) {
-                    cp_async_ca_16(
-                        &KV_fp16[r * head_dim + d],
-                        &V_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
+                    cp_async_ca_16(&KV_fp16[r * head_dim + d],
+                                   &V_ptr[(int64_t)(kv_start + r) * kv_row_stride + d]);
                 } else {
                     // cp.async can't zero — use regular store
-                    reinterpret_cast<float4*>(&KV_fp16[r * head_dim + d])[0] =
-                        make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                    reinterpret_cast<float4*>(&KV_fp16[r * head_dim + d])[0] = make_float4(0.0f, 0.0f, 0.0f,
+                                                                                           0.0f);
                 }
             }
             cp_async_commit();
@@ -794,7 +786,7 @@ fmha_sm120_mxfp4_kernel(
                 for (int c = sm_lane; c < Bkv; c += TPR)
                     partial_max = fmaxf(partial_max, S_tile[r * Bkv + c]);
             }
-            #pragma unroll
+#pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1)
                 partial_max = fmaxf(partial_max, __shfl_xor_sync(0xffffffff, partial_max, offset));
             float m_ij = partial_max;
@@ -813,14 +805,17 @@ fmha_sm120_mxfp4_kernel(
                     S_tile[r * Bkv + c] = p;
                 }
             }
-            #pragma unroll
+#pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1)
                 partial_sum += __shfl_xor_sync(0xffffffff, partial_sum, offset);
 
             // Step 4: Update running sum
             float l_old = row_valid ? row_l[r] : 0.0f;
             float l_new = alpha * l_old + partial_sum;
-            if (sm_lane == 0 && row_valid) { row_m[r] = m_new; row_l[r] = l_new; }
+            if (sm_lane == 0 && row_valid) {
+                row_m[r] = m_new;
+                row_l[r] = l_new;
+            }
 
             // Step 5: Rescale O accumulator (skip on first tile: l_old=0 → rescale=0)
             if (!first_kv_iter) {
@@ -856,27 +851,24 @@ fmha_sm120_mxfp4_kernel(
                 int di = tile_idx % o_col_tiles;
 
                 wmma::fragment<wmma::accumulator, MX_WMMA_M, MX_WMMA_N, MX_WMMA_K, float> o_frag;
-                wmma::load_matrix_sync(o_frag,
-                    O_acc + ri * MX_WMMA_M * head_dim + di * MX_WMMA_N,
-                    head_dim, wmma::mem_row_major);
+                wmma::load_matrix_sync(o_frag, O_acc + ri * MX_WMMA_M * head_dim + di * MX_WMMA_N, head_dim,
+                                       wmma::mem_row_major);
 
                 for (int k = 0; k < pv_chunks; k++) {
-                    wmma::fragment<wmma::matrix_a, MX_WMMA_M, MX_WMMA_N, MX_WMMA_K,
-                                   half, wmma::row_major> p_frag;
-                    wmma::load_matrix_sync(p_frag,
-                        P_half + ri * MX_WMMA_M * Bkv + k * MX_WMMA_K, Bkv);
+                    wmma::fragment<wmma::matrix_a, MX_WMMA_M, MX_WMMA_N, MX_WMMA_K, half, wmma::row_major>
+                        p_frag;
+                    wmma::load_matrix_sync(p_frag, P_half + ri * MX_WMMA_M * Bkv + k * MX_WMMA_K, Bkv);
 
-                    wmma::fragment<wmma::matrix_b, MX_WMMA_M, MX_WMMA_N, MX_WMMA_K,
-                                   half, wmma::row_major> v_frag;
-                    wmma::load_matrix_sync(v_frag,
-                        KV_fp16 + k * MX_WMMA_N * head_dim + di * MX_WMMA_N, head_dim);
+                    wmma::fragment<wmma::matrix_b, MX_WMMA_M, MX_WMMA_N, MX_WMMA_K, half, wmma::row_major>
+                        v_frag;
+                    wmma::load_matrix_sync(v_frag, KV_fp16 + k * MX_WMMA_N * head_dim + di * MX_WMMA_N,
+                                           head_dim);
 
                     wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
                 }
 
-                wmma::store_matrix_sync(
-                    O_acc + ri * MX_WMMA_M * head_dim + di * MX_WMMA_N,
-                    o_frag, head_dim, wmma::mem_row_major);
+                wmma::store_matrix_sync(O_acc + ri * MX_WMMA_M * head_dim + di * MX_WMMA_N, o_frag, head_dim,
+                                        wmma::mem_row_major);
             }
         }
         first_kv_iter = false;
@@ -889,15 +881,15 @@ fmha_sm120_mxfp4_kernel(
         for (int vi = tid; vi < total_vec4; vi += MX_BLOCK_THREADS) {
             int i = vi * 4;
             int r = i / head_dim;
-            if (q_start + r >= seq_q) continue;
+            if (q_start + r >= seq_q)
+                continue;
             float4 v = reinterpret_cast<const float4*>(O_acc)[vi];
             half2 lo = __float22half2_rn(make_float2(v.x, v.y));
             half2 hi = __float22half2_rn(make_float2(v.z, v.w));
             uint2 packed;
             packed.x = *reinterpret_cast<const uint32_t*>(&lo);
             packed.y = *reinterpret_cast<const uint32_t*>(&hi);
-            *reinterpret_cast<uint2*>(
-                &O_ptr[(int64_t)r * q_row_stride + (i % head_dim)]) = packed;
+            *reinterpret_cast<uint2*>(&O_ptr[(int64_t)r * q_row_stride + (i % head_dim)]) = packed;
         }
     }
 }
@@ -907,16 +899,16 @@ fmha_sm120_mxfp4_kernel(
 // =============================================================================
 
 static size_t compute_smem_mxfp4(int Bq, int Bkv, int head_dim) {
-    size_t q_fp4    = (size_t)Bq * (head_dim / 2 + 4);           // Q packed FP4 (padded stride)
-    size_t q_scales = (size_t)Bq * sizeof(float);                // Q row scales
-    size_t align    = 16;                                         // alignment padding
-    size_t kv_buf   = (size_t)Bkv * head_dim * sizeof(half);     // KV (FP4 K or FP16 V)
-    size_t k_scales = (size_t)Bkv * sizeof(float);               // K row scales
-    size_t s_tile   = (size_t)Bq * Bkv * sizeof(float);          // S_tile
-    size_t o_acc    = (size_t)Bq * head_dim * sizeof(float);     // O_acc
-    size_t softmax  = 2 * (size_t)Bq * sizeof(float);            // row_m + row_l
+    size_t q_fp4 = (size_t)Bq * (head_dim / 2 + 4);         // Q packed FP4 (padded stride)
+    size_t q_scales = (size_t)Bq * sizeof(float);           // Q row scales
+    size_t align = 16;                                      // alignment padding
+    size_t kv_buf = (size_t)Bkv * head_dim * sizeof(half);  // KV (FP4 K or FP16 V)
+    size_t k_scales = (size_t)Bkv * sizeof(float);          // K row scales
+    size_t s_tile = (size_t)Bq * Bkv * sizeof(float);       // S_tile
+    size_t o_acc = (size_t)Bq * head_dim * sizeof(float);   // O_acc
+    size_t softmax = 2 * (size_t)Bq * sizeof(float);        // row_m + row_l
     int n_k_groups = head_dim / 16;
-    size_t scales_fp8 = (size_t)(Bq + Bkv) * n_k_groups;          // UE4M3 per-16-K scales (blockscale)
+    size_t scales_fp8 = (size_t)(Bq + Bkv) * n_k_groups;  // UE4M3 per-16-K scales (blockscale)
     return q_fp4 + q_scales + align + kv_buf + k_scales + s_tile + o_acc + softmax + scales_fp8;
 }
 
@@ -924,13 +916,11 @@ static size_t compute_smem_mxfp4(int Bq, int Bkv, int head_dim) {
 // Host launcher
 // =============================================================================
 
-bool fmha_sm120_mxfp4_prefill(
-    const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, int sliding_window, float softcap,
-    cudaStream_t stream,
-    bool use_blockscale)
-{
-    if (Q.qtype != QType::F16) return false;
+bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+                              bool causal, int sliding_window, float softcap, cudaStream_t stream,
+                              bool use_blockscale) {
+    if (Q.qtype != QType::F16)
+        return false;
     // Blockscale MMA operates on K=64 per issue; head_dim must be a multiple of 64.
     // head_dim=96 (Gemma-class) is a multiple of 32 but NOT 64 → fall back to legacy.
     if (use_blockscale && (static_cast<int>(Q.shape[3]) % 64 != 0)) {
@@ -938,15 +928,18 @@ bool fmha_sm120_mxfp4_prefill(
     }
 
     const int batch_size = static_cast<int>(Q.shape[0]);
-    const int seq_q      = static_cast<int>(Q.shape[1]);
-    const int n_heads    = static_cast<int>(Q.shape[2]);
-    const int head_dim   = static_cast<int>(Q.shape[3]);
-    const int seq_kv     = static_cast<int>(K.shape[1]);
+    const int seq_q = static_cast<int>(Q.shape[1]);
+    const int n_heads = static_cast<int>(Q.shape[2]);
+    const int head_dim = static_cast<int>(Q.shape[3]);
+    const int seq_kv = static_cast<int>(K.shape[1]);
     const int n_kv_heads = static_cast<int>(K.shape[2]);
 
-    if (n_kv_heads == 0 || n_heads % n_kv_heads != 0) return false;
-    if (seq_q == 0 || seq_kv == 0) return false;
-    if (head_dim % MX_MMA_K != 0) return false;  // FP4 MMA needs head_dim % 32 == 0
+    if (n_kv_heads == 0 || n_heads % n_kv_heads != 0)
+        return false;
+    if (seq_q == 0 || seq_kv == 0)
+        return false;
+    if (head_dim % MX_MMA_K != 0)
+        return false;  // FP4 MMA needs head_dim % 32 == 0
 
     int device = 0;
     cudaGetDevice(&device);
@@ -957,8 +950,8 @@ bool fmha_sm120_mxfp4_prefill(
     int Bq;
     {
         size_t smem_128 = compute_smem_mxfp4(128, MX_Bkv, head_dim);
-        size_t smem_64  = compute_smem_mxfp4(64,  MX_Bkv, head_dim);
-        size_t smem_32  = compute_smem_mxfp4(32,  MX_Bkv, head_dim);
+        size_t smem_64 = compute_smem_mxfp4(64, MX_Bkv, head_dim);
+        size_t smem_32 = compute_smem_mxfp4(32, MX_Bkv, head_dim);
         if (smem_128 <= (size_t)max_smem) {
             Bq = 128;
         } else if (smem_64 <= (size_t)max_smem) {
@@ -966,8 +959,8 @@ bool fmha_sm120_mxfp4_prefill(
         } else if (smem_32 <= (size_t)max_smem) {
             Bq = 32;
         } else {
-            IMP_LOG_DEBUG("FMHA MXFP4: no Bq fits smem (hd=%d, smem_32=%zu, max=%d)",
-                          head_dim, smem_32, max_smem);
+            IMP_LOG_DEBUG("FMHA MXFP4: no Bq fits smem (hd=%d, smem_32=%zu, max=%d)", head_dim, smem_32,
+                          max_smem);
             return false;
         }
     }
@@ -978,68 +971,97 @@ bool fmha_sm120_mxfp4_prefill(
     dim3 grid(num_q_tiles, batch_size * n_heads);
     dim3 block(MX_WARP_SIZE, MX_NUM_WARPS);
 
-    IMP_LOG_DEBUG("FMHA MXFP4 sm120: B=%d Sq=%d Skv=%d nh=%d nkv=%d hd=%d Bq=%d Bkv=%d smem=%zu "
-                  "causal=%d sw=%d softcap=%.1f",
-                  batch_size, seq_q, seq_kv, n_heads, n_kv_heads, head_dim,
-                  Bq, MX_Bkv, smem, causal, sliding_window, softcap);
+    IMP_LOG_DEBUG(
+        "FMHA MXFP4 sm120: B=%d Sq=%d Skv=%d nh=%d nkv=%d hd=%d Bq=%d Bkv=%d smem=%zu "
+        "causal=%d sw=%d softcap=%.1f",
+        batch_size, seq_q, seq_kv, n_heads, n_kv_heads, head_dim, Bq, MX_Bkv, smem, causal, sliding_window,
+        softcap);
 
-    #define LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, BS) do { \
-        cudaError_t attr_err = cudaFuncSetAttribute( \
-            fmha_sm120_mxfp4_kernel<BQ, HD, BS>, \
-            cudaFuncAttributeMaxDynamicSharedMemorySize, \
-            static_cast<int>(smem)); \
-        if (attr_err != cudaSuccess) { \
-            IMP_LOG_WARN("FMHA MXFP4: cudaFuncSetAttribute failed Bq=%d HD=%d bs=%d smem=%zu: %s", \
-                         BQ, HD, (int)BS, smem, cudaGetErrorString(attr_err)); \
-            return false; \
-        } \
-        cudaFuncSetAttribute(fmha_sm120_mxfp4_kernel<BQ, HD, BS>, \
-            cudaFuncAttributePreferredSharedMemoryCarveout, \
-            cudaSharedmemCarveoutMaxShared); \
-        fmha_sm120_mxfp4_kernel<BQ, HD, BS><<<grid, block, smem, stream>>>( \
-            reinterpret_cast<const half*>(Q.data), \
-            reinterpret_cast<const half*>(K.data), \
-            reinterpret_cast<const half*>(V.data), \
-            reinterpret_cast<half*>(O.data), \
-            batch_size, seq_q, seq_kv, \
-            n_heads, n_kv_heads, \
-            scale, causal, sliding_window, softcap); \
+#define LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, BS)                                                                 \
+    do {                                                                                                   \
+        cudaError_t attr_err = cudaFuncSetAttribute(fmha_sm120_mxfp4_kernel<BQ, HD, BS>,                   \
+                                                    cudaFuncAttributeMaxDynamicSharedMemorySize,           \
+                                                    static_cast<int>(smem));                               \
+        if (attr_err != cudaSuccess) {                                                                     \
+            IMP_LOG_WARN("FMHA MXFP4: cudaFuncSetAttribute failed Bq=%d HD=%d bs=%d smem=%zu: %s", BQ, HD, \
+                         (int)BS, smem, cudaGetErrorString(attr_err));                                     \
+            return false;                                                                                  \
+        }                                                                                                  \
+        cudaFuncSetAttribute(fmha_sm120_mxfp4_kernel<BQ, HD, BS>,                                          \
+                             cudaFuncAttributePreferredSharedMemoryCarveout,                               \
+                             cudaSharedmemCarveoutMaxShared);                                              \
+        fmha_sm120_mxfp4_kernel<BQ, HD, BS>                                                                \
+            <<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),                         \
+                                            reinterpret_cast<const half*>(K.data),                         \
+                                            reinterpret_cast<const half*>(V.data),                         \
+                                            reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv,    \
+                                            n_heads, n_kv_heads, scale, causal, sliding_window, softcap);  \
     } while (0)
 
-    #define LAUNCH_FMHA_MXFP4(BQ, HD) do { \
-        if (use_blockscale) LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, true); \
-        else                LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, false); \
+#define LAUNCH_FMHA_MXFP4(BQ, HD)                  \
+    do {                                           \
+        if (use_blockscale)                        \
+            LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, true);  \
+        else                                       \
+            LAUNCH_FMHA_MXFP4_IMPL(BQ, HD, false); \
     } while (0)
 
     if (Bq == 128) {
         switch (head_dim) {
-            case 64:  LAUNCH_FMHA_MXFP4(128, 64);  return true;
-            case 96:  LAUNCH_FMHA_MXFP4(128, 96);  return true;
-            case 128: LAUNCH_FMHA_MXFP4(128, 128); return true;
-            case 256: LAUNCH_FMHA_MXFP4(128, 256); return true;
-            default: break;
+            case 64:
+                LAUNCH_FMHA_MXFP4(128, 64);
+                return true;
+            case 96:
+                LAUNCH_FMHA_MXFP4(128, 96);
+                return true;
+            case 128:
+                LAUNCH_FMHA_MXFP4(128, 128);
+                return true;
+            case 256:
+                LAUNCH_FMHA_MXFP4(128, 256);
+                return true;
+            default:
+                break;
         }
     } else if (Bq == 64) {
         switch (head_dim) {
-            case 64:  LAUNCH_FMHA_MXFP4(64, 64);   return true;
-            case 96:  LAUNCH_FMHA_MXFP4(64, 96);   return true;
-            case 128: LAUNCH_FMHA_MXFP4(64, 128);  return true;
-            case 256: LAUNCH_FMHA_MXFP4(64, 256);  return true;
-            default: break;
+            case 64:
+                LAUNCH_FMHA_MXFP4(64, 64);
+                return true;
+            case 96:
+                LAUNCH_FMHA_MXFP4(64, 96);
+                return true;
+            case 128:
+                LAUNCH_FMHA_MXFP4(64, 128);
+                return true;
+            case 256:
+                LAUNCH_FMHA_MXFP4(64, 256);
+                return true;
+            default:
+                break;
         }
     } else {
         switch (head_dim) {
-            case 64:  LAUNCH_FMHA_MXFP4(32, 64);   return true;
-            case 96:  LAUNCH_FMHA_MXFP4(32, 96);   return true;
-            case 128: LAUNCH_FMHA_MXFP4(32, 128);  return true;
-            case 256: LAUNCH_FMHA_MXFP4(32, 256);  return true;
-            default: break;
+            case 64:
+                LAUNCH_FMHA_MXFP4(32, 64);
+                return true;
+            case 96:
+                LAUNCH_FMHA_MXFP4(32, 96);
+                return true;
+            case 128:
+                LAUNCH_FMHA_MXFP4(32, 128);
+                return true;
+            case 256:
+                LAUNCH_FMHA_MXFP4(32, 256);
+                return true;
+            default:
+                break;
         }
     }
 
-    #undef LAUNCH_FMHA_MXFP4
-    #undef LAUNCH_FMHA_MXFP4_IMPL
+#undef LAUNCH_FMHA_MXFP4
+#undef LAUNCH_FMHA_MXFP4_IMPL
     return false;
 }
 
-} // namespace imp
+}  // namespace imp

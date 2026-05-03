@@ -14,43 +14,49 @@ namespace imp {
 // apply_pdl_edges — convert kernel→kernel edges to PDL edges in a graph
 // ---------------------------------------------------------------------------
 static int apply_pdl_edges(cudaGraph_t graph) {
-    if (!graph) return 0;
+    if (!graph)
+        return 0;
 
     // 1. Enumerate all nodes
     size_t num_nodes = 0;
     cudaError_t err = cudaGraphGetNodes(graph, nullptr, &num_nodes);
-    if (err != cudaSuccess || num_nodes == 0) return 0;
+    if (err != cudaSuccess || num_nodes == 0)
+        return 0;
 
     std::vector<cudaGraphNode_t> nodes(num_nodes);
     err = cudaGraphGetNodes(graph, nodes.data(), &num_nodes);
-    if (err != cudaSuccess) return 0;
+    if (err != cudaSuccess)
+        return 0;
 
     // 2. Build set of kernel nodes (use linear scan — node counts are small)
     std::vector<cudaGraphNode_t> kernel_nodes;
     kernel_nodes.reserve(num_nodes);
     for (size_t i = 0; i < num_nodes; i++) {
         cudaGraphNodeType type;
-        if (cudaGraphNodeGetType(nodes[i], &type) == cudaSuccess &&
-            type == cudaGraphNodeTypeKernel) {
+        if (cudaGraphNodeGetType(nodes[i], &type) == cudaSuccess && type == cudaGraphNodeTypeKernel) {
             kernel_nodes.push_back(nodes[i]);
         }
     }
-    if (kernel_nodes.size() < 2) return 0;
+    if (kernel_nodes.size() < 2)
+        return 0;
 
     // 3. Enumerate all edges with edge data
     size_t num_edges = 0;
     err = cudaGraphGetEdges(graph, nullptr, nullptr, nullptr, &num_edges);
-    if (err != cudaSuccess || num_edges == 0) return 0;
+    if (err != cudaSuccess || num_edges == 0)
+        return 0;
 
     std::vector<cudaGraphNode_t> from(num_edges), to(num_edges);
     std::vector<cudaGraphEdgeData> edge_data(num_edges);
     err = cudaGraphGetEdges(graph, from.data(), to.data(), edge_data.data(), &num_edges);
-    if (err != cudaSuccess) return 0;
+    if (err != cudaSuccess)
+        return 0;
 
     // Helper: check if a node is a kernel node
     auto is_kernel = [&](cudaGraphNode_t n) -> bool {
         for (const auto& kn : kernel_nodes) {
-            if (kn == n) return true;
+            if (kn == n)
+                return true;
         }
         return false;
     };
@@ -67,8 +73,10 @@ static int apply_pdl_edges(cudaGraph_t graph) {
     int converted = 0;
     int skipped_non_pdl = 0;
     for (size_t i = 0; i < num_edges; i++) {
-        if (edge_data[i].type != cudaGraphDependencyTypeDefault) continue;
-        if (!is_kernel(from[i]) || !is_kernel(to[i])) continue;
+        if (edge_data[i].type != cudaGraphDependencyTypeDefault)
+            continue;
+        if (!is_kernel(from[i]) || !is_kernel(to[i]))
+            continue;
 
         // Check if the source kernel has PDL enabled.
         // NOTE: cudaGraphKernelNodeGetParams returns kparams.func = nullptr
@@ -91,7 +99,8 @@ static int apply_pdl_edges(cudaGraph_t graph) {
 
         // Remove old default edge
         err = cudaGraphRemoveDependencies(graph, &from[i], &to[i], &edge_data[i], 1);
-        if (err != cudaSuccess) continue;
+        if (err != cudaSuccess)
+            continue;
 
         // Add PDL edge
         err = cudaGraphAddDependencies(graph, &from[i], &to[i], &pdl_edge, 1);
@@ -99,14 +108,12 @@ static int apply_pdl_edges(cudaGraph_t graph) {
             // Rollback: re-add the default edge. If rollback fails the graph
             // has lost an edge entirely — surface it so the eventual
             // instantiate/launch failure can be traced back.
-            cudaError_t rb_err = cudaGraphAddDependencies(graph, &from[i],
-                                                          &to[i],
-                                                          &edge_data[i], 1);
+            cudaError_t rb_err = cudaGraphAddDependencies(graph, &from[i], &to[i], &edge_data[i], 1);
             if (rb_err != cudaSuccess) {
-                IMP_LOG_ERROR("apply_pdl_edges: rollback failed after PDL add "
-                              "error (%s); dropped edge — graph is corrupted: %s",
-                              cudaGetErrorString(err),
-                              cudaGetErrorString(rb_err));
+                IMP_LOG_ERROR(
+                    "apply_pdl_edges: rollback failed after PDL add "
+                    "error (%s); dropped edge — graph is corrupted: %s",
+                    cudaGetErrorString(err), cudaGetErrorString(rb_err));
             }
             continue;
         }
@@ -114,8 +121,7 @@ static int apply_pdl_edges(cudaGraph_t graph) {
     }
 
     if (skipped_non_pdl > 0)
-        IMP_LOG_DEBUG("apply_pdl_edges: skipped %d edges (source kernel not PDL-enabled)",
-                      skipped_non_pdl);
+        IMP_LOG_DEBUG("apply_pdl_edges: skipped %d edges (source kernel not PDL-enabled)", skipped_non_pdl);
 
     return converted;
 }
@@ -124,9 +130,7 @@ static int apply_pdl_edges(cudaGraph_t graph) {
 // CudaGraphCapture
 // ---------------------------------------------------------------------------
 
-CudaGraphCapture::~CudaGraphCapture() {
-    reset();
-}
+CudaGraphCapture::~CudaGraphCapture() { reset(); }
 
 bool CudaGraphCapture::begin_capture(cudaStream_t stream) {
     if (!stream) {
@@ -135,8 +139,7 @@ bool CudaGraphCapture::begin_capture(cudaStream_t stream) {
 
     cudaError_t err = cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("CudaGraphCapture: begin_capture failed: %s",
-                      cudaGetErrorString(err));
+        IMP_LOG_ERROR("CudaGraphCapture: begin_capture failed: %s", cudaGetErrorString(err));
         return false;
     }
 
@@ -153,8 +156,7 @@ bool CudaGraphCapture::end_capture() {
     cudaError_t err = cudaStreamEndCapture(capture_stream_, &graph_);
     graph_diag::g_phase = graph_diag::Phase::NORMAL;
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("CudaGraphCapture: end_capture failed: %s",
-                      cudaGetErrorString(err));
+        IMP_LOG_ERROR("CudaGraphCapture: end_capture failed: %s", cudaGetErrorString(err));
         capture_stream_ = nullptr;
         return false;
     }
@@ -171,8 +173,7 @@ bool CudaGraphCapture::end_capture() {
 
     err = cudaGraphInstantiate(&graph_exec_, graph_, 0);
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("CudaGraphCapture: instantiate failed: %s",
-                      cudaGetErrorString(err));
+        IMP_LOG_ERROR("CudaGraphCapture: instantiate failed: %s", cudaGetErrorString(err));
         cudaGraphDestroy(graph_);
         graph_ = nullptr;
         capture_stream_ = nullptr;
@@ -192,8 +193,7 @@ bool CudaGraphCapture::replay(cudaStream_t stream) {
     graph_diag::PhaseScope scope(graph_diag::Phase::REPLAY);
     cudaError_t err = cudaGraphLaunch(graph_exec_, stream);
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("CudaGraphCapture: replay failed: %s",
-                      cudaGetErrorString(err));
+        IMP_LOG_ERROR("CudaGraphCapture: replay failed: %s", cudaGetErrorString(err));
         return false;
     }
     graph_diag::check_post_launch(stream, "replay");
@@ -232,8 +232,7 @@ bool CudaGraphCapture::end_capture_and_update() {
     cudaError_t err = cudaStreamEndCapture(capture_stream_, &new_graph);
     graph_diag::g_phase = graph_diag::Phase::NORMAL;
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("CudaGraphCapture: end_capture failed: %s",
-                      cudaGetErrorString(err));
+        IMP_LOG_ERROR("CudaGraphCapture: end_capture failed: %s", cudaGetErrorString(err));
         capture_stream_ = nullptr;
         return false;
     }
@@ -251,7 +250,8 @@ bool CudaGraphCapture::end_capture_and_update() {
         cudaGraphExecUpdateResultInfo info;
         cudaError_t ue = cudaGraphExecUpdate(graph_exec_, new_graph, &info);
         if (ue == cudaSuccess && info.result == cudaGraphExecUpdateSuccess) {
-            if (graph_) cudaGraphDestroy(graph_);
+            if (graph_)
+                cudaGraphDestroy(graph_);
             graph_ = new_graph;
             captured_ = true;
             capture_stream_ = nullptr;
@@ -262,12 +262,12 @@ bool CudaGraphCapture::end_capture_and_update() {
         graph_exec_ = nullptr;
     }
 
-    if (graph_) cudaGraphDestroy(graph_);
+    if (graph_)
+        cudaGraphDestroy(graph_);
     graph_ = new_graph;
     err = cudaGraphInstantiate(&graph_exec_, graph_, 0);
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("CudaGraphCapture: instantiate failed: %s",
-                      cudaGetErrorString(err));
+        IMP_LOG_ERROR("CudaGraphCapture: instantiate failed: %s", cudaGetErrorString(err));
         cudaGraphDestroy(graph_);
         graph_ = nullptr;
         capture_stream_ = nullptr;
@@ -332,9 +332,10 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
 
         if (!graph_.begin_capture(stream)) {
             // Capture failed -- fall back to direct execution permanently
-            IMP_LOG_ERROR("CudaGraphRunner: capture failed — falling back to per-step decode "
-                          "(up to 15x slower). Check for unsupported CUDA operations in the "
-                          "forward pass.");
+            IMP_LOG_ERROR(
+                "CudaGraphRunner: capture failed — falling back to per-step decode "
+                "(up to 15x slower). Check for unsupported CUDA operations in the "
+                "forward pass.");
             capture_failed_ = true;
             decode_fn_(stream);
             step_count_++;
@@ -347,9 +348,10 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
         // reuse the existing exec via cudaGraphExecUpdate. On first capture
         // (no prior exec) this degrades cleanly to instantiate.
         if (!graph_.end_capture_and_update()) {
-            IMP_LOG_ERROR("CudaGraphRunner: capture failed — falling back to per-step decode "
-                          "(up to 15x slower). Check for unsupported CUDA operations in the "
-                          "forward pass.");
+            IMP_LOG_ERROR(
+                "CudaGraphRunner: capture failed — falling back to per-step decode "
+                "(up to 15x slower). Check for unsupported CUDA operations in the "
+                "forward pass.");
             graph_.reset();
             capture_failed_ = true;
             // end_capture consumed the stream work; must re-execute for actual results
@@ -363,8 +365,9 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
         // During graph capture the kernels are recorded but NOT executed.
         // Replay immediately so this step produces actual results.
         if (!graph_.replay(stream)) {
-            IMP_LOG_ERROR("CudaGraphRunner: first replay after capture failed — falling back "
-                          "to per-step decode (up to 15x slower).");
+            IMP_LOG_ERROR(
+                "CudaGraphRunner: first replay after capture failed — falling back "
+                "to per-step decode (up to 15x slower).");
             graph_.reset();
             return false;
         }
@@ -374,8 +377,9 @@ bool CudaGraphRunner::execute(cudaStream_t stream) {
 
     // Phase 3: Replay the captured graph
     if (!graph_.replay(stream)) {
-        IMP_LOG_ERROR("CudaGraphRunner: replay failed — invalidating graph and falling back "
-                      "to per-step decode (up to 15x slower). Will attempt re-capture.");
+        IMP_LOG_ERROR(
+            "CudaGraphRunner: replay failed — invalidating graph and falling back "
+            "to per-step decode (up to 15x slower). Will attempt re-capture.");
         graph_.reset();
         step_count_ = 0;  // restart warmup
         // Fall back to direct execution
@@ -418,36 +422,34 @@ __constant__ int d_graph_diag_enabled = 0;
 // Copies sampled token to ring buffer, increments counters, checks stop
 // conditions, and breaks the WHILE loop via cudaGraphSetConditional.
 __global__ void post_decode_step_kernel(
-        const int32_t* __restrict__ d_token_id,     // [1] sampled token
-        int32_t* __restrict__ d_ring_buffer,         // [max_steps] output (mapped pinned)
-        int* __restrict__ d_ring_step_counter,       // [1] mapped step counter (host-visible)
-        int* __restrict__ d_position,                // [1] current position
-        int* __restrict__ d_context_len,             // [1] current context length
-        int* __restrict__ d_step_counter,            // [1] device-side step counter
-        int max_steps,
-        int eos_id,
-        const int32_t* __restrict__ d_stop_ids,
-        int n_stop_ids,
-        // Think budget (all 0/-1 when disabled)
-        int think_budget_limit,
-        int32_t think_start_id,
-        int32_t think_end_id,
-        int* __restrict__ d_think_count,             // [1] reasoning token counter
-        int* __restrict__ d_in_think,                // [1] think block flag
-        int ignore_eos,                              // 1 = don't stop on EOS/stop tokens
-        // Penalty ring buffer: d_penalty_ring[prefix_len + step] = token
-        int32_t* __restrict__ d_penalty_ring,        // may be null if no penalties
-        int penalty_prefix_len,
-        int* __restrict__ d_penalty_count,           // [1] total penalty token count
-        cudaGraphConditionalHandle handle) {
+    const int32_t* __restrict__ d_token_id,  // [1] sampled token
+    int32_t* __restrict__ d_ring_buffer,     // [max_steps] output (mapped pinned)
+    int* __restrict__ d_ring_step_counter,   // [1] mapped step counter (host-visible)
+    int* __restrict__ d_position,            // [1] current position
+    int* __restrict__ d_context_len,         // [1] current context length
+    int* __restrict__ d_step_counter,        // [1] device-side step counter
+    int max_steps, int eos_id, const int32_t* __restrict__ d_stop_ids, int n_stop_ids,
+    // Think budget (all 0/-1 when disabled)
+    int think_budget_limit, int32_t think_start_id, int32_t think_end_id,
+    int* __restrict__ d_think_count,  // [1] reasoning token counter
+    int* __restrict__ d_in_think,     // [1] think block flag
+    int ignore_eos,                   // 1 = don't stop on EOS/stop tokens
+    // Penalty ring buffer: d_penalty_ring[prefix_len + step] = token
+    int32_t* __restrict__ d_penalty_ring,  // may be null if no penalties
+    int penalty_prefix_len,
+    int* __restrict__ d_penalty_count,  // [1] total penalty token count
+    cudaGraphConditionalHandle handle) {
     int step = *d_step_counter;
     int32_t token = *d_token_id;
 
     // Track think state on device
     if (think_budget_limit > 0) {
-        if (token == think_start_id)       *d_in_think = 1;
-        else if (token == think_end_id)    *d_in_think = 0;
-        else if (*d_in_think)              (*d_think_count)++;
+        if (token == think_start_id)
+            *d_in_think = 1;
+        else if (token == think_end_id)
+            *d_in_think = 0;
+        else if (*d_in_think)
+            (*d_think_count)++;
     }
 
     // Write token to ring buffer (visible to host via mapped memory)
@@ -482,9 +484,11 @@ __global__ void post_decode_step_kernel(
     bool in_think = (think_budget_limit > 0 && d_in_think && *d_in_think);
     bool should_stop = (step + 1 >= max_steps);
     if (!in_think && !ignore_eos) {
-        if (token == eos_id) should_stop = true;
+        if (token == eos_id)
+            should_stop = true;
         for (int i = 0; i < n_stop_ids; i++) {
-            if (token == d_stop_ids[i]) should_stop = true;
+            if (token == d_stop_ids[i])
+                should_stop = true;
         }
     }
 
@@ -496,33 +500,31 @@ __global__ void post_decode_step_kernel(
     if (should_stop) {
         if (d_graph_diag_enabled) {
             int stop_reason = 0;
-            if (step + 1 >= max_steps) stop_reason = 1;          // max_steps
+            if (step + 1 >= max_steps)
+                stop_reason = 1;  // max_steps
             else if (!in_think && !ignore_eos) {
-                if (token == eos_id) stop_reason = 2;            // eos
+                if (token == eos_id)
+                    stop_reason = 2;  // eos
                 for (int i = 0; i < n_stop_ids; i++) {
-                    if (token == d_stop_ids[i]) stop_reason = 3 + i; // stop_ids[i]
+                    if (token == d_stop_ids[i])
+                        stop_reason = 3 + i;  // stop_ids[i]
                 }
             }
-            if (in_think && think_budget_limit > 0 &&
-                d_think_count && *d_think_count >= think_budget_limit) stop_reason = 100;
-            printf("[graph_diag:cond_stop] step=%d token=%d in_think=%d "
-                   "eos_id=%d n_stop_ids=%d reason=%d\n",
-                   step, token, in_think ? 1 : 0, eos_id, n_stop_ids, stop_reason);
+            if (in_think && think_budget_limit > 0 && d_think_count && *d_think_count >= think_budget_limit)
+                stop_reason = 100;
+            printf(
+                "[graph_diag:cond_stop] step=%d token=%d in_think=%d "
+                "eos_id=%d n_stop_ids=%d reason=%d\n",
+                step, token, in_think ? 1 : 0, eos_id, n_stop_ids, stop_reason);
         }
         cudaGraphSetConditional(handle, 0);  // break WHILE loop
     }
 }
 
-CudaGraphConditionalRunner::~CudaGraphConditionalRunner() {
-    cleanup();
-}
+CudaGraphConditionalRunner::~CudaGraphConditionalRunner() { cleanup(); }
 
-bool CudaGraphConditionalRunner::setup(
-        GraphExecutor* executor,
-        const InferenceState& state_template,
-        int32_t first_token,
-        Config config,
-        cudaStream_t stream) {
+bool CudaGraphConditionalRunner::setup(GraphExecutor* executor, const InferenceState& state_template,
+                                       int32_t first_token, Config config, cudaStream_t stream) {
     cleanup();  // release any prior state
     config_ = std::move(config);
 
@@ -541,24 +543,27 @@ bool CudaGraphConditionalRunner::setup(
     // Must be ARGMAX_SCRATCH_BYTES — sample_greedy_device uses multi-block
     // argmax that writes partial reduction arrays after the result token.
     err = cudaMalloc(&d_token_id_, ARGMAX_SCRATCH_BYTES);
-    if (err != cudaSuccess) goto fail;
+    if (err != cudaSuccess)
+        goto fail;
     err = cudaMalloc(&d_position_, sizeof(int));
-    if (err != cudaSuccess) goto fail;
+    if (err != cudaSuccess)
+        goto fail;
     err = cudaMalloc(&d_context_len_, sizeof(int));
-    if (err != cudaSuccess) goto fail;
+    if (err != cudaSuccess)
+        goto fail;
     err = cudaMalloc(&d_step_counter_, sizeof(int));
-    if (err != cudaSuccess) goto fail;
+    if (err != cudaSuccess)
+        goto fail;
 
     // Stop token IDs
     if (!config_.stop_ids.empty()) {
         err = cudaMalloc(&d_stop_ids_, config_.stop_ids.size() * sizeof(int32_t));
-        if (err != cudaSuccess) goto fail;
-        err = cudaMemcpyAsync(d_stop_ids_, config_.stop_ids.data(),
-                              config_.stop_ids.size() * sizeof(int32_t),
+        if (err != cudaSuccess)
+            goto fail;
+        err = cudaMemcpyAsync(d_stop_ids_, config_.stop_ids.data(), config_.stop_ids.size() * sizeof(int32_t),
                               cudaMemcpyHostToDevice, stream);
         if (err != cudaSuccess) {
-            IMP_LOG_ERROR("ConditionalRunner: stop_ids upload failed: %s",
-                          cudaGetErrorString(err));
+            IMP_LOG_ERROR("ConditionalRunner: stop_ids upload failed: %s", cudaGetErrorString(err));
             goto fail;
         }
     }
@@ -566,57 +571,55 @@ bool CudaGraphConditionalRunner::setup(
     // Think budget counters (device-side)
     if (config_.think_budget_limit > 0) {
         err = cudaMalloc(&d_think_count_, sizeof(int));
-        if (err != cudaSuccess) goto fail;
+        if (err != cudaSuccess)
+            goto fail;
         err = cudaMalloc(&d_in_think_, sizeof(int));
-        if (err != cudaSuccess) goto fail;
+        if (err != cudaSuccess)
+            goto fail;
         int zero = 0;
         int init_think = config_.initial_in_think ? 1 : 0;
-        err = cudaMemcpyAsync(d_think_count_, &zero, sizeof(int),
-                              cudaMemcpyHostToDevice, stream);
+        err = cudaMemcpyAsync(d_think_count_, &zero, sizeof(int), cudaMemcpyHostToDevice, stream);
         if (err != cudaSuccess) {
-            IMP_LOG_ERROR("ConditionalRunner: think_count init failed: %s",
-                          cudaGetErrorString(err));
+            IMP_LOG_ERROR("ConditionalRunner: think_count init failed: %s", cudaGetErrorString(err));
             goto fail;
         }
-        err = cudaMemcpyAsync(d_in_think_, &init_think, sizeof(int),
-                              cudaMemcpyHostToDevice, stream);
+        err = cudaMemcpyAsync(d_in_think_, &init_think, sizeof(int), cudaMemcpyHostToDevice, stream);
         if (err != cudaSuccess) {
-            IMP_LOG_ERROR("ConditionalRunner: in_think init failed: %s",
-                          cudaGetErrorString(err));
+            IMP_LOG_ERROR("ConditionalRunner: in_think init failed: %s", cudaGetErrorString(err));
             goto fail;
         }
     }
 
     // ---- Allocate penalty ring buffer (prefix history + generated tokens) ----
     {
-        bool has_penalties = (config_.repetition_penalty != 1.0f ||
-                              config_.frequency_penalty != 0.0f ||
+        bool has_penalties = (config_.repetition_penalty != 1.0f || config_.frequency_penalty != 0.0f ||
                               config_.presence_penalty != 0.0f);
         if (has_penalties) {
             penalty_prefix_len_ = static_cast<int>(config_.penalty_history.size());
             int total_penalty_slots = penalty_prefix_len_ + config_.max_steps;
             err = cudaMalloc(&d_penalty_ring_, total_penalty_slots * sizeof(int32_t));
-            if (err != cudaSuccess) goto fail;
+            if (err != cudaSuccess)
+                goto fail;
             err = cudaMalloc(&d_penalty_count_, sizeof(int));
-            if (err != cudaSuccess) goto fail;
+            if (err != cudaSuccess)
+                goto fail;
             // Copy prefix history to the beginning of the penalty ring
             if (penalty_prefix_len_ > 0) {
-                err = cudaMemcpyAsync(d_penalty_ring_,
-                                      config_.penalty_history.data(),
-                                      penalty_prefix_len_ * sizeof(int32_t),
-                                      cudaMemcpyHostToDevice, stream);
+                err = cudaMemcpyAsync(d_penalty_ring_, config_.penalty_history.data(),
+                                      penalty_prefix_len_ * sizeof(int32_t), cudaMemcpyHostToDevice, stream);
                 if (err != cudaSuccess) {
-                    IMP_LOG_ERROR("ConditionalRunner: penalty prefix upload "
-                                  "failed: %s", cudaGetErrorString(err));
+                    IMP_LOG_ERROR(
+                        "ConditionalRunner: penalty prefix upload "
+                        "failed: %s",
+                        cudaGetErrorString(err));
                     goto fail;
                 }
             }
             // Initialize penalty count to prefix length (before any generation)
-            err = cudaMemcpyAsync(d_penalty_count_, &penalty_prefix_len_,
-                                  sizeof(int), cudaMemcpyHostToDevice, stream);
+            err = cudaMemcpyAsync(d_penalty_count_, &penalty_prefix_len_, sizeof(int), cudaMemcpyHostToDevice,
+                                  stream);
             if (err != cudaSuccess) {
-                IMP_LOG_ERROR("ConditionalRunner: penalty_count init failed: %s",
-                              cudaGetErrorString(err));
+                IMP_LOG_ERROR("ConditionalRunner: penalty_count init failed: %s", cudaGetErrorString(err));
                 goto fail;
             }
         }
@@ -624,53 +627,47 @@ bool CudaGraphConditionalRunner::setup(
 
     // ---- Allocate mapped pinned memory for ring buffer ----
     {
-        err = cudaHostAlloc(&h_ring_buffer_,
-                             config_.max_steps * sizeof(int32_t),
-                             cudaHostAllocMapped);
-        if (err != cudaSuccess) goto fail;
+        err = cudaHostAlloc(&h_ring_buffer_, config_.max_steps * sizeof(int32_t), cudaHostAllocMapped);
+        if (err != cudaSuccess)
+            goto fail;
         err = cudaHostGetDevicePointer(&d_ring_buffer_, h_ring_buffer_, 0);
-        if (err != cudaSuccess) goto fail;
+        if (err != cudaSuccess)
+            goto fail;
 
         err = cudaHostAlloc(&h_step_counter_, sizeof(int), cudaHostAllocMapped);
-        if (err != cudaSuccess) goto fail;
+        if (err != cudaSuccess)
+            goto fail;
         err = cudaHostGetDevicePointer(&d_step_counter_mapped_, h_step_counter_, 0);
-        if (err != cudaSuccess) goto fail;
+        if (err != cudaSuccess)
+            goto fail;
     }
 
     // ---- Initialize device state ----
     {
-        int init_pos = config_.initial_position + 1;  // next position after prefill
+        int init_pos = config_.initial_position + 1;     // next position after prefill
         int init_ctx = config_.initial_context_len + 1;  // context grows by 1
         int init_step = 0;
         *h_step_counter_ = 0;
         memset(h_ring_buffer_, 0, config_.max_steps * sizeof(int32_t));
 
-        err = cudaMemcpyAsync(d_token_id_, &first_token, sizeof(int32_t),
-                              cudaMemcpyHostToDevice, stream);
+        err = cudaMemcpyAsync(d_token_id_, &first_token, sizeof(int32_t), cudaMemcpyHostToDevice, stream);
         if (err != cudaSuccess) {
-            IMP_LOG_ERROR("ConditionalRunner: first_token upload failed: %s",
-                          cudaGetErrorString(err));
+            IMP_LOG_ERROR("ConditionalRunner: first_token upload failed: %s", cudaGetErrorString(err));
             goto fail;
         }
-        err = cudaMemcpyAsync(d_position_, &init_pos, sizeof(int),
-                              cudaMemcpyHostToDevice, stream);
+        err = cudaMemcpyAsync(d_position_, &init_pos, sizeof(int), cudaMemcpyHostToDevice, stream);
         if (err != cudaSuccess) {
-            IMP_LOG_ERROR("ConditionalRunner: position init failed: %s",
-                          cudaGetErrorString(err));
+            IMP_LOG_ERROR("ConditionalRunner: position init failed: %s", cudaGetErrorString(err));
             goto fail;
         }
-        err = cudaMemcpyAsync(d_context_len_, &init_ctx, sizeof(int),
-                              cudaMemcpyHostToDevice, stream);
+        err = cudaMemcpyAsync(d_context_len_, &init_ctx, sizeof(int), cudaMemcpyHostToDevice, stream);
         if (err != cudaSuccess) {
-            IMP_LOG_ERROR("ConditionalRunner: context_len init failed: %s",
-                          cudaGetErrorString(err));
+            IMP_LOG_ERROR("ConditionalRunner: context_len init failed: %s", cudaGetErrorString(err));
             goto fail;
         }
-        err = cudaMemcpyAsync(d_step_counter_, &init_step, sizeof(int),
-                              cudaMemcpyHostToDevice, stream);
+        err = cudaMemcpyAsync(d_step_counter_, &init_step, sizeof(int), cudaMemcpyHostToDevice, stream);
         if (err != cudaSuccess) {
-            IMP_LOG_ERROR("ConditionalRunner: step_counter init failed: %s",
-                          cudaGetErrorString(err));
+            IMP_LOG_ERROR("ConditionalRunner: step_counter init failed: %s", cudaGetErrorString(err));
             goto fail;
         }
     }
@@ -711,21 +708,22 @@ bool CudaGraphConditionalRunner::setup(
         // 1. Create top-level graph
         err = cudaGraphCreate(&graph_, 0);
         if (err != cudaSuccess) {
-            IMP_LOG_ERROR("ConditionalRunner: cudaGraphCreate failed: %s — falling back to "
-                          "per-step decode (up to 15x slower). Check for unsupported CUDA "
-                          "operations in the forward pass.",
-                          cudaGetErrorString(err));
+            IMP_LOG_ERROR(
+                "ConditionalRunner: cudaGraphCreate failed: %s — falling back to "
+                "per-step decode (up to 15x slower). Check for unsupported CUDA "
+                "operations in the forward pass.",
+                cudaGetErrorString(err));
             goto fail;
         }
 
         // 2. Create conditional handle (default value = 1 = "continue looping")
-        err = cudaGraphConditionalHandleCreate(&handle_, graph_, 1,
-                                                cudaGraphCondAssignDefault);
+        err = cudaGraphConditionalHandleCreate(&handle_, graph_, 1, cudaGraphCondAssignDefault);
         if (err != cudaSuccess) {
-            IMP_LOG_ERROR("ConditionalRunner: handle create failed: %s — falling back to "
-                          "per-step decode (up to 15x slower). Requires CUDA 12.4+ with "
-                          "conditional graph support.",
-                          cudaGetErrorString(err));
+            IMP_LOG_ERROR(
+                "ConditionalRunner: handle create failed: %s — falling back to "
+                "per-step decode (up to 15x slower). Requires CUDA 12.4+ with "
+                "conditional graph support.",
+                cudaGetErrorString(err));
             goto fail;
         }
 
@@ -739,9 +737,10 @@ bool CudaGraphConditionalRunner::setup(
         cudaGraphNode_t cond_node;
         err = cudaGraphAddNode(&cond_node, graph_, nullptr, nullptr, 0, &cond_params);
         if (err != cudaSuccess) {
-            IMP_LOG_ERROR("ConditionalRunner: add conditional node failed: %s — falling back "
-                          "to per-step decode (up to 15x slower).",
-                          cudaGetErrorString(err));
+            IMP_LOG_ERROR(
+                "ConditionalRunner: add conditional node failed: %s — falling back "
+                "to per-step decode (up to 15x slower).",
+                cudaGetErrorString(err));
             goto fail;
         }
 
@@ -752,14 +751,14 @@ bool CudaGraphConditionalRunner::setup(
         // Sync stream before capture to ensure all prior work is complete
         cudaStreamSynchronize(stream);
 
-        err = cudaStreamBeginCaptureToGraph(stream, body_graph,
-                                              nullptr, nullptr, 0,
-                                              cudaStreamCaptureModeGlobal);
+        err = cudaStreamBeginCaptureToGraph(stream, body_graph, nullptr, nullptr, 0,
+                                            cudaStreamCaptureModeGlobal);
         if (err != cudaSuccess) {
-            IMP_LOG_ERROR("ConditionalRunner: capture failed — falling back to per-step decode "
-                          "(up to 15x slower). Check for unsupported CUDA operations in the "
-                          "forward pass. Error: %s",
-                          cudaGetErrorString(err));
+            IMP_LOG_ERROR(
+                "ConditionalRunner: capture failed — falling back to per-step decode "
+                "(up to 15x slower). Check for unsupported CUDA operations in the "
+                "forward pass. Error: %s",
+                cudaGetErrorString(err));
             goto fail;
         }
 
@@ -769,31 +768,29 @@ bool CudaGraphConditionalRunner::setup(
         //     Writes sampled token to d_token_id_. The h_mapped parameter receives
         //     a D2H copy each iteration (harmless scratch write; the real ring buffer
         //     write is in post_decode_step_kernel below).
-        executor->forward_decode_async(body_state, d_token_id_,
-                                        reinterpret_cast<int32_t*>(h_step_counter_),
-                                        stream);
+        executor->forward_decode_async(body_state, d_token_id_, reinterpret_cast<int32_t*>(h_step_counter_),
+                                       stream);
 
         // 5b. Post-decode-step kernel: ring buffer write, counter increment, EOS check, think budget
-        post_decode_step_kernel<<<1, 1, 0, stream>>>(
-            d_token_id_, d_ring_buffer_, d_step_counter_mapped_,
-            d_position_, d_context_len_, d_step_counter_,
-            config_.max_steps, config_.eos_id,
-            d_stop_ids_, static_cast<int>(config_.stop_ids.size()),
-            config_.think_budget_limit, config_.think_start_id, config_.think_end_id,
-            d_think_count_, d_in_think_,
-            config_.ignore_eos ? 1 : 0,
-            d_penalty_ring_, penalty_prefix_len_, d_penalty_count_,
-            handle_);
+        post_decode_step_kernel<<<1, 1, 0, stream>>>(d_token_id_, d_ring_buffer_, d_step_counter_mapped_,
+                                                     d_position_, d_context_len_, d_step_counter_,
+                                                     config_.max_steps, config_.eos_id, d_stop_ids_,
+                                                     static_cast<int>(config_.stop_ids.size()),
+                                                     config_.think_budget_limit, config_.think_start_id,
+                                                     config_.think_end_id, d_think_count_, d_in_think_,
+                                                     config_.ignore_eos ? 1 : 0, d_penalty_ring_,
+                                                     penalty_prefix_len_, d_penalty_count_, handle_);
 
         // 5c. End capture
         cudaGraph_t captured_body = nullptr;
         err = cudaStreamEndCapture(stream, &captured_body);
         graph_diag::g_phase = graph_diag::Phase::NORMAL;
         if (err != cudaSuccess) {
-            IMP_LOG_ERROR("ConditionalRunner: capture failed — falling back to per-step decode "
-                          "(up to 15x slower). Check for unsupported CUDA operations in the "
-                          "forward pass. Error: %s",
-                          cudaGetErrorString(err));
+            IMP_LOG_ERROR(
+                "ConditionalRunner: capture failed — falling back to per-step decode "
+                "(up to 15x slower). Check for unsupported CUDA operations in the "
+                "forward pass. Error: %s",
+                cudaGetErrorString(err));
             goto fail;
         }
 
@@ -811,9 +808,10 @@ bool CudaGraphConditionalRunner::setup(
         // 6. Instantiate the top-level graph
         err = cudaGraphInstantiate(&exec_, graph_, 0);
         if (err != cudaSuccess) {
-            IMP_LOG_ERROR("ConditionalRunner: graph instantiation failed: %s — falling back "
-                          "to per-step decode (up to 15x slower).",
-                          cudaGetErrorString(err));
+            IMP_LOG_ERROR(
+                "ConditionalRunner: graph instantiation failed: %s — falling back "
+                "to per-step decode (up to 15x slower).",
+                cudaGetErrorString(err));
             goto fail;
         }
 
@@ -825,20 +823,21 @@ bool CudaGraphConditionalRunner::setup(
     return true;
 
 fail:
-    IMP_LOG_ERROR("ConditionalRunner: setup failed — falling back to per-step decode "
-                  "(up to 15x slower). Check logs above for the specific failure.");
+    IMP_LOG_ERROR(
+        "ConditionalRunner: setup failed — falling back to per-step decode "
+        "(up to 15x slower). Check logs above for the specific failure.");
     cleanup();
     return false;
 }
 
 bool CudaGraphConditionalRunner::launch(cudaStream_t stream) {
-    if (!exec_) return false;
+    if (!exec_)
+        return false;
 
     graph_diag::PhaseScope scope(graph_diag::Phase::REPLAY);
     cudaError_t err = cudaGraphLaunch(exec_, stream);
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("ConditionalRunner: launch failed: %s",
-                      cudaGetErrorString(err));
+        IMP_LOG_ERROR("ConditionalRunner: launch failed: %s", cudaGetErrorString(err));
         return false;
     }
     graph_diag::check_post_launch(stream, "cond_launch");
@@ -846,9 +845,9 @@ bool CudaGraphConditionalRunner::launch(cudaStream_t stream) {
     return true;
 }
 
-std::vector<int32_t> CudaGraphConditionalRunner::wait_and_get_tokens(
-        cudaStream_t stream) {
-    if (!launched_) return {};
+std::vector<int32_t> CudaGraphConditionalRunner::wait_and_get_tokens(cudaStream_t stream) {
+    if (!launched_)
+        return {};
 
     cudaStreamSynchronize(stream);
     launched_ = false;
@@ -887,23 +886,62 @@ void CudaGraphConditionalRunner::cleanup() {
     }
 
     bool had_exec = (exec_ != nullptr);
-    if (exec_) { cudaGraphExecDestroy(exec_); exec_ = nullptr; }
-    if (graph_) { cudaGraphDestroy(graph_); graph_ = nullptr; }
+    if (exec_) {
+        cudaGraphExecDestroy(exec_);
+        exec_ = nullptr;
+    }
+    if (graph_) {
+        cudaGraphDestroy(graph_);
+        graph_ = nullptr;
+    }
 
-    if (d_token_id_) { IMP_CUDA_CHECK_LOG(cudaFree(d_token_id_)); d_token_id_ = nullptr; }
-    if (d_position_) { IMP_CUDA_CHECK_LOG(cudaFree(d_position_)); d_position_ = nullptr; }
-    if (d_context_len_) { IMP_CUDA_CHECK_LOG(cudaFree(d_context_len_)); d_context_len_ = nullptr; }
-    if (d_step_counter_) { IMP_CUDA_CHECK_LOG(cudaFree(d_step_counter_)); d_step_counter_ = nullptr; }
-    if (d_stop_ids_) { IMP_CUDA_CHECK_LOG(cudaFree(d_stop_ids_)); d_stop_ids_ = nullptr; }
-    if (d_think_count_) { IMP_CUDA_CHECK_LOG(cudaFree(d_think_count_)); d_think_count_ = nullptr; }
-    if (d_in_think_) { IMP_CUDA_CHECK_LOG(cudaFree(d_in_think_)); d_in_think_ = nullptr; }
-    if (d_penalty_ring_) { IMP_CUDA_CHECK_LOG(cudaFree(d_penalty_ring_)); d_penalty_ring_ = nullptr; }
-    if (d_penalty_count_) { IMP_CUDA_CHECK_LOG(cudaFree(d_penalty_count_)); d_penalty_count_ = nullptr; }
+    if (d_token_id_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_token_id_));
+        d_token_id_ = nullptr;
+    }
+    if (d_position_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_position_));
+        d_position_ = nullptr;
+    }
+    if (d_context_len_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_context_len_));
+        d_context_len_ = nullptr;
+    }
+    if (d_step_counter_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_step_counter_));
+        d_step_counter_ = nullptr;
+    }
+    if (d_stop_ids_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_stop_ids_));
+        d_stop_ids_ = nullptr;
+    }
+    if (d_think_count_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_think_count_));
+        d_think_count_ = nullptr;
+    }
+    if (d_in_think_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_in_think_));
+        d_in_think_ = nullptr;
+    }
+    if (d_penalty_ring_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_penalty_ring_));
+        d_penalty_ring_ = nullptr;
+    }
+    if (d_penalty_count_) {
+        IMP_CUDA_CHECK_LOG(cudaFree(d_penalty_count_));
+        d_penalty_count_ = nullptr;
+    }
     penalty_prefix_len_ = 0;
 
-    if (h_ring_buffer_) { IMP_CUDA_CHECK_LOG(cudaFreeHost(h_ring_buffer_)); h_ring_buffer_ = nullptr; }
+    if (h_ring_buffer_) {
+        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_ring_buffer_));
+        h_ring_buffer_ = nullptr;
+    }
     d_ring_buffer_ = nullptr;
-    if (h_step_counter_) { IMP_CUDA_CHECK_LOG(cudaFreeHost(h_step_counter_)); h_step_counter_ = nullptr; }
+    if (h_step_counter_) {
+        IMP_CUDA_CHECK_LOG(cudaFreeHost(h_step_counter_));
+        h_step_counter_ = nullptr;
+    }
     d_step_counter_mapped_ = nullptr;
 
     // Release the per-device graph memory pool (matches CudaGraphCapture::reset).
@@ -918,4 +956,4 @@ void CudaGraphConditionalRunner::cleanup() {
     last_read_step_ = 0;
 }
 
-} // namespace imp
+}  // namespace imp

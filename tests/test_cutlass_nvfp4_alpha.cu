@@ -34,19 +34,21 @@ protected:
     cudaStream_t stream_ = nullptr;
 };
 
-template<typename T>
+template <typename T>
 T* dev_alloc_copy(const std::vector<T>& h) {
-    T* d; cudaMalloc(&d, h.size() * sizeof(T));
+    T* d;
+    cudaMalloc(&d, h.size() * sizeof(T));
     cudaMemcpy(d, h.data(), h.size() * sizeof(T), cudaMemcpyHostToDevice);
     return d;
 }
 
 __global__ void encode_fp8_e4m3_kernel(const float* in, uint8_t* out, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) out[i] = imp::float_to_fp8_e4m3(in[i]);
+    if (i < n)
+        out[i] = imp::float_to_fp8_e4m3(in[i]);
 }
 
-} // namespace
+}  // namespace
 
 // Pin the encoder boundary: 448 must round-trip to 0x7E, not 0x77.
 TEST_F(CutlassNvfp4AlphaTest, Fp8E4M3EncoderClampBoundary) {
@@ -54,24 +56,27 @@ TEST_F(CutlassNvfp4AlphaTest, Fp8E4M3EncoderClampBoundary) {
     // Expected bytes are the standard FP8 E4M3-fn encodings.
     const std::vector<std::pair<float, uint8_t>> cases = {
         // Value     Expected byte   Decode (sanity)
-        {  448.0f,   0x7E},  // (1+6/8) * 2^8   = 448  E4M3-fn max — was 0x77 (240) before fix
-        {  500.0f,   0x7E},  // overflow → saturate at max         — was 0x77 (240) before fix
-        {  300.0f,   0x79},  // (1+1/8) * 2^8   = 288 (300 RNE-rounds to 288) — was 0x77 (240) before fix
-        {  416.0f,   0x7D},  // (1+5/8) * 2^8   = 416  e=15, m=5   — was 0x77 (240) before fix
-        {  256.0f,   0x78},  // (1+0/8) * 2^8   = 256  e=15, m=0   — was 0x77 (240) before fix
-        {  240.0f,   0x77},  // (1+7/8) * 2^7   = 240  (unchanged, still e=14)
-        {  448.5f,   0x7E},  // saturate at max
-        {  -448.0f,  0xFE},  // negative max
-        {  0.5f,     0x30},  // (1+0)   * 2^-1  = 0.5
-        {  1.0f,     0x38},  // (1+0)   * 2^0   = 1.0
-        {  6.0f,     0x4C},  // (1+4/8) * 2^2   = 6
+        {448.0f, 0x7E},   // (1+6/8) * 2^8   = 448  E4M3-fn max — was 0x77 (240) before fix
+        {500.0f, 0x7E},   // overflow → saturate at max         — was 0x77 (240) before fix
+        {300.0f, 0x79},   // (1+1/8) * 2^8   = 288 (300 RNE-rounds to 288) — was 0x77 (240) before fix
+        {416.0f, 0x7D},   // (1+5/8) * 2^8   = 416  e=15, m=5   — was 0x77 (240) before fix
+        {256.0f, 0x78},   // (1+0/8) * 2^8   = 256  e=15, m=0   — was 0x77 (240) before fix
+        {240.0f, 0x77},   // (1+7/8) * 2^7   = 240  (unchanged, still e=14)
+        {448.5f, 0x7E},   // saturate at max
+        {-448.0f, 0xFE},  // negative max
+        {0.5f, 0x30},     // (1+0)   * 2^-1  = 0.5
+        {1.0f, 0x38},     // (1+0)   * 2^0   = 1.0
+        {6.0f, 0x4C},     // (1+4/8) * 2^2   = 6
     };
 
     std::vector<float> h_in;
-    for (auto& [v, _] : cases) h_in.push_back(v);
-    float* d_in = nullptr; cudaMalloc(&d_in, h_in.size() * sizeof(float));
+    for (auto& [v, _] : cases)
+        h_in.push_back(v);
+    float* d_in = nullptr;
+    cudaMalloc(&d_in, h_in.size() * sizeof(float));
     cudaMemcpy(d_in, h_in.data(), h_in.size() * sizeof(float), cudaMemcpyHostToDevice);
-    uint8_t* d_out = nullptr; cudaMalloc(&d_out, h_in.size());
+    uint8_t* d_out = nullptr;
+    cudaMalloc(&d_out, h_in.size());
 
     const int n = static_cast<int>(h_in.size());
     encode_fp8_e4m3_kernel<<<(n + 31) / 32, 32, 0, stream_>>>(d_in, d_out, n);
@@ -82,13 +87,12 @@ TEST_F(CutlassNvfp4AlphaTest, Fp8E4M3EncoderClampBoundary) {
 
     for (size_t i = 0; i < cases.size(); ++i) {
         EXPECT_EQ(h_out[i], cases[i].second)
-            << "float_to_fp8_e4m3(" << cases[i].first
-            << ") = 0x" << std::hex << (int)h_out[i]
-            << ", expected 0x" << (int)cases[i].second
-            << " (E4M3-fn convention)";
+            << "float_to_fp8_e4m3(" << cases[i].first << ") = 0x" << std::hex << (int)h_out[i]
+            << ", expected 0x" << (int)cases[i].second << " (E4M3-fn convention)";
     }
 
-    cudaFree(d_in); cudaFree(d_out);
+    cudaFree(d_in);
+    cudaFree(d_out);
 }
 
 TEST_F(CutlassNvfp4AlphaTest, AlphaIsActuallyApplied) {
@@ -102,10 +106,10 @@ TEST_F(CutlassNvfp4AlphaTest, AlphaIsActuallyApplied) {
     // Random-looking but deterministic weights and activations.
     std::vector<half> h_w(N * K), h_x(M * K);
     for (int i = 0; i < N * K; ++i) {
-        h_w[i] = __float2half(((i % 13) - 6) * 0.05f);   // [-0.30, 0.30]
+        h_w[i] = __float2half(((i % 13) - 6) * 0.05f);  // [-0.30, 0.30]
     }
     for (int i = 0; i < M * K; ++i) {
-        h_x[i] = __float2half(((i % 17) - 8) * 0.05f);   // [-0.40, 0.40]
+        h_x[i] = __float2half(((i % 17) - 8) * 0.05f);  // [-0.40, 0.40]
     }
 
     half* d_w = dev_alloc_copy(h_w);
@@ -126,31 +130,33 @@ TEST_F(CutlassNvfp4AlphaTest, AlphaIsActuallyApplied) {
 
     // Activation NVFP4 quantization (CUTLASS dynamic-quant kernel).
     size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
-    size_t act_sf_bytes   = cutlass_nvfp4_sf_size(M, K);
-    size_t ws_needed      = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
+    size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
+    size_t ws_needed = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
 
-    void* d_act_data = nullptr; cudaMalloc(&d_act_data, act_data_bytes);
-    void* d_act_sf   = nullptr; cudaMalloc(&d_act_sf,   act_sf_bytes);
-    void* d_ws       = nullptr; cudaMalloc(&d_ws, ws_needed > 0 ? ws_needed : 1);
+    void* d_act_data = nullptr;
+    cudaMalloc(&d_act_data, act_data_bytes);
+    void* d_act_sf = nullptr;
+    cudaMalloc(&d_act_sf, act_sf_bytes);
+    void* d_ws = nullptr;
+    cudaMalloc(&d_ws, ws_needed > 0 ? ws_needed : 1);
     quantize_fp16_to_nvfp4_cutlass(d_x, d_act_data, d_act_sf, M, K, stream_);
 
-    half* d_y_a = nullptr; cudaMalloc(&d_y_a, M * N * sizeof(half));
-    half* d_y_b = nullptr; cudaMalloc(&d_y_b, M * N * sizeof(half));
+    half* d_y_a = nullptr;
+    cudaMalloc(&d_y_a, M * N * sizeof(half));
+    half* d_y_b = nullptr;
+    cudaMalloc(&d_y_b, M * N * sizeof(half));
 
     // -------- Run 1: alpha = baseline_tensor_scale --------
     cw.tensor_scale = baseline_tensor_scale;
-    bool ok1 = gemm_nvfp4_cutlass_sm120(d_act_data, d_act_sf, cw,
-                                         d_y_a, M, N, K,
-                                         d_ws, ws_needed, stream_);
+    bool ok1 = gemm_nvfp4_cutlass_sm120(d_act_data, d_act_sf, cw, d_y_a, M, N, K, d_ws, ws_needed, stream_);
     cudaStreamSynchronize(stream_);
-    if (!ok1) GTEST_SKIP() << "CUTLASS rejected dims";
+    if (!ok1)
+        GTEST_SKIP() << "CUTLASS rejected dims";
 
     // -------- Run 2: alpha = baseline * 0.25 (i.e. quarter the scale) --------
     constexpr float kRatio = 0.25f;
     cw.tensor_scale = baseline_tensor_scale * kRatio;
-    bool ok2 = gemm_nvfp4_cutlass_sm120(d_act_data, d_act_sf, cw,
-                                         d_y_b, M, N, K,
-                                         d_ws, ws_needed, stream_);
+    bool ok2 = gemm_nvfp4_cutlass_sm120(d_act_data, d_act_sf, cw, d_y_b, M, N, K, d_ws, ws_needed, stream_);
     cudaStreamSynchronize(stream_);
     ASSERT_TRUE(ok2);
 
@@ -159,8 +165,8 @@ TEST_F(CutlassNvfp4AlphaTest, AlphaIsActuallyApplied) {
     cudaMemcpy(h_y_b.data(), d_y_b, h_y_b.size() * sizeof(half), cudaMemcpyDeviceToHost);
 
     // Diagnostic stats. We expect h_y_b ≈ kRatio * h_y_a if alpha works.
-    int n_dropped = 0;     // identical bytes → alpha not applied
-    int n_scaled  = 0;     // ratio matches kRatio → alpha applied
+    int n_dropped = 0;  // identical bytes → alpha not applied
+    int n_scaled = 0;   // ratio matches kRatio → alpha applied
     double max_a = 0.0, max_b = 0.0;
     double observed_ratio_sum = 0.0;
     int observed_ratio_n = 0;
@@ -169,7 +175,8 @@ TEST_F(CutlassNvfp4AlphaTest, AlphaIsActuallyApplied) {
         const float vb = __half2float(h_y_b[i]);
         max_a = std::max(max_a, std::fabs((double)va));
         max_b = std::max(max_b, std::fabs((double)vb));
-        if (std::fabs(va) < 1e-3f) continue;  // skip near-zero outputs
+        if (std::fabs(va) < 1e-3f)
+            continue;  // skip near-zero outputs
         const float ratio = vb / va;
         observed_ratio_sum += ratio;
         observed_ratio_n++;
@@ -180,31 +187,32 @@ TEST_F(CutlassNvfp4AlphaTest, AlphaIsActuallyApplied) {
             n_scaled++;
         }
     }
-    const double mean_ratio = observed_ratio_n > 0
-        ? observed_ratio_sum / observed_ratio_n : 0.0;
+    const double mean_ratio = observed_ratio_n > 0 ? observed_ratio_sum / observed_ratio_n : 0.0;
 
     fprintf(stderr,
             "[ALPHA-BISECT] baseline_alpha=%.6g halved_alpha=%.6g\n"
             "[ALPHA-BISECT] max|y_a|=%.6g max|y_b|=%.6g  expected_ratio=%.3f\n"
             "[ALPHA-BISECT] mean_observed_ratio=%.4f over %d non-zero outs\n"
             "[ALPHA-BISECT] n_dropped=%d (identical bytes) n_scaled=%d (matches ratio)\n",
-            baseline_tensor_scale, baseline_tensor_scale * kRatio,
-            max_a, max_b, kRatio, mean_ratio,
-            observed_ratio_n,
-            n_dropped, n_scaled);
+            baseline_tensor_scale, baseline_tensor_scale * kRatio, max_a, max_b, kRatio, mean_ratio,
+            observed_ratio_n, n_dropped, n_scaled);
 
     // The decisive assertion: average output ratio should reflect alpha ratio.
     // If alpha is silently dropped, mean_ratio ≈ 1.0 (outputs identical).
     ASSERT_GT(observed_ratio_n, 0) << "all outputs were ~zero — test inconclusive";
     EXPECT_NEAR(mean_ratio, kRatio, 0.05)
-        << "alpha appears NOT to be applied: outputs unchanged when tensor_scale changed by "
-        << kRatio << "×. Mean observed output ratio: " << mean_ratio;
+        << "alpha appears NOT to be applied: outputs unchanged when tensor_scale changed by " << kRatio
+        << "×. Mean observed output ratio: " << mean_ratio;
 
     free_nvfp4_result(qr);
     free_cutlass_nvfp4_weight(cw);
-    cudaFree(d_w); cudaFree(d_x);
-    cudaFree(d_act_data); cudaFree(d_act_sf); cudaFree(d_ws);
-    cudaFree(d_y_a); cudaFree(d_y_b);
+    cudaFree(d_w);
+    cudaFree(d_x);
+    cudaFree(d_act_data);
+    cudaFree(d_act_sf);
+    cudaFree(d_ws);
+    cudaFree(d_y_a);
+    cudaFree(d_y_b);
 }
 
 // Mistral-3.2-NVFP4 L0 q_proj-shaped reproducer.
@@ -256,8 +264,7 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0Reproducer) {
     NvFP4QuantResult qr;
     quantize_fp16_to_nvfp4(w_t, qr, stream_);
     cudaStreamSynchronize(stream_);
-    fprintf(stderr,
-            "[MISTRAL-REPRO] auto-tensor_scale=%.6g (Modelopt-convention multiplier)\n",
+    fprintf(stderr, "[MISTRAL-REPRO] auto-tensor_scale=%.6g (Modelopt-convention multiplier)\n",
             qr.tensor_scale);
 
     CutlassNvFP4Weight cw;
@@ -265,19 +272,21 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0Reproducer) {
     cudaStreamSynchronize(stream_);
 
     size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
-    size_t act_sf_bytes   = cutlass_nvfp4_sf_size(M, K);
-    size_t ws_needed      = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
+    size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
+    size_t ws_needed = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
 
-    void* d_act_data = nullptr; cudaMalloc(&d_act_data, act_data_bytes);
-    void* d_act_sf   = nullptr; cudaMalloc(&d_act_sf,   act_sf_bytes);
-    void* d_ws       = nullptr; cudaMalloc(&d_ws, ws_needed > 0 ? ws_needed : 1);
+    void* d_act_data = nullptr;
+    cudaMalloc(&d_act_data, act_data_bytes);
+    void* d_act_sf = nullptr;
+    cudaMalloc(&d_act_sf, act_sf_bytes);
+    void* d_ws = nullptr;
+    cudaMalloc(&d_ws, ws_needed > 0 ? ws_needed : 1);
     quantize_fp16_to_nvfp4_cutlass(d_x, d_act_data, d_act_sf, M, K, stream_);
 
-    half* d_y = nullptr; cudaMalloc(&d_y, M * N * sizeof(half));
+    half* d_y = nullptr;
+    cudaMalloc(&d_y, M * N * sizeof(half));
 
-    bool ok = gemm_nvfp4_cutlass_sm120(d_act_data, d_act_sf, cw,
-                                        d_y, M, N, K,
-                                        d_ws, ws_needed, stream_);
+    bool ok = gemm_nvfp4_cutlass_sm120(d_act_data, d_act_sf, cw, d_y, M, N, K, d_ws, ws_needed, stream_);
     cudaStreamSynchronize(stream_);
     ASSERT_TRUE(ok);
 
@@ -288,9 +297,12 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0Reproducer) {
     double max_abs = 0.0, sum_abs = 0.0, sumsq = 0.0;
     for (int i = 0; i < M * N; ++i) {
         float v = __half2float(h_y[i]);
-        if (std::isinf(v)) n_inf++;
-        else if (std::isnan(v)) n_nan++;
-        else if (std::fabs(v) >= 65504.0f) n_saturated++;
+        if (std::isinf(v))
+            n_inf++;
+        else if (std::isnan(v))
+            n_nan++;
+        else if (std::fabs(v) >= 65504.0f)
+            n_saturated++;
         max_abs = std::max(max_abs, (double)std::fabs(v));
         sum_abs += std::fabs(v);
         sumsq += v * v;
@@ -302,9 +314,7 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0Reproducer) {
             "[MISTRAL-REPRO] M=%d N=%d K=%d   alpha=%.6g\n"
             "[MISTRAL-REPRO] max|y|=%.4g  mean|y|=%.4g  rms|y|=%.4g\n"
             "[MISTRAL-REPRO] n_inf=%d  n_nan=%d  n_saturated(>=65504)=%d  total=%d\n",
-            M, N, K, qr.tensor_scale,
-            max_abs, mean_abs, rms,
-            n_inf, n_nan, n_saturated, M * N);
+            M, N, K, qr.tensor_scale, max_abs, mean_abs, rms, n_inf, n_nan, n_saturated, M * N);
 
     // Reference FP16 GEMM (dequant→cuBLAS path) for comparison.
     void* d_w_dequant = nullptr;
@@ -312,7 +322,8 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0Reproducer) {
     dequantize_nvfp4_to_fp16(qr, d_w_dequant, stream_);
     cudaStreamSynchronize(stream_);
 
-    half* d_y_ref = nullptr; cudaMalloc(&d_y_ref, M * N * sizeof(half));
+    half* d_y_ref = nullptr;
+    cudaMalloc(&d_y_ref, M * N * sizeof(half));
     int64_t shape_x[2] = {M, K}, shape_w[2] = {N, K}, shape_y[2] = {M, N};
     Tensor t_x(d_x, QType::F16, 2, shape_x, true);
     Tensor t_w(d_w_dequant, QType::F16, 2, shape_w, true);
@@ -340,13 +351,13 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0Reproducer) {
         float d = std::fabs(a - b);
         max_diff = std::max(max_diff, (double)d);
         sum_diff += d;
-        if (d > 0.5f) n_big_diff++;
+        if (d > 0.5f)
+            n_big_diff++;
     }
     fprintf(stderr,
             "[MISTRAL-REPRO] reference (dequant+cuBLAS): max|y|=%.4g rms=%.4g\n"
             "[MISTRAL-REPRO] CUTLASS - reference:  max_diff=%.4g  mean_diff=%.4g  n>0.5=%d\n",
-            ref_max, ref_rms,
-            max_diff, sum_diff / (M * N), n_big_diff);
+            ref_max, ref_rms, max_diff, sum_diff / (M * N), n_big_diff);
 
     // Hard fail conditions:
     EXPECT_EQ(n_inf, 0) << "CUTLASS output contains Inf — saturation path";
@@ -355,9 +366,14 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0Reproducer) {
 
     free_nvfp4_result(qr);
     free_cutlass_nvfp4_weight(cw);
-    cudaFree(d_w); cudaFree(d_x);
-    cudaFree(d_act_data); cudaFree(d_act_sf); cudaFree(d_ws);
-    cudaFree(d_y); cudaFree(d_w_dequant); cudaFree(d_y_ref);
+    cudaFree(d_w);
+    cudaFree(d_x);
+    cudaFree(d_act_data);
+    cudaFree(d_act_sf);
+    cudaFree(d_ws);
+    cudaFree(d_y);
+    cudaFree(d_w_dequant);
+    cudaFree(d_y_ref);
 }
 
 // Reproduce the EXACT byte layout of compressed-tensors / llm-compressor
@@ -384,8 +400,8 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
 
     const int M = 16, N = 4096, K = 5120;
     constexpr int kBlockSize = 16;
-    constexpr float kFP4Max  = 6.0f;
-    constexpr float kFP8Max  = 448.0f;
+    constexpr float kFP4Max = 6.0f;
+    constexpr float kFP8Max = 448.0f;
 
     // 1. Build FP16 weight matrix with one Mistral-attention-style outlier per row
     std::vector<float> w_fp(static_cast<size_t>(N) * K);
@@ -400,8 +416,8 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
         w_fp[(size_t)n * K + (n * 31) % K] = outlier;
         max_w = std::max(max_w, std::fabs(outlier));
     }
-    fprintf(stderr, "[PREQ] max(|W|)=%.4f → global_scale=%.4f tensor_scale=%.6g\n",
-            max_w, (kFP8Max * kFP4Max) / max_w, max_w / (kFP8Max * kFP4Max));
+    fprintf(stderr, "[PREQ] max(|W|)=%.4f → global_scale=%.4f tensor_scale=%.6g\n", max_w,
+            (kFP8Max * kFP4Max) / max_w, max_w / (kFP8Max * kFP4Max));
 
     const float global_scale = (kFP8Max * kFP4Max) / max_w;  // compressed-tensors
     const float tensor_scale = 1.0f / global_scale;          // post-flip = max_w / 2688
@@ -414,16 +430,17 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
     auto quantize_fp4 = [](float v) -> uint8_t {
         // imp's E2M1 LUT thresholds: midpoints between {0, .5, 1, 1.5, 2, 3, 4, 6}
         float a = std::fabs(v);
-        uint8_t code =
-            (a >= 0.25f) + (a >= 0.75f) + (a >= 1.25f) +
-            (a >= 1.75f) + (a >= 2.5f)  + (a >= 3.5f)  + (a >= 5.0f);
+        uint8_t code = (a >= 0.25f) + (a >= 0.75f) + (a >= 1.25f) + (a >= 1.75f) + (a >= 2.5f) + (a >= 3.5f) +
+                       (a >= 5.0f);
         uint8_t sign = (v < 0.0f) ? 1u : 0u;
         return (sign << 3) | code;
     };
     auto float_to_fp8_e4m3 = [](float v) -> uint8_t {
         // Match imp's float_to_fp8_e4m3 (clamped, RNE-rounded). Use stdlib bit ops.
-        if (v <= 0.0f) return 0u;
-        if (v >= 448.0f) return 0x7Fu;  // saturate to E4M3 max
+        if (v <= 0.0f)
+            return 0u;
+        if (v >= 448.0f)
+            return 0x7Fu;  // saturate to E4M3 max
         // Decompose into exp + mantissa.
         int e;
         float m = std::frexp(v, &e);  // m in [0.5, 1), v = m * 2^e
@@ -433,14 +450,20 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
         if (exp_field <= 0) {
             // Denormal: v = mantissa * 2^-9  →  mantissa = v * 512, range 0..7
             int man = (int)std::round(v * 512.0f);
-            if (man > 7) man = 7;
+            if (man > 7)
+                man = 7;
             return (uint8_t)(man & 0x07);
         }
-        if (exp_field >= 15) return 0x7Fu;
+        if (exp_field >= 15)
+            return 0x7Fu;
         float frac = v / std::ldexp(1.0f, e - 1) - 1.0f;  // in [0, 1)
         int man = (int)std::round(frac * 8.0f);
-        if (man == 8) { man = 0; exp_field += 1; }
-        if (exp_field >= 15) return 0x7Fu;
+        if (man == 8) {
+            man = 0;
+            exp_field += 1;
+        }
+        if (exp_field >= 15)
+            return 0x7Fu;
         return (uint8_t)(((exp_field & 0x0F) << 3) | (man & 0x07));
     };
 
@@ -469,11 +492,12 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
             } else {
                 reconstructed = (1.0f + (float)man * 0.125f) * std::ldexp(1.0f, (int)exp - 7);
             }
-            if (reconstructed == 0.0f) reconstructed = 1.0f / 512.0f;
+            if (reconstructed == 0.0f)
+                reconstructed = 1.0f / 512.0f;
 
             // Quantize the 16 W' values into FP4 codes using this block_scale
             for (int j = 0; j < kBlockSize; j += 2) {
-                float w0 = w_fp[(size_t)n * K + b * kBlockSize + j]     * global_scale;
+                float w0 = w_fp[(size_t)n * K + b * kBlockSize + j] * global_scale;
                 float w1 = w_fp[(size_t)n * K + b * kBlockSize + j + 1] * global_scale;
                 uint8_t lo = quantize_fp4(w0 / reconstructed);
                 uint8_t hi = quantize_fp4(w1 / reconstructed);
@@ -484,16 +508,18 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
     }
 
     // 3. Upload to device — these ARE the bytes a real prequant SafeTensors load delivers.
-    void* d_packed = nullptr; cudaMalloc(&d_packed, packed.size());
+    void* d_packed = nullptr;
+    cudaMalloc(&d_packed, packed.size());
     cudaMemcpy(d_packed, packed.data(), packed.size(), cudaMemcpyHostToDevice);
-    void* d_micro = nullptr;  cudaMalloc(&d_micro, micro_scales_fp8.size());
+    void* d_micro = nullptr;
+    cudaMalloc(&d_micro, micro_scales_fp8.size());
     cudaMemcpy(d_micro, micro_scales_fp8.data(), micro_scales_fp8.size(), cudaMemcpyHostToDevice);
 
     // 4. Build NvFP4QuantResult mirroring what executor_pre_dequant Phase-0 promote produces
     NvFP4QuantResult qr_pq;
-    qr_pq.packed_data  = d_packed;
+    qr_pq.packed_data = d_packed;
     qr_pq.micro_scales = d_micro;
-    qr_pq.tensor_scale = tensor_scale;   // = max_W / 2688, ~0.00162 for Mistral
+    qr_pq.tensor_scale = tensor_scale;  // = max_W / 2688, ~0.00162 for Mistral
     qr_pq.N = N;
     qr_pq.K = K;
 
@@ -501,30 +527,32 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
     CutlassNvFP4Weight cw;
     convert_nvfp4_to_cutlass(qr_pq, cw, stream_);
     cudaStreamSynchronize(stream_);
-    fprintf(stderr,
-            "[PREQ] CUTLASS cw.tensor_scale=%.6g  (used as alpha)\n",
-            cw.tensor_scale);
+    fprintf(stderr, "[PREQ] CUTLASS cw.tensor_scale=%.6g  (used as alpha)\n", cw.tensor_scale);
 
     // 6. Build activations — RMSNorm-output magnitude (~1)
     std::vector<half> h_x(static_cast<size_t>(M) * K);
     for (int m = 0; m < M; ++m)
         for (int k = 0; k < K; ++k)
-            h_x[(size_t)m * K + k] =
-                __float2half(std::sin((float)((m * 1009 + k * 17) % 1009) * 0.01f) * 1.5f);
-    half* d_x = nullptr; cudaMalloc(&d_x, h_x.size() * sizeof(half));
+            h_x[(size_t)m * K + k] = __float2half(std::sin((float)((m * 1009 + k * 17) % 1009) * 0.01f) *
+                                                  1.5f);
+    half* d_x = nullptr;
+    cudaMalloc(&d_x, h_x.size() * sizeof(half));
     cudaMemcpy(d_x, h_x.data(), h_x.size() * sizeof(half), cudaMemcpyHostToDevice);
 
     size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
-    size_t act_sf_bytes   = cutlass_nvfp4_sf_size(M, K);
-    size_t ws_needed      = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
-    void* d_act_data = nullptr; cudaMalloc(&d_act_data, act_data_bytes);
-    void* d_act_sf   = nullptr; cudaMalloc(&d_act_sf,   act_sf_bytes);
-    void* d_ws       = nullptr; cudaMalloc(&d_ws, ws_needed > 0 ? ws_needed : 1);
+    size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
+    size_t ws_needed = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
+    void* d_act_data = nullptr;
+    cudaMalloc(&d_act_data, act_data_bytes);
+    void* d_act_sf = nullptr;
+    cudaMalloc(&d_act_sf, act_sf_bytes);
+    void* d_ws = nullptr;
+    cudaMalloc(&d_ws, ws_needed > 0 ? ws_needed : 1);
     quantize_fp16_to_nvfp4_cutlass(d_x, d_act_data, d_act_sf, M, K, stream_);
 
-    half* d_y = nullptr; cudaMalloc(&d_y, M * N * sizeof(half));
-    bool ok = gemm_nvfp4_cutlass_sm120(d_act_data, d_act_sf, cw,
-                                        d_y, M, N, K, d_ws, ws_needed, stream_);
+    half* d_y = nullptr;
+    cudaMalloc(&d_y, M * N * sizeof(half));
+    bool ok = gemm_nvfp4_cutlass_sm120(d_act_data, d_act_sf, cw, d_y, M, N, K, d_ws, ws_needed, stream_);
     cudaStreamSynchronize(stream_);
     ASSERT_TRUE(ok);
 
@@ -535,24 +563,27 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
     double max_abs = 0.0, sum_abs = 0.0, sumsq = 0.0;
     for (int i = 0; i < M * N; ++i) {
         float v = __half2float(h_y[i]);
-        if (std::isinf(v)) n_inf++;
-        else if (std::isnan(v)) n_nan++;
-        else if (std::fabs(v) >= 65504.0f) n_saturated++;
+        if (std::isinf(v))
+            n_inf++;
+        else if (std::isnan(v))
+            n_nan++;
+        else if (std::fabs(v) >= 65504.0f)
+            n_saturated++;
         max_abs = std::max(max_abs, (double)std::fabs(v));
         sum_abs += std::fabs(v);
         sumsq += v * v;
     }
-    fprintf(stderr,
-            "[PREQ] max|y|=%.4g mean|y|=%.4g rms=%.4g  n_inf=%d n_nan=%d n_sat=%d\n",
-            max_abs, sum_abs / (M * N), std::sqrt(sumsq / (M * N)),
-            n_inf, n_nan, n_saturated);
+    fprintf(stderr, "[PREQ] max|y|=%.4g mean|y|=%.4g rms=%.4g  n_inf=%d n_nan=%d n_sat=%d\n", max_abs,
+            sum_abs / (M * N), std::sqrt(sumsq / (M * N)), n_inf, n_nan, n_saturated);
 
     // Reference: dequant our hand-built NVFP4 buffer to FP16, run cuBLAS GEMM
-    void* d_w_dequant = nullptr; cudaMalloc(&d_w_dequant, (size_t)N * K * sizeof(half));
+    void* d_w_dequant = nullptr;
+    cudaMalloc(&d_w_dequant, (size_t)N * K * sizeof(half));
     dequantize_nvfp4_to_fp16(qr_pq, d_w_dequant, stream_);
     cudaStreamSynchronize(stream_);
 
-    half* d_y_ref = nullptr; cudaMalloc(&d_y_ref, M * N * sizeof(half));
+    half* d_y_ref = nullptr;
+    cudaMalloc(&d_y_ref, M * N * sizeof(half));
     int64_t shape_x[2] = {M, K}, shape_w[2] = {N, K}, shape_y[2] = {M, N};
     Tensor t_x(d_x, QType::F16, 2, shape_x, true);
     Tensor t_w(d_w_dequant, QType::F16, 2, shape_w, true);
@@ -579,7 +610,8 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
         float d = std::fabs(a - b);
         max_diff = std::max(max_diff, (double)d);
         sum_diff += d;
-        if (d > 0.5f) n_big_diff++;
+        if (d > 0.5f)
+            n_big_diff++;
     }
     fprintf(stderr,
             "[PREQ] reference dequant→cuBLAS: max=%.4g rms=%.4g\n"
@@ -592,7 +624,13 @@ TEST_F(CutlassNvfp4AlphaTest, MistralL0PrequantByteLayout) {
         << "CUTLASS prequant magnitudes exceed reference 5x — likely the in-the-wild bug";
 
     free_cutlass_nvfp4_weight(cw);
-    cudaFree(d_packed); cudaFree(d_micro);
-    cudaFree(d_x); cudaFree(d_act_data); cudaFree(d_act_sf); cudaFree(d_ws);
-    cudaFree(d_y); cudaFree(d_w_dequant); cudaFree(d_y_ref);
+    cudaFree(d_packed);
+    cudaFree(d_micro);
+    cudaFree(d_x);
+    cudaFree(d_act_data);
+    cudaFree(d_act_sf);
+    cudaFree(d_ws);
+    cudaFree(d_y);
+    cudaFree(d_w_dequant);
+    cudaFree(d_y_ref);
 }

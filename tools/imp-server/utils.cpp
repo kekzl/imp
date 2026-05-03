@@ -9,21 +9,31 @@ json safe_token_json(const std::string& text) {
     while (i < text.size()) {
         unsigned char c = static_cast<unsigned char>(text[i]);
         int expected = 0;
-        if (c < 0x80) { expected = 1; }
-        else if ((c & 0xE0) == 0xC0) { expected = 2; }
-        else if ((c & 0xF0) == 0xE0) { expected = 3; }
-        else if ((c & 0xF8) == 0xF0) { expected = 4; }
-        else { safe += "\xEF\xBF\xBD"; i++; continue; }  // invalid lead -> U+FFFD
+        if (c < 0x80) {
+            expected = 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            expected = 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            expected = 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            expected = 4;
+        } else {
+            safe += "\xEF\xBF\xBD";
+            i++;
+            continue;
+        }  // invalid lead -> U+FFFD
         if (i + expected > text.size()) {
             // Incomplete sequence at end -> U+FFFD for each remaining byte
-            for (; i < text.size(); i++) safe += "\xEF\xBF\xBD";
+            for (; i < text.size(); i++)
+                safe += "\xEF\xBF\xBD";
             break;
         }
         // Validate continuation bytes
         bool valid = true;
         for (int j = 1; j < expected; j++) {
             if ((static_cast<unsigned char>(text[i + j]) & 0xC0) != 0x80) {
-                valid = false; break;
+                valid = false;
+                break;
             }
         }
         if (valid) {
@@ -39,26 +49,34 @@ json safe_token_json(const std::string& text) {
 
 json token_bytes_json(const std::string& text) {
     json arr = json::array();
-    for (unsigned char c : text) arr.push_back(static_cast<int>(c));
+    for (unsigned char c : text)
+        arr.push_back(static_cast<int>(c));
     return arr;
 }
 
 size_t utf8_complete_len(const std::string& s) {
     size_t len = s.size();
-    if (len == 0) return 0;
+    if (len == 0)
+        return 0;
     // Walk back from end to find the start of the last codepoint
     size_t i = len - 1;
     while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80)
         --i;
     unsigned char lead = static_cast<unsigned char>(s[i]);
     int expected;
-    if (lead < 0x80) expected = 1;
-    else if ((lead & 0xE0) == 0xC0) expected = 2;
-    else if ((lead & 0xF0) == 0xE0) expected = 3;
-    else if ((lead & 0xF8) == 0xF0) expected = 4;
-    else return i; // invalid byte — emit up to it
-    if (i + static_cast<size_t>(expected) <= len) return len; // complete
-    return i; // incomplete — emit up to start of this sequence
+    if (lead < 0x80)
+        expected = 1;
+    else if ((lead & 0xE0) == 0xC0)
+        expected = 2;
+    else if ((lead & 0xF0) == 0xE0)
+        expected = 3;
+    else if ((lead & 0xF8) == 0xF0)
+        expected = 4;
+    else
+        return i;  // invalid byte — emit up to it
+    if (i + static_cast<size_t>(expected) <= len)
+        return len;  // complete
+    return i;        // incomplete — emit up to start of this sequence
 }
 
 void json_escape_into(std::string& out, const char* s, size_t len) {
@@ -66,11 +84,21 @@ void json_escape_into(std::string& out, const char* s, size_t len) {
     for (size_t i = 0; i < len; i++) {
         char c = s[i];
         switch (c) {
-            case '"':  out += "\\\""; break;
-            case '\\': out += "\\\\"; break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
+            case '"':
+                out += "\\\"";
+                break;
+            case '\\':
+                out += "\\\\";
+                break;
+            case '\n':
+                out += "\\n";
+                break;
+            case '\r':
+                out += "\\r";
+                break;
+            case '\t':
+                out += "\\t";
+                break;
             default:
                 if ((unsigned char)c < 0x20) {
                     char buf[8];
@@ -84,11 +112,16 @@ void json_escape_into(std::string& out, const char* s, size_t len) {
 }
 
 int b64_val(unsigned char c) {
-    if (c >= 'A' && c <= 'Z') return c - 'A';
-    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-    if (c >= '0' && c <= '9') return c - '0' + 52;
-    if (c == '+') return 62;
-    if (c == '/') return 63;
+    if (c >= 'A' && c <= 'Z')
+        return c - 'A';
+    if (c >= 'a' && c <= 'z')
+        return c - 'a' + 26;
+    if (c >= '0' && c <= '9')
+        return c - '0' + 52;
+    if (c == '+')
+        return 62;
+    if (c == '/')
+        return 63;
     return -1;
 }
 
@@ -99,7 +132,8 @@ std::vector<uint8_t> base64_decode(const std::string& encoded) {
     int bits = 0;
     for (unsigned char c : encoded) {
         int val = b64_val(c);
-        if (val < 0) continue;
+        if (val < 0)
+            continue;
         accum = (accum << 6) | static_cast<uint32_t>(val);
         bits += 6;
         if (bits >= 8) {
@@ -170,21 +204,18 @@ ChannelSegments split_channel_segments(const std::string& text) {
 
     size_t i = 0;
     while (i < text.size()) {
-        const bool is_open = (i + kOpenLen <= text.size() &&
-                              text.compare(i, kOpenLen, kOpen) == 0);
-        const bool is_close = (!is_open &&
-                               i + kCloseLen <= text.size() &&
+        const bool is_open = (i + kOpenLen <= text.size() && text.compare(i, kOpenLen, kOpen) == 0);
+        const bool is_close = (!is_open && i + kCloseLen <= text.size() &&
                                text.compare(i, kCloseLen, kClose) == 0);
         if (is_open) {
             // The header runs from "<|channel>" up to the FIRST of:
             //   1. a newline, or
             //   2. a "<channel|>" marker (Q5_K_M variant — see strip_channel_headers comment).
             size_t name_start = i + kOpenLen;
-            size_t nl   = text.find('\n', name_start);
-            size_t cls  = text.find(kClose, name_start);
-            size_t end  = std::min<size_t>(
-                nl  == std::string::npos ? text.size() : nl,
-                cls == std::string::npos ? text.size() : cls);
+            size_t nl = text.find('\n', name_start);
+            size_t cls = text.find(kClose, name_start);
+            size_t end = std::min<size_t>(nl == std::string::npos ? text.size() : nl,
+                                          cls == std::string::npos ? text.size() : cls);
             std::string name = text.substr(name_start, end - name_start);
             // Trim header name (whitespace, args after first space)
             size_t s = name.find_first_not_of("\n\r\t ");
@@ -194,7 +225,8 @@ ChannelSegments split_channel_segments(const std::string& text) {
             } else {
                 name = name.substr(s, e - s + 1);
                 size_t sp = name.find_first_of(" \t");
-                if (sp != std::string::npos) name = name.substr(0, sp);
+                if (sp != std::string::npos)
+                    name = name.substr(0, sp);
             }
             current_channel = std::move(name);
             // Skip past the header — including the trailing \n if that's what
@@ -225,7 +257,10 @@ ChannelSegments split_channel_segments(const std::string& text) {
 
     auto trim = [](std::string& s) {
         size_t a = s.find_first_not_of("\n\r\t ");
-        if (a == std::string::npos) { s.clear(); return; }
+        if (a == std::string::npos) {
+            s.clear();
+            return;
+        }
         size_t b = s.find_last_not_of("\n\r\t ");
         s = s.substr(a, b - a + 1);
     };
@@ -247,10 +282,8 @@ void strip_channel_headers(std::string& text) {
     out.reserve(text.size());
     size_t i = 0;
     while (i < text.size()) {
-        const bool is_open = (i + kOpenLen <= text.size() &&
-                              text.compare(i, kOpenLen, kOpen) == 0);
-        const bool is_close = (!is_open &&
-                               i + kCloseLen <= text.size() &&
+        const bool is_open = (i + kOpenLen <= text.size() && text.compare(i, kOpenLen, kOpen) == 0);
+        const bool is_close = (!is_open && i + kCloseLen <= text.size() &&
                                text.compare(i, kCloseLen, kClose) == 0);
         if (is_open) {
             // Open marker: "<|channel>NAME\n" — strip the whole header.
@@ -325,44 +358,31 @@ std::pair<std::string, std::string> extract_reasoning(const std::string& text) {
     return {"", text};
 }
 
-std::string sse_chunk(const std::string& id, int64_t created,
-                      const std::string& model,
-                      const json& delta,
-                      const char* finish_reason,
-                      const json& logprobs) {
-    json choice = {
-        {"index", 0},
-        {"delta", delta},
-        {"finish_reason", finish_reason ? json(finish_reason) : json(nullptr)}
-    };
+std::string sse_chunk(const std::string& id, int64_t created, const std::string& model, const json& delta,
+                      const char* finish_reason, const json& logprobs) {
+    json choice = {{"index", 0},
+                   {"delta", delta},
+                   {"finish_reason", finish_reason ? json(finish_reason) : json(nullptr)}};
     if (!logprobs.is_null()) {
         choice["logprobs"] = logprobs;
     }
-    json obj = {
-        {"id", id},
-        {"object", "chat.completion.chunk"},
-        {"created", created},
-        {"model", model},
-        {"choices", json::array({choice})}
-    };
+    json obj = {{"id", id},
+                {"object", "chat.completion.chunk"},
+                {"created", created},
+                {"model", model},
+                {"choices", json::array({choice})}};
     return "data: " + obj.dump() + "\n\n";
 }
 
-std::string sse_completion_chunk(const std::string& id, int64_t created,
-                                 const std::string& model,
-                                 const std::string& text,
-                                 const char* finish_reason) {
-    json choice = {
-        {"index", 0},
-        {"text", text},
-        {"finish_reason", finish_reason ? json(finish_reason) : json(nullptr)}
-    };
-    json obj = {
-        {"id", id},
-        {"object", "text_completion"},
-        {"created", created},
-        {"model", model},
-        {"choices", json::array({choice})}
-    };
+std::string sse_completion_chunk(const std::string& id, int64_t created, const std::string& model,
+                                 const std::string& text, const char* finish_reason) {
+    json choice = {{"index", 0},
+                   {"text", text},
+                   {"finish_reason", finish_reason ? json(finish_reason) : json(nullptr)}};
+    json obj = {{"id", id},
+                {"object", "text_completion"},
+                {"created", created},
+                {"model", model},
+                {"choices", json::array({choice})}};
     return "data: " + obj.dump() + "\n\n";
 }

@@ -16,7 +16,7 @@ namespace imp {
 // Shape: [sketch_dim, head_dim], packed as [sketch_dim, head_dim/8] bytes.
 // sketch_dim = head_dim (paper default) for quality-neutral 4-bit quantization.
 struct QJLProjection {
-    void* matrix = nullptr;     // [sketch_dim, head_dim/8] packed bits on GPU
+    void* matrix = nullptr;  // [sketch_dim, head_dim/8] packed bits on GPU
     int sketch_dim = 0;
     int head_dim = 0;
     uint64_t seed = 0;
@@ -31,4 +31,4 @@ bool qjl_init(QJLProjection& proj, int head_dim, int sketch_dim, uint64_t seed,
 // Free the GPU memory for the projection matrix.
 void qjl_destroy(QJLProjection& proj);
 
-} // namespace imp
+}  // namespace imp

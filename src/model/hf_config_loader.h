@@ -20,17 +20,16 @@ struct HFConfigLoader {
     // empty vector for eos) mean "not present in JSON" — caller falls back
     // to arch-family defaults or the hard-coded ImpGenerateParams baseline.
     struct GenerationConfig {
-        float temperature        = -1.0f;
-        float top_p              = -1.0f;
-        int   top_k              = -1;
+        float temperature = -1.0f;
+        float top_p = -1.0f;
+        int top_k = -1;
         float repetition_penalty = -1.0f;
         std::vector<int32_t> eos_token_ids;
     };
 
     // Load generation_config.json. Returns true if file found and parsed.
     // Only fields present in the JSON are populated; the rest stay at sentinel.
-    static bool load_generation_config(const std::string& model_dir,
-                                       GenerationConfig& cfg);
+    static bool load_generation_config(const std::string& model_dir, GenerationConfig& cfg);
 
     // Load chat_template string from tokenizer_config.json.
     // Returns empty string if not found.
@@ -57,8 +56,7 @@ struct HFConfigLoader {
         std::string pad_token;
         std::string unk_token;
     };
-    static bool load_special_tokens_map(const std::string& model_dir,
-                                        SpecialTokensMap& out);
+    static bool load_special_tokens_map(const std::string& model_dir, SpecialTokensMap& out);
 
     // Tokenizer-side flags from tokenizer_config.json. The corresponding
     // GGUF metadata is `tokenizer.ggml.add_bos_token` and
@@ -69,9 +67,9 @@ struct HFConfigLoader {
     // back to its own default (matching GGUF: gpt2-style tokenizers default
     // add_bos=false, everything else true).
     struct TokenizerFlags {
-        int add_bos_token             = -1;
-        int add_eos_token             = -1;
-        int add_prefix_space          = -1;
+        int add_bos_token = -1;
+        int add_eos_token = -1;
+        int add_prefix_space = -1;
         // When the model author sets `use_default_system_prompt: false`, the
         // chat-template apply path must NOT auto-fill the template's hardcoded
         // default system message (e.g. Mistral-Small-3.2's 600-token default
@@ -79,12 +77,11 @@ struct HFConfigLoader {
         // supplied).
         int use_default_system_prompt = -1;
     };
-    static bool load_tokenizer_flags(const std::string& model_dir,
-                                     TokenizerFlags& out);
+    static bool load_tokenizer_flags(const std::string& model_dir, TokenizerFlags& out);
 
     // GPTQ quantization config from quantize_config.json
     struct GPTQConfig {
-        int bits = 0;        // 4 or 8
+        int bits = 0;  // 4 or 8
         int group_size = 128;
         bool desc_act = false;
     };
@@ -92,8 +89,8 @@ struct HFConfigLoader {
 
     // Source format of NVFP4 quantization metadata.
     enum class NvFP4Format {
-        MODELOPT,         // hf_quant_config.json from NVIDIA Model Optimizer
-        LLM_COMPRESSOR,   // recipe.yaml from vllm-project/llm-compressor
+        MODELOPT,        // hf_quant_config.json from NVIDIA Model Optimizer
+        LLM_COMPRESSOR,  // recipe.yaml from vllm-project/llm-compressor
     };
 
     // NVFP4 quantization config. Sourced from hf_quant_config.json (modelopt)
@@ -110,4 +107,4 @@ struct HFConfigLoader {
     static ModelArch map_architecture(const std::string& hf_arch);
 };
 
-} // namespace imp
+}  // namespace imp

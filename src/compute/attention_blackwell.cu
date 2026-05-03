@@ -33,10 +33,10 @@ using namespace nvcuda;
 namespace imp {
 
 // Fixed tile/thread parameters
-static constexpr int BW_Bc             = 64;   // key tile cols (always 64)
-static constexpr int BW_WARP_SIZE      = 32;
-static constexpr int BW_NUM_WARPS      = 8;
-static constexpr int BW_BLOCK_THREADS  = BW_WARP_SIZE * BW_NUM_WARPS;  // 256
+static constexpr int BW_Bc = 64;  // key tile cols (always 64)
+static constexpr int BW_WARP_SIZE = 32;
+static constexpr int BW_NUM_WARPS = 8;
+static constexpr int BW_BLOCK_THREADS = BW_WARP_SIZE * BW_NUM_WARPS;  // 256
 
 // WMMA tile dimensions (from attention_paged_common.cuh)
 static constexpr int WMMA_M = kWmmaTileM;
@@ -46,21 +46,11 @@ static constexpr int WMMA_K = kWmmaTileK;
 // ---- kernel (templated on Br) -----------------------------------------------
 
 template <int Br, int HD>
-__global__ void flash_attention_blackwell_kernel(
-    const half* __restrict__ Q,
-    const half* __restrict__ K,
-    const half* __restrict__ V,
-    half*       __restrict__ O,
-    int   batch_size,
-    int   seq_q,
-    int   seq_kv,
-    int   n_heads,
-    int   n_kv_heads,
-    float scale,
-    bool  causal,
-    int   sliding_window,
-    float softcap)
-{
+__global__ void flash_attention_blackwell_kernel(const half* __restrict__ Q, const half* __restrict__ K,
+                                                 const half* __restrict__ V, half* __restrict__ O,
+                                                 int batch_size, int seq_q, int seq_kv, int n_heads,
+                                                 int n_kv_heads, float scale, bool causal, int sliding_window,
+                                                 float softcap) {
     constexpr int head_dim = HD;  // compile-time head_dim for optimized div/mod
 
     // Threads-per-row for parallel softmax (power of 2, fits in warp)
@@ -68,34 +58,30 @@ __global__ void flash_attention_blackwell_kernel(
     static_assert(TPR >= 1 && (TPR & (TPR - 1)) == 0, "TPR must be power of 2");
 
     // ---- index computation --------------------------------------------------
-    const int tile_q     = blockIdx.x;
+    const int tile_q = blockIdx.x;
     const int batch_head = blockIdx.y;
-    const int batch_idx  = batch_head / n_heads;
-    const int head_idx   = batch_head % n_heads;
-    const int kv_head    = head_idx / (n_heads / n_kv_heads);
+    const int batch_idx = batch_head / n_heads;
+    const int head_idx = batch_head % n_heads;
+    const int kv_head = head_idx / (n_heads / n_kv_heads);
 
-    const int tid     = threadIdx.x + threadIdx.y * blockDim.x;  // [0,256)
-    const int warp_id = tid / BW_WARP_SIZE;  // [0,8)
+    const int tid = threadIdx.x + threadIdx.y * blockDim.x;  // [0,256)
+    const int warp_id = tid / BW_WARP_SIZE;                  // [0,8)
     const int q_start = tile_q * Br;
 
     // Parallel softmax: which row and lane within row
-    const int sm_row  = tid / TPR;   // [0, Br)
-    const int sm_lane = tid % TPR;   // [0, TPR)
+    const int sm_row = tid / TPR;   // [0, Br)
+    const int sm_lane = tid % TPR;  // [0, TPR)
 
     // Global memory strides (row-major [batch, seq, heads, head_dim]).
-    const int64_t q_row_stride  = (int64_t)n_heads    * head_dim;
+    const int64_t q_row_stride = (int64_t)n_heads * head_dim;
     const int64_t kv_row_stride = (int64_t)n_kv_heads * head_dim;
 
-    const half* Q_ptr = Q + (int64_t)batch_idx * seq_q  * q_row_stride
-                          + (int64_t)q_start   * q_row_stride
-                          + (int64_t)head_idx  * head_dim;
-    const half* K_ptr = K + (int64_t)batch_idx * seq_kv * kv_row_stride
-                          + (int64_t)kv_head   * head_dim;
-    const half* V_ptr = V + (int64_t)batch_idx * seq_kv * kv_row_stride
-                          + (int64_t)kv_head   * head_dim;
-    half* O_ptr       = O + (int64_t)batch_idx * seq_q  * q_row_stride
-                          + (int64_t)q_start   * q_row_stride
-                          + (int64_t)head_idx  * head_dim;
+    const half* Q_ptr = Q + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
+                        (int64_t)head_idx * head_dim;
+    const half* K_ptr = K + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
+    const half* V_ptr = V + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
+    half* O_ptr = O + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
+                  (int64_t)head_idx * head_dim;
 
     // ---- shared memory layout -----------------------------------------------
     //
@@ -108,19 +94,17 @@ __global__ void flash_attention_blackwell_kernel(
     // row_l       : float [Br]          running row sum
     extern __shared__ char smem[];
 
-    half*  Q_tile    = reinterpret_cast<half*>(smem);
-    half*  KV_buf0   = Q_tile  + Br * head_dim;
-    half*  KV_buf1   = KV_buf0 + BW_Bc * head_dim;
+    half* Q_tile = reinterpret_cast<half*>(smem);
+    half* KV_buf0 = Q_tile + Br * head_dim;
+    half* KV_buf1 = KV_buf0 + BW_Bc * head_dim;
     // SP_tile: union of float[Br*Bc] and half[Br*Bc]
-    float* SP_float  = reinterpret_cast<float*>(KV_buf1 + BW_Bc * head_dim);
-    half*  SP_half   = reinterpret_cast<half*>(SP_float);
-    float* O_acc     = reinterpret_cast<float*>(
-                           reinterpret_cast<char*>(SP_float) +
-                           Br * BW_Bc * sizeof(float));
-    float* row_m     = reinterpret_cast<float*>(O_acc + Br * head_dim);
-    float* row_l     = row_m + Br;
+    float* SP_float = reinterpret_cast<float*>(KV_buf1 + BW_Bc * head_dim);
+    half* SP_half = reinterpret_cast<half*>(SP_float);
+    float* O_acc = reinterpret_cast<float*>(reinterpret_cast<char*>(SP_float) + Br * BW_Bc * sizeof(float));
+    float* row_m = reinterpret_cast<float*>(O_acc + Br * head_dim);
+    float* row_l = row_m + Br;
 
-    half* KV_bufs[2] = { KV_buf0, KV_buf1 };
+    half* KV_bufs[2] = {KV_buf0, KV_buf1};
 
     // ---- load Q tile --------------------------------------------------------
     {
@@ -151,18 +135,18 @@ __global__ void flash_attention_blackwell_kernel(
 
     // ---- number of KV tiles to iterate ----
     int num_kv_tiles, first_kv_tile;
-    compute_kv_tile_bounds(q_start, Br, BW_Bc, seq_q, seq_kv,
-                           causal, sliding_window, first_kv_tile, num_kv_tiles);
+    compute_kv_tile_bounds(q_start, Br, BW_Bc, seq_q, seq_kv, causal, sliding_window, first_kv_tile,
+                           num_kv_tiles);
 
     // Derived constants for WMMA tiling
-    const int hd_chunks     = head_dim / WMMA_K;
-    const int s_row_tiles   = Br / WMMA_M;
-    const int s_col_tiles   = BW_Bc / WMMA_N;             // 4
+    const int hd_chunks = head_dim / WMMA_K;
+    const int s_row_tiles = Br / WMMA_M;
+    const int s_col_tiles = BW_Bc / WMMA_N;  // 4
     const int s_total_tiles = s_row_tiles * s_col_tiles;
-    const int o_row_tiles   = Br / WMMA_M;
-    const int o_col_tiles   = head_dim / WMMA_N;
+    const int o_row_tiles = Br / WMMA_M;
+    const int o_col_tiles = head_dim / WMMA_N;
     const int o_total_tiles = o_row_tiles * o_col_tiles;
-    const int pv_chunks     = BW_Bc / WMMA_K;             // 4
+    const int pv_chunks = BW_Bc / WMMA_K;  // 4
 
     // ---- prefetch first K tile into buf[0] ----
     int cur_buf = 0;
@@ -200,31 +184,24 @@ __global__ void flash_attention_blackwell_kernel(
             wmma::fill_fragment(acc, 0.0f);
 
             for (int k = 0; k < hd_chunks; k++) {
-                wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K,
-                               half, wmma::row_major> a_frag;
-                wmma::load_matrix_sync(a_frag,
-                    Q_tile + ri * WMMA_M * head_dim + k * WMMA_K,
-                    head_dim);
+                wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> a_frag;
+                wmma::load_matrix_sync(a_frag, Q_tile + ri * WMMA_M * head_dim + k * WMMA_K, head_dim);
 
-                wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K,
-                               half, wmma::col_major> b_frag;
-                wmma::load_matrix_sync(b_frag,
-                    KV_bufs[cur_buf] + ci * WMMA_N * head_dim + k * WMMA_K,
-                    head_dim);
+                wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> b_frag;
+                wmma::load_matrix_sync(b_frag, KV_bufs[cur_buf] + ci * WMMA_N * head_dim + k * WMMA_K,
+                                       head_dim);
 
                 wmma::mma_sync(acc, a_frag, b_frag, acc);
             }
 
-            wmma::store_matrix_sync(
-                SP_float + ri * WMMA_M * BW_Bc + ci * WMMA_N,
-                acc, BW_Bc, wmma::mem_row_major);
+            wmma::store_matrix_sync(SP_float + ri * WMMA_M * BW_Bc + ci * WMMA_N, acc, BW_Bc,
+                                    wmma::mem_row_major);
         }
         __syncthreads();
 
         // ---- Apply scale, softcap, and causal/sliding_window mask ----
-        apply_score_masks(SP_float, Br, BW_Bc, BW_BLOCK_THREADS,
-                          tid, q_start, kv_start, seq_q, seq_kv,
-                          scale, softcap, causal, sliding_window);
+        apply_score_masks(SP_float, Br, BW_Bc, BW_BLOCK_THREADS, tid, q_start, kv_start, seq_q, seq_kv, scale,
+                          softcap, causal, sliding_window);
         __syncthreads();
 
         // ============================================================
@@ -244,8 +221,8 @@ __global__ void flash_attention_blackwell_kernel(
                     partial_max = fmaxf(partial_max, SP_float[r * BW_Bc + c]);
                 }
             }
-            // Warp shuffle XOR reduction across TPR lanes
-            #pragma unroll
+// Warp shuffle XOR reduction across TPR lanes
+#pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1) {
                 partial_max = fmaxf(partial_max, __shfl_xor_sync(0xffffffff, partial_max, offset));
             }
@@ -263,14 +240,13 @@ __global__ void flash_attention_blackwell_kernel(
             if (row_valid) {
                 for (int c = sm_lane; c < BW_Bc; c += TPR) {
                     float s_val = SP_float[r * BW_Bc + c];
-                    float p = (s_val <= -FLT_MAX * 0.5f) ? 0.0f
-                                                         : __expf(s_val - m_new);
+                    float p = (s_val <= -FLT_MAX * 0.5f) ? 0.0f : __expf(s_val - m_new);
                     partial_sum += p;
                     SP_float[r * BW_Bc + c] = p;  // store for half conversion below
                 }
             }
-            // Reduce sum across TPR lanes
-            #pragma unroll
+// Reduce sum across TPR lanes
+#pragma unroll
             for (int offset = TPR / 2; offset >= 1; offset >>= 1) {
                 partial_sum += __shfl_xor_sync(0xffffffff, partial_sum, offset);
             }
@@ -329,29 +305,22 @@ __global__ void flash_attention_blackwell_kernel(
             int di = tile_idx % o_col_tiles;
 
             wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> o_frag;
-            wmma::load_matrix_sync(o_frag,
-                O_acc + ri * WMMA_M * head_dim + di * WMMA_N,
-                head_dim, wmma::mem_row_major);
+            wmma::load_matrix_sync(o_frag, O_acc + ri * WMMA_M * head_dim + di * WMMA_N, head_dim,
+                                   wmma::mem_row_major);
 
             for (int k = 0; k < pv_chunks; k++) {
-                wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K,
-                               half, wmma::row_major> p_frag;
-                wmma::load_matrix_sync(p_frag,
-                    SP_half + ri * WMMA_M * BW_Bc + k * WMMA_K,
-                    BW_Bc);
+                wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> p_frag;
+                wmma::load_matrix_sync(p_frag, SP_half + ri * WMMA_M * BW_Bc + k * WMMA_K, BW_Bc);
 
-                wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K,
-                               half, wmma::row_major> v_frag;
-                wmma::load_matrix_sync(v_frag,
-                    KV_bufs[cur_buf] + k * WMMA_N * head_dim + di * WMMA_N,
-                    head_dim);
+                wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> v_frag;
+                wmma::load_matrix_sync(v_frag, KV_bufs[cur_buf] + k * WMMA_N * head_dim + di * WMMA_N,
+                                       head_dim);
 
                 wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
             }
 
-            wmma::store_matrix_sync(
-                O_acc + ri * WMMA_M * head_dim + di * WMMA_N,
-                o_frag, head_dim, wmma::mem_row_major);
+            wmma::store_matrix_sync(O_acc + ri * WMMA_M * head_dim + di * WMMA_N, o_frag, head_dim,
+                                    wmma::mem_row_major);
         }
         __syncthreads();
 
@@ -380,8 +349,7 @@ __global__ void flash_attention_blackwell_kernel(
         for (int i = tid; i < total; i += BW_BLOCK_THREADS) {
             int r = i / head_dim;
             if (q_start + r < seq_q) {
-                O_ptr[(int64_t)r * q_row_stride + (i % head_dim)] =
-                    __float2half(O_acc[i]);
+                O_ptr[(int64_t)r * q_row_stride + (i % head_dim)] = __float2half(O_acc[i]);
             }
         }
     }
@@ -389,24 +357,22 @@ __global__ void flash_attention_blackwell_kernel(
 
 // Compute shared memory for a given Br and head_dim
 static size_t compute_smem(int Br, int head_dim) {
-    return (size_t)Br * head_dim * sizeof(half)          // Q_tile
-         + 2 * (size_t)BW_Bc * head_dim * sizeof(half)  // KV_buf[0] + KV_buf[1]
-         + (size_t)Br * BW_Bc * sizeof(float)            // SP_tile (float union)
-         + (size_t)Br * head_dim * sizeof(float)          // O_acc
-         + 2 * (size_t)Br * sizeof(float);                // row_m + row_l
+    return (size_t)Br * head_dim * sizeof(half)           // Q_tile
+           + 2 * (size_t)BW_Bc * head_dim * sizeof(half)  // KV_buf[0] + KV_buf[1]
+           + (size_t)Br * BW_Bc * sizeof(float)           // SP_tile (float union)
+           + (size_t)Br * head_dim * sizeof(float)        // O_acc
+           + 2 * (size_t)Br * sizeof(float);              // row_m + row_l
 }
 
 // ===== Host-side launcher ====================================================
 
-void flash_attention_blackwell(
-    const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, int sliding_window, float softcap, cudaStream_t stream)
-{
+void flash_attention_blackwell(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+                               bool causal, int sliding_window, float softcap, cudaStream_t stream) {
     const int batch_size = static_cast<int>(Q.shape[0]);
-    const int seq_q      = static_cast<int>(Q.shape[1]);
-    const int n_heads    = static_cast<int>(Q.shape[2]);
-    const int head_dim   = static_cast<int>(Q.shape[3]);
-    const int seq_kv     = static_cast<int>(K.shape[1]);
+    const int seq_q = static_cast<int>(Q.shape[1]);
+    const int n_heads = static_cast<int>(Q.shape[2]);
+    const int head_dim = static_cast<int>(Q.shape[3]);
+    const int seq_kv = static_cast<int>(K.shape[1]);
     const int n_kv_heads = static_cast<int>(K.shape[2]);
 
     // Query device shared memory limit
@@ -417,23 +383,20 @@ void flash_attention_blackwell(
 
     // Choose Br: prefer 128 if shared memory fits, else 64
     const size_t smem_128 = compute_smem(128, head_dim);
-    const size_t smem_64  = compute_smem(64,  head_dim);
-    const bool use_br128  = (smem_128 <= (size_t)max_smem);
+    const size_t smem_64 = compute_smem(64, head_dim);
+    const bool use_br128 = (smem_128 <= (size_t)max_smem);
 
-    // Dispatch macro: Br x HD template instantiation
-    #define LAUNCH_BW(BR, HD) do { \
-        cudaFuncSetAttribute( \
-            flash_attention_blackwell_kernel<BR, HD>, \
-            cudaFuncAttributeMaxDynamicSharedMemorySize, \
-            static_cast<int>(smem)); \
-        flash_attention_blackwell_kernel<BR, HD><<<grid, block, smem, stream>>>( \
-            reinterpret_cast<const half*>(Q.data), \
-            reinterpret_cast<const half*>(K.data), \
-            reinterpret_cast<const half*>(V.data), \
-            reinterpret_cast<half*>(O.data), \
-            batch_size, seq_q, seq_kv, \
-            n_heads, n_kv_heads, \
-            scale, causal, sliding_window, softcap); \
+// Dispatch macro: Br x HD template instantiation
+#define LAUNCH_BW(BR, HD)                                                                                 \
+    do {                                                                                                  \
+        cudaFuncSetAttribute(flash_attention_blackwell_kernel<BR, HD>,                                    \
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem));        \
+        flash_attention_blackwell_kernel<BR, HD>                                                          \
+            <<<grid, block, smem, stream>>>(reinterpret_cast<const half*>(Q.data),                        \
+                                            reinterpret_cast<const half*>(K.data),                        \
+                                            reinterpret_cast<const half*>(V.data),                        \
+                                            reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv,   \
+                                            n_heads, n_kv_heads, scale, causal, sliding_window, softcap); \
     } while (0)
 
     // Select Br and compute grid
@@ -445,17 +408,37 @@ void flash_attention_blackwell(
         bool launched = false;
         if (Br == 128) {
             switch (head_dim) {
-                case 64:  LAUNCH_BW(128, 64);  launched = true; break;
-                case 96:  LAUNCH_BW(128, 96);  launched = true; break;
-                default: break;
+                case 64:
+                    LAUNCH_BW(128, 64);
+                    launched = true;
+                    break;
+                case 96:
+                    LAUNCH_BW(128, 96);
+                    launched = true;
+                    break;
+                default:
+                    break;
             }
         } else {
             switch (head_dim) {
-                case 64:  LAUNCH_BW(64, 64);   launched = true; break;
-                case 96:  LAUNCH_BW(64, 96);   launched = true; break;
-                case 128: LAUNCH_BW(64, 128);  launched = true; break;
-                case 256: LAUNCH_BW(64, 256);  launched = true; break;
-                default: break;
+                case 64:
+                    LAUNCH_BW(64, 64);
+                    launched = true;
+                    break;
+                case 96:
+                    LAUNCH_BW(64, 96);
+                    launched = true;
+                    break;
+                case 128:
+                    LAUNCH_BW(64, 128);
+                    launched = true;
+                    break;
+                case 256:
+                    LAUNCH_BW(64, 256);
+                    launched = true;
+                    break;
+                default:
+                    break;
             }
         }
         return launched;
@@ -471,7 +454,7 @@ void flash_attention_blackwell(
         // Unsupported head_dim or smem too small; fall back to tc path
         flash_attention_prefill_tc(Q, K, V, O, scale, causal, sliding_window, softcap, stream);
     }
-    #undef LAUNCH_BW
+#undef LAUNCH_BW
 }
 
-} // namespace imp
+}  // namespace imp

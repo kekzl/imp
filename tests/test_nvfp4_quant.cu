@@ -12,12 +12,8 @@ namespace {
 
 class NVFP4QuantTest : public ::testing::Test {
 protected:
-    void SetUp() override {
-        cudaStreamCreate(&stream_);
-    }
-    void TearDown() override {
-        cudaStreamDestroy(stream_);
-    }
+    void SetUp() override { cudaStreamCreate(&stream_); }
+    void TearDown() override { cudaStreamDestroy(stream_); }
     cudaStream_t stream_ = nullptr;
 };
 
@@ -26,7 +22,7 @@ TEST_F(NVFP4QuantTest, QuantDequantRoundtrip) {
     // Check that values are approximately preserved
     const int N = 64, K = 128;
     size_t fp16_bytes = N * K * sizeof(half);
-    size_t fp4_bytes = N * K / 2;  // 2 elements per byte
+    size_t fp4_bytes = N * K / 2;             // 2 elements per byte
     size_t micro_scale_count = N * (K / 16);  // one FP8 micro-scale per 16 values
 
     void* d_input = nullptr;
@@ -61,8 +57,10 @@ TEST_F(NVFP4QuantTest, GemvNVFP4Basic) {
     size_t fp4_bytes = M * K / 2;
     size_t micro_bytes = M * (K / 16);
 
-    void* d_w = nullptr; void* d_x = nullptr;
-    void* d_y = nullptr; void* d_ms = nullptr;
+    void* d_w = nullptr;
+    void* d_x = nullptr;
+    void* d_y = nullptr;
+    void* d_ms = nullptr;
     cudaMalloc(&d_w, fp4_bytes);
     cudaMalloc(&d_x, K * sizeof(half));
     cudaMalloc(&d_y, M * sizeof(half));
@@ -77,8 +75,11 @@ TEST_F(NVFP4QuantTest, GemvNVFP4Basic) {
     // Zero weights -> zero output
     EXPECT_NO_THROW(cudaStreamSynchronize(stream_));
 
-    cudaFree(d_w); cudaFree(d_x); cudaFree(d_y); cudaFree(d_ms);
+    cudaFree(d_w);
+    cudaFree(d_x);
+    cudaFree(d_y);
+    cudaFree(d_ms);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

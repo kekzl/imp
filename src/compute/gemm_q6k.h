@@ -27,15 +27,8 @@ struct block_q8_1;  // forward declaration (defined in gemm.h)
 // n_experts:     total number of experts
 // weight_stride: bytes between consecutive experts in packed_weight
 // stream:        CUDA stream
-void gemm_q6k_moe_fused(
-    const void* packed_weight,
-    const block_q8_1* q8_base,
-    const float* d8_base,
-    void* c_base,
-    const int32_t* offsets,
-    int K, int N,
-    int n_experts,
-    size_t weight_stride,
-    cudaStream_t stream = nullptr);
+void gemm_q6k_moe_fused(const void* packed_weight, const block_q8_1* q8_base, const float* d8_base,
+                        void* c_base, const int32_t* offsets, int K, int N, int n_experts,
+                        size_t weight_stride, cudaStream_t stream = nullptr);
 
-} // namespace imp
+}  // namespace imp

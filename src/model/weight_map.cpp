@@ -29,9 +29,11 @@ static std::vector<std::string> split(const std::string& s, char delim) {
 
 // Try to parse a non-negative integer from a string. Returns -1 on failure.
 static int parse_int(const std::string& s) {
-    if (s.empty()) return -1;
+    if (s.empty())
+        return -1;
     for (char c : s) {
-        if (c < '0' || c > '9') return -1;
+        if (c < '0' || c > '9')
+            return -1;
     }
     return std::atoi(s.c_str());
 }
@@ -57,12 +59,15 @@ static void ensure_expert(TransformerLayer& layer, int idx) {
 // Helper: write one of weight_scale / weight_scale_2 / input_scale into
 // model.nvfp4_scratch_[key], depending on `kind`. Used by every NVFP4-
 // prequant scale-routing branch in apply_weights().
-static void route_nvfp4_scale(Model& model, const std::string& key,
-                               const std::string& kind, const Tensor& t) {
+static void route_nvfp4_scale(Model& model, const std::string& key, const std::string& kind,
+                              const Tensor& t) {
     auto& sc = model.nvfp4_scratch_[key];
-    if      (kind == "weight_scale")    sc.weight_scale = t;
-    else if (kind == "weight_scale_2")  sc.weight_scale_2 = t;
-    else if (kind == "input_scale")     sc.input_scale = t;
+    if (kind == "weight_scale")
+        sc.weight_scale = t;
+    else if (kind == "weight_scale_2")
+        sc.weight_scale_2 = t;
+    else if (kind == "input_scale")
+        sc.input_scale = t;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,8 +81,8 @@ WeightMap::WeightMap(ModelArch arch) : arch_(arch) {
     // All supported architectures share the same top-level embedding names
     // (HuggingFace convention).
     name_map_["model.embed_tokens.weight"] = "tok_emb";
-    name_map_["model.norm.weight"]         = "out_norm";
-    name_map_["lm_head.weight"]            = "out_proj";
+    name_map_["model.norm.weight"] = "out_norm";
+    name_map_["lm_head.weight"] = "out_proj";
 }
 
 std::string WeightMap::map_name(const std::string& name) const {
@@ -92,16 +97,21 @@ std::string WeightMap::map_name(const std::string& name) const {
     // Expected: model . layers . {i} . <rest>
     if (parts.size() >= 4 && parts[0] == "model" && parts[1] == "layers") {
         int layer = parse_int(parts[2]);
-        if (layer < 0) return name;
+        if (layer < 0)
+            return name;
 
         std::string prefix = "layer." + parts[2] + ".";
 
         // Attention weights: self_attn.{q,k,v,o}_proj.weight
         if (parts.size() >= 6 && parts[3] == "self_attn" && parts[5] == "weight") {
-            if (parts[4] == "q_proj") return prefix + "wq";
-            if (parts[4] == "k_proj") return prefix + "wk";
-            if (parts[4] == "v_proj") return prefix + "wv";
-            if (parts[4] == "o_proj") return prefix + "wo";
+            if (parts[4] == "q_proj")
+                return prefix + "wq";
+            if (parts[4] == "k_proj")
+                return prefix + "wk";
+            if (parts[4] == "v_proj")
+                return prefix + "wv";
+            if (parts[4] == "o_proj")
+                return prefix + "wo";
         }
 
         // Attention norm
@@ -116,77 +126,95 @@ std::string WeightMap::map_name(const std::string& name) const {
 
         // Dense MLP: mlp.{gate_proj,up_proj,down_proj}.weight
         if (parts.size() >= 6 && parts[3] == "mlp" && parts[5] == "weight") {
-            if (parts[4] == "gate_proj") return prefix + "w_gate";
-            if (parts[4] == "up_proj")   return prefix + "w_up";
-            if (parts[4] == "down_proj") return prefix + "w_down";
+            if (parts[4] == "gate_proj")
+                return prefix + "w_gate";
+            if (parts[4] == "up_proj")
+                return prefix + "w_up";
+            if (parts[4] == "down_proj")
+                return prefix + "w_down";
         }
 
         // Mixtral MoE: block_sparse_moe.gate.weight
-        if (parts.size() >= 6 && parts[3] == "block_sparse_moe" &&
-            parts[4] == "gate" && parts[5] == "weight") {
+        if (parts.size() >= 6 && parts[3] == "block_sparse_moe" && parts[4] == "gate" &&
+            parts[5] == "weight") {
             return prefix + "moe_gate";
         }
 
         // Mixtral MoE experts: block_sparse_moe.experts.{e}.w{1,2,3}.weight
-        if (parts.size() >= 8 && parts[3] == "block_sparse_moe" &&
-            parts[4] == "experts" && parts[7] == "weight") {
+        if (parts.size() >= 8 && parts[3] == "block_sparse_moe" && parts[4] == "experts" &&
+            parts[7] == "weight") {
             int expert = parse_int(parts[5]);
             if (expert >= 0) {
                 std::string ep = prefix + "expert." + parts[5] + ".";
-                if (parts[6] == "w1") return ep + "w_gate";
-                if (parts[6] == "w3") return ep + "w_up";
-                if (parts[6] == "w2") return ep + "w_down";
+                if (parts[6] == "w1")
+                    return ep + "w_gate";
+                if (parts[6] == "w3")
+                    return ep + "w_up";
+                if (parts[6] == "w2")
+                    return ep + "w_down";
             }
         }
 
         // DeepSeek MoE router: mlp.gate.weight / mlp.gate.bias
         if (parts.size() >= 6 && parts[3] == "mlp" && parts[4] == "gate") {
-            if (parts[5] == "weight") return prefix + "moe_gate";
-            if (parts[5] == "bias")   return prefix + "moe_router_bias";
+            if (parts[5] == "weight")
+                return prefix + "moe_gate";
+            if (parts[5] == "bias")
+                return prefix + "moe_router_bias";
         }
 
         // DeepSeek MoE experts: mlp.experts.{e}.{gate_proj,up_proj,down_proj}.weight
-        if (parts.size() >= 8 && parts[3] == "mlp" &&
-            parts[4] == "experts" && parts[7] == "weight") {
+        if (parts.size() >= 8 && parts[3] == "mlp" && parts[4] == "experts" && parts[7] == "weight") {
             int expert = parse_int(parts[5]);
             if (expert >= 0) {
                 std::string ep = prefix + "expert." + parts[5] + ".";
-                if (parts[6] == "gate_proj") return ep + "w_gate";
-                if (parts[6] == "up_proj")   return ep + "w_up";
-                if (parts[6] == "down_proj") return ep + "w_down";
+                if (parts[6] == "gate_proj")
+                    return ep + "w_gate";
+                if (parts[6] == "up_proj")
+                    return ep + "w_up";
+                if (parts[6] == "down_proj")
+                    return ep + "w_down";
             }
         }
 
         // Shared expert: mlp.shared_expert.{gate,up,down}_proj.weight
-        if (parts.size() >= 7 && parts[3] == "mlp" &&
-            parts[4] == "shared_expert" && parts[6] == "weight") {
-            if (parts[5] == "gate_proj") return prefix + "w_gate_shared";
-            if (parts[5] == "up_proj")   return prefix + "w_up_shared";
-            if (parts[5] == "down_proj") return prefix + "w_down_shared";
+        if (parts.size() >= 7 && parts[3] == "mlp" && parts[4] == "shared_expert" && parts[6] == "weight") {
+            if (parts[5] == "gate_proj")
+                return prefix + "w_gate_shared";
+            if (parts[5] == "up_proj")
+                return prefix + "w_up_shared";
+            if (parts[5] == "down_proj")
+                return prefix + "w_down_shared";
         }
 
         // Attention biases: self_attn.{q,k,v}_proj.bias
         if (parts.size() >= 6 && parts[3] == "self_attn" && parts[5] == "bias") {
-            if (parts[4] == "q_proj") return prefix + "q_bias";
-            if (parts[4] == "k_proj") return prefix + "k_bias";
-            if (parts[4] == "v_proj") return prefix + "v_bias";
+            if (parts[4] == "q_proj")
+                return prefix + "q_bias";
+            if (parts[4] == "k_proj")
+                return prefix + "k_bias";
+            if (parts[4] == "v_proj")
+                return prefix + "v_bias";
         }
 
         // QK-Norm: self_attn.{q,k}_norm.weight
         if (parts.size() >= 6 && parts[3] == "self_attn" && parts[5] == "weight") {
-            if (parts[4] == "q_norm") return prefix + "attn_q_norm";
-            if (parts[4] == "k_norm") return prefix + "attn_k_norm";
+            if (parts[4] == "q_norm")
+                return prefix + "attn_q_norm";
+            if (parts[4] == "k_norm")
+                return prefix + "attn_k_norm";
         }
 
         // Post-layer norms (Gemma-3)
         if (parts.size() >= 5 && parts[4] == "weight") {
-            if (parts[3] == "post_feedforward_layernorm") return prefix + "post_ffn_norm";
-            if (parts[3] == "pre_feedforward_layernorm")  return prefix + "ffn_norm";
+            if (parts[3] == "post_feedforward_layernorm")
+                return prefix + "post_ffn_norm";
+            if (parts[3] == "pre_feedforward_layernorm")
+                return prefix + "ffn_norm";
         }
 
         // Mixtral MoE router bias: block_sparse_moe.gate.bias
-        if (parts.size() >= 6 && parts[3] == "block_sparse_moe" &&
-            parts[4] == "gate" && parts[5] == "bias") {
+        if (parts.size() >= 6 && parts[3] == "block_sparse_moe" && parts[4] == "gate" && parts[5] == "bias") {
             return prefix + "moe_router_bias";
         }
 
@@ -207,41 +235,48 @@ std::string WeightMap::map_name(const std::string& name) const {
 
         // GDN (Gated DeltaNet / Qwen3.5): temporal_block.{gate_proj,alpha,beta}.weight
         if (parts.size() >= 6 && parts[3] == "temporal_block" && parts[5] == "weight") {
-            if (parts[4] == "gate_proj") return prefix + "gdn_gate";
-            if (parts[4] == "alpha")     return prefix + "gdn_alpha";
-            if (parts[4] == "beta")      return prefix + "gdn_beta";
+            if (parts[4] == "gate_proj")
+                return prefix + "gdn_gate";
+            if (parts[4] == "alpha")
+                return prefix + "gdn_alpha";
+            if (parts[4] == "beta")
+                return prefix + "gdn_beta";
         }
 
         // SSM (Mamba2 / Nemotron-H)
         if (parts[3] == "mamba") {
             if (parts.size() >= 6 && parts[5] == "weight") {
-                if (parts[4] == "in_proj")  return prefix + "ssm_in";
-                if (parts[4] == "out_proj") return prefix + "ssm_out";
-                if (parts[4] == "conv1d")   return prefix + "ssm_conv1d_w";
-                if (parts[4] == "norm")     return prefix + "ssm_norm_w";
+                if (parts[4] == "in_proj")
+                    return prefix + "ssm_in";
+                if (parts[4] == "out_proj")
+                    return prefix + "ssm_out";
+                if (parts[4] == "conv1d")
+                    return prefix + "ssm_conv1d_w";
+                if (parts[4] == "norm")
+                    return prefix + "ssm_norm_w";
             }
             if (parts.size() >= 6 && parts[4] == "conv1d" && parts[5] == "bias")
                 return prefix + "ssm_conv1d_b";
-            if (parts.size() >= 5 && parts[4] == "dt_bias") return prefix + "ssm_dt_b";
-            if (parts.size() >= 5 && parts[4] == "A_log")   return prefix + "ssm_a";
-            if (parts.size() >= 5 && parts[4] == "D")       return prefix + "ssm_d";
+            if (parts.size() >= 5 && parts[4] == "dt_bias")
+                return prefix + "ssm_dt_b";
+            if (parts.size() >= 5 && parts[4] == "A_log")
+                return prefix + "ssm_a";
+            if (parts.size() >= 5 && parts[4] == "D")
+                return prefix + "ssm_d";
         }
     }
 
     return name;
 }
 
-bool WeightMap::apply_weights(
-        Model& model,
-        const std::unordered_map<std::string, Tensor>& tensors) {
-
+bool WeightMap::apply_weights(Model& model, const std::unordered_map<std::string, Tensor>& tensors) {
     if (tensors.empty()) {
         IMP_LOG_ERROR("WeightMap: no tensors to apply");
         return false;
     }
 
     int assigned = 0;
-    int skipped  = 0;
+    int skipped = 0;
 
     const bool is_gemma4 = (arch_ == ModelArch::GEMMA4);
 
@@ -263,8 +298,7 @@ bool WeightMap::apply_weights(
                 name = "model." + name.substr(lm_prefix.size());
             }
             // Also handle top-level aliases the wrapper introduces.
-            if (name == "model.embed_tokens.weight" ||
-                name == "language_model.embed_tokens.weight") {
+            if (name == "model.embed_tokens.weight" || name == "language_model.embed_tokens.weight") {
                 name = "model.embed_tokens.weight";
             }
         }
@@ -300,13 +334,11 @@ bool WeightMap::apply_weights(
         // Routed into the load-time scratch map under key "out_proj"; Phase 0
         // promote() in executor_pre_dequant.cu copies the device pointer onto
         // model.out_proj_'s sidecars and clears the entry.
-        if (name == "lm_head.weight_scale" ||
-            name == "lm_head.weight_scale_2" ||
+        if (name == "lm_head.weight_scale" || name == "lm_head.weight_scale_2" ||
             name == "lm_head.input_scale") {
             const std::string kind = name.substr(8);  // strip "lm_head."
             route_nvfp4_scale(model, "out_proj", kind, t);
-            IMP_LOG_DEBUG("  assigned: %s -> nvfp4_scratch_[out_proj].%s",
-                          name.c_str(), kind.c_str());
+            IMP_LOG_DEBUG("  assigned: %s -> nvfp4_scratch_[out_proj].%s", name.c_str(), kind.c_str());
             ++assigned;
             continue;
         }
@@ -334,15 +366,23 @@ bool WeightMap::apply_weights(
         // -- Attention: self_attn.{q,k,v,o}_proj.weight --
         if (parts.size() >= 6 && parts[3] == "self_attn" && parts[5] == "weight") {
             const std::string& proj = parts[4];
-            if (proj == "q_proj") { layer.wq = t; matched = true; }
-            else if (proj == "k_proj") { layer.wk = t; matched = true; }
-            else if (proj == "v_proj") { layer.wv = t; matched = true; }
-            else if (proj == "o_proj") { layer.wo = t; matched = true; }
+            if (proj == "q_proj") {
+                layer.wq = t;
+                matched = true;
+            } else if (proj == "k_proj") {
+                layer.wk = t;
+                matched = true;
+            } else if (proj == "v_proj") {
+                layer.wv = t;
+                matched = true;
+            } else if (proj == "o_proj") {
+                layer.wo = t;
+                matched = true;
+            }
         }
 
         // -- Attention norm: input_layernorm.weight --
-        if (!matched && parts.size() >= 5 &&
-            parts[3] == "input_layernorm" && parts[4] == "weight") {
+        if (!matched && parts.size() >= 5 && parts[3] == "input_layernorm" && parts[4] == "weight") {
             layer.attn_norm = t;
             matched = true;
         }
@@ -351,8 +391,8 @@ bool WeightMap::apply_weights(
         //    Llama convention: post_attention_layernorm is actually the pre-FFN norm.
         //    Gemma 3/4 convention: post_attention_layernorm is the sandwich norm
         //    applied AFTER attention output. Routed below in the Gemma-4 block.
-        if (!matched && !is_gemma4 && parts.size() >= 5 &&
-            parts[3] == "post_attention_layernorm" && parts[4] == "weight") {
+        if (!matched && !is_gemma4 && parts.size() >= 5 && parts[3] == "post_attention_layernorm" &&
+            parts[4] == "weight") {
             layer.ffn_norm = t;
             matched = true;
         }
@@ -360,12 +400,18 @@ bool WeightMap::apply_weights(
         // -- Gemma 4: mlp.{gate,up,down}_proj.weight is the SHARED EXPERT,
         //    NOT dense MLP. Route to w_*_shared instead. Must come before
         //    the generic dense-MLP branch below.
-        if (!matched && is_gemma4 && parts.size() >= 6 &&
-            parts[3] == "mlp" && parts[5] == "weight") {
+        if (!matched && is_gemma4 && parts.size() >= 6 && parts[3] == "mlp" && parts[5] == "weight") {
             const std::string& proj = parts[4];
-            if (proj == "gate_proj") { layer.w_gate_shared = t; matched = true; }
-            else if (proj == "up_proj") { layer.w_up_shared = t; matched = true; }
-            else if (proj == "down_proj") { layer.w_down_shared = t; matched = true; }
+            if (proj == "gate_proj") {
+                layer.w_gate_shared = t;
+                matched = true;
+            } else if (proj == "up_proj") {
+                layer.w_up_shared = t;
+                matched = true;
+            } else if (proj == "down_proj") {
+                layer.w_down_shared = t;
+                matched = true;
+            }
         }
 
         // -- Gemma 4: router + packed MoE experts + per-layer extras --
@@ -387,20 +433,18 @@ bool WeightMap::apply_weights(
                 }
             }
             // router.proj.weight (the gating matrix)
-            else if (parts.size() >= 6 && parts[3] == "router" &&
-                     parts[4] == "proj" && parts[5] == "weight") {
+            else if (parts.size() >= 6 && parts[3] == "router" && parts[4] == "proj" &&
+                     parts[5] == "weight") {
                 layer.moe_gate = t;
                 matched = true;
             }
             // router.scale  (per-channel router input scale == ffn_gate_inp.scale)
-            else if (parts.size() >= 5 && parts[3] == "router" &&
-                     parts[4] == "scale") {
+            else if (parts.size() >= 5 && parts[3] == "router" && parts[4] == "scale") {
                 layer.ffn_gate_inp_scale = t;
                 matched = true;
             }
             // router.per_expert_scale  (per-expert down output scale)
-            else if (parts.size() >= 5 && parts[3] == "router" &&
-                     parts[4] == "per_expert_scale") {
+            else if (parts.size() >= 5 && parts[3] == "router" && parts[4] == "per_expert_scale") {
                 layer.expert_down_scale = t;
                 matched = true;
             }
@@ -417,18 +461,24 @@ bool WeightMap::apply_weights(
             // GGUF loader (gguf_loader.cpp ffn_norm + post_ffw_norm fields).
             else if (parts.size() >= 5 && parts[4] == "weight") {
                 if (parts[3] == "pre_feedforward_layernorm_2") {
-                    layer.ffn_pre_norm_2 = t; matched = true;
+                    layer.ffn_pre_norm_2 = t;
+                    matched = true;
                 } else if (parts[3] == "post_feedforward_layernorm_1") {
-                    layer.ffn_post_norm_1 = t; matched = true;
+                    layer.ffn_post_norm_1 = t;
+                    matched = true;
                 } else if (parts[3] == "post_feedforward_layernorm_2") {
-                    layer.ffn_post_norm_2 = t; matched = true;
+                    layer.ffn_post_norm_2 = t;
+                    matched = true;
                 } else if (parts[3] == "pre_feedforward_layernorm") {
-                    layer.ffn_norm = t; matched = true;
+                    layer.ffn_norm = t;
+                    matched = true;
                 } else if (parts[3] == "post_feedforward_layernorm") {
-                    layer.post_ffn_norm = t; matched = true;
+                    layer.post_ffn_norm = t;
+                    matched = true;
                 } else if (parts[3] == "post_attention_layernorm") {
                     // Gemma 3/4 sandwich norm — distinct from Llama's FFN norm.
-                    layer.post_attn_norm = t; matched = true;
+                    layer.post_attn_norm = t;
+                    matched = true;
                 }
             }
         }
@@ -436,9 +486,16 @@ bool WeightMap::apply_weights(
         // -- Dense MLP (Llama / Mistral / DeepSeek dense layers) --
         if (!matched && parts.size() >= 6 && parts[3] == "mlp" && parts[5] == "weight") {
             const std::string& proj = parts[4];
-            if (proj == "gate_proj") { layer.w_gate = t; matched = true; }
-            else if (proj == "up_proj") { layer.w_up = t; matched = true; }
-            else if (proj == "down_proj") { layer.w_down = t; matched = true; }
+            if (proj == "gate_proj") {
+                layer.w_gate = t;
+                matched = true;
+            } else if (proj == "up_proj") {
+                layer.w_up = t;
+                matched = true;
+            } else if (proj == "down_proj") {
+                layer.w_down = t;
+                matched = true;
+            }
         }
 
         // -- NVFP4 scale tensors (ModelOpt pre-quantized) --
@@ -451,10 +508,14 @@ bool WeightMap::apply_weights(
             const std::string& proj = parts[4];
             const std::string& kind = parts[5];
             const char* slot = nullptr;
-            if      (proj == "q_proj") slot = "wq";
-            else if (proj == "k_proj") slot = "wk";
-            else if (proj == "v_proj") slot = "wv";
-            else if (proj == "o_proj") slot = "wo";
+            if (proj == "q_proj")
+                slot = "wq";
+            else if (proj == "k_proj")
+                slot = "wk";
+            else if (proj == "v_proj")
+                slot = "wv";
+            else if (proj == "o_proj")
+                slot = "wo";
             if (slot) {
                 route_nvfp4_scale(model, layer_key_prefix + slot, kind, t);
                 matched = true;
@@ -466,9 +527,12 @@ bool WeightMap::apply_weights(
             const std::string& proj = parts[4];
             const std::string& kind = parts[5];
             const char* slot = nullptr;
-            if      (proj == "gate_proj") slot = "w_gate";
-            else if (proj == "up_proj")   slot = "w_up";
-            else if (proj == "down_proj") slot = "w_down";
+            if (proj == "gate_proj")
+                slot = "w_gate";
+            else if (proj == "up_proj")
+                slot = "w_up";
+            else if (proj == "down_proj")
+                slot = "w_down";
             if (slot) {
                 route_nvfp4_scale(model, layer_key_prefix + slot, kind, t);
                 matched = true;
@@ -491,9 +555,16 @@ bool WeightMap::apply_weights(
                 if (expert_idx >= 0) {
                     ensure_expert(layer, expert_idx);
                     const std::string& wname = parts[6];
-                    if (wname == "w1") { layer.expert_w_gate[expert_idx] = t; matched = true; }
-                    else if (wname == "w3") { layer.expert_w_up[expert_idx] = t; matched = true; }
-                    else if (wname == "w2") { layer.expert_w_down[expert_idx] = t; matched = true; }
+                    if (wname == "w1") {
+                        layer.expert_w_gate[expert_idx] = t;
+                        matched = true;
+                    } else if (wname == "w3") {
+                        layer.expert_w_up[expert_idx] = t;
+                        matched = true;
+                    } else if (wname == "w2") {
+                        layer.expert_w_down[expert_idx] = t;
+                        matched = true;
+                    }
                 }
             }
         }
@@ -527,27 +598,37 @@ bool WeightMap::apply_weights(
                 if (expert_idx >= 0) {
                     ensure_expert(layer, expert_idx);
                     const std::string& proj = parts[6];
-                    if (proj == "gate_proj") { layer.expert_w_gate[expert_idx] = t; matched = true; }
-                    else if (proj == "up_proj") { layer.expert_w_up[expert_idx] = t; matched = true; }
-                    else if (proj == "down_proj") { layer.expert_w_down[expert_idx] = t; matched = true; }
+                    if (proj == "gate_proj") {
+                        layer.expert_w_gate[expert_idx] = t;
+                        matched = true;
+                    } else if (proj == "up_proj") {
+                        layer.expert_w_up[expert_idx] = t;
+                        matched = true;
+                    } else if (proj == "down_proj") {
+                        layer.expert_w_down[expert_idx] = t;
+                        matched = true;
+                    }
                 }
             }
             // MoE expert NVFP4 scales: mlp.experts.{e}.{proj}.{weight_scale,weight_scale_2,input_scale}
             else if (parts.size() >= 8 && parts[4] == "experts" &&
-                     (parts[7] == "weight_scale" || parts[7] == "weight_scale_2" || parts[7] == "input_scale")) {
+                     (parts[7] == "weight_scale" || parts[7] == "weight_scale_2" ||
+                      parts[7] == "input_scale")) {
                 int expert_idx = parse_int(parts[5]);
                 if (expert_idx >= 0) {
                     ensure_expert(layer, expert_idx);
                     const std::string& proj = parts[6];
                     const std::string& kind = parts[7];
                     const char* slot = nullptr;
-                    if      (proj == "gate_proj") slot = "expert_w_gate";
-                    else if (proj == "up_proj")   slot = "expert_w_up";
-                    else if (proj == "down_proj") slot = "expert_w_down";
+                    if (proj == "gate_proj")
+                        slot = "expert_w_gate";
+                    else if (proj == "up_proj")
+                        slot = "expert_w_up";
+                    else if (proj == "down_proj")
+                        slot = "expert_w_down";
                     if (slot) {
-                        route_nvfp4_scale(model,
-                            layer_key_prefix + slot + "." + std::to_string(expert_idx),
-                            kind, t);
+                        route_nvfp4_scale(model, layer_key_prefix + slot + "." + std::to_string(expert_idx),
+                                          kind, t);
                         matched = true;
                     }
                 }
@@ -555,9 +636,16 @@ bool WeightMap::apply_weights(
             // Shared expert: mlp.shared_expert.{gate,up,down}_proj.weight
             else if (parts.size() >= 7 && parts[4] == "shared_expert" && parts[6] == "weight") {
                 const std::string& proj = parts[5];
-                if (proj == "gate_proj") { layer.w_gate_shared = t; matched = true; }
-                else if (proj == "up_proj") { layer.w_up_shared = t; matched = true; }
-                else if (proj == "down_proj") { layer.w_down_shared = t; matched = true; }
+                if (proj == "gate_proj") {
+                    layer.w_gate_shared = t;
+                    matched = true;
+                } else if (proj == "up_proj") {
+                    layer.w_up_shared = t;
+                    matched = true;
+                } else if (proj == "down_proj") {
+                    layer.w_down_shared = t;
+                    matched = true;
+                }
             }
             // Shared expert NVFP4 prequant scales (Qwen3.5/3.6 llm-compressor):
             //   mlp.shared_expert.{proj}.{weight_scale,weight_scale_2,input_scale}
@@ -567,9 +655,12 @@ bool WeightMap::apply_weights(
                 const std::string& proj = parts[5];
                 const std::string& kind = parts[6];
                 const char* slot = nullptr;
-                if      (proj == "gate_proj") slot = "w_gate_shared";
-                else if (proj == "up_proj")   slot = "w_up_shared";
-                else if (proj == "down_proj") slot = "w_down_shared";
+                if (proj == "gate_proj")
+                    slot = "w_gate_shared";
+                else if (proj == "up_proj")
+                    slot = "w_up_shared";
+                else if (proj == "down_proj")
+                    slot = "w_down_shared";
                 if (slot) {
                     route_nvfp4_scale(model, layer_key_prefix + slot, kind, t);
                     matched = true;
@@ -577,8 +668,7 @@ bool WeightMap::apply_weights(
             }
             // Shared-expert sigmoid gate (Qwen3-Next/3.5/3.6):
             //   mlp.shared_expert_gate.weight   ->   shared_expert_gate_inp
-            else if (parts.size() >= 6 && parts[4] == "shared_expert_gate" &&
-                     parts[5] == "weight") {
+            else if (parts.size() >= 6 && parts[4] == "shared_expert_gate" && parts[5] == "weight") {
                 layer.shared_expert_gate_inp = t;
                 matched = true;
             }
@@ -597,20 +687,29 @@ bool WeightMap::apply_weights(
                 const std::string& field = parts[6];
                 if (field == "weight") {
                     ensure_expert(layer, expert_idx);
-                    if (proj == "gate_proj") { layer.expert_w_gate[expert_idx] = t; matched = true; }
-                    else if (proj == "up_proj") { layer.expert_w_up[expert_idx] = t; matched = true; }
-                    else if (proj == "down_proj") { layer.expert_w_down[expert_idx] = t; matched = true; }
+                    if (proj == "gate_proj") {
+                        layer.expert_w_gate[expert_idx] = t;
+                        matched = true;
+                    } else if (proj == "up_proj") {
+                        layer.expert_w_up[expert_idx] = t;
+                        matched = true;
+                    } else if (proj == "down_proj") {
+                        layer.expert_w_down[expert_idx] = t;
+                        matched = true;
+                    }
                 } else if (field == "weight_scale" || field == "weight_scale_2" || field == "input_scale") {
                     ensure_expert(layer, expert_idx);
                     const char* slot = nullptr;
-                    if      (proj == "gate_proj") slot = "expert_w_gate";
-                    else if (proj == "up_proj")   slot = "expert_w_up";
-                    else if (proj == "down_proj") slot = "expert_w_down";
+                    if (proj == "gate_proj")
+                        slot = "expert_w_gate";
+                    else if (proj == "up_proj")
+                        slot = "expert_w_up";
+                    else if (proj == "down_proj")
+                        slot = "expert_w_down";
                     if (slot) {
                         const std::string layer_key_prefix2 = "L" + std::to_string(layer_idx) + ".";
-                        route_nvfp4_scale(model,
-                            layer_key_prefix2 + slot + "." + std::to_string(expert_idx),
-                            field, t);
+                        route_nvfp4_scale(model, layer_key_prefix2 + slot + "." + std::to_string(expert_idx),
+                                          field, t);
                         matched = true;
                     }
                 }
@@ -620,8 +719,8 @@ bool WeightMap::apply_weights(
         // -----------------------------------------------------------------
         // MoE router bias -- Mixtral style: block_sparse_moe.gate.bias
         // -----------------------------------------------------------------
-        if (!matched && parts[3] == "block_sparse_moe" &&
-            parts.size() >= 6 && parts[4] == "gate" && parts[5] == "bias") {
+        if (!matched && parts[3] == "block_sparse_moe" && parts.size() >= 6 && parts[4] == "gate" &&
+            parts[5] == "bias") {
             layer.moe_router_bias = t;
             matched = true;
         }
@@ -631,9 +730,16 @@ bool WeightMap::apply_weights(
         // -----------------------------------------------------------------
         if (!matched && parts.size() >= 6 && parts[3] == "self_attn" && parts[5] == "bias") {
             const std::string& proj = parts[4];
-            if (proj == "q_proj") { layer.q_bias = t; matched = true; }
-            else if (proj == "k_proj") { layer.k_bias = t; matched = true; }
-            else if (proj == "v_proj") { layer.v_bias = t; matched = true; }
+            if (proj == "q_proj") {
+                layer.q_bias = t;
+                matched = true;
+            } else if (proj == "k_proj") {
+                layer.k_bias = t;
+                matched = true;
+            } else if (proj == "v_proj") {
+                layer.v_bias = t;
+                matched = true;
+            }
         }
 
         // -----------------------------------------------------------------
@@ -641,8 +747,13 @@ bool WeightMap::apply_weights(
         // -----------------------------------------------------------------
         if (!matched && parts.size() >= 6 && parts[3] == "self_attn" && parts[5] == "weight") {
             const std::string& proj = parts[4];
-            if (proj == "q_norm") { layer.attn_q_norm = t; matched = true; }
-            else if (proj == "k_norm") { layer.attn_k_norm = t; matched = true; }
+            if (proj == "q_norm") {
+                layer.attn_q_norm = t;
+                matched = true;
+            } else if (proj == "k_norm") {
+                layer.attn_k_norm = t;
+                matched = true;
+            }
         }
 
         // -----------------------------------------------------------------
@@ -665,20 +776,40 @@ bool WeightMap::apply_weights(
             const std::string& proj = parts[4];
             // 5-part forms: linear_attn.A_log / linear_attn.dt_bias
             if (parts.size() == 5) {
-                if (proj == "A_log")   { layer.ssm_a    = t; matched = true; }
-                else if (proj == "dt_bias") { layer.ssm_dt_b = t; matched = true; }
+                if (proj == "A_log") {
+                    layer.ssm_a = t;
+                    matched = true;
+                } else if (proj == "dt_bias") {
+                    layer.ssm_dt_b = t;
+                    matched = true;
+                }
             }
             // 6-part forms: linear_attn.<proj>.weight | conv1d.bias
             else if (parts.size() >= 6) {
                 const std::string& kind = parts[5];
                 if (kind == "weight") {
-                    if (proj == "in_proj_qkv") { layer.ssm_in    = t; matched = true; }
-                    else if (proj == "in_proj_a") { layer.gdn_alpha = t; matched = true; }
-                    else if (proj == "in_proj_b") { layer.gdn_beta  = t; matched = true; }
-                    else if (proj == "in_proj_z") { layer.gdn_gate  = t; matched = true; }
-                    else if (proj == "out_proj")  { layer.ssm_out   = t; matched = true; }
-                    else if (proj == "conv1d")    { layer.ssm_conv1d_w = t; matched = true; }
-                    else if (proj == "norm")      { layer.ssm_norm_w   = t; matched = true; }
+                    if (proj == "in_proj_qkv") {
+                        layer.ssm_in = t;
+                        matched = true;
+                    } else if (proj == "in_proj_a") {
+                        layer.gdn_alpha = t;
+                        matched = true;
+                    } else if (proj == "in_proj_b") {
+                        layer.gdn_beta = t;
+                        matched = true;
+                    } else if (proj == "in_proj_z") {
+                        layer.gdn_gate = t;
+                        matched = true;
+                    } else if (proj == "out_proj") {
+                        layer.ssm_out = t;
+                        matched = true;
+                    } else if (proj == "conv1d") {
+                        layer.ssm_conv1d_w = t;
+                        matched = true;
+                    } else if (proj == "norm") {
+                        layer.ssm_norm_w = t;
+                        matched = true;
+                    }
                 } else if (kind == "bias" && proj == "conv1d") {
                     layer.ssm_conv1d_b = t;
                     matched = true;
@@ -710,16 +841,29 @@ bool WeightMap::apply_weights(
             const std::string& proj = parts[4];
             const std::string& field = parts[5];
             TransformerLayer::GPTQWeight* gptq = nullptr;
-            if (proj == "q_proj") gptq = &layer.gptq_q;
-            else if (proj == "k_proj") gptq = &layer.gptq_k;
-            else if (proj == "v_proj") gptq = &layer.gptq_v;
-            else if (proj == "o_proj") gptq = &layer.gptq_o;
+            if (proj == "q_proj")
+                gptq = &layer.gptq_q;
+            else if (proj == "k_proj")
+                gptq = &layer.gptq_k;
+            else if (proj == "v_proj")
+                gptq = &layer.gptq_v;
+            else if (proj == "o_proj")
+                gptq = &layer.gptq_o;
 
             if (gptq) {
-                if (field == "qweight") { gptq->qweight = t; matched = true; }
-                else if (field == "qzeros") { gptq->qzeros = t; matched = true; }
-                else if (field == "scales") { gptq->scales = t; matched = true; }
-                else if (field == "g_idx") { gptq->g_idx = t; matched = true; }
+                if (field == "qweight") {
+                    gptq->qweight = t;
+                    matched = true;
+                } else if (field == "qzeros") {
+                    gptq->qzeros = t;
+                    matched = true;
+                } else if (field == "scales") {
+                    gptq->scales = t;
+                    matched = true;
+                } else if (field == "g_idx") {
+                    gptq->g_idx = t;
+                    matched = true;
+                }
             }
         }
 
@@ -727,15 +871,27 @@ bool WeightMap::apply_weights(
             const std::string& proj = parts[4];
             const std::string& field = parts[5];
             TransformerLayer::GPTQWeight* gptq = nullptr;
-            if (proj == "gate_proj") gptq = &layer.gptq_gate;
-            else if (proj == "up_proj") gptq = &layer.gptq_up;
-            else if (proj == "down_proj") gptq = &layer.gptq_down;
+            if (proj == "gate_proj")
+                gptq = &layer.gptq_gate;
+            else if (proj == "up_proj")
+                gptq = &layer.gptq_up;
+            else if (proj == "down_proj")
+                gptq = &layer.gptq_down;
 
             if (gptq) {
-                if (field == "qweight") { gptq->qweight = t; matched = true; }
-                else if (field == "qzeros") { gptq->qzeros = t; matched = true; }
-                else if (field == "scales") { gptq->scales = t; matched = true; }
-                else if (field == "g_idx") { gptq->g_idx = t; matched = true; }
+                if (field == "qweight") {
+                    gptq->qweight = t;
+                    matched = true;
+                } else if (field == "qzeros") {
+                    gptq->qzeros = t;
+                    matched = true;
+                } else if (field == "scales") {
+                    gptq->scales = t;
+                    matched = true;
+                } else if (field == "g_idx") {
+                    gptq->g_idx = t;
+                    matched = true;
+                }
             }
         }
 
@@ -747,9 +903,16 @@ bool WeightMap::apply_weights(
         // -----------------------------------------------------------------
         if (!matched && parts.size() >= 6 && parts[3] == "temporal_block" && parts[5] == "weight") {
             const std::string& proj = parts[4];
-            if (proj == "gate_proj") { layer.gdn_gate = t; matched = true; }
-            else if (proj == "alpha") { layer.gdn_alpha = t; matched = true; }
-            else if (proj == "beta") { layer.gdn_beta = t; matched = true; }
+            if (proj == "gate_proj") {
+                layer.gdn_gate = t;
+                matched = true;
+            } else if (proj == "alpha") {
+                layer.gdn_alpha = t;
+                matched = true;
+            } else if (proj == "beta") {
+                layer.gdn_beta = t;
+                matched = true;
+            }
         }
 
         // -----------------------------------------------------------------
@@ -766,10 +929,19 @@ bool WeightMap::apply_weights(
         if (!matched && parts[3] == "mamba") {
             if (parts.size() >= 6 && parts[5] == "weight") {
                 const std::string& proj = parts[4];
-                if (proj == "in_proj") { layer.ssm_in = t; matched = true; }
-                else if (proj == "out_proj") { layer.ssm_out = t; matched = true; }
-                else if (proj == "conv1d") { layer.ssm_conv1d_w = t; matched = true; }
-                else if (proj == "norm") { layer.ssm_norm_w = t; matched = true; }
+                if (proj == "in_proj") {
+                    layer.ssm_in = t;
+                    matched = true;
+                } else if (proj == "out_proj") {
+                    layer.ssm_out = t;
+                    matched = true;
+                } else if (proj == "conv1d") {
+                    layer.ssm_conv1d_w = t;
+                    matched = true;
+                } else if (proj == "norm") {
+                    layer.ssm_norm_w = t;
+                    matched = true;
+                }
             } else if (parts.size() >= 6 && parts[4] == "conv1d" && parts[5] == "bias") {
                 layer.ssm_conv1d_b = t;
                 matched = true;
@@ -805,10 +977,10 @@ bool WeightMap::apply_weights(
         }
     }
 
-    IMP_LOG_INFO("WeightMap (%s): assigned %d tensors, skipped %d, "
-                 "layers=%d, experts=%d",
-                 model_arch_name(arch_), assigned, skipped,
-                 model.config_.n_layers, model.config_.n_experts);
+    IMP_LOG_INFO(
+        "WeightMap (%s): assigned %d tensors, skipped %d, "
+        "layers=%d, experts=%d",
+        model_arch_name(arch_), assigned, skipped, model.config_.n_layers, model.config_.n_experts);
 
     if (assigned == 0) {
         IMP_LOG_ERROR("WeightMap: no tensors were assigned -- check weight names");
@@ -824,11 +996,12 @@ bool WeightMap::apply_weights(
     }
     if (!model.out_proj_.data) {
         // Some models tie lm_head to embed_tokens.
-        IMP_LOG_WARN("WeightMap: output projection (out_proj) was not found "
-                     "(may be tied to embed_tokens)");
+        IMP_LOG_WARN(
+            "WeightMap: output projection (out_proj) was not found "
+            "(may be tied to embed_tokens)");
     }
 
     return true;
 }
 
-} // namespace imp
+}  // namespace imp

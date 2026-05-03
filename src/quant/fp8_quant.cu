@@ -38,11 +38,7 @@ static constexpr float kFP8E4M3Max = 448.0f;
 // Absmax reduction kernel
 // ---------------------------------------------------------------------------
 
-__global__ void absmax_reduce_kernel(
-    const half*   __restrict__ input,
-    float*        __restrict__ block_maxes,
-    int n)
-{
+__global__ void absmax_reduce_kernel(const half* __restrict__ input, float* __restrict__ block_maxes, int n) {
     __shared__ float sdata[kBlockSize];
 
     const int tid = threadIdx.x;
@@ -50,8 +46,8 @@ __global__ void absmax_reduce_kernel(
 
     float local_max = 0.0f;
 
-    // Vectorised load: process kElemsPerThread elements per thread.
-    #pragma unroll
+// Vectorised load: process kElemsPerThread elements per thread.
+#pragma unroll
     for (int i = 0; i < kElemsPerThread; ++i) {
         int idx = base + i;
         if (idx < n) {
@@ -77,11 +73,8 @@ __global__ void absmax_reduce_kernel(
 }
 
 // Second-level reduction: reduce block_maxes -> single scalar.
-__global__ void absmax_final_reduce_kernel(
-    const float*  __restrict__ block_maxes,
-    float*        __restrict__ result,
-    int n_blocks)
-{
+__global__ void absmax_final_reduce_kernel(const float* __restrict__ block_maxes, float* __restrict__ result,
+                                           int n_blocks) {
     __shared__ float sdata[kBlockSize];
 
     const int tid = threadIdx.x;
@@ -112,13 +105,10 @@ __global__ void absmax_final_reduce_kernel(
 // writes scale to d_scale_out, and quantizes in a single kernel launch.
 // ---------------------------------------------------------------------------
 
-__global__ void calibrate_quantize_fp8_kernel(
-    const half*    __restrict__ input,
-    uint8_t*       __restrict__ output,
-    const float*   __restrict__ d_absmax,      // from absmax reduction
-    float*         __restrict__ d_scale_out,    // output: scale for dequant
-    int n)
-{
+__global__ void calibrate_quantize_fp8_kernel(const half* __restrict__ input, uint8_t* __restrict__ output,
+                                              const float* __restrict__ d_absmax,  // from absmax reduction
+                                              float* __restrict__ d_scale_out,  // output: scale for dequant
+                                              int n) {
     float absmax = d_absmax[0];
     float scale = (absmax > 0.0f) ? (absmax / 448.0f) : 1.0f;
     float inv_scale = 1.0f / scale;
@@ -127,9 +117,10 @@ __global__ void calibrate_quantize_fp8_kernel(
     }
 
     const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
-    if (base >= n) return;
+    if (base >= n)
+        return;
 
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < kElemsPerThread; ++i) {
         int idx = base + i;
         if (idx < n) {
@@ -145,16 +136,15 @@ __global__ void calibrate_quantize_fp8_kernel(
 // Quantize kernel: FP16 / scale -> FP8 E4M3
 // ---------------------------------------------------------------------------
 
-__global__ void quantize_fp16_to_fp8_scaled_kernel(
-    const half*   __restrict__ input,
-    uint8_t*      __restrict__ output,
-    int n,
-    float inv_scale)   // 1.0f / scale
+__global__ void quantize_fp16_to_fp8_scaled_kernel(const half* __restrict__ input,
+                                                   uint8_t* __restrict__ output, int n,
+                                                   float inv_scale)  // 1.0f / scale
 {
     const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
-    if (base >= n) return;
+    if (base >= n)
+        return;
 
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < kElemsPerThread; ++i) {
         int idx = base + i;
         if (idx < n) {
@@ -171,16 +161,13 @@ __global__ void quantize_fp16_to_fp8_scaled_kernel(
 // Dequantize kernel: FP8 E4M3 * scale -> FP16
 // ---------------------------------------------------------------------------
 
-__global__ void dequantize_fp8_to_fp16_scaled_kernel(
-    const uint8_t* __restrict__ input,
-    half*          __restrict__ output,
-    int n,
-    float scale)
-{
+__global__ void dequantize_fp8_to_fp16_scaled_kernel(const uint8_t* __restrict__ input,
+                                                     half* __restrict__ output, int n, float scale) {
     const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
-    if (base >= n) return;
+    if (base >= n)
+        return;
 
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < kElemsPerThread; ++i) {
         int idx = base + i;
         if (idx < n) {
@@ -197,12 +184,10 @@ __global__ void dequantize_fp8_to_fp16_scaled_kernel(
 // ---------------------------------------------------------------------------
 
 __global__ void quantize_fp16_to_fp8_with_scale_kernel(
-    const half*   __restrict__ input,
-    uint8_t*      __restrict__ output,
-    const float*  __restrict__ d_scale,      // device-side scale
-    float*        __restrict__ d_scale_out,  // copy scale to output
-    int n)
-{
+    const half* __restrict__ input, uint8_t* __restrict__ output,
+    const float* __restrict__ d_scale,  // device-side scale
+    float* __restrict__ d_scale_out,    // copy scale to output
+    int n) {
     // Read the scale computed by calibration.
     float scale = d_scale[0];
     if (threadIdx.x == 0 && blockIdx.x == 0 && d_scale_out != nullptr) {
@@ -212,9 +197,10 @@ __global__ void quantize_fp16_to_fp8_with_scale_kernel(
     float inv_scale = (scale > 0.0f) ? (1.0f / scale) : 1.0f;
 
     const int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
-    if (base >= n) return;
+    if (base >= n)
+        return;
 
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < kElemsPerThread; ++i) {
         int idx = base + i;
         if (idx < n) {
@@ -230,16 +216,14 @@ __global__ void quantize_fp16_to_fp8_with_scale_kernel(
 // Host-side launch wrappers
 // ---------------------------------------------------------------------------
 
-static inline int compute_grid(int n)
-{
+static inline int compute_grid(int n) {
     const int threads_needed = (n + kElemsPerThread - 1) / kElemsPerThread;
     return (threads_needed + kBlockSize - 1) / kBlockSize;
 }
 
 // ---- calibrate_fp8_scale --------------------------------------------------
 
-float calibrate_fp8_scale(const Tensor& input, cudaStream_t stream)
-{
+float calibrate_fp8_scale(const Tensor& input, cudaStream_t stream) {
     if (!input.on_device || input.data == nullptr) {
         IMP_LOG_ERROR("calibrate_fp8_scale: input must be a non-null device tensor");
         return 1.0f;
@@ -260,16 +244,11 @@ float calibrate_fp8_scale(const Tensor& input, cudaStream_t stream)
     IMP_CUDA_CHECK_LOG(cudaMalloc(&d_result, sizeof(float)));
 
     // First-level reduction: per-block absmax.
-    absmax_reduce_kernel<<<grid, kBlockSize, 0, stream>>>(
-        static_cast<const half*>(input.data),
-        d_block_maxes,
-        n);
+    absmax_reduce_kernel<<<grid, kBlockSize, 0, stream>>>(static_cast<const half*>(input.data), d_block_maxes,
+                                                          n);
 
     // Second-level reduction: reduce block results to a single scalar.
-    absmax_final_reduce_kernel<<<1, kBlockSize, 0, stream>>>(
-        d_block_maxes,
-        d_result,
-        grid);
+    absmax_final_reduce_kernel<<<1, kBlockSize, 0, stream>>>(d_block_maxes, d_result, grid);
 
     // Copy result back to host.
     float absmax = 0.0f;
@@ -295,46 +274,31 @@ float calibrate_fp8_scale(const Tensor& input, cudaStream_t stream)
 // No host sync — caller provides pre-allocated d_block_maxes and d_absmax.
 // The scale is written to d_scale_out on device.
 
-void calibrate_and_quantize_fp8_async(
-    const void* input_fp16, void* output_fp8, int n_elements,
-    float* d_block_maxes, int max_grid,
-    float* d_absmax, float* d_scale_out,
-    cudaStream_t stream)
-{
-    if (!input_fp16 || !output_fp8 || n_elements <= 0) return;
+void calibrate_and_quantize_fp8_async(const void* input_fp16, void* output_fp8, int n_elements,
+                                      float* d_block_maxes, int max_grid, float* d_absmax, float* d_scale_out,
+                                      cudaStream_t stream) {
+    if (!input_fp16 || !output_fp8 || n_elements <= 0)
+        return;
 
     const int grid = compute_grid(n_elements);
     const int reduce_grid = (grid <= max_grid) ? grid : max_grid;
 
     // Pass 1: absmax reduction
-    absmax_reduce_kernel<<<reduce_grid, kBlockSize, 0, stream>>>(
-        static_cast<const half*>(input_fp16),
-        d_block_maxes,
-        n_elements);
+    absmax_reduce_kernel<<<reduce_grid, kBlockSize, 0, stream>>>(static_cast<const half*>(input_fp16),
+                                                                 d_block_maxes, n_elements);
 
-    absmax_final_reduce_kernel<<<1, kBlockSize, 0, stream>>>(
-        d_block_maxes,
-        d_absmax,
-        reduce_grid);
+    absmax_final_reduce_kernel<<<1, kBlockSize, 0, stream>>>(d_block_maxes, d_absmax, reduce_grid);
 
     // Pass 2: fused scale computation + quantize (reads absmax from device)
-    calibrate_quantize_fp8_kernel<<<grid, kBlockSize, 0, stream>>>(
-        static_cast<const half*>(input_fp16),
-        static_cast<uint8_t*>(output_fp8),
-        d_absmax,
-        d_scale_out,
-        n_elements);
+    calibrate_quantize_fp8_kernel<<<grid, kBlockSize, 0, stream>>>(static_cast<const half*>(input_fp16),
+                                                                   static_cast<uint8_t*>(output_fp8),
+                                                                   d_absmax, d_scale_out, n_elements);
 }
 
 // ---- quantize_fp16_to_fp8_e4m3 (Tensor API) ------------------------------
 
-void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
-                                float* d_scale_out,
-                                cudaStream_t stream,
-                                float* d_block_maxes_ext,
-                                float* d_absmax_ext,
-                                int max_grid_ext)
-{
+void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output, float* d_scale_out, cudaStream_t stream,
+                               float* d_block_maxes_ext, float* d_absmax_ext, int max_grid_ext) {
     if (!input.on_device || input.data == nullptr) {
         IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3: input must be a non-null device tensor");
         return;
@@ -349,7 +313,8 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
     }
 
     const int n = (int)input.numel();
-    if (n <= 0) return;
+    if (n <= 0)
+        return;
 
     if (output.numel() != input.numel()) {
         IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3: output numel (%lld) != input numel (%lld)",
@@ -359,10 +324,8 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
 
     // Fast path: pre-allocated reduction buffers → fully async (no malloc, no sync)
     if (d_block_maxes_ext && d_absmax_ext && max_grid_ext > 0) {
-        calibrate_and_quantize_fp8_async(
-            input.data, output.data, n,
-            d_block_maxes_ext, max_grid_ext,
-            d_absmax_ext, d_scale_out, stream);
+        calibrate_and_quantize_fp8_async(input.data, output.data, n, d_block_maxes_ext, max_grid_ext,
+                                         d_absmax_ext, d_scale_out, stream);
         return;
     }
 
@@ -374,37 +337,31 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
     IMP_CUDA_CHECK_LOG(cudaMalloc(&d_block_maxes, (size_t)grid * sizeof(float)));
     IMP_CUDA_CHECK_LOG(cudaMalloc(&d_scale_device, sizeof(float)));
 
-    absmax_reduce_kernel<<<grid, kBlockSize, 0, stream>>>(
-        static_cast<const half*>(input.data),
-        d_block_maxes,
-        n);
+    absmax_reduce_kernel<<<grid, kBlockSize, 0, stream>>>(static_cast<const half*>(input.data), d_block_maxes,
+                                                          n);
 
-    absmax_final_reduce_kernel<<<1, kBlockSize, 0, stream>>>(
-        d_block_maxes,
-        d_scale_device,
-        grid);
+    absmax_final_reduce_kernel<<<1, kBlockSize, 0, stream>>>(d_block_maxes, d_scale_device, grid);
 
     float absmax = 0.0f;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&absmax, d_scale_device, sizeof(float), cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(
+        cudaMemcpyAsync(&absmax, d_scale_device, sizeof(float), cudaMemcpyDeviceToHost, stream));
     IMP_CUDA_CHECK_LOG(cudaStreamSynchronize(stream));
 
     float scale = (absmax > 0.0f) ? (absmax / kFP8E4M3Max) : 1.0f;
     float inv_scale = 1.0f / scale;
 
     if (d_scale_out != nullptr) {
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_scale_out, &scale, sizeof(float), cudaMemcpyHostToDevice, stream));
+        IMP_CUDA_CHECK_LOG(
+            cudaMemcpyAsync(d_scale_out, &scale, sizeof(float), cudaMemcpyHostToDevice, stream));
     }
 
-    quantize_fp16_to_fp8_scaled_kernel<<<grid, kBlockSize, 0, stream>>>(
-        static_cast<const half*>(input.data),
-        static_cast<uint8_t*>(output.data),
-        n,
-        inv_scale);
+    quantize_fp16_to_fp8_scaled_kernel<<<grid, kBlockSize, 0, stream>>>(static_cast<const half*>(input.data),
+                                                                        static_cast<uint8_t*>(output.data), n,
+                                                                        inv_scale);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3 kernel launch failed: %s",
-                      cudaGetErrorString(err));
+        IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3 kernel launch failed: %s", cudaGetErrorString(err));
     }
 
     IMP_CUDA_CHECK_LOG(cudaFree(d_block_maxes));
@@ -415,11 +372,10 @@ void quantize_fp16_to_fp8_e4m3(const Tensor& input, Tensor& output,
 
 // ---- quantize_fp16_to_fp8_e4m3_scaled (raw pointer API) ------------------
 
-void quantize_fp16_to_fp8_e4m3_scaled(const void* input_fp16, void* output_fp8,
-                                       int n_elements, float scale,
-                                       cudaStream_t stream)
-{
-    if (n_elements <= 0) return;
+void quantize_fp16_to_fp8_e4m3_scaled(const void* input_fp16, void* output_fp8, int n_elements, float scale,
+                                      cudaStream_t stream) {
+    if (n_elements <= 0)
+        return;
     if (input_fp16 == nullptr || output_fp8 == nullptr) {
         IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3_scaled: null pointer");
         return;
@@ -429,26 +385,22 @@ void quantize_fp16_to_fp8_e4m3_scaled(const void* input_fp16, void* output_fp8,
 
     const int grid = compute_grid(n_elements);
 
-    quantize_fp16_to_fp8_scaled_kernel<<<grid, kBlockSize, 0, stream>>>(
-        static_cast<const half*>(input_fp16),
-        static_cast<uint8_t*>(output_fp8),
-        n_elements,
-        inv_scale);
+    quantize_fp16_to_fp8_scaled_kernel<<<grid, kBlockSize, 0, stream>>>(static_cast<const half*>(input_fp16),
+                                                                        static_cast<uint8_t*>(output_fp8),
+                                                                        n_elements, inv_scale);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3_scaled launch failed: %s",
-                      cudaGetErrorString(err));
+        IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3_scaled launch failed: %s", cudaGetErrorString(err));
     }
 }
 
 // ---- dequantize_fp8_e4m3_to_fp16 (raw pointer API) ----------------------
 
-void dequantize_fp8_e4m3_to_fp16(const void* input_fp8, void* output_fp16,
-                                  int n_elements, float scale,
-                                  cudaStream_t stream)
-{
-    if (n_elements <= 0) return;
+void dequantize_fp8_e4m3_to_fp16(const void* input_fp8, void* output_fp16, int n_elements, float scale,
+                                 cudaStream_t stream) {
+    if (n_elements <= 0)
+        return;
     if (input_fp8 == nullptr || output_fp16 == nullptr) {
         IMP_LOG_ERROR("dequantize_fp8_e4m3_to_fp16: null pointer");
         return;
@@ -457,15 +409,11 @@ void dequantize_fp8_e4m3_to_fp16(const void* input_fp8, void* output_fp16,
     const int grid = compute_grid(n_elements);
 
     dequantize_fp8_to_fp16_scaled_kernel<<<grid, kBlockSize, 0, stream>>>(
-        static_cast<const uint8_t*>(input_fp8),
-        static_cast<half*>(output_fp16),
-        n_elements,
-        scale);
+        static_cast<const uint8_t*>(input_fp8), static_cast<half*>(output_fp16), n_elements, scale);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("dequantize_fp8_e4m3_to_fp16 launch failed: %s",
-                      cudaGetErrorString(err));
+        IMP_LOG_ERROR("dequantize_fp8_e4m3_to_fp16 launch failed: %s", cudaGetErrorString(err));
     }
 }
 
@@ -475,18 +423,15 @@ void dequantize_fp8_e4m3_to_fp16(const void* input_fp8, void* output_fp16,
 // writes scale = absmax / 448.0.
 // ---------------------------------------------------------------------------
 
-__global__ void calibrate_fp8_scales_per_expert_kernel(
-    const half*    __restrict__ input,
-    const int32_t* __restrict__ offsets,
-    float*         __restrict__ scales_out,
-    int K)
-{
+__global__ void calibrate_fp8_scales_per_expert_kernel(const half* __restrict__ input,
+                                                       const int32_t* __restrict__ offsets,
+                                                       float* __restrict__ scales_out, int K) {
     __shared__ float sdata[kBlockSize];
 
     const int expert = blockIdx.x;
     const int tid = threadIdx.x;
     const int start = offsets[expert];
-    const int end   = offsets[expert + 1];
+    const int end = offsets[expert + 1];
     const int n_elems = (end - start) * K;
 
     const half* expert_base = input + static_cast<int64_t>(start) * K;
@@ -518,30 +463,29 @@ __global__ void calibrate_fp8_scales_per_expert_kernel(
 // Each block handles one expert's activations with its own scale.
 // ---------------------------------------------------------------------------
 
-__global__ void quantize_fp16_to_fp8_per_expert_kernel(
-    const half*    __restrict__ input,
-    uint8_t*       __restrict__ output,
-    const int32_t* __restrict__ offsets,
-    const float*   __restrict__ scales,
-    int K)
-{
+__global__ void quantize_fp16_to_fp8_per_expert_kernel(const half* __restrict__ input,
+                                                       uint8_t* __restrict__ output,
+                                                       const int32_t* __restrict__ offsets,
+                                                       const float* __restrict__ scales, int K) {
     const int expert = blockIdx.y;
     const int start = offsets[expert];
-    const int end   = offsets[expert + 1];
+    const int end = offsets[expert + 1];
     const int n_elems = (end - start) * K;
 
-    if (n_elems == 0) return;
+    if (n_elems == 0)
+        return;
 
     float scale = scales[expert];
     float inv_scale = (scale > 0.0f) ? (1.0f / scale) : 1.0f;
 
-    const half* expert_in  = input  + static_cast<int64_t>(start) * K;
-    uint8_t*    expert_out = output + static_cast<int64_t>(start) * K;
+    const half* expert_in = input + static_cast<int64_t>(start) * K;
+    uint8_t* expert_out = output + static_cast<int64_t>(start) * K;
 
     int base = (blockIdx.x * blockDim.x + threadIdx.x) * kElemsPerThread;
-    if (base >= n_elems) return;
+    if (base >= n_elems)
+        return;
 
-    #pragma unroll
+#pragma unroll
     for (int i = 0; i < kElemsPerThread; ++i) {
         int idx = base + i;
         if (idx < n_elems) {
@@ -557,32 +501,26 @@ __global__ void quantize_fp16_to_fp8_per_expert_kernel(
 // Host-side launch wrappers for per-expert FP8 operations
 // ---------------------------------------------------------------------------
 
-void calibrate_fp8_scales_per_expert(const void* input_fp16, int K,
-                                      const int32_t* d_offsets, int n_experts,
-                                      float* d_scales_out,
-                                      cudaStream_t stream)
-{
-    if (n_experts <= 0 || !input_fp16 || !d_offsets || !d_scales_out) return;
+void calibrate_fp8_scales_per_expert(const void* input_fp16, int K, const int32_t* d_offsets, int n_experts,
+                                     float* d_scales_out, cudaStream_t stream) {
+    if (n_experts <= 0 || !input_fp16 || !d_offsets || !d_scales_out)
+        return;
 
-    calibrate_fp8_scales_per_expert_kernel<<<n_experts, kBlockSize, 0, stream>>>(
-        static_cast<const half*>(input_fp16),
-        d_offsets,
-        d_scales_out,
-        K);
+    calibrate_fp8_scales_per_expert_kernel<<<n_experts, kBlockSize, 0, stream>>>(static_cast<const half*>(
+                                                                                     input_fp16),
+                                                                                 d_offsets, d_scales_out, K);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("calibrate_fp8_scales_per_expert launch failed: %s",
-                      cudaGetErrorString(err));
+        IMP_LOG_ERROR("calibrate_fp8_scales_per_expert launch failed: %s", cudaGetErrorString(err));
     }
 }
 
-void quantize_fp16_to_fp8_e4m3_per_expert(const void* input_fp16, void* output_fp8,
-                                            int K, const int32_t* d_offsets,
-                                            int n_experts, const float* d_scales,
-                                            cudaStream_t stream)
-{
-    if (n_experts <= 0 || !input_fp16 || !output_fp8 || !d_offsets || !d_scales) return;
+void quantize_fp16_to_fp8_e4m3_per_expert(const void* input_fp16, void* output_fp8, int K,
+                                          const int32_t* d_offsets, int n_experts, const float* d_scales,
+                                          cudaStream_t stream) {
+    if (n_experts <= 0 || !input_fp16 || !output_fp8 || !d_offsets || !d_scales)
+        return;
 
     // Launch with enough blocks per expert for the maximum possible token count.
     // We use a 2D grid: x = blocks within expert, y = expert index.
@@ -599,18 +537,12 @@ void quantize_fp16_to_fp8_e4m3_per_expert(const void* input_fp16, void* output_f
     constexpr int kMaxBlocksPerExpert = 32768;
     dim3 grid(kMaxBlocksPerExpert, n_experts);
     quantize_fp16_to_fp8_per_expert_kernel<<<grid, kBlockSize, 0, stream>>>(
-        static_cast<const half*>(input_fp16),
-        static_cast<uint8_t*>(output_fp8),
-        d_offsets,
-        d_scales,
-        K);
+        static_cast<const half*>(input_fp16), static_cast<uint8_t*>(output_fp8), d_offsets, d_scales, K);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3_per_expert launch failed: %s",
-                      cudaGetErrorString(err));
+        IMP_LOG_ERROR("quantize_fp16_to_fp8_e4m3_per_expert launch failed: %s", cudaGetErrorString(err));
     }
 }
 
-} // namespace imp
-
+}  // namespace imp

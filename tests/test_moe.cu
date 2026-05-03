@@ -20,31 +20,30 @@ static constexpr float kTolerance = 1e-4f;
 
 // Create a device-resident Tensor from host data. Caller must free with
 // free_device_tensor().
-Tensor make_device_tensor(const void* host_data, QType dtype,
-                          int ndim, const int64_t* shape) {
+Tensor make_device_tensor(const void* host_data, QType dtype, int ndim, const int64_t* shape) {
     Tensor t;
     t.qtype = dtype;
     t.ndim = ndim;
-    for (int i = 0; i < ndim; ++i) t.shape[i] = shape[i];
+    for (int i = 0; i < ndim; ++i)
+        t.shape[i] = shape[i];
     t.compute_strides();
     t.on_device = true;
 
     size_t bytes = t.nbytes();
     EXPECT_EQ(cudaMalloc(&t.data, bytes), cudaSuccess);
     if (host_data) {
-        EXPECT_EQ(cudaMemcpy(t.data, host_data, bytes,
-                             cudaMemcpyHostToDevice), cudaSuccess);
+        EXPECT_EQ(cudaMemcpy(t.data, host_data, bytes, cudaMemcpyHostToDevice), cudaSuccess);
     }
     return t;
 }
 
 // Allocate a zero-initialized device tensor (no host source).
-Tensor make_device_tensor_zeros(QType dtype, int ndim,
-                                const int64_t* shape) {
+Tensor make_device_tensor_zeros(QType dtype, int ndim, const int64_t* shape) {
     Tensor t;
     t.qtype = dtype;
     t.ndim = ndim;
-    for (int i = 0; i < ndim; ++i) t.shape[i] = shape[i];
+    for (int i = 0; i < ndim; ++i)
+        t.shape[i] = shape[i];
     t.compute_strides();
     t.on_device = true;
 
@@ -59,8 +58,7 @@ template <typename T>
 std::vector<T> to_host(const Tensor& t) {
     size_t n = static_cast<size_t>(t.numel());
     std::vector<T> out(n);
-    EXPECT_EQ(cudaMemcpy(out.data(), t.data, n * sizeof(T),
-                         cudaMemcpyDeviceToHost), cudaSuccess);
+    EXPECT_EQ(cudaMemcpy(out.data(), t.data, n * sizeof(T), cudaMemcpyDeviceToHost), cudaSuccess);
     return out;
 }
 
@@ -81,17 +79,15 @@ void free_routing(MoeRoutingResult& r) {
 // ---------------------------------------------------------------------------
 // CPU reference: top-k gating with softmax over selected logits
 // ---------------------------------------------------------------------------
-void cpu_topk_gating(const float* logits, int n_tokens, int n_experts,
-                     int top_k, int* expert_indices, float* expert_weights) {
+void cpu_topk_gating(const float* logits, int n_tokens, int n_experts, int top_k, int* expert_indices,
+                     float* expert_weights) {
     for (int t = 0; t < n_tokens; t++) {
         std::vector<std::pair<float, int>> scores(n_experts);
         for (int e = 0; e < n_experts; e++) {
             scores[e] = {logits[t * n_experts + e], e};
         }
         std::partial_sort(scores.begin(), scores.begin() + top_k, scores.end(),
-                          [](const auto& a, const auto& b) {
-                              return a.first > b.first;
-                          });
+                          [](const auto& a, const auto& b) { return a.first > b.first; });
         // Softmax over the top-k logits
         float max_s = scores[0].first;
         float sum = 0.0f;
@@ -111,9 +107,9 @@ void cpu_topk_gating(const float* logits, int n_tokens, int n_experts,
 // ---------------------------------------------------------------------------
 class MoERoutingTest : public ::testing::Test {
 protected:
-    static constexpr int kNTokens  = 4;
+    static constexpr int kNTokens = 4;
     static constexpr int kNExperts = 8;
-    static constexpr int kTopK     = 2;
+    static constexpr int kTopK = 2;
 
     // Gate logits designed so that the top-2 experts for each token are
     // unambiguous:
@@ -123,21 +119,49 @@ protected:
     //   token 3 -> experts 4 (15.0) and 6 (14.0)
     std::vector<float> gate_logits = {
         // token 0:  e0   e1    e2   e3   e4   e5   e6   e7
-                     1.0, 10.0, 2.0, 8.0, 0.5, 1.5, 0.0, 3.0,
+        1.0,
+        10.0,
+        2.0,
+        8.0,
+        0.5,
+        1.5,
+        0.0,
+        3.0,
         // token 1:
-                     0.0,  1.0, 2.0, 3.0, 0.5, 12.0, 1.0, 9.0,
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        0.5,
+        12.0,
+        1.0,
+        9.0,
         // token 2:
-                    11.0,  2.0, 7.0, 1.0, 0.0,  0.5, 3.0, 0.0,
+        11.0,
+        2.0,
+        7.0,
+        1.0,
+        0.0,
+        0.5,
+        3.0,
+        0.0,
         // token 3:
-                     0.0,  1.0, 2.0, 3.0, 15.0, 0.5, 14.0, 1.0,
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        15.0,
+        0.5,
+        14.0,
+        1.0,
     };
 
     // Expected top-2 expert indices per token (by descending logit)
     std::vector<int> expected_indices = {
-        1, 3,   // token 0
-        5, 7,   // token 1
-        0, 2,   // token 2
-        4, 6,   // token 3
+        1, 3,  // token 0
+        5, 7,  // token 1
+        0, 2,  // token 2
+        4, 6,  // token 3
     };
 
     Tensor d_gate;
@@ -179,21 +203,18 @@ TEST_F(MoERoutingTest, TopKSelection) {
     // relative order than our reference (e.g. sorted by index rather than by
     // descending score).
     for (int t = 0; t < kNTokens; t++) {
-        std::set<int> got_set(h_indices.begin() + t * kTopK,
-                              h_indices.begin() + (t + 1) * kTopK);
+        std::set<int> got_set(h_indices.begin() + t * kTopK, h_indices.begin() + (t + 1) * kTopK);
         std::set<int> exp_set(expected_indices.begin() + t * kTopK,
                               expected_indices.begin() + (t + 1) * kTopK);
-        EXPECT_EQ(got_set, exp_set)
-            << "Token " << t << " selected wrong experts";
+        EXPECT_EQ(got_set, exp_set) << "Token " << t << " selected wrong experts";
     }
 
     // Verify the weights correspond to a softmax of the selected logits.
     auto h_weights = to_host<float>(routing.expert_weights);
 
-    std::vector<int>   ref_indices(kNTokens * kTopK);
+    std::vector<int> ref_indices(kNTokens * kTopK);
     std::vector<float> ref_weights(kNTokens * kTopK);
-    cpu_topk_gating(gate_logits.data(), kNTokens, kNExperts, kTopK,
-                    ref_indices.data(), ref_weights.data());
+    cpu_topk_gating(gate_logits.data(), kNTokens, kNExperts, kTopK, ref_indices.data(), ref_weights.data());
 
     for (int t = 0; t < kNTokens; t++) {
         // Build a map from expert_id -> weight for GPU output
@@ -210,8 +231,7 @@ TEST_F(MoERoutingTest, TopKSelection) {
         ASSERT_EQ(gpu_map.size(), ref_map.size());
         for (const auto& [eid, w] : ref_map) {
             auto it = gpu_map.find(eid);
-            ASSERT_NE(it, gpu_map.end())
-                << "Token " << t << ": expert " << eid << " missing from GPU output";
+            ASSERT_NE(it, gpu_map.end()) << "Token " << t << ": expert " << eid << " missing from GPU output";
             EXPECT_NEAR(it->second, w, kTolerance)
                 << "Token " << t << ", expert " << eid << " weight mismatch";
         }
@@ -230,13 +250,11 @@ TEST_F(MoERoutingTest, WeightNormalization) {
             float w = h_weights[t * kTopK + k];
             // Each individual weight must be in (0, 1]
             EXPECT_GT(w, 0.0f) << "Token " << t << ", slot " << k;
-            EXPECT_LE(w, 1.0f + kTolerance)
-                << "Token " << t << ", slot " << k;
+            EXPECT_LE(w, 1.0f + kTolerance) << "Token " << t << ", slot " << k;
             sum += w;
         }
         // Sum of weights per token must be 1.0
-        EXPECT_NEAR(sum, 1.0f, kTolerance)
-            << "Token " << t << " weights do not sum to 1.0";
+        EXPECT_NEAR(sum, 1.0f, kTolerance) << "Token " << t << " weights do not sum to 1.0";
     }
 }
 
@@ -261,8 +279,7 @@ TEST_F(MoERoutingTest, ExpertOffsets) {
 
     // Offsets must be monotonically non-decreasing (valid prefix sum)
     for (int e = 1; e <= kNExperts; e++) {
-        EXPECT_GE(h_offsets[e], h_offsets[e - 1])
-            << "expert_offsets is not non-decreasing at index " << e;
+        EXPECT_GE(h_offsets[e], h_offsets[e - 1]) << "expert_offsets is not non-decreasing at index " << e;
     }
 
     // Differences (counts per expert) must be non-negative
@@ -280,9 +297,9 @@ TEST_F(MoERoutingTest, SortedTokenIds) {
     ASSERT_EQ(routing.sorted_token_ids.qtype, QType::INT32);
     ASSERT_EQ(routing.sorted_token_ids.numel(), total);
 
-    auto h_sorted   = to_host<int32_t>(routing.sorted_token_ids);
-    auto h_offsets   = to_host<int32_t>(routing.expert_offsets);
-    auto h_indices   = to_host<int32_t>(routing.expert_indices);
+    auto h_sorted = to_host<int32_t>(routing.sorted_token_ids);
+    auto h_offsets = to_host<int32_t>(routing.expert_offsets);
+    auto h_indices = to_host<int32_t>(routing.expert_indices);
 
     // Every entry in sorted_token_ids must be a valid token index [0, n_tokens)
     for (int i = 0; i < total; i++) {
@@ -304,7 +321,7 @@ TEST_F(MoERoutingTest, SortedTokenIds) {
     std::set<std::pair<int, int>> actual_assignments;
     for (int e = 0; e < kNExperts; e++) {
         int begin = h_offsets[e];
-        int end   = h_offsets[e + 1];
+        int end = h_offsets[e + 1];
         for (int i = begin; i < end; i++) {
             int token_id = h_sorted[i];
             actual_assignments.insert({token_id, e});
@@ -330,19 +347,17 @@ TEST_F(MoERoutingTest, GatherScatter) {
     }
 
     int64_t input_shape[2] = {kNTokens, kDModel};
-    Tensor d_input = make_device_tensor(h_input.data(), QType::F32, 2,
-                                        input_shape);
+    Tensor d_input = make_device_tensor(h_input.data(), QType::F32, 2, input_shape);
 
     // ---- Gather ----
     int64_t gathered_shape[2] = {total, kDModel};
-    Tensor d_gathered = make_device_tensor_zeros(QType::F32, 2,
-                                                 gathered_shape);
+    Tensor d_gathered = make_device_tensor_zeros(QType::F32, 2, gathered_shape);
 
     moe_gather(d_input, routing, d_gathered, /*stream=*/nullptr);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     auto h_gathered = to_host<float>(d_gathered);
-    auto h_sorted   = to_host<int32_t>(routing.sorted_token_ids);
+    auto h_sorted = to_host<int32_t>(routing.sorted_token_ids);
 
     // Verify gathered[i] == input[sorted_token_ids[i]] for every row.
     for (int i = 0; i < total; i++) {
@@ -350,11 +365,8 @@ TEST_F(MoERoutingTest, GatherScatter) {
         ASSERT_GE(tok, 0);
         ASSERT_LT(tok, kNTokens);
         for (int d = 0; d < kDModel; d++) {
-            EXPECT_NEAR(h_gathered[i * kDModel + d],
-                        h_input[tok * kDModel + d],
-                        kTolerance)
-                << "Gather mismatch at sorted position " << i
-                << ", feature " << d;
+            EXPECT_NEAR(h_gathered[i * kDModel + d], h_input[tok * kDModel + d], kTolerance)
+                << "Gather mismatch at sorted position " << i << ", feature " << d;
         }
     }
 
@@ -370,7 +382,7 @@ TEST_F(MoERoutingTest, GatherScatter) {
     moe_scatter(d_gathered, routing, d_output, /*stream=*/nullptr);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
-    auto h_output  = to_host<float>(d_output);
+    auto h_output = to_host<float>(d_output);
     auto h_weights = to_host<float>(routing.expert_weights);
     auto h_indices = to_host<int32_t>(routing.expert_indices);
     auto h_offsets = to_host<int32_t>(routing.expert_offsets);
@@ -381,7 +393,7 @@ TEST_F(MoERoutingTest, GatherScatter) {
     std::vector<float> ref_output(kNTokens * kDModel, 0.0f);
 
     // Build a map from (token, expert) -> weight
-    std::map<std::pair<int,int>, float> weight_map;
+    std::map<std::pair<int, int>, float> weight_map;
     for (int t = 0; t < kNTokens; t++) {
         for (int k = 0; k < kTopK; k++) {
             int eid = h_indices[t * kTopK + k];
@@ -392,23 +404,20 @@ TEST_F(MoERoutingTest, GatherScatter) {
 
     for (int e = 0; e < kNExperts; e++) {
         int begin = h_offsets[e];
-        int end   = h_offsets[e + 1];
+        int end = h_offsets[e + 1];
         for (int i = begin; i < end; i++) {
             int tok = h_sorted[i];
             float w = weight_map[{tok, e}];
             for (int d = 0; d < kDModel; d++) {
                 // expert_output[i] == input[tok] (identity)
-                ref_output[tok * kDModel + d] +=
-                    w * h_input[tok * kDModel + d];
+                ref_output[tok * kDModel + d] += w * h_input[tok * kDModel + d];
             }
         }
     }
 
     for (int t = 0; t < kNTokens; t++) {
         for (int d = 0; d < kDModel; d++) {
-            EXPECT_NEAR(h_output[t * kDModel + d],
-                        ref_output[t * kDModel + d],
-                        kTolerance)
+            EXPECT_NEAR(h_output[t * kDModel + d], ref_output[t * kDModel + d], kTolerance)
                 << "Scatter mismatch at token " << t << ", feature " << d;
         }
     }
@@ -430,8 +439,7 @@ TEST(MoERoutingEdgeTest, EmptyExpert) {
 
     // token 0 -> expert 2 (highest), token 1 -> expert 3 (highest)
     std::vector<float> logits = {
-        0, 0, 10, 0, 0, 0, 0, 0,
-        0, 0,  0, 9, 0, 0, 0, 0,
+        0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0,
     };
 
     int64_t shape[2] = {kN, kE};
@@ -499,13 +507,12 @@ TEST(MoERoutingEdgeTest, AllTokensSameExpert) {
     // Expert 0 gets all N tokens, others get 0
     EXPECT_EQ(h_offsets[1] - h_offsets[0], kN);
     for (int e = 1; e < kE; e++) {
-        EXPECT_EQ(h_offsets[e + 1] - h_offsets[e], 0)
-            << "Expert " << e << " should have 0 tokens";
+        EXPECT_EQ(h_offsets[e + 1] - h_offsets[e], 0) << "Expert " << e << " should have 0 tokens";
     }
 
     free_tensor(d_gate);
     free_routing(routing);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

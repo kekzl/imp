@@ -15,16 +15,22 @@ namespace {
 std::vector<int32_t> parse_int_array(const std::string& json, const std::string& key) {
     std::vector<int32_t> result;
     size_t pos = json.find("\"" + key + "\"");
-    if (pos == std::string::npos) return result;
+    if (pos == std::string::npos)
+        return result;
     pos = json.find('[', pos);
-    if (pos == std::string::npos) return result;
-    pos++; // skip '['
+    if (pos == std::string::npos)
+        return result;
+    pos++;  // skip '['
     while (pos < json.size()) {
         while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\n' || json[pos] == ','))
             pos++;
-        if (pos >= json.size() || json[pos] == ']') break;
+        if (pos >= json.size() || json[pos] == ']')
+            break;
         int sign = 1;
-        if (json[pos] == '-') { sign = -1; pos++; }
+        if (json[pos] == '-') {
+            sign = -1;
+            pos++;
+        }
         int32_t val = 0;
         while (pos < json.size() && json[pos] >= '0' && json[pos] <= '9') {
             val = val * 10 + (json[pos] - '0');
@@ -37,22 +43,35 @@ std::vector<int32_t> parse_int_array(const std::string& json, const std::string&
 
 std::string parse_string(const std::string& json, const std::string& key) {
     size_t pos = json.find("\"" + key + "\"");
-    if (pos == std::string::npos) return "";
+    if (pos == std::string::npos)
+        return "";
     pos = json.find(':', pos);
-    if (pos == std::string::npos) return "";
+    if (pos == std::string::npos)
+        return "";
     pos = json.find('"', pos + 1);
-    if (pos == std::string::npos) return "";
-    pos++; // skip opening quote
+    if (pos == std::string::npos)
+        return "";
+    pos++;  // skip opening quote
     std::string result;
     while (pos < json.size() && json[pos] != '"') {
         if (json[pos] == '\\' && pos + 1 < json.size()) {
             pos++;
             switch (json[pos]) {
-                case 'n': result += '\n'; break;
-                case 't': result += '\t'; break;
-                case '"': result += '"'; break;
-                case '\\': result += '\\'; break;
-                default: result += json[pos]; break;
+                case 'n':
+                    result += '\n';
+                    break;
+                case 't':
+                    result += '\t';
+                    break;
+                case '"':
+                    result += '"';
+                    break;
+                case '\\':
+                    result += '\\';
+                    break;
+                default:
+                    result += json[pos];
+                    break;
             }
         } else {
             result += json[pos];
@@ -62,7 +81,7 @@ std::string parse_string(const std::string& json, const std::string& key) {
     return result;
 }
 
-} // namespace
+}  // namespace
 
 class TokenizerCompatTest : public ::testing::Test {
 protected:
@@ -98,8 +117,7 @@ TEST_F(TokenizerCompatTest, MatchesHuggingFace) {
     // Load golden file
     std::ifstream f(golden_path_);
     ASSERT_TRUE(f.is_open()) << "Failed to open golden file: " << golden_path_;
-    std::string golden_json((std::istreambuf_iterator<char>(f)),
-                             std::istreambuf_iterator<char>());
+    std::string golden_json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
 
     // Parse test cases (crude but functional JSON parsing)
     // Split by "text" keys to find individual cases
@@ -110,7 +128,8 @@ TEST_F(TokenizerCompatTest, MatchesHuggingFace) {
         // Find the enclosing object
         size_t obj_start = golden_json.rfind('{', pos);
         size_t obj_end = golden_json.find('}', pos);
-        if (obj_start == std::string::npos || obj_end == std::string::npos) break;
+        if (obj_start == std::string::npos || obj_end == std::string::npos)
+            break;
 
         std::string case_json = golden_json.substr(obj_start, obj_end - obj_start + 1);
 
@@ -132,11 +151,13 @@ TEST_F(TokenizerCompatTest, MatchesHuggingFace) {
             // Only log first few mismatches to avoid flooding
             if (n_mismatch <= 5) {
                 std::string exp_str, act_str;
-                for (int id : expected_ids) exp_str += std::to_string(id) + " ";
-                for (int id : actual_ids) act_str += std::to_string(id) + " ";
+                for (int id : expected_ids)
+                    exp_str += std::to_string(id) + " ";
+                for (int id : actual_ids)
+                    act_str += std::to_string(id) + " ";
                 ADD_FAILURE() << "Mismatch for text: \"" << text << "\"\n"
-                             << "  Expected: " << exp_str << "\n"
-                             << "  Actual:   " << act_str;
+                              << "  Expected: " << exp_str << "\n"
+                              << "  Actual:   " << act_str;
             }
         }
 

@@ -21,13 +21,11 @@ namespace {
 // Shared memory size for topk_topp_sample_kernel.
 static inline size_t topk_topp_smem_size(int top_k) {
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
-    return static_cast<size_t>(top_k) * (sizeof(float) + sizeof(int))
-         + BLOCK_SIZE * sizeof(float)
-         + 2 * sizeof(float)
-         + NUM_WARPS * top_k * (sizeof(float) + sizeof(int));
+    return static_cast<size_t>(top_k) * (sizeof(float) + sizeof(int)) + BLOCK_SIZE * sizeof(float) +
+           2 * sizeof(float) + NUM_WARPS * top_k * (sizeof(float) + sizeof(int));
 }
 
-} // anonymous namespace
+}  // anonymous namespace
 
 // ============================================================================
 // Greedy sampling (argmax)
@@ -35,12 +33,11 @@ static inline size_t topk_topp_smem_size(int top_k) {
 
 // Warp-level argmax reduction: returns the (value, index) of the maximum
 // across all lanes in the warp.
-__device__ __forceinline__
-void warp_argmax(float& val, int& idx) {
-    #pragma unroll
+__device__ __forceinline__ void warp_argmax(float& val, int& idx) {
+#pragma unroll
     for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
         float other_val = __shfl_xor_sync(0xFFFFFFFF, val, offset);
-        int   other_idx = __shfl_xor_sync(0xFFFFFFFF, idx, offset);
+        int other_idx = __shfl_xor_sync(0xFFFFFFFF, idx, offset);
         if (other_val > val || (other_val == val && other_idx < idx)) {
             val = other_val;
             idx = other_idx;
@@ -49,11 +46,10 @@ void warp_argmax(float& val, int& idx) {
 }
 
 // Single-block argmax kernel (fallback for paths without pre-allocated scratch).
-__global__ void argmax_kernel(const float* __restrict__ logits,
-                              int vocab_size,
+__global__ void argmax_kernel(const float* __restrict__ logits, int vocab_size,
                               int32_t* __restrict__ d_result) {
-    float  local_max = -FLT_MAX;
-    int    local_idx = 0;
+    float local_max = -FLT_MAX;
+    int local_idx = 0;
 
     for (int i = threadIdx.x; i < vocab_size; i += blockDim.x) {
         float v = logits[i];
@@ -66,8 +62,8 @@ __global__ void argmax_kernel(const float* __restrict__ logits,
     warp_argmax(local_max, local_idx);
 
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
-    __shared__ float  s_val[NUM_WARPS];
-    __shared__ int    s_idx[NUM_WARPS];
+    __shared__ float s_val[NUM_WARPS];
+    __shared__ int s_idx[NUM_WARPS];
 
     int warp_id = threadIdx.x / WARP_SIZE;
     int lane_id = threadIdx.x % WARP_SIZE;
@@ -80,12 +76,12 @@ __global__ void argmax_kernel(const float* __restrict__ logits,
 
     if (warp_id == 0) {
         float val = (lane_id < NUM_WARPS) ? s_val[lane_id] : -FLT_MAX;
-        int   idx = (lane_id < NUM_WARPS) ? s_idx[lane_id] : 0;
+        int idx = (lane_id < NUM_WARPS) ? s_idx[lane_id] : 0;
 
-        #pragma unroll
+#pragma unroll
         for (int offset = NUM_WARPS / 2; offset > 0; offset >>= 1) {
             float other_val = __shfl_xor_sync(0xFFFFFFFF, val, offset);
-            int   other_idx = __shfl_xor_sync(0xFFFFFFFF, idx, offset);
+            int other_idx = __shfl_xor_sync(0xFFFFFFFF, idx, offset);
             if (other_val > val || (other_val == val && other_idx < idx)) {
                 val = other_val;
                 idx = other_idx;
@@ -107,11 +103,10 @@ __global__ void argmax_kernel(const float* __restrict__ logits,
 //   int32_t  partial_idxs [ARGMAX_NBLOCKS]
 
 // Phase 1: each block scans its stripe and writes its local max to partials.
-__global__ void argmax_partial_kernel(
-        const float* __restrict__ logits, int vocab_size,
-        float* __restrict__ partial_vals, int32_t* __restrict__ partial_idxs) {
-    float  local_max = -FLT_MAX;
-    int    local_idx = 0;
+__global__ void argmax_partial_kernel(const float* __restrict__ logits, int vocab_size,
+                                      float* __restrict__ partial_vals, int32_t* __restrict__ partial_idxs) {
+    float local_max = -FLT_MAX;
+    int local_idx = 0;
 
     int start = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
@@ -127,8 +122,8 @@ __global__ void argmax_partial_kernel(
     warp_argmax(local_max, local_idx);
 
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
-    __shared__ float  s_val[NUM_WARPS];
-    __shared__ int    s_idx[NUM_WARPS];
+    __shared__ float s_val[NUM_WARPS];
+    __shared__ int s_idx[NUM_WARPS];
 
     int warp_id = threadIdx.x / WARP_SIZE;
     int lane_id = threadIdx.x % WARP_SIZE;
@@ -141,12 +136,12 @@ __global__ void argmax_partial_kernel(
 
     if (warp_id == 0) {
         float val = (lane_id < NUM_WARPS) ? s_val[lane_id] : -FLT_MAX;
-        int   idx = (lane_id < NUM_WARPS) ? s_idx[lane_id] : 0;
+        int idx = (lane_id < NUM_WARPS) ? s_idx[lane_id] : 0;
 
-        #pragma unroll
+#pragma unroll
         for (int offset = NUM_WARPS / 2; offset > 0; offset >>= 1) {
             float other_val = __shfl_xor_sync(0xFFFFFFFF, val, offset);
-            int   other_idx = __shfl_xor_sync(0xFFFFFFFF, idx, offset);
+            int other_idx = __shfl_xor_sync(0xFFFFFFFF, idx, offset);
             if (other_val > val || (other_val == val && other_idx < idx)) {
                 val = other_val;
                 idx = other_idx;
@@ -161,16 +156,15 @@ __global__ void argmax_partial_kernel(
 }
 
 // Phase 2: single block reduces ARGMAX_NBLOCKS partial results.
-__global__ void argmax_reduce_kernel(
-        const float* __restrict__ partial_vals,
-        const int32_t* __restrict__ partial_idxs,
-        int n_blocks, int32_t* __restrict__ d_result) {
-    float  local_max = -FLT_MAX;
-    int    local_idx = 0;
+__global__ void argmax_reduce_kernel(const float* __restrict__ partial_vals,
+                                     const int32_t* __restrict__ partial_idxs, int n_blocks,
+                                     int32_t* __restrict__ d_result) {
+    float local_max = -FLT_MAX;
+    int local_idx = 0;
 
     for (int i = threadIdx.x; i < n_blocks; i += blockDim.x) {
         float v = partial_vals[i];
-        int   idx = partial_idxs[i];
+        int idx = partial_idxs[i];
         if (v > local_max || (v == local_max && idx < local_idx)) {
             local_max = v;
             local_idx = idx;
@@ -197,16 +191,14 @@ int32_t sample_greedy(const Tensor& logits, cudaStream_t stream) {
     argmax_kernel<<<1, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, d_result);
 
     int32_t h_result = 0;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
     IMP_CUDA_CHECK_LOG(cudaFree(d_result));
     return h_result;
 }
 
-int32_t sample_greedy(const Tensor& logits, int32_t* d_result,
-                      cudaStream_t stream) {
+int32_t sample_greedy(const Tensor& logits, int32_t* d_result, cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
     const float* d_logits = static_cast<const float*>(logits.data);
 
@@ -214,17 +206,14 @@ int32_t sample_greedy(const Tensor& logits, int32_t* d_result,
     // Layout: [result(4B)] [partial_vals(ARGMAX_NBLOCKS*4B)] [partial_idxs(ARGMAX_NBLOCKS*4B)]
     auto* base = reinterpret_cast<char*>(d_result);
     auto* partial_vals = reinterpret_cast<float*>(base + sizeof(int32_t));
-    auto* partial_idxs = reinterpret_cast<int32_t*>(base + sizeof(int32_t) +
-                                                     ARGMAX_NBLOCKS * sizeof(float));
+    auto* partial_idxs = reinterpret_cast<int32_t*>(base + sizeof(int32_t) + ARGMAX_NBLOCKS * sizeof(float));
 
-    argmax_partial_kernel<<<ARGMAX_NBLOCKS, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, partial_vals, partial_idxs);
-    argmax_reduce_kernel<<<1, WARP_SIZE, 0, stream>>>(
-        partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
+    argmax_partial_kernel<<<ARGMAX_NBLOCKS, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, partial_vals,
+                                                                     partial_idxs);
+    argmax_reduce_kernel<<<1, WARP_SIZE, 0, stream>>>(partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
 
     int32_t h_result = 0;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
     return h_result;
@@ -235,15 +224,13 @@ int32_t sample_greedy(const Tensor& logits, int32_t* d_result,
 // ============================================================================
 
 // Simple LCG random number generator for device code.
-__device__ __forceinline__
-unsigned int lcg_rand(unsigned int& state) {
+__device__ __forceinline__ unsigned int lcg_rand(unsigned int& state) {
     state = state * 1664525u + 1013904223u;
     return state;
 }
 
 // Convert LCG output to a float in [0, 1).
-__device__ __forceinline__
-float lcg_rand_float(unsigned int& state) {
+__device__ __forceinline__ float lcg_rand_float(unsigned int& state) {
     return static_cast<float>(lcg_rand(state)) / 4294967296.0f;
 }
 
@@ -265,15 +252,9 @@ float lcg_rand_float(unsigned int& state) {
 // and branch on the actual value.
 static constexpr int MAX_TOP_K = 128;
 
-__global__ void topk_topp_sample_kernel(
-        const float* __restrict__ logits,
-        int vocab_size,
-        int top_k,
-        float top_p,
-        float inv_temperature,
-        unsigned int seed,
-        int32_t* __restrict__ d_result) {
-
+__global__ void topk_topp_sample_kernel(const float* __restrict__ logits, int vocab_size, int top_k,
+                                        float top_p, float inv_temperature, unsigned int seed,
+                                        int32_t* __restrict__ d_result) {
     // --- Shared memory layout ---
     // We use dynamic shared memory to hold the merged top-k candidates.
     extern __shared__ char smem_raw[];
@@ -283,8 +264,8 @@ __global__ void topk_topp_sample_kernel(
     //   int    s_topk_idx[top_k]    -- merged top-k vocab indices
     //   float  s_reduce[BLOCK_SIZE] -- scratch for reductions
     float* s_topk_val = reinterpret_cast<float*>(smem_raw);
-    int*   s_topk_idx = reinterpret_cast<int*>(s_topk_val + top_k);
-    float* s_reduce   = reinterpret_cast<float*>(s_topk_idx + top_k);
+    int* s_topk_idx = reinterpret_cast<int*>(s_topk_val + top_k);
+    float* s_reduce = reinterpret_cast<float*>(s_topk_idx + top_k);
     // Additional single-value shared vars
     float* s_global_max = s_reduce + BLOCK_SIZE;  // 1 float
     float* s_global_sum = s_global_max + 1;       // 1 float
@@ -295,20 +276,23 @@ __global__ void topk_topp_sample_kernel(
     float local_max = -FLT_MAX;
     for (int i = tid; i < vocab_size; i += blockDim.x) {
         float v = logits[i];
-        if (v > local_max) local_max = v;
+        if (v > local_max)
+            local_max = v;
     }
     // Warp reduction
     local_max = warp_reduce_max(local_max);
     // Store per-warp result
     s_reduce[tid] = -FLT_MAX;
     __syncthreads();
-    if (tid % WARP_SIZE == 0) s_reduce[tid / WARP_SIZE] = local_max;
+    if (tid % WARP_SIZE == 0)
+        s_reduce[tid / WARP_SIZE] = local_max;
     __syncthreads();
     // Thread 0 reduces across warps
     if (tid == 0) {
         float mx = -FLT_MAX;
         for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; ++w) {
-            if (s_reduce[w] > mx) mx = s_reduce[w];
+            if (s_reduce[w] > mx)
+                mx = s_reduce[w];
         }
         s_global_max[0] = mx;
     }
@@ -326,11 +310,13 @@ __global__ void topk_topp_sample_kernel(
     local_sum = warp_reduce_sum(local_sum);
     s_reduce[tid] = 0.0f;
     __syncthreads();
-    if (tid % WARP_SIZE == 0) s_reduce[tid / WARP_SIZE] = local_sum;
+    if (tid % WARP_SIZE == 0)
+        s_reduce[tid / WARP_SIZE] = local_sum;
     __syncthreads();
     if (tid == 0) {
         float sm = 0.0f;
-        for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; ++w) sm += s_reduce[w];
+        for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; ++w)
+            sm += s_reduce[w];
         s_global_sum[0] = sm;
     }
     __syncthreads();
@@ -344,10 +330,10 @@ __global__ void topk_topp_sample_kernel(
     int local_k = min(top_k, MAX_TOP_K);
 
     float local_vals[MAX_TOP_K];
-    int   local_idxs[MAX_TOP_K];
-    int   local_count = 0;
+    int local_idxs[MAX_TOP_K];
+    int local_count = 0;
     float local_min_val = -FLT_MAX;  // min of current heap
-    int   local_min_pos = 0;
+    int local_min_pos = 0;
 
     for (int i = tid; i < vocab_size; i += blockDim.x) {
         float prob = expf((logits[i] - gmax) * inv_temperature) * inv_sum;
@@ -441,12 +427,12 @@ __global__ void topk_topp_sample_kernel(
     // For top_k = 50, NUM_WARPS = 8: 400 floats + 400 ints = 3200 bytes.
     // We already have s_topk_val/idx for final result.
     // Let's allocate per-warp results after s_global_sum.
-    float* s_warp_vals = s_global_sum + 1;            // NUM_WARPS * top_k floats
-    int*   s_warp_idxs = reinterpret_cast<int*>(s_warp_vals + NUM_WARPS * top_k);
+    float* s_warp_vals = s_global_sum + 1;  // NUM_WARPS * top_k floats
+    int* s_warp_idxs = reinterpret_cast<int*>(s_warp_vals + NUM_WARPS * top_k);
 
     // Pointer to this warp's output area
     float* my_warp_vals = s_warp_vals + warp_id * top_k;
-    int*   my_warp_idxs = s_warp_idxs + warp_id * top_k;
+    int* my_warp_idxs = s_warp_idxs + warp_id * top_k;
 
     // Each lane has local candidates in registers.
     // We'll iterate top_k times to extract the top_k from the warp.
@@ -456,8 +442,12 @@ __global__ void topk_topp_sample_kernel(
     for (int i = 0; i < local_count - 1; ++i) {
         for (int j = i + 1; j < local_count; ++j) {
             if (local_vals[j] > local_vals[i]) {
-                float tv = local_vals[i]; local_vals[i] = local_vals[j]; local_vals[j] = tv;
-                int ti = local_idxs[i]; local_idxs[i] = local_idxs[j]; local_idxs[j] = ti;
+                float tv = local_vals[i];
+                local_vals[i] = local_vals[j];
+                local_vals[j] = tv;
+                int ti = local_idxs[i];
+                local_idxs[i] = local_idxs[j];
+                local_idxs[j] = ti;
             }
         }
     }
@@ -465,21 +455,21 @@ __global__ void topk_topp_sample_kernel(
     for (int k_iter = 0; k_iter < top_k; ++k_iter) {
         // Each lane offers its best remaining candidate
         float my_best_val = (my_ptr < local_count) ? local_vals[my_ptr] : -1.0f;
-        int   my_best_idx = (my_ptr < local_count) ? local_idxs[my_ptr] : -1;
+        int my_best_idx = (my_ptr < local_count) ? local_idxs[my_ptr] : -1;
 
         // Warp reduction to find the max
         float best_val = my_best_val;
-        int   best_idx = my_best_idx;
-        int   best_lane = lane_id;
+        int best_idx = my_best_idx;
+        int best_lane = lane_id;
 
-        #pragma unroll
+#pragma unroll
         for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-            float other_val  = __shfl_xor_sync(0xFFFFFFFF, best_val, offset);
-            int   other_idx  = __shfl_xor_sync(0xFFFFFFFF, best_idx, offset);
-            int   other_lane = __shfl_xor_sync(0xFFFFFFFF, best_lane, offset);
+            float other_val = __shfl_xor_sync(0xFFFFFFFF, best_val, offset);
+            int other_idx = __shfl_xor_sync(0xFFFFFFFF, best_idx, offset);
+            int other_lane = __shfl_xor_sync(0xFFFFFFFF, best_lane, offset);
             if (other_val > best_val || (other_val == best_val && other_lane < best_lane)) {
-                best_val  = other_val;
-                best_idx  = other_idx;
+                best_val = other_val;
+                best_idx = other_idx;
                 best_lane = other_lane;
             }
         }
@@ -502,12 +492,13 @@ __global__ void topk_topp_sample_kernel(
         // We have NUM_WARPS sorted lists, each of length top_k.
         // Merge using pointers (like k-way merge).
         int ptrs[NUM_WARPS];
-        for (int w = 0; w < NUM_WARPS; ++w) ptrs[w] = 0;
+        for (int w = 0; w < NUM_WARPS; ++w)
+            ptrs[w] = 0;
 
         for (int k_iter = 0; k_iter < top_k; ++k_iter) {
             float best_val = -1.0f;
-            int   best_idx = -1;
-            int   best_warp = 0;
+            int best_idx = -1;
+            int best_warp = 0;
             for (int w = 0; w < NUM_WARPS; ++w) {
                 if (ptrs[w] < top_k) {
                     float v = s_warp_vals[w * top_k + ptrs[w]];
@@ -530,7 +521,7 @@ __global__ void topk_topp_sample_kernel(
         // s_topk_val is already sorted descending from the merge.
         // Compute cumulative sum and find top-p cutoff.
         float cumsum = 0.0f;
-        int   cutoff = top_k;
+        int cutoff = top_k;
         for (int i = 0; i < top_k; ++i) {
             cumsum += s_topk_val[i];
             if (cumsum >= top_p) {
@@ -577,12 +568,12 @@ __global__ void topk_topp_sample_kernel(
 // ============================================================================
 
 // Kernel: compute softmax probabilities with temperature into key/value arrays
-__global__ void softmax_to_pairs_kernel(
-        const float* __restrict__ logits, int vocab_size,
-        float inv_temperature, float global_max, float inv_sum,
-        float* __restrict__ d_keys, int32_t* __restrict__ d_values) {
+__global__ void softmax_to_pairs_kernel(const float* __restrict__ logits, int vocab_size,
+                                        float inv_temperature, float global_max, float inv_sum,
+                                        float* __restrict__ d_keys, int32_t* __restrict__ d_values) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= vocab_size) return;
+    if (idx >= vocab_size)
+        return;
     float prob = expf((logits[idx] - global_max) * inv_temperature) * inv_sum;
     d_keys[idx] = prob;
     d_values[idx] = idx;
@@ -590,111 +581,115 @@ __global__ void softmax_to_pairs_kernel(
 
 // Kernel: compute softmax probabilities reading max/sum from device memory.
 // d_max_sum[0] = global_max, d_max_sum[1] = sum. Avoids 2 D2H syncs.
-__global__ void softmax_to_pairs_device_kernel(
-        const float* __restrict__ logits, int vocab_size,
-        float inv_temperature, const float* __restrict__ d_max_sum,
-        float* __restrict__ d_keys, int32_t* __restrict__ d_values) {
+__global__ void softmax_to_pairs_device_kernel(const float* __restrict__ logits, int vocab_size,
+                                               float inv_temperature, const float* __restrict__ d_max_sum,
+                                               float* __restrict__ d_keys, int32_t* __restrict__ d_values) {
     float global_max = d_max_sum[0];
     float inv_sum = 1.0f / d_max_sum[1];
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= vocab_size) return;
+    if (idx >= vocab_size)
+        return;
     float prob = expf((logits[idx] - global_max) * inv_temperature) * inv_sum;
     d_keys[idx] = prob;
     d_values[idx] = idx;
 }
 
 // Kernel: find global max of logits (Phase 1)
-__global__ void softmax_max_kernel(
-        const float* __restrict__ logits, int vocab_size,
-        float* __restrict__ d_max) {
+__global__ void softmax_max_kernel(const float* __restrict__ logits, int vocab_size,
+                                   float* __restrict__ d_max) {
     __shared__ float s_max[BLOCK_SIZE / WARP_SIZE];
 
     float local_max = -FLT_MAX;
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < vocab_size;
-         i += blockDim.x * gridDim.x) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < vocab_size; i += blockDim.x * gridDim.x) {
         float v = logits[i];
-        if (v > local_max) local_max = v;
+        if (v > local_max)
+            local_max = v;
     }
     local_max = warp_reduce_max(local_max);
     int warp_id = threadIdx.x / WARP_SIZE;
     int lane_id = threadIdx.x % WARP_SIZE;
-    if (lane_id == 0) s_max[warp_id] = local_max;
+    if (lane_id == 0)
+        s_max[warp_id] = local_max;
     __syncthreads();
     if (threadIdx.x == 0) {
         float mx = -FLT_MAX;
         for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; w++)
-            if (s_max[w] > mx) mx = s_max[w];
+            if (s_max[w] > mx)
+                mx = s_max[w];
         atomicMax(reinterpret_cast<int*>(d_max), __float_as_int(mx));
     }
 }
 
 // Kernel: compute sum of exp(logits - max) (Phase 2, launched after max is known)
-__global__ void softmax_sum_kernel(
-        const float* __restrict__ logits, int vocab_size,
-        float inv_temperature, float global_max,
-        float* __restrict__ d_sum) {
+__global__ void softmax_sum_kernel(const float* __restrict__ logits, int vocab_size, float inv_temperature,
+                                   float global_max, float* __restrict__ d_sum) {
     __shared__ float s_sum[BLOCK_SIZE / WARP_SIZE];
 
     float local_sum = 0.0f;
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < vocab_size;
-         i += blockDim.x * gridDim.x) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < vocab_size; i += blockDim.x * gridDim.x) {
         local_sum += expf((logits[i] - global_max) * inv_temperature);
     }
     local_sum = warp_reduce_sum(local_sum);
     int warp_id = threadIdx.x / WARP_SIZE;
     int lane_id = threadIdx.x % WARP_SIZE;
-    if (lane_id == 0) s_sum[warp_id] = local_sum;
+    if (lane_id == 0)
+        s_sum[warp_id] = local_sum;
     __syncthreads();
     if (threadIdx.x == 0) {
         float sm = 0.0f;
-        for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; w++) sm += s_sum[w];
+        for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; w++)
+            sm += s_sum[w];
         atomicAdd(d_sum, sm);
     }
 }
 
 // Kernel: compute sum of exp(logits - max) reading max from device memory.
 // Avoids D2H sync between max and sum phases.
-__global__ void softmax_sum_device_max_kernel(
-        const float* __restrict__ logits, int vocab_size,
-        float inv_temperature, const float* __restrict__ d_max,
-        float* __restrict__ d_sum) {
+__global__ void softmax_sum_device_max_kernel(const float* __restrict__ logits, int vocab_size,
+                                              float inv_temperature, const float* __restrict__ d_max,
+                                              float* __restrict__ d_sum) {
     __shared__ float s_sum[BLOCK_SIZE / WARP_SIZE];
 
     float global_max = *d_max;
     float local_sum = 0.0f;
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < vocab_size;
-         i += blockDim.x * gridDim.x) {
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < vocab_size; i += blockDim.x * gridDim.x) {
         local_sum += expf((logits[i] - global_max) * inv_temperature);
     }
     local_sum = warp_reduce_sum(local_sum);
     int warp_id = threadIdx.x / WARP_SIZE;
     int lane_id = threadIdx.x % WARP_SIZE;
-    if (lane_id == 0) s_sum[warp_id] = local_sum;
+    if (lane_id == 0)
+        s_sum[warp_id] = local_sum;
     __syncthreads();
     if (threadIdx.x == 0) {
         float sm = 0.0f;
-        for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; w++) sm += s_sum[w];
+        for (int w = 0; w < BLOCK_SIZE / WARP_SIZE; w++)
+            sm += s_sum[w];
         atomicAdd(d_sum, sm);
     }
 }
 
 // Kernel: top-p filter + sample from the first k sorted candidates
-__global__ void topp_sample_from_sorted_kernel(
-        const float* __restrict__ sorted_probs,
-        const int32_t* __restrict__ sorted_indices,
-        int top_k, float top_p, unsigned int seed,
-        int32_t* __restrict__ d_result) {
-    if (threadIdx.x != 0) return;
+__global__ void topp_sample_from_sorted_kernel(const float* __restrict__ sorted_probs,
+                                               const int32_t* __restrict__ sorted_indices, int top_k,
+                                               float top_p, unsigned int seed,
+                                               int32_t* __restrict__ d_result) {
+    if (threadIdx.x != 0)
+        return;
 
     float cumsum = 0.0f;
     int cutoff = top_k;
     for (int i = 0; i < top_k; i++) {
         cumsum += sorted_probs[i];
-        if (cumsum >= top_p) { cutoff = i + 1; break; }
+        if (cumsum >= top_p) {
+            cutoff = i + 1;
+            break;
+        }
     }
 
     float norm = 0.0f;
-    for (int i = 0; i < cutoff; i++) norm += sorted_probs[i];
+    for (int i = 0; i < cutoff; i++)
+        norm += sorted_probs[i];
     float inv_norm = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
 
     unsigned int rng_state = seed;
@@ -704,32 +699,36 @@ __global__ void topp_sample_from_sorted_kernel(
     int32_t chosen = sorted_indices[0];
     for (int i = 0; i < cutoff; i++) {
         acc += sorted_probs[i] * inv_norm;
-        if (r < acc) { chosen = sorted_indices[i]; break; }
+        if (r < acc) {
+            chosen = sorted_indices[i];
+            break;
+        }
     }
     d_result[0] = chosen;
 }
 
 // Persistent scratch for CUB sort (lazily allocated, grows only)
 struct CubSortScratch {
-    float*   d_keys_in   = nullptr;
-    float*   d_keys_out  = nullptr;
-    int32_t* d_vals_in   = nullptr;
-    int32_t* d_vals_out  = nullptr;
-    float*   d_max_sum   = nullptr;
-    void*    d_temp      = nullptr;
-    size_t   temp_bytes  = 0;
-    int      capacity    = 0;  // max vocab_size allocated for
+    float* d_keys_in = nullptr;
+    float* d_keys_out = nullptr;
+    int32_t* d_vals_in = nullptr;
+    int32_t* d_vals_out = nullptr;
+    float* d_max_sum = nullptr;
+    void* d_temp = nullptr;
+    size_t temp_bytes = 0;
+    int capacity = 0;  // max vocab_size allocated for
 
     bool ensure(int vocab_size, cudaStream_t stream) {
-        if (vocab_size <= capacity) return true;
+        if (vocab_size <= capacity)
+            return true;
         free();
         size_t elem_bytes = static_cast<size_t>(vocab_size) * sizeof(float);
-        size_t idx_bytes  = static_cast<size_t>(vocab_size) * sizeof(int32_t);
-        if (cudaMalloc(&d_keys_in,  elem_bytes) != cudaSuccess ||
+        size_t idx_bytes = static_cast<size_t>(vocab_size) * sizeof(int32_t);
+        if (cudaMalloc(&d_keys_in, elem_bytes) != cudaSuccess ||
             cudaMalloc(&d_keys_out, elem_bytes) != cudaSuccess ||
-            cudaMalloc(&d_vals_in,  idx_bytes)  != cudaSuccess ||
-            cudaMalloc(&d_vals_out, idx_bytes)  != cudaSuccess ||
-            cudaMalloc(&d_max_sum,  2 * sizeof(float)) != cudaSuccess) {
+            cudaMalloc(&d_vals_in, idx_bytes) != cudaSuccess ||
+            cudaMalloc(&d_vals_out, idx_bytes) != cudaSuccess ||
+            cudaMalloc(&d_max_sum, 2 * sizeof(float)) != cudaSuccess) {
             free();
             return false;
         }
@@ -738,23 +737,16 @@ struct CubSortScratch {
         // top-K results (to produce sorted output for top-p).
         temp_bytes = 0;
         size_t rs_full_bytes = 0;
-        cub::DeviceRadixSort::SortPairsDescending(
-            nullptr, rs_full_bytes,
-            d_keys_in, d_keys_out, d_vals_in, d_vals_out,
-            vocab_size, 0, 32, stream);
+        cub::DeviceRadixSort::SortPairsDescending(nullptr, rs_full_bytes, d_keys_in, d_keys_out, d_vals_in,
+                                                  d_vals_out, vocab_size, 0, 32, stream);
         size_t topk_bytes = 0;
-        cub::DeviceTopK::MaxPairs(
-            nullptr, topk_bytes,
-            d_keys_in, d_keys_out, d_vals_in, d_vals_out,
-            vocab_size, vocab_size,
-            ::cuda::execution::require(
-                ::cuda::execution::determinism::not_guaranteed,
-                ::cuda::execution::output_ordering::unsorted));
+        cub::DeviceTopK::MaxPairs(nullptr, topk_bytes, d_keys_in, d_keys_out, d_vals_in, d_vals_out,
+                                  vocab_size, vocab_size,
+                                  ::cuda::execution::require(::cuda::execution::determinism::not_guaranteed,
+                                                             ::cuda::execution::output_ordering::unsorted));
         size_t rs_topk_bytes = 0;
-        cub::DeviceRadixSort::SortPairsDescending(
-            nullptr, rs_topk_bytes,
-            d_keys_in, d_keys_out, d_vals_in, d_vals_out,
-            vocab_size, 0, 32, stream);
+        cub::DeviceRadixSort::SortPairsDescending(nullptr, rs_topk_bytes, d_keys_in, d_keys_out, d_vals_in,
+                                                  d_vals_out, vocab_size, 0, 32, stream);
         temp_bytes = std::max({rs_full_bytes, topk_bytes, rs_topk_bytes});
         if (cudaMalloc(&d_temp, temp_bytes) != cudaSuccess) {
             free();
@@ -765,12 +757,30 @@ struct CubSortScratch {
     }
 
     void free() {
-        if (d_keys_in)  { IMP_CUDA_CHECK_LOG(cudaFree(d_keys_in));  d_keys_in  = nullptr; }
-        if (d_keys_out) { IMP_CUDA_CHECK_LOG(cudaFree(d_keys_out)); d_keys_out = nullptr; }
-        if (d_vals_in)  { IMP_CUDA_CHECK_LOG(cudaFree(d_vals_in));  d_vals_in  = nullptr; }
-        if (d_vals_out) { IMP_CUDA_CHECK_LOG(cudaFree(d_vals_out)); d_vals_out = nullptr; }
-        if (d_max_sum)  { IMP_CUDA_CHECK_LOG(cudaFree(d_max_sum));  d_max_sum  = nullptr; }
-        if (d_temp)     { IMP_CUDA_CHECK_LOG(cudaFree(d_temp));     d_temp     = nullptr; }
+        if (d_keys_in) {
+            IMP_CUDA_CHECK_LOG(cudaFree(d_keys_in));
+            d_keys_in = nullptr;
+        }
+        if (d_keys_out) {
+            IMP_CUDA_CHECK_LOG(cudaFree(d_keys_out));
+            d_keys_out = nullptr;
+        }
+        if (d_vals_in) {
+            IMP_CUDA_CHECK_LOG(cudaFree(d_vals_in));
+            d_vals_in = nullptr;
+        }
+        if (d_vals_out) {
+            IMP_CUDA_CHECK_LOG(cudaFree(d_vals_out));
+            d_vals_out = nullptr;
+        }
+        if (d_max_sum) {
+            IMP_CUDA_CHECK_LOG(cudaFree(d_max_sum));
+            d_max_sum = nullptr;
+        }
+        if (d_temp) {
+            IMP_CUDA_CHECK_LOG(cudaFree(d_temp));
+            d_temp = nullptr;
+        }
         temp_bytes = 0;
         capacity = 0;
     }
@@ -779,10 +789,9 @@ struct CubSortScratch {
 static CubSortScratch s_cub_scratch;
 
 // CUB-based top-k sampling for k > MAX_TOP_K.
-static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size,
-                                     int top_k, float top_p,
-                                     float inv_temperature, unsigned int seed,
-                                     int32_t* d_result, cudaStream_t stream) {
+static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size, int top_k, float top_p,
+                                    float inv_temperature, unsigned int seed, int32_t* d_result,
+                                    cudaStream_t stream) {
     if (!s_cub_scratch.ensure(vocab_size, stream)) {
         IMP_LOG_ERROR("CUB sort scratch allocation failed for vocab_size=%d", vocab_size);
         return 0;
@@ -796,62 +805,53 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size,
     float neg_inf_val = -FLT_MAX;
     int neg_inf_bits;
     std::memcpy(&neg_inf_bits, &neg_inf_val, sizeof(int));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(sc.d_max_sum, &neg_inf_bits, sizeof(int),
-                    cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(
+        cudaMemcpyAsync(sc.d_max_sum, &neg_inf_bits, sizeof(int), cudaMemcpyHostToDevice, stream));
     float zero = 0.0f;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(sc.d_max_sum + 1, &zero, sizeof(float),
-                    cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(
+        cudaMemcpyAsync(sc.d_max_sum + 1, &zero, sizeof(float), cudaMemcpyHostToDevice, stream));
 
     int stats_blocks = std::min((vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE, 128);
 
     // Phase 1: global max (result in d_max_sum[0])
-    softmax_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, sc.d_max_sum);
+    softmax_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, sc.d_max_sum);
 
     // Phase 2: sum of exp — reads max from device memory (no D2H sync)
-    softmax_sum_device_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, inv_temperature, sc.d_max_sum, sc.d_max_sum + 1);
+    softmax_sum_device_max_kernel<<<stats_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size,
+                                                                           inv_temperature, sc.d_max_sum,
+                                                                           sc.d_max_sum + 1);
 
     // Step 2: Compute probabilities reading max/sum from device memory (no D2H sync)
     int pair_blocks = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    softmax_to_pairs_device_kernel<<<pair_blocks, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, inv_temperature, sc.d_max_sum,
-        sc.d_keys_in, sc.d_vals_in);
+    softmax_to_pairs_device_kernel<<<pair_blocks, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size,
+                                                                           inv_temperature, sc.d_max_sum,
+                                                                           sc.d_keys_in, sc.d_vals_in);
 
     // Step 3: extract top_k via DeviceTopK (unsorted), then sort just those k.
     // Much faster than a full radix sort over the whole vocab when k << vocab.
     {
         size_t tk_bytes = sc.temp_bytes;
-        cub::DeviceTopK::MaxPairs(
-            sc.d_temp, tk_bytes,
-            sc.d_keys_in, sc.d_keys_out,
-            sc.d_vals_in, sc.d_vals_out,
-            vocab_size, top_k,
-            ::cuda::execution::require(
-                ::cuda::execution::determinism::not_guaranteed,
-                ::cuda::execution::output_ordering::unsorted));
+        cub::DeviceTopK::MaxPairs(sc.d_temp, tk_bytes, sc.d_keys_in, sc.d_keys_out, sc.d_vals_in,
+                                  sc.d_vals_out, vocab_size, top_k,
+                                  ::cuda::execution::require(::cuda::execution::determinism::not_guaranteed,
+                                                             ::cuda::execution::output_ordering::unsorted));
         size_t rs_bytes = sc.temp_bytes;
         // In-place sort: copy outputs back to inputs as the source for the
         // small sort, write sorted result to outputs.
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(sc.d_keys_in, sc.d_keys_out,
-            top_k * sizeof(float), cudaMemcpyDeviceToDevice, stream));
-        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(sc.d_vals_in, sc.d_vals_out,
-            top_k * sizeof(int32_t), cudaMemcpyDeviceToDevice, stream));
-        cub::DeviceRadixSort::SortPairsDescending(
-            sc.d_temp, rs_bytes,
-            sc.d_keys_in, sc.d_keys_out,
-            sc.d_vals_in, sc.d_vals_out,
-            top_k, 0, 32, stream);
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(sc.d_keys_in, sc.d_keys_out, top_k * sizeof(float),
+                                           cudaMemcpyDeviceToDevice, stream));
+        IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(sc.d_vals_in, sc.d_vals_out, top_k * sizeof(int32_t),
+                                           cudaMemcpyDeviceToDevice, stream));
+        cub::DeviceRadixSort::SortPairsDescending(sc.d_temp, rs_bytes, sc.d_keys_in, sc.d_keys_out,
+                                                  sc.d_vals_in, sc.d_vals_out, top_k, 0, 32, stream);
     }
 
     // Step 4: Top-p filter + sample from sorted top-k
-    topp_sample_from_sorted_kernel<<<1, 1, 0, stream>>>(
-        sc.d_keys_out, sc.d_vals_out,
-        top_k, top_p, seed, d_result);
+    topp_sample_from_sorted_kernel<<<1, 1, 0, stream>>>(sc.d_keys_out, sc.d_vals_out, top_k, top_p, seed,
+                                                        d_result);
 
     int32_t h_result = 0;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
     return h_result;
@@ -859,42 +859,41 @@ static int32_t sample_topk_topp_cub(const float* d_logits, int vocab_size,
 
 // Shared implementation for both sample_topk_topp overloads.
 // When owns_result is true, d_result was allocated internally and will be freed.
-static int32_t sample_topk_topp_impl(
-        const float* d_logits, int vocab_size, int top_k, float top_p,
-        float inv_temperature, unsigned int seed,
-        int32_t* d_result, bool owns_result, cudaStream_t stream) {
-
+static int32_t sample_topk_topp_impl(const float* d_logits, int vocab_size, int top_k, float top_p,
+                                     float inv_temperature, unsigned int seed, int32_t* d_result,
+                                     bool owns_result, cudaStream_t stream) {
     // For large top_k, use CUB radix sort path (no MAX_TOP_K limit)
     if (top_k > MAX_TOP_K) {
-        int32_t result = sample_topk_topp_cub(
-            d_logits, vocab_size, top_k, top_p, inv_temperature, seed,
-            d_result, stream);
-        if (owns_result) IMP_CUDA_CHECK_LOG(cudaFree(d_result));
+        int32_t result = sample_topk_topp_cub(d_logits, vocab_size, top_k, top_p, inv_temperature, seed,
+                                              d_result, stream);
+        if (owns_result)
+            IMP_CUDA_CHECK_LOG(cudaFree(d_result));
         return result;
     }
 
     size_t smem_bytes = topk_topp_smem_size(top_k);
 
-    topk_topp_sample_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(
-        d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result);
+    topk_topp_sample_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(d_logits, vocab_size, top_k, top_p,
+                                                                   inv_temperature, seed, d_result);
 
     int32_t h_result = 0;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
-    if (owns_result) IMP_CUDA_CHECK_LOG(cudaFree(d_result));
+    if (owns_result)
+        IMP_CUDA_CHECK_LOG(cudaFree(d_result));
     return h_result;
 }
 
-int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
-                         float temperature, unsigned int seed,
+int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p, float temperature, unsigned int seed,
                          cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
     const float* d_logits = static_cast<const float*>(logits.data);
 
-    if (top_k <= 0 || top_k > vocab_size) top_k = vocab_size;
-    if (temperature <= 0.0f) temperature = 1.0f;
+    if (top_k <= 0 || top_k > vocab_size)
+        top_k = vocab_size;
+    if (temperature <= 0.0f)
+        temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
 
     int32_t* d_result = nullptr;
@@ -903,73 +902,68 @@ int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
         return 0;
     }
 
-    return sample_topk_topp_impl(d_logits, vocab_size, top_k, top_p,
-                                  inv_temperature, seed, d_result, true, stream);
+    return sample_topk_topp_impl(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, true,
+                                 stream);
 }
 
-int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p,
-                         float temperature, unsigned int seed,
-                         int32_t* d_result,
-                         cudaStream_t stream) {
+int32_t sample_topk_topp(const Tensor& logits, int top_k, float top_p, float temperature, unsigned int seed,
+                         int32_t* d_result, cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
     const float* d_logits = static_cast<const float*>(logits.data);
 
-    if (top_k <= 0 || top_k > vocab_size) top_k = vocab_size;
-    if (temperature <= 0.0f) temperature = 1.0f;
+    if (top_k <= 0 || top_k > vocab_size)
+        top_k = vocab_size;
+    if (temperature <= 0.0f)
+        temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
 
-    return sample_topk_topp_impl(d_logits, vocab_size, top_k, top_p,
-                                  inv_temperature, seed, d_result, false, stream);
+    return sample_topk_topp_impl(d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result, false,
+                                 stream);
 }
 
 // ===========================================================================
 // Async (device-side) sampling — no host sync
 // ===========================================================================
 
-void sample_greedy_device(const Tensor& logits, int32_t* d_result,
-                          int32_t* h_mapped, cudaStream_t stream) {
+void sample_greedy_device(const Tensor& logits, int32_t* d_result, int32_t* h_mapped, cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
     const float* d_logits = static_cast<const float*>(logits.data);
 
     // Multi-block argmax: scratch lives right after d_result.
     auto* base = reinterpret_cast<char*>(d_result);
     auto* partial_vals = reinterpret_cast<float*>(base + sizeof(int32_t));
-    auto* partial_idxs = reinterpret_cast<int32_t*>(base + sizeof(int32_t) +
-                                                     ARGMAX_NBLOCKS * sizeof(float));
+    auto* partial_idxs = reinterpret_cast<int32_t*>(base + sizeof(int32_t) + ARGMAX_NBLOCKS * sizeof(float));
 
-    argmax_partial_kernel<<<ARGMAX_NBLOCKS, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, partial_vals, partial_idxs);
-    argmax_reduce_kernel<<<1, WARP_SIZE, 0, stream>>>(
-        partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
+    argmax_partial_kernel<<<ARGMAX_NBLOCKS, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, partial_vals,
+                                                                     partial_idxs);
+    argmax_reduce_kernel<<<1, WARP_SIZE, 0, stream>>>(partial_vals, partial_idxs, ARGMAX_NBLOCKS, d_result);
 
     // Async copy to mapped pinned memory — no sync needed.
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
 }
 
-void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p,
-                              float temperature, unsigned int seed,
-                              int32_t* d_result, int32_t* h_mapped,
-                              cudaStream_t stream) {
+void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p, float temperature,
+                             unsigned int seed, int32_t* d_result, int32_t* h_mapped, cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
     const float* d_logits = static_cast<const float*>(logits.data);
 
-    if (top_k <= 0 || top_k > vocab_size) top_k = vocab_size;
+    if (top_k <= 0 || top_k > vocab_size)
+        top_k = vocab_size;
     if (top_k > MAX_TOP_K) {
         IMP_LOG_WARN("top_k=%d exceeds MAX_TOP_K=%d, clamping", top_k, MAX_TOP_K);
         top_k = MAX_TOP_K;
     }
-    if (temperature <= 0.0f) temperature = 1.0f;
+    if (temperature <= 0.0f)
+        temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
 
     size_t smem_bytes = topk_topp_smem_size(top_k);
 
-    topk_topp_sample_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(
-        d_logits, vocab_size, top_k, top_p, inv_temperature, seed, d_result);
+    topk_topp_sample_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(d_logits, vocab_size, top_k, top_p,
+                                                                   inv_temperature, seed, d_result);
 
     // Async copy to mapped pinned memory — no sync needed.
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(h_mapped, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
 }
 
 // ===========================================================================
@@ -980,24 +974,22 @@ void sample_topk_topp_device(const Tensor& logits, int top_k, float top_p,
 // Uses atomics to handle tokens appearing multiple times.
 // Strategy: first count occurrences, then apply penalties.
 // For simplicity with small history, we iterate the history per thread.
-__global__ void apply_penalties_kernel(
-        float* __restrict__ logits,
-        const int32_t* __restrict__ token_ids,
-        int n_tokens,
-        int vocab_size,
-        float repetition_penalty,
-        float frequency_penalty,
-        float presence_penalty) {
+__global__ void apply_penalties_kernel(float* __restrict__ logits, const int32_t* __restrict__ token_ids,
+                                       int n_tokens, int vocab_size, float repetition_penalty,
+                                       float frequency_penalty, float presence_penalty) {
     // Each thread handles one vocab entry
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= vocab_size) return;
+    if (idx >= vocab_size)
+        return;
 
     // Count occurrences of this token in history
     int count = 0;
     for (int i = 0; i < n_tokens; i++) {
-        if (token_ids[i] == idx) count++;
+        if (token_ids[i] == idx)
+            count++;
     }
-    if (count == 0) return;
+    if (count == 0)
+        return;
 
     float logit = logits[idx];
 
@@ -1021,16 +1013,13 @@ __global__ void apply_penalties_kernel(
 // Variant: reads n_tokens from a device pointer (for CUDA graph loop where count changes).
 // repeat_last_n: when > 0, only scan the last N tokens in the history.
 __global__ void apply_penalties_device_count_kernel(
-        float* __restrict__ logits,
-        const int32_t* __restrict__ token_ids,
-        const int* __restrict__ d_n_tokens,       // [1] device-side token count
-        int vocab_size,
-        int repeat_last_n,
-        float repetition_penalty,
-        float frequency_penalty,
-        float presence_penalty) {
+    float* __restrict__ logits, const int32_t* __restrict__ token_ids,
+    const int* __restrict__ d_n_tokens,  // [1] device-side token count
+    int vocab_size, int repeat_last_n, float repetition_penalty, float frequency_penalty,
+    float presence_penalty) {
     int n_tokens = *d_n_tokens;
-    if (n_tokens <= 0) return;
+    if (n_tokens <= 0)
+        return;
 
     // Apply repeat_last_n window
     int start = 0;
@@ -1039,13 +1028,16 @@ __global__ void apply_penalties_device_count_kernel(
     }
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= vocab_size) return;
+    if (idx >= vocab_size)
+        return;
 
     int count = 0;
     for (int i = start; i < n_tokens; i++) {
-        if (token_ids[i] == idx) count++;
+        if (token_ids[i] == idx)
+            count++;
     }
-    if (count == 0) return;
+    if (count == 0)
+        return;
 
     float logit = logits[idx];
 
@@ -1066,7 +1058,8 @@ __global__ void apply_penalties_device_count_kernel(
 // Used by think-budget to force </think> generation via logit manipulation.
 __global__ void force_single_token_kernel(float* logits, int vocab_size, int32_t keep_token) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= vocab_size) return;
+    if (idx >= vocab_size)
+        return;
     logits[idx] = (idx == keep_token) ? 0.0f : -1e30f;
 }
 
@@ -1075,37 +1068,32 @@ void force_single_token(float* logits, int vocab_size, int32_t keep_token, cudaS
     force_single_token_kernel<<<blocks, 256, 0, stream>>>(logits, vocab_size, keep_token);
 }
 
-void apply_penalties(float* logits, int vocab_size,
-                     const int32_t* token_ids, int n_tokens,
-                     float repetition_penalty,
-                     float frequency_penalty,
-                     float presence_penalty,
+void apply_penalties(float* logits, int vocab_size, const int32_t* token_ids, int n_tokens,
+                     float repetition_penalty, float frequency_penalty, float presence_penalty,
                      cudaStream_t stream) {
-    if (n_tokens == 0) return;
+    if (n_tokens == 0)
+        return;
     if (repetition_penalty == 1.0f && frequency_penalty == 0.0f && presence_penalty == 0.0f)
         return;
 
     int blocks = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    apply_penalties_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
-        logits, token_ids, n_tokens, vocab_size,
-        repetition_penalty, frequency_penalty, presence_penalty);
+    apply_penalties_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(logits, token_ids, n_tokens, vocab_size,
+                                                              repetition_penalty, frequency_penalty,
+                                                              presence_penalty);
 }
 
-void apply_penalties_device_count(float* logits, int vocab_size,
-                                  const int32_t* token_ids,
-                                  const int* d_n_tokens,
-                                  int repeat_last_n,
-                                  float repetition_penalty,
-                                  float frequency_penalty,
-                                  float presence_penalty,
-                                  cudaStream_t stream) {
+void apply_penalties_device_count(float* logits, int vocab_size, const int32_t* token_ids,
+                                  const int* d_n_tokens, int repeat_last_n, float repetition_penalty,
+                                  float frequency_penalty, float presence_penalty, cudaStream_t stream) {
     if (repetition_penalty == 1.0f && frequency_penalty == 0.0f && presence_penalty == 0.0f)
         return;
 
     int blocks = (vocab_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    apply_penalties_device_count_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
-        logits, token_ids, d_n_tokens, vocab_size, repeat_last_n,
-        repetition_penalty, frequency_penalty, presence_penalty);
+    apply_penalties_device_count_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(logits, token_ids, d_n_tokens,
+                                                                           vocab_size, repeat_last_n,
+                                                                           repetition_penalty,
+                                                                           frequency_penalty,
+                                                                           presence_penalty);
 }
 
 // ===========================================================================
@@ -1115,10 +1103,7 @@ void apply_penalties_device_count(float* logits, int vocab_size,
 // Single-kernel min_p: finds max logit via cooperative reduction, then
 // filters tokens in logit space.  threshold = max_logit + log(min_p).
 // No host sync or temp allocation needed.
-__global__ void apply_min_p_kernel(
-        float* __restrict__ logits,
-        int vocab_size,
-        float log_min_p) {
+__global__ void apply_min_p_kernel(float* __restrict__ logits, int vocab_size, float log_min_p) {
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     __shared__ float s_max[NUM_WARPS];
     __shared__ float s_threshold;
@@ -1129,17 +1114,20 @@ __global__ void apply_min_p_kernel(
     float local_max = -FLT_MAX;
     for (int i = tid; i < vocab_size; i += blockDim.x) {
         float v = logits[i];
-        if (v > local_max) local_max = v;
+        if (v > local_max)
+            local_max = v;
     }
     local_max = warp_reduce_max(local_max);
     int warp_id = tid / WARP_SIZE;
     int lane_id = tid % WARP_SIZE;
-    if (lane_id == 0) s_max[warp_id] = local_max;
+    if (lane_id == 0)
+        s_max[warp_id] = local_max;
     __syncthreads();
     if (tid == 0) {
         float mx = -FLT_MAX;
         for (int w = 0; w < NUM_WARPS; w++)
-            if (s_max[w] > mx) mx = s_max[w];
+            if (s_max[w] > mx)
+                mx = s_max[w];
         s_threshold = mx + log_min_p;
     }
     __syncthreads();
@@ -1152,13 +1140,12 @@ __global__ void apply_min_p_kernel(
     }
 }
 
-void apply_min_p(float* logits, int vocab_size, float min_p,
-                 cudaStream_t stream) {
-    if (min_p <= 0.0f) return;
+void apply_min_p(float* logits, int vocab_size, float min_p, cudaStream_t stream) {
+    if (min_p <= 0.0f)
+        return;
 
     float log_min_p = logf(min_p);
-    apply_min_p_kernel<<<1, BLOCK_SIZE, 0, stream>>>(
-        logits, vocab_size, log_min_p);
+    apply_min_p_kernel<<<1, BLOCK_SIZE, 0, stream>>>(logits, vocab_size, log_min_p);
 }
 
 // ===========================================================================
@@ -1170,30 +1157,26 @@ void apply_min_p(float* logits, int vocab_size, float min_p,
 // pre-allocate them at engine init time and avoid cudaStreamSynchronize on
 // first use during inference.
 static int32_t* s_dry_tokens_buf = nullptr;
-static float*   s_dry_values_buf = nullptr;
-static size_t   s_dry_buf_cap    = 0;
+static float* s_dry_values_buf = nullptr;
+static size_t s_dry_buf_cap = 0;
 
 // Sparse penalty application kernel: subtracts penalty from each listed token.
-__global__ void apply_dry_sparse_kernel(
-        float* __restrict__ logits,
-        const int32_t* __restrict__ penalty_tokens,
-        const float* __restrict__ penalty_values,
-        int n_penalties) {
+__global__ void apply_dry_sparse_kernel(float* __restrict__ logits,
+                                        const int32_t* __restrict__ penalty_tokens,
+                                        const float* __restrict__ penalty_values, int n_penalties) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n_penalties) {
         logits[penalty_tokens[idx]] -= penalty_values[idx];
     }
 }
 
-void apply_dry_penalty(float* d_logits, int vocab_size,
-                       const int32_t* host_token_ids, int n_tokens,
-                       float multiplier, float base,
-                       int allowed_length, int penalty_last_n,
+void apply_dry_penalty(float* d_logits, int vocab_size, const int32_t* host_token_ids, int n_tokens,
+                       float multiplier, float base, int allowed_length, int penalty_last_n,
                        cudaStream_t stream) {
-    if (multiplier <= 0.0f || n_tokens < 2) return;
+    if (multiplier <= 0.0f || n_tokens < 2)
+        return;
 
-    int search_start = (penalty_last_n > 0)
-        ? std::max(0, n_tokens - penalty_last_n) : 0;
+    int search_start = (penalty_last_n > 0) ? std::max(0, n_tokens - penalty_last_n) : 0;
 
     // CPU: scan history for suffix matches, compute max match length per token.
     // Use a flat array indexed by token ID (no heap allocation) instead of unordered_map.
@@ -1209,8 +1192,7 @@ void apply_dry_penalty(float* d_logits, int vocab_size,
         int match_len = 0;
         int a = pos - 1;
         int b = n_tokens - 1;
-        while (a >= search_start && b >= 0 &&
-               host_token_ids[a] == host_token_ids[b]) {
+        while (a >= search_start && b >= 0 && host_token_ids[a] == host_token_ids[b]) {
             match_len++;
             a--;
             b--;
@@ -1219,14 +1201,16 @@ void apply_dry_penalty(float* d_logits, int vocab_size,
         if (match_len > allowed_length) {
             int32_t token = host_token_ids[pos];
             if (token >= 0 && token < vocab_size) {
-                if (match_buf[token] == 0) touched_tokens.push_back(token);
+                if (match_buf[token] == 0)
+                    touched_tokens.push_back(token);
                 if (match_len > match_buf[token])
                     match_buf[token] = match_len;
             }
         }
     }
 
-    if (touched_tokens.empty()) return;
+    if (touched_tokens.empty())
+        return;
 
     // Build sparse penalty arrays
     int n = static_cast<int>(touched_tokens.size());
@@ -1235,8 +1219,7 @@ void apply_dry_penalty(float* d_logits, int vocab_size,
     for (int i = 0; i < n; i++) {
         int32_t tok = touched_tokens[i];
         h_tokens[i] = tok;
-        h_values[i] = multiplier * std::pow(base,
-            static_cast<float>(match_buf[tok] - allowed_length));
+        h_values[i] = multiplier * std::pow(base, static_cast<float>(match_buf[tok] - allowed_length));
         match_buf[tok] = 0;  // sparse clear
     }
 
@@ -1246,16 +1229,24 @@ void apply_dry_penalty(float* d_logits, int vocab_size,
     if (needed > s_dry_buf_cap) {
         // Grow buffers (sync stream first to ensure previous work is done)
         cudaStreamSynchronize(stream);
-        if (s_dry_tokens_buf) IMP_CUDA_CHECK_LOG(cudaFree(s_dry_tokens_buf));
-        if (s_dry_values_buf) IMP_CUDA_CHECK_LOG(cudaFree(s_dry_values_buf));
+        if (s_dry_tokens_buf)
+            IMP_CUDA_CHECK_LOG(cudaFree(s_dry_tokens_buf));
+        if (s_dry_values_buf)
+            IMP_CUDA_CHECK_LOG(cudaFree(s_dry_values_buf));
         // Over-allocate to reduce future reallocations
         size_t new_cap = std::max(needed, s_dry_buf_cap * 2);
         new_cap = std::max(new_cap, static_cast<size_t>(256));
         if (cudaMalloc(&s_dry_tokens_buf, new_cap * sizeof(int32_t)) != cudaSuccess ||
             cudaMalloc(&s_dry_values_buf, new_cap * sizeof(float)) != cudaSuccess) {
             IMP_LOG_ERROR("apply_dry_penalty: cudaMalloc failed");
-            if (s_dry_tokens_buf) { IMP_CUDA_CHECK_LOG(cudaFree(s_dry_tokens_buf)); s_dry_tokens_buf = nullptr; }
-            if (s_dry_values_buf) { IMP_CUDA_CHECK_LOG(cudaFree(s_dry_values_buf)); s_dry_values_buf = nullptr; }
+            if (s_dry_tokens_buf) {
+                IMP_CUDA_CHECK_LOG(cudaFree(s_dry_tokens_buf));
+                s_dry_tokens_buf = nullptr;
+            }
+            if (s_dry_values_buf) {
+                IMP_CUDA_CHECK_LOG(cudaFree(s_dry_values_buf));
+                s_dry_values_buf = nullptr;
+            }
             s_dry_buf_cap = 0;
             return;
         }
@@ -1263,13 +1254,12 @@ void apply_dry_penalty(float* d_logits, int vocab_size,
     }
 
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_dry_tokens_buf, h_tokens.data(), n * sizeof(int32_t),
-                    cudaMemcpyHostToDevice, stream));
+                                       cudaMemcpyHostToDevice, stream));
     IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(s_dry_values_buf, h_values.data(), n * sizeof(float),
-                    cudaMemcpyHostToDevice, stream));
+                                       cudaMemcpyHostToDevice, stream));
 
     int grid = (n + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    apply_dry_sparse_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
-        d_logits, s_dry_tokens_buf, s_dry_values_buf, n);
+    apply_dry_sparse_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(d_logits, s_dry_tokens_buf, s_dry_values_buf, n);
 }
 
 // ===========================================================================
@@ -1280,11 +1270,7 @@ void apply_dry_penalty(float* d_logits, int vocab_size,
 // and filters tokens with deviation > threshold.
 static constexpr int TYPICAL_NBUCKETS = 256;
 
-__global__ void apply_typical_p_kernel(
-        float* __restrict__ logits,
-        int vocab_size,
-        float typical_p) {
-
+__global__ void apply_typical_p_kernel(float* __restrict__ logits, int vocab_size, float typical_p) {
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     __shared__ float s_warp[NUM_WARPS];
     __shared__ float s_max, s_sum, s_entropy, s_max_dev, s_threshold;
@@ -1299,11 +1285,13 @@ __global__ void apply_typical_p_kernel(
     for (int i = tid; i < vocab_size; i += blockDim.x)
         local_max = fmaxf(local_max, logits[i]);
     local_max = warp_reduce_max(local_max);
-    if (lane_id == 0) s_warp[warp_id] = local_max;
+    if (lane_id == 0)
+        s_warp[warp_id] = local_max;
     __syncthreads();
     if (tid == 0) {
         float mx = -FLT_MAX;
-        for (int w = 0; w < NUM_WARPS; w++) mx = fmaxf(mx, s_warp[w]);
+        for (int w = 0; w < NUM_WARPS; w++)
+            mx = fmaxf(mx, s_warp[w]);
         s_max = mx;
     }
     __syncthreads();
@@ -1314,31 +1302,36 @@ __global__ void apply_typical_p_kernel(
     for (int i = tid; i < vocab_size; i += blockDim.x)
         local_sum += expf(logits[i] - gmax);
     local_sum = warp_reduce_sum(local_sum);
-    if (lane_id == 0) s_warp[warp_id] = local_sum;
+    if (lane_id == 0)
+        s_warp[warp_id] = local_sum;
     __syncthreads();
     if (tid == 0) {
         float sm = 0.0f;
-        for (int w = 0; w < NUM_WARPS; w++) sm += s_warp[w];
+        for (int w = 0; w < NUM_WARPS; w++)
+            sm += s_warp[w];
         s_sum = sm;
     }
     __syncthreads();
 
     float sum_exp = s_sum;
     float log_sum_exp = gmax + logf(sum_exp);
-    float inv_log2 = 1.4426950408889634f; // 1/ln(2)
+    float inv_log2 = 1.4426950408889634f;  // 1/ln(2)
 
     // --- Pass 3: entropy H = -sum(p_i * log2(p_i)) ---
     float local_ent = 0.0f;
     for (int i = tid; i < vocab_size; i += blockDim.x) {
         float p = expf(logits[i] - gmax) / sum_exp;
-        if (p > 1e-30f) local_ent -= p * log2f(p);
+        if (p > 1e-30f)
+            local_ent -= p * log2f(p);
     }
     local_ent = warp_reduce_sum(local_ent);
-    if (lane_id == 0) s_warp[warp_id] = local_ent;
+    if (lane_id == 0)
+        s_warp[warp_id] = local_ent;
     __syncthreads();
     if (tid == 0) {
         float e = 0.0f;
-        for (int w = 0; w < NUM_WARPS; w++) e += s_warp[w];
+        for (int w = 0; w < NUM_WARPS; w++)
+            e += s_warp[w];
         s_entropy = e;
     }
     __syncthreads();
@@ -1351,11 +1344,13 @@ __global__ void apply_typical_p_kernel(
         local_md = fmaxf(local_md, fabsf(surprise - H));
     }
     local_md = warp_reduce_max(local_md);
-    if (lane_id == 0) s_warp[warp_id] = local_md;
+    if (lane_id == 0)
+        s_warp[warp_id] = local_md;
     __syncthreads();
     if (tid == 0) {
         float md = 0.0f;
-        for (int w = 0; w < NUM_WARPS; w++) md = fmaxf(md, s_warp[w]);
+        for (int w = 0; w < NUM_WARPS; w++)
+            md = fmaxf(md, s_warp[w]);
         s_max_dev = md;
     }
     __syncthreads();
@@ -1366,8 +1361,7 @@ __global__ void apply_typical_p_kernel(
         s_buckets[b] = 0.0f;
     __syncthreads();
 
-    float bucket_scale = (s_max_dev > 1e-8f)
-        ? (static_cast<float>(TYPICAL_NBUCKETS) / s_max_dev) : 1.0f;
+    float bucket_scale = (s_max_dev > 1e-8f) ? (static_cast<float>(TYPICAL_NBUCKETS) / s_max_dev) : 1.0f;
 
     for (int i = tid; i < vocab_size; i += blockDim.x) {
         float surprise = -(logits[i] - log_sum_exp) * inv_log2;
@@ -1381,7 +1375,7 @@ __global__ void apply_typical_p_kernel(
     // --- Pass 6: scan histogram to find threshold (thread 0) ---
     if (tid == 0) {
         float cum = 0.0f;
-        s_threshold = s_max_dev + 1.0f; // default: keep all
+        s_threshold = s_max_dev + 1.0f;  // default: keep all
         for (int b = 0; b < TYPICAL_NBUCKETS; b++) {
             cum += s_buckets[b];
             if (cum >= typical_p) {
@@ -1398,16 +1392,16 @@ __global__ void apply_typical_p_kernel(
     for (int i = tid; i < vocab_size; i += blockDim.x) {
         float surprise = -(logits[i] - log_sum_exp) * inv_log2;
         float dev = fabsf(surprise - H);
-        if (dev > thr) logits[i] = -FLT_MAX;
+        if (dev > thr)
+            logits[i] = -FLT_MAX;
     }
 }
 
-void apply_typical_p(float* logits, int vocab_size, float typical_p,
-                     cudaStream_t stream) {
-    if (typical_p <= 0.0f || typical_p >= 1.0f) return;
+void apply_typical_p(float* logits, int vocab_size, float typical_p, cudaStream_t stream) {
+    if (typical_p <= 0.0f || typical_p >= 1.0f)
+        return;
 
-    apply_typical_p_kernel<<<1, BLOCK_SIZE, 0, stream>>>(
-        logits, vocab_size, typical_p);
+    apply_typical_p_kernel<<<1, BLOCK_SIZE, 0, stream>>>(logits, vocab_size, typical_p);
 }
 
 // ===========================================================================
@@ -1416,15 +1410,9 @@ void apply_typical_p(float* logits, int vocab_size, float typical_p,
 
 // Single-block kernel: computes log-sum-exp, filters by surprise threshold,
 // samples from filtered set, and outputs token + surprise.
-__global__ void mirostat_v2_sample_kernel(
-        const float* __restrict__ logits,
-        int vocab_size,
-        float mu,
-        float inv_temperature,
-        unsigned int seed,
-        int32_t* __restrict__ d_result,
-        float* __restrict__ d_surprise) {
-
+__global__ void mirostat_v2_sample_kernel(const float* __restrict__ logits, int vocab_size, float mu,
+                                          float inv_temperature, unsigned int seed,
+                                          int32_t* __restrict__ d_result, float* __restrict__ d_surprise) {
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     __shared__ float s_warp[NUM_WARPS];
     __shared__ float s_max;
@@ -1441,12 +1429,14 @@ __global__ void mirostat_v2_sample_kernel(
         local_max = fmaxf(local_max, logits[i]);
 
     local_max = warp_reduce_max(local_max);
-    if (lane_id == 0) s_warp[warp_id] = local_max;
+    if (lane_id == 0)
+        s_warp[warp_id] = local_max;
     __syncthreads();
 
     if (tid == 0) {
         float mx = -FLT_MAX;
-        for (int w = 0; w < NUM_WARPS; w++) mx = fmaxf(mx, s_warp[w]);
+        for (int w = 0; w < NUM_WARPS; w++)
+            mx = fmaxf(mx, s_warp[w]);
         s_max = mx;
     }
     __syncthreads();
@@ -1458,12 +1448,14 @@ __global__ void mirostat_v2_sample_kernel(
         local_sum += expf((logits[i] - gmax) * inv_temperature);
 
     local_sum = warp_reduce_sum(local_sum);
-    if (lane_id == 0) s_warp[warp_id] = local_sum;
+    if (lane_id == 0)
+        s_warp[warp_id] = local_sum;
     __syncthreads();
 
     if (tid == 0) {
         float sm = 0.0f;
-        for (int w = 0; w < NUM_WARPS; w++) sm += s_warp[w];
+        for (int w = 0; w < NUM_WARPS; w++)
+            sm += s_warp[w];
         s_sum = sm;
     }
     __syncthreads();
@@ -1485,12 +1477,14 @@ __global__ void mirostat_v2_sample_kernel(
     }
 
     local_fsum = warp_reduce_sum(local_fsum);
-    if (lane_id == 0) s_warp[warp_id] = local_fsum;
+    if (lane_id == 0)
+        s_warp[warp_id] = local_fsum;
     __syncthreads();
 
     if (tid == 0) {
         float fs = 0.0f;
-        for (int w = 0; w < NUM_WARPS; w++) fs += s_warp[w];
+        for (int w = 0; w < NUM_WARPS; w++)
+            fs += s_warp[w];
         // Fallback: if no tokens pass threshold, use entire distribution
         s_fsum = (fs > 0.0f) ? fs : s_sum;
     }
@@ -1526,7 +1520,10 @@ __global__ void mirostat_v2_sample_kernel(
         if (!found) {
             float best = -FLT_MAX;
             for (int i = 0; i < vocab_size; i++) {
-                if (logits[i] > best) { best = logits[i]; chosen = i; }
+                if (logits[i] > best) {
+                    best = logits[i];
+                    chosen = i;
+                }
             }
         }
 
@@ -1539,34 +1536,32 @@ __global__ void mirostat_v2_sample_kernel(
     }
 }
 
-static int32_t sample_mirostat_v2_impl(
-        const Tensor& logits, float temperature,
-        float tau, float eta, float* mu,
-        unsigned int seed, int32_t* d_result, bool owns_result,
-        cudaStream_t stream) {
-
+static int32_t sample_mirostat_v2_impl(const Tensor& logits, float temperature, float tau, float eta,
+                                       float* mu, unsigned int seed, int32_t* d_result, bool owns_result,
+                                       cudaStream_t stream) {
     const int vocab_size = static_cast<int>(logits.shape[0]);
     const float* d_logits = static_cast<const float*>(logits.data);
 
-    if (temperature <= 0.0f) temperature = 1.0f;
+    if (temperature <= 0.0f)
+        temperature = 1.0f;
     float inv_temperature = 1.0f / temperature;
 
     // Surprise value stored right after the token result
     float* d_surprise = reinterpret_cast<float*>(d_result + 1);
 
-    mirostat_v2_sample_kernel<<<1, BLOCK_SIZE, 0, stream>>>(
-        d_logits, vocab_size, *mu, inv_temperature, seed, d_result, d_surprise);
+    mirostat_v2_sample_kernel<<<1, BLOCK_SIZE, 0, stream>>>(d_logits, vocab_size, *mu, inv_temperature, seed,
+                                                            d_result, d_surprise);
 
     // Read results
     int32_t h_result = 0;
     float h_surprise = 0.0f;
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t),
-                    cudaMemcpyDeviceToHost, stream));
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_surprise, d_surprise, sizeof(float),
-                    cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(&h_result, d_result, sizeof(int32_t), cudaMemcpyDeviceToHost, stream));
+    IMP_CUDA_CHECK_LOG(
+        cudaMemcpyAsync(&h_surprise, d_surprise, sizeof(float), cudaMemcpyDeviceToHost, stream));
     cudaStreamSynchronize(stream);
 
-    if (owns_result) IMP_CUDA_CHECK_LOG(cudaFree(d_result));
+    if (owns_result)
+        IMP_CUDA_CHECK_LOG(cudaFree(d_result));
 
     // Update mu: mu = mu - eta * (surprise - tau)
     *mu = *mu - eta * (h_surprise - tau);
@@ -1574,8 +1569,7 @@ static int32_t sample_mirostat_v2_impl(
     return h_result;
 }
 
-int32_t sample_mirostat_v2(const Tensor& logits, float temperature,
-                           float tau, float eta, float* mu,
+int32_t sample_mirostat_v2(const Tensor& logits, float temperature, float tau, float eta, float* mu,
                            unsigned int seed, cudaStream_t stream) {
     // Allocate temp buffer: 4 bytes for token + 4 bytes for surprise
     int32_t* d_result = nullptr;
@@ -1583,29 +1577,25 @@ int32_t sample_mirostat_v2(const Tensor& logits, float temperature,
         IMP_LOG_ERROR("sample_mirostat_v2: cudaMalloc failed");
         return 0;
     }
-    return sample_mirostat_v2_impl(logits, temperature, tau, eta, mu,
-                                    seed, d_result, true, stream);
+    return sample_mirostat_v2_impl(logits, temperature, tau, eta, mu, seed, d_result, true, stream);
 }
 
-int32_t sample_mirostat_v2(const Tensor& logits, float temperature,
-                           float tau, float eta, float* mu,
-                           unsigned int seed, int32_t* d_result,
-                           cudaStream_t stream) {
-    return sample_mirostat_v2_impl(logits, temperature, tau, eta, mu,
-                                    seed, d_result, false, stream);
+int32_t sample_mirostat_v2(const Tensor& logits, float temperature, float tau, float eta, float* mu,
+                           unsigned int seed, int32_t* d_result, cudaStream_t stream) {
+    return sample_mirostat_v2_impl(logits, temperature, tau, eta, mu, seed, d_result, false, stream);
 }
 
 // ============================================================================
 // CPU-side logprob computation
 // ============================================================================
 
-void compute_logprobs_cpu(const float* logits, int vocab_size,
-                          int32_t sampled_token, int top_n,
+void compute_logprobs_cpu(const float* logits, int vocab_size, int32_t sampled_token, int top_n,
                           LogprobResult* out) {
     // 1. Find max for numerical stability
     float max_val = -FLT_MAX;
     for (int i = 0; i < vocab_size; i++) {
-        if (logits[i] > max_val) max_val = logits[i];
+        if (logits[i] > max_val)
+            max_val = logits[i];
     }
 
     // 2. Compute log-sum-exp
@@ -1620,7 +1610,8 @@ void compute_logprobs_cpu(const float* logits, int vocab_size,
 
     // 4. Top-N via partial sort with min-heap
     out->top.clear();
-    if (top_n <= 0) return;
+    if (top_n <= 0)
+        return;
 
     // Use a simple approach: collect all (logprob, token) and partial sort
     // For vocab ~150K and top_n <= 20, this is fast enough (~0.3ms)
@@ -1642,20 +1633,16 @@ void compute_logprobs_cpu(const float* logits, int vocab_size,
                 return a.logprob > b.logprob;  // min-heap: smallest logprob at top
             });
         } else if (lp > heap[0].logprob) {
-            std::pop_heap(heap.begin(), heap.end(), [](const Entry& a, const Entry& b) {
-                return a.logprob > b.logprob;
-            });
+            std::pop_heap(heap.begin(), heap.end(),
+                          [](const Entry& a, const Entry& b) { return a.logprob > b.logprob; });
             heap.back() = {lp, i};
-            std::push_heap(heap.begin(), heap.end(), [](const Entry& a, const Entry& b) {
-                return a.logprob > b.logprob;
-            });
+            std::push_heap(heap.begin(), heap.end(),
+                           [](const Entry& a, const Entry& b) { return a.logprob > b.logprob; });
         }
     }
 
     // Sort descending by logprob
-    std::sort(heap.begin(), heap.end(), [](const Entry& a, const Entry& b) {
-        return a.logprob > b.logprob;
-    });
+    std::sort(heap.begin(), heap.end(), [](const Entry& a, const Entry& b) { return a.logprob > b.logprob; });
 
     out->top.reserve(heap.size());
     for (const auto& e : heap) {
@@ -1664,20 +1651,34 @@ void compute_logprobs_cpu(const float* logits, int vocab_size,
 }
 
 void sampling_preallocate_dry(int max_seq_len, cudaStream_t /*stream*/) {
-    if (max_seq_len <= 0) return;
+    if (max_seq_len <= 0)
+        return;
     size_t cap = static_cast<size_t>(max_seq_len);
-    if (cap <= s_dry_buf_cap) return;  // already large enough
+    if (cap <= s_dry_buf_cap)
+        return;  // already large enough
 
     // Free existing (if any) before re-allocating
-    if (s_dry_tokens_buf) { cudaFree(s_dry_tokens_buf); s_dry_tokens_buf = nullptr; }
-    if (s_dry_values_buf) { cudaFree(s_dry_values_buf); s_dry_values_buf = nullptr; }
+    if (s_dry_tokens_buf) {
+        cudaFree(s_dry_tokens_buf);
+        s_dry_tokens_buf = nullptr;
+    }
+    if (s_dry_values_buf) {
+        cudaFree(s_dry_values_buf);
+        s_dry_values_buf = nullptr;
+    }
     s_dry_buf_cap = 0;
 
     if (cudaMalloc(&s_dry_tokens_buf, cap * sizeof(int32_t)) != cudaSuccess ||
         cudaMalloc(&s_dry_values_buf, cap * sizeof(float)) != cudaSuccess) {
         IMP_LOG_ERROR("sampling_preallocate_dry: cudaMalloc failed for %zu elements", cap);
-        if (s_dry_tokens_buf) { cudaFree(s_dry_tokens_buf); s_dry_tokens_buf = nullptr; }
-        if (s_dry_values_buf) { cudaFree(s_dry_values_buf); s_dry_values_buf = nullptr; }
+        if (s_dry_tokens_buf) {
+            cudaFree(s_dry_tokens_buf);
+            s_dry_tokens_buf = nullptr;
+        }
+        if (s_dry_values_buf) {
+            cudaFree(s_dry_values_buf);
+            s_dry_values_buf = nullptr;
+        }
         return;
     }
     s_dry_buf_cap = cap;
@@ -1686,9 +1687,15 @@ void sampling_preallocate_dry(int max_seq_len, cudaStream_t /*stream*/) {
 
 void sampling_cleanup() {
     s_cub_scratch.free();
-    if (s_dry_tokens_buf) { cudaFree(s_dry_tokens_buf); s_dry_tokens_buf = nullptr; }
-    if (s_dry_values_buf) { cudaFree(s_dry_values_buf); s_dry_values_buf = nullptr; }
+    if (s_dry_tokens_buf) {
+        cudaFree(s_dry_tokens_buf);
+        s_dry_tokens_buf = nullptr;
+    }
+    if (s_dry_values_buf) {
+        cudaFree(s_dry_values_buf);
+        s_dry_values_buf = nullptr;
+    }
     s_dry_buf_cap = 0;
 }
 
-} // namespace imp
+}  // namespace imp

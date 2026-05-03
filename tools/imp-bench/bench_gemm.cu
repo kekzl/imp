@@ -12,7 +12,7 @@
 namespace imp {
 
 static constexpr int kWarmupIters = 5;
-static constexpr int kTimedIters  = 20;
+static constexpr int kTimedIters = 20;
 
 struct GemmSize {
     int64_t M;
@@ -22,10 +22,10 @@ struct GemmSize {
 };
 
 static const GemmSize kSizes[] = {
-    {    1, 4096,  4096, "M=1, N=4096, K=4096"      },  // GEMV-like, single token
-    {  128, 4096,  4096, "M=128, N=4096, K=4096"     },  // prefill batch
-    { 4096, 4096,  4096, "M=4096, N=4096, K=4096"    },  // peak compute
-    {   32, 11008, 4096, "M=32, N=11008, K=4096"     },  // Llama FFN gate/up
+    {1, 4096, 4096, "M=1, N=4096, K=4096"},        // GEMV-like, single token
+    {128, 4096, 4096, "M=128, N=4096, K=4096"},    // prefill batch
+    {4096, 4096, 4096, "M=4096, N=4096, K=4096"},  // peak compute
+    {32, 11008, 4096, "M=32, N=11008, K=4096"},    // Llama FFN gate/up
 };
 static constexpr int kNumSizes = sizeof(kSizes) / sizeof(kSizes[0]);
 
@@ -54,12 +54,14 @@ static float bench_fp16_gemm(const GemmSize& sz) {
     size_t bytes_C = static_cast<size_t>(M * N) * sizeof(half);
 
     void *d_A = nullptr, *d_B = nullptr, *d_C = nullptr;
-    if (cudaMalloc(&d_A, bytes_A) != cudaSuccess ||
-        cudaMalloc(&d_B, bytes_B) != cudaSuccess ||
+    if (cudaMalloc(&d_A, bytes_A) != cudaSuccess || cudaMalloc(&d_B, bytes_B) != cudaSuccess ||
         cudaMalloc(&d_C, bytes_C) != cudaSuccess) {
-        if (d_A) cudaFree(d_A);
-        if (d_B) cudaFree(d_B);
-        if (d_C) cudaFree(d_C);
+        if (d_A)
+            cudaFree(d_A);
+        if (d_B)
+            cudaFree(d_B);
+        if (d_C)
+            cudaFree(d_C);
         fprintf(stderr, "bench_fp16_gemm: cudaMalloc failed for M=%ld N=%ld K=%ld\n", M, N, K);
         return -1.0f;
     }
@@ -152,10 +154,10 @@ static float bench_int4_gemm(const GemmSize& sz) {
     cudaMemset(d_C, 0, bytes_C);
 
     // Build tensor descriptors
-    int64_t shape_A[]      = {M, K};
-    int64_t shape_Bq[]     = {N, K_packed};
+    int64_t shape_A[] = {M, K};
+    int64_t shape_Bq[] = {N, K_packed};
     int64_t shape_scales[] = {N, num_groups};
-    int64_t shape_C[]      = {M, N};
+    int64_t shape_C[] = {M, N};
 
     Tensor A(d_A, QType::F16, 2, shape_A, true);
     Tensor B_quant(d_Bq, QType::INT4, 2, shape_Bq, true);
@@ -226,4 +228,4 @@ void bench_gemm() {
     printf("\n");
 }
 
-} // namespace imp
+}  // namespace imp

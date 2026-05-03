@@ -1,9 +1,8 @@
 #include "tool_call.h"
 
-std::string build_tool_prompt(imp::ChatTemplateFamily family,
-                              const json& tools,
-                              const json& tool_choice) {
-    if (tools.empty()) return "";
+std::string build_tool_prompt(imp::ChatTemplateFamily family, const json& tools, const json& tool_choice) {
+    if (tools.empty())
+        return "";
 
     // tool_choice "none" means no tool injection
     if (tool_choice.is_string() && tool_choice.get<std::string>() == "none")
@@ -15,28 +14,31 @@ std::string build_tool_prompt(imp::ChatTemplateFamily family,
         // Llama3 function calling format
         prompt = "\n\nYou have access to the following functions:\n\n";
         for (const auto& tool : tools) {
-            if (!tool.contains("function")) continue;
+            if (!tool.contains("function"))
+                continue;
             const auto& fn = tool["function"];
-            json fn_desc = {
-                {"name", fn.value("name", "")},
-                {"description", fn.value("description", "")},
-                {"parameters", fn.value("parameters", json::object())}
-            };
+            json fn_desc = {{"name", fn.value("name", "")},
+                            {"description", fn.value("description", "")},
+                            {"parameters", fn.value("parameters", json::object())}};
             prompt += fn_desc.dump() + "\n\n";
         }
-        prompt += "For each function call, return a JSON object within <function=function_name> tags:\n"
-                  "<function=function_name>{\"param\": \"value\"}</function>\n\n"
-                  "If no function call is needed, respond normally without any function tags.";
+        prompt +=
+            "For each function call, return a JSON object within <function=function_name> tags:\n"
+            "<function=function_name>{\"param\": \"value\"}</function>\n\n"
+            "If no function call is needed, respond normally without any function tags.";
     } else {
         // ChatML (Qwen3, Hermes) and all other families — use <tool_call> format
-        prompt = "\n\n# Tools\n\n"
-                 "You may call one or more functions to assist with the user query.\n\n"
-                 "<tools>\n" + tools.dump() + "\n</tools>\n\n"
-                 "For each function call, return a JSON object within <tool_call></tool_call> XML tags:\n"
-                 "<tool_call>\n"
-                 "{\"name\": \"function_name\", \"arguments\": {\"param\": \"value\"}}\n"
-                 "</tool_call>\n\n"
-                 "If no function call is needed, respond normally without any tool_call tags.";
+        prompt =
+            "\n\n# Tools\n\n"
+            "You may call one or more functions to assist with the user query.\n\n"
+            "<tools>\n" +
+            tools.dump() +
+            "\n</tools>\n\n"
+            "For each function call, return a JSON object within <tool_call></tool_call> XML tags:\n"
+            "<tool_call>\n"
+            "{\"name\": \"function_name\", \"arguments\": {\"param\": \"value\"}}\n"
+            "</tool_call>\n\n"
+            "If no function call is needed, respond normally without any tool_call tags.";
     }
 
     // Add constraints based on tool_choice
@@ -55,8 +57,8 @@ std::string build_tool_prompt(imp::ChatTemplateFamily family,
     return prompt;
 }
 
-std::pair<std::string, std::vector<ParsedToolCall>>
-parse_tool_calls_chatml(const std::string& text, std::atomic<int>& next_tool_call_id) {
+std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_chatml(
+    const std::string& text, std::atomic<int>& next_tool_call_id) {
     std::vector<ParsedToolCall> calls;
     std::string content;
 
@@ -70,17 +72,21 @@ parse_tool_calls_chatml(const std::string& text, std::atomic<int>& next_tool_cal
     content = text.substr(0, first_tag);
     // Trim trailing whitespace
     auto last = content.find_last_not_of("\n\r\t ");
-    if (last != std::string::npos) content = content.substr(0, last + 1);
-    else content.clear();
+    if (last != std::string::npos)
+        content = content.substr(0, last + 1);
+    else
+        content.clear();
 
     pos = first_tag;
     while (pos < text.size()) {
         size_t start = text.find("<tool_call>", pos);
-        if (start == std::string::npos) break;
-        start += 11; // skip "<tool_call>"
+        if (start == std::string::npos)
+            break;
+        start += 11;  // skip "<tool_call>"
 
         size_t end = text.find("</tool_call>", start);
-        if (end == std::string::npos) break; // incomplete tag
+        if (end == std::string::npos)
+            break;  // incomplete tag
 
         std::string body = text.substr(start, end - start);
         // Trim whitespace
@@ -110,14 +116,14 @@ parse_tool_calls_chatml(const std::string& text, std::atomic<int>& next_tool_cal
             // Malformed JSON — skip
         }
 
-        pos = end + 12; // skip "</tool_call>"
+        pos = end + 12;  // skip "</tool_call>"
     }
 
     return {content, calls};
 }
 
-std::pair<std::string, std::vector<ParsedToolCall>>
-parse_tool_calls_llama3(const std::string& text, std::atomic<int>& next_tool_call_id) {
+std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls_llama3(
+    const std::string& text, std::atomic<int>& next_tool_call_id) {
     std::vector<ParsedToolCall> calls;
     std::string content;
 
@@ -128,23 +134,28 @@ parse_tool_calls_llama3(const std::string& text, std::atomic<int>& next_tool_cal
 
     content = text.substr(0, first_tag);
     auto last = content.find_last_not_of("\n\r\t ");
-    if (last != std::string::npos) content = content.substr(0, last + 1);
-    else content.clear();
+    if (last != std::string::npos)
+        content = content.substr(0, last + 1);
+    else
+        content.clear();
 
     size_t pos = first_tag;
     while (pos < text.size()) {
         size_t start = text.find("<function=", pos);
-        if (start == std::string::npos) break;
-        start += 10; // skip "<function="
+        if (start == std::string::npos)
+            break;
+        start += 10;  // skip "<function="
 
         size_t name_end = text.find('>', start);
-        if (name_end == std::string::npos) break;
+        if (name_end == std::string::npos)
+            break;
 
         std::string name = text.substr(start, name_end - start);
 
         size_t body_start = name_end + 1;
         size_t end = text.find("</function>", body_start);
-        if (end == std::string::npos) break;
+        if (end == std::string::npos)
+            break;
 
         std::string body = text.substr(body_start, end - body_start);
         auto bs = body.find_first_not_of("\n\r\t ");
@@ -164,22 +175,21 @@ parse_tool_calls_llama3(const std::string& text, std::atomic<int>& next_tool_cal
             // Malformed JSON — skip
         }
 
-        pos = end + 11; // skip "</function>"
+        pos = end + 11;  // skip "</function>"
     }
 
     return {content, calls};
 }
 
-std::pair<std::string, std::vector<ParsedToolCall>>
-parse_tool_calls(imp::ChatTemplateFamily family, const std::string& text,
-                 std::atomic<int>& next_tool_call_id) {
+std::pair<std::string, std::vector<ParsedToolCall>> parse_tool_calls(imp::ChatTemplateFamily family,
+                                                                     const std::string& text,
+                                                                     std::atomic<int>& next_tool_call_id) {
     if (family == imp::ChatTemplateFamily::LLAMA3)
         return parse_tool_calls_llama3(text, next_tool_call_id);
     return parse_tool_calls_chatml(text, next_tool_call_id);
 }
 
-std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family,
-                                         const json& tool_calls,
+std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family, const json& tool_calls,
                                          const std::string& content) {
     std::string result;
     if (!content.empty() && content != "null") {
@@ -187,7 +197,8 @@ std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family,
     }
 
     for (const auto& tc : tool_calls) {
-        if (!tc.contains("function")) continue;
+        if (!tc.contains("function"))
+            continue;
         std::string name = tc["function"].value("name", "");
         std::string args = tc["function"].value("arguments", "{}");
 
@@ -196,7 +207,8 @@ std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family,
         } else {
             // ChatML format
             json call_obj = {{"name", name}, {"arguments", json::parse(args, nullptr, false)}};
-            if (call_obj["arguments"].is_discarded()) call_obj["arguments"] = args;
+            if (call_obj["arguments"].is_discarded())
+                call_obj["arguments"] = args;
             result += "\n<tool_call>\n" + call_obj.dump() + "\n</tool_call>";
         }
     }
@@ -204,8 +216,7 @@ std::string reconstruct_tool_call_output(imp::ChatTemplateFamily family,
     return result;
 }
 
-std::string format_tool_response(imp::ChatTemplateFamily family,
-                                 const json& msg) {
+std::string format_tool_response(imp::ChatTemplateFamily family, const json& msg) {
     std::string content = msg.value("content", "");
     std::string tool_call_id = msg.value("tool_call_id", "");
 

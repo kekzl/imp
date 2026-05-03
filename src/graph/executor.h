@@ -52,18 +52,18 @@ struct ExpertLRUCache {
     // Each slot holds one expert's raw quantized bytes on GPU.
     // Slots are fixed-size (max_expert_raw bytes each).
     struct Slot {
-        void* gpu_ptr = nullptr;       // points into pool_
+        void* gpu_ptr = nullptr;  // points into pool_
         ExpertCacheKey key = {};
         bool occupied = false;
     };
 
-    void* pool_ = nullptr;             // contiguous GPU allocation for all slots
-    size_t slot_size_ = 0;             // bytes per slot (max expert raw size)
-    int n_slots_ = 0;                  // number of slots
-    std::vector<Slot> slots_;          // slot metadata
+    void* pool_ = nullptr;     // contiguous GPU allocation for all slots
+    size_t slot_size_ = 0;     // bytes per slot (max expert raw size)
+    int n_slots_ = 0;          // number of slots
+    std::vector<Slot> slots_;  // slot metadata
 
     // LRU tracking: front = most recently used, back = least recently used
-    std::list<int> lru_order_;         // slot indices in LRU order
+    std::list<int> lru_order_;  // slot indices in LRU order
     // Map from cache key to (slot_index, lru_iterator)
     using LRUIter = std::list<int>::iterator;
     std::unordered_map<ExpertCacheKey, std::pair<int, LRUIter>, ExpertCacheKeyHash> lookup_;
@@ -75,14 +75,12 @@ struct ExpertLRUCache {
 
     // Initialize: allocate n_slots * slot_size bytes on GPU.
     // Returns false if GPU allocation fails (cache disabled).
-    bool init(size_t max_expert_raw, size_t budget_bytes,
-              VRAMAllocator* alloc = nullptr);
+    bool init(size_t max_expert_raw, size_t budget_bytes, VRAMAllocator* alloc = nullptr);
 
     // Lookup or insert an expert. Returns GPU pointer to cached expert data.
     // If cache miss: copies from host, evicts LRU entry if needed.
     // src_host = host pointer to this expert's raw bytes.
-    void* get_or_load(ExpertCacheKey key, const void* src_host,
-                      size_t expert_bytes, cudaStream_t stream);
+    void* get_or_load(ExpertCacheKey key, const void* src_host, size_t expert_bytes, cudaStream_t stream);
 
     // Check if expert is cached (no insertion).
     void* find(ExpertCacheKey key);
@@ -101,24 +99,24 @@ struct VRAMBudget {
     enum Strategy { FP8_PREFILL_NVFP4_DECODE, NVFP4_DECODE_ONLY, FP16_ONLY };
     Strategy strategy = FP16_ONLY;
     size_t kv_cache_bytes = 0;
-    size_t fp8_cache_bytes = 0;       // 0 for sub-8-bit models
+    size_t fp8_cache_bytes = 0;  // 0 for sub-8-bit models
     size_t nvfp4_cache_bytes = 0;
     size_t reserve_bytes = 1024ULL * 1024 * 1024;  // 1 GiB safety
     int kv_max_blocks = 0;
-    bool nvfp4_second_pass = false;   // true → re-run NVFP4 after FP16-Free
+    bool nvfp4_second_pass = false;  // true → re-run NVFP4 after FP16-Free
 };
 
 // All the state needed for a single forward pass invocation.
 struct InferenceState {
     // Input tokens
-    const int32_t* token_ids = nullptr;   // [n_tokens] on device
-    const int* positions = nullptr;        // [n_tokens] on device
+    const int32_t* token_ids = nullptr;  // [n_tokens] on device
+    const int* positions = nullptr;      // [n_tokens] on device
     int n_tokens = 0;
 
     // KV cache for paged attention (decode)
     KVCache* kv_cache = nullptr;
-    const int* block_tables = nullptr;     // [n_sequences, max_blocks_per_seq] on device (2D padded)
-    const int* context_lens = nullptr;     // [n_sequences] on device
+    const int* block_tables = nullptr;  // [n_sequences, max_blocks_per_seq] on device (2D padded)
+    const int* context_lens = nullptr;  // [n_sequences] on device
     int max_context_len = 0;
 
     // SSM state for Mamba2 layers (nullptr for non-hybrid models)
@@ -130,9 +128,10 @@ struct InferenceState {
     int gdn_seq_id = 0;
 
     // Batching
-    int n_sequences = 1;                   // number of sequences in the batch
-    int max_blocks_per_seq = 0;            // max blocks per sequence (for 2D block_table indexing)
-    const int* seq_offsets = nullptr;      // [n_sequences+1] for ragged prefill token offsets (optional, nullptr for decode)
+    int n_sequences = 1;         // number of sequences in the batch
+    int max_blocks_per_seq = 0;  // max blocks per sequence (for 2D block_table indexing)
+    const int* seq_offsets =
+        nullptr;  // [n_sequences+1] for ragged prefill token offsets (optional, nullptr for decode)
 
     // Mode
     bool is_prefill = true;
@@ -143,23 +142,23 @@ struct InferenceState {
     int top_k = 0;
     int seed = -1;
     float min_p = 0.0f;
-    float typical_p = 1.0f;           // Locally typical sampling (1.0 = disabled)
+    float typical_p = 1.0f;  // Locally typical sampling (1.0 = disabled)
     float repetition_penalty = 1.0f;
     float frequency_penalty = 0.0f;
     float presence_penalty = 0.0f;
-    int repeat_last_n = 0;               // How many recent tokens to scan (0 = all)
+    int repeat_last_n = 0;  // How many recent tokens to scan (0 = all)
 
     // DRY (Don't Repeat Yourself) penalty
-    float dry_multiplier = 0.0f;     // 0 = disabled
+    float dry_multiplier = 0.0f;  // 0 = disabled
     float dry_base = 1.75f;
     int dry_allowed_length = 2;
-    int dry_penalty_last_n = 0;      // 0 = full history
+    int dry_penalty_last_n = 0;                    // 0 = full history
     const int32_t* host_penalty_tokens = nullptr;  // HOST pointer for DRY scanning
 
     // Mirostat v2 adaptive entropy sampling
-    int mirostat = 0;             // 0=off, 2=Mirostat v2
-    float mirostat_tau = 5.0f;    // Target entropy
-    float mirostat_eta = 0.1f;    // Learning rate
+    int mirostat = 0;                  // 0=off, 2=Mirostat v2
+    float mirostat_tau = 5.0f;         // Target entropy
+    float mirostat_eta = 0.1f;         // Learning rate
     mutable float mirostat_mu = 0.0f;  // Running variable (updated by sampling)
 
     // Token history for penalty computation (device pointer, owned by engine)
@@ -225,9 +224,9 @@ struct InferenceState {
 // FP8 weight cache entry (used by WeightCaches::fp8).
 // ---------------------------------------------------------------------------
 struct FP8CacheEntry {
-    Tensor weight;       // [N, K] FP8_E4M3 on device
-    float host_scale;    // absmax / 448
-    float* d_scale;      // device-side scale (1 float)
+    Tensor weight;     // [N, K] FP8_E4M3 on device
+    float host_scale;  // absmax / 448
+    float* d_scale;    // device-side scale (1 float)
 };
 
 // ---------------------------------------------------------------------------
@@ -304,11 +303,17 @@ public:
                             int use_nvfp4_decode = 0, bool use_mxfp4_prefill = false);
 
     // Disable FP8 weight cache (must be called before pre_dequant_weights).
-    void disable_fp8_prefill() { wcache_.use_fp8 = false; hints_.prefer_fp8 = false; }
+    void disable_fp8_prefill() {
+        wcache_.use_fp8 = false;
+        hints_.prefer_fp8 = false;
+    }
 
     // Enable dual-path quantization: attention weights stay FP8, FFN weights get NVFP4.
     // Must be called before pre_dequant_weights().
-    void set_dual_path_quant(bool enable) { wcache_.dual_path_quant = enable; hints_.dual_path_attn_fp8_ffn_nvfp4 = enable; }
+    void set_dual_path_quant(bool enable) {
+        wcache_.dual_path_quant = enable;
+        hints_.dual_path_attn_fp8_ffn_nvfp4 = enable;
+    }
 
     // Phase 2: Allocate all GPU workspace buffers.
     // Call AFTER weight upload to maximize VRAM available for expert layers.
@@ -327,26 +332,22 @@ public:
 
     // Run the forward pass but return raw logits instead of sampling.
     // logits_out will be a view into the internal logits buffer.
-    void forward_logits(const InferenceState& state, Tensor& logits_out,
-                        cudaStream_t stream = nullptr);
+    void forward_logits(const InferenceState& state, Tensor& logits_out, cudaStream_t stream = nullptr);
 
     // Sample tokens from pre-computed logits (for use after CUDA graph execution).
-    std::vector<int32_t> sample_from_logits(const Tensor& logits,
-                                             const InferenceState& state,
-                                             cudaStream_t stream = nullptr);
+    std::vector<int32_t> sample_from_logits(const Tensor& logits, const InferenceState& state,
+                                            cudaStream_t stream = nullptr);
 
     // Single-token sampling: returns one int32_t directly (avoids vector alloc).
     // Use for single-sequence decode where only one token is sampled.
-    int32_t sample_single_from_logits(const Tensor& logits,
-                                       const InferenceState& state,
-                                       cudaStream_t stream = nullptr);
+    int32_t sample_single_from_logits(const Tensor& logits, const InferenceState& state,
+                                      cudaStream_t stream = nullptr);
 
     // Async decode: runs forward pass reading token from device memory (d_token_id),
     // then samples and writes result back to d_token_id. No host-device sync.
     // h_mapped: mapped pinned memory for host-side token readback (polled async).
     // Returns immediately. Host reads *h_mapped to get the token.
-    void forward_decode_async(const InferenceState& state,
-                              int32_t* d_token_id, int32_t* h_mapped,
+    void forward_decode_async(const InferenceState& state, int32_t* d_token_id, int32_t* h_mapped,
                               cudaStream_t stream = nullptr);
 
     // Set centralized VRAM allocator for budget-tracked allocations.
@@ -364,7 +365,8 @@ public:
         // Count KV layers and initialize per-layer FP8 scale vectors
         int n_kv = 0;
         for (int idx : kv_layer_map_) {
-            if (idx >= 0) n_kv = std::max(n_kv, idx + 1);
+            if (idx >= 0)
+                n_kv = std::max(n_kv, idx + 1);
         }
         kv_scales_.assign(n_kv, 1.0f);
         kv_calibrated_.assign(n_kv, false);
@@ -430,10 +432,10 @@ public:
     // sliding-window attention.
     void set_streaming_kv(int n_sinks, int window) {
         streaming_n_sinks_ = (n_sinks > 0) ? n_sinks : 0;
-        streaming_window_  = (window  > 0) ? window  : 0;
+        streaming_window_ = (window > 0) ? window : 0;
     }
     int streaming_n_sinks() const { return streaming_n_sinks_; }
-    int streaming_window()  const { return streaming_window_; }
+    int streaming_window() const { return streaming_window_; }
 
     // Access the hidden state buffer after forward_logits().
     // Returns [max_tokens, d_model] FP16 on device. Use view_tokens() to get [n, d_model].
@@ -445,18 +447,18 @@ public:
 private:
     // StreamingLLM (sinks + window). 0 = disabled.
     int streaming_n_sinks_ = 0;
-    int streaming_window_  = 0;
+    int streaming_window_ = 0;
 
     class VRAMAllocator* vram_alloc_ = nullptr;
     const Model* model_ = nullptr;
     QType compute_dtype_ = QType::F16;
-    float norm_w_off_ = 0.0f;  // Gemma: 1.0 (norms use w+1 instead of w)
+    float norm_w_off_ = 0.0f;          // Gemma: 1.0 (norms use w+1 instead of w)
     void* v_norm_ones_buf_ = nullptr;  // Gemma 4: ones buffer for V-norm (no learned weight)
     bool initialized_ = false;
     int max_tokens_ = 0;
-    int max_logit_tokens_ = 0;  // max tokens needing LM head projection (= max_batch_size)
-    int cur_n_tokens_ = 0;  // set by forward_logits for use by run_ffn
-    int cur_decode_step_ = 0;  // set by forward_logits for debug dump tagging
+    int max_logit_tokens_ = 0;     // max tokens needing LM head projection (= max_batch_size)
+    int cur_n_tokens_ = 0;         // set by forward_logits for use by run_ffn
+    int cur_decode_step_ = 0;      // set by forward_logits for debug dump tagging
     bool cur_force_fp16_ = false;  // set by forward_logits, bypasses FP8 GEMM paths
     bool cur_per_row_lm_ = false;  // set by forward_logits, per-row Q8_1 LM head
 
@@ -469,10 +471,10 @@ private:
     size_t persistent_workspace_size_ = 0;
 
     // Persistent activation tensors (views into persistent_workspace_)
-    Tensor hidden_;        // [max_tokens, d_model] FP16
-    Tensor residual_;      // [max_tokens, d_model] FP16
-    Tensor norm_out_;      // [max_tokens, d_model] FP16
-    Tensor logits_;        // [max_logit_tokens, vocab_size]
+    Tensor hidden_;    // [max_tokens, d_model] FP16
+    Tensor residual_;  // [max_tokens, d_model] FP16
+    Tensor norm_out_;  // [max_tokens, d_model] FP16
+    Tensor logits_;    // [max_logit_tokens, vocab_size]
 
     // FP32 residual accumulator for post-norm architectures (Gemma-3).
     // Prevents FP16 overflow in the residual stream over many layers.
@@ -480,7 +482,7 @@ private:
     // used as input to RMSNorm (which is scale-invariant, so clamping is safe).
     // nullptr for pre-norm models (LLaMA, Qwen, etc.).
     void* fp32_accum_buf_ = nullptr;
-    Tensor fp32_hidden_;   // [max_tokens, d_model] FP32 — true hidden state
+    Tensor fp32_hidden_;  // [max_tokens, d_model] FP32 — true hidden state
 
     // --- Shared GPU workspace (reconfigured per layer phase) ---
     // Sized to max(attn_size, ffn_size, moe_size, ssm_size).
@@ -496,34 +498,34 @@ private:
     size_t ssm_shared_size_ = 0;
 
     // Attention phase tensors (views into shared_workspace_, set by configure_attn_workspace)
-    Tensor q_;             // [max_tokens, n_heads * head_dim]
-    Tensor k_;             // [max_tokens, n_kv_heads * head_dim]
-    Tensor v_;             // [max_tokens, n_kv_heads * head_dim]
-    Tensor attn_out_;      // [max_tokens, n_heads * head_dim]
-    Tensor proj_out_;      // [max_tokens, d_model]
+    Tensor q_;         // [max_tokens, n_heads * head_dim]
+    Tensor k_;         // [max_tokens, n_kv_heads * head_dim]
+    Tensor v_;         // [max_tokens, n_kv_heads * head_dim]
+    Tensor attn_out_;  // [max_tokens, n_heads * head_dim]
+    Tensor proj_out_;  // [max_tokens, d_model]
 
     // cuBLAS attention S-matrix workspace (separately allocated, not part of shared workspace).
     // [n_heads, max_tokens, max_tokens] FP16 — used only during prefill.
     void* attn_scores_buf_ = nullptr;
     size_t attn_scores_buf_size_ = 0;
-    Tensor attn_scores_;   // 3D tensor view into attn_scores_buf_
+    Tensor attn_scores_;  // 3D tensor view into attn_scores_buf_
 
     // Dense FFN phase tensors (views into shared_workspace_, set by configure_ffn_workspace)
-    Tensor gate_out_;      // [max_tokens, d_ff]
-    Tensor up_out_;        // [max_tokens, d_ff]
-    Tensor swiglu_out_;    // [max_tokens, d_ff]
-    Tensor ffn_out_;       // [max_tokens, d_model]
+    Tensor gate_out_;    // [max_tokens, d_ff]
+    Tensor up_out_;      // [max_tokens, d_ff]
+    Tensor swiglu_out_;  // [max_tokens, d_ff]
+    Tensor ffn_out_;     // [max_tokens, d_model]
 
     // MoE workspace (phase tensors + separately allocated buffers)
     MoEWorkspace moe_;
 
     // SSM phase tensors (views into shared_workspace_, set by configure_ssm_workspace)
-    Tensor ssm_proj_buf_;   // [max_tokens, ssm_in_dim] for ssm_in projection
-    Tensor ssm_xBC_buf_;    // [max_tokens, conv_channels] for conv output
-    Tensor ssm_y_buf_;      // [max_tokens, inner_size] for scan output
-    Tensor ssm_z_buf_;      // [max_tokens, inner_size] for gate
-    Tensor ssm_out_buf_;    // [max_tokens, d_model] for ssm_out projection
-    Tensor ssm_dt_buf_;     // [max_tokens, n_heads] for dt after split
+    Tensor ssm_proj_buf_;  // [max_tokens, ssm_in_dim] for ssm_in projection
+    Tensor ssm_xBC_buf_;   // [max_tokens, conv_channels] for conv output
+    Tensor ssm_y_buf_;     // [max_tokens, inner_size] for scan output
+    Tensor ssm_z_buf_;     // [max_tokens, inner_size] for gate
+    Tensor ssm_out_buf_;   // [max_tokens, d_model] for ssm_out projection
+    Tensor ssm_dt_buf_;    // [max_tokens, n_heads] for dt after split
 
     // --- Separately allocated buffers (not part of unified workspace) ---
 
@@ -560,25 +562,26 @@ private:
     std::vector<int> gdn_layer_map_;  // gdn_layer_map_[global_idx] = gdn_idx, or -1
 
     // Mapping from global layer index to KV cache layer index (for attention layers only)
-    std::vector<int> kv_layer_map_;   // kv_layer_map_[global_idx] = kv_idx, or -1
+    std::vector<int> kv_layer_map_;  // kv_layer_map_[global_idx] = kv_idx, or -1
 
     // Per-KV-layer FP8 scales for online calibration.
     // Scale = absmax / 448.0; used as inv_scale = 1/scale for write, scale for read.
-    std::vector<float> kv_scales_;       // [n_kv_layers] per-layer FP8 scale
-    std::vector<bool>  kv_calibrated_;   // [n_kv_layers] whether scale has been calibrated
+    std::vector<float> kv_scales_;     // [n_kv_layers] per-layer FP8 scale
+    std::vector<bool> kv_calibrated_;  // [n_kv_layers] whether scale has been calibrated
 
     // TurboQuant QJL projection matrix (shared across all layers, initialized once)
     QJLProjection qjl_proj_;
 
     // YaRN correction dimension boundaries [2], precomputed at init.
-    // yarn_corr_dims_[0] = start (full interpolation below), yarn_corr_dims_[1] = end (full extrapolation above)
+    // yarn_corr_dims_[0] = start (full interpolation below), yarn_corr_dims_[1] = end (full extrapolation
+    // above)
     float yarn_corr_dims_[2] = {0.0f, 0.0f};
 
     // LongRoPE pre-computed inverse frequencies (device memory)
     float* longrope_short_freqs_ = nullptr;  // [rope_pairs] device
-    float* longrope_long_freqs_  = nullptr;  // [rope_pairs] device
-    int    longrope_orig_max_pos_ = 0;
-    int    longrope_n_pairs_ = 0;
+    float* longrope_long_freqs_ = nullptr;   // [rope_pairs] device
+    int longrope_orig_max_pos_ = 0;
+    int longrope_n_pairs_ = 0;
 
     // --- Model feature flags (set during init for workspace computation) ---
     bool has_moe_ = false;
@@ -593,10 +596,10 @@ private:
     // Slot 0 (default): main workspace (prefill, sized for max_tokens)
     // Slot 1: decode workspace (sized for up to decode_max_batch_ tokens)
     void* decode_workspace_ = nullptr;         // persistent buf for decode
-    void* decode_shared_workspace_ = nullptr;   // shared buf for decode
+    void* decode_shared_workspace_ = nullptr;  // shared buf for decode
     size_t decode_persistent_size_ = 0;
     size_t decode_shared_size_ = 0;
-    int decode_max_batch_ = 1;                  // max decode batch size this workspace supports
+    int decode_max_batch_ = 1;  // max decode batch size this workspace supports
     int active_workspace_ = 0;
 
     // Saved prefill workspace pointers (restored when switching back)
@@ -619,7 +622,8 @@ private:
 
     [[nodiscard]] bool allocate_persistent_workspace(int max_tokens);
     [[nodiscard]] bool allocate_shared_workspace(int max_tokens);
-    void allocate_auxiliary_buffers(bool skip_batch_dequant = false);  // dequant scratch, MoE staging, routing buffers
+    void allocate_auxiliary_buffers(
+        bool skip_batch_dequant = false);  // dequant scratch, MoE staging, routing buffers
     void free_buffers();
 
     // Compute shared workspace sizes for each phase (stored in *_shared_size_ members)
@@ -653,4 +657,4 @@ private:
     Tensor view_tokens(const Tensor& buf, int n_tokens) const;
 };
 
-} // namespace imp
+}  // namespace imp

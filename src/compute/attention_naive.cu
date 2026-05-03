@@ -21,19 +21,18 @@ namespace imp {
 //   V[pos * n_kv_heads * hd + kv_head * hd + d]
 //   O[pos * n_heads * hd + head * hd + d]
 __global__ void naive_attention_prefill_kernel(
-    const half* __restrict__ Q,      // [seq_len, n_heads * head_dim]
-    const half* __restrict__ K,      // [seq_len, n_kv_heads * head_dim]
-    const half* __restrict__ V,      // [seq_len, n_kv_heads * head_dim]
-    half* __restrict__ O,            // [seq_len, n_heads * head_dim]
-    int seq_len, int n_heads, int n_kv_heads, int head_dim,
-    float scale, float softcap, int sliding_window)
-{
+    const half* __restrict__ Q,  // [seq_len, n_heads * head_dim]
+    const half* __restrict__ K,  // [seq_len, n_kv_heads * head_dim]
+    const half* __restrict__ V,  // [seq_len, n_kv_heads * head_dim]
+    half* __restrict__ O,        // [seq_len, n_heads * head_dim]
+    int seq_len, int n_heads, int n_kv_heads, int head_dim, float scale, float softcap, int sliding_window) {
     const int head = blockIdx.x;
     const int q_pos = blockIdx.y;
     const int tid = threadIdx.x;
     const int gqa_group = head / (n_heads / n_kv_heads);  // which KV head
 
-    if (head >= n_heads || q_pos >= seq_len) return;
+    if (head >= n_heads || q_pos >= seq_len)
+        return;
 
     // Pointers to this head's Q row and output row
     const half* q_row = Q + (int64_t)q_pos * n_heads * head_dim + head * head_dim;
@@ -83,7 +82,8 @@ __global__ void naive_attention_prefill_kernel(
     __shared__ float s_max_vals[8];  // up to 8 warps (256 threads)
     int warp_id = tid / 32;
     int lane = tid % 32;
-    if (lane == 0) s_max_vals[warp_id] = local_max;
+    if (lane == 0)
+        s_max_vals[warp_id] = local_max;
     __syncthreads();
     if (tid == 0) {
         float m = s_max_vals[0];
@@ -107,7 +107,8 @@ __global__ void naive_attention_prefill_kernel(
         local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, off);
 
     __shared__ float s_sum_vals[8];
-    if (lane == 0) s_sum_vals[warp_id] = local_sum;
+    if (lane == 0)
+        s_sum_vals[warp_id] = local_sum;
     __syncthreads();
     if (tid == 0) {
         float s = 0.0f;
@@ -137,18 +138,15 @@ __global__ void naive_attention_prefill_kernel(
     }
 }
 
-void naive_attention_prefill(
-    const half* Q, const half* K, const half* V, half* O,
-    int seq_len, int n_heads, int n_kv_heads, int head_dim,
-    float scale, float softcap, cudaStream_t stream,
-    int sliding_window)
-{
+void naive_attention_prefill(const half* Q, const half* K, const half* V, half* O, int seq_len, int n_heads,
+                             int n_kv_heads, int head_dim, float scale, float softcap, cudaStream_t stream,
+                             int sliding_window) {
     int threads = 256;
     dim3 grid(n_heads, seq_len);
     size_t smem = seq_len * sizeof(float);  // scores array
 
-    naive_attention_prefill_kernel<<<grid, threads, smem, stream>>>(
-        Q, K, V, O, seq_len, n_heads, n_kv_heads, head_dim, scale, softcap, sliding_window);
+    naive_attention_prefill_kernel<<<grid, threads, smem, stream>>>(Q, K, V, O, seq_len, n_heads, n_kv_heads,
+                                                                    head_dim, scale, softcap, sliding_window);
 }
 
-} // namespace imp
+}  // namespace imp

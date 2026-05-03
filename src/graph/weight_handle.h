@@ -11,26 +11,46 @@
 namespace imp {
 
 struct WeightHandle {
-    TensorID    id             = kInvalidTensorID;
-    TensorKind  kind           = TensorKind::UNKNOWN;
-    StorageTier primary_tier   = StorageTier::Undefined;
-    int64_t     shape[2]       = {0, 0};
+    TensorID id = kInvalidTensorID;
+    TensorKind kind = TensorKind::UNKNOWN;
+    StorageTier primary_tier = StorageTier::Undefined;
+    int64_t shape[2] = {0, 0};
     // Size in bytes of VRAM owned by this handle. Zero means storage is
     // BORROWED (e.g. via the Phase-2 shim that points handles at wcache_
     // entries). A non-zero value means this handle's PlanExecutor (Phase 4+)
     // allocated the storage and is responsible for freeing it in the
     // registry destructor. Never mix borrowed and owned storage on the same
     // handle — the freer would double-free or leak.
-    int64_t     owned_bytes    = 0;
+    int64_t owned_bytes = 0;
 
     union {
-        struct { float* data; }                                fp32;
-        struct { half* data; }                                 fp16;
-        struct { __nv_fp8_e4m3* data; float* d_scale; }        fp8;
-        struct { uint8_t* data; uint8_t* block_scales;
-                 float* tensor_scale; float* tensor_scale_2; } nvfp4;
-        struct { void* weight; void* sf; float* global_scale; } cutlass_nvfp4;
-        struct { void* weight; void* scales; void* linear_scales; int hadamard_bs; } mxfp4;
+        struct {
+            float* data;
+        } fp32;
+        struct {
+            half* data;
+        } fp16;
+        struct {
+            __nv_fp8_e4m3* data;
+            float* d_scale;
+        } fp8;
+        struct {
+            uint8_t* data;
+            uint8_t* block_scales;
+            float* tensor_scale;
+            float* tensor_scale_2;
+        } nvfp4;
+        struct {
+            void* weight;
+            void* sf;
+            float* global_scale;
+        } cutlass_nvfp4;
+        struct {
+            void* weight;
+            void* scales;
+            void* linear_scales;
+            int hadamard_bs;
+        } mxfp4;
     } payload;
 
     bool is_populated() const { return primary_tier != StorageTier::Undefined; }
@@ -58,4 +78,4 @@ private:
     std::vector<WeightHandle> handles_;
 };
 
-} // namespace imp
+}  // namespace imp

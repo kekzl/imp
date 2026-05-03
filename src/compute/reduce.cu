@@ -15,8 +15,7 @@ static constexpr int WARP_SIZE = 32;
 // One block per outer row.
 // ============================================================================
 
-__global__ void reduce_sum_last_dim_kernel(const float* __restrict__ input,
-                                           float* __restrict__ output,
+__global__ void reduce_sum_last_dim_kernel(const float* __restrict__ input, float* __restrict__ output,
                                            int inner_size) {
     const int row = blockIdx.x;
     const float* row_ptr = input + static_cast<int64_t>(row) * inner_size;
@@ -50,8 +49,7 @@ __global__ void reduce_sum_last_dim_kernel(const float* __restrict__ input,
     }
 }
 
-__global__ void reduce_sum_last_dim_fp16_kernel(const half* __restrict__ input,
-                                                float* __restrict__ output,
+__global__ void reduce_sum_last_dim_fp16_kernel(const half* __restrict__ input, float* __restrict__ output,
                                                 int inner_size) {
     const int row = blockIdx.x;
     const half* row_ptr = input + static_cast<int64_t>(row) * inner_size;
@@ -83,8 +81,7 @@ __global__ void reduce_sum_last_dim_fp16_kernel(const half* __restrict__ input,
     }
 }
 
-__global__ void reduce_max_last_dim_kernel(const float* __restrict__ input,
-                                           float* __restrict__ output,
+__global__ void reduce_max_last_dim_kernel(const float* __restrict__ input, float* __restrict__ output,
                                            int inner_size) {
     const int row = blockIdx.x;
     const float* row_ptr = input + static_cast<int64_t>(row) * inner_size;
@@ -116,8 +113,7 @@ __global__ void reduce_max_last_dim_kernel(const float* __restrict__ input,
     }
 }
 
-__global__ void reduce_max_last_dim_fp16_kernel(const half* __restrict__ input,
-                                                float* __restrict__ output,
+__global__ void reduce_max_last_dim_fp16_kernel(const half* __restrict__ input, float* __restrict__ output,
                                                 int inner_size) {
     const int row = blockIdx.x;
     const half* row_ptr = input + static_cast<int64_t>(row) * inner_size;
@@ -167,20 +163,17 @@ __global__ void reduce_max_last_dim_fp16_kernel(const half* __restrict__ input,
 // a grid of threads covering (outer * inner) with per-thread serial reduction.
 // ============================================================================
 
-__global__ void reduce_sum_general_kernel(const float* __restrict__ input,
-                                          float* __restrict__ output,
-                                          int outer_size,
-                                          int reduce_size,
-                                          int inner_size) {
+__global__ void reduce_sum_general_kernel(const float* __restrict__ input, float* __restrict__ output,
+                                          int outer_size, int reduce_size, int inner_size) {
     // Each block handles one output element.
     int out_idx = blockIdx.x;
-    if (out_idx >= outer_size * inner_size) return;
+    if (out_idx >= outer_size * inner_size)
+        return;
 
     int outer_idx = out_idx / inner_size;
     int inner_idx = out_idx % inner_size;
 
-    const float* base = input + static_cast<int64_t>(outer_idx) * reduce_size * inner_size
-                              + inner_idx;
+    const float* base = input + static_cast<int64_t>(outer_idx) * reduce_size * inner_size + inner_idx;
 
     float local_sum = 0.0f;
     for (int r = threadIdx.x; r < reduce_size; r += blockDim.x) {
@@ -209,19 +202,16 @@ __global__ void reduce_sum_general_kernel(const float* __restrict__ input,
     }
 }
 
-__global__ void reduce_max_general_kernel(const float* __restrict__ input,
-                                          float* __restrict__ output,
-                                          int outer_size,
-                                          int reduce_size,
-                                          int inner_size) {
+__global__ void reduce_max_general_kernel(const float* __restrict__ input, float* __restrict__ output,
+                                          int outer_size, int reduce_size, int inner_size) {
     int out_idx = blockIdx.x;
-    if (out_idx >= outer_size * inner_size) return;
+    if (out_idx >= outer_size * inner_size)
+        return;
 
     int outer_idx = out_idx / inner_size;
     int inner_idx = out_idx % inner_size;
 
-    const float* base = input + static_cast<int64_t>(outer_idx) * reduce_size * inner_size
-                              + inner_idx;
+    const float* base = input + static_cast<int64_t>(outer_idx) * reduce_size * inner_size + inner_idx;
 
     float local_max = -FLT_MAX;
     for (int r = threadIdx.x; r < reduce_size; r += blockDim.x) {
@@ -254,19 +244,16 @@ __global__ void reduce_max_general_kernel(const float* __restrict__ input,
 // General FP16 variants for arbitrary-dimension reduction
 // ============================================================================
 
-__global__ void reduce_sum_general_fp16_kernel(const half* __restrict__ input,
-                                               float* __restrict__ output,
-                                               int outer_size,
-                                               int reduce_size,
-                                               int inner_size) {
+__global__ void reduce_sum_general_fp16_kernel(const half* __restrict__ input, float* __restrict__ output,
+                                               int outer_size, int reduce_size, int inner_size) {
     int out_idx = blockIdx.x;
-    if (out_idx >= outer_size * inner_size) return;
+    if (out_idx >= outer_size * inner_size)
+        return;
 
     int outer_idx = out_idx / inner_size;
     int inner_idx = out_idx % inner_size;
 
-    const half* base = input + static_cast<int64_t>(outer_idx) * reduce_size * inner_size
-                             + inner_idx;
+    const half* base = input + static_cast<int64_t>(outer_idx) * reduce_size * inner_size + inner_idx;
 
     float local_sum = 0.0f;
     for (int r = threadIdx.x; r < reduce_size; r += blockDim.x) {
@@ -295,19 +282,16 @@ __global__ void reduce_sum_general_fp16_kernel(const half* __restrict__ input,
     }
 }
 
-__global__ void reduce_max_general_fp16_kernel(const half* __restrict__ input,
-                                               float* __restrict__ output,
-                                               int outer_size,
-                                               int reduce_size,
-                                               int inner_size) {
+__global__ void reduce_max_general_fp16_kernel(const half* __restrict__ input, float* __restrict__ output,
+                                               int outer_size, int reduce_size, int inner_size) {
     int out_idx = blockIdx.x;
-    if (out_idx >= outer_size * inner_size) return;
+    if (out_idx >= outer_size * inner_size)
+        return;
 
     int outer_idx = out_idx / inner_size;
     int inner_idx = out_idx % inner_size;
 
-    const half* base = input + static_cast<int64_t>(outer_idx) * reduce_size * inner_size
-                             + inner_idx;
+    const half* base = input + static_cast<int64_t>(outer_idx) * reduce_size * inner_size + inner_idx;
 
     float local_max = -FLT_MAX;
     for (int r = threadIdx.x; r < reduce_size; r += blockDim.x) {
@@ -340,8 +324,8 @@ __global__ void reduce_max_general_fp16_kernel(const half* __restrict__ input,
 // Helper: compute outer_size, reduce_size, inner_size from shape and dim
 // ============================================================================
 
-static void compute_reduce_dims(const Tensor& input, int dim,
-                                int& outer_size, int& reduce_size, int& inner_size) {
+static void compute_reduce_dims(const Tensor& input, int dim, int& outer_size, int& reduce_size,
+                                int& inner_size) {
     outer_size = 1;
     for (int i = 0; i < dim; ++i) {
         outer_size *= static_cast<int>(input.shape[i]);
@@ -357,10 +341,10 @@ static void compute_reduce_dims(const Tensor& input, int dim,
 // Public API
 // ============================================================================
 
-void reduce_sum(const Tensor& input, Tensor& output, int dim,
-                cudaStream_t stream) {
+void reduce_sum(const Tensor& input, Tensor& output, int dim, cudaStream_t stream) {
     // Normalize negative dim
-    if (dim < 0) dim += input.ndim;
+    if (dim < 0)
+        dim += input.ndim;
 
     int outer_size, reduce_size, inner_size;
     compute_reduce_dims(input, dim, outer_size, reduce_size, inner_size);
@@ -373,31 +357,31 @@ void reduce_sum(const Tensor& input, Tensor& output, int dim,
         int num_rows = outer_size;  // inner_size == 1 for last-dim reduction
         if (input.qtype == QType::F16) {
             const half* d_input = static_cast<const half*>(input.data);
-            reduce_sum_last_dim_fp16_kernel<<<num_rows, BLOCK_SIZE, 0, stream>>>(
-                d_input, d_output, reduce_size);
+            reduce_sum_last_dim_fp16_kernel<<<num_rows, BLOCK_SIZE, 0, stream>>>(d_input, d_output,
+                                                                                 reduce_size);
         } else {
             const float* d_input = static_cast<const float*>(input.data);
-            reduce_sum_last_dim_kernel<<<num_rows, BLOCK_SIZE, 0, stream>>>(
-                d_input, d_output, reduce_size);
+            reduce_sum_last_dim_kernel<<<num_rows, BLOCK_SIZE, 0, stream>>>(d_input, d_output, reduce_size);
         }
     } else {
         // General case: reduce along arbitrary dimension
         int num_output = outer_size * inner_size;
         if (input.qtype == QType::F16) {
             const half* d_input = static_cast<const half*>(input.data);
-            reduce_sum_general_fp16_kernel<<<num_output, BLOCK_SIZE, 0, stream>>>(
-                d_input, d_output, outer_size, reduce_size, inner_size);
+            reduce_sum_general_fp16_kernel<<<num_output, BLOCK_SIZE, 0, stream>>>(d_input, d_output,
+                                                                                  outer_size, reduce_size,
+                                                                                  inner_size);
         } else {
             const float* d_input = static_cast<const float*>(input.data);
-            reduce_sum_general_kernel<<<num_output, BLOCK_SIZE, 0, stream>>>(
-                d_input, d_output, outer_size, reduce_size, inner_size);
+            reduce_sum_general_kernel<<<num_output, BLOCK_SIZE, 0, stream>>>(d_input, d_output, outer_size,
+                                                                             reduce_size, inner_size);
         }
     }
 }
 
-void reduce_max(const Tensor& input, Tensor& output, int dim,
-                cudaStream_t stream) {
-    if (dim < 0) dim += input.ndim;
+void reduce_max(const Tensor& input, Tensor& output, int dim, cudaStream_t stream) {
+    if (dim < 0)
+        dim += input.ndim;
 
     int outer_size, reduce_size, inner_size;
     compute_reduce_dims(input, dim, outer_size, reduce_size, inner_size);
@@ -408,25 +392,25 @@ void reduce_max(const Tensor& input, Tensor& output, int dim,
         int num_rows = outer_size;
         if (input.qtype == QType::F16) {
             const half* d_input = static_cast<const half*>(input.data);
-            reduce_max_last_dim_fp16_kernel<<<num_rows, BLOCK_SIZE, 0, stream>>>(
-                d_input, d_output, reduce_size);
+            reduce_max_last_dim_fp16_kernel<<<num_rows, BLOCK_SIZE, 0, stream>>>(d_input, d_output,
+                                                                                 reduce_size);
         } else {
             const float* d_input = static_cast<const float*>(input.data);
-            reduce_max_last_dim_kernel<<<num_rows, BLOCK_SIZE, 0, stream>>>(
-                d_input, d_output, reduce_size);
+            reduce_max_last_dim_kernel<<<num_rows, BLOCK_SIZE, 0, stream>>>(d_input, d_output, reduce_size);
         }
     } else {
         int num_output = outer_size * inner_size;
         if (input.qtype == QType::F16) {
             const half* d_input = static_cast<const half*>(input.data);
-            reduce_max_general_fp16_kernel<<<num_output, BLOCK_SIZE, 0, stream>>>(
-                d_input, d_output, outer_size, reduce_size, inner_size);
+            reduce_max_general_fp16_kernel<<<num_output, BLOCK_SIZE, 0, stream>>>(d_input, d_output,
+                                                                                  outer_size, reduce_size,
+                                                                                  inner_size);
         } else {
             const float* d_input = static_cast<const float*>(input.data);
-            reduce_max_general_kernel<<<num_output, BLOCK_SIZE, 0, stream>>>(
-                d_input, d_output, outer_size, reduce_size, inner_size);
+            reduce_max_general_kernel<<<num_output, BLOCK_SIZE, 0, stream>>>(d_input, d_output, outer_size,
+                                                                             reduce_size, inner_size);
         }
     }
 }
 
-} // namespace imp
+}  // namespace imp

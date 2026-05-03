@@ -36,26 +36,22 @@ bool JsonConstrainer::init(const Tokenizer& tok) {
     }
 
     // Upload to device
-    cudaError_t err = cudaMalloc(&d_token_categories_,
-                                  vocab_size_ * sizeof(uint16_t));
+    cudaError_t err = cudaMalloc(&d_token_categories_, vocab_size_ * sizeof(uint16_t));
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("JsonConstrainer: failed to allocate device categories: %s",
-                      cudaGetErrorString(err));
+        IMP_LOG_ERROR("JsonConstrainer: failed to allocate device categories: %s", cudaGetErrorString(err));
         return false;
     }
-    err = cudaMemcpy(d_token_categories_, token_categories_.data(),
-                      vocab_size_ * sizeof(uint16_t), cudaMemcpyHostToDevice);
+    err = cudaMemcpy(d_token_categories_, token_categories_.data(), vocab_size_ * sizeof(uint16_t),
+                     cudaMemcpyHostToDevice);
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("JsonConstrainer: failed to copy categories to device: %s",
-                      cudaGetErrorString(err));
+        IMP_LOG_ERROR("JsonConstrainer: failed to copy categories to device: %s", cudaGetErrorString(err));
         return false;
     }
 
     // Allocate mask buffer
     err = cudaMalloc(&d_allowed_mask_, sizeof(uint16_t));
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("JsonConstrainer: failed to allocate mask buffer: %s",
-                      cudaGetErrorString(err));
+        IMP_LOG_ERROR("JsonConstrainer: failed to allocate mask buffer: %s", cudaGetErrorString(err));
         return false;
     }
 
@@ -123,16 +119,14 @@ uint16_t JsonConstrainer::compute_allowed_mask() const {
 
         case JsonState::IN_NUMBER:
             // Inside number: digit continuation, or structural that ends the number
-            mask |= CAT_NUMBER_CONT | CAT_COMMA |
-                    CAT_CLOSE_BRACE | CAT_CLOSE_BRACKET;
+            mask |= CAT_NUMBER_CONT | CAT_COMMA | CAT_CLOSE_BRACE | CAT_CLOSE_BRACKET;
             break;
 
         case JsonState::IN_LITERAL:
             // Inside literal (true/false/null): only literal continuation chars
             mask |= CAT_LITERAL_CONT;
             // If the literal is complete, also allow post-value tokens
-            if (!target_literal_.empty() &&
-                partial_literal_.size() >= target_literal_.size()) {
+            if (!target_literal_.empty() && partial_literal_.size() >= target_literal_.size()) {
                 mask |= CAT_COMMA | CAT_CLOSE_BRACE | CAT_CLOSE_BRACKET;
             }
             break;
@@ -152,8 +146,7 @@ uint16_t JsonConstrainer::compute_allowed_mask() const {
 
 void JsonConstrainer::advance_char(char c) {
     // Skip whitespace in non-string states
-    if (current_state_ != JsonState::IN_STRING &&
-        current_state_ != JsonState::IN_STRING_ESCAPE &&
+    if (current_state_ != JsonState::IN_STRING && current_state_ != JsonState::IN_STRING_ESCAPE &&
         (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
         return;
     }
@@ -174,9 +167,9 @@ void JsonConstrainer::advance_char(char c) {
                 current_state_ = JsonState::IN_STRING;
                 state_stack_.push_back(JsonState::AFTER_KEY);
             } else if (c == '}') {
-                if (!state_stack_.empty()) state_stack_.pop_back();
-                current_state_ = state_stack_.empty() ? JsonState::DONE :
-                    state_stack_.back();
+                if (!state_stack_.empty())
+                    state_stack_.pop_back();
+                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
             }
             break;
 
@@ -219,17 +212,17 @@ void JsonConstrainer::advance_char(char c) {
                 // Next key in object
                 current_state_ = JsonState::OBJECT_START;
             } else if (c == '}') {
-                if (!state_stack_.empty()) state_stack_.pop_back();
-                current_state_ = state_stack_.empty() ? JsonState::DONE :
-                    state_stack_.back();
+                if (!state_stack_.empty())
+                    state_stack_.pop_back();
+                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
             }
             break;
 
         case JsonState::ARRAY_START:
             if (c == ']') {
-                if (!state_stack_.empty()) state_stack_.pop_back();
-                current_state_ = state_stack_.empty() ? JsonState::DONE :
-                    state_stack_.back();
+                if (!state_stack_.empty())
+                    state_stack_.pop_back();
+                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
             } else if (c == '"') {
                 state_stack_.push_back(JsonState::ARRAY_AFTER_VALUE);
                 current_state_ = JsonState::IN_STRING;
@@ -260,9 +253,9 @@ void JsonConstrainer::advance_char(char c) {
             if (c == ',') {
                 current_state_ = JsonState::ARRAY_START;
             } else if (c == ']') {
-                if (!state_stack_.empty()) state_stack_.pop_back();
-                current_state_ = state_stack_.empty() ? JsonState::DONE :
-                    state_stack_.back();
+                if (!state_stack_.empty())
+                    state_stack_.pop_back();
+                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
             }
             break;
 
@@ -287,13 +280,12 @@ void JsonConstrainer::advance_char(char c) {
             break;
 
         case JsonState::IN_NUMBER:
-            if (!((c >= '0' && c <= '9') || c == '.' || c == 'e' ||
-                  c == 'E' || c == '+' || c == '-')) {
+            if (!((c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-')) {
                 // Number ended — this char is part of the parent context
                 // Pop back to parent and re-process this character
-                current_state_ = state_stack_.empty() ? JsonState::DONE :
-                    state_stack_.back();
-                if (!state_stack_.empty()) state_stack_.pop_back();
+                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
+                if (!state_stack_.empty())
+                    state_stack_.pop_back();
                 advance_char(c);  // re-process
                 return;
             }
@@ -303,9 +295,9 @@ void JsonConstrainer::advance_char(char c) {
             partial_literal_ += c;
             if (partial_literal_.size() >= target_literal_.size()) {
                 // Literal complete — transition to parent
-                current_state_ = state_stack_.empty() ? JsonState::DONE :
-                    state_stack_.back();
-                if (!state_stack_.empty()) state_stack_.pop_back();
+                current_state_ = state_stack_.empty() ? JsonState::DONE : state_stack_.back();
+                if (!state_stack_.empty())
+                    state_stack_.pop_back();
             }
             break;
 
@@ -315,7 +307,8 @@ void JsonConstrainer::advance_char(char c) {
 }
 
 void JsonConstrainer::update(int32_t token) {
-    if (token < 0 || token >= vocab_size_) return;
+    if (token < 0 || token >= vocab_size_)
+        return;
     const std::string& text = token_texts_[token];
     for (char c : text) {
         advance_char(c);
@@ -323,19 +316,20 @@ void JsonConstrainer::update(int32_t token) {
 }
 
 void JsonConstrainer::apply_mask(float* d_logits, int vocab_size, cudaStream_t stream) {
-    if (!initialized_ || !d_token_categories_ || !d_allowed_mask_) return;
+    if (!initialized_ || !d_token_categories_ || !d_allowed_mask_)
+        return;
 
     uint16_t mask = compute_allowed_mask();
 
     // Upload mask to device
-    IMP_CUDA_CHECK_LOG(cudaMemcpyAsync(d_allowed_mask_, &mask, sizeof(uint16_t),
-                     cudaMemcpyHostToDevice, stream));
+    IMP_CUDA_CHECK_LOG(
+        cudaMemcpyAsync(d_allowed_mask_, &mask, sizeof(uint16_t), cudaMemcpyHostToDevice, stream));
 
     // Launch masking kernel
     int threads = 256;
     int blocks = (vocab_size + threads - 1) / threads;
-    constrain_mask_kernel<<<blocks, threads, 0, stream>>>(
-        d_logits, d_token_categories_, d_allowed_mask_, vocab_size);
+    constrain_mask_kernel<<<blocks, threads, 0, stream>>>(d_logits, d_token_categories_, d_allowed_mask_,
+                                                          vocab_size);
 }
 
-} // namespace imp
+}  // namespace imp

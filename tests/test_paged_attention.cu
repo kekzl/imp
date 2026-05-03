@@ -19,13 +19,13 @@ static constexpr int BLOCK_SIZE = 16;
 
 // ---- GPU helpers ----
 
-Tensor make_gpu_tensor_fp16(const float* host_data,
-                            std::initializer_list<int64_t> shape_list) {
+Tensor make_gpu_tensor_fp16(const float* host_data, std::initializer_list<int64_t> shape_list) {
     Tensor t;
     t.qtype = QType::F16;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
-    for (auto s : shape_list) t.shape[i++] = s;
+    for (auto s : shape_list)
+        t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
@@ -41,7 +41,8 @@ Tensor alloc_gpu_tensor_fp16(std::initializer_list<int64_t> shape_list) {
     t.qtype = QType::F16;
     t.ndim = static_cast<int>(shape_list.size());
     int i = 0;
-    for (auto s : shape_list) t.shape[i++] = s;
+    for (auto s : shape_list)
+        t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
@@ -59,14 +60,17 @@ std::vector<float> read_gpu_fp16(const Tensor& t) {
 }
 
 void free_gpu(Tensor& t) {
-    if (t.data) { cudaFree(t.data); t.data = nullptr; }
+    if (t.data) {
+        cudaFree(t.data);
+        t.data = nullptr;
+    }
 }
 
 // ---- CPU reference for single-head attention ----
 // Q: [head_dim], K: [seq_len, head_dim], V: [seq_len, head_dim]
 // Returns O: [head_dim] using softmax(Q.K^T / scale) @ V
-void cpu_attention(const float* Q, const float* K, const float* V,
-                   float* O, int seq_len, int head_dim, float scale) {
+void cpu_attention(const float* Q, const float* K, const float* V, float* O, int seq_len, int head_dim,
+                   float scale) {
     // Compute scores
     std::vector<float> scores(seq_len);
     for (int s = 0; s < seq_len; s++) {
@@ -100,17 +104,15 @@ void cpu_attention(const float* Q, const float* K, const float* V,
 // ---- Helper: fill KV cache blocks from flat K/V arrays ----
 // Writes K/V data into the paged cache layout [num_blocks, block_size, n_kv_heads, head_dim]
 void fill_kv_cache(std::vector<float>& kv_cache_flat,
-                   const float* kv_data, // [seq_len, head_dim] for one kv_head
-                   int kv_head, int n_kv_heads, int head_dim,
-                   int seq_len, int num_blocks,
+                   const float* kv_data,  // [seq_len, head_dim] for one kv_head
+                   int kv_head, int n_kv_heads, int head_dim, int seq_len, int num_blocks,
                    const std::vector<int>& block_table) {
     for (int s = 0; s < seq_len; s++) {
         int block_idx = s / BLOCK_SIZE;
         int slot = s % BLOCK_SIZE;
         int phys_block = block_table[block_idx];
-        int base = phys_block * BLOCK_SIZE * n_kv_heads * head_dim
-                 + slot * n_kv_heads * head_dim
-                 + kv_head * head_dim;
+        int base = phys_block * BLOCK_SIZE * n_kv_heads * head_dim + slot * n_kv_heads * head_dim +
+                   kv_head * head_dim;
         for (int d = 0; d < head_dim; d++) {
             kv_cache_flat[base + d] = kv_data[s * head_dim + d];
         }
@@ -130,7 +132,8 @@ TEST(PagedAttentionTest, SingleHeadShortContext) {
 
     // Random Q, K, V
     std::vector<float> h_Q(head_dim), h_K(seq_len * head_dim), h_V(seq_len * head_dim);
-    for (int i = 0; i < head_dim; i++) h_Q[i] = sinf(static_cast<float>(i) * 0.1f);
+    for (int i = 0; i < head_dim; i++)
+        h_Q[i] = sinf(static_cast<float>(i) * 0.1f);
     for (int i = 0; i < seq_len * head_dim; i++) {
         h_K[i] = cosf(static_cast<float>(i) * 0.05f);
         h_V[i] = sinf(static_cast<float>(i) * 0.03f + 1.0f);
@@ -138,8 +141,7 @@ TEST(PagedAttentionTest, SingleHeadShortContext) {
 
     // CPU reference
     std::vector<float> h_O(head_dim, 0.0f);
-    cpu_attention(h_Q.data(), h_K.data(), h_V.data(), h_O.data(),
-                  seq_len, head_dim, scale);
+    cpu_attention(h_Q.data(), h_K.data(), h_V.data(), h_O.data(), seq_len, head_dim, scale);
 
     // Build KV cache (1 block, identity block table)
     int total_cache_elems = num_blocks * BLOCK_SIZE * n_kv_heads * head_dim;
@@ -153,32 +155,33 @@ TEST(PagedAttentionTest, SingleHeadShortContext) {
     // Upload to GPU
     // Q: [batch, 1, n_heads, head_dim]
     Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
-    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(),
-                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
-    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(),
-                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
     Tensor d_O = alloc_gpu_tensor_fp16({batch, 1, n_heads, head_dim});
 
     // Block table and context lens on device
-    int* d_bt = nullptr; int* d_ctx = nullptr;
+    int* d_bt = nullptr;
+    int* d_ctx = nullptr;
     cudaMalloc(&d_bt, batch * max_blocks * sizeof(int));
     cudaMalloc(&d_ctx, batch * sizeof(int));
     cudaMemcpy(d_bt, block_table.data(), max_blocks * sizeof(int), cudaMemcpyHostToDevice);
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx,
-                           BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
     cudaDeviceSynchronize();
 
     auto result = read_gpu_fp16(d_O);
     for (int d = 0; d < head_dim; d++) {
-        EXPECT_NEAR(result[d], h_O[d], 0.05f)
-            << "Single head short ctx mismatch at dim " << d;
+        EXPECT_NEAR(result[d], h_O[d], 0.05f) << "Single head short ctx mismatch at dim " << d;
     }
 
-    free_gpu(d_Q); free_gpu(d_K); free_gpu(d_V); free_gpu(d_O);
-    cudaFree(d_bt); cudaFree(d_ctx);
+    free_gpu(d_Q);
+    free_gpu(d_K);
+    free_gpu(d_V);
+    free_gpu(d_O);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
 }
 
 // =========================================================================
@@ -192,15 +195,15 @@ TEST(PagedAttentionTest, MultiBlock) {
     const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
 
     std::vector<float> h_Q(head_dim), h_K(seq_len * head_dim), h_V(seq_len * head_dim);
-    for (int i = 0; i < head_dim; i++) h_Q[i] = 0.1f * static_cast<float>(i % 8);
+    for (int i = 0; i < head_dim; i++)
+        h_Q[i] = 0.1f * static_cast<float>(i % 8);
     for (int i = 0; i < seq_len * head_dim; i++) {
         h_K[i] = cosf(static_cast<float>(i) * 0.02f);
         h_V[i] = sinf(static_cast<float>(i) * 0.04f);
     }
 
     std::vector<float> h_O(head_dim, 0.0f);
-    cpu_attention(h_Q.data(), h_K.data(), h_V.data(), h_O.data(),
-                  seq_len, head_dim, scale);
+    cpu_attention(h_Q.data(), h_K.data(), h_V.data(), h_O.data(), seq_len, head_dim, scale);
 
     // Block table: non-sequential to test remapping
     // Physical blocks [1, 0] instead of [0, 1]
@@ -214,31 +217,32 @@ TEST(PagedAttentionTest, MultiBlock) {
     fill_kv_cache(h_V_cache, h_V.data(), 0, n_kv_heads, head_dim, seq_len, total_phys, block_table);
 
     Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
-    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(),
-                    {total_phys, BLOCK_SIZE, n_kv_heads, head_dim});
-    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(),
-                    {total_phys, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(), {total_phys, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(), {total_phys, BLOCK_SIZE, n_kv_heads, head_dim});
     Tensor d_O = alloc_gpu_tensor_fp16({batch, 1, n_heads, head_dim});
 
-    int* d_bt = nullptr; int* d_ctx = nullptr;
+    int* d_bt = nullptr;
+    int* d_ctx = nullptr;
     cudaMalloc(&d_bt, max_blocks * sizeof(int));
     cudaMalloc(&d_ctx, sizeof(int));
     cudaMemcpy(d_bt, block_table.data(), max_blocks * sizeof(int), cudaMemcpyHostToDevice);
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx,
-                           BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
     cudaDeviceSynchronize();
 
     auto result = read_gpu_fp16(d_O);
     for (int d = 0; d < head_dim; d++) {
-        EXPECT_NEAR(result[d], h_O[d], 0.05f)
-            << "Multi-block mismatch at dim " << d;
+        EXPECT_NEAR(result[d], h_O[d], 0.05f) << "Multi-block mismatch at dim " << d;
     }
 
-    free_gpu(d_Q); free_gpu(d_K); free_gpu(d_V); free_gpu(d_O);
-    cudaFree(d_bt); cudaFree(d_ctx);
+    free_gpu(d_Q);
+    free_gpu(d_K);
+    free_gpu(d_V);
+    free_gpu(d_O);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
 }
 
 // =========================================================================
@@ -276,8 +280,8 @@ TEST(PagedAttentionTest, MultiHead) {
                 V_head[s * head_dim + d] = h_V[s * n_kv_heads * head_dim + h * head_dim + d];
             }
         }
-        cpu_attention(h_Q.data() + h * head_dim, K_head.data(), V_head.data(),
-                      h_O.data() + h * head_dim, seq_len, head_dim, scale);
+        cpu_attention(h_Q.data() + h * head_dim, K_head.data(), V_head.data(), h_O.data() + h * head_dim,
+                      seq_len, head_dim, scale);
     }
 
     // Build KV cache: [num_blocks, BLOCK_SIZE, n_kv_heads, head_dim]
@@ -300,13 +304,12 @@ TEST(PagedAttentionTest, MultiHead) {
     }
 
     Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
-    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(),
-                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
-    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(),
-                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
     Tensor d_O = alloc_gpu_tensor_fp16({batch, 1, n_heads, head_dim});
 
-    int* d_bt = nullptr; int* d_ctx = nullptr;
+    int* d_bt = nullptr;
+    int* d_ctx = nullptr;
     std::vector<int> bt = {0};
     cudaMalloc(&d_bt, max_blocks * sizeof(int));
     cudaMalloc(&d_ctx, sizeof(int));
@@ -314,21 +317,23 @@ TEST(PagedAttentionTest, MultiHead) {
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx,
-                           BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
     cudaDeviceSynchronize();
 
     auto result = read_gpu_fp16(d_O);
     for (int h = 0; h < n_heads; h++) {
         for (int d = 0; d < head_dim; d++) {
             int idx = h * head_dim + d;
-            EXPECT_NEAR(result[idx], h_O[idx], 0.05f)
-                << "Multi-head mismatch at head " << h << " dim " << d;
+            EXPECT_NEAR(result[idx], h_O[idx], 0.05f) << "Multi-head mismatch at head " << h << " dim " << d;
         }
     }
 
-    free_gpu(d_Q); free_gpu(d_K); free_gpu(d_V); free_gpu(d_O);
-    cudaFree(d_bt); cudaFree(d_ctx);
+    free_gpu(d_Q);
+    free_gpu(d_K);
+    free_gpu(d_V);
+    free_gpu(d_O);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
 }
 
 // =========================================================================
@@ -365,8 +370,8 @@ TEST(PagedAttentionTest, GQA) {
                 V_head[s * head_dim + d] = h_V[s * n_kv_heads * head_dim + kvh * head_dim + d];
             }
         }
-        cpu_attention(h_Q.data() + qh * head_dim, K_head.data(), V_head.data(),
-                      h_O.data() + qh * head_dim, seq_len, head_dim, scale);
+        cpu_attention(h_Q.data() + qh * head_dim, K_head.data(), V_head.data(), h_O.data() + qh * head_dim,
+                      seq_len, head_dim, scale);
     }
 
     // Build KV cache
@@ -388,13 +393,12 @@ TEST(PagedAttentionTest, GQA) {
     }
 
     Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
-    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(),
-                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
-    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(),
-                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
     Tensor d_O = alloc_gpu_tensor_fp16({batch, 1, n_heads, head_dim});
 
-    int* d_bt = nullptr; int* d_ctx = nullptr;
+    int* d_bt = nullptr;
+    int* d_ctx = nullptr;
     std::vector<int> bt = {0};
     cudaMalloc(&d_bt, max_blocks * sizeof(int));
     cudaMalloc(&d_ctx, sizeof(int));
@@ -402,21 +406,23 @@ TEST(PagedAttentionTest, GQA) {
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx,
-                           BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
     cudaDeviceSynchronize();
 
     auto result = read_gpu_fp16(d_O);
     for (int qh = 0; qh < n_heads; qh++) {
         for (int d = 0; d < head_dim; d++) {
             int idx = qh * head_dim + d;
-            EXPECT_NEAR(result[idx], h_O[idx], 0.05f)
-                << "GQA mismatch at Q-head " << qh << " dim " << d;
+            EXPECT_NEAR(result[idx], h_O[idx], 0.05f) << "GQA mismatch at Q-head " << qh << " dim " << d;
         }
     }
 
-    free_gpu(d_Q); free_gpu(d_K); free_gpu(d_V); free_gpu(d_O);
-    cudaFree(d_bt); cudaFree(d_ctx);
+    free_gpu(d_Q);
+    free_gpu(d_K);
+    free_gpu(d_V);
+    free_gpu(d_O);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
 }
 
 // =========================================================================
@@ -428,7 +434,7 @@ TEST(PagedAttentionTest, BatchDifferentLengths) {
     constexpr int seq0 = 5, seq1 = 12;
     constexpr int max_ctx = 12;
     constexpr int max_blocks = (max_ctx + BLOCK_SIZE - 1) / BLOCK_SIZE;  // 1
-    constexpr int total_phys = 2;  // 2 physical blocks
+    constexpr int total_phys = 2;                                        // 2 physical blocks
     const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
 
     // Q: [batch, 1, n_heads, head_dim]
@@ -459,10 +465,8 @@ TEST(PagedAttentionTest, BatchDifferentLengths) {
         for (int h = 0; h < n_heads; h++) {
             // For MHA, kv_head == q_head, so each head has its own KV.
             // But for this test we only have per-sequence KV (same for all heads).
-            cpu_attention(h_Q.data() + (b * n_heads + h) * head_dim,
-                          K, V,
-                          h_O.data() + (b * n_heads + h) * head_dim,
-                          slen, head_dim, scale);
+            cpu_attention(h_Q.data() + (b * n_heads + h) * head_dim, K, V,
+                          h_O.data() + (b * n_heads + h) * head_dim, slen, head_dim, scale);
         }
     }
 
@@ -485,21 +489,19 @@ TEST(PagedAttentionTest, BatchDifferentLengths) {
     }
 
     Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
-    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(),
-                    {total_phys, BLOCK_SIZE, n_kv_heads, head_dim});
-    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(),
-                    {total_phys, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(), {total_phys, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(), {total_phys, BLOCK_SIZE, n_kv_heads, head_dim});
     Tensor d_O = alloc_gpu_tensor_fp16({batch, 1, n_heads, head_dim});
 
-    int* d_bt = nullptr; int* d_ctx = nullptr;
+    int* d_bt = nullptr;
+    int* d_ctx = nullptr;
     cudaMalloc(&d_bt, batch * max_blocks * sizeof(int));
     cudaMalloc(&d_ctx, batch * sizeof(int));
     cudaMemcpy(d_bt, block_table.data(), batch * max_blocks * sizeof(int), cudaMemcpyHostToDevice);
     int ctx_lens[2] = {seq0, seq1};
     cudaMemcpy(d_ctx, ctx_lens, batch * sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx,
-                           BLOCK_SIZE, scale, max_ctx);
+    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, max_ctx);
     cudaDeviceSynchronize();
 
     auto result = read_gpu_fp16(d_O);
@@ -513,8 +515,12 @@ TEST(PagedAttentionTest, BatchDifferentLengths) {
         }
     }
 
-    free_gpu(d_Q); free_gpu(d_K); free_gpu(d_V); free_gpu(d_O);
-    cudaFree(d_bt); cudaFree(d_ctx);
+    free_gpu(d_Q);
+    free_gpu(d_K);
+    free_gpu(d_V);
+    free_gpu(d_O);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
 }
 
 // =========================================================================
@@ -545,31 +551,32 @@ TEST(PagedAttentionTest, SingleTokenContext) {
     fill_kv_cache(h_V_cache, h_V.data(), 0, n_kv_heads, head_dim, seq_len, num_blocks, bt);
 
     Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
-    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(),
-                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
-    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(),
-                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
     Tensor d_O = alloc_gpu_tensor_fp16({batch, 1, n_heads, head_dim});
 
-    int* d_bt = nullptr; int* d_ctx = nullptr;
+    int* d_bt = nullptr;
+    int* d_ctx = nullptr;
     cudaMalloc(&d_bt, sizeof(int));
     cudaMalloc(&d_ctx, sizeof(int));
     int bt_val = 0, ctx = 1;
     cudaMemcpy(d_bt, &bt_val, sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx,
-                           BLOCK_SIZE, scale, 1);
+    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, 1);
     cudaDeviceSynchronize();
 
     auto result = read_gpu_fp16(d_O);
     for (int d = 0; d < head_dim; d++) {
-        EXPECT_NEAR(result[d], h_O[d], 0.02f)
-            << "Single token mismatch at dim " << d;
+        EXPECT_NEAR(result[d], h_O[d], 0.02f) << "Single token mismatch at dim " << d;
     }
 
-    free_gpu(d_Q); free_gpu(d_K); free_gpu(d_V); free_gpu(d_O);
-    cudaFree(d_bt); cudaFree(d_ctx);
+    free_gpu(d_Q);
+    free_gpu(d_K);
+    free_gpu(d_V);
+    free_gpu(d_O);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
 }
 
 // =========================================================================
@@ -605,13 +612,14 @@ TEST(PagedAttentionTest, GQALongContext) {
                 V_head[s * head_dim + d] = h_V[s * n_kv_heads * head_dim + kvh * head_dim + d];
             }
         }
-        cpu_attention(h_Q.data() + qh * head_dim, K_head.data(), V_head.data(),
-                      h_O.data() + qh * head_dim, seq_len, head_dim, scale);
+        cpu_attention(h_Q.data() + qh * head_dim, K_head.data(), V_head.data(), h_O.data() + qh * head_dim,
+                      seq_len, head_dim, scale);
     }
 
     // Block table: identity mapping
     std::vector<int> bt(num_blocks);
-    for (int i = 0; i < num_blocks; i++) bt[i] = i;
+    for (int i = 0; i < num_blocks; i++)
+        bt[i] = i;
 
     int total_cache_elems = num_blocks * BLOCK_SIZE * n_kv_heads * head_dim;
     std::vector<float> h_K_cache(total_cache_elems, 0.0f);
@@ -629,21 +637,19 @@ TEST(PagedAttentionTest, GQALongContext) {
     }
 
     Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
-    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(),
-                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
-    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(),
-                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
     Tensor d_O = alloc_gpu_tensor_fp16({batch, 1, n_heads, head_dim});
 
-    int* d_bt = nullptr; int* d_ctx = nullptr;
+    int* d_bt = nullptr;
+    int* d_ctx = nullptr;
     cudaMalloc(&d_bt, max_blocks * sizeof(int));
     cudaMalloc(&d_ctx, sizeof(int));
     cudaMemcpy(d_bt, bt.data(), max_blocks * sizeof(int), cudaMemcpyHostToDevice);
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx,
-                           BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
     cudaDeviceSynchronize();
 
     auto result = read_gpu_fp16(d_O);
@@ -655,8 +661,12 @@ TEST(PagedAttentionTest, GQALongContext) {
         }
     }
 
-    free_gpu(d_Q); free_gpu(d_K); free_gpu(d_V); free_gpu(d_O);
-    cudaFree(d_bt); cudaFree(d_ctx);
+    free_gpu(d_Q);
+    free_gpu(d_K);
+    free_gpu(d_V);
+    free_gpu(d_O);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
 }
 
 // =========================================================================
@@ -692,13 +702,14 @@ TEST(PagedAttentionTest, GQA_HD256) {
                 V_head[s * head_dim + d] = h_V[s * n_kv_heads * head_dim + kvh * head_dim + d];
             }
         }
-        cpu_attention(h_Q.data() + qh * head_dim, K_head.data(), V_head.data(),
-                      h_O.data() + qh * head_dim, seq_len, head_dim, scale);
+        cpu_attention(h_Q.data() + qh * head_dim, K_head.data(), V_head.data(), h_O.data() + qh * head_dim,
+                      seq_len, head_dim, scale);
     }
 
     // Block table: identity mapping
     std::vector<int> bt(num_blocks);
-    for (int i = 0; i < num_blocks; i++) bt[i] = i;
+    for (int i = 0; i < num_blocks; i++)
+        bt[i] = i;
 
     int total_cache_elems = num_blocks * BLOCK_SIZE * n_kv_heads * head_dim;
     std::vector<float> h_K_cache(total_cache_elems, 0.0f);
@@ -716,21 +727,19 @@ TEST(PagedAttentionTest, GQA_HD256) {
     }
 
     Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
-    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(),
-                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
-    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(),
-                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
     Tensor d_O = alloc_gpu_tensor_fp16({batch, 1, n_heads, head_dim});
 
-    int* d_bt = nullptr; int* d_ctx = nullptr;
+    int* d_bt = nullptr;
+    int* d_ctx = nullptr;
     cudaMalloc(&d_bt, max_blocks * sizeof(int));
     cudaMalloc(&d_ctx, sizeof(int));
     cudaMemcpy(d_bt, bt.data(), max_blocks * sizeof(int), cudaMemcpyHostToDevice);
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx,
-                           BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
     cudaDeviceSynchronize();
 
     cudaError_t err = cudaGetLastError();
@@ -741,14 +750,18 @@ TEST(PagedAttentionTest, GQA_HD256) {
     for (int qh = 0; qh < n_heads; qh++) {
         for (int d = 0; d < head_dim; d++) {
             int idx = qh * head_dim + d;
-            if (std::abs(result[idx] - h_O[idx]) > 0.05f) mismatches++;
+            if (std::abs(result[idx] - h_O[idx]) > 0.05f)
+                mismatches++;
         }
     }
-    EXPECT_EQ(mismatches, 0) << "HD=256 GQA: " << mismatches
-        << " mismatches out of " << n_heads * head_dim;
+    EXPECT_EQ(mismatches, 0) << "HD=256 GQA: " << mismatches << " mismatches out of " << n_heads * head_dim;
 
-    free_gpu(d_Q); free_gpu(d_K); free_gpu(d_V); free_gpu(d_O);
-    cudaFree(d_bt); cudaFree(d_ctx);
+    free_gpu(d_Q);
+    free_gpu(d_K);
+    free_gpu(d_V);
+    free_gpu(d_O);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
 }
 
 // =========================================================================
@@ -784,12 +797,13 @@ TEST(PagedAttentionTest, GQA_HD512_Gemma4Global) {
                 V_head[s * head_dim + d] = h_V[s * n_kv_heads * head_dim + kvh * head_dim + d];
             }
         }
-        cpu_attention(h_Q.data() + qh * head_dim, K_head.data(), V_head.data(),
-                      h_O.data() + qh * head_dim, seq_len, head_dim, scale);
+        cpu_attention(h_Q.data() + qh * head_dim, K_head.data(), V_head.data(), h_O.data() + qh * head_dim,
+                      seq_len, head_dim, scale);
     }
 
     std::vector<int> bt(num_blocks);
-    for (int i = 0; i < num_blocks; i++) bt[i] = i;
+    for (int i = 0; i < num_blocks; i++)
+        bt[i] = i;
 
     int total_cache_elems = num_blocks * BLOCK_SIZE * n_kv_heads * head_dim;
     std::vector<float> h_K_cache(total_cache_elems, 0.0f);
@@ -807,21 +821,19 @@ TEST(PagedAttentionTest, GQA_HD512_Gemma4Global) {
     }
 
     Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
-    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(),
-                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
-    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(),
-                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
     Tensor d_O = alloc_gpu_tensor_fp16({batch, 1, n_heads, head_dim});
 
-    int* d_bt = nullptr; int* d_ctx = nullptr;
+    int* d_bt = nullptr;
+    int* d_ctx = nullptr;
     cudaMalloc(&d_bt, max_blocks * sizeof(int));
     cudaMalloc(&d_ctx, sizeof(int));
     cudaMemcpy(d_bt, bt.data(), max_blocks * sizeof(int), cudaMemcpyHostToDevice);
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx,
-                           BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
     cudaDeviceSynchronize();
 
     cudaError_t err = cudaGetLastError();
@@ -835,15 +847,19 @@ TEST(PagedAttentionTest, GQA_HD512_Gemma4Global) {
             int idx = qh * head_dim + d;
             float err_val = std::abs(result[idx] - h_O[idx]);
             max_err = std::max(max_err, err_val);
-            if (err_val > 0.01f) mismatches++;
+            if (err_val > 0.01f)
+                mismatches++;
         }
     }
-    EXPECT_EQ(mismatches, 0) << "HD=512 GQA Gemma-4 Global: " << mismatches
-        << " mismatches out of " << n_heads * head_dim
-        << " (max_err=" << max_err << ")";
+    EXPECT_EQ(mismatches, 0) << "HD=512 GQA Gemma-4 Global: " << mismatches << " mismatches out of "
+                             << n_heads * head_dim << " (max_err=" << max_err << ")";
 
-    free_gpu(d_Q); free_gpu(d_K); free_gpu(d_V); free_gpu(d_O);
-    cudaFree(d_bt); cudaFree(d_ctx);
+    free_gpu(d_Q);
+    free_gpu(d_K);
+    free_gpu(d_V);
+    free_gpu(d_O);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
 }
 
 // =========================================================================
@@ -877,12 +893,13 @@ TEST(PagedAttentionTest, GQA_HD256_Gemma4SWA) {
                 V_head[s * head_dim + d] = h_V[s * n_kv_heads * head_dim + kvh * head_dim + d];
             }
         }
-        cpu_attention(h_Q.data() + qh * head_dim, K_head.data(), V_head.data(),
-                      h_O.data() + qh * head_dim, seq_len, head_dim, scale);
+        cpu_attention(h_Q.data() + qh * head_dim, K_head.data(), V_head.data(), h_O.data() + qh * head_dim,
+                      seq_len, head_dim, scale);
     }
 
     std::vector<int> bt(num_blocks);
-    for (int i = 0; i < num_blocks; i++) bt[i] = i;
+    for (int i = 0; i < num_blocks; i++)
+        bt[i] = i;
 
     int total_cache_elems = num_blocks * BLOCK_SIZE * n_kv_heads * head_dim;
     std::vector<float> h_K_cache(total_cache_elems, 0.0f);
@@ -900,21 +917,19 @@ TEST(PagedAttentionTest, GQA_HD256_Gemma4SWA) {
     }
 
     Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
-    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(),
-                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
-    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(),
-                    {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_K = make_gpu_tensor_fp16(h_K_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
+    Tensor d_V = make_gpu_tensor_fp16(h_V_cache.data(), {num_blocks, BLOCK_SIZE, n_kv_heads, head_dim});
     Tensor d_O = alloc_gpu_tensor_fp16({batch, 1, n_heads, head_dim});
 
-    int* d_bt = nullptr; int* d_ctx = nullptr;
+    int* d_bt = nullptr;
+    int* d_ctx = nullptr;
     cudaMalloc(&d_bt, max_blocks * sizeof(int));
     cudaMalloc(&d_ctx, sizeof(int));
     cudaMemcpy(d_bt, bt.data(), max_blocks * sizeof(int), cudaMemcpyHostToDevice);
     int ctx = seq_len;
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx,
-                           BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode(d_Q, d_K, d_V, d_O, d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
     cudaDeviceSynchronize();
     ASSERT_EQ(cudaGetLastError(), cudaSuccess);
 
@@ -926,14 +941,19 @@ TEST(PagedAttentionTest, GQA_HD256_Gemma4SWA) {
             int idx = qh * head_dim + d;
             float err_val = std::abs(result[idx] - h_O[idx]);
             max_err = std::max(max_err, err_val);
-            if (err_val > 0.01f) mismatches++;
+            if (err_val > 0.01f)
+                mismatches++;
         }
     }
-    EXPECT_EQ(mismatches, 0) << "HD=256 GQA Gemma-4 SWA: " << mismatches
-        << " mismatches / " << n_heads * head_dim << " (max_err=" << max_err << ")";
+    EXPECT_EQ(mismatches, 0) << "HD=256 GQA Gemma-4 SWA: " << mismatches << " mismatches / "
+                             << n_heads * head_dim << " (max_err=" << max_err << ")";
 
-    free_gpu(d_Q); free_gpu(d_K); free_gpu(d_V); free_gpu(d_O);
-    cudaFree(d_bt); cudaFree(d_ctx);
+    free_gpu(d_Q);
+    free_gpu(d_K);
+    free_gpu(d_V);
+    free_gpu(d_O);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
 }
 
 // =========================================================================
@@ -946,10 +966,12 @@ TEST(INT4QuantTest, PackUnpackRoundtrip) {
         return static_cast<uint8_t>((lo & 0xF) | ((hi & 0xF) << 4));
     };
     auto unpack_lo = [](uint8_t b) -> int {
-        int v = b & 0xF; return (v >= 8) ? (v - 16) : v;
+        int v = b & 0xF;
+        return (v >= 8) ? (v - 16) : v;
     };
     auto unpack_hi = [](uint8_t b) -> int {
-        int v = (b >> 4) & 0xF; return (v >= 8) ? (v - 16) : v;
+        int v = (b >> 4) & 0xF;
+        return (v >= 8) ? (v - 16) : v;
     };
 
     // Test all valid INT4 pairs
@@ -976,7 +998,8 @@ TEST(PagedAttentionINT4Test, DecodeSingleHead) {
     srand(42);
     // Generate FP16 Q and FP32 K/V reference data
     std::vector<float> h_Q(head_dim), h_K(seq_len * head_dim), h_V(seq_len * head_dim);
-    for (int i = 0; i < head_dim; i++) h_Q[i] = sinf(static_cast<float>(i) * 0.1f);
+    for (int i = 0; i < head_dim; i++)
+        h_Q[i] = sinf(static_cast<float>(i) * 0.1f);
     for (int i = 0; i < seq_len * head_dim; i++) {
         h_K[i] = cosf(static_cast<float>(i) * 0.05f) * 0.5f;
         h_V[i] = sinf(static_cast<float>(i) * 0.03f + 1.0f) * 0.5f;
@@ -995,10 +1018,8 @@ TEST(PagedAttentionINT4Test, DecodeSingleHead) {
     // K/V dequantized via INT4 (for CPU reference)
     std::vector<float> k_deq(seq_len * head_dim, 0.0f), v_deq(seq_len * head_dim, 0.0f);
 
-    auto quant_and_fill = [&](const std::vector<float>& src,
-                               std::vector<uint8_t>& dst_int4,
-                               std::vector<half>& dst_scales,
-                               std::vector<float>& deq_out) {
+    auto quant_and_fill = [&](const std::vector<float>& src, std::vector<uint8_t>& dst_int4,
+                              std::vector<half>& dst_scales, std::vector<float>& deq_out) {
         for (int s = 0; s < seq_len; s++) {
             int slot = s % BLOCK_SIZE;
             int block = s / BLOCK_SIZE;
@@ -1028,8 +1049,7 @@ TEST(PagedAttentionINT4Test, DecodeSingleHead) {
 
     // CPU reference attention using dequantized INT4 K/V
     std::vector<float> h_O(head_dim, 0.0f);
-    cpu_attention(h_Q.data(), k_deq.data(), v_deq.data(), h_O.data(),
-                  seq_len, head_dim, scale);
+    cpu_attention(h_Q.data(), k_deq.data(), v_deq.data(), h_O.data(), seq_len, head_dim, scale);
 
     // Upload to GPU
     Tensor d_Q = make_gpu_tensor_fp16(h_Q.data(), {batch, 1, n_heads, head_dim});
@@ -1038,17 +1058,23 @@ TEST(PagedAttentionINT4Test, DecodeSingleHead) {
     Tensor d_K_cache, d_V_cache;
     d_K_cache.qtype = QType::INT8;  // raw bytes
     d_K_cache.ndim = 4;
-    d_K_cache.shape[0] = num_blocks; d_K_cache.shape[1] = BLOCK_SIZE;
-    d_K_cache.shape[2] = n_kv_heads; d_K_cache.shape[3] = half_hd;
-    d_K_cache.compute_strides(); d_K_cache.on_device = true;
+    d_K_cache.shape[0] = num_blocks;
+    d_K_cache.shape[1] = BLOCK_SIZE;
+    d_K_cache.shape[2] = n_kv_heads;
+    d_K_cache.shape[3] = half_hd;
+    d_K_cache.compute_strides();
+    d_K_cache.on_device = true;
     cudaMalloc(&d_K_cache.data, cache_bytes);
     cudaMemcpy(d_K_cache.data, k_int4.data(), cache_bytes, cudaMemcpyHostToDevice);
 
     d_V_cache.qtype = QType::INT8;
     d_V_cache.ndim = 4;
-    d_V_cache.shape[0] = num_blocks; d_V_cache.shape[1] = BLOCK_SIZE;
-    d_V_cache.shape[2] = n_kv_heads; d_V_cache.shape[3] = half_hd;
-    d_V_cache.compute_strides(); d_V_cache.on_device = true;
+    d_V_cache.shape[0] = num_blocks;
+    d_V_cache.shape[1] = BLOCK_SIZE;
+    d_V_cache.shape[2] = n_kv_heads;
+    d_V_cache.shape[3] = half_hd;
+    d_V_cache.compute_strides();
+    d_V_cache.on_device = true;
     cudaMalloc(&d_V_cache.data, cache_bytes);
     cudaMemcpy(d_V_cache.data, v_int4.data(), cache_bytes, cudaMemcpyHostToDevice);
 
@@ -1060,30 +1086,33 @@ TEST(PagedAttentionINT4Test, DecodeSingleHead) {
     cudaMemcpy(d_k_scales, k_scales.data(), scale_elems * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_v_scales, v_scales.data(), scale_elems * sizeof(half), cudaMemcpyHostToDevice);
 
-    int* d_bt = nullptr; int* d_ctx = nullptr;
+    int* d_bt = nullptr;
+    int* d_ctx = nullptr;
     cudaMalloc(&d_bt, max_blocks * sizeof(int));
     cudaMalloc(&d_ctx, sizeof(int));
     int bt_val = 0, ctx = seq_len;
     cudaMemcpy(d_bt, &bt_val, sizeof(int), cudaMemcpyHostToDevice);
     cudaMemcpy(d_ctx, &ctx, sizeof(int), cudaMemcpyHostToDevice);
 
-    paged_attention_decode_int4(d_Q, d_K_cache, d_V_cache, d_O,
-                                 d_k_scales, d_v_scales,
-                                 d_bt, d_ctx, BLOCK_SIZE, scale, seq_len);
+    paged_attention_decode_int4(d_Q, d_K_cache, d_V_cache, d_O, d_k_scales, d_v_scales, d_bt, d_ctx,
+                                BLOCK_SIZE, scale, seq_len);
     cudaDeviceSynchronize();
     EXPECT_EQ(cudaGetLastError(), cudaSuccess) << "INT4 paged attention kernel failed";
 
     auto result = read_gpu_fp16(d_O);
     for (int d = 0; d < head_dim; d++) {
-        EXPECT_NEAR(result[d], h_O[d], 0.15f)
-            << "INT4 paged attention mismatch at dim " << d;
+        EXPECT_NEAR(result[d], h_O[d], 0.15f) << "INT4 paged attention mismatch at dim " << d;
     }
 
-    free_gpu(d_Q); free_gpu(d_O);
-    cudaFree(d_K_cache.data); cudaFree(d_V_cache.data);
-    cudaFree(d_k_scales); cudaFree(d_v_scales);
-    cudaFree(d_bt); cudaFree(d_ctx);
+    free_gpu(d_Q);
+    free_gpu(d_O);
+    cudaFree(d_K_cache.data);
+    cudaFree(d_V_cache.data);
+    cudaFree(d_k_scales);
+    cudaFree(d_v_scales);
+    cudaFree(d_bt);
+    cudaFree(d_ctx);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

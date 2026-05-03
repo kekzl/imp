@@ -6,11 +6,9 @@
 namespace imp {
 
 // Forward declarations
-__global__ void gdn_scan_decode_kernel(
-    const float*, const float*, const float*,
-    const half*, const half*, const float*, const float*,
-    float*, half*, const half*,
-    int, int, int, int, int);
+__global__ void gdn_scan_decode_kernel(const float*, const float*, const float*, const half*, const half*,
+                                       const float*, const float*, float*, half*, const half*, int, int, int,
+                                       int, int);
 
 // ---------------------------------------------------------------------------
 // Fused multi-token GDN Delta Rule Scan kernel.
@@ -29,29 +27,25 @@ __global__ void gdn_scan_decode_kernel(
 // Shared memory: K_norm[state_size] + Q_norm[state_size] + reduce[block_dim]
 // ---------------------------------------------------------------------------
 template <int HD, int SS, typename YOut>
-__global__ void __launch_bounds__(HD, 1)
-gdn_scan_fused_kernel(
-    const float* __restrict__ conv_f32,   // [n_tokens, conv_channels] FP32
-    const half*  __restrict__ alpha_all,  // [n_tokens, n_heads] FP16
-    const half*  __restrict__ beta_all,   // [n_tokens, n_heads] FP16
-    const float* __restrict__ A_log,      // [n_heads] FP32
-    const float* __restrict__ dt_bias,    // [n_heads] FP32
-    float*       __restrict__ h_state,    // [n_heads, SS, HD] FP32
-    YOut*        __restrict__ y_out,      // [n_tokens, n_heads * HD] FP16 or FP32
-    int n_tokens, int n_heads, int n_groups, int conv_channels,
-    int grouped_layout)
-{
+__global__ void __launch_bounds__(HD, 1) gdn_scan_fused_kernel(
+    const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
+    const half* __restrict__ alpha_all,  // [n_tokens, n_heads] FP16
+    const half* __restrict__ beta_all,   // [n_tokens, n_heads] FP16
+    const float* __restrict__ A_log,     // [n_heads] FP32
+    const float* __restrict__ dt_bias,   // [n_heads] FP32
+    float* __restrict__ h_state,         // [n_heads, SS, HD] FP32
+    YOut* __restrict__ y_out,            // [n_tokens, n_heads * HD] FP16 or FP32
+    int n_tokens, int n_heads, int n_groups, int conv_channels, int grouped_layout) {
     const int h = blockIdx.x;
-    if (h >= n_heads) return;
+    if (h >= n_heads)
+        return;
     const int d = threadIdx.x;
 
     // Head-to-K-group mapping. GGUF stores heads in tiled layout where head h's
     // group is `h % n_groups`. HF SafeTensors (Qwen3.5/3.6) stores heads in
     // grouped layout where head h's group is `h / (n_heads / n_groups)`.
     // grouped_layout=1 selects the HF formula.
-    const int g = grouped_layout
-        ? (h / (n_heads / n_groups))
-        : (h % n_groups);
+    const int g = grouped_layout ? (h / (n_heads / n_groups)) : (h % n_groups);
     const int inner = n_heads * HD;
     const int BC_size = n_groups * SS;
     const float scale = rsqrtf(static_cast<float>(HD));
@@ -65,7 +59,7 @@ gdn_scan_fused_kernel(
     float H_reg[SS];
     {
         const float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
-        #pragma unroll
+#pragma unroll
         for (int s = 0; s < SS; s++)
             H_reg[s] = H_col[s * HD];
     }
@@ -117,7 +111,8 @@ gdn_scan_fused_kernel(
             s_reduce[d] = k_sq;
             __syncthreads();
             for (int stride = HD / 2; stride > 0; stride >>= 1) {
-                if (d < stride) s_reduce[d] += s_reduce[d + stride];
+                if (d < stride)
+                    s_reduce[d] += s_reduce[d + stride];
                 __syncthreads();
             }
             // PyTorch-style L2 norm (matches llama's ggml_l2_norm): rsqrtf(max(sum_sq, eps^2)).
@@ -129,7 +124,8 @@ gdn_scan_fused_kernel(
             s_reduce[d] = q_sq;
             __syncthreads();
             for (int stride = HD / 2; stride > 0; stride >>= 1) {
-                if (d < stride) s_reduce[d] += s_reduce[d + stride];
+                if (d < stride)
+                    s_reduce[d] += s_reduce[d + stride];
                 __syncthreads();
             }
             float q_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
@@ -145,7 +141,7 @@ gdn_scan_fused_kernel(
         // Delta rule scan — all in registers, no global memory access
         // Step 1: kv = H^T @ k_norm (dot product of state column with k)
         float kv_d = 0.0f;
-        #pragma unroll
+#pragma unroll
         for (int s = 0; s < SS; s++)
             kv_d += H_reg[s] * s_k[s];
 
@@ -154,7 +150,7 @@ gdn_scan_fused_kernel(
 
         // Step 3: Update state + compute output
         float y_partial = 0.0f;
-        #pragma unroll
+#pragma unroll
         for (int s = 0; s < SS; s++) {
             float h_new = g_t * H_reg[s] + s_k[s] * delta_d;
             H_reg[s] = h_new;
@@ -173,13 +169,14 @@ gdn_scan_fused_kernel(
         // Sync before next token — the next iteration overwrites s_k/s_q in
         // shared memory. Without this barrier, fast threads can overwrite
         // s_k/s_q while slow threads are still reading them in the loops above.
-        if (t + 1 < n_tokens) __syncthreads();
+        if (t + 1 < n_tokens)
+            __syncthreads();
     }
 
     // Store state back to global memory (once, at the end)
     {
         float* H_col = h_state + static_cast<size_t>(h) * SS * HD + d;
-        #pragma unroll
+#pragma unroll
         for (int s = 0; s < SS; s++)
             H_col[s * HD] = H_reg[s];
     }
@@ -193,15 +190,15 @@ gdn_scan_fused_kernel(
 // Block: (head_dim)
 // ---------------------------------------------------------------------------
 __global__ void gdn_rmsnorm_gated_silu_kernel(
-    half* __restrict__ y,            // [n_tokens, n_heads * head_dim] in/out
-    const half* __restrict__ gate,   // [n_tokens, n_heads * head_dim]
-    const half* __restrict__ weight, // [head_dim] shared norm weight
-    float eps, int n_heads, int head_dim)
-{
+    half* __restrict__ y,             // [n_tokens, n_heads * head_dim] in/out
+    const half* __restrict__ gate,    // [n_tokens, n_heads * head_dim]
+    const half* __restrict__ weight,  // [head_dim] shared norm weight
+    float eps, int n_heads, int head_dim) {
     const int t = blockIdx.x;
     const int h = blockIdx.y;
     const int d = threadIdx.x;
-    if (d >= head_dim) return;
+    if (d >= head_dim)
+        return;
 
     const int inner = n_heads * head_dim;
     const int base = t * inner + h * head_dim;
@@ -214,7 +211,8 @@ __global__ void gdn_rmsnorm_gated_silu_kernel(
     s_buf[d] = val * val;
     __syncthreads();
     for (int stride = head_dim / 2; stride > 0; stride >>= 1) {
-        if (d < stride) s_buf[d] += s_buf[d + stride];
+        if (d < stride)
+            s_buf[d] += s_buf[d + stride];
         __syncthreads();
     }
     float inv_rms = rsqrtf(s_buf[0] / static_cast<float>(head_dim) + eps);
@@ -232,14 +230,12 @@ __global__ void gdn_rmsnorm_gated_silu_kernel(
 // ---------------------------------------------------------------------------
 // V-head reorder: tiled → grouped (undo GGUF converter reorder for ssm_out)
 // ---------------------------------------------------------------------------
-__global__ void vhead_tiled_to_grouped_kernel(
-    const half* __restrict__ src,
-    half* __restrict__       dst,
-    int n_tokens, int n_heads, int head_dim, int n_groups)
-{
+__global__ void vhead_tiled_to_grouped_kernel(const half* __restrict__ src, half* __restrict__ dst,
+                                              int n_tokens, int n_heads, int head_dim, int n_groups) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int total = n_tokens * n_heads * head_dim;
-    if (tid >= total) return;
+    if (tid >= total)
+        return;
 
     int d = tid % head_dim;
     int h_tiled = (tid / head_dim) % n_heads;
@@ -254,28 +250,26 @@ __global__ void vhead_tiled_to_grouped_kernel(
         src[t * n_heads * head_dim + h_tiled * head_dim + d];
 }
 
-void vhead_tiled_to_grouped(const half* src, half* dst,
-                             int n_tokens, int n_heads, int head_dim, int n_groups,
-                             cudaStream_t stream) {
-    if (n_heads == n_groups) return;
+void vhead_tiled_to_grouped(const half* src, half* dst, int n_tokens, int n_heads, int head_dim, int n_groups,
+                            cudaStream_t stream) {
+    if (n_heads == n_groups)
+        return;
     int total = n_tokens * n_heads * head_dim;
     int threads = 256;
     int blocks = (total + threads - 1) / threads;
-    vhead_tiled_to_grouped_kernel<<<blocks, threads, 0, stream>>>(
-        src, dst, n_tokens, n_heads, head_dim, n_groups);
+    vhead_tiled_to_grouped_kernel<<<blocks, threads, 0, stream>>>(src, dst, n_tokens, n_heads, head_dim,
+                                                                  n_groups);
 }
 
 // FP32 variant for conv1d-SiLU output (= scan V input). Same math as FP16,
 // different element type. Used when the GGUF stored V in tiled layout and the
 // scan kernel reads V[h*HD+d] assuming grouped layout.
-__global__ void vhead_tiled_to_grouped_f32_kernel(
-    const float* __restrict__ src,
-    float* __restrict__       dst,
-    int n_tokens, int n_heads, int head_dim, int n_groups)
-{
+__global__ void vhead_tiled_to_grouped_f32_kernel(const float* __restrict__ src, float* __restrict__ dst,
+                                                  int n_tokens, int n_heads, int head_dim, int n_groups) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int total = n_tokens * n_heads * head_dim;
-    if (tid >= total) return;
+    if (tid >= total)
+        return;
 
     int d = tid % head_dim;
     int h_tiled = (tid / head_dim) % n_heads;
@@ -290,15 +284,15 @@ __global__ void vhead_tiled_to_grouped_f32_kernel(
         src[t * n_heads * head_dim + h_tiled * head_dim + d];
 }
 
-void vhead_tiled_to_grouped_f32(const float* src, float* dst,
-                                  int n_tokens, int n_heads, int head_dim, int n_groups,
-                                  cudaStream_t stream) {
-    if (n_heads == n_groups) return;
+void vhead_tiled_to_grouped_f32(const float* src, float* dst, int n_tokens, int n_heads, int head_dim,
+                                int n_groups, cudaStream_t stream) {
+    if (n_heads == n_groups)
+        return;
     int total = n_tokens * n_heads * head_dim;
     int threads = 256;
     int blocks = (total + threads - 1) / threads;
-    vhead_tiled_to_grouped_f32_kernel<<<blocks, threads, 0, stream>>>(
-        src, dst, n_tokens, n_heads, head_dim, n_groups);
+    vhead_tiled_to_grouped_f32_kernel<<<blocks, threads, 0, stream>>>(src, dst, n_tokens, n_heads, head_dim,
+                                                                      n_groups);
 }
 
 // ---------------------------------------------------------------------------
@@ -309,26 +303,22 @@ void vhead_tiled_to_grouped_f32(const float* src, float* dst,
 // conv_f32: [n_tokens, conv_channels] FP32 — full conv output (Q|K|V interleaved per token)
 // grouped_layout: 0 = GGUF tiled (g = h % n_groups), 1 = HF SafeTensors grouped
 //                 (g = h / n_v_per_k). See kernel comment for details.
-void gdn_scan_fused_f32(const float* conv_f32, int conv_channels,
-                         const half* alpha, const half* beta,
-                         const float* A_log, const float* dt_bias,
-                         float* h_state, half* y,
-                         int n_tokens, int n_heads, int head_dim_ssm,
-                         int state_size, int n_groups,
-                         cudaStream_t stream,
-                         int grouped_layout) {
+void gdn_scan_fused_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
+                        const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
+                        int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
+                        int grouped_layout) {
     // Shared memory: K_norm[SS] + Q_norm[SS] + reduce[HD]
     size_t smem = (2 * state_size + head_dim_ssm) * sizeof(float);
 
     // Template dispatch for common sizes
     if (head_dim_ssm == 128 && state_size == 128) {
-        gdn_scan_fused_kernel<128, 128, half><<<n_heads, 128, smem, stream>>>(
-            conv_f32, alpha, beta, A_log, dt_bias, h_state, y,
-            n_tokens, n_heads, n_groups, conv_channels, grouped_layout);
+        gdn_scan_fused_kernel<128, 128, half>
+            <<<n_heads, 128, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
+                                             n_heads, n_groups, conv_channels, grouped_layout);
     } else if (head_dim_ssm == 64 && state_size == 64) {
-        gdn_scan_fused_kernel<64, 64, half><<<n_heads, 64, smem, stream>>>(
-            conv_f32, alpha, beta, A_log, dt_bias, h_state, y,
-            n_tokens, n_heads, n_groups, conv_channels, grouped_layout);
+        gdn_scan_fused_kernel<64, 64, half>
+            <<<n_heads, 64, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y, n_tokens,
+                                            n_heads, n_groups, conv_channels, grouped_layout);
     } else {
         // Fallback: per-token loop (for unsupported HD/SS sizes)
         int inner = n_heads * head_dim_ssm;
@@ -337,34 +327,28 @@ void gdn_scan_fused_f32(const float* conv_f32, int conv_channels,
         for (int t = 0; t < n_tokens; t++) {
             const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
             gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem_old, stream>>>(
-                row + 2 * BC_size, row + BC_size, row,
-                alpha + t * n_heads, beta + t * n_heads,
-                A_log, dt_bias, h_state,
-                y + t * inner, nullptr,
-                n_heads, head_dim_ssm, state_size, n_groups, grouped_layout);
+                row + 2 * BC_size, row + BC_size, row, alpha + t * n_heads, beta + t * n_heads, A_log,
+                dt_bias, h_state, y + t * inner, nullptr, n_heads, head_dim_ssm, state_size, n_groups,
+                grouped_layout);
         }
     }
 }
 
 // FP32-output variant — writes scan result as FP32 for downstream
 // FP32-input RMSNorm+Gate (avoids FP16 subnormal-truncation at ~6e-5).
-void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels,
-                             const half* alpha, const half* beta,
-                             const float* A_log, const float* dt_bias,
-                             float* h_state, float* y_fp32,
-                             int n_tokens, int n_heads, int head_dim_ssm,
-                             int state_size, int n_groups,
-                             cudaStream_t stream,
-                             int grouped_layout) {
+void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
+                            const float* A_log, const float* dt_bias, float* h_state, float* y_fp32,
+                            int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
+                            cudaStream_t stream, int grouped_layout) {
     size_t smem = (2 * state_size + head_dim_ssm) * sizeof(float);
     if (head_dim_ssm == 128 && state_size == 128) {
-        gdn_scan_fused_kernel<128, 128, float><<<n_heads, 128, smem, stream>>>(
-            conv_f32, alpha, beta, A_log, dt_bias, h_state, y_fp32,
-            n_tokens, n_heads, n_groups, conv_channels, grouped_layout);
+        gdn_scan_fused_kernel<128, 128, float>
+            <<<n_heads, 128, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens,
+                                             n_heads, n_groups, conv_channels, grouped_layout);
     } else if (head_dim_ssm == 64 && state_size == 64) {
-        gdn_scan_fused_kernel<64, 64, float><<<n_heads, 64, smem, stream>>>(
-            conv_f32, alpha, beta, A_log, dt_bias, h_state, y_fp32,
-            n_tokens, n_heads, n_groups, conv_channels, grouped_layout);
+        gdn_scan_fused_kernel<64, 64, float>
+            <<<n_heads, 64, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias, h_state, y_fp32, n_tokens,
+                                            n_heads, n_groups, conv_channels, grouped_layout);
     } else {
         // No FP32 fallback: supported sizes are HD=SS=128 / 64 only.
         // Fall back to FP16 path + post-hoc upcast (precision loss intact).
@@ -377,16 +361,15 @@ void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels,
         for (int t = 0; t < n_tokens; t++) {
             const float* row = conv_f32 + static_cast<size_t>(t) * conv_channels;
             gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem_old, stream>>>(
-                row + 2 * BC_size, row + BC_size, row,
-                alpha + t * n_heads, beta + t * n_heads,
-                A_log, dt_bias, h_state,
-                scratch_dev + t * inner, nullptr,
-                n_heads, head_dim_ssm, state_size, n_groups, grouped_layout);
+                row + 2 * BC_size, row + BC_size, row, alpha + t * n_heads, beta + t * n_heads, A_log,
+                dt_bias, h_state, scratch_dev + t * inner, nullptr, n_heads, head_dim_ssm, state_size,
+                n_groups, grouped_layout);
         }
         // Convert FP16 scratch → FP32. Simple elementwise cast kernel not
         // present; do it via cuda memcpy + cast on device via small kernel.
         // Skip for now; assume 128/64 paths cover practical models.
-        IMP_LOG_WARN("gdn_scan_fused_fp32out: unsupported HD=%d SS=%d — fallback not implemented", head_dim_ssm, state_size);
+        IMP_LOG_WARN("gdn_scan_fused_fp32out: unsupported HD=%d SS=%d — fallback not implemented",
+                     head_dim_ssm, state_size);
         cudaFreeAsync(scratch_dev, stream);
     }
 }
@@ -408,26 +391,23 @@ void gdn_scan_fused_fp32out(const float* conv_f32, int conv_channels,
 // kernel has a correctness bug (register lifetime, sync, or dataflow).
 // ---------------------------------------------------------------------------
 __global__ void gdn_scan_reference_kernel(
-    const float* __restrict__ conv_f32,   // [n_tokens, conv_channels] FP32
-    const half*  __restrict__ alpha_all,  // [n_tokens, n_heads] FP16
-    const half*  __restrict__ beta_all,   // [n_tokens, n_heads] FP16
-    const float* __restrict__ A_log,      // [n_heads] FP32
-    const float* __restrict__ dt_bias,    // [n_heads] FP32
-    float*       __restrict__ h_state,    // [n_heads, state_size, head_dim_v] FP32
-    half*        __restrict__ y_out,      // [n_tokens, n_heads * head_dim_v] FP16
-    int n_tokens, int n_heads, int n_groups,
-    int head_dim_v, int state_size, int conv_channels,
-    int grouped_layout)
-{
+    const float* __restrict__ conv_f32,  // [n_tokens, conv_channels] FP32
+    const half* __restrict__ alpha_all,  // [n_tokens, n_heads] FP16
+    const half* __restrict__ beta_all,   // [n_tokens, n_heads] FP16
+    const float* __restrict__ A_log,     // [n_heads] FP32
+    const float* __restrict__ dt_bias,   // [n_heads] FP32
+    float* __restrict__ h_state,         // [n_heads, state_size, head_dim_v] FP32
+    half* __restrict__ y_out,            // [n_tokens, n_heads * head_dim_v] FP16
+    int n_tokens, int n_heads, int n_groups, int head_dim_v, int state_size, int conv_channels,
+    int grouped_layout) {
     const int h = blockIdx.x;
-    if (h >= n_heads) return;
+    if (h >= n_heads)
+        return;
     const int d = threadIdx.x;  // [0, head_dim_v)
     const int SS = state_size;
     const int HD = head_dim_v;
 
-    const int g = grouped_layout
-        ? (h / (n_heads / n_groups))
-        : (h % n_groups);
+    const int g = grouped_layout ? (h / (n_heads / n_groups)) : (h % n_groups);
     const int inner = n_heads * HD;
     const int BC_size = n_groups * SS;
 
@@ -441,10 +421,10 @@ __global__ void gdn_scan_reference_kernel(
     //   s_v[HD]            — V for current token
     //   s_reduce[HD]       — block reduction scratch
     extern __shared__ float smem[];
-    float* s_H      = smem;
-    float* s_k      = s_H + SS * HD;
-    float* s_q      = s_k + SS;
-    float* s_v      = s_q + SS;
+    float* s_H = smem;
+    float* s_k = s_H + SS * HD;
+    float* s_q = s_k + SS;
+    float* s_v = s_q + SS;
     float* s_reduce = s_v + HD;
 
     // Load state from global into shared.
@@ -489,7 +469,8 @@ __global__ void gdn_scan_reference_kernel(
         s_reduce[d] = k_sq;
         __syncthreads();
         for (int stride = HD / 2; stride > 0; stride >>= 1) {
-            if (d < stride) s_reduce[d] += s_reduce[d + stride];
+            if (d < stride)
+                s_reduce[d] += s_reduce[d + stride];
             __syncthreads();
         }
         // PyTorch-style L2 norm (see note in fused kernel above).
@@ -498,7 +479,8 @@ __global__ void gdn_scan_reference_kernel(
         s_reduce[d] = q_sq;
         __syncthreads();
         for (int stride = HD / 2; stride > 0; stride >>= 1) {
-            if (d < stride) s_reduce[d] += s_reduce[d + stride];
+            if (d < stride)
+                s_reduce[d] += s_reduce[d + stride];
             __syncthreads();
         }
         float q_inv = rsqrtf(fmaxf(s_reduce[0], 1e-12f));
@@ -544,47 +526,38 @@ __global__ void gdn_scan_reference_kernel(
     }
 }
 
-void gdn_scan_reference_f32(const float* conv_f32, int conv_channels,
-                             const half* alpha, const half* beta,
-                             const float* A_log, const float* dt_bias,
-                             float* h_state, half* y,
-                             int n_tokens, int n_heads, int head_dim_ssm,
-                             int state_size, int n_groups,
-                             cudaStream_t stream,
-                             int grouped_layout) {
+void gdn_scan_reference_f32(const float* conv_f32, int conv_channels, const half* alpha, const half* beta,
+                            const float* A_log, const float* dt_bias, float* h_state, half* y, int n_tokens,
+                            int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
+                            int grouped_layout) {
     // Shared memory: state slab [SS*HD] + K[SS] + Q[SS] + V[HD] + reduce[HD]
     // For Qwen 3.6 (SS=128, HD=128): ~66 KB — exceeds 48 KB default per block,
     // needs the opt-in dynamic-shared attribute.
-    size_t smem = (state_size * head_dim_ssm
-                   + 2 * state_size
-                   + 2 * head_dim_ssm) * sizeof(float);
+    size_t smem = (state_size * head_dim_ssm + 2 * state_size + 2 * head_dim_ssm) * sizeof(float);
     static bool attr_set = false;
     if (!attr_set) {
         cudaFuncSetAttribute(reinterpret_cast<const void*>(&gdn_scan_reference_kernel),
-                             cudaFuncAttributeMaxDynamicSharedMemorySize,
-                             96 * 1024);
+                             cudaFuncAttributeMaxDynamicSharedMemorySize, 96 * 1024);
         attr_set = true;
     }
-    gdn_scan_reference_kernel<<<n_heads, head_dim_ssm, smem, stream>>>(
-        conv_f32, alpha, beta, A_log, dt_bias, h_state, y,
-        n_tokens, n_heads, n_groups, head_dim_ssm, state_size, conv_channels,
-        grouped_layout);
+    gdn_scan_reference_kernel<<<n_heads, head_dim_ssm, smem, stream>>>(conv_f32, alpha, beta, A_log, dt_bias,
+                                                                       h_state, y, n_tokens, n_heads,
+                                                                       n_groups, head_dim_ssm, state_size,
+                                                                       conv_channels, grouped_layout);
 }
 
 // FP32-input variant: reads y as FP32, writes FP16. Used together with
 // `gdn_scan_fused_fp32out` so the RMS reduction sees full-precision scan output
 // (without FP16 subnormal truncation at ~6e-5).
 __global__ void gdn_rmsnorm_gated_silu_fp32in_kernel(
-    half*        __restrict__ y_fp16_out, // [n_tokens, n_heads * head_dim]
+    half* __restrict__ y_fp16_out,        // [n_tokens, n_heads * head_dim]
     const float* __restrict__ y_fp32_in,  // [n_tokens, n_heads * head_dim]
-    const half*  __restrict__ gate,
-    const half*  __restrict__ weight,
-    float eps, int n_heads, int head_dim)
-{
+    const half* __restrict__ gate, const half* __restrict__ weight, float eps, int n_heads, int head_dim) {
     const int t = blockIdx.x;
     const int h = blockIdx.y;
     const int d = threadIdx.x;
-    if (d >= head_dim) return;
+    if (d >= head_dim)
+        return;
 
     const int inner = n_heads * head_dim;
     const int base = t * inner + h * head_dim;
@@ -595,7 +568,8 @@ __global__ void gdn_rmsnorm_gated_silu_fp32in_kernel(
     s_buf[d] = val * val;
     __syncthreads();
     for (int stride = head_dim / 2; stride > 0; stride >>= 1) {
-        if (d < stride) s_buf[d] += s_buf[d + stride];
+        if (d < stride)
+            s_buf[d] += s_buf[d + stride];
         __syncthreads();
     }
     float inv_rms = rsqrtf(s_buf[0] / static_cast<float>(head_dim) + eps);
@@ -608,29 +582,27 @@ __global__ void gdn_rmsnorm_gated_silu_fp32in_kernel(
     y_fp16_out[base + d] = __float2half(normed * silu_g);
 }
 
-void gdn_rmsnorm_gated_silu_fp32in(half* y_fp16_out, const float* y_fp32_in,
-                                     const half* gate, const half* weight,
-                                     float eps, int n_tokens, int n_heads,
-                                     int head_dim, cudaStream_t stream) {
+void gdn_rmsnorm_gated_silu_fp32in(half* y_fp16_out, const float* y_fp32_in, const half* gate,
+                                   const half* weight, float eps, int n_tokens, int n_heads, int head_dim,
+                                   cudaStream_t stream) {
     size_t smem = head_dim * sizeof(float);
     dim3 grid(n_tokens, n_heads);
-    gdn_rmsnorm_gated_silu_fp32in_kernel<<<grid, head_dim, smem, stream>>>(
-        y_fp16_out, y_fp32_in, gate, weight, eps, n_heads, head_dim);
+    gdn_rmsnorm_gated_silu_fp32in_kernel<<<grid, head_dim, smem, stream>>>(y_fp16_out, y_fp32_in, gate,
+                                                                           weight, eps, n_heads, head_dim);
 }
 
 // FP32-in, FP32-out: keeps full precision through gated norm so ssm_out GEMM
 // sees FP32 input (fixes 6% accumulation drift in FP16-input matmul).
-__global__ void gdn_rmsnorm_gated_silu_fp32inout_kernel(
-    float*       __restrict__ y_fp32_out,
-    const float* __restrict__ y_fp32_in,
-    const half*  __restrict__ gate,
-    const half*  __restrict__ weight,
-    float eps, int n_heads, int head_dim)
-{
+__global__ void gdn_rmsnorm_gated_silu_fp32inout_kernel(float* __restrict__ y_fp32_out,
+                                                        const float* __restrict__ y_fp32_in,
+                                                        const half* __restrict__ gate,
+                                                        const half* __restrict__ weight, float eps,
+                                                        int n_heads, int head_dim) {
     const int t = blockIdx.x;
     const int h = blockIdx.y;
     const int d = threadIdx.x;
-    if (d >= head_dim) return;
+    if (d >= head_dim)
+        return;
 
     const int inner = n_heads * head_dim;
     const int base = t * inner + h * head_dim;
@@ -641,7 +613,8 @@ __global__ void gdn_rmsnorm_gated_silu_fp32inout_kernel(
     s_buf[d] = val * val;
     __syncthreads();
     for (int stride = head_dim / 2; stride > 0; stride >>= 1) {
-        if (d < stride) s_buf[d] += s_buf[d + stride];
+        if (d < stride)
+            s_buf[d] += s_buf[d + stride];
         __syncthreads();
     }
     float inv_rms = rsqrtf(s_buf[0] / static_cast<float>(head_dim) + eps);
@@ -654,24 +627,21 @@ __global__ void gdn_rmsnorm_gated_silu_fp32inout_kernel(
     y_fp32_out[base + d] = normed * silu_g;
 }
 
-void gdn_rmsnorm_gated_silu_fp32inout(float* y_fp32_out, const float* y_fp32_in,
-                                        const half* gate, const half* weight,
-                                        float eps, int n_tokens, int n_heads,
-                                        int head_dim, cudaStream_t stream) {
+void gdn_rmsnorm_gated_silu_fp32inout(float* y_fp32_out, const float* y_fp32_in, const half* gate,
+                                      const half* weight, float eps, int n_tokens, int n_heads, int head_dim,
+                                      cudaStream_t stream) {
     size_t smem = head_dim * sizeof(float);
     dim3 grid(n_tokens, n_heads);
-    gdn_rmsnorm_gated_silu_fp32inout_kernel<<<grid, head_dim, smem, stream>>>(
-        y_fp32_out, y_fp32_in, gate, weight, eps, n_heads, head_dim);
+    gdn_rmsnorm_gated_silu_fp32inout_kernel<<<grid, head_dim, smem, stream>>>(y_fp32_out, y_fp32_in, gate,
+                                                                              weight, eps, n_heads, head_dim);
 }
 
 // Fused RMSNormGated + SiLU
-void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight,
-                              float eps, int n_tokens, int n_heads, int head_dim,
-                              cudaStream_t stream) {
+void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight, float eps, int n_tokens,
+                            int n_heads, int head_dim, cudaStream_t stream) {
     size_t smem = head_dim * sizeof(float);
     dim3 grid(n_tokens, n_heads);
-    gdn_rmsnorm_gated_silu_kernel<<<grid, head_dim, smem, stream>>>(
-        y, gate, weight, eps, n_heads, head_dim);
+    gdn_rmsnorm_gated_silu_kernel<<<grid, head_dim, smem, stream>>>(y, gate, weight, eps, n_heads, head_dim);
 }
 
 // ---------------------------------------------------------------------------
@@ -679,28 +649,20 @@ void gdn_rmsnorm_gated_silu(half* y, const half* gate, const half* weight,
 // ---------------------------------------------------------------------------
 
 // Old per-token decode kernel (still available for reference)
-__global__ void gdn_scan_decode_kernel(
-    const float* __restrict__ x,
-    const float* __restrict__ B_in,
-    const float* __restrict__ C_in,
-    const half*  __restrict__ alpha_raw,
-    const half*  __restrict__ beta_raw,
-    const float* __restrict__ A_log,
-    const float* __restrict__ dt_bias,
-    float*       __restrict__ h_state,
-    half*        __restrict__ y,
-    const half*  __restrict__ z,
-    int n_heads, int head_dim_ssm, int state_size, int n_groups,
-    int grouped_layout)
-{
+__global__ void gdn_scan_decode_kernel(const float* __restrict__ x, const float* __restrict__ B_in,
+                                       const float* __restrict__ C_in, const half* __restrict__ alpha_raw,
+                                       const half* __restrict__ beta_raw, const float* __restrict__ A_log,
+                                       const float* __restrict__ dt_bias, float* __restrict__ h_state,
+                                       half* __restrict__ y, const half* __restrict__ z, int n_heads,
+                                       int head_dim_ssm, int state_size, int n_groups, int grouped_layout) {
     const int h = blockIdx.x;
-    if (h >= n_heads) return;
+    if (h >= n_heads)
+        return;
     const int d = threadIdx.x;
-    if (d >= head_dim_ssm) return;
+    if (d >= head_dim_ssm)
+        return;
 
-    const int g = grouped_layout
-        ? (h / (n_heads / n_groups))
-        : (h % n_groups);
+    const int g = grouped_layout ? (h / (n_heads / n_groups)) : (h % n_groups);
     float* H = h_state + static_cast<size_t>(h) * state_size * head_dim_ssm;
     const float* K_g = B_in + g * state_size;
     const float* Q_g = C_in + g * state_size;
@@ -721,15 +683,19 @@ __global__ void gdn_scan_decode_kernel(
     if (d == 0) {
         float k_sq = 0.0f, q_sq = 0.0f;
         for (int s = 0; s < state_size; s++) {
-            float ks = K_g[s]; float qs = Q_g[s];
-            s_k[s] = ks; s_q[s] = qs;
-            k_sq += ks * ks; q_sq += qs * qs;
+            float ks = K_g[s];
+            float qs = Q_g[s];
+            s_k[s] = ks;
+            s_q[s] = qs;
+            k_sq += ks * ks;
+            q_sq += qs * qs;
         }
         // PyTorch-style L2 norm: rsqrtf(max(sum_sq, eps^2)), matches llama's ggml_l2_norm.
         s_k_inv = rsqrtf(fmaxf(k_sq, 1e-12f));
         s_q_inv = rsqrtf(fmaxf(q_sq, 1e-12f));
         for (int s = 0; s < state_size; s++) {
-            s_k[s] *= s_k_inv; s_q[s] *= s_q_inv;
+            s_k[s] *= s_k_inv;
+            s_q[s] *= s_q_inv;
         }
     }
     __syncthreads();
@@ -748,54 +714,41 @@ __global__ void gdn_scan_decode_kernel(
     y[h * head_dim_ssm + d] = __float2half(y_partial * scale);
 }
 
-void gdn_scan_decode_f32(const float* x, const float* B, const float* C,
-                         const half* alpha, const half* beta,
-                         const float* A_log, const float* dt_bias,
-                         float* h_state, half* y, const half* z,
-                         int n_heads, int head_dim_ssm,
-                         int state_size, int n_groups,
-                         cudaStream_t stream,
+void gdn_scan_decode_f32(const float* x, const float* B, const float* C, const half* alpha, const half* beta,
+                         const float* A_log, const float* dt_bias, float* h_state, half* y, const half* z,
+                         int n_heads, int head_dim_ssm, int state_size, int n_groups, cudaStream_t stream,
                          int grouped_layout) {
     size_t smem = 2 * state_size * sizeof(float) + 2 * sizeof(float);
-    gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem, stream>>>(
-        x, B, C, alpha, beta, A_log, dt_bias, h_state, y, z,
-        n_heads, head_dim_ssm, state_size, n_groups, grouped_layout);
+    gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem, stream>>>(x, B, C, alpha, beta, A_log, dt_bias,
+                                                                    h_state, y, z, n_heads, head_dim_ssm,
+                                                                    state_size, n_groups, grouped_layout);
 }
 
-void gdn_scan_prefill_f32(const float* x, const float* B, const float* C,
-                          const half* alpha, const half* beta,
-                          const float* A_log, const float* dt_bias,
-                          float* h_state, half* y, const half* z,
-                          int n_tokens, int n_heads, int head_dim_ssm,
-                          int state_size, int n_groups,
-                          cudaStream_t stream,
-                          int grouped_layout) {
+void gdn_scan_prefill_f32(const float* x, const float* B, const float* C, const half* alpha, const half* beta,
+                          const float* A_log, const float* dt_bias, float* h_state, half* y, const half* z,
+                          int n_tokens, int n_heads, int head_dim_ssm, int state_size, int n_groups,
+                          cudaStream_t stream, int grouped_layout) {
     int inner = n_heads * head_dim_ssm;
     int BC_size = n_groups * state_size;
     size_t smem = 2 * state_size * sizeof(float) + 2 * sizeof(float);
     for (int t = 0; t < n_tokens; t++) {
-        gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem, stream>>>(
-            x + t * inner, B + t * BC_size, C + t * BC_size,
-            alpha + t * n_heads, beta + t * n_heads,
-            A_log, dt_bias, h_state, y + t * inner, nullptr,
-            n_heads, head_dim_ssm, state_size, n_groups, grouped_layout);
+        gdn_scan_decode_kernel<<<n_heads, head_dim_ssm, smem, stream>>>(x + t * inner, B + t * BC_size,
+                                                                        C + t * BC_size, alpha + t * n_heads,
+                                                                        beta + t * n_heads, A_log, dt_bias,
+                                                                        h_state, y + t * inner, nullptr,
+                                                                        n_heads, head_dim_ssm, state_size,
+                                                                        n_groups, grouped_layout);
     }
 }
 
 // Legacy stubs
-void gdn_scan_decode(const half*, const half*, const half*,
-                     const half*, const half*, const float*, const float*,
-                     float*, half*, const half*,
-                     int, int, int, int, cudaStream_t) {}
-void gdn_scan_prefill(const half*, const half*, const half*,
-                      const half*, const half*, const float*, const float*,
-                      float*, half*, const half*,
-                      int, int, int, int, int, cudaStream_t) {}
-void gdn_decode(const half*, const half*, const half*,
-                const half*, const half*, float*, half*, const half*,
+void gdn_scan_decode(const half*, const half*, const half*, const half*, const half*, const float*,
+                     const float*, float*, half*, const half*, int, int, int, int, cudaStream_t) {}
+void gdn_scan_prefill(const half*, const half*, const half*, const half*, const half*, const float*,
+                      const float*, float*, half*, const half*, int, int, int, int, int, cudaStream_t) {}
+void gdn_decode(const half*, const half*, const half*, const half*, const half*, float*, half*, const half*,
                 int, int, int, int, cudaStream_t) {}
-void gdn_prefill(const half*, const half*, const half*,
-                 const half*, const half*, float*, half*, const half*,
+void gdn_prefill(const half*, const half*, const half*, const half*, const half*, float*, half*, const half*,
                  int, int, int, int, int, cudaStream_t) {}
 
-} // namespace imp
+}  // namespace imp

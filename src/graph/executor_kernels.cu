@@ -28,9 +28,8 @@ namespace imp {
 // Resolve the physical block ID from the block table for a given token.
 // For batched decode (n_sequences > 1), each token maps to its own sequence row.
 // For single-sequence or legacy mode, uses a flat block table.
-__device__ __forceinline__ int kv_get_block_id(
-    const int* block_tables, int block_idx,
-    int token_idx, int max_blocks_per_seq, int n_sequences) {
+__device__ __forceinline__ int kv_get_block_id(const int* block_tables, int block_idx, int token_idx,
+                                               int max_blocks_per_seq, int n_sequences) {
     if (max_blocks_per_seq > 0 && n_sequences > 1)
         return block_tables[token_idx * max_blocks_per_seq + block_idx];
     return block_tables[block_idx];
@@ -38,10 +37,9 @@ __device__ __forceinline__ int kv_get_block_id(
 
 // Compute block index and slot within block from a token's position.
 // Returns the physical block ID via kv_get_block_id.
-__device__ __forceinline__ int kv_resolve_slot(
-    const int* block_tables, int pos, int block_size,
-    int token_idx, int max_blocks_per_seq, int n_sequences,
-    int& slot_in_block) {
+__device__ __forceinline__ int kv_resolve_slot(const int* block_tables, int pos, int block_size,
+                                               int token_idx, int max_blocks_per_seq, int n_sequences,
+                                               int& slot_in_block) {
     int block_idx = pos / block_size;
     slot_in_block = pos % block_size;
     return kv_get_block_id(block_tables, block_idx, token_idx, max_blocks_per_seq, n_sequences);
@@ -53,17 +51,30 @@ __device__ __forceinline__ int kv_resolve_slot(
 
 // Dispatch dp4a GEMV by quant type: y = W @ q8_1 (FP16 output).
 // Defined here, declared in executor_kernels.h for use by executor_forward.cu.
-void dispatch_dp4a_gemv(QType qtype,
-                        const void* W, const block_q8_1* q8_1, const float* d8,
-                        half* y, int M, int K, cudaStream_t stream) {
+void dispatch_dp4a_gemv(QType qtype, const void* W, const block_q8_1* q8_1, const float* d8, half* y, int M,
+                        int K, cudaStream_t stream) {
     switch (qtype) {
-        case QType::Q6_K: gemv_q6k_q8_1(W, q8_1, d8, y, M, K, stream); break;
-        case QType::Q4_0: gemv_q4_0_q8_1(W, q8_1, d8, y, M, K, stream); break;
-        case QType::Q4_K: gemv_q4_k_q8_1(W, q8_1, d8, y, M, K, stream); break;
-        case QType::Q5_K: gemv_q5_k_q8_1(W, q8_1, d8, y, M, K, stream); break;
-        case QType::Q2_K: gemv_q2_k_q8_1(W, q8_1, d8, y, M, K, stream); break;
-        case QType::Q3_K: gemv_q3_k_q8_1(W, q8_1, d8, y, M, K, stream); break;
-        default:                  gemv_q8_0_q8_1(W, q8_1, d8, y, M, K, stream); break;
+        case QType::Q6_K:
+            gemv_q6k_q8_1(W, q8_1, d8, y, M, K, stream);
+            break;
+        case QType::Q4_0:
+            gemv_q4_0_q8_1(W, q8_1, d8, y, M, K, stream);
+            break;
+        case QType::Q4_K:
+            gemv_q4_k_q8_1(W, q8_1, d8, y, M, K, stream);
+            break;
+        case QType::Q5_K:
+            gemv_q5_k_q8_1(W, q8_1, d8, y, M, K, stream);
+            break;
+        case QType::Q2_K:
+            gemv_q2_k_q8_1(W, q8_1, d8, y, M, K, stream);
+            break;
+        case QType::Q3_K:
+            gemv_q3_k_q8_1(W, q8_1, d8, y, M, K, stream);
+            break;
+        default:
+            gemv_q8_0_q8_1(W, q8_1, d8, y, M, K, stream);
+            break;
     }
 }
 
@@ -72,8 +83,9 @@ void dispatch_dp4a_gemv(QType qtype,
 // ---------------------------------------------------------------------------
 
 // Broadcast bias addition: out[row, col] += bias[col] for rows x cols elements
-__global__ __launch_bounds__(256) void broadcast_add_bias_fp16_kernel(half* __restrict__ out, const half* __restrict__ bias,
-                                                int rows, int cols) {
+__global__ __launch_bounds__(256) void broadcast_add_bias_fp16_kernel(half* __restrict__ out,
+                                                                      const half* __restrict__ bias, int rows,
+                                                                      int cols) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = rows * cols;
     for (int i = idx; i < total; i += blockDim.x * gridDim.x) {
@@ -81,7 +93,6 @@ __global__ __launch_bounds__(256) void broadcast_add_bias_fp16_kernel(half* __re
         out[i] = __hadd(out[i], bias[col]);
     }
 }
-
 
 // Element-wise scale: out[i] *= scale, for FP16 data (Gemma embedding scaling)
 __global__ __launch_bounds__(256) void scale_fp16_kernel(half* __restrict__ data, half scale, int64_t n) {
@@ -99,7 +110,8 @@ __global__ __launch_bounds__(256) void scale_fp16_kernel(half* __restrict__ data
 }
 
 // Element-wise addition: a[i] += b[i], for FP16 data
-__global__ __launch_bounds__(256) void elementwise_add_fp16_kernel(half* __restrict__ a, const half* __restrict__ b, int64_t n) {
+__global__ __launch_bounds__(256) void elementwise_add_fp16_kernel(half* __restrict__ a,
+                                                                   const half* __restrict__ b, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t n2 = n / 2;
     if (idx < n2) {
@@ -113,8 +125,9 @@ __global__ __launch_bounds__(256) void elementwise_add_fp16_kernel(half* __restr
 }
 
 // Element-wise add-store: out[i] = a[i] + b[i], for FP16 data
-__global__ __launch_bounds__(256) void elementwise_add_store_fp16_kernel(const half* __restrict__ a, const half* __restrict__ b,
-                                                   half* __restrict__ out, int64_t n) {
+__global__ __launch_bounds__(256) void elementwise_add_store_fp16_kernel(const half* __restrict__ a,
+                                                                         const half* __restrict__ b,
+                                                                         half* __restrict__ out, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     int64_t n2 = n / 2;
     if (idx < n2) {
@@ -129,7 +142,9 @@ __global__ __launch_bounds__(256) void elementwise_add_store_fp16_kernel(const h
 }
 
 // FP32 accumulator += FP16 branch: accum[i] += __half2float(branch[i])
-__global__ __launch_bounds__(256) void fp32_accum_add_fp16_kernel(float* __restrict__ accum, const half* __restrict__ branch, int64_t n) {
+__global__ __launch_bounds__(256) void fp32_accum_add_fp16_kernel(float* __restrict__ accum,
+                                                                  const half* __restrict__ branch,
+                                                                  int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) {
         accum[idx] += __half2float(branch[idx]);
@@ -143,14 +158,15 @@ __global__ __launch_bounds__(256) void fp32_accum_add_fp16_kernel(float* __restr
 // when the FP32 residual stream far exceeds FP16 range.
 // Launch: <<<n_rows, 256, 256 * sizeof(float)>>>
 __global__ __launch_bounds__(256) void fp32_to_fp16_rowscale_kernel(const float* __restrict__ in,
-                                             half* __restrict__ out,
-                                             int rows, int cols) {
+                                                                    half* __restrict__ out, int rows,
+                                                                    int cols) {
     extern __shared__ float smem[];
     int row = blockIdx.x;
-    if (row >= rows) return;
+    if (row >= rows)
+        return;
 
     const float* row_in = in + static_cast<int64_t>(row) * cols;
-    half* row_out       = out + static_cast<int64_t>(row) * cols;
+    half* row_out = out + static_cast<int64_t>(row) * cols;
 
     // Phase 1: parallel reduction to find max |value| in this row
     float local_max = 0.0f;
@@ -181,13 +197,11 @@ __global__ __launch_bounds__(256) void fp32_to_fp16_rowscale_kernel(const float*
 // Uses same register-cached, warp-level reduction pattern as rmsnorm_quantize_q8_1.
 // Launch: <<<n_rows, 256>>>
 __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
-        const half* __restrict__ input,     // [n, d_model] pre-norm data (e.g. GEMV output)
-        const half* __restrict__ norm_w,    // [d_model] RMSNorm weights
-        float* __restrict__ fp32_accum,     // [n, d_model] FP32 accumulator (read-modify-write)
-        half* __restrict__ output,          // [n, d_model] FP16 output for next layer
-        int d_model,
-        float eps,
-        float weight_offset) {
+    const half* __restrict__ input,   // [n, d_model] pre-norm data (e.g. GEMV output)
+    const half* __restrict__ norm_w,  // [d_model] RMSNorm weights
+    float* __restrict__ fp32_accum,   // [n, d_model] FP32 accumulator (read-modify-write)
+    half* __restrict__ output,        // [n, d_model] FP16 output for next layer
+    int d_model, float eps, float weight_offset) {
     __shared__ float warp_reduce[kWarpSize];  // support up to 1024 threads (32 warps)
     __shared__ float s_inv_rms;
     __shared__ float s_row_max;
@@ -201,13 +215,10 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
     // Vectorized: process 8 halfs (1 float4 = 2 half2) per iteration.
     const int d_model_v = d_model / 8;  // number of float4-sized chunks
 
-    const float4* x_row4 = reinterpret_cast<const float4*>(
-        input + static_cast<int64_t>(row) * d_model);
+    const float4* x_row4 = reinterpret_cast<const float4*>(input + static_cast<int64_t>(row) * d_model);
     const float4* nw_row4 = reinterpret_cast<const float4*>(norm_w);
-    float4* accum_row4 = reinterpret_cast<float4*>(
-        fp32_accum + static_cast<int64_t>(row) * d_model);
-    float4* out_row4 = reinterpret_cast<float4*>(
-        output + static_cast<int64_t>(row) * d_model);
+    float4* accum_row4 = reinterpret_cast<float4*>(fp32_accum + static_cast<int64_t>(row) * d_model);
+    float4* out_row4 = reinterpret_cast<float4*>(output + static_cast<int64_t>(row) * d_model);
 
     // Phase 1: Load input (half→float via float4 loads), compute sum of squares.
     // Each thread handles d_model_v / blockDim.x chunks, each chunk = 8 halfs.
@@ -219,20 +230,21 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
         float2 f1 = __half22float2(h2[1]);
         float2 f2 = __half22float2(h2[2]);
         float2 f3 = __half22float2(h2[3]);
-        sum_sq += f0.x*f0.x + f0.y*f0.y + f1.x*f1.x + f1.y*f1.y
-                + f2.x*f2.x + f2.y*f2.y + f3.x*f3.x + f3.y*f3.y;
+        sum_sq += f0.x * f0.x + f0.y * f0.y + f1.x * f1.x + f1.y * f1.y + f2.x * f2.x + f2.y * f2.y +
+                  f3.x * f3.x + f3.y * f3.y;
     }
 
-    // Block reduce sum_sq
-    #pragma unroll
+// Block reduce sum_sq
+#pragma unroll
     for (int off = 16; off > 0; off >>= 1)
         sum_sq += __shfl_xor_sync(0xFFFFFFFF, sum_sq, off);
-    if (lane == 0) warp_reduce[warp_id] = sum_sq;
+    if (lane == 0)
+        warp_reduce[warp_id] = sum_sq;
     __syncthreads();
 
     if (warp_id == 0) {
         float total = (lane < n_warps) ? warp_reduce[lane] : 0.0f;
-        #pragma unroll
+#pragma unroll
         for (int off = 16; off > 0; off >>= 1)
             total += __shfl_xor_sync(0xFFFFFFFF, total, off);
         if (lane == 0)
@@ -278,24 +290,23 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
         accum_row4[i * 2] = acc_lo;
         accum_row4[i * 2 + 1] = acc_hi;
 
-        local_max = fmaxf(local_max, fmaxf(
-            fmaxf(fabsf(acc_f[0]), fabsf(acc_f[1])),
-            fmaxf(fabsf(acc_f[2]), fabsf(acc_f[3]))));
-        local_max = fmaxf(local_max, fmaxf(
-            fmaxf(fabsf(acc_f_hi[0]), fabsf(acc_f_hi[1])),
-            fmaxf(fabsf(acc_f_hi[2]), fabsf(acc_f_hi[3]))));
+        local_max = fmaxf(local_max, fmaxf(fmaxf(fabsf(acc_f[0]), fabsf(acc_f[1])),
+                                           fmaxf(fabsf(acc_f[2]), fabsf(acc_f[3]))));
+        local_max = fmaxf(local_max, fmaxf(fmaxf(fabsf(acc_f_hi[0]), fabsf(acc_f_hi[1])),
+                                           fmaxf(fabsf(acc_f_hi[2]), fabsf(acc_f_hi[3]))));
     }
 
-    // Block reduce max_abs
-    #pragma unroll
+// Block reduce max_abs
+#pragma unroll
     for (int off = 16; off > 0; off >>= 1)
         local_max = fmaxf(local_max, __shfl_xor_sync(0xFFFFFFFF, local_max, off));
-    if (lane == 0) warp_reduce[warp_id] = local_max;
+    if (lane == 0)
+        warp_reduce[warp_id] = local_max;
     __syncthreads();
 
     if (warp_id == 0) {
         float m = (lane < n_warps) ? warp_reduce[lane] : 0.0f;
-        #pragma unroll
+#pragma unroll
         for (int off = 16; off > 0; off >>= 1)
             m = fmaxf(m, __shfl_xor_sync(0xFFFFFFFF, m, off));
         if (lane == 0)
@@ -326,13 +337,11 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32_accum_to_fp16_kernel(
 // cuBLAS internal accumulator precision). Same accum + overflow protection as
 // the FP16-input variant. Used by IMP_GEMMA4_FP32_GEMM_OUT for attention.
 __global__ __launch_bounds__(512) void rmsnorm_fp32in_fp32_accum_to_fp16_kernel(
-        const float* __restrict__ input,     // [n, d_model] FP32 pre-norm data
-        const half* __restrict__ norm_w,     // [d_model] RMSNorm weights
-        float* __restrict__ fp32_accum,      // [n, d_model] FP32 accumulator (RMW)
-        half* __restrict__ output,           // [n, d_model] FP16 output for next layer
-        int d_model,
-        float eps,
-        float weight_offset) {
+    const float* __restrict__ input,  // [n, d_model] FP32 pre-norm data
+    const half* __restrict__ norm_w,  // [d_model] RMSNorm weights
+    float* __restrict__ fp32_accum,   // [n, d_model] FP32 accumulator (RMW)
+    half* __restrict__ output,        // [n, d_model] FP16 output for next layer
+    int d_model, float eps, float weight_offset) {
     __shared__ float warp_reduce[32];
     __shared__ float s_inv_rms;
     __shared__ float s_row_max;
@@ -354,14 +363,15 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32in_fp32_accum_to_fp16_kernel(
         float v = x_row[i];
         sum_sq += v * v;
     }
-    #pragma unroll
+#pragma unroll
     for (int off = 16; off > 0; off >>= 1)
         sum_sq += __shfl_xor_sync(0xFFFFFFFF, sum_sq, off);
-    if (lane == 0) warp_reduce[warp_id] = sum_sq;
+    if (lane == 0)
+        warp_reduce[warp_id] = sum_sq;
     __syncthreads();
     if (warp_id == 0) {
         float total = (lane < n_warps) ? warp_reduce[lane] : 0.0f;
-        #pragma unroll
+#pragma unroll
         for (int off = 16; off > 0; off >>= 1)
             total += __shfl_xor_sync(0xFFFFFFFF, total, off);
         if (lane == 0)
@@ -380,14 +390,15 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32in_fp32_accum_to_fp16_kernel(
         accum_row[i] = new_acc;
         local_max = fmaxf(local_max, fabsf(new_acc));
     }
-    #pragma unroll
+#pragma unroll
     for (int off = 16; off > 0; off >>= 1)
         local_max = fmaxf(local_max, __shfl_xor_sync(0xFFFFFFFF, local_max, off));
-    if (lane == 0) warp_reduce[warp_id] = local_max;
+    if (lane == 0)
+        warp_reduce[warp_id] = local_max;
     __syncthreads();
     if (warp_id == 0) {
         float m = (lane < n_warps) ? warp_reduce[lane] : 0.0f;
-        #pragma unroll
+#pragma unroll
         for (int off = 16; off > 0; off >>= 1)
             m = fmaxf(m, __shfl_xor_sync(0xFFFFFFFF, m, off));
         if (lane == 0)
@@ -403,7 +414,8 @@ __global__ __launch_bounds__(512) void rmsnorm_fp32in_fp32_accum_to_fp16_kernel(
 }
 
 // Convert FP16 → FP32: out[i] = __half2float(in[i])
-__global__ __launch_bounds__(256) void fp16_to_fp32_kernel(const half* __restrict__ in, float* __restrict__ out, int64_t n) {
+__global__ __launch_bounds__(256) void fp16_to_fp32_kernel(const half* __restrict__ in,
+                                                           float* __restrict__ out, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) {
         out[idx] = __half2float(in[idx]);
@@ -411,7 +423,8 @@ __global__ __launch_bounds__(256) void fp16_to_fp32_kernel(const half* __restric
 }
 
 // Element-wise addition: a[i] += b[i], for FP32 data
-__global__ __launch_bounds__(256) void elementwise_add_fp32_kernel(float* __restrict__ a, const float* __restrict__ b, int64_t n) {
+__global__ __launch_bounds__(256) void elementwise_add_fp32_kernel(float* __restrict__ a,
+                                                                   const float* __restrict__ b, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     for (int64_t i = idx; i < n; i += static_cast<int64_t>(blockDim.x) * gridDim.x) {
         a[i] += b[i];
@@ -429,29 +442,23 @@ __global__ __launch_bounds__(256) void elementwise_add_fp32_kernel(float* __rest
 // row_elems:        n_kv_heads * head_dim (elements per token)
 // max_blocks_per_seq: stride for 2D block table (0 = legacy flat)
 // n_sequences:      number of sequences in the batch
-__global__ __launch_bounds__(256) void write_kv_cache_kernel(
-    const half* __restrict__ data_in,
-    const int* __restrict__ positions,
-    const int* __restrict__ block_tables,
-    half* __restrict__ cache_base,
-    int block_stride,
-    int row_elems,
-    int block_size,
-    int n_tokens,
-    int max_blocks_per_seq,
-    int n_sequences
-) {
+__global__ __launch_bounds__(256) void write_kv_cache_kernel(const half* __restrict__ data_in,
+                                                             const int* __restrict__ positions,
+                                                             const int* __restrict__ block_tables,
+                                                             half* __restrict__ cache_base, int block_stride,
+                                                             int row_elems, int block_size, int n_tokens,
+                                                             int max_blocks_per_seq, int n_sequences) {
     int token_idx = blockIdx.x;
-    if (token_idx >= n_tokens) return;
+    if (token_idx >= n_tokens)
+        return;
 
     int pos = positions[token_idx];
     int slot_in_block;
-    int block_id = kv_resolve_slot(block_tables, pos, block_size,
-                                   token_idx, max_blocks_per_seq, n_sequences,
+    int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
 
-    half* dst = cache_base + static_cast<int64_t>(block_id) * block_stride
-                           + static_cast<int64_t>(slot_in_block) * row_elems;
+    half* dst = cache_base + static_cast<int64_t>(block_id) * block_stride +
+                static_cast<int64_t>(slot_in_block) * row_elems;
     const half* src = data_in + static_cast<int64_t>(token_idx) * row_elems;
 
     // Vectorized 128-bit copy (8 FP16 per store) — row_elems is always a
@@ -468,26 +475,18 @@ __global__ __launch_bounds__(256) void write_kv_cache_kernel(
 // blockIdx.x = token index, blockIdx.y = 0 (K) or 1 (V).
 // Saves one kernel launch per attention layer.
 __global__ __launch_bounds__(256) void write_kv_cache_fused_kernel(
-    const half* __restrict__ k_in,        // [n_tokens, n_kv_heads * head_dim]
-    const half* __restrict__ v_in,        // [n_tokens, n_kv_heads * head_dim]
-    const int* __restrict__ positions,
-    const int* __restrict__ block_tables,
-    half* __restrict__ k_cache_base,
-    half* __restrict__ v_cache_base,
-    int block_stride,
-    int row_elems,
-    int block_size,
-    int n_tokens,
-    int max_blocks_per_seq,
-    int n_sequences
-) {
+    const half* __restrict__ k_in,  // [n_tokens, n_kv_heads * head_dim]
+    const half* __restrict__ v_in,  // [n_tokens, n_kv_heads * head_dim]
+    const int* __restrict__ positions, const int* __restrict__ block_tables, half* __restrict__ k_cache_base,
+    half* __restrict__ v_cache_base, int block_stride, int row_elems, int block_size, int n_tokens,
+    int max_blocks_per_seq, int n_sequences) {
     int token_idx = blockIdx.x;
-    if (token_idx >= n_tokens) return;
+    if (token_idx >= n_tokens)
+        return;
 
     int pos = positions[token_idx];
     int slot_in_block;
-    int block_id = kv_resolve_slot(block_tables, pos, block_size,
-                                   token_idx, max_blocks_per_seq, n_sequences,
+    int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
 
     // blockIdx.y selects K (0) or V (1)
@@ -501,8 +500,8 @@ __global__ __launch_bounds__(256) void write_kv_cache_fused_kernel(
         dst_base = v_cache_base;
     }
 
-    half* dst = dst_base + static_cast<int64_t>(block_id) * block_stride
-                         + static_cast<int64_t>(slot_in_block) * row_elems;
+    half* dst = dst_base + static_cast<int64_t>(block_id) * block_stride +
+                static_cast<int64_t>(slot_in_block) * row_elems;
 
     // Vectorized 128-bit copy (8 FP16 per store)
     const int vec_elems = row_elems / 8;
@@ -515,29 +514,21 @@ __global__ __launch_bounds__(256) void write_kv_cache_fused_kernel(
 
 // FP16 -> FP8 E4M3 quantization + write to paged KV cache
 __global__ __launch_bounds__(256) void write_kv_cache_fp8_kernel(
-    const half* __restrict__ data_in,
-    const int* __restrict__ positions,
-    const int* __restrict__ block_tables,
+    const half* __restrict__ data_in, const int* __restrict__ positions, const int* __restrict__ block_tables,
     __nv_fp8_e4m3* __restrict__ cache_base,  // FP8 cache
-    float inv_scale,            // 1.0 / kv_scale
-    int block_stride,
-    int row_elems,
-    int block_size,
-    int n_tokens,
-    int max_blocks_per_seq,
-    int n_sequences
-) {
+    float inv_scale,                         // 1.0 / kv_scale
+    int block_stride, int row_elems, int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences) {
     int token_idx = blockIdx.x;
-    if (token_idx >= n_tokens) return;
+    if (token_idx >= n_tokens)
+        return;
 
     int pos = positions[token_idx];
     int slot_in_block;
-    int block_id = kv_resolve_slot(block_tables, pos, block_size,
-                                   token_idx, max_blocks_per_seq, n_sequences,
+    int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
 
-    __nv_fp8_e4m3* dst = cache_base + static_cast<int64_t>(block_id) * block_stride
-                                     + static_cast<int64_t>(slot_in_block) * row_elems;
+    __nv_fp8_e4m3* dst = cache_base + static_cast<int64_t>(block_id) * block_stride +
+                         static_cast<int64_t>(slot_in_block) * row_elems;
     const half* src = data_in + static_cast<int64_t>(token_idx) * row_elems;
 
     // Packed PTX cvt: 2 paired conversions per 4 elements (half→e4m3x2).
@@ -548,7 +539,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_kernel(
     const half2* src2 = reinterpret_cast<const half2*>(src);
     uint32_t* dst4 = reinterpret_cast<uint32_t*>(dst);
     for (int i = threadIdx.x; i < vec_elems; i += blockDim.x) {
-        half2 lo = __hmul2(src2[2 * i],     inv_scale_h2);
+        half2 lo = __hmul2(src2[2 * i], inv_scale_h2);
         half2 hi = __hmul2(src2[2 * i + 1], inv_scale_h2);
         uint16_t e4m3_lo = cvt_f16x2_to_e4m3x2(*reinterpret_cast<uint32_t*>(&lo));
         uint16_t e4m3_hi = cvt_f16x2_to_e4m3x2(*reinterpret_cast<uint32_t*>(&hi));
@@ -569,30 +560,21 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_kernel(
 // blockDim.x = 256 (8 warps). Each warp loops over heads.
 // ---------------------------------------------------------------------------
 __global__ __launch_bounds__(256) void write_kv_cache_int8_kernel(
-    const half* __restrict__ k_in,        // [n_tokens, n_kv_heads * head_dim]
-    const half* __restrict__ v_in,
-    const int* __restrict__ positions,
-    const int* __restrict__ block_tables,
-    int8_t* __restrict__ k_cache_base,
-    int8_t* __restrict__ v_cache_base,
-    half* __restrict__ k_scale_base,      // [total_blocks, kKVBlockSize, n_kv_heads]
+    const half* __restrict__ k_in,  // [n_tokens, n_kv_heads * head_dim]
+    const half* __restrict__ v_in, const int* __restrict__ positions, const int* __restrict__ block_tables,
+    int8_t* __restrict__ k_cache_base, int8_t* __restrict__ v_cache_base,
+    half* __restrict__ k_scale_base,  // [total_blocks, kKVBlockSize, n_kv_heads]
     half* __restrict__ v_scale_base,
-    int block_stride,                     // kKVBlockSize * n_kv_heads * head_dim (int8 elems)
-    int scale_block_stride,               // kKVBlockSize * n_kv_heads (half elems)
-    int n_kv_heads,
-    int head_dim,
-    int block_size,
-    int n_tokens,
-    int max_blocks_per_seq,
-    int n_sequences)
-{
+    int block_stride,        // kKVBlockSize * n_kv_heads * head_dim (int8 elems)
+    int scale_block_stride,  // kKVBlockSize * n_kv_heads (half elems)
+    int n_kv_heads, int head_dim, int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences) {
     const int token_idx = blockIdx.x;
-    if (token_idx >= n_tokens) return;
+    if (token_idx >= n_tokens)
+        return;
 
     const int pos = positions[token_idx];
     int slot_in_block;
-    int block_id = kv_resolve_slot(block_tables, pos, block_size,
-                                   token_idx, max_blocks_per_seq, n_sequences,
+    int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
 
     // Select K or V based on blockIdx.y
@@ -602,10 +584,10 @@ __global__ __launch_bounds__(256) void write_kv_cache_int8_kernel(
 
     const int row_elems = n_kv_heads * head_dim;
     const half* src = src_base + static_cast<int64_t>(token_idx) * row_elems;
-    int8_t* dst = cache_base + static_cast<int64_t>(block_id) * block_stride
-                             + static_cast<int64_t>(slot_in_block) * row_elems;
-    half* scale_dst = scale_base + static_cast<int64_t>(block_id) * scale_block_stride
-                                 + static_cast<int64_t>(slot_in_block) * n_kv_heads;
+    int8_t* dst = cache_base + static_cast<int64_t>(block_id) * block_stride +
+                  static_cast<int64_t>(slot_in_block) * row_elems;
+    half* scale_dst = scale_base + static_cast<int64_t>(block_id) * scale_block_stride +
+                      static_cast<int64_t>(slot_in_block) * n_kv_heads;
 
     const int warp_id = threadIdx.x / kWarpSize;
     const int lane_id = threadIdx.x % kWarpSize;
@@ -625,8 +607,8 @@ __global__ __launch_bounds__(256) void write_kv_cache_int8_kernel(
             amax = fmaxf(amax, fabsf(__half2float(h2.x)));
             amax = fmaxf(amax, fabsf(__half2float(h2.y)));
         }
-        // Warp-level absmax reduction
-        #pragma unroll
+// Warp-level absmax reduction
+#pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1)
             amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset));
 
@@ -643,7 +625,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_int8_kernel(
             const half* hp = reinterpret_cast<const half*>(&h2);
             uint32_t packed;
             int8_t* p = reinterpret_cast<int8_t*>(&packed);
-            #pragma unroll
+#pragma unroll
             for (int j = 0; j < 4; j++) {
                 p[j] = static_cast<int8_t>(__float2int_rn(__half2float(hp[j]) * inv_sc));
             }
@@ -664,30 +646,20 @@ __global__ __launch_bounds__(256) void write_kv_cache_int8_kernel(
 // blockIdx.x = token, blockIdx.y = 0 (K) or 1 (V).
 // ---------------------------------------------------------------------------
 __global__ __launch_bounds__(256) void write_kv_cache_int4_kernel(
-    const half* __restrict__ k_in,
-    const half* __restrict__ v_in,
-    const int* __restrict__ positions,
+    const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
     const int* __restrict__ block_tables,
-    uint8_t* __restrict__ k_cache_base,   // packed INT4 pairs
-    uint8_t* __restrict__ v_cache_base,
-    half* __restrict__ k_scale_base,
-    half* __restrict__ v_scale_base,
-    int block_stride,                     // kKVBlockSize * n_kv_heads * head_dim / 2 (bytes)
-    int scale_block_stride,               // kKVBlockSize * n_kv_heads (half elems)
-    int n_kv_heads,
-    int head_dim,
-    int block_size,
-    int n_tokens,
-    int max_blocks_per_seq,
-    int n_sequences)
-{
+    uint8_t* __restrict__ k_cache_base,  // packed INT4 pairs
+    uint8_t* __restrict__ v_cache_base, half* __restrict__ k_scale_base, half* __restrict__ v_scale_base,
+    int block_stride,        // kKVBlockSize * n_kv_heads * head_dim / 2 (bytes)
+    int scale_block_stride,  // kKVBlockSize * n_kv_heads (half elems)
+    int n_kv_heads, int head_dim, int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences) {
     const int token_idx = blockIdx.x;
-    if (token_idx >= n_tokens) return;
+    if (token_idx >= n_tokens)
+        return;
 
     const int pos = positions[token_idx];
     int slot_in_block;
-    int block_id = kv_resolve_slot(block_tables, pos, block_size,
-                                   token_idx, max_blocks_per_seq, n_sequences,
+    int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
 
     const half* src_base = (blockIdx.y == 0) ? k_in : v_in;
@@ -697,10 +669,10 @@ __global__ __launch_bounds__(256) void write_kv_cache_int4_kernel(
     const int row_elems = n_kv_heads * head_dim;
     const int row_bytes = row_elems / 2;  // 2 INT4 values per byte
     const half* src = src_base + static_cast<int64_t>(token_idx) * row_elems;
-    uint8_t* dst = cache_base + static_cast<int64_t>(block_id) * block_stride
-                              + static_cast<int64_t>(slot_in_block) * row_bytes;
-    half* scale_dst = scale_base + static_cast<int64_t>(block_id) * scale_block_stride
-                                 + static_cast<int64_t>(slot_in_block) * n_kv_heads;
+    uint8_t* dst = cache_base + static_cast<int64_t>(block_id) * block_stride +
+                   static_cast<int64_t>(slot_in_block) * row_bytes;
+    half* scale_dst = scale_base + static_cast<int64_t>(block_id) * scale_block_stride +
+                      static_cast<int64_t>(slot_in_block) * n_kv_heads;
 
     const int warp_id = threadIdx.x / kWarpSize;
     const int lane_id = threadIdx.x % kWarpSize;
@@ -715,7 +687,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_int4_kernel(
             float val = __half2float(src[head_offset + d]);
             amax = fmaxf(amax, fabsf(val));
         }
-        #pragma unroll
+#pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1)
             amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset));
 
@@ -736,8 +708,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_int4_kernel(
             q1 = max(-8, min(7, q1));
 
             // Pack: low nibble = q0, high nibble = q1
-            uint8_t packed = (static_cast<uint8_t>(q0 & 0xF)) |
-                             (static_cast<uint8_t>(q1 & 0xF) << 4);
+            uint8_t packed = (static_cast<uint8_t>(q0 & 0xF)) | (static_cast<uint8_t>(q1 & 0xF) << 4);
             dst[head_byte_offset + d / 2] = packed;
         }
 
@@ -761,34 +732,19 @@ __global__ __launch_bounds__(256) void write_kv_cache_int4_kernel(
 // V path (blockIdx.y == 1): Standard INT4 per-head quantization (same as INT4 kernel)
 // ---------------------------------------------------------------------------
 __global__ __launch_bounds__(256) void write_kv_cache_turboquant_kernel(
-    const half* __restrict__ k_in,
-    const half* __restrict__ v_in,
-    const int* __restrict__ positions,
-    const int* __restrict__ block_tables,
-    uint8_t* __restrict__ k_dir_cache_base,
-    uint8_t* __restrict__ v_cache_base,
-    half* __restrict__ k_norm_base,
-    half* __restrict__ v_scale_base,
-    uint8_t* __restrict__ k_sketch_base,
-    const uint8_t* __restrict__ qjl_matrix,
-    int block_stride,
-    int scale_block_stride,
-    int sketch_block_stride,
-    int n_kv_heads,
-    int head_dim,
-    int sketch_dim,
-    int block_size,
-    int n_tokens,
-    int max_blocks_per_seq,
-    int n_sequences)
-{
+    const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
+    const int* __restrict__ block_tables, uint8_t* __restrict__ k_dir_cache_base,
+    uint8_t* __restrict__ v_cache_base, half* __restrict__ k_norm_base, half* __restrict__ v_scale_base,
+    uint8_t* __restrict__ k_sketch_base, const uint8_t* __restrict__ qjl_matrix, int block_stride,
+    int scale_block_stride, int sketch_block_stride, int n_kv_heads, int head_dim, int sketch_dim,
+    int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences) {
     const int token_idx = blockIdx.x;
-    if (token_idx >= n_tokens) return;
+    if (token_idx >= n_tokens)
+        return;
 
     const int pos = positions[token_idx];
     int slot_in_block;
-    int block_id = kv_resolve_slot(block_tables, pos, block_size,
-                                   token_idx, max_blocks_per_seq, n_sequences,
+    int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
 
     const int row_elems = n_kv_heads * head_dim;
@@ -797,13 +753,13 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_kernel(
         // ── K path: PolarQuant + QJL sketch ──
         const half* src = k_in + static_cast<int64_t>(token_idx) * row_elems;
         const int row_bytes = n_kv_heads * head_dim / 2;
-        uint8_t* dir_dst = k_dir_cache_base + static_cast<int64_t>(block_id) * block_stride
-                           + static_cast<int64_t>(slot_in_block) * row_bytes;
-        half* norm_dst = k_norm_base + static_cast<int64_t>(block_id) * scale_block_stride
-                         + static_cast<int64_t>(slot_in_block) * n_kv_heads;
+        uint8_t* dir_dst = k_dir_cache_base + static_cast<int64_t>(block_id) * block_stride +
+                           static_cast<int64_t>(slot_in_block) * row_bytes;
+        half* norm_dst = k_norm_base + static_cast<int64_t>(block_id) * scale_block_stride +
+                         static_cast<int64_t>(slot_in_block) * n_kv_heads;
         const int sketch_row_bytes = n_kv_heads * (sketch_dim / 8);
-        uint8_t* sketch_dst = k_sketch_base + static_cast<int64_t>(block_id) * sketch_block_stride
-                              + static_cast<int64_t>(slot_in_block) * sketch_row_bytes;
+        uint8_t* sketch_dst = k_sketch_base + static_cast<int64_t>(block_id) * sketch_block_stride +
+                              static_cast<int64_t>(slot_in_block) * sketch_row_bytes;
 
         const int warp_id = threadIdx.x / kWarpSize;
         const int lane_id = threadIdx.x % kWarpSize;
@@ -819,7 +775,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_kernel(
                 float val = __half2float(src[head_offset + d]);
                 norm_sq += val * val;
             }
-            #pragma unroll
+#pragma unroll
             for (int offset = 16; offset > 0; offset >>= 1)
                 norm_sq += __shfl_xor_sync(0xFFFFFFFF, norm_sq, offset);
 
@@ -838,8 +794,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_kernel(
                 q0 = max(-7, min(7, q0));
                 q1 = max(-7, min(7, q1));
 
-                uint8_t packed = (static_cast<uint8_t>(q0 & 0xF)) |
-                                 (static_cast<uint8_t>(q1 & 0xF) << 4);
+                uint8_t packed = (static_cast<uint8_t>(q0 & 0xF)) | (static_cast<uint8_t>(q1 & 0xF) << 4);
                 dir_dst[head_byte_offset + d / 2] = packed;
             }
 
@@ -862,7 +817,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_kernel(
                 float dot = 0.0f;
                 for (int d = 0; d < head_dim; d += 8) {
                     uint8_t r_byte = __ldg(&R_row[d / 8]);
-                    #pragma unroll
+#pragma unroll
                     for (int b = 0; b < 8; b++) {
                         float sign = (r_byte & (1u << b)) ? 1.0f : -1.0f;
                         float k_val = __half2float(src[head_offset + d + b]);
@@ -877,19 +832,18 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_kernel(
                 uint8_t bit_val = (dot >= 0.0f) ? (1u << bit_idx) : 0;
 
                 // Atomic OR to pack bits from different lanes into the same byte
-                atomicOr(reinterpret_cast<unsigned int*>(
-                    &sketch_dst[sketch_byte_offset + (byte_idx & ~3)]),
-                    static_cast<unsigned int>(bit_val) << (8 * (byte_idx & 3)));
+                atomicOr(reinterpret_cast<unsigned int*>(&sketch_dst[sketch_byte_offset + (byte_idx & ~3)]),
+                         static_cast<unsigned int>(bit_val) << (8 * (byte_idx & 3)));
             }
         }
     } else {
         // ── V path: Standard INT4 per-head quantization ──
         const half* src = v_in + static_cast<int64_t>(token_idx) * row_elems;
         const int row_bytes = n_kv_heads * head_dim / 2;
-        uint8_t* dst = v_cache_base + static_cast<int64_t>(block_id) * block_stride
-                       + static_cast<int64_t>(slot_in_block) * row_bytes;
-        half* scale_dst = v_scale_base + static_cast<int64_t>(block_id) * scale_block_stride
-                          + static_cast<int64_t>(slot_in_block) * n_kv_heads;
+        uint8_t* dst = v_cache_base + static_cast<int64_t>(block_id) * block_stride +
+                       static_cast<int64_t>(slot_in_block) * row_bytes;
+        half* scale_dst = v_scale_base + static_cast<int64_t>(block_id) * scale_block_stride +
+                          static_cast<int64_t>(slot_in_block) * n_kv_heads;
 
         const int warp_id = threadIdx.x / kWarpSize;
         const int lane_id = threadIdx.x % kWarpSize;
@@ -904,7 +858,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_kernel(
                 float val = __half2float(src[head_offset + d]);
                 amax = fmaxf(amax, fabsf(val));
             }
-            #pragma unroll
+#pragma unroll
             for (int offset = 16; offset > 0; offset >>= 1)
                 amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset));
 
@@ -922,8 +876,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_kernel(
                 q0 = max(-8, min(7, q0));
                 q1 = max(-8, min(7, q1));
 
-                uint8_t packed = (static_cast<uint8_t>(q0 & 0xF)) |
-                                 (static_cast<uint8_t>(q1 & 0xF) << 4);
+                uint8_t packed = (static_cast<uint8_t>(q0 & 0xF)) | (static_cast<uint8_t>(q1 & 0xF) << 4);
                 dst[head_byte_offset + d / 2] = packed;
             }
 
@@ -936,14 +889,14 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_kernel(
 
 // FP4 E2M1 + UE8M0 helpers for TurboQuant MXFP4 path (shared header).
 // Close namespace before including to avoid double-nesting (header defines in imp::).
-} // namespace imp
+}  // namespace imp
 #include "quant/turboquant_fp4.cuh"
 namespace imp {
 
 // Aliases for shorter names in the kernel below
-#define tq_float_abs_to_fp4  tq_fp4_quantize_abs
-#define tq_float_to_ue8m0    tq_fp4_float_to_ue8m0
-#define tq_ue8m0_to_float    tq_fp4_ue8m0_to_float
+#define tq_float_abs_to_fp4 tq_fp4_quantize_abs
+#define tq_float_to_ue8m0 tq_fp4_float_to_ue8m0
+#define tq_ue8m0_to_float tq_fp4_ue8m0_to_float
 
 // ---------------------------------------------------------------------------
 // TurboQuant MXFP4 write kernel
@@ -959,36 +912,20 @@ namespace imp {
 // V path (blockIdx.y == 1): Standard INT4 per-head quantization (identical)
 // ---------------------------------------------------------------------------
 __global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
-    const half* __restrict__ k_in,
-    const half* __restrict__ v_in,
-    const int* __restrict__ positions,
-    const int* __restrict__ block_tables,
-    uint8_t* __restrict__ k_dir_cache_base,
-    uint8_t* __restrict__ v_cache_base,
-    half* __restrict__ k_norm_base,
-    half* __restrict__ v_scale_base,
-    uint8_t* __restrict__ k_sketch_base,
-    uint8_t* __restrict__ k_mscale_base,
-    const uint8_t* __restrict__ qjl_matrix,
-    int block_stride,
-    int scale_block_stride,
-    int sketch_block_stride,
-    int mscale_block_stride,
-    int n_kv_heads,
-    int head_dim,
-    int sketch_dim,
-    int block_size,
-    int n_tokens,
-    int max_blocks_per_seq,
-    int n_sequences)
-{
+    const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
+    const int* __restrict__ block_tables, uint8_t* __restrict__ k_dir_cache_base,
+    uint8_t* __restrict__ v_cache_base, half* __restrict__ k_norm_base, half* __restrict__ v_scale_base,
+    uint8_t* __restrict__ k_sketch_base, uint8_t* __restrict__ k_mscale_base,
+    const uint8_t* __restrict__ qjl_matrix, int block_stride, int scale_block_stride, int sketch_block_stride,
+    int mscale_block_stride, int n_kv_heads, int head_dim, int sketch_dim, int block_size, int n_tokens,
+    int max_blocks_per_seq, int n_sequences) {
     const int token_idx = blockIdx.x;
-    if (token_idx >= n_tokens) return;
+    if (token_idx >= n_tokens)
+        return;
 
     const int pos = positions[token_idx];
     int slot_in_block;
-    int block_id = kv_resolve_slot(block_tables, pos, block_size,
-                                   token_idx, max_blocks_per_seq, n_sequences,
+    int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
 
     const int row_elems = n_kv_heads * head_dim;
@@ -998,17 +935,17 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
         // ── K path: PolarQuant + FP4 E2M1 + UE8M0 micro-scales + QJL ──
         const half* src = k_in + static_cast<int64_t>(token_idx) * row_elems;
         const int row_bytes = n_kv_heads * head_dim / 2;
-        uint8_t* dir_dst = k_dir_cache_base + static_cast<int64_t>(block_id) * block_stride
-                           + static_cast<int64_t>(slot_in_block) * row_bytes;
-        half* norm_dst = k_norm_base + static_cast<int64_t>(block_id) * scale_block_stride
-                         + static_cast<int64_t>(slot_in_block) * n_kv_heads;
+        uint8_t* dir_dst = k_dir_cache_base + static_cast<int64_t>(block_id) * block_stride +
+                           static_cast<int64_t>(slot_in_block) * row_bytes;
+        half* norm_dst = k_norm_base + static_cast<int64_t>(block_id) * scale_block_stride +
+                         static_cast<int64_t>(slot_in_block) * n_kv_heads;
         const int sketch_row_bytes = n_kv_heads * (sketch_dim / 8);
-        uint8_t* sketch_dst = k_sketch_base + static_cast<int64_t>(block_id) * sketch_block_stride
-                              + static_cast<int64_t>(slot_in_block) * sketch_row_bytes;
+        uint8_t* sketch_dst = k_sketch_base + static_cast<int64_t>(block_id) * sketch_block_stride +
+                              static_cast<int64_t>(slot_in_block) * sketch_row_bytes;
         const int n_groups = head_dim / GROUP_SIZE;
         const int mscale_row_bytes = n_kv_heads * n_groups;
-        uint8_t* mscale_dst = k_mscale_base + static_cast<int64_t>(block_id) * mscale_block_stride
-                              + static_cast<int64_t>(slot_in_block) * mscale_row_bytes;
+        uint8_t* mscale_dst = k_mscale_base + static_cast<int64_t>(block_id) * mscale_block_stride +
+                              static_cast<int64_t>(slot_in_block) * mscale_row_bytes;
 
         const int warp_id = threadIdx.x / kWarpSize;
         const int lane_id = threadIdx.x % kWarpSize;
@@ -1026,7 +963,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
                 float v1 = __half2float(h2.y);
                 norm_sq += v0 * v0 + v1 * v1;
             }
-            #pragma unroll
+#pragma unroll
             for (int offset = 16; offset > 0; offset >>= 1)
                 norm_sq += __shfl_xor_sync(0xFFFFFFFF, norm_sq, offset);
 
@@ -1055,7 +992,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
                     float v1 = __half2float(h2.y) * inv_norm;
                     group_amax = fmaxf(group_amax, fmaxf(fabsf(v0), fabsf(v1)));
                 }
-                #pragma unroll
+#pragma unroll
                 for (int offset = 16; offset > 0; offset >>= 1)
                     group_amax = fmaxf(group_amax, __shfl_xor_sync(0xFFFFFFFF, group_amax, offset));
 
@@ -1063,7 +1000,8 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
                 float raw_scale = group_amax / 6.0f;
                 uint8_t ue8m0 = tq_float_to_ue8m0(raw_scale);
                 float actual_scale = tq_ue8m0_to_float(ue8m0);
-                if (actual_scale == 0.0f) actual_scale = 1.0f / (1 << 30);  // avoid div-by-zero
+                if (actual_scale == 0.0f)
+                    actual_scale = 1.0f / (1 << 30);  // avoid div-by-zero
                 float inv_scale = 1.0f / actual_scale;
 
                 // 3c: Store micro-scale
@@ -1078,8 +1016,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
                     half2 h2 = src_h2[d];
                     float s0 = __half2float(h2.x) * combined_inv;
                     float s1 = __half2float(h2.y) * combined_inv;
-                    dir_dst[head_byte_offset + (g_start + d * 2) / 2] =
-                        tq_fp4_pack_pair(s0, s1);
+                    dir_dst[head_byte_offset + (g_start + d * 2) / 2] = tq_fp4_pack_pair(s0, s1);
                 }
             }
 
@@ -1090,7 +1027,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
                 float dot = 0.0f;
                 for (int d = 0; d < head_dim; d += 8) {
                     uint8_t r_byte = __ldg(&R_row[d / 8]);
-                    #pragma unroll
+#pragma unroll
                     for (int b = 0; b < 8; b++) {
                         float sign = (r_byte & (1u << b)) ? 1.0f : -1.0f;
                         float k_val = __half2float(src[head_offset + d + b]);
@@ -1100,19 +1037,18 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
                 int byte_idx = sr / 8;
                 int bit_idx = sr % 8;
                 uint8_t bit_val = (dot >= 0.0f) ? (1u << bit_idx) : 0;
-                atomicOr(reinterpret_cast<unsigned int*>(
-                    &sketch_dst[sketch_byte_offset + (byte_idx & ~3)]),
-                    static_cast<unsigned int>(bit_val) << (8 * (byte_idx & 3)));
+                atomicOr(reinterpret_cast<unsigned int*>(&sketch_dst[sketch_byte_offset + (byte_idx & ~3)]),
+                         static_cast<unsigned int>(bit_val) << (8 * (byte_idx & 3)));
             }
         }
     } else {
         // ── V path: Standard INT4 per-head quantization (identical to non-MXFP4) ──
         const half* src = v_in + static_cast<int64_t>(token_idx) * row_elems;
         const int row_bytes = n_kv_heads * head_dim / 2;
-        uint8_t* dst = v_cache_base + static_cast<int64_t>(block_id) * block_stride
-                       + static_cast<int64_t>(slot_in_block) * row_bytes;
-        half* scale_dst = v_scale_base + static_cast<int64_t>(block_id) * scale_block_stride
-                          + static_cast<int64_t>(slot_in_block) * n_kv_heads;
+        uint8_t* dst = v_cache_base + static_cast<int64_t>(block_id) * block_stride +
+                       static_cast<int64_t>(slot_in_block) * row_bytes;
+        half* scale_dst = v_scale_base + static_cast<int64_t>(block_id) * scale_block_stride +
+                          static_cast<int64_t>(slot_in_block) * n_kv_heads;
 
         const int warp_id = threadIdx.x / kWarpSize;
         const int lane_id = threadIdx.x % kWarpSize;
@@ -1125,10 +1061,9 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
             float amax = 0.0f;
             for (int d = lane_id; d < head_dim / 2; d += kWarpSize) {
                 half2 h2 = src_h2[d];
-                amax = fmaxf(amax, fmaxf(fabsf(__half2float(h2.x)),
-                                          fabsf(__half2float(h2.y))));
+                amax = fmaxf(amax, fmaxf(fabsf(__half2float(h2.x)), fabsf(__half2float(h2.y))));
             }
-            #pragma unroll
+#pragma unroll
             for (int offset = 16; offset > 0; offset >>= 1)
                 amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset));
 
@@ -1145,8 +1080,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
                 int q1 = __float2int_rn(v1 * inv_sc);
                 q0 = max(-8, min(7, q0));
                 q1 = max(-8, min(7, q1));
-                uint8_t packed = (static_cast<uint8_t>(q0 & 0xF)) |
-                                 (static_cast<uint8_t>(q1 & 0xF) << 4);
+                uint8_t packed = (static_cast<uint8_t>(q0 & 0xF)) | (static_cast<uint8_t>(q1 & 0xF) << 4);
                 dst[head_byte_offset + d] = packed;
             }
             if (lane_id == 0) {
@@ -1167,33 +1101,19 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_mxfp4_kernel(
 // V path (blockIdx.y == 1): Standard INT4 per-head quantization (same as INT4/TQ kernel)
 // ---------------------------------------------------------------------------
 __global__ __launch_bounds__(256) void write_kv_cache_turboquant_lite_kernel(
-    const half* __restrict__ k_in,
-    const half* __restrict__ v_in,
-    const int* __restrict__ positions,
-    const int* __restrict__ block_tables,
-    uint8_t* __restrict__ v_cache_base,
-    half* __restrict__ k_norm_base,
-    half* __restrict__ v_scale_base,
-    uint8_t* __restrict__ k_sketch_base,
-    const uint8_t* __restrict__ qjl_matrix,
-    int v_block_stride,
-    int scale_block_stride,
-    int sketch_block_stride,
-    int n_kv_heads,
-    int head_dim,
-    int sketch_dim,
-    int block_size,
-    int n_tokens,
-    int max_blocks_per_seq,
-    int n_sequences)
-{
+    const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
+    const int* __restrict__ block_tables, uint8_t* __restrict__ v_cache_base, half* __restrict__ k_norm_base,
+    half* __restrict__ v_scale_base, uint8_t* __restrict__ k_sketch_base,
+    const uint8_t* __restrict__ qjl_matrix, int v_block_stride, int scale_block_stride,
+    int sketch_block_stride, int n_kv_heads, int head_dim, int sketch_dim, int block_size, int n_tokens,
+    int max_blocks_per_seq, int n_sequences) {
     const int token_idx = blockIdx.x;
-    if (token_idx >= n_tokens) return;
+    if (token_idx >= n_tokens)
+        return;
 
     const int pos = positions[token_idx];
     int slot_in_block;
-    int block_id = kv_resolve_slot(block_tables, pos, block_size,
-                                   token_idx, max_blocks_per_seq, n_sequences,
+    int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
 
     const int row_elems = n_kv_heads * head_dim;
@@ -1201,11 +1121,11 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_lite_kernel(
     if (blockIdx.y == 0) {
         // ── K path: norm + QJL sketch only (no INT4 direction quantization) ──
         const half* src = k_in + static_cast<int64_t>(token_idx) * row_elems;
-        half* norm_dst = k_norm_base + static_cast<int64_t>(block_id) * scale_block_stride
-                         + static_cast<int64_t>(slot_in_block) * n_kv_heads;
+        half* norm_dst = k_norm_base + static_cast<int64_t>(block_id) * scale_block_stride +
+                         static_cast<int64_t>(slot_in_block) * n_kv_heads;
         const int sketch_row_bytes = n_kv_heads * (sketch_dim / 8);
-        uint8_t* sketch_dst = k_sketch_base + static_cast<int64_t>(block_id) * sketch_block_stride
-                              + static_cast<int64_t>(slot_in_block) * sketch_row_bytes;
+        uint8_t* sketch_dst = k_sketch_base + static_cast<int64_t>(block_id) * sketch_block_stride +
+                              static_cast<int64_t>(slot_in_block) * sketch_row_bytes;
 
         const int warp_id = threadIdx.x / kWarpSize;
         const int lane_id = threadIdx.x % kWarpSize;
@@ -1221,7 +1141,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_lite_kernel(
                 float val = __half2float(src[head_offset + d]);
                 norm_sq += val * val;
             }
-            #pragma unroll
+#pragma unroll
             for (int offset = 16; offset > 0; offset >>= 1)
                 norm_sq += __shfl_xor_sync(0xFFFFFFFF, norm_sq, offset);
 
@@ -1241,7 +1161,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_lite_kernel(
                 float dot = 0.0f;
                 for (int d = 0; d < head_dim; d += 8) {
                     uint8_t r_byte = __ldg(&R_row[d / 8]);
-                    #pragma unroll
+#pragma unroll
                     for (int b = 0; b < 8; b++) {
                         float sign = (r_byte & (1u << b)) ? 1.0f : -1.0f;
                         float k_val = __half2float(src[head_offset + d + b]);
@@ -1253,19 +1173,18 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_lite_kernel(
                 int bit_idx = sr % 8;
                 uint8_t bit_val = (dot >= 0.0f) ? (1u << bit_idx) : 0;
 
-                atomicOr(reinterpret_cast<unsigned int*>(
-                    &sketch_dst[sketch_byte_offset + (byte_idx & ~3)]),
-                    static_cast<unsigned int>(bit_val) << (8 * (byte_idx & 3)));
+                atomicOr(reinterpret_cast<unsigned int*>(&sketch_dst[sketch_byte_offset + (byte_idx & ~3)]),
+                         static_cast<unsigned int>(bit_val) << (8 * (byte_idx & 3)));
             }
         }
     } else {
         // ── V path: Standard INT4 per-head quantization ──
         const half* src = v_in + static_cast<int64_t>(token_idx) * row_elems;
         const int row_bytes = n_kv_heads * head_dim / 2;
-        uint8_t* dst = v_cache_base + static_cast<int64_t>(block_id) * v_block_stride
-                       + static_cast<int64_t>(slot_in_block) * row_bytes;
-        half* scale_dst = v_scale_base + static_cast<int64_t>(block_id) * scale_block_stride
-                          + static_cast<int64_t>(slot_in_block) * n_kv_heads;
+        uint8_t* dst = v_cache_base + static_cast<int64_t>(block_id) * v_block_stride +
+                       static_cast<int64_t>(slot_in_block) * row_bytes;
+        half* scale_dst = v_scale_base + static_cast<int64_t>(block_id) * scale_block_stride +
+                          static_cast<int64_t>(slot_in_block) * n_kv_heads;
 
         const int warp_id = threadIdx.x / kWarpSize;
         const int lane_id = threadIdx.x % kWarpSize;
@@ -1279,7 +1198,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_lite_kernel(
                 float val = __half2float(src[head_offset + d]);
                 amax = fmaxf(amax, fabsf(val));
             }
-            #pragma unroll
+#pragma unroll
             for (int offset = 16; offset > 0; offset >>= 1)
                 amax = fmaxf(amax, __shfl_xor_sync(0xFFFFFFFF, amax, offset));
 
@@ -1296,8 +1215,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_lite_kernel(
                 q0 = max(-8, min(7, q0));
                 q1 = max(-8, min(7, q1));
 
-                uint8_t packed = (static_cast<uint8_t>(q0 & 0xF)) |
-                                 (static_cast<uint8_t>(q1 & 0xF) << 4);
+                uint8_t packed = (static_cast<uint8_t>(q0 & 0xF)) | (static_cast<uint8_t>(q1 & 0xF) << 4);
                 dst[head_byte_offset + d / 2] = packed;
             }
 
@@ -1312,40 +1230,27 @@ __global__ __launch_bounds__(256) void write_kv_cache_turboquant_lite_kernel(
 // blockIdx.x = token index, blockIdx.y = 0 (K+RoPE) or 1 (V copy).
 // Eliminates the separate RoPE kernel launch for K in the decode path.
 __global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
-    const half* __restrict__ k_in,       // [n_tokens, n_kv_heads * head_dim] raw K (no RoPE)
-    const half* __restrict__ v_in,       // [n_tokens, n_kv_heads * head_dim]
-    const int* __restrict__ positions,
-    const int* __restrict__ block_tables,
-    half* __restrict__ k_cache_base,
-    half* __restrict__ v_cache_base,
-    int block_stride,
-    int row_elems,
-    int block_size,
-    int n_tokens,
-    int max_blocks_per_seq,
-    int n_sequences,
-    int n_kv_heads,
-    int head_dim,
-    float theta,
-    float inv_scaling,
-    int rope_pairs,      // effective_rope_dim / 2
-    bool neox,
-    const float* __restrict__ longrope_inv_freqs
-) {
+    const half* __restrict__ k_in,  // [n_tokens, n_kv_heads * head_dim] raw K (no RoPE)
+    const half* __restrict__ v_in,  // [n_tokens, n_kv_heads * head_dim]
+    const int* __restrict__ positions, const int* __restrict__ block_tables, half* __restrict__ k_cache_base,
+    half* __restrict__ v_cache_base, int block_stride, int row_elems, int block_size, int n_tokens,
+    int max_blocks_per_seq, int n_sequences, int n_kv_heads, int head_dim, float theta, float inv_scaling,
+    int rope_pairs,  // effective_rope_dim / 2
+    bool neox, const float* __restrict__ longrope_inv_freqs) {
     int token_idx = blockIdx.x;
-    if (token_idx >= n_tokens) return;
+    if (token_idx >= n_tokens)
+        return;
 
     int pos = positions[token_idx];
     int slot_in_block;
-    int block_id = kv_resolve_slot(block_tables, pos, block_size,
-                                   token_idx, max_blocks_per_seq, n_sequences,
+    int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
 
     if (blockIdx.y == 0) {
         // K path: apply RoPE during write
         const half* k_src = k_in + static_cast<int64_t>(token_idx) * row_elems;
-        half* k_dst = k_cache_base + static_cast<int64_t>(block_id) * block_stride
-                                   + static_cast<int64_t>(slot_in_block) * row_elems;
+        half* k_dst = k_cache_base + static_cast<int64_t>(block_id) * block_stride +
+                      static_cast<int64_t>(slot_in_block) * row_elems;
 
         // Process RoPE pairs
         int total_pairs = n_kv_heads * rope_pairs;
@@ -1394,8 +1299,8 @@ __global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
     } else {
         // V path: vectorized 128-bit copy (no RoPE)
         const half* v_src = v_in + static_cast<int64_t>(token_idx) * row_elems;
-        half* v_dst = v_cache_base + static_cast<int64_t>(block_id) * block_stride
-                                   + static_cast<int64_t>(slot_in_block) * row_elems;
+        half* v_dst = v_cache_base + static_cast<int64_t>(block_id) * block_stride +
+                      static_cast<int64_t>(slot_in_block) * row_elems;
         const int vec_elems = row_elems / 8;
         const float4* vs4 = reinterpret_cast<const float4*>(v_src);
         float4* vd4 = reinterpret_cast<float4*>(v_dst);
@@ -1408,39 +1313,29 @@ __global__ __launch_bounds__(256) void write_kv_cache_rope_fused_kernel(
 // Fused K+V FP8 write: combines K and V quantize+write into one kernel launch.
 // blockIdx.x = token index, blockIdx.y = 0 (K) or 1 (V).
 __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
-    const half* __restrict__ k_in,
-    const half* __restrict__ v_in,
-    const int* __restrict__ positions,
-    const int* __restrict__ block_tables,
-    __nv_fp8_e4m3* __restrict__ k_cache_base,
-    __nv_fp8_e4m3* __restrict__ v_cache_base,
-    float inv_scale,
-    int block_stride,
-    int row_elems,
-    int block_size,
-    int n_tokens,
-    int max_blocks_per_seq,
-    int n_sequences
-) {
+    const half* __restrict__ k_in, const half* __restrict__ v_in, const int* __restrict__ positions,
+    const int* __restrict__ block_tables, __nv_fp8_e4m3* __restrict__ k_cache_base,
+    __nv_fp8_e4m3* __restrict__ v_cache_base, float inv_scale, int block_stride, int row_elems,
+    int block_size, int n_tokens, int max_blocks_per_seq, int n_sequences) {
     int token_idx = blockIdx.x;
-    if (token_idx >= n_tokens) return;
+    if (token_idx >= n_tokens)
+        return;
 
     int pos = positions[token_idx];
     int slot_in_block;
-    int block_id = kv_resolve_slot(block_tables, pos, block_size,
-                                   token_idx, max_blocks_per_seq, n_sequences,
+    int block_id = kv_resolve_slot(block_tables, pos, block_size, token_idx, max_blocks_per_seq, n_sequences,
                                    slot_in_block);
 
     const half* src;
     __nv_fp8_e4m3* dst;
     if (blockIdx.y == 0) {
         src = k_in + static_cast<int64_t>(token_idx) * row_elems;
-        dst = k_cache_base + static_cast<int64_t>(block_id) * block_stride
-                           + static_cast<int64_t>(slot_in_block) * row_elems;
+        dst = k_cache_base + static_cast<int64_t>(block_id) * block_stride +
+              static_cast<int64_t>(slot_in_block) * row_elems;
     } else {
         src = v_in + static_cast<int64_t>(token_idx) * row_elems;
-        dst = v_cache_base + static_cast<int64_t>(block_id) * block_stride
-                           + static_cast<int64_t>(slot_in_block) * row_elems;
+        dst = v_cache_base + static_cast<int64_t>(block_id) * block_stride +
+              static_cast<int64_t>(slot_in_block) * row_elems;
     }
 
     // Packed PTX cvt: 2 paired conversions per 4 elements (half→e4m3x2).
@@ -1450,7 +1345,7 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
     const half2* src2 = reinterpret_cast<const half2*>(src);
     uint32_t* dst4 = reinterpret_cast<uint32_t*>(dst);
     for (int i = threadIdx.x; i < vec_elems; i += blockDim.x) {
-        half2 lo = __hmul2(src2[2 * i],     inv_scale_h2);
+        half2 lo = __hmul2(src2[2 * i], inv_scale_h2);
         half2 hi = __hmul2(src2[2 * i + 1], inv_scale_h2);
         uint16_t e4m3_lo = cvt_f16x2_to_e4m3x2(*reinterpret_cast<uint32_t*>(&lo));
         uint16_t e4m3_hi = cvt_f16x2_to_e4m3x2(*reinterpret_cast<uint32_t*>(&hi));
@@ -1464,20 +1359,15 @@ __global__ __launch_bounds__(256) void write_kv_cache_fp8_fused_kernel(
 
 // Q-only RoPE for decode (n=1): applies RoPE to Q in-place.
 // Grid: (1, n_heads), Block: rope_pairs.
-__global__ __launch_bounds__(256) void rope_q_only_fp16_kernel(
-    half* __restrict__ Q,       // [n_heads * head_dim]
-    const int* __restrict__ positions,
-    int n_heads,
-    int head_dim,
-    float theta,
-    float inv_scaling,
-    int rope_pairs,
-    bool neox,
-    const float* __restrict__ longrope_inv_freqs
-) {
-    int head_idx  = blockIdx.y;
-    int pair_idx  = threadIdx.x;
-    if (head_idx >= n_heads || pair_idx >= rope_pairs) return;
+__global__ __launch_bounds__(256) void rope_q_only_fp16_kernel(half* __restrict__ Q,  // [n_heads * head_dim]
+                                                               const int* __restrict__ positions, int n_heads,
+                                                               int head_dim, float theta, float inv_scaling,
+                                                               int rope_pairs, bool neox,
+                                                               const float* __restrict__ longrope_inv_freqs) {
+    int head_idx = blockIdx.y;
+    int pair_idx = threadIdx.x;
+    if (head_idx >= n_heads || pair_idx >= rope_pairs)
+        return;
 
     int pos = positions[0];  // decode: single token
 
@@ -1505,10 +1395,11 @@ __global__ __launch_bounds__(256) void rope_q_only_fp16_kernel(
 // Add FP16 bias to each row of FP32 matrix: out[i,j] += bias[j]
 // Grid: n_tokens, Block: 256, each thread handles multiple expert indices.
 __global__ __launch_bounds__(256) void add_fp16_bias_to_fp32_kernel(float* __restrict__ data,
-                                              const half* __restrict__ bias,
-                                              int n_tokens, int n_cols) {
+                                                                    const half* __restrict__ bias,
+                                                                    int n_tokens, int n_cols) {
     int token = blockIdx.x;
-    if (token >= n_tokens) return;
+    if (token >= n_tokens)
+        return;
     float* row = data + static_cast<int64_t>(token) * n_cols;
     for (int j = threadIdx.x; j < n_cols; j += blockDim.x) {
         row[j] += __half2float(bias[j]);
@@ -1524,9 +1415,8 @@ __global__ __launch_bounds__(256) void scale_fp32_kernel(float* __restrict__ dat
 }
 
 // Logit soft-capping: logit = softcap * tanh(logit / softcap)  (Gemma-2/3)
-__global__ __launch_bounds__(256) void logit_softcap_fp32_kernel(float* __restrict__ data,
-                                          float softcap, float inv_softcap,
-                                          int64_t n) {
+__global__ __launch_bounds__(256) void logit_softcap_fp32_kernel(float* __restrict__ data, float softcap,
+                                                                 float inv_softcap, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) {
         data[idx] = softcap * tanhf(data[idx] * inv_softcap);
@@ -1535,8 +1425,7 @@ __global__ __launch_bounds__(256) void logit_softcap_fp32_kernel(float* __restri
 
 // FP32 -> FP16 conversion kernel (for scatter output back to compute_dtype)
 __global__ __launch_bounds__(256) void fp32_to_fp16_kernel(const float* __restrict__ in,
-                                    half* __restrict__ out,
-                                    int64_t n) {
+                                                           half* __restrict__ out, int64_t n) {
     int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (idx < n) {
         out[idx] = __float2half(in[idx]);
@@ -1553,68 +1442,68 @@ void elementwise_add(Tensor& a, const Tensor& b, cudaStream_t stream) {
         int64_t n2 = (n + 1) / 2;
         int threads = 256;
         int blocks = static_cast<int>((n2 + threads - 1) / threads);
-        pdl::launch(elementwise_add_fp16_kernel,
-                    dim3(blocks), dim3(threads), 0, stream,
-                    static_cast<half*>(a.data),
-                    static_cast<const half*>(b.data),
-                    n);
+        pdl::launch(elementwise_add_fp16_kernel, dim3(blocks), dim3(threads), 0, stream,
+                    static_cast<half*>(a.data), static_cast<const half*>(b.data), n);
     } else {
         int threads = 256;
         int blocks = static_cast<int>((n + threads - 1) / threads);
-        pdl::launch(elementwise_add_fp32_kernel,
-                    dim3(blocks), dim3(threads), 0, stream,
-                    static_cast<float*>(a.data),
-                    static_cast<const float*>(b.data),
-                    n);
+        pdl::launch(elementwise_add_fp32_kernel, dim3(blocks), dim3(threads), 0, stream,
+                    static_cast<float*>(a.data), static_cast<const float*>(b.data), n);
     }
 }
 
 // Element-wise add-store: out[i] = a[i] + b[i] — avoids in-place + copy pattern
-void elementwise_add_store(const Tensor& a, const Tensor& b, Tensor& out,
-                                   cudaStream_t stream) {
+void elementwise_add_store(const Tensor& a, const Tensor& b, Tensor& out, cudaStream_t stream) {
     int64_t n = a.numel();
     int64_t n2 = (n + 1) / 2;
     int threads = 256;
     int blocks = static_cast<int>((n2 + threads - 1) / threads);
-    pdl::launch(elementwise_add_store_fp16_kernel,
-                dim3(blocks), dim3(threads), 0, stream,
-                static_cast<const half*>(a.data),
-                static_cast<const half*>(b.data),
-                static_cast<half*>(out.data),
-                n);
+    pdl::launch(elementwise_add_store_fp16_kernel, dim3(blocks), dim3(threads), 0, stream,
+                static_cast<const half*>(a.data), static_cast<const half*>(b.data),
+                static_cast<half*>(out.data), n);
 }
 
 // Add 1D bias to each row of a 2D output: out[row, col] += bias[col]
 void add_bias(Tensor& out, const Tensor& bias, cudaStream_t stream) {
-    if (bias.data == nullptr) return;
+    if (bias.data == nullptr)
+        return;
     int rows = static_cast<int>(out.shape[0]);
     int cols = static_cast<int>(bias.shape[0]);
-    if (rows == 0 || cols == 0) return;
+    if (rows == 0 || cols == 0)
+        return;
     int total = rows * cols;
     int threads = 256;
     int blocks = (total + threads - 1) / threads;
-    broadcast_add_bias_fp16_kernel<<<blocks, threads, 0, stream>>>(
-        static_cast<half*>(out.data),
-        static_cast<const half*>(bias.data),
-        rows, cols);
+    broadcast_add_bias_fp16_kernel<<<blocks, threads, 0, stream>>>(static_cast<half*>(out.data),
+                                                                   static_cast<const half*>(bias.data), rows,
+                                                                   cols);
 }
-
 
 // Fused 3-way bias add: applies up to 3 biases in a single kernel launch.
 // blockIdx.y selects which output/bias pair (0, 1, or 2).
 __global__ __launch_bounds__(256) void add_bias_3way_kernel(
-    half* __restrict__ out0, const half* __restrict__ bias0, int cols0,
-    half* __restrict__ out1, const half* __restrict__ bias1, int cols1,
-    half* __restrict__ out2, const half* __restrict__ bias2, int cols2,
-    int rows) {
+    half* __restrict__ out0, const half* __restrict__ bias0, int cols0, half* __restrict__ out1,
+    const half* __restrict__ bias1, int cols1, half* __restrict__ out2, const half* __restrict__ bias2,
+    int cols2, int rows) {
     int which = blockIdx.y;
     half* out;
     const half* bias;
     int cols;
-    if (which == 0)      { out = out0; bias = bias0; cols = cols0; }
-    else if (which == 1) { out = out1; bias = bias1; cols = cols1; }
-    else                 { out = out2; bias = bias2; cols = cols2; }
-    if (!out || !bias) return;
+    if (which == 0) {
+        out = out0;
+        bias = bias0;
+        cols = cols0;
+    } else if (which == 1) {
+        out = out1;
+        bias = bias1;
+        cols = cols1;
+    } else {
+        out = out2;
+        bias = bias2;
+        cols = cols2;
+    }
+    if (!out || !bias)
+        return;
 
     int total = rows * cols;
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < total; i += blockDim.x * gridDim.x) {
@@ -1623,13 +1512,12 @@ __global__ __launch_bounds__(256) void add_bias_3way_kernel(
     }
 }
 
-void add_bias_3way(Tensor& out_a, const Tensor& bias_a,
-                   Tensor& out_b, const Tensor& bias_b,
-                   Tensor& out_c, const Tensor& bias_c,
-                   cudaStream_t stream) {
+void add_bias_3way(Tensor& out_a, const Tensor& bias_a, Tensor& out_b, const Tensor& bias_b, Tensor& out_c,
+                   const Tensor& bias_c, cudaStream_t stream) {
     // Count how many actually have biases
     int n_active = (bias_a.data ? 1 : 0) + (bias_b.data ? 1 : 0) + (bias_c.data ? 1 : 0);
-    if (n_active == 0) return;
+    if (n_active == 0)
+        return;
 
     // Fall back to individual calls if only 1-2 biases
     if (n_active <= 2) {
@@ -1656,20 +1544,18 @@ void add_bias_3way(Tensor& out_a, const Tensor& bias_a,
         bias_b.data ? static_cast<half*>(out_b.data) : nullptr,
         bias_b.data ? static_cast<const half*>(bias_b.data) : nullptr, cols_b,
         bias_c.data ? static_cast<half*>(out_c.data) : nullptr,
-        bias_c.data ? static_cast<const half*>(bias_c.data) : nullptr, cols_c,
-        rows);
+        bias_c.data ? static_cast<const half*>(bias_c.data) : nullptr, cols_c, rows);
 }
 
 // Fused residual add + RMSNorm: hidden += residual; output = rmsnorm(hidden, weight).
 // Saves 1 DRAM round-trip: reads hidden+residual+weight, writes hidden+output.
 // Launch: <<<n_rows, 256>>>
 __global__ __launch_bounds__(256) void residual_add_rmsnorm_kernel(
-    half* __restrict__ hidden,         // [n, d_model] — modified in-place (residual added)
-    const half* __restrict__ residual, // [n, d_model]
-    const half* __restrict__ weight,   // [d_model] RMSNorm weight
-    half* __restrict__ output,         // [n, d_model] normalized output
+    half* __restrict__ hidden,          // [n, d_model] — modified in-place (residual added)
+    const half* __restrict__ residual,  // [n, d_model]
+    const half* __restrict__ weight,    // [d_model] RMSNorm weight
+    half* __restrict__ output,          // [n, d_model] normalized output
     int d_model, float eps, float weight_offset) {
-
     __shared__ float warp_reduce[kWarpSize];
     const int tid = threadIdx.x;
     const int row = blockIdx.x;
@@ -1686,20 +1572,21 @@ __global__ __launch_bounds__(256) void residual_add_rmsnorm_kernel(
         sum_sq += h * h;
     }
 
-    // Warp-level reduction
-    #pragma unroll
+// Warp-level reduction
+#pragma unroll
     for (int off = kWarpSize / 2; off > 0; off >>= 1)
         sum_sq += __shfl_xor_sync(0xFFFFFFFF, sum_sq, off);
 
     int warp_id = tid / kWarpSize;
     int lane = tid % kWarpSize;
-    if (lane == 0) warp_reduce[warp_id] = sum_sq;
+    if (lane == 0)
+        warp_reduce[warp_id] = sum_sq;
     __syncthreads();
 
     if (warp_id == 0) {
         int n_warps = blockDim.x / kWarpSize;
         float total = (lane < n_warps) ? warp_reduce[lane] : 0.0f;
-        #pragma unroll
+#pragma unroll
         for (int off = kWarpSize / 2; off > 0; off >>= 1)
             total += __shfl_xor_sync(0xFFFFFFFF, total, off);
         if (lane == 0)
@@ -1716,30 +1603,26 @@ __global__ __launch_bounds__(256) void residual_add_rmsnorm_kernel(
     }
 }
 
-void residual_add_rmsnorm(Tensor& hidden, const Tensor& residual,
-                          const Tensor& weight, Tensor& output,
-                          float eps, cudaStream_t stream,
-                          float weight_offset) {
+void residual_add_rmsnorm(Tensor& hidden, const Tensor& residual, const Tensor& weight, Tensor& output,
+                          float eps, cudaStream_t stream, float weight_offset) {
     int n = static_cast<int>(hidden.shape[0]);
     int d_model = static_cast<int>(hidden.shape[hidden.ndim - 1]);
-    residual_add_rmsnorm_kernel<<<n, 256, 0, stream>>>(
-        static_cast<half*>(hidden.data),
-        static_cast<const half*>(residual.data),
-        static_cast<const half*>(weight.data),
-        static_cast<half*>(output.data),
-        d_model, eps, weight_offset);
+    residual_add_rmsnorm_kernel<<<n, 256, 0, stream>>>(static_cast<half*>(hidden.data),
+                                                       static_cast<const half*>(residual.data),
+                                                       static_cast<const half*>(weight.data),
+                                                       static_cast<half*>(output.data), d_model, eps,
+                                                       weight_offset);
 }
 
 // Fused add-store + RMSNorm in-place: hidden = rmsnorm(a + b, weight).
 // Saves 2 kernel launches + 1 memcpy vs separate add_store + rmsnorm + copy.
 // Launch: <<<n_rows, 256>>>
 __global__ __launch_bounds__(256) void add_rmsnorm_inplace_kernel(
-    const half* __restrict__ a,        // [n, d_model]
-    const half* __restrict__ b,        // [n, d_model]
-    half* __restrict__ hidden,         // [n, d_model] — output (a + b, then normalized)
-    const half* __restrict__ weight,   // [d_model] RMSNorm weight
+    const half* __restrict__ a,       // [n, d_model]
+    const half* __restrict__ b,       // [n, d_model]
+    half* __restrict__ hidden,        // [n, d_model] — output (a + b, then normalized)
+    const half* __restrict__ weight,  // [d_model] RMSNorm weight
     int d_model, float eps, float weight_offset) {
-
     __shared__ float warp_reduce[kWarpSize];
     const int tid = threadIdx.x;
     const int row = blockIdx.x;
@@ -1756,20 +1639,21 @@ __global__ __launch_bounds__(256) void add_rmsnorm_inplace_kernel(
         sum_sq += h * h;
     }
 
-    // Warp-level reduction
-    #pragma unroll
+// Warp-level reduction
+#pragma unroll
     for (int off = kWarpSize / 2; off > 0; off >>= 1)
         sum_sq += __shfl_xor_sync(0xFFFFFFFF, sum_sq, off);
 
     int warp_id = tid / kWarpSize;
     int lane = tid % kWarpSize;
-    if (lane == 0) warp_reduce[warp_id] = sum_sq;
+    if (lane == 0)
+        warp_reduce[warp_id] = sum_sq;
     __syncthreads();
 
     if (warp_id == 0) {
         int n_warps = blockDim.x / kWarpSize;
         float total = (lane < n_warps) ? warp_reduce[lane] : 0.0f;
-        #pragma unroll
+#pragma unroll
         for (int off = kWarpSize / 2; off > 0; off >>= 1)
             total += __shfl_xor_sync(0xFFFFFFFF, total, off);
         if (lane == 0)
@@ -1786,35 +1670,31 @@ __global__ __launch_bounds__(256) void add_rmsnorm_inplace_kernel(
     }
 }
 
-void add_rmsnorm_inplace(const Tensor& a, const Tensor& b,
-                         Tensor& hidden, const Tensor& weight,
-                         float eps, cudaStream_t stream,
-                         float weight_offset) {
+void add_rmsnorm_inplace(const Tensor& a, const Tensor& b, Tensor& hidden, const Tensor& weight, float eps,
+                         cudaStream_t stream, float weight_offset) {
     int n = static_cast<int>(a.shape[0]);
     int d_model = static_cast<int>(a.shape[a.ndim - 1]);
-    add_rmsnorm_inplace_kernel<<<n, 256, 0, stream>>>(
-        static_cast<const half*>(a.data),
-        static_cast<const half*>(b.data),
-        static_cast<half*>(hidden.data),
-        static_cast<const half*>(weight.data),
-        d_model, eps, weight_offset);
+    add_rmsnorm_inplace_kernel<<<n, 256, 0, stream>>>(static_cast<const half*>(a.data),
+                                                      static_cast<const half*>(b.data),
+                                                      static_cast<half*>(hidden.data),
+                                                      static_cast<const half*>(weight.data), d_model, eps,
+                                                      weight_offset);
 }
 
 // Fused RMSNorm + residual add: output = rmsnorm(input, weight) + residual.
 // Launch: <<<n_rows, 256>>>
 __global__ __launch_bounds__(256) void rmsnorm_add_residual_kernel(
-    const half* __restrict__ input,    // [n, d_model]
-    const half* __restrict__ weight,   // [d_model]
-    const half* __restrict__ residual, // [n, d_model]
-    half* __restrict__ output,         // [n, d_model]
+    const half* __restrict__ input,     // [n, d_model]
+    const half* __restrict__ weight,    // [d_model]
+    const half* __restrict__ residual,  // [n, d_model]
+    half* __restrict__ output,          // [n, d_model]
     int d_model, float eps, float weight_offset) {
-
     __shared__ float warp_reduce[kWarpSize];
     const int tid = threadIdx.x;
     const int row = blockIdx.x;
 
     const half* in_row = input + static_cast<int64_t>(row) * d_model;
-    const half* r_row  = residual + static_cast<int64_t>(row) * d_model;
+    const half* r_row = residual + static_cast<int64_t>(row) * d_model;
     half* o_row = output + static_cast<int64_t>(row) * d_model;
 
     // Phase 1: Compute sum of squares of input
@@ -1824,19 +1704,20 @@ __global__ __launch_bounds__(256) void rmsnorm_add_residual_kernel(
         sum_sq += v * v;
     }
 
-    #pragma unroll
+#pragma unroll
     for (int off = kWarpSize / 2; off > 0; off >>= 1)
         sum_sq += __shfl_xor_sync(0xFFFFFFFF, sum_sq, off);
 
     int warp_id = tid / kWarpSize;
     int lane = tid % kWarpSize;
-    if (lane == 0) warp_reduce[warp_id] = sum_sq;
+    if (lane == 0)
+        warp_reduce[warp_id] = sum_sq;
     __syncthreads();
 
     if (warp_id == 0) {
         int n_warps = blockDim.x / kWarpSize;
         float total = (lane < n_warps) ? warp_reduce[lane] : 0.0f;
-        #pragma unroll
+#pragma unroll
         for (int off = kWarpSize / 2; off > 0; off >>= 1)
             total += __shfl_xor_sync(0xFFFFFFFF, total, off);
         if (lane == 0)
@@ -1854,24 +1735,22 @@ __global__ __launch_bounds__(256) void rmsnorm_add_residual_kernel(
     }
 }
 
-void rmsnorm_add_residual(const Tensor& input, const Tensor& weight,
-                          const Tensor& residual, Tensor& output,
-                          float eps, cudaStream_t stream,
-                          float weight_offset) {
+void rmsnorm_add_residual(const Tensor& input, const Tensor& weight, const Tensor& residual, Tensor& output,
+                          float eps, cudaStream_t stream, float weight_offset) {
     int n = static_cast<int>(input.shape[0]);
     int d_model = static_cast<int>(input.shape[input.ndim - 1]);
-    rmsnorm_add_residual_kernel<<<n, 256, 0, stream>>>(
-        static_cast<const half*>(input.data),
-        static_cast<const half*>(weight.data),
-        static_cast<const half*>(residual.data),
-        static_cast<half*>(output.data),
-        d_model, eps, weight_offset);
+    rmsnorm_add_residual_kernel<<<n, 256, 0, stream>>>(static_cast<const half*>(input.data),
+                                                       static_cast<const half*>(weight.data),
+                                                       static_cast<const half*>(residual.data),
+                                                       static_cast<half*>(output.data), d_model, eps,
+                                                       weight_offset);
 }
 
 // Create a view of the first n_tokens rows from a [max_tokens, cols] buffer.
 // Never modifies the source tensor.
 Tensor slice_rows(const Tensor& buf, int n_tokens) {
-    if (n_tokens == static_cast<int>(buf.shape[0])) return buf;
+    if (n_tokens == static_cast<int>(buf.shape[0]))
+        return buf;
     // buf.slice(0, n) returns a view with shape[0] = n, same data pointer.
     return buf.slice(0, n_tokens);
 }
@@ -1885,30 +1764,17 @@ Tensor slice_rows(const Tensor& buf, int n_tokens) {
 // - NONE/FP16/BF16: standard cuBLAS gemm.
 // - dp4a MMVQ path (M=1 + q8_1_buf/d8_buf): pre-quantize input to Q8_1, dot
 //   products via native INT8 SIMD (~2x faster than FP16 dequant for Q6_K/Q8_0).
-static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
-                           const Tensor& scales, QType qtype,
-                           Tensor& output, void* dequant_scratch,
-                           cudaStream_t stream,
-                           block_q8_1* q8_1_buf,
-                           float* d8_buf,
-                           const std::unordered_map<const void*, Tensor>* fp16_cache,
-                           const std::unordered_map<const void*, FP8CacheEntry>* fp8_cache,
-                           void* fp8_act_buf,
-                           float* d_act_scale,
-                           float* d_fp8_block_maxes,
-                           float* d_fp8_absmax,
-                           int fp8_max_grid,
-                           const std::unordered_map<const void*, NvFP4QuantResult>* nvfp4_cache,
-                           const std::unordered_map<const void*, CutlassNvFP4Weight>* cutlass_nvfp4_cache,
-                           void* cutlass_act_data,
-                           void* cutlass_act_sf,
-                           void* cutlass_workspace,
-                           size_t cutlass_workspace_size,
-                           const std::unordered_map<const void*, CutlassMxFP4Weight>* mxfp4_cache,
-                           void* mxfp4_act_sf,
-                           void* mxfp4_workspace,
-                           size_t mxfp4_workspace_size,
-                           float beta) {
+static void gemm_dispatch_impl(
+    const Tensor& input, const Tensor& weight, const Tensor& scales, QType qtype, Tensor& output,
+    void* dequant_scratch, cudaStream_t stream, block_q8_1* q8_1_buf, float* d8_buf,
+    const std::unordered_map<const void*, Tensor>* fp16_cache,
+    const std::unordered_map<const void*, FP8CacheEntry>* fp8_cache, void* fp8_act_buf, float* d_act_scale,
+    float* d_fp8_block_maxes, float* d_fp8_absmax, int fp8_max_grid,
+    const std::unordered_map<const void*, NvFP4QuantResult>* nvfp4_cache,
+    const std::unordered_map<const void*, CutlassNvFP4Weight>* cutlass_nvfp4_cache, void* cutlass_act_data,
+    void* cutlass_act_sf, void* cutlass_workspace, size_t cutlass_workspace_size,
+    const std::unordered_map<const void*, CutlassMxFP4Weight>* mxfp4_cache, void* mxfp4_act_sf,
+    void* mxfp4_workspace, size_t mxfp4_workspace_size, float beta) {
     // beta != 0 (residual-fused GEMM) is only supported on FP16/dequant/FP8 paths
     // below; callers must ensure their preconditions route there.
     // Native MXFP4 GGUF: GEMV for M=1, CUTLASS for M>1.
@@ -1920,15 +1786,12 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
                 int hbs = mx_it->second.hadamard_bs;
                 if (hbs > 0 && hadamard_block_size_valid(hbs)) {
                     int K = static_cast<int>(mx_it->second.K);
-                    hadamard_transform_fp16(
-                        reinterpret_cast<const half*>(input.data),
-                        reinterpret_cast<half*>(input.data),  // in-place
-                        1, K, hbs, stream);
+                    hadamard_transform_fp16(reinterpret_cast<const half*>(input.data),
+                                            reinterpret_cast<half*>(input.data),  // in-place
+                                            1, K, hbs, stream);
                 }
-                gemv_mxfp4_kpar(mx_it->second,
-                                reinterpret_cast<const half*>(input.data),
-                                reinterpret_cast<half*>(output.data),
-                                static_cast<int>(mx_it->second.N),
+                gemv_mxfp4_kpar(mx_it->second, reinterpret_cast<const half*>(input.data),
+                                reinterpret_cast<half*>(output.data), static_cast<int>(mx_it->second.N),
                                 static_cast<int>(mx_it->second.K), stream);
                 return;
             } else if (dequant_scratch != nullptr) {
@@ -1951,65 +1814,58 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
     // otherwise fall through to the cache lookup.
     NvFP4QuantResult nvfp4_tmp;
     const NvFP4QuantResult* nvfp4_view = nullptr;
-    if (input.qtype == QType::F16 && weight.qtype == QType::NVFP4 &&
-        weight.scales != nullptr) {
-        nvfp4_tmp.packed_data  = weight.data;
+    if (input.qtype == QType::F16 && weight.qtype == QType::NVFP4 && weight.scales != nullptr) {
+        nvfp4_tmp.packed_data = weight.data;
         nvfp4_tmp.micro_scales = weight.scales;
         nvfp4_tmp.tensor_scale = weight.tensor_scale;
-        nvfp4_tmp.N            = weight.shape[0];
+        nvfp4_tmp.N = weight.shape[0];
         // shape[1] holds packed K/2 for FP4 → kernel needs logical K
-        nvfp4_tmp.K            = weight.shape[1] * 2;
-        nvfp4_view             = &nvfp4_tmp;
+        nvfp4_tmp.K = weight.shape[1] * 2;
+        nvfp4_view = &nvfp4_tmp;
     } else if (nvfp4_cache != nullptr && input.qtype == QType::F16) {
         auto it = nvfp4_cache->find(weight.data);
-        if (it != nvfp4_cache->end()) nvfp4_view = &it->second;
+        if (it != nvfp4_cache->end())
+            nvfp4_view = &it->second;
     }
     if (nvfp4_view != nullptr) {
         const NvFP4QuantResult& res = *nvfp4_view;
         if (input.shape[0] == 1) {
-            gemv_nvfp4_kpar(res,
-                            reinterpret_cast<const half*>(input.data),
-                            reinterpret_cast<half*>(output.data),
-                            static_cast<int>(res.N),
+            gemv_nvfp4_kpar(res, reinterpret_cast<const half*>(input.data),
+                            reinterpret_cast<half*>(output.data), static_cast<int>(res.N),
                             static_cast<int>(res.K), stream);
         } else if (cutlass_nvfp4_cache != nullptr && cutlass_act_data != nullptr) {
-                // Native FP4 GEMM: try cuBLASLt first, then CUTLASS sm_120
-                auto ct_it = cutlass_nvfp4_cache->find(weight.data);
-                if (ct_it != cutlass_nvfp4_cache->end()) {
-                    int M = static_cast<int>(input.shape[0]);
-                    int K = static_cast<int>(input.shape[1]);
-                    int N = static_cast<int>(res.N);
-                    quantize_fp16_to_nvfp4_cutlass(input.data, cutlass_act_data,
-                                                    cutlass_act_sf, M, K, stream);
+            // Native FP4 GEMM: try cuBLASLt first, then CUTLASS sm_120
+            auto ct_it = cutlass_nvfp4_cache->find(weight.data);
+            if (ct_it != cutlass_nvfp4_cache->end()) {
+                int M = static_cast<int>(input.shape[0]);
+                int K = static_cast<int>(input.shape[1]);
+                int N = static_cast<int>(res.N);
+                quantize_fp16_to_nvfp4_cutlass(input.data, cutlass_act_data, cutlass_act_sf, M, K, stream);
 
-                    // MXFP4 CUTLASS: UE8M0 scales per 32 elements (alternative to NVFP4)
-                    if (mxfp4_cache != nullptr && mxfp4_act_sf != nullptr && K % 32 == 0) {
-                        auto mx_it = mxfp4_cache->find(weight.data);
-                        if (mx_it != mxfp4_cache->end()) {
-                            quantize_fp16_to_mxfp4_cutlass(input.data, cutlass_act_data,
-                                                            mxfp4_act_sf, M, K, stream);
-                            bool ok = gemm_mxfp4_cutlass_sm120(
-                                cutlass_act_data, mxfp4_act_sf,
-                                mx_it->second,
-                                output.data, M, N, K,
-                                mxfp4_workspace, mxfp4_workspace_size,
-                                stream);
-                            if (ok) return;
-                        }
+                // MXFP4 CUTLASS: UE8M0 scales per 32 elements (alternative to NVFP4)
+                if (mxfp4_cache != nullptr && mxfp4_act_sf != nullptr && K % 32 == 0) {
+                    auto mx_it = mxfp4_cache->find(weight.data);
+                    if (mx_it != mxfp4_cache->end()) {
+                        quantize_fp16_to_mxfp4_cutlass(input.data, cutlass_act_data, mxfp4_act_sf, M, K,
+                                                       stream);
+                        bool ok = gemm_mxfp4_cutlass_sm120(cutlass_act_data, mxfp4_act_sf, mx_it->second,
+                                                           output.data, M, N, K, mxfp4_workspace,
+                                                           mxfp4_workspace_size, stream);
+                        if (ok)
+                            return;
                     }
-
-                    // CUTLASS sm_120 block-scaled NVFP4 kernel. (cuBLASLt NVFP4
-                    // was an alternate path but NVIDIA ships no FP4 kernels for
-                    // consumer Blackwell (sm_120); deleted in favor of CUTLASS.)
-                    bool ok = gemm_nvfp4_cutlass_sm120(
-                        cutlass_act_data, cutlass_act_sf,
-                        ct_it->second,
-                        output.data, M, N, K,
-                        cutlass_workspace, cutlass_workspace_size,
-                        stream);
-                    if (ok) return;
                 }
+
+                // CUTLASS sm_120 block-scaled NVFP4 kernel. (cuBLASLt NVFP4
+                // was an alternate path but NVIDIA ships no FP4 kernels for
+                // consumer Blackwell (sm_120); deleted in favor of CUTLASS.)
+                bool ok = gemm_nvfp4_cutlass_sm120(cutlass_act_data, cutlass_act_sf, ct_it->second,
+                                                   output.data, M, N, K, cutlass_workspace,
+                                                   cutlass_workspace_size, stream);
+                if (ok)
+                    return;
             }
+        }
         if (input.shape[0] > 1) {
             gemm_nvfp4(res, input, output, stream);
         }
@@ -2018,17 +1874,16 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
     // Gemma 4: if FP16 cache has the weight, use it (dp4a dispatch has issues
     // with non-standard strides from per-layer narrow tensors).
     bool prefer_fp16_cache = (fp16_cache != nullptr && fp16_cache->count(weight.data) > 0 &&
-                               input.stride[0] != weight.shape[1]);  // non-contiguous input
+                              input.stride[0] != weight.shape[1]);  // non-contiguous input
     if (RuntimeConfig::current().diagnostics.debug_gemm_dispatch) {
-        fprintf(stderr, "[GEMM_DISP] w=%p qtype=%d M=%lld N=%lld K=%lld prefer_fp16=%d "
+        fprintf(stderr,
+                "[GEMM_DISP] w=%p qtype=%d M=%lld N=%lld K=%lld prefer_fp16=%d "
                 "in_fp16_cache=%d in_fp8_cache=%d dp4a_ok=%d has_dequant=%d\n",
-                weight.data, (int)qtype,
-                (long long)input.shape[0], (long long)weight.shape[0], (long long)weight.shape[1],
-                (int)prefer_fp16_cache,
+                weight.data, (int)qtype, (long long)input.shape[0], (long long)weight.shape[0],
+                (long long)weight.shape[1], (int)prefer_fp16_cache,
                 (fp16_cache && fp16_cache->count(weight.data) > 0),
                 (fp8_cache && fp8_cache->count(weight.data) > 0),
-                (int)(is_dp4a_qtype(qtype) && q8_1_buf && d8_buf),
-                (int)(dequant_scratch != nullptr));
+                (int)(is_dp4a_qtype(qtype) && q8_1_buf && d8_buf), (int)(dequant_scratch != nullptr));
     }
     const bool no_dp4a_gemv = RuntimeConfig::current().gemm.no_dp4a_gemv;
     // MMVQ: ggml-compatible quantized GEMM for llama.cpp numerical parity.
@@ -2036,21 +1891,18 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
     // env var set during engine init (after static init of other flags).
     // IMP_NO_MMVQ_Q8_0 / IMP_NO_MMVQ: debug bypass for suspected Q8_0 MMVQ bug.
     const bool no_mmvq_q8_0 = RuntimeConfig::current().gemm.no_mmvq_q8_0;
-    const bool no_mmvq_all  = RuntimeConfig::current().gemm.no_mmvq;
+    const bool no_mmvq_all = RuntimeConfig::current().gemm.no_mmvq;
     // FP16-only fast paths (mmvq, dp4a, gemv_q6k, gemv_q8_0) write directly to
     // half* — must skip when caller requested FP32 output, otherwise the FP16
     // bytes get interpreted as FP32 and produce billions-magnitude garbage.
     const bool fp32_output = (output.qtype == QType::F32);
-    bool use_mmvq = RuntimeConfig::current().gemma4.force_mmvq &&
-                    !prefer_fp16_cache && input.qtype == QType::F16 && !fp32_output &&
-                    (qtype == QType::Q4_K || qtype == QType::Q5_K ||
-                     qtype == QType::Q5_1 || qtype == QType::Q8_0) &&
-                    (weight.shape[1] % 32 == 0) &&
-                    !(no_mmvq_q8_0 && qtype == QType::Q8_0) &&
-                    !no_mmvq_all;
-    bool use_dp4a = !no_dp4a_gemv && !prefer_fp16_cache && input.shape[0] == 1 &&
+    bool use_mmvq = RuntimeConfig::current().gemma4.force_mmvq && !prefer_fp16_cache &&
                     input.qtype == QType::F16 && !fp32_output &&
-                    q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype);
+                    (qtype == QType::Q4_K || qtype == QType::Q5_K || qtype == QType::Q5_1 ||
+                     qtype == QType::Q8_0) &&
+                    (weight.shape[1] % 32 == 0) && !(no_mmvq_q8_0 && qtype == QType::Q8_0) && !no_mmvq_all;
+    bool use_dp4a = !no_dp4a_gemv && !prefer_fp16_cache && input.shape[0] == 1 && input.qtype == QType::F16 &&
+                    !fp32_output && q8_1_buf != nullptr && d8_buf != nullptr && is_dp4a_qtype(qtype);
     if (use_mmvq) {
         int M = static_cast<int>(input.shape[0]);
         int N = static_cast<int>(weight.shape[0]);
@@ -2060,33 +1912,29 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
         static void* s_mmvq_scratch = nullptr;
         static size_t s_mmvq_scratch_size = 0;
         if (!s_mmvq_scratch || s_mmvq_scratch_size < q8_need) {
-            if (s_mmvq_scratch) cudaFree(s_mmvq_scratch);
+            if (s_mmvq_scratch)
+                cudaFree(s_mmvq_scratch);
             cudaMalloc(&s_mmvq_scratch, q8_need * 2);
             s_mmvq_scratch_size = q8_need * 2;
         }
         if (qtype == QType::Q4_K)
-            ggml_mmvq_q4k(weight.data, static_cast<const half*>(input.data),
-                          static_cast<half*>(output.data), M, N, K,
-                          s_mmvq_scratch, s_mmvq_scratch_size, stream);
+            ggml_mmvq_q4k(weight.data, static_cast<const half*>(input.data), static_cast<half*>(output.data),
+                          M, N, K, s_mmvq_scratch, s_mmvq_scratch_size, stream);
         else if (qtype == QType::Q5_K)
-            ggml_mmvq_q5k(weight.data, static_cast<const half*>(input.data),
-                          static_cast<half*>(output.data), M, N, K,
-                          s_mmvq_scratch, s_mmvq_scratch_size, stream);
+            ggml_mmvq_q5k(weight.data, static_cast<const half*>(input.data), static_cast<half*>(output.data),
+                          M, N, K, s_mmvq_scratch, s_mmvq_scratch_size, stream);
         else if (qtype == QType::Q5_1)
-            ggml_mmvq_q5_1(weight.data, static_cast<const half*>(input.data),
-                           static_cast<half*>(output.data), M, N, K,
-                           s_mmvq_scratch, s_mmvq_scratch_size, stream);
+            ggml_mmvq_q5_1(weight.data, static_cast<const half*>(input.data), static_cast<half*>(output.data),
+                           M, N, K, s_mmvq_scratch, s_mmvq_scratch_size, stream);
         else if (qtype == QType::Q8_0)
-            ggml_mmvq_q8_0(weight.data, static_cast<const half*>(input.data),
-                           static_cast<half*>(output.data), M, N, K,
-                           s_mmvq_scratch, s_mmvq_scratch_size, stream);
+            ggml_mmvq_q8_0(weight.data, static_cast<const half*>(input.data), static_cast<half*>(output.data),
+                           M, N, K, s_mmvq_scratch, s_mmvq_scratch_size, stream);
     } else if (use_dp4a) {
         int N = static_cast<int>(weight.shape[0]);
         int K = static_cast<int>(weight.shape[1]);
-        quantize_fp16_to_q8_1(static_cast<const half*>(input.data),
-                               q8_1_buf, d8_buf, K, stream);
-        dispatch_dp4a_gemv(qtype, weight.data, q8_1_buf, d8_buf,
-                           static_cast<half*>(output.data), N, K, stream);
+        quantize_fp16_to_q8_1(static_cast<const half*>(input.data), q8_1_buf, d8_buf, K, stream);
+        dispatch_dp4a_gemv(qtype, weight.data, q8_1_buf, d8_buf, static_cast<half*>(output.data), N, K,
+                           stream);
     } else if (qtype == QType::Q4_1 && fp16_cache != nullptr) {
         // Prefer pre-dequantized FP16 cache (P3 optimization)
         auto it = fp16_cache->find(weight.data);
@@ -2098,27 +1946,26 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
     } else if (qtype == QType::Q4_1) {
         // weight is [N, K/2] packed nibbles, scales is [N, num_groups]
         quant_gemm_int4(input, weight, scales, output, stream);
-    } else if (input.shape[0] == 1 && input.qtype == QType::F16 &&
-               dequant_scratch != nullptr && qtype == QType::Q6_K) {
+    } else if (input.shape[0] == 1 && input.qtype == QType::F16 && dequant_scratch != nullptr &&
+               qtype == QType::Q6_K) {
         // Fallback: Fused Q6_K GEMV (FP16 dequant path)
-        gemv_q6k(weight.data, static_cast<const half*>(input.data),
-                 static_cast<half*>(output.data),
+        gemv_q6k(weight.data, static_cast<const half*>(input.data), static_cast<half*>(output.data),
                  static_cast<int>(weight.shape[0]), static_cast<int>(weight.shape[1]), stream);
-    } else if (input.shape[0] == 1 && input.qtype == QType::F16 &&
-               dequant_scratch != nullptr && qtype == QType::Q8_0) {
+    } else if (input.shape[0] == 1 && input.qtype == QType::F16 && dequant_scratch != nullptr &&
+               qtype == QType::Q8_0) {
         // Fallback: Fused Q8_0 GEMV (FP16 dequant path)
-        gemv_q8_0(weight.data, static_cast<const half*>(input.data),
-                  static_cast<half*>(output.data),
+        gemv_q8_0(weight.data, static_cast<const half*>(input.data), static_cast<half*>(output.data),
                   static_cast<int>(weight.shape[0]), static_cast<int>(weight.shape[1]), stream);
-    } else if (fp8_cache != nullptr && input.shape[0] > 1 && fp8_act_buf != nullptr && d_act_scale != nullptr) {
+    } else if (fp8_cache != nullptr && input.shape[0] > 1 && fp8_act_buf != nullptr &&
+               d_act_scale != nullptr) {
         // FP8 cache: quantize activation → FP8, then FP8×FP8 cuBLASLt GEMM (2x throughput on sm_120)
         auto it = fp8_cache->find(weight.data);
         if (it != fp8_cache->end()) {
             Tensor fp8_act(fp8_act_buf, QType::FP8_E4M3, input.ndim, input.shape, true);
-            quantize_fp16_to_fp8_e4m3(input, fp8_act, d_act_scale, stream,
-                                       d_fp8_block_maxes, d_fp8_absmax, fp8_max_grid);
-            gemm_cublaslt(fp8_act, it->second.weight, output, 1.0f, beta,
-                          d_act_scale, it->second.d_scale, stream);
+            quantize_fp16_to_fp8_e4m3(input, fp8_act, d_act_scale, stream, d_fp8_block_maxes, d_fp8_absmax,
+                                      fp8_max_grid);
+            gemm_cublaslt(fp8_act, it->second.weight, output, 1.0f, beta, d_act_scale, it->second.d_scale,
+                          stream);
         } else if (dequant_scratch != nullptr && dequant_gpu_supported(qtype)) {
             int rows = static_cast<int>(weight.shape[0]);
             int cols = static_cast<int>(weight.shape[1]);
@@ -2131,7 +1978,8 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
     } else if (fp16_cache != nullptr && (dequant_gpu_supported(qtype) || qtype == QType::MXFP4)) {
         // Pre-dequantized FP16 cache: zero per-GEMM dequant overhead
         auto it = fp16_cache->find(weight.data);
-        if (RuntimeConfig::current().diagnostics.debug_gemm_dispatch) fprintf(stderr, "[GEMM_DISP]   -> fp16_cache hit=%d\n", (int)(it != fp16_cache->end()));
+        if (RuntimeConfig::current().diagnostics.debug_gemm_dispatch)
+            fprintf(stderr, "[GEMM_DISP]   -> fp16_cache hit=%d\n", (int)(it != fp16_cache->end()));
         if (it != fp16_cache->end()) {
             gemm(input, it->second, output, 1.0f, beta, stream);
         } else if (dequant_scratch != nullptr && qtype != QType::MXFP4) {
@@ -2162,11 +2010,11 @@ static void gemm_dispatch_impl(const Tensor& input, const Tensor& weight,
 // tensor (no separate parameter needed) and delegates to the file-private
 // gemm_dispatch_impl helper.
 // ---------------------------------------------------------------------------
-void gemm_dispatch(const Tensor& input, const Tensor& weight,
-                   Tensor& output, const GemmContext& ctx) {
+void gemm_dispatch(const Tensor& input, const Tensor& weight, Tensor& output, const GemmContext& ctx) {
     const auto* wc = ctx.wcache;
     const auto* qs = ctx.qscratch;
-    if (!wc || !qs) return;
+    if (!wc || !qs)
+        return;
 
     const QType qtype = weight.qtype;
 
@@ -2191,28 +2039,25 @@ void gemm_dispatch(const Tensor& input, const Tensor& weight,
             gemm(input, weight, output, 1.0f, ctx.beta, ctx.stream);
             return;
         }
-        IMP_LOG_ERROR("gemm_dispatch: beta=%.3f requested but no FP16 path available "
-                      "for qtype=%d", ctx.beta, (int)qtype);
+        IMP_LOG_ERROR(
+            "gemm_dispatch: beta=%.3f requested but no FP16 path available "
+            "for qtype=%d",
+            ctx.beta, (int)qtype);
         return;
     }
 
-    const auto* fp16  = &wc->fp16;
-    const auto* fp8   = (wc->use_fp8 && !ctx.force_fp16) ? &wc->fp8 : nullptr;
-    const auto* nv4   = (wc->nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->nvfp4;
-    const auto* ct4   = (wc->cutlass_nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_nvfp4;
-    const auto* mx4   = (wc->cutlass_mxfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_mxfp4;
+    const auto* fp16 = &wc->fp16;
+    const auto* fp8 = (wc->use_fp8 && !ctx.force_fp16) ? &wc->fp8 : nullptr;
+    const auto* nv4 = (wc->nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->nvfp4;
+    const auto* ct4 = (wc->cutlass_nvfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_nvfp4;
+    const auto* mx4 = (wc->cutlass_mxfp4.empty() || ctx.force_fp16) ? nullptr : &wc->cutlass_mxfp4;
 
-    gemm_dispatch_impl(input, weight, Tensor(), qtype, output,
-                  qs->dequant, ctx.stream,
-                  static_cast<block_q8_1*>(qs->q8_1_buf), qs->d8_buf,
-                  fp16, fp8,
-                  qs->fp8_act, qs->d_act_scale,
-                  qs->d_fp8_block_maxes, qs->d_fp8_absmax, qs->fp8_max_grid,
-                  nv4, ct4,
-                  qs->cutlass_act_data, qs->cutlass_act_sf,
-                  qs->cutlass_workspace, qs->cutlass_workspace_size,
-                  mx4, qs->mxfp4_act_sf, qs->mxfp4_workspace, qs->mxfp4_workspace_size,
-                  ctx.beta);
+    gemm_dispatch_impl(input, weight, Tensor(), qtype, output, qs->dequant, ctx.stream,
+                       static_cast<block_q8_1*>(qs->q8_1_buf), qs->d8_buf, fp16, fp8, qs->fp8_act,
+                       qs->d_act_scale, qs->d_fp8_block_maxes, qs->d_fp8_absmax, qs->fp8_max_grid, nv4, ct4,
+                       qs->cutlass_act_data, qs->cutlass_act_sf, qs->cutlass_workspace,
+                       qs->cutlass_workspace_size, mx4, qs->mxfp4_act_sf, qs->mxfp4_workspace,
+                       qs->mxfp4_workspace_size, ctx.beta);
 }
 
-} // namespace imp
+}  // namespace imp

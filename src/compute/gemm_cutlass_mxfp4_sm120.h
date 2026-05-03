@@ -21,15 +21,15 @@ namespace imp {
 // This may trade some precision for potentially better hardware scheduling.
 
 struct CutlassMxFP4Weight {
-    const void* data = nullptr;       // [N, K/2] packed E2M1 nibbles
-    void* scale_factors = nullptr;    // SfAtom layout UE8M0 (for CUTLASS prefill)
-    void* linear_scales = nullptr;    // [N, K/32] row-major UE8M0 (for GEMV decode)
-    float tensor_scale = 1.0f;        // deferred global scale
+    const void* data = nullptr;     // [N, K/2] packed E2M1 nibbles
+    void* scale_factors = nullptr;  // SfAtom layout UE8M0 (for CUTLASS prefill)
+    void* linear_scales = nullptr;  // [N, K/32] row-major UE8M0 (for GEMV decode)
+    float tensor_scale = 1.0f;      // deferred global scale
     int64_t N = 0;
     int64_t K = 0;
     size_t sf_bytes = 0;
-    bool owns_data = false;           // true if data was allocated (Hadamard path)
-    int hadamard_bs = 0;              // Hadamard block size for online rotation (0=disabled)
+    bool owns_data = false;  // true if data was allocated (Hadamard path)
+    int hadamard_bs = 0;     // Hadamard block size for online rotation (0=disabled)
 };
 
 // Compute SfAtom buffer size for MXFP4 (UE8M0, SFVecSize=32).
@@ -39,9 +39,8 @@ size_t cutlass_mxfp4_sf_size(int rows, int K);
 // Merges pairs of UE4M3 micro-scales into one UE8M0 scale per 32 elements.
 // Packed data pointer is borrowed (same E2M1 nibbles, same layout).
 struct NvFP4QuantResult;  // forward
-void convert_nvfp4_to_mxfp4_cutlass(const NvFP4QuantResult& src,
-                                     CutlassMxFP4Weight& dst,
-                                     cudaStream_t stream);
+void convert_nvfp4_to_mxfp4_cutlass(const NvFP4QuantResult& src, CutlassMxFP4Weight& dst,
+                                    cudaStream_t stream);
 
 // Convert NVFP4 weights to MXFP4 with Hadamard rotation:
 //   1. Dequant NVFP4 → FP16 (into scratch)
@@ -49,46 +48,40 @@ void convert_nvfp4_to_mxfp4_cutlass(const NvFP4QuantResult& src,
 //   3. Requant FP16 → MXFP4 (E2M1 + UE8M0 scales, new allocation)
 // This changes the packed data (not borrowed) — weights are re-quantized.
 // scratch_fp16: pre-allocated [N, K] FP16 buffer on device.
-void convert_nvfp4_to_mxfp4_hadamard(const NvFP4QuantResult& src,
-                                      CutlassMxFP4Weight& dst,
-                                      void* scratch_fp16,
-                                      int hadamard_block_size,
-                                      cudaStream_t stream);
+void convert_nvfp4_to_mxfp4_hadamard(const NvFP4QuantResult& src, CutlassMxFP4Weight& dst, void* scratch_fp16,
+                                     int hadamard_block_size, cudaStream_t stream);
 
 void free_cutlass_mxfp4_weight(CutlassMxFP4Weight& w);
 
 // Unpack native MXFP4 GGUF blocks (17 bytes each: 16 data + 1 scale)
 // into separate data and SfAtom scale arrays for CUTLASS GEMM.
-bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K,
-                         CutlassMxFP4Weight& dst, cudaStream_t stream);
+bool unpack_mxfp4_gguf(const void* raw_gpu, int64_t N, int64_t K, CutlassMxFP4Weight& dst,
+                       cudaStream_t stream);
 
 // Quantize FP16 activation [M,K] to MXFP4 in CUTLASS block-scaled format.
 // Uses absmax per 32 elements → UE8M0 scale.
 // Optionally applies Walsh-Hadamard rotation before quantization (hadamard_size > 0).
 // dst_data: pre-allocated [M, K/2] packed FP4 bytes
 // dst_sf:   pre-allocated SfAtom layout UE8M0 scales
-void quantize_fp16_to_mxfp4_cutlass(const void* src_fp16, void* dst_data,
-                                     void* dst_sf, int M, int K,
-                                     cudaStream_t stream);
+void quantize_fp16_to_mxfp4_cutlass(const void* src_fp16, void* dst_data, void* dst_sf, int M, int K,
+                                    cudaStream_t stream);
 
 // Run CUTLASS sm_120 block-scaled MXFP4×MXFP4 GEMM: D = alpha * A × B^T
 //   A (activation): [M, K] MXFP4 RowMajor + SFA UE8M0 scale factors
 //   B (weight):     [N, K] MXFP4 RowMajor + SFB UE8M0 scale factors
 //   D (output):     [M, N] FP16 RowMajor
-bool gemm_mxfp4_cutlass_sm120(const void* a_data, const void* a_sf,
-                               const CutlassMxFP4Weight& b,
-                               void* d_fp16, int M, int N, int K,
-                               void* workspace, size_t workspace_size,
-                               cudaStream_t stream);
+bool gemm_mxfp4_cutlass_sm120(const void* a_data, const void* a_sf, const CutlassMxFP4Weight& b, void* d_fp16,
+                              int M, int N, int K, void* workspace, size_t workspace_size,
+                              cudaStream_t stream);
 
 size_t gemm_mxfp4_cutlass_sm120_workspace(int M, int N, int K);
 
 // Dequantize raw MXFP4 GGUF blocks to FP16.
 // Input: raw interleaved blocks (17 bytes each: 16 E2M1 + 1 UE8M0).
 // Output: [N, K] FP16 on device (caller allocates).
-void dequant_mxfp4_to_fp16(const void* raw_mxfp4_data, int64_t N, int64_t K,
-                             void* dst_fp16, cudaStream_t stream);
+void dequant_mxfp4_to_fp16(const void* raw_mxfp4_data, int64_t N, int64_t K, void* dst_fp16,
+                           cudaStream_t stream);
 
 bool cutlass_sm120_mxfp4_available();
 
-} // namespace imp
+}  // namespace imp

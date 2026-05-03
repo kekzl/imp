@@ -29,8 +29,7 @@ struct JValue {
 
 class JsonParser {
 public:
-    explicit JsonParser(const char* data, size_t len)
-        : data_(data), len_(len), pos_(0) {}
+    explicit JsonParser(const char* data, size_t len) : data_(data), len_(len), pos_(0) {}
 
     JValue parse() {
         skip_ws();
@@ -46,42 +45,58 @@ private:
     bool error_ = false;
 
     char peek() const {
-        if (pos_ >= len_) return '\0';
+        if (pos_ >= len_)
+            return '\0';
         return data_[pos_];
     }
 
     char advance() {
-        if (pos_ >= len_) { error_ = true; return '\0'; }
+        if (pos_ >= len_) {
+            error_ = true;
+            return '\0';
+        }
         return data_[pos_++];
     }
 
     void skip_ws() {
-        while (pos_ < len_ && (data_[pos_] == ' ' || data_[pos_] == '\t' ||
-                                data_[pos_] == '\n' || data_[pos_] == '\r')) {
+        while (pos_ < len_ &&
+               (data_[pos_] == ' ' || data_[pos_] == '\t' || data_[pos_] == '\n' || data_[pos_] == '\r')) {
             pos_++;
         }
     }
 
     bool expect(char c) {
         skip_ws();
-        if (peek() == c) { advance(); return true; }
+        if (peek() == c) {
+            advance();
+            return true;
+        }
         error_ = true;
         return false;
     }
 
     static int hex_digit(char c) {
-        if (c >= '0' && c <= '9') return c - '0';
-        if (c >= 'a' && c <= 'f') return 10 + c - 'a';
-        if (c >= 'A' && c <= 'F') return 10 + c - 'A';
+        if (c >= '0' && c <= '9')
+            return c - '0';
+        if (c >= 'a' && c <= 'f')
+            return 10 + c - 'a';
+        if (c >= 'A' && c <= 'F')
+            return 10 + c - 'A';
         return -1;
     }
 
     uint32_t parse_u4() {
         uint32_t v = 0;
         for (int i = 0; i < 4; i++) {
-            if (pos_ >= len_) { error_ = true; return 0; }
+            if (pos_ >= len_) {
+                error_ = true;
+                return 0;
+            }
             int d = hex_digit(data_[pos_++]);
-            if (d < 0) { error_ = true; return 0; }
+            if (d < 0) {
+                error_ = true;
+                return 0;
+            }
             v = (v << 4) | d;
         }
         return v;
@@ -107,14 +122,21 @@ private:
 
     JValue parse_value() {
         skip_ws();
-        if (error_) return {};
+        if (error_)
+            return {};
         char c = peek();
-        if (c == '"') return parse_string_value();
-        if (c == '{') return parse_object();
-        if (c == '[') return parse_array();
-        if (c == 't' || c == 'f') return parse_bool();
-        if (c == 'n') return parse_null();
-        if (c == '-' || (c >= '0' && c <= '9')) return parse_number();
+        if (c == '"')
+            return parse_string_value();
+        if (c == '{')
+            return parse_object();
+        if (c == '[')
+            return parse_array();
+        if (c == 't' || c == 'f')
+            return parse_bool();
+        if (c == 'n')
+            return parse_null();
+        if (c == '-' || (c >= '0' && c <= '9'))
+            return parse_number();
         error_ = true;
         return {};
     }
@@ -127,28 +149,49 @@ private:
     }
 
     std::string parse_string_raw() {
-        if (!expect('"')) return "";
+        if (!expect('"'))
+            return "";
         std::string s;
         while (pos_ < len_) {
             char c = advance();
-            if (c == '"') return s;
+            if (c == '"')
+                return s;
             if (c == '\\') {
-                if (pos_ >= len_) { error_ = true; return s; }
+                if (pos_ >= len_) {
+                    error_ = true;
+                    return s;
+                }
                 char esc = advance();
                 switch (esc) {
-                    case '"':  s += '"'; break;
-                    case '\\': s += '\\'; break;
-                    case '/':  s += '/'; break;
-                    case 'b':  s += '\b'; break;
-                    case 'f':  s += '\f'; break;
-                    case 'n':  s += '\n'; break;
-                    case 'r':  s += '\r'; break;
-                    case 't':  s += '\t'; break;
+                    case '"':
+                        s += '"';
+                        break;
+                    case '\\':
+                        s += '\\';
+                        break;
+                    case '/':
+                        s += '/';
+                        break;
+                    case 'b':
+                        s += '\b';
+                        break;
+                    case 'f':
+                        s += '\f';
+                        break;
+                    case 'n':
+                        s += '\n';
+                        break;
+                    case 'r':
+                        s += '\r';
+                        break;
+                    case 't':
+                        s += '\t';
+                        break;
                     case 'u': {
                         uint32_t cp = parse_u4();
                         // Handle UTF-16 surrogate pairs
                         if (cp >= 0xD800 && cp <= 0xDBFF) {
-                            if (pos_ + 1 < len_ && data_[pos_] == '\\' && data_[pos_+1] == 'u') {
+                            if (pos_ + 1 < len_ && data_[pos_] == '\\' && data_[pos_ + 1] == 'u') {
                                 pos_ += 2;
                                 uint32_t lo = parse_u4();
                                 if (lo >= 0xDC00 && lo <= 0xDFFF) {
@@ -159,7 +202,9 @@ private:
                         append_codepoint_utf8(s, cp);
                         break;
                     }
-                    default: s += esc; break;
+                    default:
+                        s += esc;
+                        break;
                 }
             } else {
                 s += c;
@@ -173,16 +218,21 @@ private:
         JValue v;
         v.type = JType::NUMBER;
         size_t start = pos_;
-        if (peek() == '-') advance();
-        while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9') advance();
+        if (peek() == '-')
+            advance();
+        while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9')
+            advance();
         if (pos_ < len_ && data_[pos_] == '.') {
             advance();
-            while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9') advance();
+            while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9')
+                advance();
         }
         if (pos_ < len_ && (data_[pos_] == 'e' || data_[pos_] == 'E')) {
             advance();
-            if (pos_ < len_ && (data_[pos_] == '+' || data_[pos_] == '-')) advance();
-            while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9') advance();
+            if (pos_ < len_ && (data_[pos_] == '+' || data_[pos_] == '-'))
+                advance();
+            while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9')
+                advance();
         }
         std::string num_str(data_ + start, pos_ - start);
         v.num_val = std::stod(num_str);
@@ -192,17 +242,25 @@ private:
     JValue parse_object() {
         JValue v;
         v.type = JType::OBJECT;
-        if (!expect('{')) return v;
+        if (!expect('{'))
+            return v;
         skip_ws();
-        if (peek() == '}') { advance(); return v; }
+        if (peek() == '}') {
+            advance();
+            return v;
+        }
         while (!error_) {
             skip_ws();
             std::string key = parse_string_raw();
-            if (!expect(':')) break;
+            if (!expect(':'))
+                break;
             JValue val = parse_value();
             v.obj.emplace_back(std::move(key), std::move(val));
             skip_ws();
-            if (peek() == ',') { advance(); continue; }
+            if (peek() == ',') {
+                advance();
+                continue;
+            }
             break;
         }
         expect('}');
@@ -212,13 +270,20 @@ private:
     JValue parse_array() {
         JValue v;
         v.type = JType::ARRAY;
-        if (!expect('[')) return v;
+        if (!expect('['))
+            return v;
         skip_ws();
-        if (peek() == ']') { advance(); return v; }
+        if (peek() == ']') {
+            advance();
+            return v;
+        }
         while (!error_) {
             v.arr.push_back(parse_value());
             skip_ws();
-            if (peek() == ',') { advance(); continue; }
+            if (peek() == ',') {
+                advance();
+                continue;
+            }
             break;
         }
         expect(']');
@@ -229,10 +294,12 @@ private:
         JValue v;
         v.type = JType::NUMBER;
         if (peek() == 't') {
-            for (int i = 0; i < 4 && pos_ < len_; i++) advance();
+            for (int i = 0; i < 4 && pos_ < len_; i++)
+                advance();
             v.num_val = 1.0;
         } else {
-            for (int i = 0; i < 5 && pos_ < len_; i++) advance();
+            for (int i = 0; i < 5 && pos_ < len_; i++)
+                advance();
             v.num_val = 0.0;
         }
         return v;
@@ -241,35 +308,42 @@ private:
     JValue parse_null() {
         JValue v;
         v.type = JType::NUL;
-        for (int i = 0; i < 4 && pos_ < len_; i++) advance();
+        for (int i = 0; i < 4 && pos_ < len_; i++)
+            advance();
         return v;
     }
 };
 
 const JValue* jobj_find(const JValue& obj, const std::string& key) {
     for (const auto& kv : obj.obj) {
-        if (kv.first == key) return &kv.second;
+        if (kv.first == key)
+            return &kv.second;
     }
     return nullptr;
 }
 
 bool jobj_get_string(const JValue& obj, const std::string& key, std::string& out) {
     const JValue* v = jobj_find(obj, key);
-    if (!v || v->type != JType::STRING) return false;
+    if (!v || v->type != JType::STRING)
+        return false;
     out = v->str_val;
     return true;
 }
 
-} // anonymous namespace
+}  // anonymous namespace
 
 // ---- UTF-8 helpers ----
 
 int Tokenizer::utf8_char_len(uint8_t c) {
-    if ((c & 0x80) == 0)    return 1;
-    if ((c & 0xE0) == 0xC0) return 2;
-    if ((c & 0xF0) == 0xE0) return 3;
-    if ((c & 0xF8) == 0xF0) return 4;
-    return 1; // invalid byte, treat as single
+    if ((c & 0x80) == 0)
+        return 1;
+    if ((c & 0xE0) == 0xC0)
+        return 2;
+    if ((c & 0xF0) == 0xE0)
+        return 3;
+    if ((c & 0xF8) == 0xF0)
+        return 4;
+    return 1;  // invalid byte, treat as single
 }
 
 static std::string codepoint_to_utf8(uint32_t cp) {
@@ -303,37 +377,267 @@ static std::string codepoint_to_utf8(uint32_t cp) {
 
 static const uint32_t BYTE_TO_CODEPOINT[256] = {
     // 0-32: mapped to 256-288
-    256, 257, 258, 259, 260, 261, 262, 263, 264, 265,
-    266, 267, 268, 269, 270, 271, 272, 273, 274, 275,
-    276, 277, 278, 279, 280, 281, 282, 283, 284, 285,
-    286, 287, 288,
+    256,
+    257,
+    258,
+    259,
+    260,
+    261,
+    262,
+    263,
+    264,
+    265,
+    266,
+    267,
+    268,
+    269,
+    270,
+    271,
+    272,
+    273,
+    274,
+    275,
+    276,
+    277,
+    278,
+    279,
+    280,
+    281,
+    282,
+    283,
+    284,
+    285,
+    286,
+    287,
+    288,
     // 33-126: identity (! to ~)
-    33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
-    48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62,
-    63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77,
-    78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92,
-    93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106,
-    107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
-    120, 121, 122, 123, 124, 125, 126,
+    33,
+    34,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    44,
+    45,
+    46,
+    47,
+    48,
+    49,
+    50,
+    51,
+    52,
+    53,
+    54,
+    55,
+    56,
+    57,
+    58,
+    59,
+    60,
+    61,
+    62,
+    63,
+    64,
+    65,
+    66,
+    67,
+    68,
+    69,
+    70,
+    71,
+    72,
+    73,
+    74,
+    75,
+    76,
+    77,
+    78,
+    79,
+    80,
+    81,
+    82,
+    83,
+    84,
+    85,
+    86,
+    87,
+    88,
+    89,
+    90,
+    91,
+    92,
+    93,
+    94,
+    95,
+    96,
+    97,
+    98,
+    99,
+    100,
+    101,
+    102,
+    103,
+    104,
+    105,
+    106,
+    107,
+    108,
+    109,
+    110,
+    111,
+    112,
+    113,
+    114,
+    115,
+    116,
+    117,
+    118,
+    119,
+    120,
+    121,
+    122,
+    123,
+    124,
+    125,
+    126,
     // 127-160: mapped to 289-322
-    289, 290, 291, 292, 293, 294, 295, 296, 297, 298,
-    299, 300, 301, 302, 303, 304, 305, 306, 307, 308,
-    309, 310, 311, 312, 313, 314, 315, 316, 317, 318,
-    319, 320, 321, 322,
+    289,
+    290,
+    291,
+    292,
+    293,
+    294,
+    295,
+    296,
+    297,
+    298,
+    299,
+    300,
+    301,
+    302,
+    303,
+    304,
+    305,
+    306,
+    307,
+    308,
+    309,
+    310,
+    311,
+    312,
+    313,
+    314,
+    315,
+    316,
+    317,
+    318,
+    319,
+    320,
+    321,
+    322,
     // 161-172: identity
-    161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172,
+    161,
+    162,
+    163,
+    164,
+    165,
+    166,
+    167,
+    168,
+    169,
+    170,
+    171,
+    172,
     // 173: mapped to 323
     323,
     // 174-255: identity
-    174, 175, 176, 177, 178, 179, 180, 181, 182, 183,
-    184, 185, 186, 187, 188, 189, 190, 191, 192, 193,
-    194, 195, 196, 197, 198, 199, 200, 201, 202, 203,
-    204, 205, 206, 207, 208, 209, 210, 211, 212, 213,
-    214, 215, 216, 217, 218, 219, 220, 221, 222, 223,
-    224, 225, 226, 227, 228, 229, 230, 231, 232, 233,
-    234, 235, 236, 237, 238, 239, 240, 241, 242, 243,
-    244, 245, 246, 247, 248, 249, 250, 251, 252, 253,
-    254, 255,
+    174,
+    175,
+    176,
+    177,
+    178,
+    179,
+    180,
+    181,
+    182,
+    183,
+    184,
+    185,
+    186,
+    187,
+    188,
+    189,
+    190,
+    191,
+    192,
+    193,
+    194,
+    195,
+    196,
+    197,
+    198,
+    199,
+    200,
+    201,
+    202,
+    203,
+    204,
+    205,
+    206,
+    207,
+    208,
+    209,
+    210,
+    211,
+    212,
+    213,
+    214,
+    215,
+    216,
+    217,
+    218,
+    219,
+    220,
+    221,
+    222,
+    223,
+    224,
+    225,
+    226,
+    227,
+    228,
+    229,
+    230,
+    231,
+    232,
+    233,
+    234,
+    235,
+    236,
+    237,
+    238,
+    239,
+    240,
+    241,
+    242,
+    243,
+    244,
+    245,
+    246,
+    247,
+    248,
+    249,
+    250,
+    251,
+    252,
+    253,
+    254,
+    255,
 };
 
 // Reverse mapping: codepoint -> byte value (built once)
@@ -341,7 +645,8 @@ static uint8_t CODEPOINT_TO_BYTE[324];
 static bool CODEPOINT_TABLE_INIT = false;
 
 static void init_codepoint_table() {
-    if (CODEPOINT_TABLE_INIT) return;
+    if (CODEPOINT_TABLE_INIT)
+        return;
     for (int b = 0; b < 256; b++) {
         CODEPOINT_TO_BYTE[BYTE_TO_CODEPOINT[b]] = static_cast<uint8_t>(b);
     }
@@ -349,9 +654,7 @@ static void init_codepoint_table() {
 }
 
 // Convert a single byte to its GPT2 Unicode character (UTF-8 encoded)
-static std::string byte_to_gpt2(uint8_t byte) {
-    return codepoint_to_utf8(BYTE_TO_CODEPOINT[byte]);
-}
+static std::string byte_to_gpt2(uint8_t byte) { return codepoint_to_utf8(BYTE_TO_CODEPOINT[byte]); }
 
 // Convert a UTF-8 character (from GPT2 encoding) back to the original byte
 // Returns -1 if not a valid GPT2 byte-encoded character
@@ -361,12 +664,10 @@ static int gpt2_to_byte(const char* s, int len) {
     if (len == 1) {
         cp = static_cast<uint8_t>(s[0]);
     } else if (len == 2) {
-        cp = ((static_cast<uint32_t>(s[0]) & 0x1F) << 6) |
-              (static_cast<uint32_t>(s[1]) & 0x3F);
+        cp = ((static_cast<uint32_t>(s[0]) & 0x1F) << 6) | (static_cast<uint32_t>(s[1]) & 0x3F);
     } else if (len == 3) {
-        cp = ((static_cast<uint32_t>(s[0]) & 0x0F) << 12) |
-             ((static_cast<uint32_t>(s[1]) & 0x3F) << 6) |
-              (static_cast<uint32_t>(s[2]) & 0x3F);
+        cp = ((static_cast<uint32_t>(s[0]) & 0x0F) << 12) | ((static_cast<uint32_t>(s[1]) & 0x3F) << 6) |
+             (static_cast<uint32_t>(s[2]) & 0x3F);
     } else {
         return -1;
     }
@@ -389,7 +690,8 @@ static int gpt2_to_byte(const char* s, int len) {
 
 static std::vector<std::string> gpt2_pre_tokenize(const std::string& text) {
     std::vector<std::string> result;
-    if (text.empty()) return result;
+    if (text.empty())
+        return result;
 
     size_t i = 0;
     while (i < text.size()) {
@@ -401,7 +703,8 @@ static std::vector<std::string> gpt2_pre_tokenize(const std::string& text) {
         }
 
         if (i >= text.size()) {
-            if (!chunk.empty()) result.push_back(chunk);
+            if (!chunk.empty())
+                result.push_back(chunk);
             break;
         }
 
@@ -418,9 +721,12 @@ static std::vector<std::string> gpt2_pre_tokenize(const std::string& text) {
                 unsigned char cc = static_cast<unsigned char>(text[i]);
                 if (std::isalpha(cc) || cc >= 128) {
                     int len = 1;
-                    if ((cc & 0xE0) == 0xC0) len = 2;
-                    else if ((cc & 0xF0) == 0xE0) len = 3;
-                    else if ((cc & 0xF8) == 0xF0) len = 4;
+                    if ((cc & 0xE0) == 0xC0)
+                        len = 2;
+                    else if ((cc & 0xF0) == 0xE0)
+                        len = 3;
+                    else if ((cc & 0xF8) == 0xF0)
+                        len = 4;
                     for (int j = 0; j < len && i < text.size(); j++)
                         chunk += text[i++];
                 } else {
@@ -452,13 +758,18 @@ static std::vector<std::string> gpt2_pre_tokenize(const std::string& text) {
 bool Tokenizer::load(const std::string& path) {
     // Read file
     int fd = open(path.c_str(), O_RDONLY);
-    if (fd < 0) return false;
+    if (fd < 0)
+        return false;
     struct stat st;
-    if (fstat(fd, &st) != 0) { close(fd); return false; }
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        return false;
+    }
     std::string file_data(st.st_size, '\0');
     ssize_t n = ::read(fd, file_data.data(), st.st_size);
     close(fd);
-    if (n != st.st_size) return false;
+    if (n != st.st_size)
+        return false;
 
     // Parse JSON
     JsonParser parser(file_data.c_str(), file_data.size());
@@ -487,7 +798,8 @@ bool Tokenizer::load(const std::string& path) {
         for (const auto& [token, val] : vocab->obj) {
             if (val.type == JType::NUMBER) {
                 int id = static_cast<int>(val.num_val);
-                if (id > max_id) max_id = id;
+                if (id > max_id)
+                    max_id = id;
             }
         }
         vocab_.resize(max_id + 1);
@@ -496,14 +808,15 @@ bool Tokenizer::load(const std::string& path) {
         token_to_id_.clear();
         token_to_id_.reserve(vocab->obj.size());
         for (const auto& [token, val] : vocab->obj) {
-            if (val.type != JType::NUMBER) continue;
+            if (val.type != JType::NUMBER)
+                continue;
             int id = static_cast<int>(val.num_val);
             vocab_[id] = token;
             token_to_id_[token] = id;
         }
 
-        IMP_LOG_INFO("tokenizer.json: loaded %zu vocab entries (type=%s)",
-                     vocab->obj.size(), model_type.c_str());
+        IMP_LOG_INFO("tokenizer.json: loaded %zu vocab entries (type=%s)", vocab->obj.size(),
+                     model_type.c_str());
     }
 
     // Extract merges (BPE only)
@@ -515,8 +828,8 @@ bool Tokenizer::load(const std::string& path) {
         for (const auto& m : merges->arr) {
             if (m.type == JType::STRING) {
                 merge_strs.push_back(m.str_val);
-            } else if (m.type == JType::ARRAY && m.arr.size() == 2 &&
-                       m.arr[0].type == JType::STRING && m.arr[1].type == JType::STRING) {
+            } else if (m.type == JType::ARRAY && m.arr.size() == 2 && m.arr[0].type == JType::STRING &&
+                       m.arr[1].type == JType::STRING) {
                 merge_strs.push_back(m.arr[0].str_val + " " + m.arr[1].str_val);
             }
         }
@@ -530,17 +843,19 @@ bool Tokenizer::load(const std::string& path) {
         token_types_.resize(vocab_.size(), 1);  // default NORMAL=1
 
         for (const auto& tok : added->arr) {
-            if (tok.type != JType::OBJECT) continue;
+            if (tok.type != JType::OBJECT)
+                continue;
             const JValue* id_v = jobj_find(tok, "id");
             const JValue* content_v = jobj_find(tok, "content");
             const JValue* special_v = jobj_find(tok, "special");
 
-            if (!id_v || !content_v) continue;
-            if (id_v->type != JType::NUMBER || content_v->type != JType::STRING) continue;
+            if (!id_v || !content_v)
+                continue;
+            if (id_v->type != JType::NUMBER || content_v->type != JType::STRING)
+                continue;
             int id = static_cast<int>(id_v->num_val);
             const std::string& content = content_v->str_val;
-            bool is_special = special_v && special_v->type == JType::NUMBER &&
-                              special_v->num_val != 0.0;
+            bool is_special = special_v && special_v->type == JType::NUMBER && special_v->num_val != 0.0;
 
             // Ensure vectors are large enough
             if (id >= static_cast<int>(vocab_.size())) {
@@ -551,15 +866,15 @@ bool Tokenizer::load(const std::string& path) {
 
             vocab_[id] = content;
             token_to_id_[content] = id;
-            if (is_special) token_types_[id] = 3;  // CONTROL
+            if (is_special)
+                token_types_[id] = 3;  // CONTROL
 
             // Detect BOS/EOS tokens
-            if (content == "<s>" || content == "<|begin_of_text|>" ||
-                content == "<|startoftext|>") {
+            if (content == "<s>" || content == "<|begin_of_text|>" || content == "<|startoftext|>") {
                 bos_id_ = id;
             }
-            if (content == "</s>" || content == "<|end_of_text|>" ||
-                content == "<|endoftext|>" || content == "<|eot_id|>") {
+            if (content == "</s>" || content == "<|end_of_text|>" || content == "<|endoftext|>" ||
+                content == "<|eot_id|>") {
                 if (eos_ids_.size() == 1 && eos_ids_[0] == 2) {
                     // Replace default
                     eos_ids_ = {static_cast<int32_t>(id)};
@@ -593,7 +908,8 @@ bool Tokenizer::load(const std::string& path) {
             const JValue* pretoks = jobj_find(*pre_tok, "pretokenizers");
             if (pretoks && pretoks->type == JType::ARRAY) {
                 for (const auto& pt : pretoks->arr) {
-                    if (pt.type != JType::OBJECT) continue;
+                    if (pt.type != JType::OBJECT)
+                        continue;
                     std::string inner_type;
                     jobj_get_string(pt, "type", inner_type);
                     if (inner_type == "ByteLevel") {
@@ -641,22 +957,20 @@ bool Tokenizer::load(const std::string& path) {
                     token_to_id_[vocab_[i]] = static_cast<int32_t>(i);
                 }
             }
-            IMP_LOG_INFO("tokenizer.json: loaded %zu Unigram vocab entries",
-                         uni_vocab->arr.size());
+            IMP_LOG_INFO("tokenizer.json: loaded %zu Unigram vocab entries", uni_vocab->arr.size());
         }
     }
 
-    IMP_LOG_INFO("tokenizer.json: type=%s vocab_size=%d bos=%d eos=%d add_prefix=%s",
-                 type_.c_str(), static_cast<int>(vocab_.size()), bos_id_,
-                 eos_ids_.empty() ? -1 : eos_ids_[0],
+    IMP_LOG_INFO("tokenizer.json: type=%s vocab_size=%d bos=%d eos=%d add_prefix=%s", type_.c_str(),
+                 static_cast<int>(vocab_.size()), bos_id_, eos_ids_.empty() ? -1 : eos_ids_[0],
                  add_space_prefix_ ? "true" : "false");
     return true;
 }
 
-bool Tokenizer::load_vocab(const std::vector<std::string>& tokens,
-                           const std::vector<float>& scores,
+bool Tokenizer::load_vocab(const std::vector<std::string>& tokens, const std::vector<float>& scores,
                            int bos_id, int eos_id) {
-    if (tokens.empty()) return false;
+    if (tokens.empty())
+        return false;
 
     vocab_ = tokens;
     scores_ = scores;
@@ -686,7 +1000,8 @@ void Tokenizer::load_merges(const std::vector<std::string>& merges) {
 static const std::string SPIECE_SPACE = "\xe2\x96\x81";
 
 std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_prefix) const {
-    if (text.empty() || vocab_.empty()) return {};
+    if (text.empty() || vocab_.empty())
+        return {};
 
     // Pre-process: SentencePiece convention - replace spaces with ▁
     // add_space_prefix_: prepend ▁ at start (true for LLaMA/Mistral, false for Gemma)
@@ -709,9 +1024,10 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_pref
     std::vector<std::string> symbols;
     symbols.reserve(processed.size());
 
-    for (size_t i = 0; i < processed.size(); ) {
+    for (size_t i = 0; i < processed.size();) {
         int len = utf8_char_len(static_cast<uint8_t>(processed[i]));
-        if (i + len > processed.size()) len = 1;
+        if (i + len > processed.size())
+            len = 1;
         symbols.push_back(processed.substr(i, len));
         i += len;
     }
@@ -729,12 +1045,13 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_pref
     // Max-heap: highest score first, then lowest position for tie-breaking
     struct MergeCand {
         float score;
-        int pos;       // left symbol index
-        int seq;       // left sequence number at insertion (for invalidation)
-        int rseq;      // right sequence number at insertion
+        int pos;   // left symbol index
+        int seq;   // left sequence number at insertion (for invalidation)
+        int rseq;  // right sequence number at insertion
     };
     auto cmp = [](const MergeCand& a, const MergeCand& b) {
-        if (a.score != b.score) return a.score < b.score;
+        if (a.score != b.score)
+            return a.score < b.score;
         return a.pos > b.pos;
     };
     std::priority_queue<MergeCand, std::vector<MergeCand>, decltype(cmp)> pq(cmp);
@@ -756,10 +1073,13 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_pref
         pq.pop();
 
         // Validate: both symbols still exist and haven't been modified since insertion
-        if (deleted[pos] || seq[pos] != s) continue;
+        if (deleted[pos] || seq[pos] != s)
+            continue;
         int right = next[pos];
-        if (right >= n || deleted[right]) continue;
-        if (seq[right] != rs) continue;  // right symbol was modified
+        if (right >= n || deleted[right])
+            continue;
+        if (seq[right] != rs)
+            continue;  // right symbol was modified
 
         // Merge: symbols[pos] absorbs symbols[right]
         symbols[pos] = symbols[pos] + symbols[right];
@@ -768,7 +1088,8 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_pref
 
         // Update linked list
         next[pos] = next[right];
-        if (next[right] < n) prev[next[right]] = pos;
+        if (next[right] < n)
+            prev[next[right]] = pos;
 
         // Try new pair with left neighbor
         if (prev[pos] >= 0) {
@@ -794,7 +1115,8 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_pref
     ids.reserve(n);
 
     for (int i = 0; i < n; i++) {
-        if (deleted[i]) continue;
+        if (deleted[i])
+            continue;
         const auto& sym = symbols[i];
         auto it = token_to_id_.find(sym);
         if (it != token_to_id_.end()) {
@@ -825,13 +1147,29 @@ std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_pref
 
 static std::vector<std::string> llama3_pre_tokenize(const std::string& text) {
     std::vector<std::string> result;
-    if (text.empty()) return result;
+    if (text.empty())
+        return result;
 
     // Common English contractions that get their own tokens
     static const char* contractions[] = {
-        "'s", "'t", "'re", "'ve", "'m", "'ll", "'d",
-        "\xe2\x80\x99s", "\xe2\x80\x99t", "\xe2\x80\x99re",
-        "\xe2\x80\x99" "ve", "\xe2\x80\x99" "m", "\xe2\x80\x99" "ll", "\xe2\x80\x99" "d",
+        "'s",
+        "'t",
+        "'re",
+        "'ve",
+        "'m",
+        "'ll",
+        "'d",
+        "\xe2\x80\x99s",
+        "\xe2\x80\x99t",
+        "\xe2\x80\x99re",
+        "\xe2\x80\x99"
+        "ve",
+        "\xe2\x80\x99"
+        "m",
+        "\xe2\x80\x99"
+        "ll",
+        "\xe2\x80\x99"
+        "d",
     };
 
     size_t i = 0;
@@ -840,8 +1178,8 @@ static std::vector<std::string> llama3_pre_tokenize(const std::string& text) {
 
         // Check for contractions
         bool found_contraction = false;
-        if (c == '\'' || (c == 0xe2 && i + 2 < text.size() &&
-            text[i+1] == '\x80' && text[i+2] == '\x99')) {
+        if (c == '\'' ||
+            (c == 0xe2 && i + 2 < text.size() && text[i + 1] == '\x80' && text[i + 2] == '\x99')) {
             for (const char* ctr : contractions) {
                 size_t len = std::strlen(ctr);
                 if (i + len <= text.size() && text.compare(i, len, ctr) == 0) {
@@ -852,7 +1190,8 @@ static std::vector<std::string> llama3_pre_tokenize(const std::string& text) {
                 }
             }
         }
-        if (found_contraction) continue;
+        if (found_contraction)
+            continue;
 
         if (c == ' ' || c == '\t') {
             // Space: attach to following word (like GPT2)
@@ -860,12 +1199,17 @@ static std::vector<std::string> llama3_pre_tokenize(const std::string& text) {
             chunk += text[i++];
             while (i < text.size()) {
                 unsigned char cc = static_cast<unsigned char>(text[i]);
-                if (cc == ' ' || cc == '\t' || cc == '\n' || cc == '\r') break;
-                if (std::ispunct(cc) && cc != '\'') break;
+                if (cc == ' ' || cc == '\t' || cc == '\n' || cc == '\r')
+                    break;
+                if (std::ispunct(cc) && cc != '\'')
+                    break;
                 int len = 1;
-                if ((cc & 0xE0) == 0xC0) len = 2;
-                else if ((cc & 0xF0) == 0xE0) len = 3;
-                else if ((cc & 0xF8) == 0xF0) len = 4;
+                if ((cc & 0xE0) == 0xC0)
+                    len = 2;
+                else if ((cc & 0xF0) == 0xE0)
+                    len = 3;
+                else if ((cc & 0xF8) == 0xF0)
+                    len = 4;
                 for (int j = 0; j < len && i < text.size(); j++)
                     chunk += text[i++];
             }
@@ -879,11 +1223,15 @@ static std::vector<std::string> llama3_pre_tokenize(const std::string& text) {
             std::string chunk;
             while (i < text.size()) {
                 unsigned char cc = static_cast<unsigned char>(text[i]);
-                if (!std::isalpha(cc) && cc < 128) break;
+                if (!std::isalpha(cc) && cc < 128)
+                    break;
                 int len = 1;
-                if ((cc & 0xE0) == 0xC0) len = 2;
-                else if ((cc & 0xF0) == 0xE0) len = 3;
-                else if ((cc & 0xF8) == 0xF0) len = 4;
+                if ((cc & 0xE0) == 0xC0)
+                    len = 2;
+                else if ((cc & 0xF0) == 0xE0)
+                    len = 3;
+                else if ((cc & 0xF8) == 0xF0)
+                    len = 4;
                 for (int j = 0; j < len && i < text.size(); j++)
                     chunk += text[i++];
             }
@@ -902,7 +1250,8 @@ static std::vector<std::string> llama3_pre_tokenize(const std::string& text) {
 // Gemma-4 uses SentencePiece-style BPE: spaces→▁, no word-level pre-splitting
 // (only split on newlines), raw UTF-8 characters, BPE merges by rank.
 std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
-    if (text.empty() || vocab_.empty()) return {};
+    if (text.empty() || vocab_.empty())
+        return {};
 
     // 1. Escape spaces → ▁
     std::string processed;
@@ -921,12 +1270,14 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
     while (start < processed.size()) {
         if (processed[start] == '\n') {
             size_t end = start;
-            while (end < processed.size() && processed[end] == '\n') end++;
+            while (end < processed.size() && processed[end] == '\n')
+                end++;
             chunks.push_back(processed.substr(start, end - start));
             start = end;
         } else {
             size_t end = start;
-            while (end < processed.size() && processed[end] != '\n') end++;
+            while (end < processed.size() && processed[end] != '\n')
+                end++;
             chunks.push_back(processed.substr(start, end - start));
             start = end;
         }
@@ -939,9 +1290,10 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
         // 3. Split into UTF-8 characters (raw, no byte encoding)
         std::vector<std::string> symbols;
         symbols.reserve(chunk.size());
-        for (size_t i = 0; i < chunk.size(); ) {
+        for (size_t i = 0; i < chunk.size();) {
             int len = utf8_char_len(static_cast<uint8_t>(chunk[i]));
-            if (i + len > chunk.size()) len = 1;
+            if (i + len > chunk.size())
+                len = 1;
             symbols.push_back(chunk.substr(i, len));
             i += len;
         }
@@ -961,7 +1313,8 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
             int seq;
         };
         auto cmp = [](const BPEMerge& a, const BPEMerge& b) {
-            if (a.rank != b.rank) return a.rank > b.rank;  // min-heap: lower rank first
+            if (a.rank != b.rank)
+                return a.rank > b.rank;  // min-heap: lower rank first
             return a.pos > b.pos;
         };
         std::priority_queue<BPEMerge, std::vector<BPEMerge>, decltype(cmp)> pq(cmp);
@@ -978,9 +1331,11 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
         while (!pq.empty()) {
             auto [rank, pos, s] = pq.top();
             pq.pop();
-            if (sdel[pos] || sseq[pos] != s) continue;
+            if (sdel[pos] || sseq[pos] != s)
+                continue;
             int right = snext[pos];
-            if (right >= ns || sdel[right]) continue;
+            if (right >= ns || sdel[right])
+                continue;
 
             // Re-validate: the pair at this position may have changed since
             // the merge was enqueued (the right neighbor may have merged
@@ -990,7 +1345,8 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
             {
                 std::string cur_key = symbols[pos] + " " + symbols[right];
                 auto vit = merge_ranks_.find(cur_key);
-                if (vit == merge_ranks_.end() || vit->second != rank) continue;
+                if (vit == merge_ranks_.end() || vit->second != rank)
+                    continue;
             }
             // Vocab-existence guard: merge_ranks_ contains rules whose output
             // is not in the final vocab (intermediate merge steps, e.g.
@@ -998,13 +1354,15 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
             // merge produces a symbol that fails vocab lookup and byte-
             // falls back the entire word. Skipping these keeps sub-parts
             // that ARE tokens intact. Matches llama.cpp behavior.
-            if (token_to_id_.find(merged) == token_to_id_.end()) continue;
+            if (token_to_id_.find(merged) == token_to_id_.end())
+                continue;
 
             symbols[pos] = merged;
             sdel[right] = true;
             sseq[pos]++;
             snext[pos] = snext[right];
-            if (snext[right] < ns) sprev[snext[right]] = pos;
+            if (snext[right] < ns)
+                sprev[snext[right]] = pos;
 
             if (sprev[pos] >= 0) {
                 int lp = sprev[pos];
@@ -1025,7 +1383,8 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
 
         // 5. Convert symbols to token IDs
         for (int i = 0; i < ns; i++) {
-            if (sdel[i]) continue;
+            if (sdel[i])
+                continue;
             auto it = token_to_id_.find(symbols[i]);
             if (it != token_to_id_.end()) {
                 all_ids.push_back(it->second);
@@ -1035,9 +1394,10 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
                 // initial UTF-8 characters that the vocab doesn't cover. Try
                 // per-character vocab lookup first, then byte fallback.
                 const std::string& sym = symbols[i];
-                for (size_t ci = 0; ci < sym.size(); ) {
+                for (size_t ci = 0; ci < sym.size();) {
                     int clen = utf8_char_len(static_cast<uint8_t>(sym[ci]));
-                    if (ci + clen > sym.size()) clen = 1;
+                    if (ci + clen > sym.size())
+                        clen = 1;
                     std::string ch = sym.substr(ci, clen);
                     auto ch_it = token_to_id_.find(ch);
                     if (ch_it != token_to_id_.end()) {
@@ -1045,9 +1405,7 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
                     } else {
                         for (int bi = 0; bi < clen; bi++) {
                             char buf[8];
-                            snprintf(buf, sizeof(buf),
-                                     "<0x%02X>",
-                                     static_cast<unsigned char>(sym[ci + bi]));
+                            snprintf(buf, sizeof(buf), "<0x%02X>", static_cast<unsigned char>(sym[ci + bi]));
                             auto bit = token_to_id_.find(buf);
                             if (bit != token_to_id_.end()) {
                                 all_ids.push_back(bit->second);
@@ -1064,12 +1422,12 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
 }
 
 std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
-    if (text.empty() || vocab_.empty()) return {};
+    if (text.empty() || vocab_.empty())
+        return {};
 
     // 1. Pre-tokenize into chunks (dispatch based on pre-tokenizer type)
     std::vector<std::string> chunks;
-    if (pre_tokenizer_ == "llama3" || pre_tokenizer_ == "llama-v3" ||
-        pre_tokenizer_ == "llama-bpe") {
+    if (pre_tokenizer_ == "llama3" || pre_tokenizer_ == "llama-v3" || pre_tokenizer_ == "llama-bpe") {
         chunks = llama3_pre_tokenize(text);
     } else {
         chunks = gpt2_pre_tokenize(text);
@@ -1102,7 +1460,8 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
             int seq;
         };
         auto gcmp = [](const GPT2Merge& a, const GPT2Merge& b) {
-            if (a.rank != b.rank) return a.rank > b.rank;
+            if (a.rank != b.rank)
+                return a.rank > b.rank;
             return a.pos > b.pos;
         };
         std::priority_queue<GPT2Merge, std::vector<GPT2Merge>, decltype(gcmp)> gpq(gcmp);
@@ -1121,9 +1480,11 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
             auto [rank, pos, s] = gpq.top();
             gpq.pop();
 
-            if (sdel[pos] || sseq[pos] != s) continue;
+            if (sdel[pos] || sseq[pos] != s)
+                continue;
             int right = snext[pos];
-            if (right >= ns || sdel[right]) continue;
+            if (right >= ns || sdel[right])
+                continue;
 
             // Re-validate: the pair at this position may have changed since
             // the merge was enqueued (e.g., the right neighbor was merged
@@ -1132,7 +1493,8 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
             {
                 std::string cur_key = symbols[pos] + " " + symbols[right];
                 auto vit = merge_ranks_.find(cur_key);
-                if (vit == merge_ranks_.end() || vit->second != rank) continue;
+                if (vit == merge_ranks_.end() || vit->second != rank)
+                    continue;
             }
 
             symbols[pos] = symbols[pos] + symbols[right];
@@ -1140,7 +1502,8 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
             sseq[pos]++;
 
             snext[pos] = snext[right];
-            if (snext[right] < ns) sprev[snext[right]] = pos;
+            if (snext[right] < ns)
+                sprev[snext[right]] = pos;
 
             if (sprev[pos] >= 0) {
                 int lp = sprev[pos];
@@ -1161,16 +1524,18 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
 
         // 4. Look up token IDs
         for (int i = 0; i < ns; i++) {
-            if (sdel[i]) continue;
+            if (sdel[i])
+                continue;
             const auto& sym = symbols[i];
             auto it = token_to_id_.find(sym);
             if (it != token_to_id_.end()) {
                 all_ids.push_back(it->second);
             } else {
                 // Fallback: try individual GPT2 byte tokens
-                for (size_t ci = 0; ci < sym.size(); ) {
+                for (size_t ci = 0; ci < sym.size();) {
                     int len = utf8_char_len(static_cast<uint8_t>(sym[ci]));
-                    if (ci + len > sym.size()) len = 1;
+                    if (ci + len > sym.size())
+                        len = 1;
                     std::string ch = sym.substr(ci, len);
                     auto ch_it = token_to_id_.find(ch);
                     if (ch_it != token_to_id_.end()) {
@@ -1204,132 +1569,132 @@ struct NfcEntry {
 //   0x0303 (tilde), 0x0304 (macron), 0x0308 (diaeresis), 0x030C (caron)
 static const NfcEntry kNfcTable[] = {
     // Grave accent (0x0300)
-    {0x0041, 0x0300, 0x00C0}, // À
-    {0x0045, 0x0300, 0x00C8}, // È
-    {0x0049, 0x0300, 0x00CC}, // Ì
-    {0x004F, 0x0300, 0x00D2}, // Ò
-    {0x0055, 0x0300, 0x00D9}, // Ù
-    {0x0061, 0x0300, 0x00E0}, // à
-    {0x0065, 0x0300, 0x00E8}, // è
-    {0x0069, 0x0300, 0x00EC}, // ì
-    {0x006F, 0x0300, 0x00F2}, // ò
-    {0x0075, 0x0300, 0x00F9}, // ù
+    {0x0041, 0x0300, 0x00C0},  // À
+    {0x0045, 0x0300, 0x00C8},  // È
+    {0x0049, 0x0300, 0x00CC},  // Ì
+    {0x004F, 0x0300, 0x00D2},  // Ò
+    {0x0055, 0x0300, 0x00D9},  // Ù
+    {0x0061, 0x0300, 0x00E0},  // à
+    {0x0065, 0x0300, 0x00E8},  // è
+    {0x0069, 0x0300, 0x00EC},  // ì
+    {0x006F, 0x0300, 0x00F2},  // ò
+    {0x0075, 0x0300, 0x00F9},  // ù
 
     // Acute accent (0x0301)
-    {0x0041, 0x0301, 0x00C1}, // Á
-    {0x0043, 0x0301, 0x0106}, // Ć
-    {0x0045, 0x0301, 0x00C9}, // É
-    {0x0049, 0x0301, 0x00CD}, // Í
-    {0x004C, 0x0301, 0x0139}, // Ĺ
-    {0x004E, 0x0301, 0x0143}, // Ń
-    {0x004F, 0x0301, 0x00D3}, // Ó
-    {0x0052, 0x0301, 0x0154}, // Ŕ
-    {0x0053, 0x0301, 0x015A}, // Ś
-    {0x0055, 0x0301, 0x00DA}, // Ú
-    {0x0059, 0x0301, 0x00DD}, // Ý
-    {0x005A, 0x0301, 0x0179}, // Ź
-    {0x0061, 0x0301, 0x00E1}, // á
-    {0x0063, 0x0301, 0x0107}, // ć
-    {0x0065, 0x0301, 0x00E9}, // é
-    {0x0069, 0x0301, 0x00ED}, // í
-    {0x006C, 0x0301, 0x013A}, // ĺ
-    {0x006E, 0x0301, 0x0144}, // ń
-    {0x006F, 0x0301, 0x00F3}, // ó
-    {0x0072, 0x0301, 0x0155}, // ŕ
-    {0x0073, 0x0301, 0x015B}, // ś
-    {0x0075, 0x0301, 0x00FA}, // ú
-    {0x0079, 0x0301, 0x00FD}, // ý
-    {0x007A, 0x0301, 0x017A}, // ź
+    {0x0041, 0x0301, 0x00C1},  // Á
+    {0x0043, 0x0301, 0x0106},  // Ć
+    {0x0045, 0x0301, 0x00C9},  // É
+    {0x0049, 0x0301, 0x00CD},  // Í
+    {0x004C, 0x0301, 0x0139},  // Ĺ
+    {0x004E, 0x0301, 0x0143},  // Ń
+    {0x004F, 0x0301, 0x00D3},  // Ó
+    {0x0052, 0x0301, 0x0154},  // Ŕ
+    {0x0053, 0x0301, 0x015A},  // Ś
+    {0x0055, 0x0301, 0x00DA},  // Ú
+    {0x0059, 0x0301, 0x00DD},  // Ý
+    {0x005A, 0x0301, 0x0179},  // Ź
+    {0x0061, 0x0301, 0x00E1},  // á
+    {0x0063, 0x0301, 0x0107},  // ć
+    {0x0065, 0x0301, 0x00E9},  // é
+    {0x0069, 0x0301, 0x00ED},  // í
+    {0x006C, 0x0301, 0x013A},  // ĺ
+    {0x006E, 0x0301, 0x0144},  // ń
+    {0x006F, 0x0301, 0x00F3},  // ó
+    {0x0072, 0x0301, 0x0155},  // ŕ
+    {0x0073, 0x0301, 0x015B},  // ś
+    {0x0075, 0x0301, 0x00FA},  // ú
+    {0x0079, 0x0301, 0x00FD},  // ý
+    {0x007A, 0x0301, 0x017A},  // ź
 
     // Circumflex (0x0302)
-    {0x0041, 0x0302, 0x00C2}, // Â
-    {0x0043, 0x0302, 0x0108}, // Ĉ
-    {0x0045, 0x0302, 0x00CA}, // Ê
-    {0x0047, 0x0302, 0x011C}, // Ĝ
-    {0x0048, 0x0302, 0x0124}, // Ĥ
-    {0x0049, 0x0302, 0x00CE}, // Î
-    {0x004A, 0x0302, 0x0134}, // Ĵ
-    {0x004F, 0x0302, 0x00D4}, // Ô
-    {0x0053, 0x0302, 0x015C}, // Ŝ
-    {0x0055, 0x0302, 0x00DB}, // Û
-    {0x0057, 0x0302, 0x0174}, // Ŵ
-    {0x0059, 0x0302, 0x0176}, // Ŷ
-    {0x0061, 0x0302, 0x00E2}, // â
-    {0x0063, 0x0302, 0x0109}, // ĉ
-    {0x0065, 0x0302, 0x00EA}, // ê
-    {0x0067, 0x0302, 0x011D}, // ĝ
-    {0x0068, 0x0302, 0x0125}, // ĥ
-    {0x0069, 0x0302, 0x00EE}, // î
-    {0x006A, 0x0302, 0x0135}, // ĵ
-    {0x006F, 0x0302, 0x00F4}, // ô
-    {0x0073, 0x0302, 0x015D}, // ŝ
-    {0x0075, 0x0302, 0x00FB}, // û
-    {0x0077, 0x0302, 0x0175}, // ŵ
-    {0x0079, 0x0302, 0x0177}, // ŷ
+    {0x0041, 0x0302, 0x00C2},  // Â
+    {0x0043, 0x0302, 0x0108},  // Ĉ
+    {0x0045, 0x0302, 0x00CA},  // Ê
+    {0x0047, 0x0302, 0x011C},  // Ĝ
+    {0x0048, 0x0302, 0x0124},  // Ĥ
+    {0x0049, 0x0302, 0x00CE},  // Î
+    {0x004A, 0x0302, 0x0134},  // Ĵ
+    {0x004F, 0x0302, 0x00D4},  // Ô
+    {0x0053, 0x0302, 0x015C},  // Ŝ
+    {0x0055, 0x0302, 0x00DB},  // Û
+    {0x0057, 0x0302, 0x0174},  // Ŵ
+    {0x0059, 0x0302, 0x0176},  // Ŷ
+    {0x0061, 0x0302, 0x00E2},  // â
+    {0x0063, 0x0302, 0x0109},  // ĉ
+    {0x0065, 0x0302, 0x00EA},  // ê
+    {0x0067, 0x0302, 0x011D},  // ĝ
+    {0x0068, 0x0302, 0x0125},  // ĥ
+    {0x0069, 0x0302, 0x00EE},  // î
+    {0x006A, 0x0302, 0x0135},  // ĵ
+    {0x006F, 0x0302, 0x00F4},  // ô
+    {0x0073, 0x0302, 0x015D},  // ŝ
+    {0x0075, 0x0302, 0x00FB},  // û
+    {0x0077, 0x0302, 0x0175},  // ŵ
+    {0x0079, 0x0302, 0x0177},  // ŷ
 
     // Tilde (0x0303)
-    {0x0041, 0x0303, 0x00C3}, // Ã
-    {0x004E, 0x0303, 0x00D1}, // Ñ
-    {0x004F, 0x0303, 0x00D5}, // Õ
-    {0x0061, 0x0303, 0x00E3}, // ã
-    {0x006E, 0x0303, 0x00F1}, // ñ
-    {0x006F, 0x0303, 0x00F5}, // õ
+    {0x0041, 0x0303, 0x00C3},  // Ã
+    {0x004E, 0x0303, 0x00D1},  // Ñ
+    {0x004F, 0x0303, 0x00D5},  // Õ
+    {0x0061, 0x0303, 0x00E3},  // ã
+    {0x006E, 0x0303, 0x00F1},  // ñ
+    {0x006F, 0x0303, 0x00F5},  // õ
 
     // Diaeresis/Umlaut (0x0308)
-    {0x0041, 0x0308, 0x00C4}, // Ä
-    {0x0045, 0x0308, 0x00CB}, // Ë
-    {0x0049, 0x0308, 0x00CF}, // Ï
-    {0x004F, 0x0308, 0x00D6}, // Ö
-    {0x0055, 0x0308, 0x00DC}, // Ü
-    {0x0059, 0x0308, 0x0178}, // Ÿ
-    {0x0061, 0x0308, 0x00E4}, // ä
-    {0x0065, 0x0308, 0x00EB}, // ë
-    {0x0069, 0x0308, 0x00EF}, // ï
-    {0x006F, 0x0308, 0x00F6}, // ö
-    {0x0075, 0x0308, 0x00FC}, // ü
-    {0x0079, 0x0308, 0x00FF}, // ÿ
+    {0x0041, 0x0308, 0x00C4},  // Ä
+    {0x0045, 0x0308, 0x00CB},  // Ë
+    {0x0049, 0x0308, 0x00CF},  // Ï
+    {0x004F, 0x0308, 0x00D6},  // Ö
+    {0x0055, 0x0308, 0x00DC},  // Ü
+    {0x0059, 0x0308, 0x0178},  // Ÿ
+    {0x0061, 0x0308, 0x00E4},  // ä
+    {0x0065, 0x0308, 0x00EB},  // ë
+    {0x0069, 0x0308, 0x00EF},  // ï
+    {0x006F, 0x0308, 0x00F6},  // ö
+    {0x0075, 0x0308, 0x00FC},  // ü
+    {0x0079, 0x0308, 0x00FF},  // ÿ
 
     // Caron/Háček (0x030C)
-    {0x0043, 0x030C, 0x010C}, // Č
-    {0x0044, 0x030C, 0x010E}, // Ď
-    {0x0045, 0x030C, 0x011A}, // Ě
-    {0x004E, 0x030C, 0x0147}, // Ň
-    {0x0052, 0x030C, 0x0158}, // Ř
-    {0x0053, 0x030C, 0x0160}, // Š
-    {0x0054, 0x030C, 0x0164}, // Ť
-    {0x005A, 0x030C, 0x017D}, // Ž
-    {0x0063, 0x030C, 0x010D}, // č
-    {0x0064, 0x030C, 0x010F}, // ď
-    {0x0065, 0x030C, 0x011B}, // ě
-    {0x006E, 0x030C, 0x0148}, // ň
-    {0x0072, 0x030C, 0x0159}, // ř
-    {0x0073, 0x030C, 0x0161}, // š
-    {0x0074, 0x030C, 0x0165}, // ť
-    {0x007A, 0x030C, 0x017E}, // ž
+    {0x0043, 0x030C, 0x010C},  // Č
+    {0x0044, 0x030C, 0x010E},  // Ď
+    {0x0045, 0x030C, 0x011A},  // Ě
+    {0x004E, 0x030C, 0x0147},  // Ň
+    {0x0052, 0x030C, 0x0158},  // Ř
+    {0x0053, 0x030C, 0x0160},  // Š
+    {0x0054, 0x030C, 0x0164},  // Ť
+    {0x005A, 0x030C, 0x017D},  // Ž
+    {0x0063, 0x030C, 0x010D},  // č
+    {0x0064, 0x030C, 0x010F},  // ď
+    {0x0065, 0x030C, 0x011B},  // ě
+    {0x006E, 0x030C, 0x0148},  // ň
+    {0x0072, 0x030C, 0x0159},  // ř
+    {0x0073, 0x030C, 0x0161},  // š
+    {0x0074, 0x030C, 0x0165},  // ť
+    {0x007A, 0x030C, 0x017E},  // ž
 
     // Cedilla (0x0327)
-    {0x0043, 0x0327, 0x00C7}, // Ç
-    {0x0063, 0x0327, 0x00E7}, // ç
-    {0x0053, 0x0327, 0x015E}, // Ş
-    {0x0073, 0x0327, 0x015F}, // ş
+    {0x0043, 0x0327, 0x00C7},  // Ç
+    {0x0063, 0x0327, 0x00E7},  // ç
+    {0x0053, 0x0327, 0x015E},  // Ş
+    {0x0073, 0x0327, 0x015F},  // ş
 
     // Ring above (0x030A)
-    {0x0041, 0x030A, 0x00C5}, // Å
-    {0x0061, 0x030A, 0x00E5}, // å
-    {0x0055, 0x030A, 0x016E}, // Ů
-    {0x0075, 0x030A, 0x016F}, // ů
+    {0x0041, 0x030A, 0x00C5},  // Å
+    {0x0061, 0x030A, 0x00E5},  // å
+    {0x0055, 0x030A, 0x016E},  // Ů
+    {0x0075, 0x030A, 0x016F},  // ů
 
     // Macron (0x0304)
-    {0x0041, 0x0304, 0x0100}, // Ā
-    {0x0045, 0x0304, 0x0112}, // Ē
-    {0x0049, 0x0304, 0x012A}, // Ī
-    {0x004F, 0x0304, 0x014C}, // Ō
-    {0x0055, 0x0304, 0x016A}, // Ū
-    {0x0061, 0x0304, 0x0101}, // ā
-    {0x0065, 0x0304, 0x0113}, // ē
-    {0x0069, 0x0304, 0x012B}, // ī
-    {0x006F, 0x0304, 0x014D}, // ō
-    {0x0075, 0x0304, 0x016B}, // ū
+    {0x0041, 0x0304, 0x0100},  // Ā
+    {0x0045, 0x0304, 0x0112},  // Ē
+    {0x0049, 0x0304, 0x012A},  // Ī
+    {0x004F, 0x0304, 0x014C},  // Ō
+    {0x0055, 0x0304, 0x016A},  // Ū
+    {0x0061, 0x0304, 0x0101},  // ā
+    {0x0065, 0x0304, 0x0113},  // ē
+    {0x0069, 0x0304, 0x012B},  // ī
+    {0x006F, 0x0304, 0x014D},  // ō
+    {0x0075, 0x0304, 0x016B},  // ū
 };
 
 static constexpr int kNfcTableSize = sizeof(kNfcTable) / sizeof(kNfcTable[0]);
@@ -1342,11 +1707,22 @@ static uint32_t nfc_decode_utf8(const std::string& s, size_t& pos) {
     uint8_t c = static_cast<uint8_t>(s[pos]);
     uint32_t cp;
     int len;
-    if ((c & 0x80) == 0) { cp = c; len = 1; }
-    else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; len = 2; }
-    else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; len = 3; }
-    else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; len = 4; }
-    else { pos++; return 0xFFFD; }
+    if ((c & 0x80) == 0) {
+        cp = c;
+        len = 1;
+    } else if ((c & 0xE0) == 0xC0) {
+        cp = c & 0x1F;
+        len = 2;
+    } else if ((c & 0xF0) == 0xE0) {
+        cp = c & 0x0F;
+        len = 3;
+    } else if ((c & 0xF8) == 0xF0) {
+        cp = c & 0x07;
+        len = 4;
+    } else {
+        pos++;
+        return 0xFFFD;
+    }
     if (pos + static_cast<size_t>(len) > s.size()) {
         pos = s.size();
         return 0xFFFD;
@@ -1380,9 +1756,7 @@ static void nfc_encode_utf8(std::string& out, uint32_t cp) {
 // Check if a codepoint is a combining mark (Unicode General Category Mn/Mc/Me)
 // Simplified: only checks the combining diacritical marks block (0x0300-0x036F)
 // which covers the vast majority of combining marks in practice.
-static bool is_combining_mark(uint32_t cp) {
-    return (cp >= 0x0300 && cp <= 0x036F);
-}
+static bool is_combining_mark(uint32_t cp) { return (cp >= 0x0300 && cp <= 0x036F); }
 
 // Look up composition in table
 static uint32_t try_compose(uint32_t base, uint32_t combining) {
@@ -1391,21 +1765,26 @@ static uint32_t try_compose(uint32_t base, uint32_t combining) {
             return kNfcTable[i].composed;
         }
     }
-    return 0; // no composition found
+    return 0;  // no composition found
 }
 
 // Normalize a UTF-8 string to NFC form (basic Latin coverage)
 static std::string normalize_nfc(const std::string& text) {
-    if (text.empty()) return text;
+    if (text.empty())
+        return text;
 
     // Quick check: if no bytes in the combining mark range (0xCC-0xCD in UTF-8),
     // the text has no combining marks and is already NFC.
     bool has_combining = false;
     for (size_t i = 0; i + 1 < text.size(); i++) {
         uint8_t c = static_cast<uint8_t>(text[i]);
-        if (c == 0xCC || c == 0xCD) { has_combining = true; break; }
+        if (c == 0xCC || c == 0xCD) {
+            has_combining = true;
+            break;
+        }
     }
-    if (!has_combining) return text;
+    if (!has_combining)
+        return text;
 
     // Decode to codepoints, compose adjacent base+combining pairs
     std::vector<uint32_t> codepoints;
@@ -1429,7 +1808,7 @@ static std::string normalize_nfc(const std::string& text) {
                 cp = composed;
                 i++;
             } else {
-                break; // can't compose further
+                break;  // can't compose further
             }
         }
 
@@ -1440,7 +1819,7 @@ static std::string normalize_nfc(const std::string& text) {
     return result;
 }
 
-} // anonymous namespace
+}  // anonymous namespace
 
 // ---- Encode dispatch ----
 
@@ -1476,7 +1855,8 @@ std::string Tokenizer::decode_spm(const std::vector<int32_t>& tokens) const {
 }
 
 std::string Tokenizer::decode_spm_token(int32_t token) const {
-    if (token < 0 || token >= static_cast<int32_t>(vocab_.size())) return "";
+    if (token < 0 || token >= static_cast<int32_t>(vocab_.size()))
+        return "";
 
     std::string piece = vocab_[token];
 
@@ -1488,8 +1868,7 @@ std::string Tokenizer::decode_spm_token(int32_t token) const {
     }
 
     // Handle byte tokens: <0xHH> -> single byte
-    if (piece.size() == 6 && piece[0] == '<' && piece[1] == '0' &&
-        piece[2] == 'x' && piece[5] == '>') {
+    if (piece.size() == 6 && piece[0] == '<' && piece[1] == '0' && piece[2] == 'x' && piece[5] == '>') {
         unsigned int byte_val = 0;
         if (std::sscanf(piece.c_str(), "<0x%02X>", &byte_val) == 1) {
             return std::string(1, static_cast<char>(byte_val));
@@ -1511,15 +1890,17 @@ std::string Tokenizer::decode_gpt2(const std::vector<int32_t>& tokens) const {
 }
 
 std::string Tokenizer::decode_gpt2_token(int32_t token) const {
-    if (token < 0 || token >= static_cast<int32_t>(vocab_.size())) return "";
+    if (token < 0 || token >= static_cast<int32_t>(vocab_.size()))
+        return "";
 
     const std::string& piece = vocab_[token];
     std::string decoded;
 
     // Each UTF-8 character in piece represents a byte via GPT2 encoding
-    for (size_t i = 0; i < piece.size(); ) {
+    for (size_t i = 0; i < piece.size();) {
         int len = utf8_char_len(static_cast<uint8_t>(piece[i]));
-        if (i + len > piece.size()) len = 1;
+        if (i + len > piece.size())
+            len = 1;
 
         int byte_val = gpt2_to_byte(piece.data() + i, len);
         if (byte_val >= 0) {
@@ -1552,20 +1933,17 @@ std::string Tokenizer::decode_token(int32_t token) const {
 
 // ---- Accessors ----
 
-int Tokenizer::vocab_size() const {
-    return static_cast<int>(vocab_.size());
-}
+int Tokenizer::vocab_size() const { return static_cast<int>(vocab_.size()); }
 
-int Tokenizer::bos_id() const {
-    return bos_id_;
-}
+int Tokenizer::bos_id() const { return bos_id_; }
 
 // eos_id() is now inline in tokenizer.h
 
 int32_t Tokenizer::find_token(const std::string& text) const {
     auto it = token_to_id_.find(text);
-    if (it != token_to_id_.end()) return it->second;
+    if (it != token_to_id_.end())
+        return it->second;
     return -1;
 }
 
-} // namespace imp
+}  // namespace imp

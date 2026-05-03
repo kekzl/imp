@@ -25,16 +25,22 @@ static const char* get_model_path() {
 
 static bool model_exists() {
     FILE* f = fopen(get_model_path(), "r");
-    if (f) { fclose(f); return true; }
+    if (f) {
+        fclose(f);
+        return true;
+    }
     return false;
 }
 
-#define SKIP_IF_NO_MODEL() do { if (!model_exists()) GTEST_SKIP() << "Model not found: " << get_model_path(); } while(0)
+#define SKIP_IF_NO_MODEL()                                           \
+    do {                                                             \
+        if (!model_exists())                                         \
+            GTEST_SKIP() << "Model not found: " << get_model_path(); \
+    } while (0)
 
 // Helper: generate text via imp API and return as string
-static std::string generate(ImpModel model, ImpContext ctx,
-                             const std::string& prompt, int max_tokens,
-                             float temperature = 0.7f) {
+static std::string generate(ImpModel model, ImpContext ctx, const std::string& prompt, int max_tokens,
+                            float temperature = 0.7f) {
     (void)model;
     ImpGenerateParams params = imp_generate_params_default();
     params.max_tokens = max_tokens;
@@ -44,37 +50,44 @@ static std::string generate(ImpModel model, ImpContext ctx,
 
     char output[4096];
     size_t output_len = 0;
-    ImpError err = imp_generate(ctx, prompt.c_str(), &params,
-                                 output, sizeof(output), &output_len);
-    if (err != IMP_SUCCESS) return "";
+    ImpError err = imp_generate(ctx, prompt.c_str(), &params, output, sizeof(output), &output_len);
+    if (err != IMP_SUCCESS)
+        return "";
     return std::string(output, output_len);
 }
 
 // Helper: detect n-gram repetition in a token sequence.
 // Returns the fraction of tokens that are part of a repeating n-gram.
 static float repetition_ratio(const std::string& text, int ngram_size = 3) {
-    if (text.size() < static_cast<size_t>(ngram_size * 3)) return 0.0f;
+    if (text.size() < static_cast<size_t>(ngram_size * 3))
+        return 0.0f;
 
     // Split into words (crude but effective)
     std::vector<std::string> words;
     std::string word;
     for (char c : text) {
         if (c == ' ' || c == '\n' || c == '\t') {
-            if (!word.empty()) { words.push_back(word); word.clear(); }
+            if (!word.empty()) {
+                words.push_back(word);
+                word.clear();
+            }
         } else {
             word += c;
         }
     }
-    if (!word.empty()) words.push_back(word);
+    if (!word.empty())
+        words.push_back(word);
 
-    if (words.size() < static_cast<size_t>(ngram_size * 3)) return 0.0f;
+    if (words.size() < static_cast<size_t>(ngram_size * 3))
+        return 0.0f;
 
     // Count n-gram occurrences
     std::unordered_map<std::string, int> ngram_counts;
     for (size_t i = 0; i + ngram_size <= words.size(); i++) {
         std::string ngram;
         for (int j = 0; j < ngram_size; j++) {
-            if (j > 0) ngram += " ";
+            if (j > 0)
+                ngram += " ";
             ngram += words[i + j];
         }
         ngram_counts[ngram]++;
@@ -83,7 +96,8 @@ static float repetition_ratio(const std::string& text, int ngram_size = 3) {
     // Find max repeating n-gram
     int max_count = 0;
     for (const auto& [ng, count] : ngram_counts) {
-        if (count > max_count) max_count = count;
+        if (count > max_count)
+            max_count = count;
     }
 
     // Ratio: repeated tokens / total tokens
@@ -114,8 +128,10 @@ protected:
     }
 
     void TearDown() override {
-        if (ctx_) imp_context_free(ctx_);
-        if (model_) imp_model_free(model_);
+        if (ctx_)
+            imp_context_free(ctx_);
+        if (model_)
+            imp_model_free(model_);
     }
 };
 
@@ -125,8 +141,8 @@ TEST_F(DegenerationTest, ShortPromptNoRepetition) {
     EXPECT_GT(out.size(), 0u) << "Empty output for simple prompt";
 
     float rep = repetition_ratio(out, 3);
-    EXPECT_LT(rep, 0.5f)
-        << "High repetition ratio (" << (rep * 100) << "%) in output: " << out.substr(0, 200);
+    EXPECT_LT(rep, 0.5f) << "High repetition ratio (" << (rep * 100)
+                         << "%) in output: " << out.substr(0, 200);
 }
 
 // Test 2: Second request after first should still produce coherent output
@@ -146,26 +162,22 @@ TEST_F(DegenerationTest, SecondRequestNotCorrupt) {
     // Relaxed: if not "4", at least no heavy repetition
     if (!has_four) {
         float rep = repetition_ratio(out2, 2);
-        EXPECT_LT(rep, 0.6f)
-            << "Second request degenerated: " << out2.substr(0, 200);
+        EXPECT_LT(rep, 0.6f) << "Second request degenerated: " << out2.substr(0, 200);
     }
 }
 
 // Test 3: Long generation should not degenerate into repetition loop
 TEST_F(DegenerationTest, LongGenerationStability) {
-    std::string out = generate(model_, ctx_,
-        "Write a short paragraph about the history of computing.", 200);
+    std::string out = generate(model_, ctx_, "Write a short paragraph about the history of computing.", 200);
     EXPECT_GT(out.size(), 50u) << "Output too short for 200-token generation";
 
     // Check 3-gram repetition
     float rep3 = repetition_ratio(out, 3);
-    EXPECT_LT(rep3, 0.4f)
-        << "3-gram repetition at " << (rep3 * 100) << "%: " << out.substr(0, 300);
+    EXPECT_LT(rep3, 0.4f) << "3-gram repetition at " << (rep3 * 100) << "%: " << out.substr(0, 300);
 
     // Check 5-gram repetition (stricter — longer patterns)
     float rep5 = repetition_ratio(out, 5);
-    EXPECT_LT(rep5, 0.3f)
-        << "5-gram repetition at " << (rep5 * 100) << "%: " << out.substr(0, 300);
+    EXPECT_LT(rep5, 0.3f) << "5-gram repetition at " << (rep5 * 100) << "%: " << out.substr(0, 300);
 }
 
 // Test 4: Greedy (temp=0) should be deterministic across calls
@@ -191,27 +203,21 @@ TEST_F(DegenerationTest, DISABLED_GreedyDeterminism) {
 
     std::string out1 = gen_greedy("The answer is");
     std::string out2 = gen_greedy("The answer is");
-    EXPECT_EQ(out1, out2)
-        << "Greedy sampling not deterministic!\n  Run 1: " << out1
-        << "\n  Run 2: " << out2;
+    EXPECT_EQ(out1, out2) << "Greedy sampling not deterministic!\n  Run 1: " << out1 << "\n  Run 2: " << out2;
 }
 
 // Test 5: Output should not contain raw special tokens
 TEST_F(DegenerationTest, NoLeakedSpecialTokens) {
-    std::string out = generate(model_, ctx_,
-        "Tell me a fun fact about dolphins.", 100);
+    std::string out = generate(model_, ctx_, "Tell me a fun fact about dolphins.", 100);
 
     // These should never appear in user-visible output
-    std::vector<std::string> leaked_tokens = {
-        "<|im_start|>", "<|im_end|>", "<|endoftext|>",
-        "<s>", "</s>", "<pad>"
-    };
+    std::vector<std::string> leaked_tokens = {"<|im_start|>", "<|im_end|>", "<|endoftext|>",
+                                              "<s>",          "</s>",       "<pad>"};
 
     for (const auto& tok : leaked_tokens) {
         EXPECT_EQ(out.find(tok), std::string::npos)
-            << "Leaked special token '" << tok << "' in output: "
-            << out.substr(0, 200);
+            << "Leaked special token '" << tok << "' in output: " << out.substr(0, 200);
     }
 }
 
-} // namespace
+}  // namespace

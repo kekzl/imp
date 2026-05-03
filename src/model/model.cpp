@@ -40,7 +40,8 @@ Model::~Model() {
 
     // Free heap-allocated permuted weight buffers (Qwen3.5/3.6 GDN reorder).
     for (void* ptr : host_owned_buffers_) {
-        if (ptr) std::free(ptr);
+        if (ptr)
+            std::free(ptr);
     }
     host_owned_buffers_.clear();
 
@@ -49,7 +50,8 @@ Model::~Model() {
 #ifdef __linux__
     // Unmap split shard files first
     for (auto& [ptr, sz] : split_mmaps_) {
-        if (ptr && sz > 0) munmap(ptr, sz);
+        if (ptr && sz > 0)
+            munmap(ptr, sz);
     }
     split_mmaps_.clear();
 
@@ -62,7 +64,8 @@ Model::~Model() {
 }
 
 void Model::release_gpu_allocation(void* ptr) {
-    if (!ptr) return;
+    if (!ptr)
+        return;
     auto it = std::find(gpu_allocations_.begin(), gpu_allocations_.end(), ptr);
     if (it != gpu_allocations_.end()) {
         gpu_allocations_.erase(it);
@@ -77,13 +80,13 @@ void Model::release_gpu_allocation(void* ptr) {
 struct ArchEntry {
     ModelArch arch;
     const char* name;
-    int c_api_id;           // IMP_ARCH_* enum value
+    int c_api_id;  // IMP_ARCH_* enum value
 
     // Config defaults
-    int rope_neox;          // -1 = don't override, 0 = false, 1 = true
-    float embed_scale;      // 0 = don't override
-    int ffn_activation;     // -1 = don't override, else FFNActivation cast
-    int norm_placement;     // -1 = don't override, else NormPlacement cast
+    int rope_neox;       // -1 = don't override, 0 = false, 1 = true
+    float embed_scale;   // 0 = don't override
+    int ffn_activation;  // -1 = don't override, else FFNActivation cast
+    int norm_placement;  // -1 = don't override, else NormPlacement cast
     bool moe_sigmoid_gating;
     bool expert_weights_norm;
 
@@ -95,44 +98,52 @@ struct ArchEntry {
 
 // IMP_ARCH_* values from include/imp/types.h (avoid header dependency)
 enum {
-    kApiLlama = 0, kApiMistral = 1, kApiMixtral = 2, kApiDeepseek = 3,
-    kApiNemotronHMoe = 4, kApiQwen3 = 5, kApiQwen3Moe = 6,
-    kApiGemma3 = 7, kApiLlama4 = 8, kApiGeneric = 9,
-    kApiQwen35 = 10, kApiQwen35Moe = 11, kApiGemma4 = 12,
+    kApiLlama = 0,
+    kApiMistral = 1,
+    kApiMixtral = 2,
+    kApiDeepseek = 3,
+    kApiNemotronHMoe = 4,
+    kApiQwen3 = 5,
+    kApiQwen3Moe = 6,
+    kApiGemma3 = 7,
+    kApiLlama4 = 8,
+    kApiGeneric = 9,
+    kApiQwen35 = 10,
+    kApiQwen35Moe = 11,
+    kApiGemma4 = 12,
     kApiQwen36Moe = 13,
 };
 
 static constexpr ArchEntry kArchRegistry[] = {
-    // arch                      name              c_api    rope  embed  ffn  norm  sigm  ewnorm  temp  top_p  top_k
-    {ModelArch::LLAMA,          "llama",           kApiLlama,          0, 0,    -1, -1, false, false, 0.6f, 0.95f, 0},
-    {ModelArch::MISTRAL,        "mistral",         kApiMistral,        0, 0,    -1, -1, false, false, 0.6f, 0.95f, 0},
-    {ModelArch::MIXTRAL,        "mixtral",         kApiMixtral,        0, 0,    -1, -1, false, false, 0.6f, 0.95f, 0},
-    {ModelArch::DEEPSEEK,       "deepseek",        kApiDeepseek,      -1, 0,    -1, -1, false, false, 0.6f, 0.95f, 0},
-    {ModelArch::NEMOTRON_H_MOE, "nemotron_h_moe",  kApiNemotronHMoe,  -1, 0,     2,  -1, true,  false, 0.6f, 0.95f, 0},
-    {ModelArch::QWEN3,          "qwen3",           kApiQwen3,         -1, 0,    -1, -1, false, false, 0.6f, 0.95f, 20},
-    {ModelArch::QWEN3_MOE,      "qwen3moe",        kApiQwen3Moe,      -1, 0,    -1, -1, false, true,  0.6f, 0.95f, 20},
-    {ModelArch::QWEN35,         "qwen35",          kApiQwen35,        -1, 0,    -1, -1, false, false, 0.6f, 0.95f, 20},
-    {ModelArch::QWEN35_MOE,     "qwen35moe",       kApiQwen35Moe,     -1, 0,    -1, -1, false, true,  0.6f, 0.95f, 20},
-    {ModelArch::QWEN36_MOE,     "qwen36moe",       kApiQwen36Moe,     -1, 0,    -1, -1, false, true,  0.6f, 0.95f, 20},
-    {ModelArch::GEMMA3,         "gemma3",          kApiGemma3,        -1, 0,     1,   1, false, false, 0.6f, 0.95f, 0},
-    {ModelArch::GEMMA4,         "gemma4",          kApiGemma4,        -1, 0,     1,   1, false, true,  0.6f, 0.9f,  20},
-    {ModelArch::LLAMA4,         "llama4",          kApiLlama4,         0, 0,    -1, -1, false, false, 0.6f, 0.95f, 0},
-    {ModelArch::GENERIC,        "generic",         kApiGeneric,       -1, 0,    -1, -1, false, false, 0.6f, 0.95f, 0},
+    // arch                      name              c_api    rope  embed  ffn  norm  sigm  ewnorm  temp  top_p
+    // top_k
+    {ModelArch::LLAMA, "llama", kApiLlama, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::MISTRAL, "mistral", kApiMistral, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::MIXTRAL, "mixtral", kApiMixtral, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::DEEPSEEK, "deepseek", kApiDeepseek, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::NEMOTRON_H_MOE, "nemotron_h_moe", kApiNemotronHMoe, -1, 0, 2, -1, true, false, 0.6f, 0.95f,
+     0},
+    {ModelArch::QWEN3, "qwen3", kApiQwen3, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 20},
+    {ModelArch::QWEN3_MOE, "qwen3moe", kApiQwen3Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20},
+    {ModelArch::QWEN35, "qwen35", kApiQwen35, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 20},
+    {ModelArch::QWEN35_MOE, "qwen35moe", kApiQwen35Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20},
+    {ModelArch::QWEN36_MOE, "qwen36moe", kApiQwen36Moe, -1, 0, -1, -1, false, true, 0.6f, 0.95f, 20},
+    {ModelArch::GEMMA3, "gemma3", kApiGemma3, -1, 0, 1, 1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::GEMMA4, "gemma4", kApiGemma4, -1, 0, 1, 1, false, true, 0.6f, 0.9f, 20},
+    {ModelArch::LLAMA4, "llama4", kApiLlama4, 0, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
+    {ModelArch::GENERIC, "generic", kApiGeneric, -1, 0, -1, -1, false, false, 0.6f, 0.95f, 0},
 };
 
 static const ArchEntry& lookup_arch(ModelArch arch) {
     for (const auto& e : kArchRegistry)
-        if (e.arch == arch) return e;
-    return kArchRegistry[sizeof(kArchRegistry)/sizeof(kArchRegistry[0]) - 1];  // GENERIC
+        if (e.arch == arch)
+            return e;
+    return kArchRegistry[sizeof(kArchRegistry) / sizeof(kArchRegistry[0]) - 1];  // GENERIC
 }
 
-const char* model_arch_name(ModelArch arch) {
-    return lookup_arch(arch).name;
-}
+const char* model_arch_name(ModelArch arch) { return lookup_arch(arch).name; }
 
-int model_arch_c_api_id(ModelArch arch) {
-    return lookup_arch(arch).c_api_id;
-}
+int model_arch_c_api_id(ModelArch arch) { return lookup_arch(arch).c_api_id; }
 
 void model_arch_sampling_defaults(ModelArch arch, float& temperature, float& top_p, int& top_k) {
     const auto& e = lookup_arch(arch);
@@ -212,4 +223,4 @@ void apply_arch_defaults(ModelConfig& cfg) {
         cfg.expert_weights_norm = true;
 }
 
-} // namespace imp
+}  // namespace imp

@@ -20,11 +20,11 @@ static bool HasCudaDevice() {
     return err == cudaSuccess && count > 0;
 }
 
-#define SKIP_IF_NO_CUDA()                                                     \
-    do {                                                                       \
-        if (!HasCudaDevice()) {                                                \
-            GTEST_SKIP() << "No CUDA device available";                        \
-        }                                                                      \
+#define SKIP_IF_NO_CUDA()                               \
+    do {                                                \
+        if (!HasCudaDevice()) {                         \
+            GTEST_SKIP() << "No CUDA device available"; \
+        }                                               \
     } while (0)
 
 // ============================================================================
@@ -146,8 +146,7 @@ TEST(FP8KVCache, BlockBytesMatchesDTypeSize) {
     KVCache cache(1, n_kv_heads, head_dim, QType::FP8_E4M3, max_blocks);
 
     // block_bytes = kKVBlockSize * n_kv_heads * head_dim * dtype_size(FP8_E4M3)
-    size_t expected = static_cast<size_t>(kKVBlockSize) * n_kv_heads * head_dim *
-                      dtype_size(QType::FP8_E4M3);
+    size_t expected = static_cast<size_t>(kKVBlockSize) * n_kv_heads * head_dim * dtype_size(QType::FP8_E4M3);
     EXPECT_EQ(cache.block_bytes(), expected);
     EXPECT_EQ(dtype_size(QType::FP8_E4M3), 1u);  // FP8 = 1 byte per element
 }
@@ -170,7 +169,7 @@ TEST(FP8KVCache, SplitKConsistency) {
     const int n_kv_heads = 8;  // MHA for simplicity
     const int head_dim = 128;
     const int ctx_len = 256;
-    const int block_size = kKVBlockSize;  // 16
+    const int block_size = kKVBlockSize;                             // 16
     const int num_blocks = (ctx_len + block_size - 1) / block_size;  // 16
     const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
 
@@ -228,7 +227,8 @@ TEST(FP8KVCache, SplitKConsistency) {
     float v_scale = calibrate_fp8_scale(t_v16, nullptr);
     cudaDeviceSynchronize();
     float kv_scale = fmaxf(k_scale, v_scale);
-    if (kv_scale <= 0.0f) kv_scale = 1.0f;
+    if (kv_scale <= 0.0f)
+        kv_scale = 1.0f;
 
     void* d_k_fp8 = nullptr;
     void* d_v_fp8 = nullptr;
@@ -253,23 +253,20 @@ TEST(FP8KVCache, SplitKConsistency) {
     // ---- Run FP8 decode WITHOUT Split-K (reference) ----
     Tensor t_o_nosplit(d_o_nosplit, QType::F16, 4, q_shape, true);
     paged_attention_set_splitk_scratch(nullptr, 0);  // force non-split-K
-    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_nosplit,
-                               d_bt, d_ctx, block_size, scale, kv_scale,
+    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_nosplit, d_bt, d_ctx, block_size, scale, kv_scale,
                                ctx_len, 0, 0.0f, nullptr);
     cudaDeviceSynchronize();
 
     // ---- Run FP8 decode WITH Split-K ----
     const int max_splits = 32;
-    size_t scratch_size = (size_t)batch_size * n_heads * max_splits
-                          * (2 + head_dim) * sizeof(float);
+    size_t scratch_size = (size_t)batch_size * n_heads * max_splits * (2 + head_dim) * sizeof(float);
     void* d_scratch = nullptr;
     cudaMalloc(&d_scratch, scratch_size);
 
     Tensor t_o_splitk(d_o_splitk, QType::F16, 4, q_shape, true);
     paged_attention_set_splitk_scratch(d_scratch, scratch_size);
-    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_splitk,
-                               d_bt, d_ctx, block_size, scale, kv_scale,
-                               ctx_len, 0, 0.0f, nullptr);
+    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_splitk, d_bt, d_ctx, block_size, scale, kv_scale, ctx_len,
+                               0, 0.0f, nullptr);
     cudaDeviceSynchronize();
 
     // ---- Compare Split-K vs non-Split-K (same FP8 data, should match closely) ----
@@ -283,7 +280,7 @@ TEST(FP8KVCache, SplitKConsistency) {
     float max_abs_err = 0.0f;
     for (int i = 0; i < q_elems; i++) {
         float ref = __half2float(h_o_nosplit[i]);
-        float sk  = __half2float(h_o_splitk[i]);
+        float sk = __half2float(h_o_splitk[i]);
         float err = ref - sk;
         sum_sq_err += (double)err * err;
         max_abs_ref = fmaxf(max_abs_ref, fabsf(ref));
@@ -293,11 +290,9 @@ TEST(FP8KVCache, SplitKConsistency) {
 
     // Split-K vs non-Split-K should agree within 2% (only FP32 accumulation order differs)
     float rel_rmse = (max_abs_ref > 1e-6f) ? (rmse / max_abs_ref) : rmse;
-    EXPECT_LT(rel_rmse, 0.02f)
-        << "FP8 Split-K vs non-Split-K: relative RMSE = "
-        << (rel_rmse * 100.0f) << "% (rmse=" << rmse
-        << ", max_abs_err=" << max_abs_err
-        << ", max_abs_ref=" << max_abs_ref << ")";
+    EXPECT_LT(rel_rmse, 0.02f) << "FP8 Split-K vs non-Split-K: relative RMSE = " << (rel_rmse * 100.0f)
+                               << "% (rmse=" << rmse << ", max_abs_err=" << max_abs_err
+                               << ", max_abs_ref=" << max_abs_ref << ")";
 
     // ---- Cleanup ----
     paged_attention_set_splitk_scratch(nullptr, 0);
@@ -372,12 +367,9 @@ TEST(INT8KVCache, Construction) {
 // Host helper: quantize FP16 KV data to INT8 with per-head scales.
 // KV layout: [num_blocks, block_size, n_kv_heads, head_dim]
 // Scale layout: [num_blocks, block_size, n_kv_heads]
-static void quantize_kv_to_int8_host(
-    const std::vector<half>& fp16_data,
-    std::vector<int8_t>& int8_data,
-    std::vector<half>& scales,
-    int num_blocks, int block_size, int n_kv_heads, int head_dim)
-{
+static void quantize_kv_to_int8_host(const std::vector<half>& fp16_data, std::vector<int8_t>& int8_data,
+                                     std::vector<half>& scales, int num_blocks, int block_size,
+                                     int n_kv_heads, int head_dim) {
     const int total_tokens = num_blocks * block_size;
     int8_data.resize(fp16_data.size());
     scales.resize(total_tokens * n_kv_heads);
@@ -446,10 +438,8 @@ TEST(INT8KVCache, SplitKConsistency) {
     // ---- Quantize to INT8 on host ----
     std::vector<int8_t> h_k_int8, h_v_int8;
     std::vector<half> h_k_scales, h_v_scales;
-    quantize_kv_to_int8_host(h_k_fp16, h_k_int8, h_k_scales,
-                              num_blocks, block_size, n_kv_heads, head_dim);
-    quantize_kv_to_int8_host(h_v_fp16, h_v_int8, h_v_scales,
-                              num_blocks, block_size, n_kv_heads, head_dim);
+    quantize_kv_to_int8_host(h_k_fp16, h_k_int8, h_k_scales, num_blocks, block_size, n_kv_heads, head_dim);
+    quantize_kv_to_int8_host(h_v_fp16, h_v_int8, h_v_scales, num_blocks, block_size, n_kv_heads, head_dim);
 
     // ---- Upload to device ----
     void* d_k_int8 = nullptr;
@@ -494,27 +484,22 @@ TEST(INT8KVCache, SplitKConsistency) {
     // ---- Run INT8 decode WITHOUT Split-K ----
     Tensor t_o_nosplit(d_o_nosplit, QType::F16, 4, q_shape, true);
     paged_attention_set_splitk_scratch(nullptr, 0);
-    paged_attention_decode_int8(t_q, t_k_i8, t_v_i8, t_o_nosplit,
-                                static_cast<const half*>(d_k_scales),
-                                static_cast<const half*>(d_v_scales),
-                                d_bt, d_ctx, block_size, scale,
-                                ctx_len, 0, 0.0f, nullptr);
+    paged_attention_decode_int8(t_q, t_k_i8, t_v_i8, t_o_nosplit, static_cast<const half*>(d_k_scales),
+                                static_cast<const half*>(d_v_scales), d_bt, d_ctx, block_size, scale, ctx_len,
+                                0, 0.0f, nullptr);
     cudaDeviceSynchronize();
 
     // ---- Run INT8 decode WITH Split-K ----
     const int max_splits = 32;
-    size_t scratch_size = (size_t)batch_size * n_heads * max_splits
-                          * (2 + head_dim) * sizeof(float);
+    size_t scratch_size = (size_t)batch_size * n_heads * max_splits * (2 + head_dim) * sizeof(float);
     void* d_scratch = nullptr;
     cudaMalloc(&d_scratch, scratch_size);
 
     Tensor t_o_splitk(d_o_splitk, QType::F16, 4, q_shape, true);
     paged_attention_set_splitk_scratch(d_scratch, scratch_size);
-    paged_attention_decode_int8(t_q, t_k_i8, t_v_i8, t_o_splitk,
-                                static_cast<const half*>(d_k_scales),
-                                static_cast<const half*>(d_v_scales),
-                                d_bt, d_ctx, block_size, scale,
-                                ctx_len, 0, 0.0f, nullptr);
+    paged_attention_decode_int8(t_q, t_k_i8, t_v_i8, t_o_splitk, static_cast<const half*>(d_k_scales),
+                                static_cast<const half*>(d_v_scales), d_bt, d_ctx, block_size, scale, ctx_len,
+                                0, 0.0f, nullptr);
     cudaDeviceSynchronize();
 
     // ---- Compare Split-K vs non-Split-K ----
@@ -528,7 +513,7 @@ TEST(INT8KVCache, SplitKConsistency) {
     float max_abs_err = 0.0f;
     for (int i = 0; i < q_elems; i++) {
         float ref = __half2float(h_o_nosplit[i]);
-        float sk  = __half2float(h_o_splitk[i]);
+        float sk = __half2float(h_o_splitk[i]);
         float err = ref - sk;
         sum_sq_err += (double)err * err;
         max_abs_ref = fmaxf(max_abs_ref, fabsf(ref));
@@ -537,11 +522,9 @@ TEST(INT8KVCache, SplitKConsistency) {
     float rmse = sqrtf((float)(sum_sq_err / q_elems));
 
     float rel_rmse = (max_abs_ref > 1e-6f) ? (rmse / max_abs_ref) : rmse;
-    EXPECT_LT(rel_rmse, 0.02f)
-        << "INT8 Split-K vs non-Split-K: relative RMSE = "
-        << (rel_rmse * 100.0f) << "% (rmse=" << rmse
-        << ", max_abs_err=" << max_abs_err
-        << ", max_abs_ref=" << max_abs_ref << ")";
+    EXPECT_LT(rel_rmse, 0.02f) << "INT8 Split-K vs non-Split-K: relative RMSE = " << (rel_rmse * 100.0f)
+                               << "% (rmse=" << rmse << ", max_abs_err=" << max_abs_err
+                               << ", max_abs_ref=" << max_abs_ref << ")";
 
     // ---- Cleanup ----
     paged_attention_set_splitk_scratch(nullptr, 0);
@@ -616,10 +599,8 @@ TEST(FP8KVCache, QuantDequantRoundtrip) {
     // FP8 E4M3 has 3 mantissa bits → coarse quantization.
     // For values in [-2, 2] with per-tensor scale, step sizes can be ~0.25,
     // giving max absolute errors up to ~1.0 for unlucky values.
-    EXPECT_LT(max_abs_err, 1.5f)
-        << "FP8 roundtrip max absolute error = " << max_abs_err;
-    EXPECT_LT(rmse, 0.5f)
-        << "FP8 roundtrip RMSE = " << rmse;
+    EXPECT_LT(max_abs_err, 1.5f) << "FP8 roundtrip max absolute error = " << max_abs_err;
+    EXPECT_LT(rmse, 0.5f) << "FP8 roundtrip RMSE = " << rmse;
 
     cudaFree(d_input);
     cudaFree(d_fp8);
@@ -642,7 +623,7 @@ TEST(FP8KVCache, PagedAttentionDecodeFP8vsFP16) {
     const int n_kv_heads = 4;  // MHA
     const int head_dim = 64;
     const int ctx_len = 64;
-    const int block_size = kKVBlockSize;  // 16
+    const int block_size = kKVBlockSize;                             // 16
     const int num_blocks = (ctx_len + block_size - 1) / block_size;  // 4
     const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
 
@@ -685,7 +666,8 @@ TEST(FP8KVCache, PagedAttentionDecodeFP8vsFP16) {
     float v_scale = calibrate_fp8_scale(t_v16, nullptr);
     cudaDeviceSynchronize();
     float kv_scale = fmaxf(k_scale, v_scale);
-    if (kv_scale <= 0.0f) kv_scale = 1.0f;
+    if (kv_scale <= 0.0f)
+        kv_scale = 1.0f;
 
     void* d_k_fp8 = nullptr;
     void* d_v_fp8 = nullptr;
@@ -719,9 +701,8 @@ TEST(FP8KVCache, PagedAttentionDecodeFP8vsFP16) {
     cudaMemset(d_o_fp16, 0, q_elems * sizeof(half));
     Tensor t_o_fp16(d_o_fp16, QType::F16, 4, q_shape, true);
     paged_attention_set_splitk_scratch(nullptr, 0);
-    paged_attention_decode(t_q, t_k16, t_v16, t_o_fp16,
-                           d_bt, d_ctx, block_size, scale,
-                           ctx_len, 0, 0.0f, nullptr);
+    paged_attention_decode(t_q, t_k16, t_v16, t_o_fp16, d_bt, d_ctx, block_size, scale, ctx_len, 0, 0.0f,
+                           nullptr);
     cudaDeviceSynchronize();
 
     // ---- Run FP8 decode ----
@@ -729,9 +710,8 @@ TEST(FP8KVCache, PagedAttentionDecodeFP8vsFP16) {
     cudaMalloc(&d_o_fp8, q_elems * sizeof(half));
     cudaMemset(d_o_fp8, 0, q_elems * sizeof(half));
     Tensor t_o_fp8(d_o_fp8, QType::F16, 4, q_shape, true);
-    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_fp8,
-                               d_bt, d_ctx, block_size, scale, kv_scale,
-                               ctx_len, 0, 0.0f, nullptr);
+    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_fp8, d_bt, d_ctx, block_size, scale, kv_scale, ctx_len, 0,
+                               0.0f, nullptr);
     cudaDeviceSynchronize();
 
     // ---- Compare outputs ----
@@ -756,15 +736,12 @@ TEST(FP8KVCache, PagedAttentionDecodeFP8vsFP16) {
     // FP8 KV cache introduces quantization error. With per-tensor scale and
     // small attention values, relative RMSE can reach ~15%.
     float rel_rmse = (max_abs_ref > 1e-6f) ? (rmse / max_abs_ref) : rmse;
-    EXPECT_LT(rel_rmse, 0.20f)
-        << "FP8 vs FP16 paged attention: relative RMSE = "
-        << (rel_rmse * 100.0f) << "% (rmse=" << rmse
-        << ", max_abs_err=" << max_abs_err
-        << ", max_abs_ref=" << max_abs_ref << ")";
+    EXPECT_LT(rel_rmse, 0.20f) << "FP8 vs FP16 paged attention: relative RMSE = " << (rel_rmse * 100.0f)
+                               << "% (rmse=" << rmse << ", max_abs_err=" << max_abs_err
+                               << ", max_abs_ref=" << max_abs_ref << ")";
 
     // No catastrophic single-element error
-    EXPECT_LT(max_abs_err, 0.15f)
-        << "FP8 vs FP16 paged attention: max absolute error = " << max_abs_err;
+    EXPECT_LT(max_abs_err, 0.15f) << "FP8 vs FP16 paged attention: max absolute error = " << max_abs_err;
 
     // ---- Cleanup ----
     cudaFree(d_q);
@@ -795,7 +772,7 @@ TEST(FP8KVCache, SplitKHD256) {
     const int n_heads = 16;
     const int n_kv_heads = 8;
     const int head_dim = 256;
-    const int ctx_len = 128;  // enough for split-K
+    const int ctx_len = 128;              // enough for split-K
     const int block_size = kKVBlockSize;  // 16
     const int num_blocks = (ctx_len + block_size - 1) / block_size;
     const float scale = 1.0f / sqrtf(static_cast<float>(head_dim));
@@ -847,7 +824,8 @@ TEST(FP8KVCache, SplitKHD256) {
     float v_scale = calibrate_fp8_scale(t_v16, nullptr);
     cudaDeviceSynchronize();
     float kv_scale = fmaxf(k_scale, v_scale);
-    if (kv_scale <= 0.0f) kv_scale = 1.0f;
+    if (kv_scale <= 0.0f)
+        kv_scale = 1.0f;
 
     void* d_k_fp8 = nullptr;
     void* d_v_fp8 = nullptr;
@@ -872,23 +850,20 @@ TEST(FP8KVCache, SplitKHD256) {
     // Run FP8 decode WITHOUT Split-K (reference — uses non-pipelined kernel)
     Tensor t_o_nosplit(d_o_nosplit, QType::F16, 4, q_shape, true);
     paged_attention_set_splitk_scratch(nullptr, 0);
-    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_nosplit,
-                               d_bt, d_ctx, block_size, scale, kv_scale,
+    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_nosplit, d_bt, d_ctx, block_size, scale, kv_scale,
                                ctx_len, 0, 0.0f, nullptr);
     cudaDeviceSynchronize();
 
     // Run FP8 decode WITH Split-K (exercises pipelined kernel on sm_90+)
     const int max_splits = 64;
-    size_t scratch_size = (size_t)batch_size * n_heads * max_splits
-                          * (2 + head_dim) * sizeof(float);
+    size_t scratch_size = (size_t)batch_size * n_heads * max_splits * (2 + head_dim) * sizeof(float);
     void* d_scratch = nullptr;
     cudaMalloc(&d_scratch, scratch_size);
 
     Tensor t_o_splitk(d_o_splitk, QType::F16, 4, q_shape, true);
     paged_attention_set_splitk_scratch(d_scratch, scratch_size);
-    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_splitk,
-                               d_bt, d_ctx, block_size, scale, kv_scale,
-                               ctx_len, 0, 0.0f, nullptr);
+    paged_attention_decode_fp8(t_q, t_k8, t_v8, t_o_splitk, d_bt, d_ctx, block_size, scale, kv_scale, ctx_len,
+                               0, 0.0f, nullptr);
     cudaDeviceSynchronize();
 
     // Check for CUDA errors (would catch invalid argument from bad kernel launch)
@@ -909,10 +884,11 @@ TEST(FP8KVCache, SplitKHD256) {
         float denom = std::max(std::abs(ref), 1e-6f);
         float rel_err = std::abs(test - ref) / denom;
         max_rel_err = std::max(max_rel_err, rel_err);
-        if (rel_err > 0.05f) mismatches++;
+        if (rel_err > 0.05f)
+            mismatches++;
     }
-    EXPECT_EQ(mismatches, 0) << "HD=256 FP8 Split-K vs non-Split-K: "
-        << mismatches << "/" << q_elems << " mismatches, max_rel_err=" << max_rel_err;
+    EXPECT_EQ(mismatches, 0) << "HD=256 FP8 Split-K vs non-Split-K: " << mismatches << "/" << q_elems
+                             << " mismatches, max_rel_err=" << max_rel_err;
 
     // Cleanup
     paged_attention_set_splitk_scratch(nullptr, 0);
@@ -928,5 +904,5 @@ TEST(FP8KVCache, SplitKHD256) {
     cudaFree(d_o_splitk);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

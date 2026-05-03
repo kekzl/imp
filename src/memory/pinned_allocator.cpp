@@ -13,7 +13,8 @@ namespace imp {
 // ---------------------------------------------------------------------------
 
 size_t PinnedAllocator::round_up_size(size_t nbytes) {
-    if (nbytes <= kMinBlockSize) return kMinBlockSize;
+    if (nbytes <= kMinBlockSize)
+        return kMinBlockSize;
 
     // Next power of two.
     size_t v = nbytes - 1;
@@ -35,14 +36,14 @@ PinnedAllocator::PinnedAllocator(size_t pool_size) {
 
     cudaError_t err = cudaMallocHost(&pool_base_, pool_size_);
     if (err != cudaSuccess) {
-        IMP_LOG_WARN("PinnedAllocator: cudaMallocHost(%zu) failed (%s), "
-                     "running without a pool",
-                     pool_size_, cudaGetErrorString(err));
+        IMP_LOG_WARN(
+            "PinnedAllocator: cudaMallocHost(%zu) failed (%s), "
+            "running without a pool",
+            pool_size_, cudaGetErrorString(err));
         pool_base_ = nullptr;
         pool_size_ = 0;
     } else {
-        IMP_LOG_INFO("PinnedAllocator: allocated %zu byte pinned pool at %p",
-                     pool_size_, pool_base_);
+        IMP_LOG_INFO("PinnedAllocator: allocated %zu byte pinned pool at %p", pool_size_, pool_base_);
     }
 }
 
@@ -60,8 +61,7 @@ PinnedAllocator::~PinnedAllocator() {
     }
 
     if (used_ != 0) {
-        IMP_LOG_WARN("PinnedAllocator: destroyed with %zu bytes still in use",
-                     used_);
+        IMP_LOG_WARN("PinnedAllocator: destroyed with %zu bytes still in use", used_);
     }
 }
 
@@ -71,7 +71,8 @@ PinnedAllocator::~PinnedAllocator() {
 
 void* PinnedAllocator::alloc_from_free_list(size_t size_class) {
     auto it = free_lists_.find(size_class);
-    if (it == free_lists_.end() || it->second.empty()) return nullptr;
+    if (it == free_lists_.end() || it->second.empty())
+        return nullptr;
 
     void* ptr = it->second.back();
     it->second.pop_back();
@@ -79,11 +80,13 @@ void* PinnedAllocator::alloc_from_free_list(size_t size_class) {
 }
 
 void* PinnedAllocator::alloc_from_bump(size_t size_class) {
-    if (!pool_base_) return nullptr;
+    if (!pool_base_)
+        return nullptr;
 
     // Align the current offset up to kAlignment.
     size_t aligned_offset = (pool_offset_ + kAlignment - 1) & ~(kAlignment - 1);
-    if (aligned_offset + size_class > pool_size_) return nullptr;
+    if (aligned_offset + size_class > pool_size_)
+        return nullptr;
 
     void* ptr = static_cast<uint8_t*>(pool_base_) + aligned_offset;
     pool_offset_ = aligned_offset + size_class;
@@ -94,14 +97,13 @@ void* PinnedAllocator::alloc_fallback(size_t nbytes) {
     void* ptr = nullptr;
     cudaError_t err = cudaMallocHost(&ptr, nbytes);
     if (err != cudaSuccess) {
-        IMP_LOG_ERROR("PinnedAllocator: fallback cudaMallocHost(%zu) failed (%s)",
-                      nbytes, cudaGetErrorString(err));
+        IMP_LOG_ERROR("PinnedAllocator: fallback cudaMallocHost(%zu) failed (%s)", nbytes,
+                      cudaGetErrorString(err));
         return nullptr;
     }
 
     fallback_allocs_.insert(ptr);
-    IMP_LOG_DEBUG("PinnedAllocator: fallback allocation of %zu bytes at %p",
-                  nbytes, ptr);
+    IMP_LOG_DEBUG("PinnedAllocator: fallback allocation of %zu bytes at %p", nbytes, ptr);
     return ptr;
 }
 
@@ -111,7 +113,8 @@ void* PinnedAllocator::alloc_fallback(size_t nbytes) {
 
 void* PinnedAllocator::allocate(size_t nbytes) {
     std::lock_guard<std::mutex> lock(mu_);
-    if (nbytes == 0) return nullptr;
+    if (nbytes == 0)
+        return nullptr;
 
     size_t size_class = round_up_size(nbytes);
 
@@ -126,7 +129,8 @@ void* PinnedAllocator::allocate(size_t nbytes) {
     // 3. Fall back to a direct cudaMallocHost.
     if (!ptr) {
         ptr = alloc_fallback(size_class);
-        if (!ptr) return nullptr;
+        if (!ptr)
+            return nullptr;
     }
 
     alloc_map_[ptr] = size_class;
@@ -136,12 +140,12 @@ void* PinnedAllocator::allocate(size_t nbytes) {
 
 void PinnedAllocator::deallocate(void* ptr) {
     std::lock_guard<std::mutex> lock(mu_);
-    if (!ptr) return;
+    if (!ptr)
+        return;
 
     auto it = alloc_map_.find(ptr);
     if (it == alloc_map_.end()) {
-        IMP_LOG_ERROR("PinnedAllocator: deallocate called on unknown pointer %p",
-                      ptr);
+        IMP_LOG_ERROR("PinnedAllocator: deallocate called on unknown pointer %p", ptr);
         return;
     }
 
@@ -150,9 +154,7 @@ void PinnedAllocator::deallocate(void* ptr) {
     used_ -= size_class;
 
     // Check whether this pointer falls within the pool range.
-    bool in_pool = pool_base_ &&
-                   ptr >= pool_base_ &&
-                   ptr < static_cast<uint8_t*>(pool_base_) + pool_size_;
+    bool in_pool = pool_base_ && ptr >= pool_base_ && ptr < static_cast<uint8_t*>(pool_base_) + pool_size_;
 
     if (in_pool) {
         // Return to the free list for reuse.
@@ -174,4 +176,4 @@ size_t PinnedAllocator::used() const {
     return used_;
 }
 
-} // namespace imp
+}  // namespace imp

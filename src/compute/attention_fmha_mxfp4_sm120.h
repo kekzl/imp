@@ -31,10 +31,8 @@ namespace imp {
 // multiple of 64 (legacy path requires only multiple of 32); unsupported
 // head_dim 96 falls through to the legacy path. Up to ~1.5-2× Phase 1
 // speedup measured on raw MMA (254 vs 102 TOPS).
-bool fmha_sm120_mxfp4_prefill(
-    const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, int sliding_window, float softcap,
-    cudaStream_t stream,
-    bool use_blockscale = false);
+bool fmha_sm120_mxfp4_prefill(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+                              bool causal, int sliding_window, float softcap, cudaStream_t stream,
+                              bool use_blockscale = false);
 
-} // namespace imp
+}  // namespace imp

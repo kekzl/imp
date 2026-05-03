@@ -38,5 +38,5 @@ TEST(Mxf4nvf4ProbeTest, BlockScaleMMA_ZeroAZeroesOutput) {
     EXPECT_FLOAT_EQ(d[3], 0.0f);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

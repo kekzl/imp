@@ -20,7 +20,6 @@ struct MmaVariantsBenchResult {
 // `iterations`: tight-loop iterations per warp.
 // Result.entries[i].tops < 0 indicates the variant failed to launch
 // (likely missing CUTE_ARCH_*_ENABLED defines or invalid PTX).
-MmaVariantsBenchResult bench_mma_variants(int warps, int iterations,
-                                           cudaStream_t stream);
+MmaVariantsBenchResult bench_mma_variants(int warps, int iterations, cudaStream_t stream);
 
-} // namespace imp
+}  // namespace imp

@@ -52,59 +52,44 @@ static constexpr int WMMA_M = kWmmaTileM;
 static constexpr int WMMA_N = kWmmaTileN;
 static constexpr int WMMA_K = kWmmaTileK;
 
-__global__ void flash_attention_prefill_tc_kernel(
-    const half* __restrict__ Q,
-    const half* __restrict__ K,
-    const half* __restrict__ V,
-    half* __restrict__ O,
-    int batch_size,
-    int seq_q,
-    int seq_kv,
-    int n_heads,
-    int n_kv_heads,
-    int head_dim,
-    float scale,
-    bool causal,
-    int sliding_window,
-    float softcap)
-{
+__global__ void flash_attention_prefill_tc_kernel(const half* __restrict__ Q, const half* __restrict__ K,
+                                                  const half* __restrict__ V, half* __restrict__ O,
+                                                  int batch_size, int seq_q, int seq_kv, int n_heads,
+                                                  int n_kv_heads, int head_dim, float scale, bool causal,
+                                                  int sliding_window, float softcap) {
     // ---- index mapping ----
-    const int tile_q     = blockIdx.x;                   // query-tile index
-    const int batch_head = blockIdx.y;                   // flat (batch, head)
-    const int batch_idx  = batch_head / n_heads;
-    const int head_idx   = batch_head % n_heads;
-    const int kv_head    = head_idx / (n_heads / n_kv_heads);  // GQA
+    const int tile_q = blockIdx.x;      // query-tile index
+    const int batch_head = blockIdx.y;  // flat (batch, head)
+    const int batch_idx = batch_head / n_heads;
+    const int head_idx = batch_head % n_heads;
+    const int kv_head = head_idx / (n_heads / n_kv_heads);  // GQA
 
-    const int tid       = threadIdx.x + threadIdx.y * blockDim.x;  // [0,128)
-    const int warp_id   = tid / TC_WARP_SIZE;   // [0,4)
-    const int q_start   = tile_q * TC_Br;       // first query row in this tile
+    const int tid = threadIdx.x + threadIdx.y * blockDim.x;  // [0,128)
+    const int warp_id = tid / TC_WARP_SIZE;                  // [0,4)
+    const int q_start = tile_q * TC_Br;                      // first query row in this tile
 
     // ---- global pointers (row-major strides) ----
-    const int64_t q_row_stride  = (int64_t)n_heads    * head_dim;
+    const int64_t q_row_stride = (int64_t)n_heads * head_dim;
     const int64_t kv_row_stride = (int64_t)n_kv_heads * head_dim;
 
-    const half* Q_ptr = Q + (int64_t)batch_idx * seq_q  * q_row_stride
-                          + (int64_t)q_start   * q_row_stride
-                          + (int64_t)head_idx  * head_dim;
+    const half* Q_ptr = Q + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
+                        (int64_t)head_idx * head_dim;
 
-    const half* K_ptr = K + (int64_t)batch_idx * seq_kv * kv_row_stride
-                          + (int64_t)kv_head   * head_dim;
+    const half* K_ptr = K + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
 
-    const half* V_ptr = V + (int64_t)batch_idx * seq_kv * kv_row_stride
-                          + (int64_t)kv_head   * head_dim;
+    const half* V_ptr = V + (int64_t)batch_idx * seq_kv * kv_row_stride + (int64_t)kv_head * head_dim;
 
-    half* O_ptr = O + (int64_t)batch_idx * seq_q * q_row_stride
-                    + (int64_t)q_start   * q_row_stride
-                    + (int64_t)head_idx  * head_dim;
+    half* O_ptr = O + (int64_t)batch_idx * seq_q * q_row_stride + (int64_t)q_start * q_row_stride +
+                  (int64_t)head_idx * head_dim;
 
     // ---- shared memory layout ----
     //   [Q_tile | KV_tile | S_tile | O_acc | P_half | scale_pv_shared]
     extern __shared__ char smem[];
-    half*  Q_tile  = reinterpret_cast<half*>(smem);
-    half*  KV_tile = Q_tile + TC_Br * head_dim;
-    float* S_tile  = reinterpret_cast<float*>(KV_tile + TC_Bc * head_dim);
-    float* O_acc   = S_tile + TC_Br * TC_Bc;
-    half*  P_half  = reinterpret_cast<half*>(O_acc + TC_Br * head_dim);
+    half* Q_tile = reinterpret_cast<half*>(smem);
+    half* KV_tile = Q_tile + TC_Br * head_dim;
+    float* S_tile = reinterpret_cast<float*>(KV_tile + TC_Bc * head_dim);
+    float* O_acc = S_tile + TC_Br * TC_Bc;
+    half* P_half = reinterpret_cast<half*>(O_acc + TC_Br * head_dim);
     float* scale_pv_shared = reinterpret_cast<float*>(P_half + TC_Br * TC_Bc);
 
     // ---- Load Q tile into shared memory (once) ----
@@ -133,23 +118,23 @@ __global__ void flash_attention_prefill_tc_kernel(
 
     // ---- Per-row softmax running state (thread-local) ----
     // Only threads with tid < TC_Br own a row.
-    float m_i = -FLT_MAX;   // running max
-    float l_i = 0.0f;       // running denominator
+    float m_i = -FLT_MAX;  // running max
+    float l_i = 0.0f;      // running denominator
 
     // ---- Number of KV tiles to iterate ----
     int num_kv_tiles, first_kv_tile;
-    compute_kv_tile_bounds(q_start, TC_Br, TC_Bc, seq_q, seq_kv,
-                           causal, sliding_window, first_kv_tile, num_kv_tiles);
+    compute_kv_tile_bounds(q_start, TC_Br, TC_Bc, seq_q, seq_kv, causal, sliding_window, first_kv_tile,
+                           num_kv_tiles);
 
     // Derived constants for WMMA tiling
-    const int hd_chunks   = head_dim / WMMA_K;              // e.g. 128/16 = 8
-    const int s_row_tiles = TC_Br / WMMA_M;                 // 4
-    const int s_col_tiles = TC_Bc / WMMA_N;                 // 4
-    const int s_total_tiles = s_row_tiles * s_col_tiles;     // 16
-    const int o_row_tiles = TC_Br / WMMA_M;                 // 4
-    const int o_col_tiles = head_dim / WMMA_N;               // head_dim/16
+    const int hd_chunks = head_dim / WMMA_K;              // e.g. 128/16 = 8
+    const int s_row_tiles = TC_Br / WMMA_M;               // 4
+    const int s_col_tiles = TC_Bc / WMMA_N;               // 4
+    const int s_total_tiles = s_row_tiles * s_col_tiles;  // 16
+    const int o_row_tiles = TC_Br / WMMA_M;               // 4
+    const int o_col_tiles = head_dim / WMMA_N;            // head_dim/16
     const int o_total_tiles = o_row_tiles * o_col_tiles;
-    const int pv_chunks   = TC_Bc / WMMA_K;                 // 4
+    const int pv_chunks = TC_Bc / WMMA_K;  // 4
 
     // ================================================================
     // Main loop over KV tiles
@@ -197,8 +182,8 @@ __global__ void flash_attention_prefill_tc_kernel(
         // ============================================================
 
         for (int tile_idx = warp_id; tile_idx < s_total_tiles; tile_idx += TC_NUM_WARPS) {
-            int ri = tile_idx / s_col_tiles;   // row-tile index [0,4)
-            int ci = tile_idx % s_col_tiles;   // col-tile index [0,4)
+            int ri = tile_idx / s_col_tiles;  // row-tile index [0,4)
+            int ci = tile_idx % s_col_tiles;  // col-tile index [0,4)
 
             // Accumulator fragment for this 16x16 output tile
             wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> acc;
@@ -208,37 +193,29 @@ __global__ void flash_attention_prefill_tc_kernel(
             for (int k = 0; k < hd_chunks; k++) {
                 // Q fragment: rows [ri*16, ri*16+16), cols [k*16, k*16+16)
                 // Pointer: Q_tile + ri*16*head_dim + k*16, ldm = head_dim
-                wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K,
-                               half, wmma::row_major> a_frag;
-                wmma::load_matrix_sync(a_frag,
-                    Q_tile + ri * WMMA_M * head_dim + k * WMMA_K,
-                    head_dim);
+                wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> a_frag;
+                wmma::load_matrix_sync(a_frag, Q_tile + ri * WMMA_M * head_dim + k * WMMA_K, head_dim);
 
                 // K^T fragment via col_major load of KV_tile
                 // Pointer: KV_tile + ci*16*head_dim + k*16, ldm = head_dim
                 // col_major: element(i,j) = mem[j*head_dim + i]
                 //          = KV_tile[(ci*16+j)*head_dim + (k*16+i)]
                 //          = K[ci*16+j, k*16+i] = K^T[k*16+i, ci*16+j]
-                wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K,
-                               half, wmma::col_major> b_frag;
-                wmma::load_matrix_sync(b_frag,
-                    KV_tile + ci * WMMA_N * head_dim + k * WMMA_K,
-                    head_dim);
+                wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::col_major> b_frag;
+                wmma::load_matrix_sync(b_frag, KV_tile + ci * WMMA_N * head_dim + k * WMMA_K, head_dim);
 
                 wmma::mma_sync(acc, a_frag, b_frag, acc);
             }
 
             // Store accumulated S tile to shared memory
             // S_tile is [Br, Bc] row-major, ldm = Bc
-            wmma::store_matrix_sync(
-                S_tile + ri * WMMA_M * TC_Bc + ci * WMMA_N,
-                acc, TC_Bc, wmma::mem_row_major);
+            wmma::store_matrix_sync(S_tile + ri * WMMA_M * TC_Bc + ci * WMMA_N, acc, TC_Bc,
+                                    wmma::mem_row_major);
         }
         __syncthreads();
 
         // ---- Apply scale, softcap, and causal mask to S_tile ----
-        apply_score_masks(S_tile, TC_Br, TC_Bc, TC_BLOCK_THREADS,
-                          tid, q_start, kv_start, seq_q, seq_kv,
+        apply_score_masks(S_tile, TC_Br, TC_Bc, TC_BLOCK_THREADS, tid, q_start, kv_start, seq_q, seq_kv,
                           scale, softcap, causal, sliding_window);
         __syncthreads();
 
@@ -277,7 +254,7 @@ __global__ void flash_attention_prefill_tc_kernel(
             float l_new = alpha + p_sum;
 
             float rescale = (l_new > 0.0f) ? (alpha / l_new) : 0.0f;
-            float spv     = (l_new > 0.0f) ? (1.0f / l_new)  : 0.0f;
+            float spv = (l_new > 0.0f) ? (1.0f / l_new) : 0.0f;
 
             for (int d = 0; d < head_dim; d++) {
                 O_acc[r * head_dim + d] *= rescale;
@@ -335,38 +312,30 @@ __global__ void flash_attention_prefill_tc_kernel(
         // ============================================================
 
         for (int tile_idx = warp_id; tile_idx < o_total_tiles; tile_idx += TC_NUM_WARPS) {
-            int ri = tile_idx / o_col_tiles;   // row-tile [0, Br/16)
-            int di = tile_idx % o_col_tiles;   // col-tile [0, head_dim/16)
+            int ri = tile_idx / o_col_tiles;  // row-tile [0, Br/16)
+            int di = tile_idx % o_col_tiles;  // col-tile [0, head_dim/16)
 
             // Load current O_acc 16x16 tile into accumulator fragment
             wmma::fragment<wmma::accumulator, WMMA_M, WMMA_N, WMMA_K, float> o_frag;
-            wmma::load_matrix_sync(o_frag,
-                O_acc + ri * WMMA_M * head_dim + di * WMMA_N,
-                head_dim, wmma::mem_row_major);
+            wmma::load_matrix_sync(o_frag, O_acc + ri * WMMA_M * head_dim + di * WMMA_N, head_dim,
+                                   wmma::mem_row_major);
 
             // Accumulate P[ri_block, k_block] @ V[k_block, di_block]
             for (int k = 0; k < pv_chunks; k++) {
                 // P fragment: P_half[ri*16..(ri+1)*16, k*16..(k+1)*16], row-major
-                wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K,
-                               half, wmma::row_major> p_frag;
-                wmma::load_matrix_sync(p_frag,
-                    P_half + ri * WMMA_M * TC_Bc + k * WMMA_K,
-                    TC_Bc);
+                wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> p_frag;
+                wmma::load_matrix_sync(p_frag, P_half + ri * WMMA_M * TC_Bc + k * WMMA_K, TC_Bc);
 
                 // V fragment: KV_tile[k*16..(k+1)*16, di*16..(di+1)*16], row-major
-                wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K,
-                               half, wmma::row_major> v_frag;
-                wmma::load_matrix_sync(v_frag,
-                    KV_tile + k * WMMA_N * head_dim + di * WMMA_N,
-                    head_dim);
+                wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, half, wmma::row_major> v_frag;
+                wmma::load_matrix_sync(v_frag, KV_tile + k * WMMA_N * head_dim + di * WMMA_N, head_dim);
 
                 wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
             }
 
             // Store updated O fragment back to shared memory
-            wmma::store_matrix_sync(
-                O_acc + ri * WMMA_M * head_dim + di * WMMA_N,
-                o_frag, head_dim, wmma::mem_row_major);
+            wmma::store_matrix_sync(O_acc + ri * WMMA_M * head_dim + di * WMMA_N, o_frag, head_dim,
+                                    wmma::mem_row_major);
         }
         __syncthreads();
     }
@@ -377,8 +346,7 @@ __global__ void flash_attention_prefill_tc_kernel(
         for (int i = tid; i < total; i += TC_BLOCK_THREADS) {
             int r = i / head_dim;
             if (q_start + r < seq_q) {
-                O_ptr[(int64_t)r * q_row_stride + (i % head_dim)] =
-                    __float2half(O_acc[i]);
+                O_ptr[(int64_t)r * q_row_stride + (i % head_dim)] = __float2half(O_acc[i]);
             }
         }
     }
@@ -387,15 +355,13 @@ __global__ void flash_attention_prefill_tc_kernel(
 // ---------------------------------------------------------------------------
 // Host launcher
 // ---------------------------------------------------------------------------
-void flash_attention_prefill_tc(
-    const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O,
-    float scale, bool causal, int sliding_window, float softcap, cudaStream_t stream)
-{
+void flash_attention_prefill_tc(const Tensor& Q, const Tensor& K, const Tensor& V, Tensor& O, float scale,
+                                bool causal, int sliding_window, float softcap, cudaStream_t stream) {
     const int batch_size = static_cast<int>(Q.shape[0]);
-    const int seq_q      = static_cast<int>(Q.shape[1]);
-    const int n_heads    = static_cast<int>(Q.shape[2]);
-    const int head_dim   = static_cast<int>(Q.shape[3]);
-    const int seq_kv     = static_cast<int>(K.shape[1]);
+    const int seq_q = static_cast<int>(Q.shape[1]);
+    const int n_heads = static_cast<int>(Q.shape[2]);
+    const int head_dim = static_cast<int>(Q.shape[3]);
+    const int seq_kv = static_cast<int>(K.shape[1]);
     const int n_kv_heads = static_cast<int>(K.shape[2]);
 
     const int num_q_tiles = (seq_q + TC_Br - 1) / TC_Br;
@@ -409,34 +375,30 @@ void flash_attention_prefill_tc(
     //   O_acc   : float [Br * head_dim]
     //   P_half  : half  [Br * Bc]           -- half P for WMMA P@V
     //   scale_pv_shared : float [Br]        -- per-row 1/l_new
-    size_t smem_bytes = TC_Br * head_dim * sizeof(half)      // Q_tile
-                      + TC_Bc * head_dim * sizeof(half)      // KV_tile
-                      + TC_Br * TC_Bc    * sizeof(float)     // S_tile
-                      + TC_Br * head_dim * sizeof(float)     // O_acc
-                      + TC_Br * TC_Bc    * sizeof(half)      // P_half
-                      + TC_Br            * sizeof(float);    // scale_pv_shared
+    size_t smem_bytes = TC_Br * head_dim * sizeof(half)     // Q_tile
+                        + TC_Bc * head_dim * sizeof(half)   // KV_tile
+                        + TC_Br * TC_Bc * sizeof(float)     // S_tile
+                        + TC_Br * head_dim * sizeof(float)  // O_acc
+                        + TC_Br * TC_Bc * sizeof(half)      // P_half
+                        + TC_Br * sizeof(float);            // scale_pv_shared
 
-    cudaFuncSetAttribute(flash_attention_prefill_tc_kernel,
-                         cudaFuncAttributeMaxDynamicSharedMemorySize,
+    cudaFuncSetAttribute(flash_attention_prefill_tc_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                          static_cast<int>(smem_bytes));
 
     flash_attention_prefill_tc_kernel<<<grid, block, smem_bytes, stream>>>(
-        reinterpret_cast<const half*>(Q.data),
-        reinterpret_cast<const half*>(K.data),
-        reinterpret_cast<const half*>(V.data),
-        reinterpret_cast<half*>(O.data),
-        batch_size, seq_q, seq_kv, n_heads, n_kv_heads, head_dim,
-        scale, causal, sliding_window, softcap);
+        reinterpret_cast<const half*>(Q.data), reinterpret_cast<const half*>(K.data),
+        reinterpret_cast<const half*>(V.data), reinterpret_cast<half*>(O.data), batch_size, seq_q, seq_kv,
+        n_heads, n_kv_heads, head_dim, scale, causal, sliding_window, softcap);
 }
 
 // ---------------------------------------------------------------------------
 // Check if tensor-core attention is available on the current device
 // ---------------------------------------------------------------------------
-bool tc_attention_available()
-{
+bool tc_attention_available() {
     int device = -1;
     cudaError_t err = cudaGetDevice(&device);
-    if (err != cudaSuccess || device < 0) return false;
+    if (err != cudaSuccess || device < 0)
+        return false;
 
     int major = 0, minor = 0;
     cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
@@ -446,4 +408,4 @@ bool tc_attention_available()
     return (major > 9) || (major == 9 && minor >= 0);
 }
 
-} // namespace imp
+}  // namespace imp

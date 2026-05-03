@@ -43,8 +43,8 @@ public:
 
 private:
     static constexpr size_t kDefaultPoolSize = 64ULL * 1024 * 1024;  // 64 MiB
-    static constexpr size_t kMinBlockSize    = 256;                   // smallest allocation unit
-    static constexpr size_t kAlignment       = 256;
+    static constexpr size_t kMinBlockSize = 256;                     // smallest allocation unit
+    static constexpr size_t kAlignment = 256;
 
     // Round nbytes up to the next power of two, at least kMinBlockSize.
     static size_t round_up_size(size_t nbytes);
@@ -61,9 +61,9 @@ private:
     mutable std::mutex mu_;
 
     // --- Pool state ---
-    void*  pool_base_   = nullptr;   // base address of the cudaMallocHost pool
-    size_t pool_size_   = 0;         // total pool capacity in bytes
-    size_t pool_offset_ = 0;         // bump-pointer offset into the pool
+    void* pool_base_ = nullptr;  // base address of the cudaMallocHost pool
+    size_t pool_size_ = 0;       // total pool capacity in bytes
+    size_t pool_offset_ = 0;     // bump-pointer offset into the pool
 
     // Per-size-class free lists (size_class -> list of recycled pointers).
     std::unordered_map<size_t, std::vector<void*>> free_lists_;
@@ -79,4 +79,4 @@ private:
     size_t used_ = 0;  // currently outstanding bytes
 };
 
-} // namespace imp
+}  // namespace imp

@@ -29,19 +29,19 @@ TEST(Nvfp4QuantRefTest, RoundTripGaussian1024) {
     }
     float input_rms = std::sqrt(input_ss / N);
 
-    half*    d_input  = nullptr;
-    uint8_t* d_nvfp4  = nullptr;
-    uint8_t* d_sf     = nullptr;
-    half*    d_output = nullptr;
+    half* d_input = nullptr;
+    uint8_t* d_nvfp4 = nullptr;
+    uint8_t* d_sf = nullptr;
+    half* d_output = nullptr;
 
-    ASSERT_EQ(cudaMalloc(&d_input,  N * sizeof(half)),    cudaSuccess);
-    ASSERT_EQ(cudaMalloc(&d_nvfp4,  N / 2),               cudaSuccess);
-    ASSERT_EQ(cudaMalloc(&d_sf,     (N + 15) / 16),       cudaSuccess);
-    ASSERT_EQ(cudaMalloc(&d_output, N * sizeof(half)),    cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_input, N * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_nvfp4, N / 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_sf, (N + 15) / 16), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_output, N * sizeof(half)), cudaSuccess);
 
     cudaMemcpy(d_input, h_input.data(), N * sizeof(half), cudaMemcpyHostToDevice);
 
-    nvfp4_quant_linear_fp16  (d_input, d_nvfp4, d_sf, N, 0);
+    nvfp4_quant_linear_fp16(d_input, d_nvfp4, d_sf, N, 0);
     nvfp4_dequant_linear_fp16(d_nvfp4, d_sf, d_output, N, 0);
     cudaDeviceSynchronize();
 
@@ -61,18 +61,17 @@ TEST(Nvfp4QuantRefTest, RoundTripGaussian1024) {
         float d = a - b;
         err_ss += d * d;
     }
-    float err_rms     = std::sqrt(err_ss / N);
+    float err_rms = std::sqrt(err_ss / N);
     float rel_err_rms = err_rms / input_rms;
 
     // E2M1 with per-16-elem scale: expected RMSE ≈ 2-6% of input RMS for
     // Gaussian data. Fail if > 15% (something fundamentally wrong).
-    EXPECT_LT(rel_err_rms, 0.15f)
-        << "NVFP4 round-trip RMSE " << (rel_err_rms * 100.0f)
-        << "% of input RMS — quant math likely wrong.";
+    EXPECT_LT(rel_err_rms, 0.15f) << "NVFP4 round-trip RMSE " << (rel_err_rms * 100.0f)
+                                  << "% of input RMS — quant math likely wrong.";
 
     // Informational — not a failure condition.
-    std::cout << "[  INFO    ] NVFP4 round-trip relative RMSE: "
-              << (rel_err_rms * 100.0f) << "%" << std::endl;
+    std::cout << "[  INFO    ] NVFP4 round-trip relative RMSE: " << (rel_err_rms * 100.0f) << "%"
+              << std::endl;
 }
 
 // Representable-value invariance: if every input is already exactly in
@@ -86,23 +85,24 @@ TEST(Nvfp4QuantRefTest, RepresentableValuesAreBitExact) {
     float vals[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
     for (int i = 0; i < N; ++i) {
         float v = vals[i % 8];
-        if (i >= 8) v = -v;
+        if (i >= 8)
+            v = -v;
         h_input[i] = __float2half(v);
     }
 
-    half*    d_input  = nullptr;
-    uint8_t* d_nvfp4  = nullptr;
-    uint8_t* d_sf     = nullptr;
-    half*    d_output = nullptr;
+    half* d_input = nullptr;
+    uint8_t* d_nvfp4 = nullptr;
+    uint8_t* d_sf = nullptr;
+    half* d_output = nullptr;
 
-    ASSERT_EQ(cudaMalloc(&d_input,  N * sizeof(half)),    cudaSuccess);
-    ASSERT_EQ(cudaMalloc(&d_nvfp4,  N / 2),               cudaSuccess);
-    ASSERT_EQ(cudaMalloc(&d_sf,     1),                   cudaSuccess);
-    ASSERT_EQ(cudaMalloc(&d_output, N * sizeof(half)),    cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_input, N * sizeof(half)), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_nvfp4, N / 2), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_sf, 1), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&d_output, N * sizeof(half)), cudaSuccess);
 
     cudaMemcpy(d_input, h_input.data(), N * sizeof(half), cudaMemcpyHostToDevice);
 
-    nvfp4_quant_linear_fp16  (d_input, d_nvfp4, d_sf, N, 0);
+    nvfp4_quant_linear_fp16(d_input, d_nvfp4, d_sf, N, 0);
     nvfp4_dequant_linear_fp16(d_nvfp4, d_sf, d_output, N, 0);
     cudaDeviceSynchronize();
 
@@ -122,5 +122,5 @@ TEST(Nvfp4QuantRefTest, RepresentableValuesAreBitExact) {
     }
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

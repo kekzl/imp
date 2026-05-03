@@ -133,7 +133,9 @@ TEST(JinjaTest, ForLoopVariables) {
 
 TEST(JinjaTest, ForLoopFirst) {
     Template tpl;
-    ASSERT_TRUE(tpl.parse("{% for x in items %}{% if loop.first %}[{% endif %}{{ x }}{% if loop.last %}]{% endif %}{% endfor %}"));
+    ASSERT_TRUE(
+        tpl.parse("{% for x in items %}{% if loop.first %}[{% endif %}{{ x }}{% if loop.last %}]{% endif "
+                  "%}{% endfor %}"));
     auto items = Value::array({Value(std::string("a")), Value(std::string("b"))});
     EXPECT_EQ(tpl.render({{"items", items}}), "[ab]");
 }
@@ -241,7 +243,9 @@ TEST(JinjaTest, SetVariable) {
 
 TEST(JinjaTest, NamespaceSet) {
     Template tpl;
-    ASSERT_TRUE(tpl.parse("{% set ns = namespace(found=false) %}{% for x in items %}{% if x == 'b' %}{% set ns.found = true %}{% endif %}{% endfor %}{{ ns.found }}"));
+    ASSERT_TRUE(
+        tpl.parse("{% set ns = namespace(found=false) %}{% for x in items %}{% if x == 'b' %}{% set ns.found "
+                  "= true %}{% endif %}{% endfor %}{{ ns.found }}"));
     auto items = Value::array({Value(std::string("a")), Value(std::string("b")), Value(std::string("c"))});
     auto result = tpl.render({{"items", items}});
     EXPECT_TRUE(result == "True" || result == "true");
@@ -254,14 +258,13 @@ TEST(JinjaTest, NamespaceSet) {
 TEST(JinjaChatTest, ChatML) {
     // ChatML format (Qwen3)
     Template tpl;
-    ASSERT_TRUE(tpl.parse(
-        "{%- for message in messages %}"
-        "{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>' + '\\n' }}"
-        "{%- endfor %}"
-        "{%- if add_generation_prompt %}"
-        "{{ '<|im_start|>assistant\\n' }}"
-        "{%- endif %}"
-    ));
+    ASSERT_TRUE(
+        tpl.parse("{%- for message in messages %}"
+                  "{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>' + '\\n' }}"
+                  "{%- endfor %}"
+                  "{%- if add_generation_prompt %}"
+                  "{{ '<|im_start|>assistant\\n' }}"
+                  "{%- endif %}"));
 
     auto msgs = Value::array({
         Value::object({{"role", Value(std::string("user"))}, {"content", Value(std::string("Hello"))}}),
@@ -287,8 +290,7 @@ TEST(JinjaChatTest, Gemma) {
         "{%- endfor %}"
         "{%- if add_generation_prompt %}"
         "{{ '<start_of_turn>model\\n' }}"
-        "{%- endif %}"
-    ));
+        "{%- endif %}"));
 
     auto msgs = Value::array({
         Value::object({{"role", Value(std::string("user"))}, {"content", Value(std::string("Hi"))}}),
@@ -309,15 +311,15 @@ TEST(JinjaChatTest, Gemma) {
 TEST(JinjaChatTest, MultiTurnWithTrim) {
     // Llama3-style with trim filter
     Template tpl;
-    ASSERT_TRUE(tpl.parse(
-        "{{ bos_token }}"
-        "{%- for message in messages %}"
-        "{{ '<|start_header_id|>' + message['role'] + '<|end_header_id|>\\n\\n' + message['content'] | trim + '<|eot_id|>' }}"
-        "{%- endfor %}"
-        "{%- if add_generation_prompt %}"
-        "{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n' }}"
-        "{%- endif %}"
-    ));
+    ASSERT_TRUE(
+        tpl.parse("{{ bos_token }}"
+                  "{%- for message in messages %}"
+                  "{{ '<|start_header_id|>' + message['role'] + '<|end_header_id|>\\n\\n' + "
+                  "message['content'] | trim + '<|eot_id|>' }}"
+                  "{%- endfor %}"
+                  "{%- if add_generation_prompt %}"
+                  "{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n' }}"
+                  "{%- endif %}"));
 
     auto msgs = Value::array({
         Value::object({{"role", Value(std::string("user"))}, {"content", Value(std::string("  Hello  "))}}),
@@ -356,7 +358,8 @@ TEST(JinjaTest, SliceToEnd) {
 TEST(JinjaTest, SliceStartStop) {
     Template tpl;
     ASSERT_TRUE(tpl.parse("{% for x in items[0:3] %}{{ x }}{% endfor %}"));
-    auto items = Value::array({Value(std::string("a")), Value(std::string("b")), Value(std::string("c")), Value(std::string("d"))});
+    auto items = Value::array(
+        {Value(std::string("a")), Value(std::string("b")), Value(std::string("c")), Value(std::string("d"))});
     EXPECT_EQ(tpl.render({{"items", items}}), "abc");
 }
 
@@ -494,29 +497,29 @@ TEST(JinjaTest, TojsonBool) {
 
 TEST(JinjaChatTest, Qwen3RealTemplate) {
     Template tpl;
-    ASSERT_TRUE(tpl.parse(
-        "{%- if messages[0].role == 'system' %}"
-            "{{- '<|im_start|>system\\n' + messages[0].content + '<|im_end|>\\n' }}"
-        "{%- endif %}"
-        "{%- for message in messages %}"
-            "{%- if message.content is string %}"
-                "{%- set content = message.content %}"
-            "{%- else %}"
-                "{%- set content = '' %}"
-            "{%- endif %}"
-            "{%- if (message.role == \"user\") or (message.role == \"system\" and not loop.first) %}"
-                "{{- '<|im_start|>' + message.role + '\\n' + content + '<|im_end|>' + '\\n' }}"
-            "{%- elif message.role == \"assistant\" %}"
-                "{{- '<|im_start|>' + message.role + '\\n' + content + '<|im_end|>\\n' }}"
-            "{%- endif %}"
-        "{%- endfor %}"
-        "{%- if add_generation_prompt %}"
-            "{{- '<|im_start|>assistant\\n' }}"
-        "{%- endif %}"
-    ));
+    ASSERT_TRUE(
+        tpl.parse("{%- if messages[0].role == 'system' %}"
+                  "{{- '<|im_start|>system\\n' + messages[0].content + '<|im_end|>\\n' }}"
+                  "{%- endif %}"
+                  "{%- for message in messages %}"
+                  "{%- if message.content is string %}"
+                  "{%- set content = message.content %}"
+                  "{%- else %}"
+                  "{%- set content = '' %}"
+                  "{%- endif %}"
+                  "{%- if (message.role == \"user\") or (message.role == \"system\" and not loop.first) %}"
+                  "{{- '<|im_start|>' + message.role + '\\n' + content + '<|im_end|>' + '\\n' }}"
+                  "{%- elif message.role == \"assistant\" %}"
+                  "{{- '<|im_start|>' + message.role + '\\n' + content + '<|im_end|>\\n' }}"
+                  "{%- endif %}"
+                  "{%- endfor %}"
+                  "{%- if add_generation_prompt %}"
+                  "{{- '<|im_start|>assistant\\n' }}"
+                  "{%- endif %}"));
 
     auto msgs = Value::array({
-        Value::object({{"role", Value(std::string("system"))}, {"content", Value(std::string("You are helpful."))}}),
+        Value::object(
+            {{"role", Value(std::string("system"))}, {"content", Value(std::string("You are helpful."))}}),
         Value::object({{"role", Value(std::string("user"))}, {"content", Value(std::string("Hello"))}}),
     });
 
@@ -533,15 +536,14 @@ TEST(JinjaChatTest, Qwen3RealTemplate) {
 TEST(JinjaChatTest, Qwen3IsStringWithNonStringContent) {
     // Test that "is string" returns false for non-string content
     Template tpl;
-    ASSERT_TRUE(tpl.parse(
-        "{%- for message in messages %}"
-            "{%- if message.content is string %}"
-                "{{- 'STR:' + message.content }}"
-            "{%- else %}"
-                "{{- 'OTHER' }}"
-            "{%- endif %}"
-        "{%- endfor %}"
-    ));
+    ASSERT_TRUE(
+        tpl.parse("{%- for message in messages %}"
+                  "{%- if message.content is string %}"
+                  "{{- 'STR:' + message.content }}"
+                  "{%- else %}"
+                  "{{- 'OTHER' }}"
+                  "{%- endif %}"
+                  "{%- endfor %}"));
 
     auto msgs = Value::array({
         Value::object({{"role", Value(std::string("user"))}, {"content", Value(std::string("hello"))}}),
@@ -558,34 +560,34 @@ TEST(JinjaChatTest, Qwen3IsStringWithNonStringContent) {
 
 TEST(JinjaChatTest, GemmaRealTemplate) {
     Template tpl;
-    ASSERT_TRUE(tpl.parse(
-        "{%- if messages[0]['role'] == 'system' -%}"
-            "{%- set first_user_prefix = messages[0]['content'] + '\\n\\n' -%}"
-            "{%- set loop_messages = messages[1:] -%}"
-        "{%- else -%}"
-            "{%- set first_user_prefix = \"\" -%}"
-            "{%- set loop_messages = messages -%}"
-        "{%- endif -%}"
-        "{%- for message in loop_messages -%}"
-            "{%- if (message['role'] == 'assistant') -%}"
-                "{%- set role = \"model\" -%}"
-            "{%- else -%}"
-                "{%- set role = message['role'] -%}"
-            "{%- endif -%}"
-            "{{ '<start_of_turn>' + role + '\\n' + (first_user_prefix if loop.first else \"\") }}"
-            "{%- if message['content'] is string -%}"
-                "{{ message['content'] | trim }}"
-            "{%- endif -%}"
-            "{{ '<end_of_turn>\\n' }}"
-        "{%- endfor -%}"
-        "{%- if add_generation_prompt -%}"
-            "{{'<start_of_turn>model\\n'}}"
-        "{%- endif -%}"
-    ));
+    ASSERT_TRUE(
+        tpl.parse("{%- if messages[0]['role'] == 'system' -%}"
+                  "{%- set first_user_prefix = messages[0]['content'] + '\\n\\n' -%}"
+                  "{%- set loop_messages = messages[1:] -%}"
+                  "{%- else -%}"
+                  "{%- set first_user_prefix = \"\" -%}"
+                  "{%- set loop_messages = messages -%}"
+                  "{%- endif -%}"
+                  "{%- for message in loop_messages -%}"
+                  "{%- if (message['role'] == 'assistant') -%}"
+                  "{%- set role = \"model\" -%}"
+                  "{%- else -%}"
+                  "{%- set role = message['role'] -%}"
+                  "{%- endif -%}"
+                  "{{ '<start_of_turn>' + role + '\\n' + (first_user_prefix if loop.first else \"\") }}"
+                  "{%- if message['content'] is string -%}"
+                  "{{ message['content'] | trim }}"
+                  "{%- endif -%}"
+                  "{{ '<end_of_turn>\\n' }}"
+                  "{%- endfor -%}"
+                  "{%- if add_generation_prompt -%}"
+                  "{{'<start_of_turn>model\\n'}}"
+                  "{%- endif -%}"));
 
     // Test with system message (exercises messages[1:] slice)
     auto msgs_with_sys = Value::array({
-        Value::object({{"role", Value(std::string("system"))}, {"content", Value(std::string("Be concise"))}}),
+        Value::object(
+            {{"role", Value(std::string("system"))}, {"content", Value(std::string("Be concise"))}}),
         Value::object({{"role", Value(std::string("user"))}, {"content", Value(std::string("  Hello  "))}}),
         Value::object({{"role", Value(std::string("assistant"))}, {"content", Value(std::string("  Hi  "))}}),
         Value::object({{"role", Value(std::string("user"))}, {"content", Value(std::string("  Bye  "))}}),
@@ -610,30 +612,29 @@ TEST(JinjaChatTest, GemmaRealTemplate) {
 
 TEST(JinjaChatTest, GemmaRealTemplateNoSystem) {
     Template tpl;
-    ASSERT_TRUE(tpl.parse(
-        "{%- if messages[0]['role'] == 'system' -%}"
-            "{%- set first_user_prefix = messages[0]['content'] + '\\n\\n' -%}"
-            "{%- set loop_messages = messages[1:] -%}"
-        "{%- else -%}"
-            "{%- set first_user_prefix = \"\" -%}"
-            "{%- set loop_messages = messages -%}"
-        "{%- endif -%}"
-        "{%- for message in loop_messages -%}"
-            "{%- if (message['role'] == 'assistant') -%}"
-                "{%- set role = \"model\" -%}"
-            "{%- else -%}"
-                "{%- set role = message['role'] -%}"
-            "{%- endif -%}"
-            "{{ '<start_of_turn>' + role + '\\n' + (first_user_prefix if loop.first else \"\") }}"
-            "{%- if message['content'] is string -%}"
-                "{{ message['content'] | trim }}"
-            "{%- endif -%}"
-            "{{ '<end_of_turn>\\n' }}"
-        "{%- endfor -%}"
-        "{%- if add_generation_prompt -%}"
-            "{{'<start_of_turn>model\\n'}}"
-        "{%- endif -%}"
-    ));
+    ASSERT_TRUE(
+        tpl.parse("{%- if messages[0]['role'] == 'system' -%}"
+                  "{%- set first_user_prefix = messages[0]['content'] + '\\n\\n' -%}"
+                  "{%- set loop_messages = messages[1:] -%}"
+                  "{%- else -%}"
+                  "{%- set first_user_prefix = \"\" -%}"
+                  "{%- set loop_messages = messages -%}"
+                  "{%- endif -%}"
+                  "{%- for message in loop_messages -%}"
+                  "{%- if (message['role'] == 'assistant') -%}"
+                  "{%- set role = \"model\" -%}"
+                  "{%- else -%}"
+                  "{%- set role = message['role'] -%}"
+                  "{%- endif -%}"
+                  "{{ '<start_of_turn>' + role + '\\n' + (first_user_prefix if loop.first else \"\") }}"
+                  "{%- if message['content'] is string -%}"
+                  "{{ message['content'] | trim }}"
+                  "{%- endif -%}"
+                  "{{ '<end_of_turn>\\n' }}"
+                  "{%- endfor -%}"
+                  "{%- if add_generation_prompt -%}"
+                  "{{'<start_of_turn>model\\n'}}"
+                  "{%- endif -%}"));
 
     // Test without system message (loop_messages = messages, no slice needed)
     auto msgs = Value::array({

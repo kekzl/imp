@@ -46,7 +46,7 @@ __global__ void bench_f8f6f4_m16n8k32_kernel(int iterations, float* sink) {
     float d0 = 0.0f, d1 = 0.0f, d2 = 0.0f, d3 = 0.0f;
 
 #if __CUDA_ARCH__ >= 1200
-    #pragma unroll 1
+#pragma unroll 1
     for (int i = 0; i < iterations; ++i) {
         asm volatile(
             "mma.sync.aligned.kind::f8f6f4.m16n8k32.row.col.f32.e2m1.e2m1.f32 "
@@ -55,9 +55,7 @@ __global__ void bench_f8f6f4_m16n8k32_kernel(int iterations, float* sink) {
             "{%8, %9},"
             "{%10, %11, %12, %13};\n"
             : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-            : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-              "r"(b0), "r"(b1),
-              "f"(d0), "f"(d1), "f"(d2), "f"(d3));
+            : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(d0), "f"(d1), "f"(d2), "f"(d3));
     }
 #endif
 
@@ -88,10 +86,11 @@ __global__ void bench_mxf4nvf4_blockscale_m16n8k64_kernel(int iterations, float*
     constexpr uint16_t tidB0 = 0;
 
 #if __CUDA_ARCH__ >= 1200
-    #pragma unroll 1
+#pragma unroll 1
     for (int i = 0; i < iterations; ++i) {
         asm volatile(
-            "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 "
+            "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32."
+            "ue4m3 "
             "{%0, %1, %2, %3},"
             "{%4, %5, %6, %7},"
             "{%8, %9},"
@@ -101,11 +100,8 @@ __global__ void bench_mxf4nvf4_blockscale_m16n8k64_kernel(int iterations, float*
             "{%17},"
             "{%18, %19};\n"
             : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-            : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-              "r"(b0), "r"(b1),
-              "f"(d0), "f"(d1), "f"(d2), "f"(d3),
-              "r"(sfa), "h"(bidA), "h"(tidA),
-              "r"(sfb), "h"(bidB), "h"(tidB0));
+            : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "f"(d0), "f"(d1), "f"(d2), "f"(d3),
+              "r"(sfa), "h"(bidA), "h"(tidA), "r"(sfb), "h"(bidB), "h"(tidB0));
     }
 #endif
 
@@ -117,10 +113,10 @@ __global__ void bench_mxf4nvf4_blockscale_m16n8k64_kernel(int iterations, float*
 // ---------------------------------------------------------------------------
 // Host-side measurement
 // ---------------------------------------------------------------------------
-static float run_bench(void(*kernel)(int, float*), int warps, int iterations,
-                       cudaStream_t stream) {
+static float run_bench(void (*kernel)(int, float*), int warps, int iterations, cudaStream_t stream) {
     float* d_sink = nullptr;
-    if (cudaMalloc(&d_sink, sizeof(float)) != cudaSuccess) return -1.0f;
+    if (cudaMalloc(&d_sink, sizeof(float)) != cudaSuccess)
+        return -1.0f;
 
     // Warmup
     kernel<<<warps, 32, 0, stream>>>(iterations / 10, d_sink);
@@ -153,8 +149,7 @@ MmaBenchResult bench_mma_comparison(int warps, int iterations, cudaStream_t stre
     MmaBenchResult r;
 
     float legacy_ms = run_bench(bench_f8f6f4_m16n8k32_kernel, warps, iterations, stream);
-    float block_ms  = run_bench(bench_mxf4nvf4_blockscale_m16n8k64_kernel,
-                                 warps, iterations, stream);
+    float block_ms = run_bench(bench_mxf4nvf4_blockscale_m16n8k64_kernel, warps, iterations, stream);
 
     r.legacy_ms = legacy_ms;
     r.blockscale_ms = block_ms;
@@ -163,15 +158,15 @@ MmaBenchResult bench_mma_comparison(int warps, int iterations, cudaStream_t stre
     //   legacy  m16n8k32: 16*8*32*2 = 8192
     //   blockscale m16n8k64: 16*8*64*2 = 16384
     constexpr double kLegacyOps = 16.0 * 8.0 * 32.0 * 2.0;
-    constexpr double kBlockOps  = 16.0 * 8.0 * 64.0 * 2.0;
+    constexpr double kBlockOps = 16.0 * 8.0 * 64.0 * 2.0;
 
     const double total_mmas = static_cast<double>(warps) * iterations;
     // TOPS = ops_per_mma * total_mmas / seconds / 1e12
-    r.legacy_tops     = (kLegacyOps * total_mmas) / (legacy_ms * 1e-3) / 1e12;
-    r.blockscale_tops = (kBlockOps  * total_mmas) / (block_ms  * 1e-3) / 1e12;
-    r.speedup         = r.blockscale_tops / r.legacy_tops;
+    r.legacy_tops = (kLegacyOps * total_mmas) / (legacy_ms * 1e-3) / 1e12;
+    r.blockscale_tops = (kBlockOps * total_mmas) / (block_ms * 1e-3) / 1e12;
+    r.speedup = r.blockscale_tops / r.legacy_tops;
 
     return r;
 }
 
-} // namespace imp
+}  // namespace imp

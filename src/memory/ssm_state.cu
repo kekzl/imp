@@ -7,16 +7,16 @@ namespace imp {
 
 SSMState::~SSMState() {
     if (pool_) {
-        if (alloc_) alloc_->free(pool_);
-        else IMP_CUDA_CHECK_LOG(cudaFree(pool_));
+        if (alloc_)
+            alloc_->free(pool_);
+        else
+            IMP_CUDA_CHECK_LOG(cudaFree(pool_));
         pool_ = nullptr;
     }
 }
 
-bool SSMState::init(int n_ssm_layers, int max_sequences,
-                    int conv_channels, int conv_kernel,
-                    int n_heads, int head_dim_ssm, int state_size,
-                    QType h_dtype, VRAMAllocator* alloc) {
+bool SSMState::init(int n_ssm_layers, int max_sequences, int conv_channels, int conv_kernel, int n_heads,
+                    int head_dim_ssm, int state_size, QType h_dtype, VRAMAllocator* alloc) {
     n_ssm_layers_ = n_ssm_layers;
     max_sequences_ = max_sequences;
     h_dtype_ = h_dtype;
@@ -45,12 +45,15 @@ bool SSMState::init(int n_ssm_layers, int max_sequences,
         if (!pool_) {
             IMP_LOG_WARN("SSM state: allocator rejected, trying raw cudaMalloc (%zu bytes)", total_bytes_);
             cudaError_t err = cudaMalloc(&pool_, total_bytes_);
-            if (err == cudaSuccess) alloc_ = nullptr;  // don't free via allocator
-            else pool_ = nullptr;
+            if (err == cudaSuccess)
+                alloc_ = nullptr;  // don't free via allocator
+            else
+                pool_ = nullptr;
         }
     } else {
         cudaError_t err = cudaMalloc(&pool_, total_bytes_);
-        if (err != cudaSuccess) pool_ = nullptr;
+        if (err != cudaSuccess)
+            pool_ = nullptr;
     }
     if (!pool_) {
         IMP_LOG_ERROR("Failed to allocate SSM state pool (%zu bytes)", total_bytes_);
@@ -60,12 +63,11 @@ bool SSMState::init(int n_ssm_layers, int max_sequences,
     // Zero-initialize all state
     IMP_CUDA_CHECK_LOG(cudaMemset(pool_, 0, total_bytes_));
 
-    IMP_LOG_INFO("SSM state: %d layers x %d sequences = %.2f MiB "
-                 "(conv=%.1f KB, h=%.1f KB [%s] per layer)",
-                 n_ssm_layers_, max_sequences_,
-                 total_bytes_ / (1024.0 * 1024.0),
-                 conv_bytes_ / 1024.0, h_bytes_ / 1024.0,
-                 dtype_name(h_dtype_));
+    IMP_LOG_INFO(
+        "SSM state: %d layers x %d sequences = %.2f MiB "
+        "(conv=%.1f KB, h=%.1f KB [%s] per layer)",
+        n_ssm_layers_, max_sequences_, total_bytes_ / (1024.0 * 1024.0), conv_bytes_ / 1024.0,
+        h_bytes_ / 1024.0, dtype_name(h_dtype_));
     return true;
 }
 
@@ -80,9 +82,10 @@ void* SSMState::h_state(int seq_id, int ssm_layer_idx) {
 }
 
 void SSMState::reset_sequence(int seq_id, cudaStream_t stream) {
-    if (!pool_ || seq_id < 0 || seq_id >= max_sequences_) return;
+    if (!pool_ || seq_id < 0 || seq_id >= max_sequences_)
+        return;
     char* base = static_cast<char*>(pool_) + seq_id * per_seq_bytes_;
     IMP_CUDA_CHECK_LOG(cudaMemsetAsync(base, 0, per_seq_bytes_, stream));
 }
 
-} // namespace imp
+}  // namespace imp

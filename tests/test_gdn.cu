@@ -11,10 +11,9 @@ namespace {
 
 // CPU reference: delta rule scan for a single head, single token.
 // Mutates h_state in-place, writes y_out.
-static void gdn_scan_cpu(
-    const float* V, const float* K, const float* Q,
-    float alpha, float beta_raw, float A_log, float dt_bias,
-    float* h_state, float* y_out, int head_dim, int state_size) {
+static void gdn_scan_cpu(const float* V, const float* K, const float* Q, float alpha, float beta_raw,
+                         float A_log, float dt_bias, float* h_state, float* y_out, int head_dim,
+                         int state_size) {
     float dt_val = alpha + dt_bias;
     dt_val = (dt_val > 20.0f) ? dt_val : logf(1.0f + expf(dt_val));
     float g_t = expf(fmaxf(A_log * dt_val, -20.0f));
@@ -65,9 +64,12 @@ TEST(GDNScanTest, SingleTokenCPUvsGPU) {
     std::vector<float> h_A_log(n_heads, -0.5f), h_dt_bias(n_heads, 0.5f);
     std::vector<float> state_cpu(n_heads * state_size * head_dim, 0.0f);
 
-    for (auto& v : h_V) v = (rand() % 200 - 100) / 100.0f;
-    for (auto& v : h_K) v = (rand() % 200 - 100) / 100.0f;
-    for (auto& v : h_Q) v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : h_V)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : h_K)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : h_Q)
+        v = (rand() % 200 - 100) / 100.0f;
     for (int i = 0; i < n_heads; i++) {
         h_alpha[i] = (rand() % 200 - 100) / 100.0f;
         h_beta[i] = (rand() % 200 - 100) / 100.0f;
@@ -77,11 +79,10 @@ TEST(GDNScanTest, SingleTokenCPUvsGPU) {
     std::vector<float> y_cpu(inner);
     for (int h = 0; h < n_heads; h++) {
         int g = h % n_groups;
-        gdn_scan_cpu(h_V.data() + h * head_dim, h_K.data() + g * state_size,
-                      h_Q.data() + g * state_size, h_alpha[h], h_beta[h],
-                      h_A_log[h], h_dt_bias[h],
-                      state_cpu.data() + h * state_size * head_dim,
-                      y_cpu.data() + h * head_dim, head_dim, state_size);
+        gdn_scan_cpu(h_V.data() + h * head_dim, h_K.data() + g * state_size, h_Q.data() + g * state_size,
+                     h_alpha[h], h_beta[h], h_A_log[h], h_dt_bias[h],
+                     state_cpu.data() + h * state_size * head_dim, y_cpu.data() + h * head_dim, head_dim,
+                     state_size);
     }
 
     // GPU
@@ -112,9 +113,8 @@ TEST(GDNScanTest, SingleTokenCPUvsGPU) {
     cudaMemcpy(d_alpha, ha.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_beta, hb.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
 
-    gdn_scan_decode_f32(d_V, d_K, d_Q, d_alpha, d_beta, d_A, d_dt,
-                         d_state, d_y, nullptr,
-                         n_heads, head_dim, state_size, n_groups, nullptr);
+    gdn_scan_decode_f32(d_V, d_K, d_Q, d_alpha, d_beta, d_A, d_dt, d_state, d_y, nullptr, n_heads, head_dim,
+                        state_size, n_groups, nullptr);
     cudaDeviceSynchronize();
 
     std::vector<half> hy(inner);
@@ -126,9 +126,15 @@ TEST(GDNScanTest, SingleTokenCPUvsGPU) {
     }
     EXPECT_LT(max_err, 1e-2f) << "Single-token CPU vs GPU max error too large";
 
-    cudaFree(d_V); cudaFree(d_K); cudaFree(d_Q);
-    cudaFree(d_A); cudaFree(d_dt); cudaFree(d_state);
-    cudaFree(d_alpha); cudaFree(d_beta); cudaFree(d_y);
+    cudaFree(d_V);
+    cudaFree(d_K);
+    cudaFree(d_Q);
+    cudaFree(d_A);
+    cudaFree(d_dt);
+    cudaFree(d_state);
+    cudaFree(d_alpha);
+    cudaFree(d_beta);
+    cudaFree(d_y);
 }
 
 // =========================================================================
@@ -144,11 +150,16 @@ TEST(GDNScanTest, MultiTokenSequential) {
     std::vector<float> all_V(n_tok * inner), all_K(n_tok * BC_size), all_Q(n_tok * BC_size);
     std::vector<float> all_alpha(n_tok * n_heads), all_beta(n_tok * n_heads);
     std::vector<float> h_A_log(n_heads, -0.5f), h_dt_bias(n_heads, 0.5f);
-    for (auto& v : all_V) v = (rand() % 200 - 100) / 100.0f;
-    for (auto& v : all_K) v = (rand() % 200 - 100) / 100.0f;
-    for (auto& v : all_Q) v = (rand() % 200 - 100) / 100.0f;
-    for (auto& v : all_alpha) v = (rand() % 200 - 100) / 100.0f;
-    for (auto& v : all_beta) v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_V)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_K)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_Q)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_alpha)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_beta)
+        v = (rand() % 200 - 100) / 100.0f;
 
     // CPU: sequential per-token processing
     std::vector<float> state_cpu(n_heads * state_size * head_dim, 0.0f);
@@ -156,13 +167,11 @@ TEST(GDNScanTest, MultiTokenSequential) {
     for (int t = 0; t < n_tok; t++) {
         for (int h = 0; h < n_heads; h++) {
             int g = h % n_groups;
-            gdn_scan_cpu(&all_V[t * inner + h * head_dim],
-                          &all_K[t * BC_size + g * state_size],
-                          &all_Q[t * BC_size + g * state_size],
-                          all_alpha[t * n_heads + h], all_beta[t * n_heads + h],
-                          h_A_log[h], h_dt_bias[h],
-                          &state_cpu[h * state_size * head_dim],
-                          y_cpu.data() + h * head_dim, head_dim, state_size);
+            gdn_scan_cpu(&all_V[t * inner + h * head_dim], &all_K[t * BC_size + g * state_size],
+                         &all_Q[t * BC_size + g * state_size], all_alpha[t * n_heads + h],
+                         all_beta[t * n_heads + h], h_A_log[h], h_dt_bias[h],
+                         &state_cpu[h * state_size * head_dim], y_cpu.data() + h * head_dim, head_dim,
+                         state_size);
         }
     }
 
@@ -194,9 +203,8 @@ TEST(GDNScanTest, MultiTokenSequential) {
         }
         cudaMemcpy(d_alpha, ha.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
         cudaMemcpy(d_beta, hb.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
-        gdn_scan_decode_f32(d_V, d_K, d_Q, d_alpha, d_beta, d_A, d_dt,
-                             d_state, d_y, nullptr,
-                             n_heads, head_dim, state_size, n_groups, nullptr);
+        gdn_scan_decode_f32(d_V, d_K, d_Q, d_alpha, d_beta, d_A, d_dt, d_state, d_y, nullptr, n_heads,
+                            head_dim, state_size, n_groups, nullptr);
         cudaDeviceSynchronize();
     }
 
@@ -207,9 +215,15 @@ TEST(GDNScanTest, MultiTokenSequential) {
         max_err = fmaxf(max_err, fabsf(__half2float(hy[i]) - y_cpu[i]));
     EXPECT_LT(max_err, 0.05f) << "Multi-token sequential max error too large";
 
-    cudaFree(d_V); cudaFree(d_K); cudaFree(d_Q);
-    cudaFree(d_A); cudaFree(d_dt); cudaFree(d_state);
-    cudaFree(d_alpha); cudaFree(d_beta); cudaFree(d_y);
+    cudaFree(d_V);
+    cudaFree(d_K);
+    cudaFree(d_Q);
+    cudaFree(d_A);
+    cudaFree(d_dt);
+    cudaFree(d_state);
+    cudaFree(d_alpha);
+    cudaFree(d_beta);
+    cudaFree(d_y);
 }
 
 // =========================================================================
@@ -227,9 +241,12 @@ TEST(GDNScanTest, FusedKernelMatchesLegacy) {
     std::vector<float> conv_f32(n_tok * conv_channels);
     std::vector<float> all_alpha(n_tok * n_heads), all_beta(n_tok * n_heads);
     std::vector<float> h_A_log(n_heads, -0.5f), h_dt_bias(n_heads, 0.5f);
-    for (auto& v : conv_f32) v = (rand() % 200 - 100) / 100.0f;
-    for (auto& v : all_alpha) v = (rand() % 200 - 100) / 100.0f;
-    for (auto& v : all_beta) v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : conv_f32)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_alpha)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : all_beta)
+        v = (rand() % 200 - 100) / 100.0f;
 
     // Convert alpha/beta to FP16
     std::vector<half> h_alpha_h(n_tok * n_heads), h_beta_h(n_tok * n_heads);
@@ -260,9 +277,8 @@ TEST(GDNScanTest, FusedKernelMatchesLegacy) {
     cudaMemset(d_state2, 0, n_heads * state_size * head_dim * sizeof(float));
 
     // Fused: single kernel for all tokens
-    gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt,
-                        d_state1, d_y1, n_tok, n_heads, head_dim,
-                        state_size, n_groups, nullptr);
+    gdn_scan_fused_f32(d_conv, conv_channels, d_alpha, d_beta, d_A, d_dt, d_state1, d_y1, n_tok, n_heads,
+                       head_dim, state_size, n_groups, nullptr);
     cudaDeviceSynchronize();
 
     // Legacy: per-token using gdn_scan_prefill_f32 (which internally loops)
@@ -284,9 +300,8 @@ TEST(GDNScanTest, FusedKernelMatchesLegacy) {
         cudaMemcpy(d_V, row + 2 * BC_size, inner * sizeof(float), cudaMemcpyHostToDevice);
         cudaMemcpy(d_a1, h_alpha_h.data() + t * n_heads, n_heads * sizeof(half), cudaMemcpyHostToDevice);
         cudaMemcpy(d_b1, h_beta_h.data() + t * n_heads, n_heads * sizeof(half), cudaMemcpyHostToDevice);
-        gdn_scan_decode_f32(d_V, d_K, d_Q, d_a1, d_b1, d_A, d_dt,
-                             d_state2, d_y2 + t * inner, nullptr,
-                             n_heads, head_dim, state_size, n_groups, nullptr);
+        gdn_scan_decode_f32(d_V, d_K, d_Q, d_a1, d_b1, d_A, d_dt, d_state2, d_y2 + t * inner, nullptr,
+                            n_heads, head_dim, state_size, n_groups, nullptr);
         cudaDeviceSynchronize();
     }
 
@@ -299,12 +314,20 @@ TEST(GDNScanTest, FusedKernelMatchesLegacy) {
         max_err = fmaxf(max_err, fabsf(__half2float(hy1[i]) - __half2float(hy2[i])));
     EXPECT_LT(max_err, 1e-2f) << "Fused vs legacy max error too large";
 
-    cudaFree(d_conv); cudaFree(d_A); cudaFree(d_dt);
-    cudaFree(d_state1); cudaFree(d_state2);
-    cudaFree(d_alpha); cudaFree(d_beta);
-    cudaFree(d_y1); cudaFree(d_y2);
-    cudaFree(d_V); cudaFree(d_K); cudaFree(d_Q);
-    cudaFree(d_a1); cudaFree(d_b1);
+    cudaFree(d_conv);
+    cudaFree(d_A);
+    cudaFree(d_dt);
+    cudaFree(d_state1);
+    cudaFree(d_state2);
+    cudaFree(d_alpha);
+    cudaFree(d_beta);
+    cudaFree(d_y1);
+    cudaFree(d_y2);
+    cudaFree(d_V);
+    cudaFree(d_K);
+    cudaFree(d_Q);
+    cudaFree(d_a1);
+    cudaFree(d_b1);
 }
 
 // =========================================================================
@@ -317,9 +340,12 @@ TEST(GDNScanTest, ZeroState) {
 
     srand(42);
     std::vector<float> h_V(inner), h_K(BC_size), h_Q(BC_size);
-    for (auto& v : h_V) v = 1.0f;
-    for (auto& v : h_K) v = 0.5f;
-    for (auto& v : h_Q) v = 0.3f;
+    for (auto& v : h_V)
+        v = 1.0f;
+    for (auto& v : h_K)
+        v = 0.5f;
+    for (auto& v : h_Q)
+        v = 0.3f;
 
     float *d_V, *d_K, *d_Q, *d_A, *d_dt, *d_state;
     half *d_alpha, *d_beta, *d_y;
@@ -348,22 +374,30 @@ TEST(GDNScanTest, ZeroState) {
     cudaMemcpy(d_alpha, ha.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_beta, hb.data(), n_heads * sizeof(half), cudaMemcpyHostToDevice);
 
-    gdn_scan_decode_f32(d_V, d_K, d_Q, d_alpha, d_beta, d_A, d_dt,
-                         d_state, d_y, nullptr,
-                         n_heads, head_dim, state_size, n_groups, nullptr);
+    gdn_scan_decode_f32(d_V, d_K, d_Q, d_alpha, d_beta, d_A, d_dt, d_state, d_y, nullptr, n_heads, head_dim,
+                        state_size, n_groups, nullptr);
     cudaDeviceSynchronize();
 
     std::vector<half> hy(inner);
     cudaMemcpy(hy.data(), d_y, inner * sizeof(half), cudaMemcpyDeviceToHost);
     bool any_nonzero = false;
     for (int i = 0; i < inner; i++) {
-        if (fabsf(__half2float(hy[i])) > 1e-6f) { any_nonzero = true; break; }
+        if (fabsf(__half2float(hy[i])) > 1e-6f) {
+            any_nonzero = true;
+            break;
+        }
     }
     EXPECT_TRUE(any_nonzero) << "Zero state + non-zero input should produce non-zero output";
 
-    cudaFree(d_V); cudaFree(d_K); cudaFree(d_Q);
-    cudaFree(d_A); cudaFree(d_dt); cudaFree(d_state);
-    cudaFree(d_alpha); cudaFree(d_beta); cudaFree(d_y);
+    cudaFree(d_V);
+    cudaFree(d_K);
+    cudaFree(d_Q);
+    cudaFree(d_A);
+    cudaFree(d_dt);
+    cudaFree(d_state);
+    cudaFree(d_alpha);
+    cudaFree(d_beta);
+    cudaFree(d_y);
 }
 
 // =========================================================================
@@ -376,9 +410,12 @@ TEST(GDNScanTest, RMSNormGatedSiLU) {
 
     srand(42);
     std::vector<float> h_y(total), h_gate(total), h_weight(head_dim);
-    for (auto& v : h_y) v = (rand() % 200 - 100) / 100.0f;
-    for (auto& v : h_gate) v = (rand() % 200 - 100) / 100.0f;
-    for (auto& v : h_weight) v = 0.5f + (rand() % 100) / 200.0f;
+    for (auto& v : h_y)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : h_gate)
+        v = (rand() % 200 - 100) / 100.0f;
+    for (auto& v : h_weight)
+        v = 0.5f + (rand() % 100) / 200.0f;
     const float eps = 1e-5f;
 
     // CPU reference
@@ -406,15 +443,17 @@ TEST(GDNScanTest, RMSNormGatedSiLU) {
     cudaMalloc(&d_weight, head_dim * sizeof(half));
 
     std::vector<half> hy(total), hg(total), hw(head_dim);
-    for (int i = 0; i < total; i++) hy[i] = __float2half(h_y[i]);
-    for (int i = 0; i < total; i++) hg[i] = __float2half(h_gate[i]);
-    for (int i = 0; i < head_dim; i++) hw[i] = __float2half(h_weight[i]);
+    for (int i = 0; i < total; i++)
+        hy[i] = __float2half(h_y[i]);
+    for (int i = 0; i < total; i++)
+        hg[i] = __float2half(h_gate[i]);
+    for (int i = 0; i < head_dim; i++)
+        hw[i] = __float2half(h_weight[i]);
     cudaMemcpy(d_y, hy.data(), total * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_gate, hg.data(), total * sizeof(half), cudaMemcpyHostToDevice);
     cudaMemcpy(d_weight, hw.data(), head_dim * sizeof(half), cudaMemcpyHostToDevice);
 
-    gdn_rmsnorm_gated_silu(d_y, d_gate, d_weight, eps,
-                             n_tokens, n_heads, head_dim, nullptr);
+    gdn_rmsnorm_gated_silu(d_y, d_gate, d_weight, eps, n_tokens, n_heads, head_dim, nullptr);
     cudaDeviceSynchronize();
 
     cudaMemcpy(hy.data(), d_y, total * sizeof(half), cudaMemcpyDeviceToHost);
@@ -423,8 +462,10 @@ TEST(GDNScanTest, RMSNormGatedSiLU) {
         max_err = fmaxf(max_err, fabsf(__half2float(hy[i]) - y_ref[i]));
     EXPECT_LT(max_err, 0.02f) << "RMSNormGatedSiLU max error too large";
 
-    cudaFree(d_y); cudaFree(d_gate); cudaFree(d_weight);
+    cudaFree(d_y);
+    cudaFree(d_gate);
+    cudaFree(d_weight);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

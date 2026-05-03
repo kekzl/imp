@@ -7,7 +7,12 @@
 #include <vector>
 #include <cmath>
 
-#define SKIP_IF_NO_CUDA() do { int dev; if (cudaGetDevice(&dev) != cudaSuccess) GTEST_SKIP(); } while(0)
+#define SKIP_IF_NO_CUDA()                       \
+    do {                                        \
+        int dev;                                \
+        if (cudaGetDevice(&dev) != cudaSuccess) \
+            GTEST_SKIP();                       \
+    } while (0)
 
 namespace imp {
 namespace {
@@ -18,9 +23,10 @@ namespace {
 Tensor make_fp16_gpu(const float* host, std::initializer_list<int64_t> shape) {
     Tensor t;
     t.qtype = QType::F16;
-    t.ndim  = static_cast<int>(shape.size());
+    t.ndim = static_cast<int>(shape.size());
     int i = 0;
-    for (auto s : shape) t.shape[i++] = s;
+    for (auto s : shape)
+        t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
@@ -34,9 +40,10 @@ Tensor make_fp16_gpu(const float* host, std::initializer_list<int64_t> shape) {
 Tensor alloc_fp16_gpu(std::initializer_list<int64_t> shape) {
     Tensor t;
     t.qtype = QType::F16;
-    t.ndim  = static_cast<int>(shape.size());
+    t.ndim = static_cast<int>(shape.size());
     int i = 0;
-    for (auto s : shape) t.shape[i++] = s;
+    for (auto s : shape)
+        t.shape[i++] = s;
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
@@ -62,7 +69,10 @@ std::vector<float> read_fp16(const Tensor& t) {
 }
 
 void free_tensor(Tensor& t) {
-    if (t.data) { cudaFree(t.data); t.data = nullptr; }
+    if (t.data) {
+        cudaFree(t.data);
+        t.data = nullptr;
+    }
 }
 
 // ===========================================================================
@@ -93,8 +103,7 @@ TEST(SSMConv1dTest, DecodeShiftAndConvolve) {
     // Allocate GPU buffers
     float* d_state;
     cudaMalloc(&d_state, channels * kernel_size * sizeof(float));
-    cudaMemcpy(d_state, h_state.data(), channels * kernel_size * sizeof(float),
-               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_state, h_state.data(), channels * kernel_size * sizeof(float), cudaMemcpyHostToDevice);
 
     Tensor d_x = make_fp16_gpu(h_x.data(), {channels});
     Tensor d_w = make_fp16_gpu(h_weight.data(), {channels, kernel_size});
@@ -150,8 +159,8 @@ TEST(SSMConv1dTest, PrefillCausal) {
     cudaMalloc(&d_state, channels * kernel_size * sizeof(float));
     cudaMemset(d_state, 0, channels * kernel_size * sizeof(float));
 
-    Tensor d_x   = make_fp16_gpu(h_x.data(), {n_tokens, channels});
-    Tensor d_w   = make_fp16_gpu(h_w.data(), {channels, kernel_size});
+    Tensor d_x = make_fp16_gpu(h_x.data(), {n_tokens, channels});
+    Tensor d_w = make_fp16_gpu(h_w.data(), {channels, kernel_size});
     Tensor d_out = alloc_fp16_gpu({n_tokens, channels});
     Tensor d_bias = make_empty_tensor();
 
@@ -169,8 +178,7 @@ TEST(SSMConv1dTest, PrefillCausal) {
                 if (src_t >= 0)
                     expected += h_x[src_t * channels + ch] * h_w[ch * kernel_size + k];
             }
-            EXPECT_NEAR(out[t * channels + ch], expected, 0.5f)
-                << "Token " << t << " channel " << ch;
+            EXPECT_NEAR(out[t * channels + ch], expected, 0.5f) << "Token " << t << " channel " << ch;
         }
     }
 
@@ -206,18 +214,17 @@ TEST(SSMConv1dTest, StateConsistency) {
     cudaMalloc(&d_state_prefill, channels * kernel_size * sizeof(float));
     cudaMemset(d_state_prefill, 0, channels * kernel_size * sizeof(float));
 
-    Tensor d_x_pf   = make_fp16_gpu(h_x.data(), {n_tokens, channels});
-    Tensor d_w_pf   = make_fp16_gpu(h_w.data(), {channels, kernel_size});
+    Tensor d_x_pf = make_fp16_gpu(h_x.data(), {n_tokens, channels});
+    Tensor d_w_pf = make_fp16_gpu(h_w.data(), {channels, kernel_size});
     Tensor d_out_pf = alloc_fp16_gpu({n_tokens, channels});
-    Tensor d_bias   = make_empty_tensor();
+    Tensor d_bias = make_empty_tensor();
 
-    ssm_conv1d_prefill(d_state_prefill, d_x_pf, d_w_pf, d_bias, d_out_pf,
-                       kernel_size, nullptr);
+    ssm_conv1d_prefill(d_state_prefill, d_x_pf, d_w_pf, d_bias, d_out_pf, kernel_size, nullptr);
     cudaDeviceSynchronize();
 
     std::vector<float> prefill_state(channels * kernel_size);
-    cudaMemcpy(prefill_state.data(), d_state_prefill,
-               channels * kernel_size * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(prefill_state.data(), d_state_prefill, channels * kernel_size * sizeof(float),
+               cudaMemcpyDeviceToHost);
 
     // --- Sequential decode path ---
     float* d_state_decode;
@@ -226,23 +233,21 @@ TEST(SSMConv1dTest, StateConsistency) {
 
     Tensor d_w_dec = make_fp16_gpu(h_w.data(), {channels, kernel_size});
     for (int t = 0; t < n_tokens; t++) {
-        Tensor d_x_t   = make_fp16_gpu(h_x.data() + t * channels, {channels});
+        Tensor d_x_t = make_fp16_gpu(h_x.data() + t * channels, {channels});
         Tensor d_out_t = alloc_fp16_gpu({channels});
-        ssm_conv1d_decode(d_state_decode, d_x_t, d_w_dec, d_bias, d_out_t,
-                          kernel_size, nullptr);
+        ssm_conv1d_decode(d_state_decode, d_x_t, d_w_dec, d_bias, d_out_t, kernel_size, nullptr);
         cudaDeviceSynchronize();
         free_tensor(d_x_t);
         free_tensor(d_out_t);
     }
 
     std::vector<float> decode_state(channels * kernel_size);
-    cudaMemcpy(decode_state.data(), d_state_decode,
-               channels * kernel_size * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(decode_state.data(), d_state_decode, channels * kernel_size * sizeof(float),
+               cudaMemcpyDeviceToHost);
 
     // Compare states
     for (int i = 0; i < channels * kernel_size; i++) {
-        EXPECT_NEAR(prefill_state[i], decode_state[i], 1e-2f)
-            << "State mismatch at index " << i;
+        EXPECT_NEAR(prefill_state[i], decode_state[i], 1e-2f) << "State mismatch at index " << i;
     }
 
     cudaFree(d_state_prefill);
@@ -269,23 +274,20 @@ TEST(SSMConv1dTest, FP32SiLUFused) {
 
     float* d_state;
     cudaMalloc(&d_state, channels * kernel_size * sizeof(float));
-    cudaMemcpy(d_state, h_state.data(), channels * kernel_size * sizeof(float),
-               cudaMemcpyHostToDevice);
+    cudaMemcpy(d_state, h_state.data(), channels * kernel_size * sizeof(float), cudaMemcpyHostToDevice);
 
-    Tensor d_x    = make_fp16_gpu(h_x.data(), {channels});
-    Tensor d_w    = make_fp16_gpu(h_w.data(), {channels, kernel_size});
+    Tensor d_x = make_fp16_gpu(h_x.data(), {channels});
+    Tensor d_w = make_fp16_gpu(h_w.data(), {channels, kernel_size});
     Tensor d_bias = make_empty_tensor();
 
     float* d_out_f32;
     cudaMalloc(&d_out_f32, channels * sizeof(float));
 
-    ssm_conv1d_decode_f32_silu(d_state, d_x, d_w, d_bias, d_out_f32,
-                                kernel_size, nullptr);
+    ssm_conv1d_decode_f32_silu(d_state, d_x, d_w, d_bias, d_out_f32, kernel_size, nullptr);
     cudaDeviceSynchronize();
 
     std::vector<float> h_out(channels);
-    cudaMemcpy(h_out.data(), d_out_f32, channels * sizeof(float),
-               cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_out.data(), d_out_f32, channels * sizeof(float), cudaMemcpyDeviceToHost);
 
     // After shift: state = [old[1], old[2], old[3], new_x] = [1,1,1,1]
     // conv = sum(1.0 * 0.5) * 4 = 2.0
@@ -303,5 +305,5 @@ TEST(SSMConv1dTest, FP32SiLUFused) {
     free_tensor(d_w);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp

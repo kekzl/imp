@@ -81,4 +81,4 @@ private:
     bool initialized_ = false;
 };
 
-} // namespace imp
+}  // namespace imp

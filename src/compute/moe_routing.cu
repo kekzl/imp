@@ -23,13 +23,9 @@ static constexpr int WARP_SIZE = 32;
 //   expert_weights[token * top_k + j]  -- normalized weight for j-th expert
 // ============================================================================
 
-__global__ void topk_gating_kernel(const float* __restrict__ gate_logits,
-                                   int n_experts,
-                                   int top_k,
-                                   int32_t* __restrict__ expert_indices,
-                                   float* __restrict__ expert_weights,
-                                   bool use_sigmoid,
-                                   bool normalize_weights,
+__global__ void topk_gating_kernel(const float* __restrict__ gate_logits, int n_experts, int top_k,
+                                   int32_t* __restrict__ expert_indices, float* __restrict__ expert_weights,
+                                   bool use_sigmoid, bool normalize_weights,
                                    const half* __restrict__ score_bias) {
     const int token = blockIdx.x;
     const int tid = threadIdx.x;
@@ -41,12 +37,12 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits,
     int lane_id = tid % WARP_SIZE;
 
     extern __shared__ char smem_raw[];
-    float* s_probs   = reinterpret_cast<float*>(smem_raw);
+    float* s_probs = reinterpret_cast<float*>(smem_raw);
     // When using score_bias, we need a second array for selection scores
     // s_probs holds unbiased scores (used for weight values)
     // s_sel_probs holds biased scores (used for top-k selection)
     float* s_sel_probs = s_probs + (score_bias ? n_experts : 0);
-    float* s_topk_val  = s_probs + (score_bias ? 2 * n_experts : n_experts);
+    float* s_topk_val = s_probs + (score_bias ? 2 * n_experts : n_experts);
     int32_t* s_topk_idx = reinterpret_cast<int32_t*>(s_topk_val + top_k);
 
     if (use_sigmoid) {
@@ -68,12 +64,14 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits,
         }
         local_max = warp_reduce_max(local_max);
 
-        if (lane_id == 0) s_warp[warp_id] = local_max;
+        if (lane_id == 0)
+            s_warp[warp_id] = local_max;
         __syncthreads();
         if (warp_id == 0) {
             float val = (lane_id < NUM_WARPS) ? s_warp[lane_id] : -FLT_MAX;
             val = warp_reduce_max(val);
-            if (lane_id == 0) s_warp[0] = val;
+            if (lane_id == 0)
+                s_warp[0] = val;
         }
         __syncthreads();
         float gmax = s_warp[0];
@@ -85,12 +83,14 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits,
         }
         local_sum = warp_reduce_sum(local_sum);
 
-        if (lane_id == 0) s_warp[warp_id] = local_sum;
+        if (lane_id == 0)
+            s_warp[warp_id] = local_sum;
         __syncthreads();
         if (warp_id == 0) {
             float val = (lane_id < NUM_WARPS) ? s_warp[lane_id] : 0.0f;
             val = warp_reduce_sum(val);
-            if (lane_id == 0) s_warp[0] = val;
+            if (lane_id == 0)
+                s_warp[0] = val;
         }
         __syncthreads();
         float inv_sum = 1.0f / s_warp[0];
@@ -109,7 +109,7 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits,
     {
         // Shared memory for argmax reduction across warps
         __shared__ float s_warp_max[NUM_WARPS];
-        __shared__ int   s_warp_argmax[NUM_WARPS];
+        __shared__ int s_warp_argmax[NUM_WARPS];
 
         const float* sel = score_bias ? s_sel_probs : s_probs;
 
@@ -121,11 +121,14 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits,
             // Warp-level argmax
             float wmax = my_val;
             int widx = my_idx;
-            #pragma unroll
+#pragma unroll
             for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
                 float other_val = __shfl_xor_sync(0xFFFFFFFF, wmax, off);
                 int other_idx = __shfl_xor_sync(0xFFFFFFFF, widx, off);
-                if (other_val > wmax) { wmax = other_val; widx = other_idx; }
+                if (other_val > wmax) {
+                    wmax = other_val;
+                    widx = other_idx;
+                }
             }
 
             // Write per-warp results
@@ -139,11 +142,14 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits,
             if (warp_id == 0) {
                 float v = (lane_id < NUM_WARPS) ? s_warp_max[lane_id] : -FLT_MAX;
                 int ix = (lane_id < NUM_WARPS) ? s_warp_argmax[lane_id] : -1;
-                #pragma unroll
+#pragma unroll
                 for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
                     float ov = __shfl_xor_sync(0xFFFFFFFF, v, off);
                     int oi = __shfl_xor_sync(0xFFFFFFFF, ix, off);
-                    if (ov > v) { v = ov; ix = oi; }
+                    if (ov > v) {
+                        v = ov;
+                        ix = oi;
+                    }
                 }
                 if (lane_id == 0) {
                     s_topk_idx[k] = ix;
@@ -154,7 +160,8 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits,
             __syncthreads();
 
             // Mask out the selected expert so it won't be picked again
-            if (tid == s_topk_idx[k]) my_val = -FLT_MAX;
+            if (tid == s_topk_idx[k])
+                my_val = -FLT_MAX;
         }
 
         // Thread 0: normalize weights and write output
@@ -162,7 +169,8 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits,
             float multiplier = 1.0f;
             if (normalize_weights) {
                 float norm = 0.0f;
-                for (int j = 0; j < top_k; ++j) norm += s_topk_val[j];
+                for (int j = 0; j < top_k; ++j)
+                    norm += s_topk_val[j];
                 multiplier = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
             }
             int base = token * top_k;
@@ -185,18 +193,13 @@ __global__ void topk_gating_kernel(const float* __restrict__ gate_logits,
 // softmax/sigmoid + top-k selection (same algorithm as topk_gating_kernel).
 // ============================================================================
 
-__global__ void gemv_gate_topk_fused_kernel(
-        const half* __restrict__ W_gate,        // [n_experts, d_model] FP16
-        const half* __restrict__ x,             // [d_model] FP16 input
-        int n_experts,
-        int d_model,
-        int top_k,
-        int32_t* __restrict__ expert_indices,   // [top_k] output
-        float* __restrict__ expert_weights,     // [top_k] output
-        bool use_sigmoid,
-        bool normalize_weights,
-        const half* __restrict__ score_bias) {
-
+__global__ void gemv_gate_topk_fused_kernel(const half* __restrict__ W_gate,  // [n_experts, d_model] FP16
+                                            const half* __restrict__ x,       // [d_model] FP16 input
+                                            int n_experts, int d_model, int top_k,
+                                            int32_t* __restrict__ expert_indices,  // [top_k] output
+                                            float* __restrict__ expert_weights,    // [top_k] output
+                                            bool use_sigmoid, bool normalize_weights,
+                                            const half* __restrict__ score_bias) {
     const int tid = threadIdx.x;
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     const int warp_id = tid / WARP_SIZE;
@@ -212,10 +215,10 @@ __global__ void gemv_gate_topk_fused_kernel(
     extern __shared__ char smem_raw[];
     float* s_logits = reinterpret_cast<float*>(smem_raw);
     float* s_sel_probs = s_logits + (score_bias ? n_experts : 0);
-    float* s_topk_val  = s_logits + (score_bias ? 2 * n_experts : n_experts);
+    float* s_topk_val = s_logits + (score_bias ? 2 * n_experts : n_experts);
     int32_t* s_topk_idx = reinterpret_cast<int32_t*>(s_topk_val + top_k);
     float* s_warp_scratch = reinterpret_cast<float*>(s_topk_idx + top_k);
-    int*   s_warp_argmax  = reinterpret_cast<int*>(s_warp_scratch + NUM_WARPS);
+    int* s_warp_argmax = reinterpret_cast<int*>(s_warp_scratch + NUM_WARPS);
 
     // ---- Phase 1: Gate GEMV — compute dot(W_gate[e], x) for all experts ----
     const int K2 = d_model / 2;
@@ -232,12 +235,13 @@ __global__ void gemv_gate_topk_fused_kernel(
             sum += __half2float(w.y) * __half2float(v.y);
         }
 
-        // Warp shuffle reduction
-        #pragma unroll
+// Warp shuffle reduction
+#pragma unroll
         for (int off = WARP_SIZE / 2; off > 0; off >>= 1)
             sum += __shfl_down_sync(0xFFFFFFFF, sum, off);
 
-        if (lane_id == 0) s_logits[e] = sum;
+        if (lane_id == 0)
+            s_logits[e] = sum;
     }
     __syncthreads();
 
@@ -257,12 +261,14 @@ __global__ void gemv_gate_topk_fused_kernel(
             local_max = fmaxf(local_max, s_logits[i]);
         }
         local_max = warp_reduce_max(local_max);
-        if (lane_id == 0) s_warp_scratch[warp_id] = local_max;
+        if (lane_id == 0)
+            s_warp_scratch[warp_id] = local_max;
         __syncthreads();
         if (warp_id == 0) {
             float val = (lane_id < NUM_WARPS) ? s_warp_scratch[lane_id] : -FLT_MAX;
             val = warp_reduce_max(val);
-            if (lane_id == 0) s_warp_scratch[0] = val;
+            if (lane_id == 0)
+                s_warp_scratch[0] = val;
         }
         __syncthreads();
         float gmax = s_warp_scratch[0];
@@ -273,12 +279,14 @@ __global__ void gemv_gate_topk_fused_kernel(
             local_sum += expf(s_logits[i] - gmax);
         }
         local_sum = warp_reduce_sum(local_sum);
-        if (lane_id == 0) s_warp_scratch[warp_id] = local_sum;
+        if (lane_id == 0)
+            s_warp_scratch[warp_id] = local_sum;
         __syncthreads();
         if (warp_id == 0) {
             float val = (lane_id < NUM_WARPS) ? s_warp_scratch[lane_id] : 0.0f;
             val = warp_reduce_sum(val);
-            if (lane_id == 0) s_warp_scratch[0] = val;
+            if (lane_id == 0)
+                s_warp_scratch[0] = val;
         }
         __syncthreads();
         float inv_sum = 1.0f / s_warp_scratch[0];
@@ -299,11 +307,14 @@ __global__ void gemv_gate_topk_fused_kernel(
         for (int k = 0; k < top_k; k++) {
             float wmax = my_val;
             int widx = my_idx;
-            #pragma unroll
+#pragma unroll
             for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
                 float other_val = __shfl_xor_sync(0xFFFFFFFF, wmax, off);
                 int other_idx = __shfl_xor_sync(0xFFFFFFFF, widx, off);
-                if (other_val > wmax) { wmax = other_val; widx = other_idx; }
+                if (other_val > wmax) {
+                    wmax = other_val;
+                    widx = other_idx;
+                }
             }
 
             if (lane_id == 0) {
@@ -315,11 +326,14 @@ __global__ void gemv_gate_topk_fused_kernel(
             if (warp_id == 0) {
                 float v = (lane_id < NUM_WARPS) ? s_warp_scratch[lane_id] : -FLT_MAX;
                 int ix = (lane_id < NUM_WARPS) ? s_warp_argmax[lane_id] : -1;
-                #pragma unroll
+#pragma unroll
                 for (int off = WARP_SIZE / 2; off > 0; off >>= 1) {
                     float ov = __shfl_xor_sync(0xFFFFFFFF, v, off);
                     int oi = __shfl_xor_sync(0xFFFFFFFF, ix, off);
-                    if (ov > v) { v = ov; ix = oi; }
+                    if (ov > v) {
+                        v = ov;
+                        ix = oi;
+                    }
                 }
                 if (lane_id == 0) {
                     s_topk_idx[k] = ix;
@@ -328,7 +342,8 @@ __global__ void gemv_gate_topk_fused_kernel(
             }
             __syncthreads();
 
-            if (tid == s_topk_idx[k]) my_val = -FLT_MAX;
+            if (tid == s_topk_idx[k])
+                my_val = -FLT_MAX;
         }
 
         // Thread 0: normalize weights and write output
@@ -336,7 +351,8 @@ __global__ void gemv_gate_topk_fused_kernel(
             float multiplier = 1.0f;
             if (normalize_weights) {
                 float norm = 0.0f;
-                for (int j = 0; j < top_k; ++j) norm += s_topk_val[j];
+                for (int j = 0; j < top_k; ++j)
+                    norm += s_topk_val[j];
                 multiplier = (norm > 0.0f) ? (1.0f / norm) : 1.0f;
             }
             for (int j = 0; j < top_k; ++j) {
@@ -354,11 +370,8 @@ __global__ void gemv_gate_topk_fused_kernel(
 // counts.  expert_counts has n_experts elements, initialized to zero.
 // ============================================================================
 
-__global__ void count_tokens_per_expert_kernel(
-        const int32_t* __restrict__ expert_indices,
-        int n_tokens,
-        int top_k,
-        int32_t* __restrict__ expert_counts) {
+__global__ void count_tokens_per_expert_kernel(const int32_t* __restrict__ expert_indices, int n_tokens,
+                                               int top_k, int32_t* __restrict__ expert_counts) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = n_tokens * top_k;
     if (idx < total) {
@@ -372,8 +385,7 @@ __global__ void count_tokens_per_expert_kernel(
 // expert_offsets.  Single block, single thread (n_experts is small).
 // ============================================================================
 
-__global__ void exclusive_scan_kernel(const int32_t* __restrict__ counts,
-                                      int32_t* __restrict__ offsets,
+__global__ void exclusive_scan_kernel(const int32_t* __restrict__ counts, int32_t* __restrict__ offsets,
                                       int n_experts) {
     if (threadIdx.x == 0) {
         int32_t running = 0;
@@ -393,13 +405,10 @@ __global__ void exclusive_scan_kernel(const int32_t* __restrict__ counts,
 // We use atomicAdd on a write-position counter per expert.
 // ============================================================================
 
-__global__ void scatter_token_ids_kernel(
-        const int32_t* __restrict__ expert_indices,
-        const int32_t* __restrict__ expert_offsets,
-        int n_tokens,
-        int top_k,
-        int32_t* __restrict__ sorted_token_ids,
-        int32_t* __restrict__ expert_write_pos) {  // [n_experts], init to 0
+__global__ void scatter_token_ids_kernel(const int32_t* __restrict__ expert_indices,
+                                         const int32_t* __restrict__ expert_offsets, int n_tokens, int top_k,
+                                         int32_t* __restrict__ sorted_token_ids,
+                                         int32_t* __restrict__ expert_write_pos) {  // [n_experts], init to 0
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = n_tokens * top_k;
     if (idx < total) {
@@ -417,14 +426,13 @@ __global__ void scatter_token_ids_kernel(
 //   gathered[i, :] = input[sorted_token_ids[i], :]
 // ============================================================================
 
-template<typename T>
+template <typename T>
 __global__ void moe_gather_kernel_impl(const T* __restrict__ input,
-                                       const int32_t* __restrict__ sorted_token_ids,
-                                       T* __restrict__ gathered,
-                                       int total_tokens,
-                                       int d_model) {
+                                       const int32_t* __restrict__ sorted_token_ids, T* __restrict__ gathered,
+                                       int total_tokens, int d_model) {
     int row = blockIdx.x;
-    if (row >= total_tokens) return;
+    if (row >= total_tokens)
+        return;
 
     int src_token = sorted_token_ids[row];
     const T* src = input + static_cast<int64_t>(src_token) * d_model;
@@ -467,14 +475,9 @@ __global__ void moe_gather_kernel_impl(const T* __restrict__ input,
 
 // Extended scatter kernel that also writes flat indices.
 __global__ void scatter_token_ids_with_flat_idx_kernel(
-        const int32_t* __restrict__ expert_indices,
-        const int32_t* __restrict__ expert_offsets,
-        int n_tokens,
-        int top_k,
-        int32_t* __restrict__ sorted_token_ids,
-        int32_t* __restrict__ sorted_flat_idx,
-        int32_t* __restrict__ expert_write_pos,
-        int32_t* __restrict__ token_to_expanded) {
+    const int32_t* __restrict__ expert_indices, const int32_t* __restrict__ expert_offsets, int n_tokens,
+    int top_k, int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ sorted_flat_idx,
+    int32_t* __restrict__ expert_write_pos, int32_t* __restrict__ token_to_expanded) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = n_tokens * top_k;
     if (idx < total) {
@@ -483,8 +486,9 @@ __global__ void scatter_token_ids_with_flat_idx_kernel(
         int pos = atomicAdd(&expert_write_pos[expert], 1);
         int dest = expert_offsets[expert] + pos;
         sorted_token_ids[dest] = token;
-        sorted_flat_idx[dest]  = idx;  // flat index into expert_weights
-        if (token_to_expanded) token_to_expanded[idx] = dest;  // inverse map
+        sorted_flat_idx[dest] = idx;  // flat index into expert_weights
+        if (token_to_expanded)
+            token_to_expanded[idx] = dest;  // inverse map
     }
 }
 
@@ -494,16 +498,15 @@ __global__ void scatter_token_ids_with_flat_idx_kernel(
 __device__ __forceinline__ float to_float(float v) { return v; }
 __device__ __forceinline__ float to_float(half v) { return __half2float(v); }
 
-template<typename T>
+template <typename T>
 __global__ void moe_scatter_kernel_impl(const T* __restrict__ expert_output,
                                         const int32_t* __restrict__ sorted_token_ids,
                                         const int32_t* __restrict__ sorted_flat_idx,
-                                        const float* __restrict__ expert_weights,
-                                        float* __restrict__ output,
-                                        int total_tokens,
-                                        int d_model) {
+                                        const float* __restrict__ expert_weights, float* __restrict__ output,
+                                        int total_tokens, int d_model) {
     int row = blockIdx.x;
-    if (row >= total_tokens) return;
+    if (row >= total_tokens)
+        return;
 
     int token_id = sorted_token_ids[row];
     int flat_idx = sorted_flat_idx[row];
@@ -527,19 +530,15 @@ __global__ void moe_scatter_kernel_impl(const T* __restrict__ expert_output,
 // Requires n_experts ≤ 1024 (covers all current models).
 // ============================================================================
 
-__global__ void __launch_bounds__(256)
-moe_fused_permute_kernel(
-        const int32_t* __restrict__ expert_indices,
-        int n_tokens,
-        int top_k,
-        int n_experts,
-        int32_t* __restrict__ sorted_token_ids,
-        int32_t* __restrict__ sorted_flat_idx,
-        int32_t* __restrict__ expert_offsets,
-        int32_t* __restrict__ token_to_expanded) {
+__global__ void __launch_bounds__(256) moe_fused_permute_kernel(const int32_t* __restrict__ expert_indices,
+                                                                int n_tokens, int top_k, int n_experts,
+                                                                int32_t* __restrict__ sorted_token_ids,
+                                                                int32_t* __restrict__ sorted_flat_idx,
+                                                                int32_t* __restrict__ expert_offsets,
+                                                                int32_t* __restrict__ token_to_expanded) {
     // Dynamic shared memory: [n_experts] counts + [n_experts] write_pos
     extern __shared__ int32_t smem[];
-    int32_t* s_counts    = smem;
+    int32_t* s_counts = smem;
     int32_t* s_write_pos = smem + n_experts;
 
     const int tid = threadIdx.x;
@@ -576,8 +575,9 @@ moe_fused_permute_kernel(
         int pos = atomicAdd(&s_write_pos[expert], 1);
         int dest = expert_offsets[expert] + pos;
         sorted_token_ids[dest] = token;
-        sorted_flat_idx[dest]  = idx;
-        if (token_to_expanded) token_to_expanded[idx] = dest;
+        sorted_flat_idx[dest] = idx;
+        if (token_to_expanded)
+            token_to_expanded[idx] = dest;
     }
 }
 
@@ -587,12 +587,14 @@ moe_fused_permute_kernel(
 
 __global__ void zero_int32_kernel(int32_t* data, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) data[idx] = 0;
+    if (idx < n)
+        data[idx] = 0;
 }
 
 __global__ void zero_float_kernel(float* data, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) data[idx] = 0.0f;
+    if (idx < n)
+        data[idx] = 0.0f;
 }
 
 // ============================================================================
@@ -637,13 +639,9 @@ static Tensor make_tensor_2d(void* data, QType dtype, int64_t d0, int64_t d1, bo
 // Public API: moe_topk_gating
 // ============================================================================
 
-void moe_topk_gating(const Tensor& gate_logits, int top_k,
-                     MoeRoutingResult& result,
-                     cudaStream_t stream,
-                     bool use_sigmoid,
-                     bool normalize_weights,
-                     const void* score_bias) {
-    const int n_tokens  = static_cast<int>(gate_logits.shape[0]);
+void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingResult& result, cudaStream_t stream,
+                     bool use_sigmoid, bool normalize_weights, const void* score_bias) {
+    const int n_tokens = static_cast<int>(gate_logits.shape[0]);
     const int n_experts = static_cast<int>(gate_logits.shape[1]);
     const float* d_logits = static_cast<const float*>(gate_logits.data);
     const int total_assignments = n_tokens * top_k;
@@ -652,8 +650,7 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
 
     auto check_alloc = [](cudaError_t err, const char* name) -> bool {
         if (err != cudaSuccess) {
-            IMP_LOG_ERROR("moe_topk_gating: cudaMalloc failed for %s: %s",
-                          name, cudaGetErrorString(err));
+            IMP_LOG_ERROR("moe_topk_gating: cudaMalloc failed for %s: %s", name, cudaGetErrorString(err));
             return false;
         }
         return true;
@@ -661,14 +658,14 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
 
     // expert_indices: [n_tokens, top_k] int32
     int32_t* d_expert_indices = nullptr;
-    if (!check_alloc(cudaMalloc(&d_expert_indices,
-            static_cast<size_t>(total_assignments) * sizeof(int32_t)), "expert_indices"))
+    if (!check_alloc(cudaMalloc(&d_expert_indices, static_cast<size_t>(total_assignments) * sizeof(int32_t)),
+                     "expert_indices"))
         return;
 
     // expert_weights: [n_tokens, top_k] float
     float* d_expert_weights = nullptr;
-    if (!check_alloc(cudaMalloc(&d_expert_weights,
-            static_cast<size_t>(total_assignments) * sizeof(float)), "expert_weights")) {
+    if (!check_alloc(cudaMalloc(&d_expert_weights, static_cast<size_t>(total_assignments) * sizeof(float)),
+                     "expert_weights")) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_expert_indices));
         return;
     }
@@ -677,7 +674,8 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
     // We allocate 2x to hold a parallel sorted_flat_idx array right after.
     int32_t* d_sorted_token_ids = nullptr;
     if (!check_alloc(cudaMalloc(&d_sorted_token_ids,
-            static_cast<size_t>(total_assignments) * 2 * sizeof(int32_t)), "sorted_token_ids")) {
+                                static_cast<size_t>(total_assignments) * 2 * sizeof(int32_t)),
+                     "sorted_token_ids")) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_expert_indices));
         IMP_CUDA_CHECK_LOG(cudaFree(d_expert_weights));
         return;
@@ -686,8 +684,8 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
 
     // expert_offsets: [n_experts + 1] int32
     int32_t* d_expert_offsets = nullptr;
-    if (!check_alloc(cudaMalloc(&d_expert_offsets,
-            static_cast<size_t>(n_experts + 1) * sizeof(int32_t)), "expert_offsets")) {
+    if (!check_alloc(cudaMalloc(&d_expert_offsets, static_cast<size_t>(n_experts + 1) * sizeof(int32_t)),
+                     "expert_offsets")) {
         IMP_CUDA_CHECK_LOG(cudaFree(d_expert_indices));
         IMP_CUDA_CHECK_LOG(cudaFree(d_expert_weights));
         IMP_CUDA_CHECK_LOG(cudaFree(d_sorted_token_ids));
@@ -696,56 +694,53 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
 
     // ---- Kernel 1: Softmax + top-k selection per token ----
     int probs_arrays = score_bias ? 2 : 1;
-    size_t smem_gating = static_cast<size_t>(n_experts) * probs_arrays * sizeof(float)
-                       + static_cast<size_t>(top_k) * sizeof(float)
-                       + static_cast<size_t>(top_k) * sizeof(int32_t);
+    size_t smem_gating = static_cast<size_t>(n_experts) * probs_arrays * sizeof(float) +
+                         static_cast<size_t>(top_k) * sizeof(float) +
+                         static_cast<size_t>(top_k) * sizeof(int32_t);
 
-    topk_gating_kernel<<<n_tokens, BLOCK_SIZE, smem_gating, stream>>>(
-        d_logits, n_experts, top_k, d_expert_indices, d_expert_weights, use_sigmoid, normalize_weights,
-        static_cast<const half*>(score_bias));
+    topk_gating_kernel<<<n_tokens, BLOCK_SIZE, smem_gating, stream>>>(d_logits, n_experts, top_k,
+                                                                      d_expert_indices, d_expert_weights,
+                                                                      use_sigmoid, normalize_weights,
+                                                                      static_cast<const half*>(score_bias));
 
     // ---- Fused count + scan + scatter (single kernel) ----
     size_t smem_permute = static_cast<size_t>(n_experts) * 2 * sizeof(int32_t);
-    moe_fused_permute_kernel<<<1, BLOCK_SIZE, smem_permute, stream>>>(
-        d_expert_indices, n_tokens, top_k, n_experts,
-        d_sorted_token_ids, d_sorted_flat_idx, d_expert_offsets, nullptr);
+    moe_fused_permute_kernel<<<1, BLOCK_SIZE, smem_permute, stream>>>(d_expert_indices, n_tokens, top_k,
+                                                                      n_experts, d_sorted_token_ids,
+                                                                      d_sorted_flat_idx, d_expert_offsets,
+                                                                      nullptr);
 
     // ---- Fill result struct ----
-    result.expert_indices = make_tensor_2d(d_expert_indices, QType::INT32,
-                                           n_tokens, top_k, true);
-    result.expert_weights = make_tensor_2d(d_expert_weights, QType::F32,
-                                           n_tokens, top_k, true);
+    result.expert_indices = make_tensor_2d(d_expert_indices, QType::INT32, n_tokens, top_k, true);
+    result.expert_weights = make_tensor_2d(d_expert_weights, QType::F32, n_tokens, top_k, true);
     // sorted_token_ids: we expose the full allocation (includes flat_idx)
     // but the tensor shape only covers the token IDs part.
-    result.sorted_token_ids = make_tensor_1d(d_sorted_token_ids, QType::INT32,
-                                             total_assignments, true);
-    result.expert_offsets = make_tensor_1d(d_expert_offsets, QType::INT32,
-                                           n_experts + 1, true);
+    result.sorted_token_ids = make_tensor_1d(d_sorted_token_ids, QType::INT32, total_assignments, true);
+    result.expert_offsets = make_tensor_1d(d_expert_offsets, QType::INT32, n_experts + 1, true);
 }
 
 // ============================================================================
 // Public API: moe_gather
 // ============================================================================
 
-void moe_gather(const Tensor& input, const MoeRoutingResult& routing,
-                Tensor& gathered, cudaStream_t stream) {
+void moe_gather(const Tensor& input, const MoeRoutingResult& routing, Tensor& gathered, cudaStream_t stream) {
     const int n_tokens_orig = static_cast<int>(input.shape[0]);
-    const int d_model       = static_cast<int>(input.shape[1]);
-    const int total_tokens  = static_cast<int>(routing.sorted_token_ids.shape[0]);
+    const int d_model = static_cast<int>(input.shape[1]);
+    const int total_tokens = static_cast<int>(routing.sorted_token_ids.shape[0]);
     const int32_t* d_sorted = static_cast<const int32_t*>(routing.sorted_token_ids.data);
 
     (void)n_tokens_orig;
 
     if (input.qtype == QType::F16) {
         const half* d_input = static_cast<const half*>(input.data);
-        half* d_gathered    = static_cast<half*>(gathered.data);
-        moe_gather_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(
-            d_input, d_sorted, d_gathered, total_tokens, d_model);
+        half* d_gathered = static_cast<half*>(gathered.data);
+        moe_gather_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(d_input, d_sorted, d_gathered,
+                                                                        total_tokens, d_model);
     } else {
         const float* d_input = static_cast<const float*>(input.data);
-        float* d_gathered    = static_cast<float*>(gathered.data);
-        moe_gather_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(
-            d_input, d_sorted, d_gathered, total_tokens, d_model);
+        float* d_gathered = static_cast<float*>(gathered.data);
+        moe_gather_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(d_input, d_sorted, d_gathered,
+                                                                        total_tokens, d_model);
     }
 }
 
@@ -753,11 +748,11 @@ void moe_gather(const Tensor& input, const MoeRoutingResult& routing,
 // Public API: moe_scatter
 // ============================================================================
 
-void moe_scatter(const Tensor& expert_output, const MoeRoutingResult& routing,
-                 Tensor& output, cudaStream_t stream) {
-    const int d_model      = static_cast<int>(expert_output.shape[1]);
+void moe_scatter(const Tensor& expert_output, const MoeRoutingResult& routing, Tensor& output,
+                 cudaStream_t stream) {
+    const int d_model = static_cast<int>(expert_output.shape[1]);
     const int total_tokens = static_cast<int>(routing.sorted_token_ids.shape[0]);
-    const int n_tokens     = static_cast<int>(output.shape[0]);
+    const int n_tokens = static_cast<int>(output.shape[0]);
 
     const int32_t* d_sorted_token_ids = static_cast<const int32_t*>(routing.sorted_token_ids.data);
     // The sorted_flat_idx array is stored immediately after sorted_token_ids
@@ -775,14 +770,14 @@ void moe_scatter(const Tensor& expert_output, const MoeRoutingResult& routing,
 
     if (expert_output.qtype == QType::F16) {
         const half* d_expert_out = static_cast<const half*>(expert_output.data);
-        moe_scatter_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(
-            d_expert_out, d_sorted_token_ids, d_sorted_flat_idx,
-            d_expert_weights, d_output, total_tokens, d_model);
+        moe_scatter_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(d_expert_out, d_sorted_token_ids,
+                                                                         d_sorted_flat_idx, d_expert_weights,
+                                                                         d_output, total_tokens, d_model);
     } else {
         const float* d_expert_out = static_cast<const float*>(expert_output.data);
-        moe_scatter_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(
-            d_expert_out, d_sorted_token_ids, d_sorted_flat_idx,
-            d_expert_weights, d_output, total_tokens, d_model);
+        moe_scatter_kernel_impl<<<total_tokens, BLOCK_SIZE, 0, stream>>>(d_expert_out, d_sorted_token_ids,
+                                                                         d_sorted_flat_idx, d_expert_weights,
+                                                                         d_output, total_tokens, d_model);
     }
 }
 
@@ -790,9 +785,7 @@ void moe_scatter(const Tensor& expert_output, const MoeRoutingResult& routing,
 // MoeRoutingBuffers -- pre-allocated pool
 // ============================================================================
 
-MoeRoutingBuffers::~MoeRoutingBuffers() {
-    free();
-}
+MoeRoutingBuffers::~MoeRoutingBuffers() { free(); }
 
 void MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val) {
     free();
@@ -803,13 +796,13 @@ void MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val) {
     int total_assignments = max_tokens * top_k;
     auto align256 = [](size_t x) -> size_t { return (x + 255) & ~size_t(255); };
 
-    size_t indices_sz  = align256(static_cast<size_t>(total_assignments) * sizeof(int32_t));
-    size_t weights_sz  = align256(static_cast<size_t>(total_assignments) * sizeof(float));
-    size_t sorted_sz   = align256(static_cast<size_t>(total_assignments) * 2 * sizeof(int32_t));
-    size_t offsets_sz  = align256(static_cast<size_t>(max_experts + 1) * sizeof(int32_t));
-    size_t counts_sz   = align256(static_cast<size_t>(max_experts) * sizeof(int32_t));
-    size_t wpos_sz     = align256(static_cast<size_t>(max_experts) * sizeof(int32_t));
-    size_t t2e_sz      = align256(static_cast<size_t>(total_assignments) * sizeof(int32_t));
+    size_t indices_sz = align256(static_cast<size_t>(total_assignments) * sizeof(int32_t));
+    size_t weights_sz = align256(static_cast<size_t>(total_assignments) * sizeof(float));
+    size_t sorted_sz = align256(static_cast<size_t>(total_assignments) * 2 * sizeof(int32_t));
+    size_t offsets_sz = align256(static_cast<size_t>(max_experts + 1) * sizeof(int32_t));
+    size_t counts_sz = align256(static_cast<size_t>(max_experts) * sizeof(int32_t));
+    size_t wpos_sz = align256(static_cast<size_t>(max_experts) * sizeof(int32_t));
+    size_t t2e_sz = align256(static_cast<size_t>(total_assignments) * sizeof(int32_t));
 
     pool_size = indices_sz + weights_sz + sorted_sz + offsets_sz + counts_sz + wpos_sz + t2e_sz;
     cudaError_t err = cudaMalloc(&pool, pool_size);
@@ -820,13 +813,20 @@ void MoeRoutingBuffers::allocate(int max_tok, int max_exp, int top_k_val) {
     }
 
     char* ptr = static_cast<char*>(pool);
-    expert_indices    = reinterpret_cast<int32_t*>(ptr); ptr += indices_sz;
-    expert_weights    = reinterpret_cast<float*>(ptr);   ptr += weights_sz;
-    sorted_token_ids  = reinterpret_cast<int32_t*>(ptr); ptr += sorted_sz;
-    expert_offsets    = reinterpret_cast<int32_t*>(ptr);  ptr += offsets_sz;
-    expert_counts     = reinterpret_cast<int32_t*>(ptr);  ptr += counts_sz;
-    expert_write_pos  = reinterpret_cast<int32_t*>(ptr);  ptr += wpos_sz;
-    token_to_expanded = reinterpret_cast<int32_t*>(ptr);  ptr += t2e_sz;
+    expert_indices = reinterpret_cast<int32_t*>(ptr);
+    ptr += indices_sz;
+    expert_weights = reinterpret_cast<float*>(ptr);
+    ptr += weights_sz;
+    sorted_token_ids = reinterpret_cast<int32_t*>(ptr);
+    ptr += sorted_sz;
+    expert_offsets = reinterpret_cast<int32_t*>(ptr);
+    ptr += offsets_sz;
+    expert_counts = reinterpret_cast<int32_t*>(ptr);
+    ptr += counts_sz;
+    expert_write_pos = reinterpret_cast<int32_t*>(ptr);
+    ptr += wpos_sz;
+    token_to_expanded = reinterpret_cast<int32_t*>(ptr);
+    ptr += t2e_sz;
 }
 
 void MoeRoutingBuffers::free() {
@@ -848,55 +848,47 @@ void MoeRoutingBuffers::free() {
 // moe_topk_gating with pre-allocated buffers
 // ============================================================================
 
-void moe_topk_gating(const Tensor& gate_logits, int top_k,
-                     MoeRoutingBuffers& buffers,
-                     MoeRoutingResult& result,
-                     cudaStream_t stream,
-                     bool use_sigmoid,
-                     bool normalize_weights,
-                     const void* score_bias,
-                     bool skip_sorting) {
-    const int n_tokens  = static_cast<int>(gate_logits.shape[0]);
+void moe_topk_gating(const Tensor& gate_logits, int top_k, MoeRoutingBuffers& buffers,
+                     MoeRoutingResult& result, cudaStream_t stream, bool use_sigmoid, bool normalize_weights,
+                     const void* score_bias, bool skip_sorting) {
+    const int n_tokens = static_cast<int>(gate_logits.shape[0]);
     const int n_experts = static_cast<int>(gate_logits.shape[1]);
     const float* d_logits = static_cast<const float*>(gate_logits.data);
     const int total_assignments = n_tokens * top_k;
 
-    int32_t* d_expert_indices    = buffers.expert_indices;
-    float*   d_expert_weights    = buffers.expert_weights;
-    int32_t* d_sorted_token_ids  = buffers.sorted_token_ids;
-    int32_t* d_expert_offsets    = buffers.expert_offsets;
+    int32_t* d_expert_indices = buffers.expert_indices;
+    float* d_expert_weights = buffers.expert_weights;
+    int32_t* d_sorted_token_ids = buffers.sorted_token_ids;
+    int32_t* d_expert_offsets = buffers.expert_offsets;
 
     // Kernel 1: Softmax + top-k selection per token
     int probs_arrays = score_bias ? 2 : 1;
-    size_t smem_gating = static_cast<size_t>(n_experts) * probs_arrays * sizeof(float)
-                       + static_cast<size_t>(top_k) * sizeof(float)
-                       + static_cast<size_t>(top_k) * sizeof(int32_t);
+    size_t smem_gating = static_cast<size_t>(n_experts) * probs_arrays * sizeof(float) +
+                         static_cast<size_t>(top_k) * sizeof(float) +
+                         static_cast<size_t>(top_k) * sizeof(int32_t);
 
-    topk_gating_kernel<<<n_tokens, BLOCK_SIZE, smem_gating, stream>>>(
-        d_logits, n_experts, top_k, d_expert_indices, d_expert_weights, use_sigmoid, normalize_weights,
-        static_cast<const half*>(score_bias));
+    topk_gating_kernel<<<n_tokens, BLOCK_SIZE, smem_gating, stream>>>(d_logits, n_experts, top_k,
+                                                                      d_expert_indices, d_expert_weights,
+                                                                      use_sigmoid, normalize_weights,
+                                                                      static_cast<const half*>(score_bias));
 
     if (!skip_sorting) {
         int32_t* d_sorted_flat_idx = d_sorted_token_ids + total_assignments;
         size_t smem_bytes = static_cast<size_t>(n_experts) * 2 * sizeof(int32_t);
 
-        moe_fused_permute_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(
-            d_expert_indices, n_tokens, top_k, n_experts,
-            d_sorted_token_ids, d_sorted_flat_idx, d_expert_offsets,
-            buffers.token_to_expanded);
+        moe_fused_permute_kernel<<<1, BLOCK_SIZE, smem_bytes, stream>>>(d_expert_indices, n_tokens, top_k,
+                                                                        n_experts, d_sorted_token_ids,
+                                                                        d_sorted_flat_idx, d_expert_offsets,
+                                                                        buffers.token_to_expanded);
     }
 
     // Fill result struct (no ownership -- memory belongs to buffers)
     result.owns_memory = false;
     result.token_to_expanded = buffers.token_to_expanded;
-    result.expert_indices = make_tensor_2d(d_expert_indices, QType::INT32,
-                                           n_tokens, top_k, true);
-    result.expert_weights = make_tensor_2d(d_expert_weights, QType::F32,
-                                           n_tokens, top_k, true);
-    result.sorted_token_ids = make_tensor_1d(d_sorted_token_ids, QType::INT32,
-                                             total_assignments, true);
-    result.expert_offsets = make_tensor_1d(d_expert_offsets, QType::INT32,
-                                           n_experts + 1, true);
+    result.expert_indices = make_tensor_2d(d_expert_indices, QType::INT32, n_tokens, top_k, true);
+    result.expert_weights = make_tensor_2d(d_expert_weights, QType::F32, n_tokens, top_k, true);
+    result.sorted_token_ids = make_tensor_1d(d_sorted_token_ids, QType::INT32, total_assignments, true);
+    result.expert_offsets = make_tensor_1d(d_expert_offsets, QType::INT32, n_experts + 1, true);
 }
 
 // ============================================================================
@@ -904,32 +896,33 @@ void moe_topk_gating(const Tensor& gate_logits, int top_k,
 // Eliminates the FP32 intermediate buffer and fp32_to_fp16 conversion kernel.
 // ============================================================================
 
-__global__ void moe_weighted_sum_residual_kernel(
-        const half* __restrict__ expert_outputs,
-        const float* __restrict__ expert_weights,
-        const half* residual,  // may be nullptr, may alias output
-        half* output,          // no __restrict__ — may alias residual
-        int d_model, int top_k) {
+__global__ void moe_weighted_sum_residual_kernel(const half* __restrict__ expert_outputs,
+                                                 const float* __restrict__ expert_weights,
+                                                 const half* residual,  // may be nullptr, may alias output
+                                                 half* output,  // no __restrict__ — may alias residual
+                                                 int d_model, int top_k) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= d_model) return;
+    if (i >= d_model)
+        return;
 
     float sum = 0.0f;
     for (int k = 0; k < top_k; ++k) {
         sum += expert_weights[k] * __half2float(expert_outputs[k * d_model + i]);
     }
-    if (residual) sum += __half2float(residual[i]);
+    if (residual)
+        sum += __half2float(residual[i]);
     output[i] = __float2half(sum);
 }
 
-void moe_weighted_sum_residual(const void* expert_outputs, const float* expert_weights,
-                               const void* residual, void* output,
-                               int d_model, int top_k, cudaStream_t stream) {
+void moe_weighted_sum_residual(const void* expert_outputs, const float* expert_weights, const void* residual,
+                               void* output, int d_model, int top_k, cudaStream_t stream) {
     int threads = 256;
     int blocks = (d_model + threads - 1) / threads;
-    moe_weighted_sum_residual_kernel<<<blocks, threads, 0, stream>>>(
-        static_cast<const half*>(expert_outputs), expert_weights,
-        static_cast<const half*>(residual),
-        static_cast<half*>(output), d_model, top_k);
+    moe_weighted_sum_residual_kernel<<<blocks, threads, 0, stream>>>(static_cast<const half*>(expert_outputs),
+                                                                     expert_weights,
+                                                                     static_cast<const half*>(residual),
+                                                                     static_cast<half*>(output), d_model,
+                                                                     top_k);
 }
 
 // ============================================================================
@@ -942,12 +935,12 @@ void moe_weighted_sum_residual(const void* expert_outputs, const float* expert_w
 // ============================================================================
 
 __global__ void moe_scatter_fused_residual_kernel(
-        const half* __restrict__ expert_output,  // [expanded, d_model]
-        const int32_t* __restrict__ token_to_expanded, // [n_tokens * top_k]
-        const float* __restrict__ expert_weights,      // [n_tokens * top_k]
-        const half* residual,   // [n_tokens, d_model] or nullptr
-        half* output,           // [n_tokens, d_model]
-        int d_model, int top_k) {
+    const half* __restrict__ expert_output,         // [expanded, d_model]
+    const int32_t* __restrict__ token_to_expanded,  // [n_tokens * top_k]
+    const float* __restrict__ expert_weights,       // [n_tokens * top_k]
+    const half* residual,                           // [n_tokens, d_model] or nullptr
+    half* output,                                   // [n_tokens, d_model]
+    int d_model, int top_k) {
     const int token = blockIdx.x;
     const int base_flat = token * top_k;
 
@@ -958,34 +951,28 @@ __global__ void moe_scatter_fused_residual_kernel(
             float w = expert_weights[base_flat + k];
             sum += w * __half2float(expert_output[static_cast<int64_t>(expanded_row) * d_model + col]);
         }
-        if (residual) sum += __half2float(residual[static_cast<int64_t>(token) * d_model + col]);
+        if (residual)
+            sum += __half2float(residual[static_cast<int64_t>(token) * d_model + col]);
         output[static_cast<int64_t>(token) * d_model + col] = __float2half(sum);
     }
 }
 
-void moe_scatter_fused_residual(const void* expert_output,
-                                 const int32_t* token_to_expanded,
-                                 const float* expert_weights,
-                                 const void* residual, void* output,
-                                 int n_tokens, int d_model, int top_k,
-                                 cudaStream_t stream) {
+void moe_scatter_fused_residual(const void* expert_output, const int32_t* token_to_expanded,
+                                const float* expert_weights, const void* residual, void* output, int n_tokens,
+                                int d_model, int top_k, cudaStream_t stream) {
     int threads = 256;
     moe_scatter_fused_residual_kernel<<<n_tokens, threads, 0, stream>>>(
         static_cast<const half*>(expert_output), token_to_expanded, expert_weights,
-        static_cast<const half*>(residual), static_cast<half*>(output),
-        d_model, top_k);
+        static_cast<const half*>(residual), static_cast<half*>(output), d_model, top_k);
 }
 
 // FP32-input variant: expert_output is float* (not half*).
 // Used by IMP_GEMMA4_FP32_EXPERT_DOWN to test if FP16 truncation at down GEMM
 // output is the source of the L3+ precision drift.
 __global__ void moe_scatter_fused_residual_fp32in_kernel(
-        const float* __restrict__ expert_output_fp32,  // [expanded, d_model] FP32
-        const int32_t* __restrict__ token_to_expanded,
-        const float* __restrict__ expert_weights,
-        const half* residual,
-        half* output,
-        int d_model, int top_k) {
+    const float* __restrict__ expert_output_fp32,  // [expanded, d_model] FP32
+    const int32_t* __restrict__ token_to_expanded, const float* __restrict__ expert_weights,
+    const half* residual, half* output, int d_model, int top_k) {
     const int token = blockIdx.x;
     const int base_flat = token * top_k;
 
@@ -996,63 +983,49 @@ __global__ void moe_scatter_fused_residual_fp32in_kernel(
             float w = expert_weights[base_flat + k];
             sum += w * expert_output_fp32[static_cast<int64_t>(expanded_row) * d_model + col];
         }
-        if (residual) sum += __half2float(residual[static_cast<int64_t>(token) * d_model + col]);
+        if (residual)
+            sum += __half2float(residual[static_cast<int64_t>(token) * d_model + col]);
         output[static_cast<int64_t>(token) * d_model + col] = __float2half(sum);
     }
 }
 
-void moe_scatter_fused_residual_fp32in(const void* expert_output_fp32,
-                                        const int32_t* token_to_expanded,
-                                        const float* expert_weights,
-                                        const void* residual, void* output,
-                                        int n_tokens, int d_model, int top_k,
-                                        cudaStream_t stream) {
+void moe_scatter_fused_residual_fp32in(const void* expert_output_fp32, const int32_t* token_to_expanded,
+                                       const float* expert_weights, const void* residual, void* output,
+                                       int n_tokens, int d_model, int top_k, cudaStream_t stream) {
     int threads = 256;
     moe_scatter_fused_residual_fp32in_kernel<<<n_tokens, threads, 0, stream>>>(
         static_cast<const float*>(expert_output_fp32), token_to_expanded, expert_weights,
-        static_cast<const half*>(residual), static_cast<half*>(output),
-        d_model, top_k);
+        static_cast<const half*>(residual), static_cast<half*>(output), d_model, top_k);
 }
 
 // ============================================================================
 // Fused gate GEMV + topk routing launcher
 // ============================================================================
 
-void moe_gate_topk_fused(const void* W_gate, const void* x,
-                         int n_experts, int d_model, int top_k,
-                         MoeRoutingBuffers& buffers,
-                         MoeRoutingResult& result,
-                         cudaStream_t stream,
-                         bool use_sigmoid,
-                         bool normalize_weights,
-                         const void* score_bias) {
+void moe_gate_topk_fused(const void* W_gate, const void* x, int n_experts, int d_model, int top_k,
+                         MoeRoutingBuffers& buffers, MoeRoutingResult& result, cudaStream_t stream,
+                         bool use_sigmoid, bool normalize_weights, const void* score_bias) {
     // Shared memory: logits + optional sel_probs + topk_val + topk_idx
     //                + warp scratch (float[8] + int[8])
     constexpr int NUM_WARPS = BLOCK_SIZE / WARP_SIZE;
     int probs_arrays = score_bias ? 2 : 1;
-    size_t smem = static_cast<size_t>(n_experts) * probs_arrays * sizeof(float)
-                + static_cast<size_t>(top_k) * sizeof(float)
-                + static_cast<size_t>(top_k) * sizeof(int32_t)
-                + NUM_WARPS * sizeof(float)
-                + NUM_WARPS * sizeof(int);
+    size_t smem = static_cast<size_t>(n_experts) * probs_arrays * sizeof(float) +
+                  static_cast<size_t>(top_k) * sizeof(float) + static_cast<size_t>(top_k) * sizeof(int32_t) +
+                  NUM_WARPS * sizeof(float) + NUM_WARPS * sizeof(int);
 
-    gemv_gate_topk_fused_kernel<<<1, BLOCK_SIZE, smem, stream>>>(
-        static_cast<const half*>(W_gate), static_cast<const half*>(x),
-        n_experts, d_model, top_k,
-        buffers.expert_indices, buffers.expert_weights,
-        use_sigmoid, normalize_weights,
-        static_cast<const half*>(score_bias));
+    gemv_gate_topk_fused_kernel<<<1, BLOCK_SIZE, smem, stream>>>(static_cast<const half*>(W_gate),
+                                                                 static_cast<const half*>(x), n_experts,
+                                                                 d_model, top_k, buffers.expert_indices,
+                                                                 buffers.expert_weights, use_sigmoid,
+                                                                 normalize_weights,
+                                                                 static_cast<const half*>(score_bias));
 
     // Fill result struct (no ownership — memory belongs to buffers)
     result.owns_memory = false;
-    result.expert_indices = make_tensor_2d(buffers.expert_indices, QType::INT32,
-                                           1, top_k, true);
-    result.expert_weights = make_tensor_2d(buffers.expert_weights, QType::F32,
-                                           1, top_k, true);
-    result.sorted_token_ids = make_tensor_1d(buffers.sorted_token_ids, QType::INT32,
-                                             top_k, true);
-    result.expert_offsets = make_tensor_1d(buffers.expert_offsets, QType::INT32,
-                                           n_experts + 1, true);
+    result.expert_indices = make_tensor_2d(buffers.expert_indices, QType::INT32, 1, top_k, true);
+    result.expert_weights = make_tensor_2d(buffers.expert_weights, QType::F32, 1, top_k, true);
+    result.sorted_token_ids = make_tensor_1d(buffers.sorted_token_ids, QType::INT32, top_k, true);
+    result.expert_offsets = make_tensor_1d(buffers.expert_offsets, QType::INT32, n_experts + 1, true);
 }
 
-} // namespace imp
+}  // namespace imp

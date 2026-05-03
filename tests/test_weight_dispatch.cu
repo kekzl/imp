@@ -47,7 +47,7 @@ protected:
 };
 
 // Allocate and copy helper
-template<typename T>
+template <typename T>
 T* dev_alloc_copy(const std::vector<T>& h, cudaStream_t s = nullptr) {
     T* d;
     cudaMalloc(&d, h.size() * sizeof(T));
@@ -55,14 +55,14 @@ T* dev_alloc_copy(const std::vector<T>& h, cudaStream_t s = nullptr) {
     return d;
 }
 
-template<typename T>
+template <typename T>
 std::vector<T> dev_read(const T* d_ptr, size_t n) {
     std::vector<T> h(n);
     cudaMemcpy(h.data(), d_ptr, n * sizeof(T), cudaMemcpyDeviceToHost);
     return h;
 }
 
-} // namespace
+}  // namespace
 
 // ===========================================================================
 // FP16 parity (existing test, kept for completeness)
@@ -72,13 +72,17 @@ TEST_F(WeightDispatchTest, FP16_GemmMatchesDirect) {
     // W [M=16, K=64], X [N=32, K=64], Y [M=16, N=32]
     const int M = 16, N = 32, K = 64;
     std::vector<half> h_w(M * K), h_x(N * K);
-    for (int i = 0; i < M * K; ++i) h_w[i] = __float2half((i % 7) * 0.01f);
-    for (int i = 0; i < N * K; ++i) h_x[i] = __float2half((i % 11) * 0.01f);
+    for (int i = 0; i < M * K; ++i)
+        h_w[i] = __float2half((i % 7) * 0.01f);
+    for (int i = 0; i < N * K; ++i)
+        h_x[i] = __float2half((i % 11) * 0.01f);
 
-    half* d_w  = dev_alloc_copy(h_w);
-    half* d_x  = dev_alloc_copy(h_x);
-    half* d_y_direct; cudaMalloc(&d_y_direct,  M * N * sizeof(half));
-    half* d_y_disp;   cudaMalloc(&d_y_disp,    M * N * sizeof(half));
+    half* d_w = dev_alloc_copy(h_w);
+    half* d_x = dev_alloc_copy(h_x);
+    half* d_y_direct;
+    cudaMalloc(&d_y_direct, M * N * sizeof(half));
+    half* d_y_disp;
+    cudaMalloc(&d_y_disp, M * N * sizeof(half));
 
     int64_t wshape[2] = {M, K}, xshape[2] = {N, K}, yshape[2] = {M, N};
     Tensor w_t(d_w, QType::F16, 2, wshape, true);
@@ -92,40 +96,46 @@ TEST_F(WeightDispatchTest, FP16_GemmMatchesDirect) {
     WeightHandle h;
     h.kind = TensorKind::WQ;
     h.primary_tier = StorageTier::FP16;
-    h.shape[0] = M;  h.shape[1] = K;
+    h.shape[0] = M;
+    h.shape[1] = K;
     h.payload.fp16.data = d_w;
 
-    gemm_dispatch(lt_, h, x_t, y_disp, 1.0f, 0.0f,
-                  workspace_, kWorkspaceBytes, stream_);
+    gemm_dispatch(lt_, h, x_t, y_disp, 1.0f, 0.0f, workspace_, kWorkspaceBytes, stream_);
     cudaStreamSynchronize(stream_);
 
     auto h_direct = dev_read(d_y_direct, M * N);
-    auto h_disp   = dev_read(d_y_disp,   M * N);
+    auto h_disp = dev_read(d_y_disp, M * N);
     for (int i = 0; i < M * N; ++i)
         EXPECT_EQ(__half_as_ushort(h_direct[i]), __half_as_ushort(h_disp[i]))
             << "FP16 GEMM mismatch at i=" << i;
 
-    cudaFree(d_w); cudaFree(d_x);
-    cudaFree(d_y_direct); cudaFree(d_y_disp);
+    cudaFree(d_w);
+    cudaFree(d_x);
+    cudaFree(d_y_direct);
+    cudaFree(d_y_disp);
 }
 
 // FP16 gemv_dispatch parity (M=1)
 TEST_F(WeightDispatchTest, FP16_GemvMatchesDirect) {
     const int M = 16, K = 64;
     std::vector<half> h_w(M * K), h_x(K);
-    for (int i = 0; i < M * K; ++i) h_w[i] = __float2half((i % 7) * 0.01f);
-    for (int i = 0; i < K; ++i)     h_x[i] = __float2half((i % 11) * 0.01f);
+    for (int i = 0; i < M * K; ++i)
+        h_w[i] = __float2half((i % 7) * 0.01f);
+    for (int i = 0; i < K; ++i)
+        h_x[i] = __float2half((i % 11) * 0.01f);
 
-    half* d_w  = dev_alloc_copy(h_w);
-    half* d_x  = dev_alloc_copy(h_x);
-    half* d_y_direct; cudaMalloc(&d_y_direct, M * sizeof(half));
-    half* d_y_disp;   cudaMalloc(&d_y_disp,   M * sizeof(half));
+    half* d_w = dev_alloc_copy(h_w);
+    half* d_x = dev_alloc_copy(h_x);
+    half* d_y_direct;
+    cudaMalloc(&d_y_direct, M * sizeof(half));
+    half* d_y_disp;
+    cudaMalloc(&d_y_disp, M * sizeof(half));
 
     int64_t wshape[2] = {M, K}, xshape[2] = {1, K}, yshape[2] = {M, 1};
     Tensor w_t(d_w, QType::F16, 2, wshape, true);
     Tensor x_t(d_x, QType::F16, 2, xshape, true);
     Tensor y_direct(d_y_direct, QType::F16, 2, yshape, true);
-    Tensor y_disp(d_y_disp,   QType::F16, 2, yshape, true);
+    Tensor y_disp(d_y_disp, QType::F16, 2, yshape, true);
 
     gemm(w_t, x_t, y_direct, 1.0f, 0.0f, stream_);
     cudaStreamSynchronize(stream_);
@@ -133,20 +143,23 @@ TEST_F(WeightDispatchTest, FP16_GemvMatchesDirect) {
     WeightHandle h;
     h.kind = TensorKind::WQ;
     h.primary_tier = StorageTier::FP16;
-    h.shape[0] = M;  h.shape[1] = K;
+    h.shape[0] = M;
+    h.shape[1] = K;
     h.payload.fp16.data = d_w;
 
     gemv_dispatch(h, x_t, y_disp, stream_);
     cudaStreamSynchronize(stream_);
 
     auto h_direct = dev_read(d_y_direct, M);
-    auto h_disp   = dev_read(d_y_disp,   M);
+    auto h_disp = dev_read(d_y_disp, M);
     for (int i = 0; i < M; ++i)
         EXPECT_EQ(__half_as_ushort(h_direct[i]), __half_as_ushort(h_disp[i]))
             << "FP16 GEMV mismatch at i=" << i;
 
-    cudaFree(d_w); cudaFree(d_x);
-    cudaFree(d_y_direct); cudaFree(d_y_disp);
+    cudaFree(d_w);
+    cudaFree(d_x);
+    cudaFree(d_y_direct);
+    cudaFree(d_y_disp);
 }
 
 // ===========================================================================
@@ -167,18 +180,24 @@ TEST_F(WeightDispatchTest, FP8_GemmMatchesDirect) {
 
     // Build FP16 weight and activation, quantize both to FP8
     std::vector<half> h_w_fp16(M * K), h_x_fp16(N * K);
-    for (int i = 0; i < M * K; ++i) h_w_fp16[i] = __float2half((i % 7) * 0.01f);
-    for (int i = 0; i < N * K; ++i) h_x_fp16[i] = __float2half((i % 11) * 0.01f);
+    for (int i = 0; i < M * K; ++i)
+        h_w_fp16[i] = __float2half((i % 7) * 0.01f);
+    for (int i = 0; i < N * K; ++i)
+        h_x_fp16[i] = __float2half((i % 11) * 0.01f);
 
     half* d_w_fp16 = dev_alloc_copy(h_w_fp16);
     half* d_x_fp16 = dev_alloc_copy(h_x_fp16);
 
     // FP8 weight buffer + weight scale
-    void*  d_w_fp8;    cudaMalloc(&d_w_fp8,   M * K * sizeof(__nv_fp8_e4m3));
-    float* d_w_scale;  cudaMalloc(&d_w_scale,  sizeof(float));
+    void* d_w_fp8;
+    cudaMalloc(&d_w_fp8, M * K * sizeof(__nv_fp8_e4m3));
+    float* d_w_scale;
+    cudaMalloc(&d_w_scale, sizeof(float));
     // FP8 activation buffer + activation scale
-    void*  d_x_fp8;    cudaMalloc(&d_x_fp8,   N * K * sizeof(__nv_fp8_e4m3));
-    float* d_x_scale;  cudaMalloc(&d_x_scale,  sizeof(float));
+    void* d_x_fp8;
+    cudaMalloc(&d_x_fp8, N * K * sizeof(__nv_fp8_e4m3));
+    float* d_x_scale;
+    cudaMalloc(&d_x_scale, sizeof(float));
 
     int64_t wshape[2] = {M, K}, xshape[2] = {N, K};
     Tensor w_fp16_t(d_w_fp16, QType::F16, 2, wshape, true);
@@ -191,10 +210,12 @@ TEST_F(WeightDispatchTest, FP8_GemmMatchesDirect) {
     cudaStreamSynchronize(stream_);
 
     int64_t yshape[2] = {M, N};
-    half* d_y_direct; cudaMalloc(&d_y_direct, M * N * sizeof(half));
-    half* d_y_disp;   cudaMalloc(&d_y_disp,   M * N * sizeof(half));
+    half* d_y_direct;
+    cudaMalloc(&d_y_direct, M * N * sizeof(half));
+    half* d_y_disp;
+    cudaMalloc(&d_y_disp, M * N * sizeof(half));
     Tensor y_direct(d_y_direct, QType::F16, 2, yshape, true);
-    Tensor y_disp(d_y_disp,   QType::F16, 2, yshape, true);
+    Tensor y_disp(d_y_disp, QType::F16, 2, yshape, true);
 
     // Direct call: gemm_cublaslt(fp8_x, fp8_w, fp16_y, alpha, beta, aScale, bScale)
     gemm_cublaslt(x_fp8_t, w_fp8_t, y_direct, 1.0f, 0.0f, d_x_scale, d_w_scale, stream_);
@@ -204,8 +225,9 @@ TEST_F(WeightDispatchTest, FP8_GemmMatchesDirect) {
     WeightHandle h;
     h.kind = TensorKind::WQ;
     h.primary_tier = StorageTier::FP8;
-    h.shape[0] = M;  h.shape[1] = K;
-    h.payload.fp8.data    = reinterpret_cast<__nv_fp8_e4m3*>(d_w_fp8);
+    h.shape[0] = M;
+    h.shape[1] = K;
+    h.payload.fp8.data = reinterpret_cast<__nv_fp8_e4m3*>(d_w_fp8);
     h.payload.fp8.d_scale = d_w_scale;
 
     // gemm_dispatch FP8: calls gemm_cublaslt(x, fp8_w, y, alpha, beta, nullptr, d_scale)
@@ -216,20 +238,23 @@ TEST_F(WeightDispatchTest, FP8_GemmMatchesDirect) {
     gemm_cublaslt(x_fp8_t, w_fp8_t, y_direct, 1.0f, 0.0f, nullptr, d_w_scale, stream_);
     cudaStreamSynchronize(stream_);
 
-    gemm_dispatch(lt_, h, x_fp8_t, y_disp, 1.0f, 0.0f,
-                  workspace_, kWorkspaceBytes, stream_);
+    gemm_dispatch(lt_, h, x_fp8_t, y_disp, 1.0f, 0.0f, workspace_, kWorkspaceBytes, stream_);
     cudaStreamSynchronize(stream_);
 
     auto h_direct = dev_read(d_y_direct, M * N);
-    auto h_disp   = dev_read(d_y_disp,   M * N);
+    auto h_disp = dev_read(d_y_disp, M * N);
     for (int i = 0; i < M * N; ++i)
         EXPECT_EQ(__half_as_ushort(h_direct[i]), __half_as_ushort(h_disp[i]))
             << "FP8 GEMM mismatch at i=" << i;
 
-    cudaFree(d_w_fp16); cudaFree(d_x_fp16);
-    cudaFree(d_w_fp8);  cudaFree(d_w_scale);
-    cudaFree(d_x_fp8);  cudaFree(d_x_scale);
-    cudaFree(d_y_direct); cudaFree(d_y_disp);
+    cudaFree(d_w_fp16);
+    cudaFree(d_x_fp16);
+    cudaFree(d_w_fp8);
+    cudaFree(d_w_scale);
+    cudaFree(d_x_fp8);
+    cudaFree(d_x_scale);
+    cudaFree(d_y_direct);
+    cudaFree(d_y_disp);
 }
 
 // gemv_dispatch FP8 tier: single-token decode path.
@@ -239,14 +264,18 @@ TEST_F(WeightDispatchTest, FP8_GemvMatchesDirect) {
     const int M = 32, K = 64;
 
     std::vector<half> h_w_fp16(M * K), h_x(K);
-    for (int i = 0; i < M * K; ++i) h_w_fp16[i] = __float2half((i % 7) * 0.02f);
-    for (int i = 0; i < K;     ++i) h_x[i]     = __float2half((i % 11) * 0.01f);
+    for (int i = 0; i < M * K; ++i)
+        h_w_fp16[i] = __float2half((i % 7) * 0.02f);
+    for (int i = 0; i < K; ++i)
+        h_x[i] = __float2half((i % 11) * 0.01f);
 
     half* d_w_fp16 = dev_alloc_copy(h_w_fp16);
-    half* d_x      = dev_alloc_copy(h_x);
+    half* d_x = dev_alloc_copy(h_x);
 
-    void* d_w_fp8;  cudaMalloc(&d_w_fp8, M * K * sizeof(__nv_fp8_e4m3));
-    float* d_scale; cudaMalloc(&d_scale, sizeof(float));
+    void* d_w_fp8;
+    cudaMalloc(&d_w_fp8, M * K * sizeof(__nv_fp8_e4m3));
+    float* d_scale;
+    cudaMalloc(&d_scale, sizeof(float));
 
     int64_t wshape[2] = {M, K};
     Tensor w_fp16_t(d_w_fp16, QType::F16, 2, wshape, true);
@@ -261,10 +290,12 @@ TEST_F(WeightDispatchTest, FP8_GemvMatchesDirect) {
     int64_t xshape[2] = {1, K}, yshape[2] = {M, 1};
     Tensor x_t(d_x, QType::F16, 2, xshape, true);
 
-    half* d_y_direct; cudaMalloc(&d_y_direct, M * sizeof(half));
-    half* d_y_disp;   cudaMalloc(&d_y_disp,   M * sizeof(half));
+    half* d_y_direct;
+    cudaMalloc(&d_y_direct, M * sizeof(half));
+    half* d_y_disp;
+    cudaMalloc(&d_y_disp, M * sizeof(half));
     Tensor y_direct(d_y_direct, QType::F16, 2, yshape, true);
-    Tensor y_disp(d_y_disp,   QType::F16, 2, yshape, true);
+    Tensor y_disp(d_y_disp, QType::F16, 2, yshape, true);
 
     gemv_fp8(w_fp8_t, x_t, y_direct, host_scale, stream_);
     cudaStreamSynchronize(stream_);
@@ -272,22 +303,26 @@ TEST_F(WeightDispatchTest, FP8_GemvMatchesDirect) {
     WeightHandle h;
     h.kind = TensorKind::WQ;
     h.primary_tier = StorageTier::FP8;
-    h.shape[0] = M;  h.shape[1] = K;
-    h.payload.fp8.data    = reinterpret_cast<__nv_fp8_e4m3*>(d_w_fp8);
+    h.shape[0] = M;
+    h.shape[1] = K;
+    h.payload.fp8.data = reinterpret_cast<__nv_fp8_e4m3*>(d_w_fp8);
     h.payload.fp8.d_scale = d_scale;
 
     gemv_dispatch(h, x_t, y_disp, stream_);
     cudaStreamSynchronize(stream_);
 
     auto h_direct = dev_read(d_y_direct, M);
-    auto h_disp   = dev_read(d_y_disp,   M);
+    auto h_disp = dev_read(d_y_disp, M);
     for (int i = 0; i < M; ++i)
         EXPECT_EQ(__half_as_ushort(h_direct[i]), __half_as_ushort(h_disp[i]))
             << "FP8 GEMV mismatch at i=" << i;
 
-    cudaFree(d_w_fp16); cudaFree(d_x);
-    cudaFree(d_w_fp8);  cudaFree(d_scale);
-    cudaFree(d_y_direct); cudaFree(d_y_disp);
+    cudaFree(d_w_fp16);
+    cudaFree(d_x);
+    cudaFree(d_w_fp8);
+    cudaFree(d_scale);
+    cudaFree(d_y_direct);
+    cudaFree(d_y_disp);
 }
 
 // ===========================================================================
@@ -306,8 +341,10 @@ TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
     const int M = 16, N = 8, K = 64;
 
     std::vector<half> h_w(M * K), h_x(N * K);
-    for (int i = 0; i < M * K; ++i) h_w[i] = __float2half((i % 5) * 0.1f - 0.2f);
-    for (int i = 0; i < N * K; ++i) h_x[i] = __float2half((i % 7) * 0.05f - 0.15f);
+    for (int i = 0; i < M * K; ++i)
+        h_w[i] = __float2half((i % 5) * 0.1f - 0.2f);
+    for (int i = 0; i < N * K; ++i)
+        h_x[i] = __float2half((i % 7) * 0.05f - 0.15f);
 
     half* d_w = dev_alloc_copy(h_w);
     half* d_x = dev_alloc_copy(h_x);
@@ -328,10 +365,12 @@ TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
     int64_t xshape[2] = {N, K}, yshape[2] = {M, N};
     Tensor x_t(d_x, QType::F16, 2, xshape, true);
 
-    half* d_y_direct; cudaMalloc(&d_y_direct, M * N * sizeof(half));
-    half* d_y_disp;   cudaMalloc(&d_y_disp,   M * N * sizeof(half));
+    half* d_y_direct;
+    cudaMalloc(&d_y_direct, M * N * sizeof(half));
+    half* d_y_disp;
+    cudaMalloc(&d_y_disp, M * N * sizeof(half));
     Tensor y_direct(d_y_direct, QType::F16, 2, yshape, true);
-    Tensor y_disp(d_y_disp,   QType::F16, 2, yshape, true);
+    Tensor y_disp(d_y_disp, QType::F16, 2, yshape, true);
 
     gemm_nvfp4(qr, x_t, y_direct, stream_);
     cudaStreamSynchronize(stream_);
@@ -340,31 +379,32 @@ TEST_F(WeightDispatchTest, NVFP4_GemmMatchesDirect) {
     WeightHandle h;
     h.kind = TensorKind::WQ;
     h.primary_tier = StorageTier::NVFP4;
-    h.shape[0] = M;  h.shape[1] = K;
-    h.payload.nvfp4.data         = static_cast<uint8_t*>(qr.packed_data);
+    h.shape[0] = M;
+    h.shape[1] = K;
+    h.payload.nvfp4.data = static_cast<uint8_t*>(qr.packed_data);
     h.payload.nvfp4.block_scales = static_cast<uint8_t*>(qr.micro_scales);
-    h.payload.nvfp4.tensor_scale  = nullptr;   // shim limitation: no device ptr
+    h.payload.nvfp4.tensor_scale = nullptr;  // shim limitation: no device ptr
     h.payload.nvfp4.tensor_scale_2 = nullptr;
 
-    gemm_dispatch(lt_, h, x_t, y_disp, 1.0f, 0.0f,
-                  workspace_, kWorkspaceBytes, stream_);
+    gemm_dispatch(lt_, h, x_t, y_disp, 1.0f, 0.0f, workspace_, kWorkspaceBytes, stream_);
     cudaStreamSynchronize(stream_);
 
     auto h_direct = dev_read(d_y_direct, M * N);
-    auto h_disp   = dev_read(d_y_disp,   M * N);
+    auto h_disp = dev_read(d_y_disp, M * N);
     for (int i = 0; i < M * N; ++i) {
         float vd = __half2float(h_direct[i]);
         float vp = __half2float(h_disp[i]);
         // Same underlying call (gemm_nvfp4 dequant + cuBLAS), expect identical.
         EXPECT_EQ(__half_as_ushort(h_direct[i]), __half_as_ushort(h_disp[i]))
-            << "NVFP4 GEMM dispatch mismatch at i=" << i
-            << " direct=" << vd << " dispatch=" << vp;
+            << "NVFP4 GEMM dispatch mismatch at i=" << i << " direct=" << vd << " dispatch=" << vp;
     }
 
     qr.tensor_scale = saved_ts;  // restore before free
     free_nvfp4_result(qr);
-    cudaFree(d_w); cudaFree(d_x);
-    cudaFree(d_y_direct); cudaFree(d_y_disp);
+    cudaFree(d_w);
+    cudaFree(d_x);
+    cudaFree(d_y_direct);
+    cudaFree(d_y_disp);
 }
 
 // gemv_dispatch NVFP4 tier (M=1): single-token decode.
@@ -373,8 +413,10 @@ TEST_F(WeightDispatchTest, NVFP4_GemvMatchesDirect) {
     const int M = 32, K = 64;
 
     std::vector<half> h_w(M * K), h_x(K);
-    for (int i = 0; i < M * K; ++i) h_w[i] = __float2half((i % 5) * 0.1f - 0.2f);
-    for (int i = 0; i < K;     ++i) h_x[i] = __float2half((i % 7) * 0.05f);
+    for (int i = 0; i < M * K; ++i)
+        h_w[i] = __float2half((i % 5) * 0.1f - 0.2f);
+    for (int i = 0; i < K; ++i)
+        h_x[i] = __float2half((i % 7) * 0.05f);
 
     half* d_w = dev_alloc_copy(h_w);
     half* d_x = dev_alloc_copy(h_x);
@@ -389,8 +431,10 @@ TEST_F(WeightDispatchTest, NVFP4_GemvMatchesDirect) {
     float saved_ts = qr.tensor_scale;
     qr.tensor_scale = 1.0f;  // force same scale in dispatch (phase-2 shim returns 1.0f)
 
-    half* d_y_direct; cudaMalloc(&d_y_direct, M * sizeof(half));
-    half* d_y_disp;   cudaMalloc(&d_y_disp,   M * sizeof(half));
+    half* d_y_direct;
+    cudaMalloc(&d_y_direct, M * sizeof(half));
+    half* d_y_disp;
+    cudaMalloc(&d_y_disp, M * sizeof(half));
 
     gemv_nvfp4_kpar(qr, static_cast<const half*>(d_x), d_y_direct, M, K, stream_);
     cudaStreamSynchronize(stream_);
@@ -402,29 +446,31 @@ TEST_F(WeightDispatchTest, NVFP4_GemvMatchesDirect) {
     WeightHandle h;
     h.kind = TensorKind::WQ;
     h.primary_tier = StorageTier::NVFP4;
-    h.shape[0] = M;  h.shape[1] = K;
-    h.payload.nvfp4.data         = static_cast<uint8_t*>(qr.packed_data);
+    h.shape[0] = M;
+    h.shape[1] = K;
+    h.payload.nvfp4.data = static_cast<uint8_t*>(qr.packed_data);
     h.payload.nvfp4.block_scales = static_cast<uint8_t*>(qr.micro_scales);
-    h.payload.nvfp4.tensor_scale  = nullptr;
+    h.payload.nvfp4.tensor_scale = nullptr;
     h.payload.nvfp4.tensor_scale_2 = nullptr;
 
     gemv_dispatch(h, x_t, y_disp, stream_);
     cudaStreamSynchronize(stream_);
 
     auto h_direct = dev_read(d_y_direct, M);
-    auto h_disp   = dev_read(d_y_disp,   M);
+    auto h_disp = dev_read(d_y_disp, M);
     for (int i = 0; i < M; ++i) {
         float vd = __half2float(h_direct[i]);
         float vp = __half2float(h_disp[i]);
         EXPECT_EQ(__half_as_ushort(h_direct[i]), __half_as_ushort(h_disp[i]))
-            << "NVFP4 GEMV mismatch at i=" << i
-            << " direct=" << vd << " dispatch=" << vp;
+            << "NVFP4 GEMV mismatch at i=" << i << " direct=" << vd << " dispatch=" << vp;
     }
 
     qr.tensor_scale = saved_ts;
     free_nvfp4_result(qr);
-    cudaFree(d_w); cudaFree(d_x);
-    cudaFree(d_y_direct); cudaFree(d_y_disp);
+    cudaFree(d_w);
+    cudaFree(d_x);
+    cudaFree(d_y_direct);
+    cudaFree(d_y_disp);
 }
 
 // ===========================================================================
@@ -449,8 +495,10 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     const int M = 8, N = 16, K = 64;
 
     std::vector<half> h_w(N * K), h_x(M * K);
-    for (int i = 0; i < N * K; ++i) h_w[i] = __float2half((i % 5) * 0.1f - 0.2f);
-    for (int i = 0; i < M * K; ++i) h_x[i] = __float2half((i % 7) * 0.05f - 0.15f);
+    for (int i = 0; i < N * K; ++i)
+        h_w[i] = __float2half((i % 5) * 0.1f - 0.2f);
+    for (int i = 0; i < M * K; ++i)
+        h_x[i] = __float2half((i % 7) * 0.05f - 0.15f);
 
     half* d_w = dev_alloc_copy(h_w);
     half* d_x = dev_alloc_copy(h_x);
@@ -468,37 +516,41 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
 
     // Allocate activation scratch for direct call
     size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
-    size_t act_sf_bytes   = cutlass_nvfp4_sf_size(M, K);
-    size_t ws_needed      = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
+    size_t act_sf_bytes = cutlass_nvfp4_sf_size(M, K);
+    size_t ws_needed = gemm_nvfp4_cutlass_sm120_workspace(M, N, K);
 
-    void* d_act_data; cudaMalloc(&d_act_data, act_data_bytes);
-    void* d_act_sf;   cudaMalloc(&d_act_sf,   act_sf_bytes);
-    void* d_ws;       cudaMalloc(&d_ws, (ws_needed > 0) ? ws_needed : 1);
+    void* d_act_data;
+    cudaMalloc(&d_act_data, act_data_bytes);
+    void* d_act_sf;
+    cudaMalloc(&d_act_sf, act_sf_bytes);
+    void* d_ws;
+    cudaMalloc(&d_ws, (ws_needed > 0) ? ws_needed : 1);
 
     quantize_fp16_to_nvfp4_cutlass(d_x, d_act_data, d_act_sf, M, K, stream_);
     cudaStreamSynchronize(stream_);
 
-    half* d_y_direct; cudaMalloc(&d_y_direct, M * N * sizeof(half));
-    half* d_y_disp;   cudaMalloc(&d_y_disp,   M * N * sizeof(half));
+    half* d_y_direct;
+    cudaMalloc(&d_y_direct, M * N * sizeof(half));
+    half* d_y_disp;
+    cudaMalloc(&d_y_disp, M * N * sizeof(half));
 
-    bool ok = gemm_nvfp4_cutlass_sm120(d_act_data, d_act_sf, cw,
-                                        d_y_direct, M, N, K,
-                                        d_ws, ws_needed, stream_);
+    bool ok = gemm_nvfp4_cutlass_sm120(d_act_data, d_act_sf, cw, d_y_direct, M, N, K, d_ws, ws_needed,
+                                       stream_);
     cudaStreamSynchronize(stream_);
 
     if (!ok) {
         // CUTLASS rejected the dimensions — skip test, not a dispatch bug.
-        GTEST_SKIP() << "gemm_nvfp4_cutlass_sm120 returned false for M=" << M
-                     << " N=" << N << " K=" << K;
+        GTEST_SKIP() << "gemm_nvfp4_cutlass_sm120 returned false for M=" << M << " N=" << N << " K=" << K;
     }
 
     // Build handle: workspace holds act_data + act_sf + CUTLASS workspace
     WeightHandle h;
     h.kind = TensorKind::WQ;
     h.primary_tier = StorageTier::CUTLASS_NVFP4;
-    h.shape[0] = N;  h.shape[1] = K;
-    h.payload.cutlass_nvfp4.weight       = const_cast<void*>(cw.data);
-    h.payload.cutlass_nvfp4.sf           = cw.scale_factors;
+    h.shape[0] = N;
+    h.shape[1] = K;
+    h.payload.cutlass_nvfp4.weight = const_cast<void*>(cw.data);
+    h.payload.cutlass_nvfp4.sf = cw.scale_factors;
     h.payload.cutlass_nvfp4.global_scale = const_cast<float*>(&cw.tensor_scale);
 
     int64_t xshape[2] = {M, K}, yshape[2] = {M, N};
@@ -509,27 +561,29 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemmMatchesDirect) {
     // Must fit in kWorkspaceBytes (64 MiB)
     ASSERT_LE(act_data_bytes + act_sf_bytes + ws_needed, kWorkspaceBytes);
 
-    gemm_dispatch(lt_, h, x_t, y_disp, 1.0f, 0.0f,
-                  workspace_, kWorkspaceBytes, stream_);
+    gemm_dispatch(lt_, h, x_t, y_disp, 1.0f, 0.0f, workspace_, kWorkspaceBytes, stream_);
     cudaStreamSynchronize(stream_);
 
     auto h_direct = dev_read(d_y_direct, M * N);
-    auto h_disp   = dev_read(d_y_disp,   M * N);
+    auto h_disp = dev_read(d_y_disp, M * N);
     for (int i = 0; i < M * N; ++i) {
         float vd = __half2float(h_direct[i]);
         float vp = __half2float(h_disp[i]);
         // Same kernel path (both call gemm_nvfp4_cutlass_sm120 with identical
         // FP4-quantized activation) — outputs should be byte-identical.
         EXPECT_EQ(__half_as_ushort(h_direct[i]), __half_as_ushort(h_disp[i]))
-            << "CUTLASS_NVFP4 GEMM mismatch at i=" << i
-            << " direct=" << vd << " dispatch=" << vp;
+            << "CUTLASS_NVFP4 GEMM mismatch at i=" << i << " direct=" << vd << " dispatch=" << vp;
     }
 
     free_nvfp4_result(qr);
     free_cutlass_nvfp4_weight(cw);
-    cudaFree(d_w); cudaFree(d_x);
-    cudaFree(d_act_data); cudaFree(d_act_sf); cudaFree(d_ws);
-    cudaFree(d_y_direct); cudaFree(d_y_disp);
+    cudaFree(d_w);
+    cudaFree(d_x);
+    cudaFree(d_act_data);
+    cudaFree(d_act_sf);
+    cudaFree(d_ws);
+    cudaFree(d_y_direct);
+    cudaFree(d_y_disp);
 }
 
 // gemv_dispatch CUTLASS_NVFP4 (M=1): CUTLASS_NVFP4 is a prefill-only tier.
@@ -540,20 +594,25 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemvIsStub) {
     // not crash (logs an error but returns cleanly).
     const int M = 8, K = 32;
 
-    void* dummy_data;  cudaMalloc(&dummy_data, M * K / 2);
-    void* dummy_sf;    cudaMalloc(&dummy_sf, cutlass_nvfp4_sf_size(M, K));
+    void* dummy_data;
+    cudaMalloc(&dummy_data, M * K / 2);
+    void* dummy_sf;
+    cudaMalloc(&dummy_sf, cutlass_nvfp4_sf_size(M, K));
     float dummy_scale = 1.0f;
 
     WeightHandle h;
     h.kind = TensorKind::WQ;
     h.primary_tier = StorageTier::CUTLASS_NVFP4;
-    h.shape[0] = M;  h.shape[1] = K;
-    h.payload.cutlass_nvfp4.weight       = dummy_data;
-    h.payload.cutlass_nvfp4.sf           = dummy_sf;
+    h.shape[0] = M;
+    h.shape[1] = K;
+    h.payload.cutlass_nvfp4.weight = dummy_data;
+    h.payload.cutlass_nvfp4.sf = dummy_sf;
     h.payload.cutlass_nvfp4.global_scale = &dummy_scale;
 
-    half* d_x; cudaMalloc(&d_x, K * sizeof(half));
-    half* d_y; cudaMalloc(&d_y, M * sizeof(half));
+    half* d_x;
+    cudaMalloc(&d_x, K * sizeof(half));
+    half* d_y;
+    cudaMalloc(&d_y, M * sizeof(half));
     cudaMemset(d_x, 0, K * sizeof(half));
     cudaMemset(d_y, 0, M * sizeof(half));
 
@@ -565,8 +624,10 @@ TEST_F(WeightDispatchTest, CUTLASS_NVFP4_GemvIsStub) {
     EXPECT_NO_THROW(gemv_dispatch(h, x_t, y_t, stream_));
     EXPECT_EQ(cudaStreamSynchronize(stream_), cudaSuccess);
 
-    cudaFree(dummy_data); cudaFree(dummy_sf);
-    cudaFree(d_x); cudaFree(d_y);
+    cudaFree(dummy_data);
+    cudaFree(dummy_sf);
+    cudaFree(d_x);
+    cudaFree(d_y);
 }
 
 // ===========================================================================
@@ -587,8 +648,10 @@ TEST_F(WeightDispatchTest, MXFP4_GemmMatchesDirect) {
     const int M = 8, N = 16, K = 64;
 
     std::vector<half> h_w(N * K), h_x(M * K);
-    for (int i = 0; i < N * K; ++i) h_w[i] = __float2half((i % 5) * 0.1f - 0.2f);
-    for (int i = 0; i < M * K; ++i) h_x[i] = __float2half((i % 7) * 0.05f - 0.15f);
+    for (int i = 0; i < N * K; ++i)
+        h_w[i] = __float2half((i % 5) * 0.1f - 0.2f);
+    for (int i = 0; i < M * K; ++i)
+        h_x[i] = __float2half((i % 7) * 0.05f - 0.15f);
 
     half* d_w = dev_alloc_copy(h_w);
     half* d_x = dev_alloc_copy(h_x);
@@ -607,36 +670,40 @@ TEST_F(WeightDispatchTest, MXFP4_GemmMatchesDirect) {
 
     // Allocate activation scratch for direct call
     size_t act_data_bytes = static_cast<size_t>(M) * K / 2;
-    size_t act_sf_bytes   = cutlass_mxfp4_sf_size(M, K);
-    size_t ws_needed      = gemm_mxfp4_cutlass_sm120_workspace(M, N, K);
+    size_t act_sf_bytes = cutlass_mxfp4_sf_size(M, K);
+    size_t ws_needed = gemm_mxfp4_cutlass_sm120_workspace(M, N, K);
 
-    void* d_act_data; cudaMalloc(&d_act_data, act_data_bytes);
-    void* d_act_sf;   cudaMalloc(&d_act_sf,   act_sf_bytes);
-    void* d_ws;       cudaMalloc(&d_ws, (ws_needed > 0) ? ws_needed : 1);
+    void* d_act_data;
+    cudaMalloc(&d_act_data, act_data_bytes);
+    void* d_act_sf;
+    cudaMalloc(&d_act_sf, act_sf_bytes);
+    void* d_ws;
+    cudaMalloc(&d_ws, (ws_needed > 0) ? ws_needed : 1);
 
     quantize_fp16_to_mxfp4_cutlass(d_x, d_act_data, d_act_sf, M, K, stream_);
     cudaStreamSynchronize(stream_);
 
-    half* d_y_direct; cudaMalloc(&d_y_direct, M * N * sizeof(half));
-    half* d_y_disp;   cudaMalloc(&d_y_disp,   M * N * sizeof(half));
+    half* d_y_direct;
+    cudaMalloc(&d_y_direct, M * N * sizeof(half));
+    half* d_y_disp;
+    cudaMalloc(&d_y_disp, M * N * sizeof(half));
 
-    bool ok = gemm_mxfp4_cutlass_sm120(d_act_data, d_act_sf, mw,
-                                        d_y_direct, M, N, K,
-                                        d_ws, ws_needed, stream_);
+    bool ok = gemm_mxfp4_cutlass_sm120(d_act_data, d_act_sf, mw, d_y_direct, M, N, K, d_ws, ws_needed,
+                                       stream_);
     cudaStreamSynchronize(stream_);
 
     if (!ok) {
-        GTEST_SKIP() << "gemm_mxfp4_cutlass_sm120 returned false for M=" << M
-                     << " N=" << N << " K=" << K;
+        GTEST_SKIP() << "gemm_mxfp4_cutlass_sm120 returned false for M=" << M << " N=" << N << " K=" << K;
     }
 
     // Build handle
     WeightHandle h;
     h.kind = TensorKind::WQ;
     h.primary_tier = StorageTier::MXFP4;
-    h.shape[0] = N;  h.shape[1] = K;
-    h.payload.mxfp4.weight        = const_cast<void*>(mw.data);
-    h.payload.mxfp4.scales        = mw.scale_factors;
+    h.shape[0] = N;
+    h.shape[1] = K;
+    h.payload.mxfp4.weight = const_cast<void*>(mw.data);
+    h.payload.mxfp4.scales = mw.scale_factors;
     h.payload.mxfp4.linear_scales = mw.linear_scales;
 
     int64_t xshape[2] = {M, K}, yshape[2] = {M, N};
@@ -645,26 +712,28 @@ TEST_F(WeightDispatchTest, MXFP4_GemmMatchesDirect) {
 
     ASSERT_LE(act_data_bytes + act_sf_bytes + ws_needed, kWorkspaceBytes);
 
-    gemm_dispatch(lt_, h, x_t, y_disp, 1.0f, 0.0f,
-                  workspace_, kWorkspaceBytes, stream_);
+    gemm_dispatch(lt_, h, x_t, y_disp, 1.0f, 0.0f, workspace_, kWorkspaceBytes, stream_);
     cudaStreamSynchronize(stream_);
 
     auto h_direct = dev_read(d_y_direct, M * N);
-    auto h_disp   = dev_read(d_y_disp,   M * N);
+    auto h_disp = dev_read(d_y_disp, M * N);
     for (int i = 0; i < M * N; ++i) {
         float vd = __half2float(h_direct[i]);
         float vp = __half2float(h_disp[i]);
         // Same kernel path: byte-identical output expected.
         EXPECT_EQ(__half_as_ushort(h_direct[i]), __half_as_ushort(h_disp[i]))
-            << "MXFP4 GEMM mismatch at i=" << i
-            << " direct=" << vd << " dispatch=" << vp;
+            << "MXFP4 GEMM mismatch at i=" << i << " direct=" << vd << " dispatch=" << vp;
     }
 
     free_nvfp4_result(qr);
     free_cutlass_mxfp4_weight(mw);
-    cudaFree(d_w); cudaFree(d_x);
-    cudaFree(d_act_data); cudaFree(d_act_sf); cudaFree(d_ws);
-    cudaFree(d_y_direct); cudaFree(d_y_disp);
+    cudaFree(d_w);
+    cudaFree(d_x);
+    cudaFree(d_act_data);
+    cudaFree(d_act_sf);
+    cudaFree(d_ws);
+    cudaFree(d_y_direct);
+    cudaFree(d_y_disp);
 }
 
 // gemv_dispatch MXFP4 tier (M=1): decode path using linear_scales.
@@ -673,8 +742,10 @@ TEST_F(WeightDispatchTest, MXFP4_GemvMatchesDirect) {
     const int M = 16, K = 64;
 
     std::vector<half> h_w(M * K), h_x(K);
-    for (int i = 0; i < M * K; ++i) h_w[i] = __float2half((i % 5) * 0.1f - 0.2f);
-    for (int i = 0; i < K;     ++i) h_x[i] = __float2half((i % 7) * 0.05f);
+    for (int i = 0; i < M * K; ++i)
+        h_w[i] = __float2half((i % 5) * 0.1f - 0.2f);
+    for (int i = 0; i < K; ++i)
+        h_x[i] = __float2half((i % 7) * 0.05f);
 
     half* d_w = dev_alloc_copy(h_w);
     half* d_x = dev_alloc_copy(h_x);
@@ -694,8 +765,10 @@ TEST_F(WeightDispatchTest, MXFP4_GemvMatchesDirect) {
         GTEST_SKIP() << "convert_nvfp4_to_mxfp4_cutlass did not populate linear_scales";
     }
 
-    half* d_y_direct; cudaMalloc(&d_y_direct, M * sizeof(half));
-    half* d_y_disp;   cudaMalloc(&d_y_disp,   M * sizeof(half));
+    half* d_y_direct;
+    cudaMalloc(&d_y_direct, M * sizeof(half));
+    half* d_y_disp;
+    cudaMalloc(&d_y_disp, M * sizeof(half));
 
     // Direct call
     gemv_mxfp4_kpar(mw, static_cast<const half*>(d_x), d_y_direct, M, K, stream_);
@@ -709,26 +782,28 @@ TEST_F(WeightDispatchTest, MXFP4_GemvMatchesDirect) {
     WeightHandle h;
     h.kind = TensorKind::WQ;
     h.primary_tier = StorageTier::MXFP4;
-    h.shape[0] = M;  h.shape[1] = K;
-    h.payload.mxfp4.weight        = const_cast<void*>(mw.data);
-    h.payload.mxfp4.scales        = mw.scale_factors;
+    h.shape[0] = M;
+    h.shape[1] = K;
+    h.payload.mxfp4.weight = const_cast<void*>(mw.data);
+    h.payload.mxfp4.scales = mw.scale_factors;
     h.payload.mxfp4.linear_scales = mw.linear_scales;
 
     gemv_dispatch(h, x_t, y_disp, stream_);
     cudaStreamSynchronize(stream_);
 
     auto h_direct = dev_read(d_y_direct, M);
-    auto h_disp   = dev_read(d_y_disp,   M);
+    auto h_disp = dev_read(d_y_disp, M);
     for (int i = 0; i < M; ++i) {
         float vd = __half2float(h_direct[i]);
         float vp = __half2float(h_disp[i]);
         EXPECT_EQ(__half_as_ushort(h_direct[i]), __half_as_ushort(h_disp[i]))
-            << "MXFP4 GEMV mismatch at i=" << i
-            << " direct=" << vd << " dispatch=" << vp;
+            << "MXFP4 GEMV mismatch at i=" << i << " direct=" << vd << " dispatch=" << vp;
     }
 
     free_nvfp4_result(qr);
     free_cutlass_mxfp4_weight(mw);
-    cudaFree(d_w); cudaFree(d_x);
-    cudaFree(d_y_direct); cudaFree(d_y_disp);
+    cudaFree(d_w);
+    cudaFree(d_x);
+    cudaFree(d_y_direct);
+    cudaFree(d_y_disp);
 }

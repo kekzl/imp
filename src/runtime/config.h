@@ -23,80 +23,80 @@ namespace imp {
 
 struct RuntimeConfig {
     struct Runtime {
-        bool        deterministic_gemm = false;
-        std::string cuda_graphs        = "auto";   // "auto" | "always" | "never"
-        bool        warmup             = false;  // opt-in for prod rollout; off in dev/CI
-        int         max_seq_len        = 0;        // 0 = use model default
-        bool        no_pdl             = false;
-        bool        debug_raw          = false;    // raw stream debug
-        bool        no_vision_graph    = false;    // disable SigLIP graph capture
+        bool deterministic_gemm = false;
+        std::string cuda_graphs = "auto";  // "auto" | "always" | "never"
+        bool warmup = false;               // opt-in for prod rollout; off in dev/CI
+        int max_seq_len = 0;               // 0 = use model default
+        bool no_pdl = false;
+        bool debug_raw = false;        // raw stream debug
+        bool no_vision_graph = false;  // disable SigLIP graph capture
     } runtime;
 
     struct KVCache {
-        std::string dtype                       = "fp16";  // fp16 | fp8 | int8 | int4 | nvfp4
-        bool        allow_nondeterministic_fp8  = false;
-        bool        fp8_auto_legacy             = false;   // legacy IMP_KV_FP8_AUTO compat
+        std::string dtype = "fp16";  // fp16 | fp8 | int8 | int4 | nvfp4
+        bool allow_nondeterministic_fp8 = false;
+        bool fp8_auto_legacy = false;  // legacy IMP_KV_FP8_AUTO compat
     } kv_cache;
 
     struct Attention {
-        std::string fp8_prefill          = "auto";
-        std::string fp8_fmha             = "auto";
-        std::string fmha_sm120           = "auto";
-        std::string mxfp4                = "auto";
-        bool        mxfp4_fp16_fallback  = false;
-        std::string fmha_blockscale      = "auto";
-        bool        naive                = false;
-        bool        no_cublas            = false;
-        bool        force_cublas_decode  = false;
-        bool        no_qknorm_fused      = false;
-        bool        no_naive_swa         = false;
-        bool        splitk_pipe          = true;
-        bool        gate_concat          = false;
+        std::string fp8_prefill = "auto";
+        std::string fp8_fmha = "auto";
+        std::string fmha_sm120 = "auto";
+        std::string mxfp4 = "auto";
+        bool mxfp4_fp16_fallback = false;
+        std::string fmha_blockscale = "auto";
+        bool naive = false;
+        bool no_cublas = false;
+        bool force_cublas_decode = false;
+        bool no_qknorm_fused = false;
+        bool no_naive_swa = false;
+        bool splitk_pipe = true;
+        bool gate_concat = false;
     } attention;
 
     struct MoE {
-        int  expert_overhead_pct = 10;
-        int  force_host_experts  = 0;     // last N layers forced to host (0 = none)
-        bool skip                = false;
-        bool force_fp16_sync     = false;
-        bool no_expert_cache     = false;
-        bool zero_workspace      = false;
-        bool no_shared_mlp       = false;
-        bool no_shexp_gate       = false;
-        bool no_cutlass3x        = false;
+        int expert_overhead_pct = 10;
+        int force_host_experts = 0;  // last N layers forced to host (0 = none)
+        bool skip = false;
+        bool force_fp16_sync = false;
+        bool no_expert_cache = false;
+        bool zero_workspace = false;
+        bool no_shared_mlp = false;
+        bool no_shexp_gate = false;
+        bool no_cutlass3x = false;
     } moe;
 
     struct GDN {
-        bool  fp32_scan          = false;
-        bool  fp32_out           = false;
-        float norm_eps_override  = 0.0f;   // 0 = use model default
-        bool  ref_kernel         = false;
-        bool  vhead_reorder      = false;
+        bool fp32_scan = false;
+        bool fp32_out = false;
+        float norm_eps_override = 0.0f;  // 0 = use model default
+        bool ref_kernel = false;
+        bool vhead_reorder = false;
     } gdn;
 
     struct GEMM {
-        bool no_dp4a      = false;
+        bool no_dp4a = false;
         bool no_dp4a_gemv = false;
-        bool no_dp4a_lm   = false;
-        bool no_mmvq      = false;
+        bool no_dp4a_lm = false;
+        bool no_mmvq = false;
         bool no_mmvq_q8_0 = false;
     } gemm;
 
     struct Gemma4 {
-        bool fp32_gemm_out    = false;
-        bool no_graphs        = false;
-        bool force_mmvq       = false;
+        bool fp32_gemm_out = false;
+        bool no_graphs = false;
+        bool force_mmvq = false;
         bool fp32_expert_down = false;
-        bool no_decode_fast   = false;
-        bool no_post_ffw_1    = false;
-        bool ggml_prefill     = false;
+        bool no_decode_fast = false;
+        bool no_post_ffw_1 = false;
+        bool ggml_prefill = false;
     } gemma4;
 
     struct Generation {
         bool no_logit_softcap = false;
-        bool lm_dequant_fp16  = false;
-        int  think_budget     = 0;
-        bool force_bos        = false;
+        bool lm_dequant_fp16 = false;
+        int think_budget = 0;
+        bool force_bos = false;
     } generation;
 
     struct Server {
@@ -112,16 +112,16 @@ struct RuntimeConfig {
     } paths;
 
     struct Diagnostics {
-        bool        debug_forward       = false;
-        bool        debug_gemm_dispatch = false;
-        bool        debug_template      = false;
+        bool debug_forward = false;
+        bool debug_gemm_dispatch = false;
+        bool debug_template = false;
         std::string dump_hidden_dir;
-        std::string dump_logits_dir;     // path or empty
-        std::string dump_routing_dir;    // path or empty
-        bool        dump_tokens         = false;
-        int         exit_layer          = -1;
-        bool        profile             = false;
-        bool        graph_diag          = false;
+        std::string dump_logits_dir;   // path or empty
+        std::string dump_routing_dir;  // path or empty
+        bool dump_tokens = false;
+        int exit_layer = -1;
+        bool profile = false;
+        bool graph_diag = false;
         std::string graph_dump_dir;
     } diagnostics;
 
@@ -142,8 +142,7 @@ struct RuntimeConfig {
 
     // Convenience: locate + load + apply overrides + log a one-line summary.
     // Pass empty path to use the search-path default.
-    static RuntimeConfig load(const std::string& explicit_path,
-                              const std::vector<std::string>& overrides);
+    static RuntimeConfig load(const std::string& explicit_path, const std::vector<std::string>& overrides);
 
     // ---- Process-wide singleton -----------------------------------------
     //
@@ -162,4 +161,4 @@ struct RuntimeConfig {
     static void install(const RuntimeConfig& cfg);
 };
 
-} // namespace imp
+}  // namespace imp

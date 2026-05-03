@@ -67,9 +67,9 @@ private:
     Slot slots_[2];
     int active_slot_ = 0;  // slot that ensure_layer will use
 
-    std::vector<bool> offloaded_;                         // [n_layers]
-    std::vector<std::vector<WeightEntry>> layer_entries_; // [n_layers]
-    std::vector<size_t> layer_slot_bytes_;                // [n_layers] total bytes per layer
+    std::vector<bool> offloaded_;                          // [n_layers]
+    std::vector<std::vector<WeightEntry>> layer_entries_;  // [n_layers]
+    std::vector<size_t> layer_slot_bytes_;                 // [n_layers] total bytes per layer
 
     // Scan a layer's tensors and build WeightEntry list.
     void scan_layer_weights(int layer);
@@ -78,4 +78,4 @@ private:
     void upload_layer_to_slot(int layer, int slot_idx);
 };
 
-} // namespace imp
+}  // namespace imp

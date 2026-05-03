@@ -6,8 +6,7 @@
 
 namespace imp {
 
-Scheduler::Scheduler(int max_batch_size)
-    : max_batch_size_(max_batch_size) {}
+Scheduler::Scheduler(int max_batch_size) : max_batch_size_(max_batch_size) {}
 
 void Scheduler::add_request(std::shared_ptr<Request> req) {
     pending_.push_back(std::move(req));
@@ -21,15 +20,13 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
 
     // 1. Remove finished/cancelled requests from active_
     std::erase_if(active_, [](const std::shared_ptr<Request>& r) {
-        return r->status == RequestStatus::FINISHED ||
-               r->status == RequestStatus::CANCELLED;
+        return r->status == RequestStatus::FINISHED || r->status == RequestStatus::CANCELLED;
     });
 
     // 2. Sort pending by ascending input token count (shortest-first)
     //    to reduce head-of-line blocking in continuous batching.
     if (pending_dirty_) {
-        std::ranges::sort(pending_, [](const std::shared_ptr<Request>& a,
-                                       const std::shared_ptr<Request>& b) {
+        std::ranges::sort(pending_, [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
             return a->input_tokens.size() < b->input_tokens.size();
         });
         pending_dirty_ = false;
@@ -38,8 +35,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
     // 3. Promote pending requests to prefill (up to max_batch_size_ budget)
     {
         auto it = pending_.begin();
-        while (it != pending_.end() &&
-               static_cast<int>(active_.size()) < max_batch_size_) {
+        while (it != pending_.end() && static_cast<int>(active_.size()) < max_batch_size_) {
             auto& req = *it;
 
             // Memory-aware check: estimate KV blocks needed for this request
@@ -54,8 +50,7 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                 }
                 // Reserve blocks, using prefix caching when enabled.
                 if (kv_manager_->prefix_caching_enabled()) {
-                    int reused = kv_manager_->allocate_blocks_with_prefix(
-                        req->id, req->input_tokens);
+                    int reused = kv_manager_->allocate_blocks_with_prefix(req->id, req->input_tokens);
                     if (reused < 0) {
                         ++it;
                         continue;
@@ -64,8 +59,10 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
                     if (reused > 0) {
                         int skip = reused * bs;
                         int total = static_cast<int>(req->input_tokens.size());
-                        if (skip >= total) skip = (total / bs) * bs;
-                        if (skip >= total) skip = total - 1;
+                        if (skip >= total)
+                            skip = (total / bs) * bs;
+                        if (skip >= total)
+                            skip = total - 1;
                         req->prefill_offset = skip;
                     }
                 } else {
@@ -87,12 +84,14 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
     // 3. Re-schedule incomplete PREFILLING requests (chunked prefill).
     //    Skip requests already in prefill_batch (just promoted from pending).
     for (auto& req : active_) {
-        if (req->status == RequestStatus::PREFILLING &&
-            req->prefill_offset > 0 &&
+        if (req->status == RequestStatus::PREFILLING && req->prefill_offset > 0 &&
             req->prefill_offset < static_cast<int>(req->input_tokens.size())) {
             bool already_queued = false;
             for (const auto& pf : prefill_batch) {
-                if (pf.get() == req.get()) { already_queued = true; break; }
+                if (pf.get() == req.get()) {
+                    already_queued = true;
+                    break;
+                }
             }
             if (!already_queued) {
                 prefill_batch.push_back(req);
@@ -108,12 +107,8 @@ void Scheduler::schedule(std::vector<std::shared_ptr<Request>>& prefill_batch,
     }
 }
 
-bool Scheduler::has_pending() const {
-    return !pending_.empty();
-}
+bool Scheduler::has_pending() const { return !pending_.empty(); }
 
-int Scheduler::active_count() const {
-    return static_cast<int>(active_.size());
-}
+int Scheduler::active_count() const { return static_cast<int>(active_.size()); }
 
-} // namespace imp
+}  // namespace imp

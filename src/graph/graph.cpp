@@ -22,8 +22,8 @@ int Graph::add_node(OpType type, const std::vector<int>& inputs, int layer) {
     return node.id;
 }
 
-int Graph::build_transformer_layer(int layer_idx, int input_node,
-                                   const ModelConfig& config, bool is_prefill) {
+int Graph::build_transformer_layer(int layer_idx, int input_node, const ModelConfig& config,
+                                   bool is_prefill) {
     int head_dim = config.d_model / config.n_heads;
     float attn_scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
@@ -213,4 +213,4 @@ std::string Graph::to_dot() const {
     return ss.str();
 }
 
-} // namespace imp
+}  // namespace imp

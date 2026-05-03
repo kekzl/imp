@@ -15,12 +15,12 @@ namespace {
 
 // ---- GPU tensor helpers ----
 
-Tensor make_gpu_tensor(const float* host_data, QType dtype,
-                       int ndim, const int64_t* shape) {
+Tensor make_gpu_tensor(const float* host_data, QType dtype, int ndim, const int64_t* shape) {
     Tensor t;
     t.qtype = dtype;
     t.ndim = ndim;
-    for (int i = 0; i < ndim; i++) t.shape[i] = shape[i];
+    for (int i = 0; i < ndim; i++)
+        t.shape[i] = shape[i];
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
@@ -39,7 +39,8 @@ Tensor alloc_gpu_tensor(QType dtype, int ndim, const int64_t* shape) {
     Tensor t;
     t.qtype = dtype;
     t.ndim = ndim;
-    for (int i = 0; i < ndim; i++) t.shape[i] = shape[i];
+    for (int i = 0; i < ndim; i++)
+        t.shape[i] = shape[i];
     t.compute_strides();
     t.on_device = true;
     cudaMalloc(&t.data, t.nbytes());
@@ -54,7 +55,10 @@ std::vector<float> read_gpu_fp32(const Tensor& t) {
 }
 
 void free_gpu(Tensor& t) {
-    if (t.data) { cudaFree(t.data); t.data = nullptr; }
+    if (t.data) {
+        cudaFree(t.data);
+        t.data = nullptr;
+    }
 }
 
 // =========================================================================
@@ -64,11 +68,7 @@ void free_gpu(Tensor& t) {
 TEST(ReduceTest, SumLastDimFP32) {
     // Input: [3, 4], reduce dim=1 → output: [3]
     constexpr int rows = 3, cols = 4;
-    std::vector<float> h_in = {
-        1, 2, 3, 4,
-        5, 6, 7, 8,
-        9, 10, 11, 12
-    };
+    std::vector<float> h_in = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
     std::vector<float> expected = {10.0f, 26.0f, 42.0f};
 
     int64_t in_shape[] = {rows, cols};
@@ -81,11 +81,11 @@ TEST(ReduceTest, SumLastDimFP32) {
 
     auto result = read_gpu_fp32(d_out);
     for (int i = 0; i < rows; i++) {
-        EXPECT_NEAR(result[i], expected[i], 1e-5f)
-            << "SumLastDim mismatch at " << i;
+        EXPECT_NEAR(result[i], expected[i], 1e-5f) << "SumLastDim mismatch at " << i;
     }
 
-    free_gpu(d_in); free_gpu(d_out);
+    free_gpu(d_in);
+    free_gpu(d_out);
 }
 
 TEST(ReduceTest, SumLastDimFP16) {
@@ -109,20 +109,16 @@ TEST(ReduceTest, SumLastDimFP16) {
 
     auto result = read_gpu_fp32(d_out);
     for (int i = 0; i < rows; i++) {
-        EXPECT_NEAR(result[i], expected[i], 0.1f)
-            << "SumLastDim FP16 mismatch at " << i;
+        EXPECT_NEAR(result[i], expected[i], 0.1f) << "SumLastDim FP16 mismatch at " << i;
     }
 
-    free_gpu(d_in); free_gpu(d_out);
+    free_gpu(d_in);
+    free_gpu(d_out);
 }
 
 TEST(ReduceTest, SumFirstDim) {
     // Input: [3, 4], reduce dim=0 → output: [4]
-    std::vector<float> h_in = {
-        1, 2, 3, 4,
-        5, 6, 7, 8,
-        9, 10, 11, 12
-    };
+    std::vector<float> h_in = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
     // Sum along rows: [1+5+9, 2+6+10, 3+7+11, 4+8+12] = [15, 18, 21, 24]
     std::vector<float> expected = {15.0f, 18.0f, 21.0f, 24.0f};
 
@@ -136,11 +132,11 @@ TEST(ReduceTest, SumFirstDim) {
 
     auto result = read_gpu_fp32(d_out);
     for (int i = 0; i < 4; i++) {
-        EXPECT_NEAR(result[i], expected[i], 1e-5f)
-            << "SumFirstDim mismatch at " << i;
+        EXPECT_NEAR(result[i], expected[i], 1e-5f) << "SumFirstDim mismatch at " << i;
     }
 
-    free_gpu(d_in); free_gpu(d_out);
+    free_gpu(d_in);
+    free_gpu(d_out);
 }
 
 TEST(ReduceTest, SumSingleElement) {
@@ -156,7 +152,8 @@ TEST(ReduceTest, SumSingleElement) {
     auto result = read_gpu_fp32(d_out);
     EXPECT_NEAR(result[0], 42.0f, 1e-6f);
 
-    free_gpu(d_in); free_gpu(d_out);
+    free_gpu(d_in);
+    free_gpu(d_out);
 }
 
 TEST(ReduceTest, SumLargeRow) {
@@ -180,11 +177,11 @@ TEST(ReduceTest, SumLargeRow) {
 
     auto result = read_gpu_fp32(d_out);
     for (int i = 0; i < rows; i++) {
-        EXPECT_NEAR(result[i], expected[i], 0.01f)
-            << "SumLargeRow mismatch at " << i;
+        EXPECT_NEAR(result[i], expected[i], 0.01f) << "SumLargeRow mismatch at " << i;
     }
 
-    free_gpu(d_in); free_gpu(d_out);
+    free_gpu(d_in);
+    free_gpu(d_out);
 }
 
 TEST(ReduceTest, SumNegativeDim) {
@@ -203,11 +200,11 @@ TEST(ReduceTest, SumNegativeDim) {
 
     auto result = read_gpu_fp32(d_out);
     for (int i = 0; i < rows; i++) {
-        EXPECT_NEAR(result[i], expected[i], 1e-5f)
-            << "SumNegativeDim mismatch at " << i;
+        EXPECT_NEAR(result[i], expected[i], 1e-5f) << "SumNegativeDim mismatch at " << i;
     }
 
-    free_gpu(d_in); free_gpu(d_out);
+    free_gpu(d_in);
+    free_gpu(d_out);
 }
 
 // =========================================================================
@@ -238,11 +235,11 @@ TEST(ReduceTest, Sum3DMiddleDim) {
 
     auto result = read_gpu_fp32(d_out);
     for (int i = 0; i < d0 * d2; i++) {
-        EXPECT_NEAR(result[i], expected[i], 1e-4f)
-            << "Sum3DMiddleDim mismatch at " << i;
+        EXPECT_NEAR(result[i], expected[i], 1e-4f) << "Sum3DMiddleDim mismatch at " << i;
     }
 
-    free_gpu(d_in); free_gpu(d_out);
+    free_gpu(d_in);
+    free_gpu(d_out);
 }
 
 // =========================================================================
@@ -251,11 +248,7 @@ TEST(ReduceTest, Sum3DMiddleDim) {
 
 TEST(ReduceTest, MaxLastDimFP32) {
     constexpr int rows = 3, cols = 4;
-    std::vector<float> h_in = {
-        3, 1, 4, 1,
-        5, 9, 2, 6,
-        5, 3, 5, 8
-    };
+    std::vector<float> h_in = {3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8};
     std::vector<float> expected = {4.0f, 9.0f, 8.0f};
 
     int64_t in_shape[] = {rows, cols};
@@ -268,19 +261,15 @@ TEST(ReduceTest, MaxLastDimFP32) {
 
     auto result = read_gpu_fp32(d_out);
     for (int i = 0; i < rows; i++) {
-        EXPECT_NEAR(result[i], expected[i], 1e-5f)
-            << "MaxLastDim mismatch at " << i;
+        EXPECT_NEAR(result[i], expected[i], 1e-5f) << "MaxLastDim mismatch at " << i;
     }
 
-    free_gpu(d_in); free_gpu(d_out);
+    free_gpu(d_in);
+    free_gpu(d_out);
 }
 
 TEST(ReduceTest, MaxFirstDim) {
-    std::vector<float> h_in = {
-        1, 5, 3,
-        4, 2, 6,
-        7, 8, 0
-    };
+    std::vector<float> h_in = {1, 5, 3, 4, 2, 6, 7, 8, 0};
     // Max along dim=0: [max(1,4,7), max(5,2,8), max(3,6,0)] = [7, 8, 6]
     std::vector<float> expected = {7.0f, 8.0f, 6.0f};
 
@@ -294,11 +283,11 @@ TEST(ReduceTest, MaxFirstDim) {
 
     auto result = read_gpu_fp32(d_out);
     for (int i = 0; i < 3; i++) {
-        EXPECT_NEAR(result[i], expected[i], 1e-5f)
-            << "MaxFirstDim mismatch at " << i;
+        EXPECT_NEAR(result[i], expected[i], 1e-5f) << "MaxFirstDim mismatch at " << i;
     }
 
-    free_gpu(d_in); free_gpu(d_out);
+    free_gpu(d_in);
+    free_gpu(d_out);
 }
 
 TEST(ReduceTest, MaxNegativeValues) {
@@ -316,11 +305,11 @@ TEST(ReduceTest, MaxNegativeValues) {
 
     auto result = read_gpu_fp32(d_out);
     for (int i = 0; i < 2; i++) {
-        EXPECT_NEAR(result[i], expected[i], 1e-5f)
-            << "MaxNegative mismatch at " << i;
+        EXPECT_NEAR(result[i], expected[i], 1e-5f) << "MaxNegative mismatch at " << i;
     }
 
-    free_gpu(d_in); free_gpu(d_out);
+    free_gpu(d_in);
+    free_gpu(d_out);
 }
 
 TEST(ReduceTest, MaxFP16) {
@@ -347,11 +336,11 @@ TEST(ReduceTest, MaxFP16) {
 
     auto result = read_gpu_fp32(d_out);
     for (int i = 0; i < rows; i++) {
-        EXPECT_NEAR(result[i], expected[i], 0.01f)
-            << "MaxFP16 mismatch at " << i;
+        EXPECT_NEAR(result[i], expected[i], 0.01f) << "MaxFP16 mismatch at " << i;
     }
 
-    free_gpu(d_in); free_gpu(d_out);
+    free_gpu(d_in);
+    free_gpu(d_out);
 }
 
 TEST(ReduceTest, MaxLargeRow) {
@@ -375,8 +364,9 @@ TEST(ReduceTest, MaxLargeRow) {
     EXPECT_NEAR(result[0], 100.0f, 1e-5f);
     EXPECT_NEAR(result[1], 200.0f, 1e-5f);
 
-    free_gpu(d_in); free_gpu(d_out);
+    free_gpu(d_in);
+    free_gpu(d_out);
 }
 
-} // namespace
-} // namespace imp
+}  // namespace
+}  // namespace imp
