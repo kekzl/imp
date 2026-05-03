@@ -5,7 +5,7 @@ DOCKER_IMG ?= imp:test
 DOCKER_RUN = docker run --rm --gpus all -v $(PWD)/models:/models $(DOCKER_IMG)
 BUILD_ARGS = --build-arg IMP_BUILD_TESTS=ON
 
-.PHONY: build test-unit test-gpu test-fast test-all test-perf test-golden bench check-gpu verify verify-fast install-hooks
+.PHONY: build test-unit test-gpu test-fast test-all test-perf test-golden bench check-gpu verify verify-fast install-hooks format format-check
 
 # Check that no other process is using the GPU (games, other inference, etc.)
 check-gpu:
@@ -26,8 +26,9 @@ build:
 	docker build $(BUILD_ARGS) -t $(DOCKER_IMG) .
 
 # Unit tests: CPU-only, no GPU, no model, < 5s
+# Mirrors `ctest -L unit`. Filter is sourced from CMakeLists.txt (_unit_e2e_filter).
 test-unit: build
-	$(DOCKER_RUN) imp-tests --gtest_filter="TensorTest.*:GgufLoaderTest.*:Tokenizer*:ChatTemplate*:HFChatTemplate*:BatchBuilder*:Scheduler*:Request*:EndToEndTest.*:StubModelTest.LoadStubModel:StubModelTest.TokenizeStub"
+	$(DOCKER_RUN) imp-tests-unit
 
 # GPU tests: everything including CUDA kernels, < 30s
 test-gpu: build
@@ -90,3 +91,18 @@ install-hooks:
 	@cp scripts/pre-push.hook .git/hooks/pre-push
 	@chmod +x .git/hooks/pre-push
 	@echo "pre-push hook installed → runs 'make verify-fast' when src/, include/, or tools/ changes"
+
+# clang-format settings live in .clang-format. Host has no clang-format
+# installed (clean-host policy), so we run it in a throwaway container.
+CLANG_FORMAT_IMG ?= silkeh/clang:18
+CLANG_FORMAT_RUN = docker run --rm -v $(PWD):/work -w /work $(CLANG_FORMAT_IMG) clang-format
+CLANG_FORMAT_FILES = $$(find src include tools tests -name '*.cpp' -o -name '*.h' -o -name '*.cu' -o -name '*.cuh')
+
+# Apply clang-format in place across src/, include/, tools/, tests/.
+format:
+	@$(CLANG_FORMAT_RUN) -i --style=file $(CLANG_FORMAT_FILES)
+	@echo "clang-format applied"
+
+# Check formatting without modifying files. Exits non-zero on violation.
+format-check:
+	@$(CLANG_FORMAT_RUN) --dry-run -Werror --style=file $(CLANG_FORMAT_FILES)
