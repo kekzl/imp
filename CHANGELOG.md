@@ -19,7 +19,7 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   the warmup observation survives if it's already wider, and real prefill
   widens it further when needed. Long generation (100 tokens) on
   Llama-3.2-3B FP8 KV now produces a clean factually-correct list of world
-  capitals. Memo: `fp8_kv_warmup_calibration_2026_05_01.md`.
+  capitals.
 - **NVFP4 prequant CUTLASS prefill cache** (#88) — Phase 0 promotes set
   `Tensor.qtype = NVFP4` directly on the main weight tensors but Phase 3b
   (CUTLASS cache build) only iterated the legacy `wcache_.nvfp4` map.
@@ -31,16 +31,13 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   Mistral-3.2-NVFP4 tg 81→101, Qwen3.6-NVFP4 tg 117–142→217,
   Gemma-4-NVFP4 tg 157–180→213, **Qwen3-Coder-30B-A3B-NVFP4 tg 51→272**
   (`--no-cuda-graphs` no longer needed). Mistral-3.2-NVFP4 long-context
-  Lorem×11 numerical-hash garbage → coherent text. Memo:
-  `nvfp4_prequant_cutlass_cache_2026_05_01.md`.
+  Lorem×11 numerical-hash garbage → coherent text.
 - **NVFP4 prequant MoE decode fast-path** (#85) — Qwen3.6-NVFP4 went 8.34 →
   117–142 tok/s (~14–17×); Gemma-4-NVFP4 went ~42 → 157–180 tok/s (~4×).
   Three bugs: `can_decode_fast` whitelist did not include NVFP4-prequant
   models; `cache_moe_native_nvfp4` had to be added to build the contiguous
   per-expert NVFP4 buffer for SafeTensors per-expert layouts; per-layer
   free of per-expert allocations (32 GiB VRAM ceiling on 35B-A3B).
-  Memos: `qwen36_nvfp4_decode_underutil_2026_04_30.md`,
-  `gemma4_nvfp4_decode_fastpath_2026_05_01.md`.
 - **Six Qwen3.5/3.6-NVFP4 SafeTensors loader bugs** (#81) blocking coherent
   decode: (1) RMSNorm `1+W` convention now honoured via
   `UploadCtx::arch_norm_offset`, (2) GDN head layout HF-grouped vs
@@ -53,18 +50,16 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   matches the GGUF oracle for the standard verification prompt.
 - **Qwen3.5 GDN Q8_0 α/β qtype mismatch** (#59) — `upload_weight` pre-dequanted
   Q8 → FP16 without updating `qtype`. Dispatcher mis-interpreted bytes →
-  state collapse (` my my my…`). Memo: `qwen35_q8_alpha_beta_qtype_bug_2026_04_25.md`.
+  state collapse (` my my my…`).
 - **MXFP4 GDN-fallback dequant** (#58) — replaced buggy CPU path with GPU kernel.
 - **MXFP4 FP16-fallback VRAM oversubscription diagnostic** (#60) — clear error
   message for the Qwen3.5-27B-MXFP4 IMA-on-load case (was silent).
 - **Qwen3.5-MXFP4 `A_log` from `blk.X.ssm_dt.weight`** (#61).
 - **MoE expert-offload auto-pick** (#54) — defaults try 10 % overhead first
   before falling back to 30 %. Qwen3-Coder-30B Q6_K 77 → 234 tok/s.
-  Memo: `moe_expert_offload_fix_2026_04_24.md`.
 - **Mistral-3.2-NVFP4 `use_default_system_prompt`** (#78) — honour the
   tokenizer-config flag and skip the 600-token jinja default system prompt.
-  "I am the capital of France?" → "Paris". Memo:
-  `mistral_3_2_nvfp4_use_default_system_2026_04_28.md`.
+  "I am the capital of France?" → "Paris".
 - **Server `<channel|>` swallowing answer body on Gemma-4** (#39).
 - **Gemma-4 byte-fallback on common names** (#37).
 - **Server `reasoning_content` for chat-template-injected `<think>`** (#86).
@@ -78,10 +73,9 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
   DeepSeek, and Qwen3.5-GDN out of the box on first decode.
 - **Auto-deterministic cuBLAS when FP8 KV active** (#52) — pins cuBLAS algo
   selection to avoid quant-dequant noise → softmax NaN. Necessary fix; not
-  sufficient for all archs (see TODO.md "FP8 KV stride bug").
+  sufficient for all archs (see docs/roadmap.md "FP8 KV stride bug").
 - **CUDA Graph coverage expansion** (#53) — speculative-verify graphs, SigLIP
   vision graph, default mem-pool retain, `cudaGraphExecUpdate` re-capture.
-  Memo: `cuda_graph_expansion_2026_04_24.md`.
 - **SM120 FMHA optimisation pass — Project B Stage 4** (#55, #56) — float4
   tile loads + HW FP4 conversion. **+11–13 % prefill** on Qwen3-4B Q8_0 at
   pp=8192. Stage 5 (`mxf4nvf4.block_scale.scale_vec::4X.m16n8k64`) layouts
@@ -138,18 +132,15 @@ All notable changes since v0.6. Format loosely follows [Keep a Changelog](https:
 
 ### Performance baseline refresh (2026-04-29)
 
-`tests/perf_baseline.json` refreshed during the autonomous bringup mission
-(#80). Drift was visible **before** the bringup branch's two code commits —
-i.e. not a regression introduced by the mission. Numbers reflect the
+`tests/perf_baseline.json` refreshed (#80). Numbers reflect a
 RelWithDebInfo build with full GPU boost engaged (P1, 2880 MHz, 456 W).
-Refresh mechanism documented in CLAUDE.md memory:
-`scripts/gen_perf_baseline.sh`.
+Refresh via `scripts/gen_perf_baseline.sh`.
 
 ### Known issues (carry-over)
 
 - **FP8 KV cache** still breaks Llama-3.2 / Mistral-Small-3.1 / DeepSeek-R1-Distill
   out of the box even with the determ-cuBLAS gate. Default is FP16; opt-in
-  per model after testing. See TODO.md.
+  per model after testing. See docs/roadmap.md.
 - **NVFP4 long-context regression** on Mistral-3.2-NVFP4 at ~500+ raw tokens
   is **partially resolved** by PR #88 (CUTLASS NVFP4×NVFP4 prefill);
   numerical-hash kernel garbage is gone. Residual model-behaviour issue
