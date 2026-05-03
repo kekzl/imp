@@ -1,0 +1,37 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+
+# C / C++ / CUDA — 4 spaces, matches .clang-format
+[*.{c,cc,cpp,cxx,h,hh,hpp,cu,cuh}]
+indent_size = 4
+max_line_length = 110
+
+# CMake / build glue — 2 spaces is conventional
+[CMakeLists.txt]
+indent_size = 2
+[*.cmake]
+indent_size = 2
+[Makefile]
+indent_style = tab
+
+# Config / data files — 2 spaces
+[*.{yml,yaml,json,toml}]
+indent_size = 2
+
+# Shell + Python
+[*.{sh,bash}]
+indent_size = 4
+[*.py]
+indent_size = 4
+max_line_length = 100
+
+# Markdown — keep trailing whitespace (used for line breaks)
+[*.md]
+trim_trailing_whitespace = false
+indent_size = 2
