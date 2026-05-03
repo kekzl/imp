@@ -76,7 +76,7 @@ There are no architecture fallbacks. The code will fail to compile or fail at st
 | Gemma-3 | text + vision (SigLIP) | GGUF |
 | Nemotron-H | Mamba2 + Attention + MoE | GGUF |
 
-Detailed quality-per-VRAM picks: [`docs/RECOMMENDED_MODELS.md`](docs/RECOMMENDED_MODELS.md).
+Tested-and-verified models with VRAM and decode `tok/s`: [`docs/supported-models.md`](docs/supported-models.md).
 
 ## Performance
 
@@ -103,11 +103,11 @@ Full build options, test commands, and verify-gate setup: [`docs/usage.md`](docs
 | Document | Description |
 |---|---|
 | [Usage & reference](docs/usage.md) | Build, server, CLI, C API |
+| [Supported models](docs/supported-models.md) | Tested model families with VRAM + tok/s |
+| [Quantization](docs/quantization.md) | GGUF Q*_K, NVFP4, MXFP4, FP8 KV — formats, pipelines, trade-offs |
 | [Benchmarks](BENCHMARKS.md) | Decode + prefill throughput, methodology |
 | [imp.conf reference](imp.conf.example) | All runtime configuration keys |
-| [SM120 status](docs/SM120_OPTIMIZATION_STATUS.md) | Kernel optimization notes |
-| [MXFP4](docs/MXFP4_QUANTIZATION.md) | MXFP4 background and tooling |
-| [Recommended models](docs/RECOMMENDED_MODELS.md) | Quality-per-VRAM picks |
+| [sm_120 kernels](docs/sm120.md) | Kernel optimization notes |
 | [Roadmap](docs/roadmap.md) | Open bugs and in-flight performance work |
 | [Changelog](CHANGELOG.md) | Per-release notes |
 

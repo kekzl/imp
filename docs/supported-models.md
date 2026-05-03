@@ -1,0 +1,88 @@
+# Supported models
+
+This page lists model families with a known-working code path on `main`. Throughput numbers come from [`BENCHMARKS.md`](../BENCHMARKS.md) — see that doc for methodology and the cuBLAS prefill-variance caveat. VRAM figures are model weights only (default KV cache adds 1–4 GiB depending on context).
+
+Anything not on this list may still load (the GGUF and SafeTensors paths cover most LLaMA-derived architectures), but it has not been verified end-to-end.
+
+## Dense transformers
+
+| Model | Quant | VRAM | Decode `tg256` | Format |
+|---|---|---:|---:|---|
+| Qwen3-4B | Q8_0 | 4.0 GB | 401 | GGUF |
+| Qwen3-4B | MXFP4 | 2.8 GB | 124 | GGUF |
+| Qwen3-8B | Q8_0 | 8.2 GB | 255 | GGUF |
+| Qwen3-32B | Q4_K_M | 19 GB | — | GGUF |
+| Llama-3.2-3B | Q8_0 | 3.2 GB | 208 | GGUF |
+| Mistral-Small-3.1-24B | Q6_K | 19 GB | — | GGUF |
+| Mistral-Small-3.2-24B | NVFP4 | 13 GB | 101 | SafeTensors (Modelopt) |
+| DeepSeek-R1-Distill-Qwen-7B | Q8_0 | 7.6 GB | — | GGUF |
+| DeepSeek-R1-Distill-Qwen-14B | Q6_K | 12 GB | — | GGUF |
+
+## Hybrid (Gated DeltaNet + attention)
+
+GDN models use FP16 prefill instead of FP8 (~8% slower than FP8 dense, but eliminates multi-turn state collapse). Linear-time scan vs O(n²) attention.
+
+| Model | Quant | VRAM | Decode `tg256` | Format |
+|---|---|---:|---:|---|
+| Qwen3.5-4B (GDN) | Q8_0 | 4.2 GB | 220 | GGUF |
+| Qwen3.5-9B (GDN) | Q8_0 | 8.9 GB | 140 | GGUF |
+| Qwen3.5-27B (GDN) | Q4_K_M | 16 GB | — | GGUF |
+| Qwen3.5-27B (GDN) | MXFP4 | — | — | Loads OOM on 32 GB — see [roadmap](roadmap.md) |
+
+## Mixture-of-Experts
+
+| Model | Quant | VRAM | Decode `tg256` | Format |
+|---|---|---:|---:|---|
+| Qwen3-Coder-30B-A3B | Q6_K | 24 GB | 234 | GGUF |
+| Qwen3-Coder-30B-A3B | NVFP4 | 16 GB | 272 | SafeTensors (Modelopt) |
+| Qwen3.6-35B-A3B | Q4_K_M | 22 GB | 143 | GGUF, set `moe.expert_overhead_pct=10` |
+| Qwen3.6-35B-A3B | NVFP4 | 18 GB | 217 | SafeTensors (Modelopt) |
+| Gemma-4-26B-A4B-it | Q4_K_M | 14 GB | 183 | GGUF |
+| Gemma-4-26B-A4B-it | Q5_K_M | 17 GB | 65 | GGUF, recommended for code-gen |
+| Gemma-4-26B-A4B-it | NVFP4 | 14 GB | 213 | SafeTensors (Modelopt) |
+| Nemotron-3-Nano-30B-A3B | Q6_K | 32 GB | — | GGUF, Mamba2 + attention + MoE |
+
+## Vision
+
+Gemma-3 is the only multimodal family currently supported. The vision encoder weights ship as a separate `mmproj.gguf` file:
+
+| Model | Quant | VRAM | Decode `tg256` | Notes |
+|---|---|---:|---:|---|
+| Gemma-3-12B | Q8_0 | 12 GB | 129 | text + vision via mmproj |
+| Gemma-3-27B | Q4_K_M | 16 GB | — | largest Gemma-3 |
+
+Run with both flags:
+
+```bash
+imp-cli --model gemma-3-12b-it.gguf --mmproj gemma-3-12b-mmproj.gguf \
+        --image photo.jpg --prompt "Describe this image"
+```
+
+## Format notes
+
+- **GGUF** — standard llama.cpp format. `Q*_K`, `Q8_0`, `Q*_0`, MXFP4 (imp-proprietary tensor type 31). Loaded directly from a single file.
+- **SafeTensors NVFP4 prequant** — produced by [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) (Modelopt) or [llm-compressor](https://github.com/vllm-project/llm-compressor). Loaded from a directory with `config.json` + sharded `*.safetensors`. The Modelopt path is more thoroughly tested; llm-compressor degenerates past ~30 tokens on several models (see [roadmap](roadmap.md)).
+
+For the underlying quantization formats and when each one is used internally, see [`docs/quantization.md`](quantization.md).
+
+## Loading
+
+```bash
+# GGUF — file path
+imp-cli --model models/Qwen3-8B-Q8_0.gguf --prompt "Hello"
+
+# SafeTensors — directory path
+imp-cli --model models/Qwen3-Coder-30B-A3B-FP4/ --prompt "Hello"
+
+# Vision — text model + mmproj
+imp-cli --model gemma-3-12b-it.gguf --mmproj mmproj.gguf \
+        --image photo.jpg --prompt "Describe"
+```
+
+The `imp` helper script at the repo root downloads from a presets list:
+
+```bash
+./imp list
+./imp pull qwen3-8b-q8_0
+./imp use qwen3-8b-q8_0   # set in .env, restart the server
+```
