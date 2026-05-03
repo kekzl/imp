@@ -20,12 +20,12 @@ Models tested and verified on RTX 5090 (32 GB GDDR7). Sorted by quality-per-VRAM
 |-------|-------|------|-------------|-------|
 | **Llama-3.2-3B** | Q8_0 | 3.2 GB | ~400 | Lightweight, good instruction following |
 
-### Mistral / Devstral
+### Mistral
 
 | Model | Quant | VRAM | Notes |
 |-------|-------|------|-------|
 | **Mistral-Small-3.1-24B** | Q6_K | 19 GB | Strong reasoning, fits 32 GB |
-| **Devstral-Small-2507** | Q4_K_M | 14 GB | Code-specialized Mistral |
+| **Mistral-Small-3.2-24B** | NVFP4 | 13 GB | NVFP4 prequant, 101 tok/s decode |
 
 ### Gemma 3
 
@@ -44,20 +44,20 @@ Models tested and verified on RTX 5090 (32 GB GDDR7). Sorted by quality-per-VRAM
 | **Qwen3.5-9B** | Q8_0 | 8.9 GB | 140 | 9,483 | Best GDN quality/speed |
 | **Qwen3.5-27B** | Q4_K_M | 16 GB | ~45 | ~3,000 | Frontier GDN, fits 32 GB |
 | **Qwen3.5-27B** | Q8_0 | 27 GB | ~35 | ~2,200 | Highest quality, tight fit |
-| **Qwen3.5-27B** | MXFP4 | — | — | — | ⚠ Loads OOM on 32 GB; see TODO.md |
+| **Qwen3.5-27B** | MXFP4 | — | — | — | ⚠ Loads OOM on 32 GB; see [`docs/roadmap.md`](roadmap.md) |
 
 ## Mixture of Experts (MoE)
 
 | Model | Quant | VRAM | Decode tok/s | Notes |
 |-------|-------|------|-------------|-------|
-| **Qwen3-Coder-30B-A3B** | Q6_K | 24 GB | 234 | Code MoE post moe_expert_offload_fix (PR #54) |
-| **Qwen3-Coder-30B-A3B** | NVFP4 | 16 GB | 51 | `--no-cuda-graphs` for coherence; Model Optimizer SafeTensors |
+| **Qwen3-Coder-30B-A3B** | Q6_K | 24 GB | 234 | Code MoE |
+| **Qwen3-Coder-30B-A3B** | NVFP4 | 16 GB | 272 | Model Optimizer SafeTensors |
 | **Qwen3.6-35B-A3B** | Q4_K_M | 22 GB | 143 | GDN + MoE, `moe.expert_overhead_pct=10` |
-| **Qwen3.6-35B-A3B** | NVFP4 | — | 117–142 | Decode fast-path post PR #85 (was 8.34) |
-| **Gemma-4-26B-A4B-it** | Q4_K_M | 14 GB | 183 | 1.21× llama.cpp; CUDA Graphs lit up |
+| **Qwen3.6-35B-A3B** | NVFP4 | 18 GB | 217 | Decode fast-path |
+| **Gemma-4-26B-A4B-it** | Q4_K_M | 14 GB | 183 | 1.21× llama.cpp |
 | **Gemma-4-26B-A4B-it** | Q5_K_M | 17 GB | 65 | Best quality/speed |
-| **Gemma-4-26B-A4B-it** | NVFP4 | — | 157–180 | Decode fast-path post PR #85 |
-| **Mistral-Small-3.2** | NVFP4 | — | 81 | llm-compressor Phase 2 Item 1 |
+| **Gemma-4-26B-A4B-it** | NVFP4 | 14 GB | 213 | Decode fast-path |
+| **Mistral-Small-3.2** | NVFP4 | 13 GB | 101 | NVFP4 prequant |
 | **DeepSeek-R1-Distill-Qwen-14B** | Q6_K | 12 GB | — | Reasoning-optimised (R1 distillation) |
 | **Nemotron-3-Nano-30B-A3B** | Q6_K | 32 GB | — | Mamba2+Attention+MoE hybrid, tight fit |
 
@@ -70,9 +70,8 @@ Models tested and verified on RTX 5090 (32 GB GDDR7). Sorted by quality-per-VRAM
 | **Best quality ≤16 GB** | Qwen3.5-27B Q4_K_M | GDN + large model |
 | **Best quality ≤32 GB** | Qwen3-32B Q4_K_M | Dense frontier |
 | **Long context** | Qwen3.6-35B-A3B Q4_K_M | GDN+MoE = O(1) per token + sparse compute |
-| **Coding (MoE)** | Qwen3-Coder-30B-A3B Q6_K | 234 tok/s post moe_expert_offload_fix |
-| **Coding (dense)** | Devstral-Small Q4_K_M | Code-specialised |
-| **Big-MoE NVFP4** | Gemma-4-26B-A4B NVFP4 | 157–180 tok/s, decode fast-path |
+| **Coding (MoE)** | Qwen3-Coder-30B-A3B NVFP4 | 272 tok/s |
+| **Big-MoE NVFP4** | Gemma-4-26B-A4B NVFP4 | 213 tok/s, decode fast-path |
 | **Vision** | Gemma-3-12B Q8_0 | Text + image (mmproj) |
 | **Reasoning** | DeepSeek-R1-Distill-14B Q6_K | Chain-of-thought |
 | **Smallest footprint** | Qwen3-4B MXFP4 | 2.8 GB, Blackwell FP4 |

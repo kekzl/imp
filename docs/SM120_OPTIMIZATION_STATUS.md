@@ -33,9 +33,8 @@ This means:
 ## What Would Actually Help Decode
 
 1. **Smaller KV cache** (INT4, TurboQuant) — already implemented, ~2x bandwidth reduction
-2. **Speculative decoding** (TurboDraft) — amortizes weight loads over N tokens
-3. **GPU clock boost** — RTX 5090 boosts correctly to ~2445 MHz under load (max 3090 MHz)
-4. **Batch>1 decode** — multiple sequences share weight loads, increases arithmetic intensity
+2. **GPU clock boost** — RTX 5090 boosts correctly to ~2445 MHz under load (max 3090 MHz)
+3. **Batch>1 decode** — multiple sequences share weight loads, increases arithmetic intensity
 
 ## NVFP4 Prequant (Model Optimizer) — NEW
 
@@ -48,19 +47,20 @@ This means:
 | CUDA graphs for non-fast-path MoE | ⛔ Disabled | D2H routing memcpy incompatible |
 | CUDA graphs for NVFP4-prequant MoE fast-path | ✅ Done (PR #85) | `cache_moe_native_nvfp4` builds contiguous expert buffer device-side |
 | Packed MoE NVFP4 dispatch | ✅ Done (PR #85) | Contiguous `[ne, N, K_packed]` buffer per layer per projection |
-| Tested: Qwen3-Coder-30B-A3B (NVFP4) | ✅ 51 tok/s | `--no-cuda-graphs` for coherence |
-| Tested: Qwen3-Coder-30B-A3B (Q6_K) | ✅ 234 tok/s | post moe_expert_offload_fix (PR #54) |
-| Tested: Qwen3.6-35B-A3B (NVFP4) | ✅ 117–142 tok/s | post #85 fast-path (was 8.34) |
-| Tested: Gemma-4-26B-A4B (NVFP4) | ✅ 157–180 tok/s | post #85 fast-path (was ~42) |
+| Tested: Qwen3-Coder-30B-A3B (NVFP4) | ✅ 272 tok/s | post CUTLASS prefill cache (PR #88) |
+| Tested: Qwen3-Coder-30B-A3B (Q6_K) | ✅ 234 tok/s | post MoE expert offload auto-pick (PR #54) |
+| Tested: Qwen3.6-35B-A3B (NVFP4) | ✅ 217 tok/s | post CUTLASS prefill cache (PR #88) |
+| Tested: Gemma-4-26B-A4B (NVFP4) | ✅ 213 tok/s | post CUTLASS prefill cache (PR #88) |
+| Tested: Mistral-Small-3.2 (NVFP4) | ✅ 101 tok/s | post CUTLASS prefill cache (PR #88) |
 
 ## Open Items
 
 | Item | Impact | Feasibility |
 |------|--------|-------------|
 | Generalise NVFP4-prequant fast-path to GGUF MoE decode | High — removes D2H sync per layer per token | Medium-High — needs device-side expert routing for GGUF MoE |
-| Project B Stage 5 (`mxf4nvf4.block_scale.scale_vec::4X.m16n8k64`) | 2-4× MXFP4 prefill attention | Medium — layouts decoded byte-exact (PR #55), integration is the open item |
+| MXFP4 block-scale MMA upgrade (`mxf4nvf4.block_scale.scale_vec::4X.m16n8k64`) | 2-4× MXFP4 prefill attention | Medium — operand layouts decoded byte-exact, integration open |
 | FP8 TC-GEMV for batch decode (M=2-16) | Medium (batch>1 only) | Medium |
 | TMA for contiguous KV (non-paged) | Small (~5%) | Medium |
 | `cublasLtMatmulGrouped` with NVFP4 + device-side shapes (CUDA 13.2 U1) | High for general MoE — host-sync-free expert dispatch | Medium |
 | `cub::DeviceTopK` (AIR algorithm) | Medium — 5× faster top_k>128 | Low |
-| Per-arch FP8 KV stride fix | High — remove `engine.cpp:547` Gemma-4 carve-out + unblock Llama / Mistral / DeepSeek | High — needs per-layer head_dim awareness in KV write/read kernels |
+| Per-arch FP8 KV stride fix | High — remove Gemma-4 carve-out + unblock Llama / Mistral / DeepSeek | High — needs per-layer head_dim awareness in KV write/read kernels |

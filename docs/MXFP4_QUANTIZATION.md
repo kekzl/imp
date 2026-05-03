@@ -78,7 +78,7 @@ Model Optimizer SafeTensors (per-expert weights)
   → CUDA Graphs disabled (MoE routing uses D2H memcpy)
 ```
 
-**Tested:** Qwen3-Coder-30B-A3B-FP4 (128 experts, 38 tok/s decode, 90 tok/s prefill on RTX 5090).
+**Tested:** Qwen3-Coder-30B-A3B-FP4 (128 experts; decode 272 tok/s after PR #88 lit up the CUTLASS NVFP4×NVFP4 prefill cache for prequant SafeTensors — was 51 tok/s with `--no-cuda-graphs`).
 
 ## Legacy note
 

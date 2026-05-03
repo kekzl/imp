@@ -108,7 +108,6 @@ Full build options, test commands, and verify-gate setup: [`docs/usage.md`](docs
 | [SM120 status](docs/SM120_OPTIMIZATION_STATUS.md) | Kernel optimization notes |
 | [MXFP4](docs/MXFP4_QUANTIZATION.md) | MXFP4 background and tooling |
 | [Recommended models](docs/RECOMMENDED_MODELS.md) | Quality-per-VRAM picks |
-| [Memory management](docs/memory-management-comparison.md) | VRAM/RAM strategy comparison |
 | [Roadmap](docs/roadmap.md) | Open bugs and in-flight performance work |
 | [Changelog](CHANGELOG.md) | Per-release notes |
 
