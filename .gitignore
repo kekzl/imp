@@ -61,3 +61,4 @@ test_detail.json
 .claude/*.lock
 .claude/worktrees/
 .claude/settings.local.json
+_audit/
