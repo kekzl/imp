@@ -16,6 +16,46 @@ and short long-context. FP8 KV warmup calibration fixed for Llama and
 GDN families. CUDA Graphs lit up for prequant SafeTensors. Forty-plus
 PRs since v0.7.0.
 
+### Server + tools (PR #97)
+
+- **Native function calling for Gemma-4 + Qwen3.6** — root-cause was a
+  tokenizer bug, not just missing parsers. `encode_spm` / `encode_gpt2` /
+  `encode_gemma4` now run a longest-match pre-split pass against
+  CONTROL-flagged added tokens before BPE. Multi-character markers like
+  `<|tool_call>` (Gemma-4 token id 48) were being BPE'd as raw UTF-8
+  bytes — the model never saw the trained marker in its prompt's
+  tools-rendering and answered with markdown JSON code blocks instead
+  of the native protocol. Fixed: token 48/49 round-trip as their
+  assigned id. Added `parse_tool_calls_gemma()` for Gemma's non-JSON
+  syntax (`<|tool_call>call:NAME{key:value}<tool_call|>` with
+  `<|"|>...<|"|>` string escapes), and extended `parse_tool_calls_chatml()`
+  to branch on body shape so Qwen3.6's XML-styled
+  `<function=...><parameter=...>` payload parses too. End-to-end
+  verified on Gemma-4 Q4_K_M (`finish_reason=tool_calls`, 19 tokens
+  completion) and Qwen3.6-NVFP4 (`finish_reason=tool_calls` with
+  reasoning_content alongside).
+- **Faster cold start (24s → 18s on Qwen3.6 NVFP4)** — skip MTP / vision
+  -only SafeTensors shards when neither is wired up (~5s, 2.4 GiB of
+  mmap + header parse + page-cache pressure avoided), MAP_POPULATE +
+  MADV_WILLNEED on weight mmaps, pinned staging ring 2x64 MiB →
+  4x128 MiB, Pass-2 expert upload re-arms cudaMemGetInfo cache so
+  per-tensor checked_cuda_malloc skips ~15k sync calls on 128-expert
+  MoE, concurrent SafeTensors shard parse (3 shards in parallel
+  threads), exposed `name_is_skipped()` to deduplicate the shard-skip
+  filter and translate_name's skip rules.
+- **Server fixes (Open WebUI on Qwen3.6-NVFP4)** — UTF-8 boundary walk
+  in reasoning stream (German umlauts came out as `f��r` because the
+  7-byte tail-overlap landed mid-multibyte), drop leaked stop tokens
+  (`<|im_end|>` / `<|endoftext|>`) before the `is_last` gate, restrict
+  "[Reasoning truncated]" notice to `finish == "length"`, post-`</think>`
+  grace 4 → 16 tokens, repetition_penalty default 1.0 → 1.05 to break
+  multi-turn loop degeneration, workspace skips FP8 / MXFP4 scratch
+  for paths we won't use (~6.4 GiB VRAM headroom on Qwen3.6 NVFP4 GDN).
+- **Open WebUI tools enabled in docker-compose** — DuckDuckGo web
+  search (no API key), Pyodide code interpreter (browser-side, no
+  sandbox service), URL fetch, native function calling toggleable
+  per message via the chat-input icons.
+
 ### Fixed
 
 - **FP8 KV warmup-calibration bug** (#89) — `Engine::warmup()` ran a forward

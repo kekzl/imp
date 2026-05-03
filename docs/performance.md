@@ -142,9 +142,10 @@ Memo: `memory/kv_dtype_tradeoffs_2026_04_24.md`.
 
 | Spec | Value |
 |------|-------|
-| GPU | NVIDIA GeForce RTX 5090 |
+| GPU (this benchmark) | NVIDIA GeForce RTX 5090 |
+| Other supported GPUs (same `sm_120f`) | RTX PRO 5000 Blackwell (48 GB), RTX PRO 6000 Blackwell (96 GB) |
 | Architecture | Blackwell (GB202), sm_120 |
-| VRAM | 32 GB GDDR7, 512-bit, 1792 GB/s |
+| VRAM | 32 GB GDDR7, 512-bit, 1792 GB/s (RTX 5090) |
 | SMs | 170 |
 | CUDA Cores | 21,760 |
 | Tensor Cores | 680 (5th gen) |

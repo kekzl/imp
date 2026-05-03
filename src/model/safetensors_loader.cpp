@@ -14,10 +14,14 @@
 #include <filesystem>
 #include <fstream>
 #include <set>
+#include <map>
 #include <unordered_map>
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <thread>
+#include <mutex>
+#include <atomic>
 
 namespace imp {
 
@@ -38,7 +42,8 @@ struct JValue {
 
 class JsonParser {
 public:
-    explicit JsonParser(const char* data, size_t len) : data_(data), len_(len), pos_(0) {}
+    explicit JsonParser(const char* data, size_t len)
+        : data_(data), len_(len), pos_(0) {}
 
     JValue parse() {
         skip_ws();
@@ -54,53 +59,39 @@ private:
     bool error_ = false;
 
     char peek() const {
-        if (pos_ >= len_)
-            return '\0';
+        if (pos_ >= len_) return '\0';
         return data_[pos_];
     }
 
     char advance() {
-        if (pos_ >= len_) {
-            error_ = true;
-            return '\0';
-        }
+        if (pos_ >= len_) { error_ = true; return '\0'; }
         return data_[pos_++];
     }
 
     void skip_ws() {
-        while (pos_ < len_ &&
-               (data_[pos_] == ' ' || data_[pos_] == '\t' || data_[pos_] == '\n' || data_[pos_] == '\r')) {
+        while (pos_ < len_ && (data_[pos_] == ' ' || data_[pos_] == '\t' ||
+                                data_[pos_] == '\n' || data_[pos_] == '\r')) {
             pos_++;
         }
     }
 
     bool expect(char c) {
         skip_ws();
-        if (peek() == c) {
-            advance();
-            return true;
-        }
+        if (peek() == c) { advance(); return true; }
         error_ = true;
         return false;
     }
 
     JValue parse_value() {
         skip_ws();
-        if (error_)
-            return {};
+        if (error_) return {};
         char c = peek();
-        if (c == '"')
-            return parse_string_value();
-        if (c == '{')
-            return parse_object();
-        if (c == '[')
-            return parse_array();
-        if (c == 't' || c == 'f')
-            return parse_bool();
-        if (c == 'n')
-            return parse_null();
-        if (c == '-' || (c >= '0' && c <= '9'))
-            return parse_number();
+        if (c == '"') return parse_string_value();
+        if (c == '{') return parse_object();
+        if (c == '[') return parse_array();
+        if (c == 't' || c == 'f') return parse_bool();
+        if (c == 'n') return parse_null();
+        if (c == '-' || (c >= '0' && c <= '9')) return parse_number();
         error_ = true;
         return {};
     }
@@ -113,54 +104,30 @@ private:
     }
 
     std::string parse_string_raw() {
-        if (!expect('"'))
-            return "";
+        if (!expect('"')) return "";
         std::string s;
         while (pos_ < len_) {
             char c = advance();
-            if (c == '"')
-                return s;
+            if (c == '"') return s;
             if (c == '\\') {
-                if (pos_ >= len_) {
-                    error_ = true;
-                    return s;
-                }
+                if (pos_ >= len_) { error_ = true; return s; }
                 char esc = advance();
                 switch (esc) {
-                    case '"':
-                        s += '"';
-                        break;
-                    case '\\':
-                        s += '\\';
-                        break;
-                    case '/':
-                        s += '/';
-                        break;
-                    case 'b':
-                        s += '\b';
-                        break;
-                    case 'f':
-                        s += '\f';
-                        break;
-                    case 'n':
-                        s += '\n';
-                        break;
-                    case 'r':
-                        s += '\r';
-                        break;
-                    case 't':
-                        s += '\t';
-                        break;
+                    case '"':  s += '"'; break;
+                    case '\\': s += '\\'; break;
+                    case '/':  s += '/'; break;
+                    case 'b':  s += '\b'; break;
+                    case 'f':  s += '\f'; break;
+                    case 'n':  s += '\n'; break;
+                    case 'r':  s += '\r'; break;
+                    case 't':  s += '\t'; break;
                     case 'u': {
                         // Skip unicode escapes (consume 4 hex digits, emit '?')
-                        for (int i = 0; i < 4 && pos_ < len_; i++)
-                            advance();
+                        for (int i = 0; i < 4 && pos_ < len_; i++) advance();
                         s += '?';
                         break;
                     }
-                    default:
-                        s += esc;
-                        break;
+                    default: s += esc; break;
                 }
             } else {
                 s += c;
@@ -174,21 +141,16 @@ private:
         JValue v;
         v.type = JType::NUMBER;
         size_t start = pos_;
-        if (peek() == '-')
-            advance();
-        while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9')
-            advance();
+        if (peek() == '-') advance();
+        while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9') advance();
         if (pos_ < len_ && data_[pos_] == '.') {
             advance();
-            while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9')
-                advance();
+            while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9') advance();
         }
         if (pos_ < len_ && (data_[pos_] == 'e' || data_[pos_] == 'E')) {
             advance();
-            if (pos_ < len_ && (data_[pos_] == '+' || data_[pos_] == '-'))
-                advance();
-            while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9')
-                advance();
+            if (pos_ < len_ && (data_[pos_] == '+' || data_[pos_] == '-')) advance();
+            while (pos_ < len_ && data_[pos_] >= '0' && data_[pos_] <= '9') advance();
         }
         std::string num_str(data_ + start, pos_ - start);
         v.num_val = std::stod(num_str);
@@ -198,25 +160,17 @@ private:
     JValue parse_object() {
         JValue v;
         v.type = JType::OBJECT;
-        if (!expect('{'))
-            return v;
+        if (!expect('{')) return v;
         skip_ws();
-        if (peek() == '}') {
-            advance();
-            return v;
-        }
+        if (peek() == '}') { advance(); return v; }
         while (!error_) {
             skip_ws();
             std::string key = parse_string_raw();
-            if (!expect(':'))
-                break;
+            if (!expect(':')) break;
             JValue val = parse_value();
             v.obj.emplace_back(std::move(key), std::move(val));
             skip_ws();
-            if (peek() == ',') {
-                advance();
-                continue;
-            }
+            if (peek() == ',') { advance(); continue; }
             break;
         }
         expect('}');
@@ -226,20 +180,13 @@ private:
     JValue parse_array() {
         JValue v;
         v.type = JType::ARRAY;
-        if (!expect('['))
-            return v;
+        if (!expect('[')) return v;
         skip_ws();
-        if (peek() == ']') {
-            advance();
-            return v;
-        }
+        if (peek() == ']') { advance(); return v; }
         while (!error_) {
             v.arr.push_back(parse_value());
             skip_ws();
-            if (peek() == ',') {
-                advance();
-                continue;
-            }
+            if (peek() == ',') { advance(); continue; }
             break;
         }
         expect(']');
@@ -251,13 +198,11 @@ private:
         v.type = JType::NUMBER;
         if (peek() == 't') {
             // true
-            for (int i = 0; i < 4 && pos_ < len_; i++)
-                advance();
+            for (int i = 0; i < 4 && pos_ < len_; i++) advance();
             v.num_val = 1.0;
         } else {
             // false
-            for (int i = 0; i < 5 && pos_ < len_; i++)
-                advance();
+            for (int i = 0; i < 5 && pos_ < len_; i++) advance();
             v.num_val = 0.0;
         }
         return v;
@@ -266,8 +211,7 @@ private:
     JValue parse_null() {
         JValue v;
         v.type = JType::NUL;
-        for (int i = 0; i < 4 && pos_ < len_; i++)
-            advance();
+        for (int i = 0; i < 4 && pos_ < len_; i++) advance();
         return v;
     }
 };
@@ -276,8 +220,7 @@ private:
 
 static const JValue* jobj_find(const JValue& obj, const std::string& key) {
     for (const auto& kv : obj.obj) {
-        if (kv.first == key)
-            return &kv.second;
+        if (kv.first == key) return &kv.second;
     }
     return nullptr;
 }
@@ -285,37 +228,26 @@ static const JValue* jobj_find(const JValue& obj, const std::string& key) {
 // ---- SafeTensors dtype string to QType ----
 
 static QType safetensors_dtype(const std::string& s) {
-    if (s == "F32")
-        return QType::F32;
-    if (s == "F16")
-        return QType::F16;
-    if (s == "BF16")
-        return QType::BF16;
-    if (s == "F64")
-        return QType::F32;  // closest proxy
-    if (s == "I8")
-        return QType::INT8;
-    if (s == "U8")
-        return QType::INT8;  // treat unsigned byte as INT8
-    if (s == "I16")
-        return QType::INT32;  // closest proxy
-    if (s == "I32")
-        return QType::INT32;
-    if (s == "I64")
-        return QType::INT32;  // closest proxy
-    if (s == "BOOL")
-        return QType::INT8;
-    if (s == "F8_E4M3")
-        return QType::FP8_E4M3;
-    if (s == "F8_E5M2")
-        return QType::FP8_E4M3;  // closest proxy
+    if (s == "F32")  return QType::F32;
+    if (s == "F16")  return QType::F16;
+    if (s == "BF16") return QType::BF16;
+    if (s == "F64")  return QType::F32;  // closest proxy
+    if (s == "I8")   return QType::INT8;
+    if (s == "U8")   return QType::INT8;   // treat unsigned byte as INT8
+    if (s == "I16")  return QType::INT32;  // closest proxy
+    if (s == "I32")  return QType::INT32;
+    if (s == "I64")  return QType::INT32;  // closest proxy
+    if (s == "BOOL") return QType::INT8;
+    if (s == "F8_E4M3") return QType::FP8_E4M3;
+    if (s == "F8_E5M2") return QType::FP8_E4M3;  // closest proxy
     IMP_LOG_WARN("Unknown SafeTensors dtype '%s', defaulting to FP32", s.c_str());
     return QType::F32;
 }
 
 // ---- Architecture detection from weight names ----
 
-static ModelArch detect_arch_from_weights(const std::unordered_map<std::string, Tensor>& tensors) {
+static ModelArch detect_arch_from_weights(
+        const std::unordered_map<std::string, Tensor>& tensors) {
     bool has_block_sparse_moe = false;
     bool has_mlp_experts = false;
     bool has_ssm = false;
@@ -330,7 +262,8 @@ static ModelArch detect_arch_from_weights(const std::unordered_map<std::string, 
             has_block_sparse_moe = true;
         if (name.find("mlp.experts") != std::string::npos)
             has_mlp_experts = true;
-        if (name.find("mamba") != std::string::npos || name.find("ssm") != std::string::npos)
+        if (name.find("mamba") != std::string::npos ||
+            name.find("ssm") != std::string::npos)
             has_ssm = true;
         if (name.find(".qweight") != std::string::npos)
             has_gptq = true;
@@ -340,14 +273,10 @@ static ModelArch detect_arch_from_weights(const std::unordered_map<std::string, 
         IMP_LOG_INFO("Detected GPTQ quantized weights");
     }
 
-    if (has_ssm)
-        return ModelArch::NEMOTRON_H_MOE;
-    if (has_mlp_experts)
-        return ModelArch::DEEPSEEK;
-    if (has_block_sparse_moe)
-        return ModelArch::MIXTRAL;
-    if (has_layers)
-        return ModelArch::LLAMA;
+    if (has_ssm)              return ModelArch::NEMOTRON_H_MOE;
+    if (has_mlp_experts)      return ModelArch::DEEPSEEK;
+    if (has_block_sparse_moe) return ModelArch::MIXTRAL;
+    if (has_layers)           return ModelArch::LLAMA;
     return ModelArch::GENERIC;
 }
 
@@ -358,8 +287,7 @@ static ModelArch detect_arch_from_weights(const std::unordered_map<std::string, 
 static int extract_layer_index(const std::string& name) {
     const char* prefix = "model.layers.";
     size_t plen = std::strlen(prefix);
-    if (name.compare(0, plen, prefix) != 0)
-        return -1;
+    if (name.compare(0, plen, prefix) != 0) return -1;
 
     int idx = 0;
     size_t i = plen;
@@ -367,8 +295,7 @@ static int extract_layer_index(const std::string& name) {
         idx = idx * 10 + (name[i] - '0');
         i++;
     }
-    if (i == plen)
-        return -1;  // no digits found
+    if (i == plen) return -1;  // no digits found
     return idx;
 }
 
@@ -378,15 +305,15 @@ static int infer_n_layers(const std::unordered_map<std::string, Tensor>& tensors
     int max_idx = -1;
     for (const auto& kv : tensors) {
         int idx = extract_layer_index(kv.first);
-        if (idx > max_idx)
-            max_idx = idx;
+        if (idx > max_idx) max_idx = idx;
     }
     return max_idx + 1;  // 0-indexed, so count = max + 1
 }
 
 // ---- Infer model config from weight shapes ----
 
-static void infer_config(ModelConfig& cfg, const std::unordered_map<std::string, Tensor>& tensors) {
+static void infer_config(ModelConfig& cfg,
+                         const std::unordered_map<std::string, Tensor>& tensors) {
     // Only infer fields that are still at their default (zero) values.
     // config.json (via HFConfigLoader) is authoritative when present.
 
@@ -396,10 +323,8 @@ static void infer_config(ModelConfig& cfg, const std::unordered_map<std::string,
     // token embedding: shape = [vocab_size, d_model]
     auto it = tensors.find("model.embed_tokens.weight");
     if (it != tensors.end() && it->second.ndim == 2) {
-        if (cfg.vocab_size == 0)
-            cfg.vocab_size = static_cast<int>(it->second.shape[0]);
-        if (cfg.d_model == 0)
-            cfg.d_model = static_cast<int>(it->second.shape[1]);
+        if (cfg.vocab_size == 0) cfg.vocab_size = static_cast<int>(it->second.shape[0]);
+        if (cfg.d_model == 0) cfg.d_model = static_cast<int>(it->second.shape[1]);
     }
 
     // Only infer heads from weights if config.json didn't set them
@@ -440,8 +365,9 @@ static void infer_config(ModelConfig& cfg, const std::unordered_map<std::string,
 
     if (cfg.expert_d_ff == 0 && cfg.n_experts > 0) {
         // Try Mixtral-style (w1) then DeepSeek/Qwen-style (gate_proj)
-        for (const char* name : {"model.layers.0.block_sparse_moe.experts.0.w1.weight",
-                                 "model.layers.0.mlp.experts.0.gate_proj.weight"}) {
+        for (const char* name : {
+            "model.layers.0.block_sparse_moe.experts.0.w1.weight",
+            "model.layers.0.mlp.experts.0.gate_proj.weight"}) {
             auto it_expert = tensors.find(name);
             if (it_expert != tensors.end() && it_expert->second.ndim == 2) {
                 cfg.expert_d_ff = static_cast<int>(it_expert->second.shape[0]);
@@ -451,10 +377,8 @@ static void infer_config(ModelConfig& cfg, const std::unordered_map<std::string,
     }
 
     // Defaults for fields we couldn't infer
-    if (cfg.max_seq_len == 0)
-        cfg.max_seq_len = 4096;
-    if (cfg.n_kv_heads == 0)
-        cfg.n_kv_heads = cfg.n_heads;
+    if (cfg.max_seq_len == 0) cfg.max_seq_len = 4096;
+    if (cfg.n_kv_heads == 0) cfg.n_kv_heads = cfg.n_heads;
 }
 
 // ---- Per-shard loading helper ----
@@ -464,30 +388,30 @@ struct ShardInfo {
     size_t mmap_size = 0;
 };
 
-static bool load_shard(const std::string& path, std::unordered_map<std::string, Tensor>& tensor_map,
-                       ShardInfo& shard, bool llm_compressor_format,
+static bool load_shard(const std::string& path,
+                       std::unordered_map<std::string, Tensor>& tensor_map,
+                       ShardInfo& shard,
+                       bool llm_compressor_format,
                        imp::llm_compressor::TranslationCounters& counters) {
     int fd = open(path.c_str(), O_RDONLY);
-    if (fd < 0) {
-        IMP_LOG_ERROR("Failed to open: %s", path.c_str());
-        return false;
-    }
+    if (fd < 0) { IMP_LOG_ERROR("Failed to open: %s", path.c_str()); return false; }
 
     struct stat st;
-    if (fstat(fd, &st) != 0) {
-        close(fd);
-        return false;
-    }
+    if (fstat(fd, &st) != 0) { close(fd); return false; }
     size_t file_size = static_cast<size_t>(st.st_size);
-    if (file_size < 8) {
-        close(fd);
-        return false;
-    }
+    if (file_size < 8) { close(fd); return false; }
 
-    void* mmap_base = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    void* mmap_base = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
     close(fd);
-    if (mmap_base == MAP_FAILED)
-        return false;
+    if (mmap_base == MAP_FAILED) {
+        // MAP_POPULATE may fail on some filesystems; retry without it.
+        int fd2 = open(path.c_str(), O_RDONLY);
+        if (fd2 < 0) return false;
+        mmap_base = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd2, 0);
+        close(fd2);
+        if (mmap_base == MAP_FAILED) return false;
+    }
+    madvise(mmap_base, file_size, MADV_WILLNEED);
     madvise(mmap_base, file_size, MADV_SEQUENTIAL);
 
     shard.mmap_base = mmap_base;
@@ -496,18 +420,12 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
     auto data = reinterpret_cast<const uint8_t*>(mmap_base);
     uint64_t header_size = 0;
     std::memcpy(&header_size, data, sizeof(uint64_t));
-    if (8 + header_size > file_size) {
-        munmap(mmap_base, file_size);
-        return false;
-    }
+    if (8 + header_size > file_size) { munmap(mmap_base, file_size); return false; }
 
     const char* json_data = reinterpret_cast<const char*>(data + 8);
     JsonParser parser(json_data, static_cast<size_t>(header_size));
     JValue root = parser.parse();
-    if (!parser.ok() || root.type != JType::OBJECT) {
-        munmap(mmap_base, file_size);
-        return false;
-    }
+    if (!parser.ok() || root.type != JType::OBJECT) { munmap(mmap_base, file_size); return false; }
 
     size_t tensor_data_offset = 8 + static_cast<size_t>(header_size);
     uint8_t* tensor_data_base = const_cast<uint8_t*>(data + tensor_data_offset);
@@ -516,31 +434,25 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
         std::string tensor_name = kv.first;  // copy — may be mutated by translation
         const JValue& tensor_meta = kv.second;
 
-        if (tensor_name == "__metadata__")
-            continue;
-        if (tensor_meta.type != JType::OBJECT)
-            continue;
+        if (tensor_name == "__metadata__") continue;
+        if (tensor_meta.type != JType::OBJECT) continue;
 
         // Translate llm-compressor names → modelopt names if applicable.
         if (llm_compressor_format) {
             auto translated = imp::llm_compressor::translate_name(tensor_name, counters);
-            if (translated.action == imp::llm_compressor::NameTranslation::SKIP)
-                continue;
+            if (translated.action == imp::llm_compressor::NameTranslation::SKIP) continue;
             tensor_name = std::move(translated.out_name);
         }
 
         const JValue* dtype_val = jobj_find(tensor_meta, "dtype");
-        if (!dtype_val || dtype_val->type != JType::STRING)
-            continue;
+        if (!dtype_val || dtype_val->type != JType::STRING) continue;
         QType dtype = safetensors_dtype(dtype_val->str_val);
 
         const JValue* shape_val = jobj_find(tensor_meta, "shape");
-        if (!shape_val || shape_val->type != JType::ARRAY)
-            continue;
+        if (!shape_val || shape_val->type != JType::ARRAY) continue;
 
         int ndim = static_cast<int>(shape_val->arr.size());
-        if (ndim > kMaxDims)
-            continue;
+        if (ndim > kMaxDims) continue;
 
         int64_t shape[kMaxDims] = {};
         for (int d = 0; d < ndim; d++) {
@@ -548,24 +460,23 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
         }
 
         const JValue* offsets_val = jobj_find(tensor_meta, "data_offsets");
-        if (!offsets_val || offsets_val->type != JType::ARRAY || offsets_val->arr.size() != 2)
-            continue;
+        if (!offsets_val || offsets_val->type != JType::ARRAY || offsets_val->arr.size() != 2) continue;
 
         uint64_t offset_start = static_cast<uint64_t>(offsets_val->arr[0].as_int());
         uint64_t offset_end = static_cast<uint64_t>(offsets_val->arr[1].as_int());
 
-        if (tensor_data_offset + offset_end > file_size)
-            continue;
+        if (tensor_data_offset + offset_end > file_size) continue;
 
         void* tensor_ptr = tensor_data_base + offset_start;
         Tensor t(tensor_ptr, dtype, ndim, shape, /*on_device=*/false);
         tensor_map.emplace(tensor_name, t);
 
-        IMP_LOG_DEBUG("Tensor: %s dtype=%s shape=[%ld%s%s%s%s] offsets=[%lu,%lu]", tensor_name.c_str(),
-                      dtype_val->str_val.c_str(), (long)shape[0], ndim > 1 ? "," : "",
-                      ndim > 1 ? std::to_string(shape[1]).c_str() : "", ndim > 2 ? "," : "",
-                      ndim > 2 ? std::to_string(shape[2]).c_str() : "", (unsigned long)offset_start,
-                      (unsigned long)offset_end);
+        IMP_LOG_DEBUG("Tensor: %s dtype=%s shape=[%ld%s%s%s%s] offsets=[%lu,%lu]",
+                      tensor_name.c_str(), dtype_val->str_val.c_str(),
+                      (long)shape[0],
+                      ndim > 1 ? "," : "", ndim > 1 ? std::to_string(shape[1]).c_str() : "",
+                      ndim > 2 ? "," : "", ndim > 2 ? std::to_string(shape[2]).c_str() : "",
+                      (unsigned long)offset_start, (unsigned long)offset_end);
     }
 
     return true;
@@ -573,7 +484,8 @@ static bool load_shard(const std::string& path, std::unordered_map<std::string, 
 
 // ---- Sharded SafeTensors loading ----
 
-static bool load_sharded(const std::string& model_dir, std::unordered_map<std::string, Tensor>& tensor_map,
+static bool load_sharded(const std::string& model_dir,
+                         std::unordered_map<std::string, Tensor>& tensor_map,
                          std::vector<ShardInfo>& shards) {
     std::string index_path = model_dir + "/model.safetensors.index.json";
 
@@ -583,7 +495,8 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
         IMP_LOG_ERROR("Failed to open index: %s", index_path.c_str());
         return false;
     }
-    std::string index_json((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    std::string index_json((std::istreambuf_iterator<char>(ifs)),
+                            std::istreambuf_iterator<char>());
     ifs.close();
 
     JsonParser parser(index_json.data(), index_json.size());
@@ -599,12 +512,29 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
         return false;
     }
 
-    // Collect unique shard filenames
-    std::set<std::string> shard_files;
+    // Collect tensors per shard (need this to decide whether a shard is
+    // entirely skippable — e.g. an MTP-only shard when spec decode is off,
+    // or a vision-only shard when no mmproj is configured).
+    std::map<std::string, std::vector<std::string>> shard_tensors;
     for (const auto& kv : weight_map->obj) {
         if (kv.second.type == JType::STRING) {
-            shard_files.insert(kv.second.str_val);
+            shard_tensors[kv.second.str_val].push_back(kv.first);
         }
+    }
+
+    // Drop shards where every tensor would be skipped by translate_name.
+    // Saves the mmap + header parse + page cache pressure for an unused file.
+    std::set<std::string> shard_files;
+    for (auto& [fname, tensors] : shard_tensors) {
+        bool all_skip = !tensors.empty() &&
+                        std::all_of(tensors.begin(), tensors.end(),
+                                    imp::llm_compressor::name_is_skipped);
+        if (all_skip) {
+            IMP_LOG_INFO("Skipping shard %s (%zu tensors are MTP/vision-only and unused)",
+                         fname.c_str(), tensors.size());
+            continue;
+        }
+        shard_files.insert(fname);
     }
 
     IMP_LOG_INFO("Sharded SafeTensors: %zu shards", shard_files.size());
@@ -612,20 +542,47 @@ static bool load_sharded(const std::string& model_dir, std::unordered_map<std::s
     // Detect format ONCE so all shards translate consistently.
     imp::HFConfigLoader::NvFP4Config probe_cfg;
     bool probe_ok = imp::HFConfigLoader::load_nvfp4_config(model_dir, probe_cfg);
-    bool llm_compressor_format = probe_ok &&
-                                 probe_cfg.format == imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR;
+    bool llm_compressor_format =
+        probe_ok && probe_cfg.format == imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR;
     imp::llm_compressor::TranslationCounters tcounters{};
 
-    // Load each shard
-    for (const auto& filename : shard_files) {
-        std::string shard_path = model_dir + "/" + filename;
-        ShardInfo shard;
-        if (!load_shard(shard_path, tensor_map, shard, llm_compressor_format, tcounters)) {
+    // Parse shards in parallel (mmap + header decode are independent per file).
+    std::vector<std::string> shard_list(shard_files.begin(), shard_files.end());
+    std::vector<std::unordered_map<std::string, Tensor>> per_shard_maps(shard_list.size());
+    std::vector<ShardInfo> per_shard_info(shard_list.size());
+    std::vector<imp::llm_compressor::TranslationCounters> per_shard_counters(shard_list.size());
+    std::atomic<bool> any_failure{false};
+
+    auto worker = [&](size_t i) {
+        std::string shard_path = model_dir + "/" + shard_list[i];
+        if (!load_shard(shard_path, per_shard_maps[i], per_shard_info[i],
+                        llm_compressor_format, per_shard_counters[i])) {
             IMP_LOG_ERROR("Failed to load shard: %s", shard_path.c_str());
-            return false;
+            any_failure.store(true);
         }
-        shards.push_back(shard);
-        IMP_LOG_INFO("Loaded shard: %s (%zu tensors total)", filename.c_str(), tensor_map.size());
+    };
+
+    {
+        std::vector<std::thread> ts;
+        ts.reserve(shard_list.size());
+        for (size_t i = 0; i < shard_list.size(); ++i) ts.emplace_back(worker, i);
+        for (auto& t : ts) t.join();
+    }
+
+    if (any_failure.load()) return false;
+
+    // Merge per-shard results into the caller-owned aggregates.
+    for (size_t i = 0; i < shard_list.size(); ++i) {
+        for (auto& kv : per_shard_maps[i]) tensor_map.emplace(kv.first, kv.second);
+        shards.push_back(per_shard_info[i]);
+        const auto& c = per_shard_counters[i];
+        tcounters.suffix_renames += c.suffix_renames;
+        tcounters.prefix_strips  += c.prefix_strips;
+        tcounters.vision_skipped += c.vision_skipped;
+        tcounters.gemma4_extras  += c.gemma4_extras;
+        tcounters.passed_through += c.passed_through;
+        IMP_LOG_INFO("Loaded shard: %s (%zu tensors total)",
+                     shard_list[i].c_str(), tensor_map.size());
     }
 
     if (llm_compressor_format) {
@@ -659,8 +616,8 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     // Detect format ONCE so all shards translate consistently.
     imp::HFConfigLoader::NvFP4Config probe_cfg;
     bool probe_ok = imp::HFConfigLoader::load_nvfp4_config(model_dir, probe_cfg);
-    bool llm_compressor_format = probe_ok &&
-                                 probe_cfg.format == imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR;
+    bool llm_compressor_format =
+        probe_ok && probe_cfg.format == imp::HFConfigLoader::NvFP4Format::LLM_COMPRESSOR;
     imp::llm_compressor::TranslationCounters tcounters{};
 
     // Try loading tensors
@@ -670,8 +627,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
         // Single file mode
         ShardInfo shard;
         loaded = load_shard(single_file, tensor_map, shard, llm_compressor_format, tcounters);
-        if (loaded)
-            shards.push_back(shard);
+        if (loaded) shards.push_back(shard);
     } else {
         // Directory mode: try sharded first, then single
         std::string index_path = model_dir + "/model.safetensors.index.json";
@@ -683,8 +639,7 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
             if (fs::exists(st_path)) {
                 ShardInfo shard;
                 loaded = load_shard(st_path, tensor_map, shard, llm_compressor_format, tcounters);
-                if (loaded)
-                    shards.push_back(shard);
+                if (loaded) shards.push_back(shard);
             }
         }
     }
@@ -692,9 +647,9 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     // For the single-file paths (single_file mode or directory fallback to model.safetensors),
     // emit the summary here. The sharded path (load_sharded) emits its own summary internally
     // with its own counters — tcounters is only populated by the two load_shard calls above.
-    if (llm_compressor_format &&
-        (tcounters.suffix_renames + tcounters.prefix_strips + tcounters.vision_skipped +
-         tcounters.gemma4_extras + tcounters.passed_through) > 0) {
+    if (llm_compressor_format && (tcounters.suffix_renames + tcounters.prefix_strips +
+                                   tcounters.vision_skipped + tcounters.gemma4_extras +
+                                   tcounters.passed_through) > 0) {
         imp::llm_compressor::log_summary(tcounters);
     }
 
@@ -735,16 +690,17 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     apply_arch_defaults(cfg);
 
     IMP_LOG_INFO("Architecture: %s", model_arch_name(cfg.arch));
-    IMP_LOG_INFO("Config: layers=%d d_model=%d d_ff=%d heads=%d kv_heads=%d vocab=%d ctx=%d", cfg.n_layers,
-                 cfg.d_model, cfg.d_ff, cfg.n_heads, cfg.n_kv_heads, cfg.vocab_size, cfg.max_seq_len);
-    IMP_LOG_INFO(
-        "RoPE: theta=%.0f freq_scale=%.4f head_dim=%d sliding_window=%d "
-        "rope_theta_swa=%.0f rope_local_theta=%.0f rope_n_ctx_orig=%d",
-        cfg.rope_theta, cfg.rope_freq_scale, cfg.head_dim, cfg.sliding_window, cfg.rope_theta_swa,
-        cfg.rope_local_theta, cfg.rope_n_ctx_orig);
+    IMP_LOG_INFO("Config: layers=%d d_model=%d d_ff=%d heads=%d kv_heads=%d vocab=%d ctx=%d",
+                 cfg.n_layers, cfg.d_model, cfg.d_ff, cfg.n_heads, cfg.n_kv_heads,
+                 cfg.vocab_size, cfg.max_seq_len);
+    IMP_LOG_INFO("RoPE: theta=%.0f freq_scale=%.4f head_dim=%d sliding_window=%d "
+                 "rope_theta_swa=%.0f rope_local_theta=%.0f rope_n_ctx_orig=%d",
+                 cfg.rope_theta, cfg.rope_freq_scale, cfg.head_dim,
+                 cfg.sliding_window, cfg.rope_theta_swa, cfg.rope_local_theta,
+                 cfg.rope_n_ctx_orig);
     if (cfg.n_experts > 0) {
-        IMP_LOG_INFO("MoE: %d experts, %d active, expert_d_ff=%d", cfg.n_experts, cfg.n_experts_active,
-                     cfg.expert_d_ff);
+        IMP_LOG_INFO("MoE: %d experts, %d active, expert_d_ff=%d",
+                     cfg.n_experts, cfg.n_experts_active, cfg.expert_d_ff);
     }
 
     // 5. Allocate layers and expert vectors
@@ -766,13 +722,14 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     bool is_gptq = HFConfigLoader::load_gptq_config(model_dir, gptq_cfg);
     if (is_gptq) {
         for (auto& layer : model->layers_) {
-            for (auto* gw : {&layer.gptq_q, &layer.gptq_k, &layer.gptq_v, &layer.gptq_o, &layer.gptq_gate,
-                             &layer.gptq_up, &layer.gptq_down}) {
+            for (auto* gw : {&layer.gptq_q, &layer.gptq_k, &layer.gptq_v, &layer.gptq_o,
+                             &layer.gptq_gate, &layer.gptq_up, &layer.gptq_down}) {
                 gw->bits = gptq_cfg.bits;
                 gw->group_size = gptq_cfg.group_size;
             }
         }
-        IMP_LOG_INFO("GPTQ model: %d-bit, group_size=%d, desc_act=%s", gptq_cfg.bits, gptq_cfg.group_size,
+        IMP_LOG_INFO("GPTQ model: %d-bit, group_size=%d, desc_act=%s",
+                     gptq_cfg.bits, gptq_cfg.group_size,
                      gptq_cfg.desc_act ? "true" : "false");
     }
 
@@ -787,8 +744,8 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
         cfg.is_nvfp4_prequant = true;
         cfg.nvfp4_group_size = nvfp4_cfg.group_size;
         cfg.is_llm_compressor_nvfp4 = (nvfp4_cfg.format == HFConfigLoader::NvFP4Format::LLM_COMPRESSOR);
-        IMP_LOG_INFO("NVFP4 pre-quantized: %zu scratch entries (group_size=%d)", model->nvfp4_scratch_.size(),
-                     nvfp4_cfg.group_size);
+        IMP_LOG_INFO("NVFP4 pre-quantized: %zu scratch entries (group_size=%d)",
+                     model->nvfp4_scratch_.size(), nvfp4_cfg.group_size);
     }
 
     // 7. Tie output projection if not found
@@ -848,7 +805,8 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
                 model->tokenizer_->set_add_space_prefix(tflags.add_prefix_space != 0);
             }
             if (tflags.use_default_system_prompt >= 0) {
-                model->tokenizer_->set_use_default_system_prompt(tflags.use_default_system_prompt != 0);
+                model->tokenizer_->set_use_default_system_prompt(
+                    tflags.use_default_system_prompt != 0);
             }
         }
     }
@@ -882,20 +840,16 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
             int patched = 0, missing = 0;
             for (const auto& s : stm.additional_special_tokens) {
                 int32_t id = model->tokenizer_->find_token(s);
-                if (id < 0) {
-                    missing++;
-                    continue;
-                }
+                if (id < 0) { missing++; continue; }
                 if (!model->tokenizer_->is_control_token(id)) {
                     model->tokenizer_->mark_as_control(id);
                     patched++;
                 }
             }
             if (patched > 0 || missing > 0) {
-                IMP_LOG_INFO(
-                    "special_tokens_map: cross-check patched %d, "
-                    "missing-from-vocab %d",
-                    patched, missing);
+                IMP_LOG_INFO("special_tokens_map: cross-check patched %d, "
+                             "missing-from-vocab %d",
+                             patched, missing);
             }
         }
     }
@@ -904,4 +858,4 @@ std::unique_ptr<Model> load_safetensors(const std::string& path) {
     return model;
 }
 
-}  // namespace imp
+} // namespace imp

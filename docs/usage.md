@@ -6,7 +6,7 @@ Build instructions, CLI/server usage, configuration, C API, project structure.
 
 ## Requirements
 
-- **NVIDIA RTX 5090** (GB202 Blackwell, sm_120f) — only target architecture
+- **NVIDIA Blackwell GB202** (sm_120f) — RTX 5090, RTX PRO 5000 Blackwell, or RTX PRO 6000 Blackwell. Same binary, same kernels; the workstation cards just have more VRAM (48 / 96 GB) for bigger MoE models without expert offload.
 - **CUDA Toolkit 13.2+** — `cudart`, `cuda_driver`, `cublas`, `cublasLt`
 - **CMake 3.25+**
 - **C++20 compiler** (GCC 11+, Clang 14+)

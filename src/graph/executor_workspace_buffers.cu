@@ -545,7 +545,28 @@ void GraphExecutor::allocate_auxiliary_buffers(bool skip_batch_dequant) {
 
                 // MXFP4 activation buffers: shares packed data with NVFP4, only needs
                 // separate UE8M0 scale factors (SFVecSize=32 vs NVFP4's 16).
-                if (cutlass_sm120_mxfp4_available()) {
+                // Only allocate when the model actually carries MXFP4 weights
+                // (or attention.mxfp4 prefill is opt-in enabled). hardware-
+                // availability (cutlass_sm120_mxfp4_available) is necessary
+                // but not sufficient — was allocating ~0.5 MiB on every NVFP4
+                // model regardless of whether MXFP4 path would ever execute.
+                bool has_mxfp4_weights = false;
+                for (int i = 0; i < cfg.n_layers && !has_mxfp4_weights; i++) {
+                    const auto& L = model_->layer(i);
+                    if (L.wq.qtype == QType::MXFP4 ||
+                        L.w_gate.qtype == QType::MXFP4 ||
+                        L.w_up.qtype == QType::MXFP4 ||
+                        L.w_down.qtype == QType::MXFP4 ||
+                        L.ssm_in.qtype == QType::MXFP4 ||
+                        L.ssm_out.qtype == QType::MXFP4 ||
+                        L.expert_gate_packed.qtype == QType::MXFP4 ||
+                        L.expert_up_packed.qtype == QType::MXFP4 ||
+                        L.expert_down_packed.qtype == QType::MXFP4) {
+                        has_mxfp4_weights = true;
+                    }
+                }
+                if (cutlass_sm120_mxfp4_available() &&
+                    (has_mxfp4_weights || RuntimeConfig::current().attention.mxfp4 == "always")) {
                     qscratch_.mxfp4_act_sf_size = cutlass_mxfp4_sf_size(max_tokens_, max_k);
                     qscratch_.mxfp4_workspace_size = gemm_mxfp4_cutlass_sm120_workspace(max_tokens_, max_n,
                                                                                         max_k);

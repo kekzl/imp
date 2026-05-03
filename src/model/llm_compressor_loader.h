@@ -28,6 +28,11 @@ struct NameTranslation {
 // the matching counter. Pure apart from counter mutation.
 NameTranslation translate_name(const std::string& in, TranslationCounters& counters);
 
+// True if the given tensor name would be SKIP'd by translate_name. Exposed so
+// the SafeTensors loader can skip an entire shard whose contents are unused
+// (e.g. model_visual.safetensors when no mmproj is configured).
+bool name_is_skipped(const std::string& in);
+
 // Emit one INFO log summarizing what translate_name() did across a shard.
 // Call once at the end of the enumerate-tensors loop in load_shard().
 void log_summary(const TranslationCounters& counters);
