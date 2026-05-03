@@ -193,8 +193,6 @@ Performance:
   --no-nvfp4                Disable NVFP4 auto-detection
   --ssm-fp16                FP16 SSM state
   --no-cuda-graphs          Disable CUDA Graphs
-  --ngram-spec              N-gram speculative decoding (draft from token history)
-  --ngram-spec-k <n>        Max draft tokens per step (default: 5)
   --mxfp4-prefill           CUTLASS MXFP4 GEMM for prefill (sm_120)
 
 Benchmark:
@@ -216,7 +214,7 @@ Benchmark:
 - **Decode:** CUDA Graphs (conditional WHILE loop), PDL, fused RMSNorm+Q8_1, fused QKV/gate+up GEMV, NVFP4 decode cache with prmt register LUT, multi-block argmax, NVFP4-prequant MoE fast-path (Qwen3.6, Gemma-4)
 - **Prefill:** CUTLASS SM120 FMHA, CUTLASS NVFP4 GEMM, CUTLASS 3.x grouped MoE GEMM, FP8 cuBLASLt, FP16/FP8 weight cache, batched K/V GEMM
 - **Sampling:** temperature, top-p, top-k, min-p, typical-p, repetition/frequency/presence penalties (windowed), DRY, Mirostat v2
-- **Runtime:** continuous batching, n-gram speculative decoding, Green Context SM partitioning, upfront VRAM budget planner, `imp.conf` (TOML, replaces ~50 `IMP_*` env vars)
+- **Runtime:** continuous batching, Green Context SM partitioning, upfront VRAM budget planner, `imp.conf` (TOML, replaces ~50 `IMP_*` env vars)
 - **Agentic:** prefix cache block pinning, JSON schema constraining, tool calling (ChatML + Llama3), thinking/reasoning budgets, TTFT metrics
 - **API:** C library, OpenAI-compatible HTTP server (SSE streaming, tool calling, logprobs, JSON mode, concurrent requests), Anthropic `/v1/messages` (streaming + non-streaming)
 

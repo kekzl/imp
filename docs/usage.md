@@ -162,8 +162,6 @@ Performance:
   --no-nvfp4                Disable NVFP4 auto-detection
   --ssm-fp16                FP16 SSM state
   --no-cuda-graphs          Disable CUDA Graphs
-  --ngram-spec              N-gram speculative decoding (draft from history)
-  --ngram-spec-k <n>        Max draft tokens per step (default: 5)
   --mxfp4-prefill           CUTLASS MXFP4 GEMM for prefill
 
 Benchmark:
@@ -245,8 +243,8 @@ imp_context_free(ctx);
 imp_model_free(model);
 ```
 
-Token-level control via `imp_prefill` / `imp_decode_step`, speculative
-decoding via `imp_set_draft_model`, vision via `imp_set_image`.
+Token-level control via `imp_prefill` / `imp_decode_step`, vision
+via `imp_set_image`.
 
 ## Project Structure
 
@@ -284,8 +282,8 @@ make bench                 # full benchmark suite across baseline models
 Covers: tensor ops, GGUF + SafeTensors parsing, KV cache, attention
 (paged FP16/FP8/INT4 + FMHA FP16/FP8/MXFP4), RoPE, LayerNorm, MoE
 (legacy + CUTLASS 3.x grouped), quantisation, FP8/NVFP4, Green Contexts,
-continuous batching, n-gram speculative decoding, end-to-end generation
-including NVFP4 prequant from both Model Optimizer and llm-compressor.
+continuous batching, end-to-end generation including NVFP4 prequant
+from both Model Optimizer and llm-compressor.
 
 ## Architecture
 
