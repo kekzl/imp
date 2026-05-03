@@ -568,6 +568,8 @@ bool Tokenizer::load(const std::string& path) {
                 }
             }
         }
+
+        build_special_pieces();
     }
 
     // Detect pre-tokenizer type
@@ -685,8 +687,107 @@ void Tokenizer::load_merges(const std::vector<std::string>& merges) {
 
 static const std::string SPIECE_SPACE = "\xe2\x96\x81";
 
+// Cache the list of CONTROL-class added tokens (e.g. <|tool_call>, <|im_start|>,
+// <|channel>) sorted by length descending so that longest-match wins. encode_*
+// uses this list to split the input text on those literals before running BPE,
+// so the rendered chat-template markers round-trip as their assigned token IDs.
+void Tokenizer::build_special_pieces() {
+    special_pieces_.clear();
+    if (token_types_.empty()) return;
+    for (size_t id = 0; id < token_types_.size() && id < vocab_.size(); ++id) {
+        if (token_types_[id] != 3) continue;  // CONTROL only
+        const std::string& s = vocab_[id];
+        if (s.empty()) continue;
+        // Skip plain ASCII identifiers — they would shadow normal BPE matches
+        // (e.g. a model that flagged "the" as control would break encoding).
+        // All real special markers contain at least one non-alnum char.
+        bool has_marker = false;
+        for (unsigned char c : s) {
+            if (!std::isalnum(c) && c != '_') { has_marker = true; break; }
+        }
+        if (!has_marker) continue;
+        special_pieces_.emplace_back(s, static_cast<int32_t>(id));
+    }
+    std::sort(special_pieces_.begin(), special_pieces_.end(),
+              [](const auto& a, const auto& b) {
+                  return a.first.size() > b.first.size();
+              });
+    IMP_LOG_INFO("Tokenizer: %zu special pieces cached for pre-split",
+                 special_pieces_.size());
+}
+
+namespace {
+// Split text on cached special pieces. Returns a flat vector where each entry
+// is either {.special_id=-1, .text=..} (BPE-this) or {.special_id=N, .text=""}
+// (emit token N directly). Empty text chunks are dropped.
+struct PieceChunk {
+    std::string text;
+    int32_t special_id = -1;
+};
+std::vector<PieceChunk> split_on_special(
+    const std::string& text,
+    const std::vector<std::pair<std::string,int32_t>>& specials)
+{
+    std::vector<PieceChunk> out;
+    if (specials.empty()) {
+        if (!text.empty()) out.push_back({text, -1});
+        return out;
+    }
+    size_t i = 0;
+    std::string cur;
+    while (i < text.size()) {
+        bool matched = false;
+        for (const auto& [piece, id] : specials) {
+            size_t L = piece.size();
+            if (L == 0 || i + L > text.size()) continue;
+            if (std::memcmp(text.data() + i, piece.data(), L) == 0) {
+                if (!cur.empty()) {
+                    out.push_back({std::move(cur), -1});
+                    cur.clear();
+                }
+                out.push_back({"", id});
+                i += L;
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) {
+            cur += text[i++];
+        }
+    }
+    if (!cur.empty()) out.push_back({std::move(cur), -1});
+    return out;
+}
+} // namespace
+
 std::vector<int32_t> Tokenizer::encode_spm(const std::string& text, bool no_prefix) const {
     if (text.empty() || vocab_.empty()) return {};
+
+    // Pre-split on registered control / added tokens. Without this an HF
+    // tokenizer.json with type=spm + special added_tokens (Gemma-4 family,
+    // some Mistral variants) silently BPEs the marker text as raw UTF-8 and
+    // the model never sees the trained single-token id. Recurse once with
+    // the marker stripped so the BPE body below runs on a clean substring.
+    if (!special_pieces_.empty()) {
+        auto pieces = split_on_special(text, special_pieces_);
+        bool any_special = false;
+        for (const auto& p : pieces) if (p.special_id >= 0) { any_special = true; break; }
+        if (any_special) {
+            std::vector<int32_t> out;
+            out.reserve(text.size());
+            bool first = true;
+            for (const auto& p : pieces) {
+                if (p.special_id >= 0) { out.push_back(p.special_id); first = false; continue; }
+                if (p.text.empty()) continue;
+                // Suppress add_space_prefix_ on chunks that don't start at the
+                // very beginning of the original text (matches HF behavior).
+                auto sub = encode_spm(p.text, /*no_prefix=*/!first || no_prefix);
+                out.insert(out.end(), sub.begin(), sub.end());
+                first = false;
+            }
+            return out;
+        }
+    }
 
     // Pre-process: SentencePiece convention - replace spaces with ▁
     // add_space_prefix_: prepend ▁ at start (true for LLaMA/Mistral, false for Gemma)
@@ -904,14 +1005,32 @@ static std::vector<std::string> llama3_pre_tokenize(const std::string& text) {
 std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
     if (text.empty() || vocab_.empty()) return {};
 
+    // 0. Pre-split on registered control / added tokens (e.g. <|tool_call>,
+    //    <|channel>, <|tool>) so each is emitted as its single token id
+    //    instead of being BPE'd as raw UTF-8.
+    auto pieces = split_on_special(text, special_pieces_);
+    std::vector<int32_t> out_ids;
+    out_ids.reserve(text.size());
+    for (const auto& p : pieces) {
+        if (p.special_id >= 0) { out_ids.push_back(p.special_id); continue; }
+        if (p.text.empty()) continue;
+        // Recursive call: re-enter encode_gemma4 with the BPE-only chunk.
+        // (special_pieces_ now matches nothing inside p.text by construction.)
+        // To avoid infinite recursion we call the BPE body directly; we emulate
+        // that by calling this function once specials are stripped — the
+        // first-call splitter has already removed them, so the recursion ends
+        // immediately at the no-match path below.
+        // For simplicity we just inline the BPE path here.
+        const std::string& bpe_text = p.text;
+
     // 1. Escape spaces → ▁
     std::string processed;
-    processed.reserve(text.size() + 4);
-    for (size_t i = 0; i < text.size(); i++) {
-        if (text[i] == ' ') {
+    processed.reserve(bpe_text.size() + 4);
+    for (size_t i = 0; i < bpe_text.size(); i++) {
+        if (bpe_text[i] == ' ') {
             processed += SPIECE_SPACE;  // ▁ (U+2581)
         } else {
-            processed += text[i];
+            processed += bpe_text[i];
         }
     }
 
@@ -1059,24 +1178,39 @@ std::vector<int32_t> Tokenizer::encode_gemma4(const std::string& text) const {
             }
         }
     }
+        out_ids.insert(out_ids.end(), all_ids.begin(), all_ids.end());
+    }  // end for piece
 
-    return all_ids;
+    return out_ids;
 }
 
 std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
     if (text.empty() || vocab_.empty()) return {};
 
+    // 0. Pre-split on registered control tokens. Models like Qwen3.6 / Hermes
+    //    rely on multi-character markers (e.g. <|im_start|>, <|tool_call>)
+    //    that the pre-tokenizer regex doesn't always isolate cleanly; an
+    //    explicit longest-match pass guarantees the marker round-trips as
+    //    its assigned token id.
+    auto pieces = split_on_special(text, special_pieces_);
+    std::vector<int32_t> out_ids;
+    out_ids.reserve(text.size());
+    for (const auto& piece : pieces) {
+        if (piece.special_id >= 0) { out_ids.push_back(piece.special_id); continue; }
+        if (piece.text.empty()) continue;
+        const std::string& bpe_text = piece.text;
+
     // 1. Pre-tokenize into chunks (dispatch based on pre-tokenizer type)
     std::vector<std::string> chunks;
     if (pre_tokenizer_ == "llama3" || pre_tokenizer_ == "llama-v3" ||
         pre_tokenizer_ == "llama-bpe") {
-        chunks = llama3_pre_tokenize(text);
+        chunks = llama3_pre_tokenize(bpe_text);
     } else {
-        chunks = gpt2_pre_tokenize(text);
+        chunks = gpt2_pre_tokenize(bpe_text);
     }
 
     std::vector<int32_t> all_ids;
-    all_ids.reserve(text.size());  // rough estimate
+    all_ids.reserve(bpe_text.size());  // rough estimate
 
     for (const auto& chunk : chunks) {
         // 2. Convert each byte to GPT2 unicode character
@@ -1181,8 +1315,10 @@ std::vector<int32_t> Tokenizer::encode_gpt2(const std::string& text) const {
             }
         }
     }
+        out_ids.insert(out_ids.end(), all_ids.begin(), all_ids.end());
+    }  // end for piece
 
-    return all_ids;
+    return out_ids;
 }
 
 // ---- NFC Normalization ----

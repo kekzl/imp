@@ -2,7 +2,11 @@
 
 ## Project Overview
 
-**imp** is a high-performance LLM inference engine written in C++20 and CUDA, targeting exclusively the NVIDIA RTX 5090 (GB202, Blackwell, sm_120f). It requires CUDA 13.2+ and leverages Blackwell-specific features: Green Contexts for SM partitioning, Programmatic Dependent Launch (PDL), CUDA Graphs, packed FP8 E4M3 conversion (cvt.e4m3x2), and MXFP4 tensor core attention. No support for older architectures — sm_120 only. The engine supports GGUF and SafeTensors model formats, multiple quantization schemes (FP8, INT8, INT4, NVFP4, MXFP4), and architectures including LLaMA, Mistral, Mixtral, DeepSeek, Qwen3, Qwen3.5 (Gated DeltaNet), Gemma-3 (text + vision), and Nemotron-H. Vision support uses a SigLIP encoder for Gemma-3 multimodal via separate mmproj.gguf files.
+**imp** is a high-performance LLM inference engine written in C++20 and CUDA, targeting Blackwell `sm_120f` only — the consumer + workstation family on `GB202`: RTX 5090 (32 GB), RTX PRO 5000 Blackwell (48 GB), RTX PRO 6000 Blackwell (96 GB). Same binary, same kernels; the workstation cards just fit larger MoE models without expert offload. Requires CUDA 13.2+ and leverages Blackwell-specific features: Green Contexts for SM partitioning, Programmatic Dependent Launch (PDL), CUDA Graphs, packed FP8 E4M3 conversion (cvt.e4m3x2), NVFP4 (E2M1 + microscale) tensor cores, and MXFP4 tensor core attention. No support for older architectures.
+
+**Primary path: SafeTensors NVFP4 prequant** — both NVIDIA Model Optimizer and llm-compressor formats. Decode fast-path (`cache_moe_native_nvfp4`) builds a contiguous per-expert NVFP4 buffer and runs entirely device-side, so CUDA Graphs capture cleanly across all MoE layers without per-layer D2H expert-routing sync. **Legacy path: GGUF** (Q2_K / Q3_K / Q4_0 / Q4_K_M / Q5_K / Q6_K / Q8_0, plus an imp-proprietary MXFP4 GGUF for Blackwell experimental). Other quantizations: FP8 E4M3 (KV + opt-in weights), INT8, INT4 (KV).
+
+**Architectures:** Qwen3, Qwen3-MoE, Qwen3.5 (GDN), Qwen3.6 (GDN+MoE hybrid), Gemma-4 (26B-A4B MoE), Gemma-3 (text + vision via SigLIP mmproj), Mistral / Mistral-Small-3.2, Mixtral, DeepSeek, Llama-3.x, Phi-4, Nemotron-H (Mamba2 + Attention + MoE), generic fallback.
 
 ## Repository Structure
 
@@ -30,9 +34,9 @@ imp/
 │   ├── imp-server/       # OpenAI-compatible HTTP server (SSE streaming)
 │   └── imp-bench/        # Benchmark tool: GEMM, attention, end-to-end
 ├── third_party/stb/      # stb_image headers (image loading for vision)
-├── tests/                # Google Test suite (63 test files, ~700 tests)
+├── tests/                # Google Test suite (~700 tests, split into 8 per-module binaries)
 ├── scripts/              # verify.sh, gen_perf_baseline.sh, pre-push.hook, imp-pull.py
-├── docs/                 # SM120 status, MXFP4, Qwen3.6 roadmap, gemv plan, layer-diff dumps
+├── docs/                 # SM120 status, MXFP4, recommended models, memory-management compare, traffic-reduction catalog, usage
 ├── cmake/                # Custom CMake modules (CompilerFlags, FindCUDAToolkit131)
 ├── CMakeLists.txt        # Build configuration
 ├── Makefile              # Docker-based test/bench/verify targets (canonical workflow)
@@ -76,7 +80,7 @@ cmake -B build-asan -DIMP_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
 | `IMP_BUILD_BENCH` | ON | Build benchmark tool |
 | `IMP_BUILD_SERVER` | ON | Build imp-server (OpenAI-compatible HTTP server) |
 | `IMP_SANITIZERS` | OFF | Enable ASAN + UBSAN (host C++ code only) |
-| `CMAKE_CUDA_ARCHITECTURES` | `sm_120f` (hardcoded) | Target GPU architecture (RTX 5090 only) |
+| `CMAKE_CUDA_ARCHITECTURES` | `sm_120f` (hardcoded) | Target GPU family (Blackwell consumer + workstation: RTX 5090 / PRO 5000 / PRO 6000) |
 
 ### Dependencies
 
@@ -86,18 +90,20 @@ cmake -B build-asan -DIMP_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
 - **stb_image / stb_image_resize2** (vendored in `third_party/stb/`) — image loading for vision
 - **pthread** (linked privately)
 
-### Target GPU: NVIDIA RTX 5090 (GB202, Blackwell)
+### Target GPUs: Blackwell GB202 family (sm_120f)
 
-| Spec | Value |
-|---|---|
-| Compute Capability | sm_120a |
-| SMs | 170 |
-| CUDA Cores | 21,760 (128/SM) |
-| Tensor Cores | 680 (5th gen, 4/SM) |
-| Boost Clock | 2,407 MHz |
-| VRAM | 32 GB GDDR7, 512-bit bus |
-| Memory Bandwidth | 1,792 GB/s (28 Gbps/pin) |
-| TDP | 575 W |
+Same `sm_120f` binary, same kernels — only VRAM and clock vary.
+
+| Spec | RTX 5090 (consumer) | RTX PRO 5000 Blackwell | RTX PRO 6000 Blackwell |
+|---|---|---|---|
+| Compute Capability | sm_120a | sm_120a | sm_120a |
+| SMs | 170 | 110 | 188 |
+| CUDA Cores | 21,760 (128/SM) | 14,080 | 24,064 |
+| Tensor Cores | 680 (5th gen, 4/SM) | 440 | 752 |
+| VRAM | 32 GB GDDR7, 512-bit | 48 GB GDDR7, 384-bit (ECC) | 96 GB GDDR7, 512-bit (ECC) |
+| Memory Bandwidth | 1,792 GB/s | ~1,344 GB/s | 1,792 GB/s |
+| TDP | 575 W | 300 W | 600 W |
+| Headline use case | Single-user max perf | Workstation, mid-VRAM ECC | Workstation, large MoE / long ctx |
 
 **Cache Hierarchy:**
 
@@ -126,7 +132,7 @@ cmake -B build-asan -DIMP_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Debug
 
 ### Hardware Constraints
 
-Only one GPU is available. **Always test models sequentially** — never run multiple model instances in parallel.
+Only one GPU is available on the dev machine (RTX 5090). **Always test models sequentially** — never run multiple model instances in parallel.
 
 ## Running Tests
 
@@ -168,7 +174,14 @@ Options: `--model`, `--prompt`, `--max-tokens`, `--temperature`, `--top-p`, `--t
 
 ### imp-server
 
-OpenAI-compatible HTTP server with SSE streaming. Runs in Docker via `docker compose up imp-server` (pairs with Open WebUI on port 3000) or directly: `./build/imp-server --model path/to/model.gguf --port 8080`. Configuration via env vars — see "Environment Variables" below.
+OpenAI-compatible HTTP server with SSE streaming, native function calling
+(ChatML / Llama3 / Gemma-4 `<|tool_call>` / Qwen3.6 `<function=...>` XML),
+JSON mode, logprobs, concurrent requests, and an Anthropic-compatible
+`/v1/messages` endpoint. Runs in Docker via `docker compose up -d` (pairs
+with Open WebUI on port 3000 — web search via DuckDuckGo, code interpreter
+via Pyodide, URL fetch all enabled by default in `docker-compose.yml`) or
+directly: `./build/imp-server --model path/to/model.gguf --port 8080`.
+Configuration via `imp.conf` (TOML) — see "Runtime Configuration" below.
 
 ### imp-bench
 
@@ -271,17 +284,38 @@ Hybrid architecture: 24 GDN layers (recurrent) + 8 attention layers + 32 dense F
 - **CUDA Graphs**: Captured decode iterations for reduced launch overhead (`cuda_graph.cu`). NVFP4-prequant MoE models (Qwen3.6, Gemma-4 llm-compressor NVFP4) capture cleanly — `cache_moe_native_nvfp4` builds the contiguous per-layer expert buffer and the decode fast-path runs entirely device-side (no D2H expert-offsets sync). GGUF MoE decode still falls through the legacy expert-routing path with a D2H sync per layer per token and is graph-incompatible. Prefill is never captured (variable n).
 
 ### Supported Model Architectures
-- LLaMA (dense transformer)
-- Mistral (GQA variant)
-- Mixtral (Mixture-of-Experts)
-- DeepSeek (MoE)
-- Qwen3 / Qwen3-MoE
+- Qwen3 / Qwen3-MoE (incl. Qwen3-Coder-30B-A3B, NVFP4 + Q6_K)
 - Qwen3.5 / Qwen3.5-MoE (Gated DeltaNet hybrid — GDN + Attention + dense FFN)
-- Qwen3.6 (35B-A3B GDN+MoE hybrid)
+- Qwen3.6 (35B-A3B GDN+MoE hybrid; NVFP4 fast-path 217 tok/s)
 - Gemma-3 (text + vision via SigLIP encoder)
-- Gemma-4 (26B-A4B MoE; FP32 router, host gate_up split, decode fast-path supports CUDA Graphs)
+- Gemma-4 (26B-A4B MoE; FP32 router, host gate_up split, decode fast-path supports CUDA Graphs; NVFP4 213 tok/s)
+- Mistral / Mistral-Small-3.2 (GQA, NVFP4 llm-compressor)
+- Mixtral (Mixture-of-Experts)
+- DeepSeek (MoE) / DeepSeek-R1-Distill
+- Llama-3.x (dense transformer)
+- Phi-4 / Phi-4-Mini
 - Nemotron-H (Mamba2 + Attention + MoE hybrid)
-- Generic fallback
+- Generic fallback (anything sharing the same building blocks)
+
+### Tool Calling
+
+Native function calling is wired into the OpenAI HTTP server, dispatched
+by chat-template family:
+
+| Family | Output format | Parser |
+|---|---|---|
+| ChatML (Qwen3 / Hermes) | `<tool_call>{"name":...,"arguments":{}}</tool_call>` | `parse_tool_calls_chatml` (JSON branch) |
+| Qwen3.6 | `<tool_call>\n<function=NAME>\n<parameter=KEY>VALUE</parameter>...\n</function>\n</tool_call>` | `parse_tool_calls_chatml` (XML branch) |
+| Llama-3.x | `<function=NAME>{"arg":"val"}</function>` | `parse_tool_calls_llama3` |
+| Gemma-4 | `<\|tool_call>call:NAME{key:value,...}<tool_call\|>` (pipe-delimited, non-JSON, `<\|"\|>...<\|"\|>` string escapes) | `parse_tool_calls_gemma` |
+
+The tokenizer runs a longest-match special-token pre-split pass against
+CONTROL-flagged added tokens (`<|tool_call>` / `<|im_start|>` / `<|channel>` etc)
+before BPE in all three encoders (`encode_spm`, `encode_gpt2`, `encode_gemma4`).
+Without this pass, multi-character markers get BPE'd as raw UTF-8 bytes
+instead of their single-token id, the model never sees the trained marker
+in the rendered prompt, and silently emits markdown JSON code blocks
+instead of native tool calls.
 
 ### Runtime Configuration
 
@@ -341,13 +375,18 @@ imp-cli --set kv_cache.dtype=fp8 --set runtime.cuda_graphs=never \
 Gemma-3 vision uses a frozen 400M-parameter SigLIP ViT that produces 256 image tokens per image, projected into the LLM's embedding space. The vision encoder weights ship as a separate `mmproj.gguf` file. The pipeline: load image → resize 896x896 → normalize → extract 14x14 patches → 27 SigLIP transformer layers → 4x4 avg pool → RMSNorm + linear projection → replace `<image_soft_token>` embeddings before LLM prefill.
 
 ### Speculative Decoding
-Draft model generates K candidate tokens, target model verifies in a single pass. Uses stochastic acceptance for non-greedy sampling. KV cache manager supports rollback for rejected tokens.
+N-gram speculative decoding is implemented (default off, opt-in via
+`--ngram-spec`); +10% on repetitive content, ~0% overhead on non-repetitive.
+EAGLE / self-speculative / DFlash / TurboDraft all evaluated and dropped
+(see TODO.md "Speculative decoding — abandoned options"): on a single
+RTX 5090 the decode bottleneck is bandwidth, not compute, and none of
+the speculation variants tested can amortise weight reads at batch=1.
 
 ## Verification Before Commit
 
 **Every change MUST be verified in this order before `git add`, `git commit`, and `git push`:**
 
-1. **Tests** — `make test-gpu` (or `./build/imp-tests`). All 606 tests must pass.
+1. **Tests** — `make test-gpu` (or per-binary `./build/imp-tests-*`). ~700 tests across 8 per-module binaries must pass.
 2. **Performance** — `make verify-fast` runs the perf baseline gate (`tests/perf_baseline.json`, 3% decode / 5% prefill thresholds). Refresh the baseline after intentional perf changes via `scripts/gen_perf_baseline.sh`.
 3. **Real prompts** — `--prompt "..."` on at least 2-3 affected models to confirm coherent output (degeneration detector covers this in `verify-fast` smoke step).
 

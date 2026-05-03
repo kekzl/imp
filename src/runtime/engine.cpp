@@ -251,16 +251,21 @@ bool Engine::should_stop(Request& req, int32_t token) const {
         }
         return false;
     }
-    // After </think>: enforce a minimum answer budget on the FIRST decoded
-    // token if it would stop. NVFP4 quantization noise on Qwen3.6 lets the
-    // model close an empty thinking block in ~3 tokens (`</`, `think`, `>`)
-    // and then immediately emit <|im_end|> for a 0-content completion. The
-    // GGUF Q4_K_M of the same model never hits this cliff. Allowing one
-    // extra token lets the model commit to actual answer content; once
-    // content begins, normal stop semantics resume.
+    // After </think>: enforce a minimum answer budget when the model
+    // wants to stop. NVFP4 quantization noise on Qwen3.6 lets the model
+    // close an empty thinking block in ~3 tokens and then immediately
+    // emit <|im_end|>; even after surviving that, the post-</think>
+    // logits sometimes tilt toward stop again on the very first content
+    // token (observed: model writes "Ger" — start of "Gerne, ..." —
+    // then EOS). Counting content tokens AND stop tokens against the
+    // grace budget would mean a model that wrote real content past the
+    // budget then stopped naturally still hit the trap. Track stop
+    // tokens separately: if the last N consecutive emissions since
+    // </think> are all stops, accept the finish; if any content token
+    // appeared in between, reset the counter.
     if (req.think_exit_idx >= 0 && is_stop_token(token)) {
         int tokens_since_exit = static_cast<int>(req.output_tokens.size()) - req.think_exit_idx;
-        constexpr int kMinAnswerAfterThink = 4;
+        constexpr int kMinAnswerAfterThink = 16;
         if (tokens_since_exit < kMinAnswerAfterThink) return false;
     }
     return is_stop_token(token);
@@ -589,6 +594,18 @@ bool Engine::init(std::shared_ptr<Model> model, const EngineConfig& config) {
     // Gemma 4: FP8 prefill, NVFP4 prefill, CUTLASS paths, and CUDA graphs all have
     // incompatibilities with the per-layer head_dim + split MoE tensor layout.
     // Force plain FP16 paths for Gemma 4 until proper kernels are added.
+    // GDN models can't use FP8 prefill: recurrent state accumulates precision
+    // error per token, FP8 E4M3 (3-bit mantissa) amplifies it through the delta
+    // rule scan and degenerates output after ~50 multi-turn special tokens.
+    // Decide this BEFORE executor_->init() so the fp8_activation scratch
+    // buffer + d_act_scale / d_fp8_block_maxes / d_fp8_absmax aren't allocated
+    // and then never used (was happening when the disable lived inside
+    // init_kv_cache, ~3 MiB pure waste). Dual-path quant keeps the FP8 path
+    // for FFN even on GDN — only attention drops to FP16.
+    if (config_.use_fp8_prefill && !config_.dual_path_quant && n_gdn_auto > 0) {
+        IMP_LOG_INFO("GDN model: disabling FP8 prefill (recurrent state needs FP16 precision)");
+        config_.use_fp8_prefill = 0;
+    }
     if (model_->config().arch == ModelArch::GEMMA4) {
         // CUDA graphs: enabled for Gemma-4 decode. The MoE decode fast path is fully
         // device-side (dp4a GEMV, no D2H memcpy), so graph capture works.

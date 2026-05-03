@@ -489,6 +489,12 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
     const bool top_p_explicit = body.contains("top_p");
     const bool top_k_explicit = body.contains("top_k");
     const bool rep_pen_explicit = body.contains("repetition_penalty");
+    // 1.05 default is mild — breaks pathological repetition loops on
+    // verbose-think models (Qwen3.6-NVFP4 falling into "Wie wär es mit
+    // diesem hier?" 40-iteration spirals on multi-turn sensitive prompts)
+    // without disrupting structurally-repetitive valid output (JSON keys,
+    // markdown lists, code idioms). Callers that need deterministic
+    // sampling (validation harness, perf tests) can pass 1.0 explicitly.
     float top_p = body.value("top_p", 0.95f);
     int top_k = body.value("top_k", 40);
     int max_tokens = body.value("max_tokens", state.default_max_tokens);
@@ -508,7 +514,7 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
     float min_p = body.value("min_p", 0.0f);
     float typical_p = body.value("typical_p", 1.0f);
-    float repetition_penalty = body.value("repetition_penalty", 1.0f);
+    float repetition_penalty = body.value("repetition_penalty", 1.05f);
     float frequency_penalty = body.value("frequency_penalty", 0.0f);
     float presence_penalty = body.value("presence_penalty", 0.0f);
     int repeat_last_n = body.value("repeat_last_n", 0);
@@ -607,7 +613,17 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
         if (role == "tool") {
             // Tool response message — format for the model
             std::string content = format_tool_response(tpl_family, msg);
-            chat_msgs.push_back({"tool", content});
+            // Gemma's chat-template skips standalone role=tool messages and
+            // expects tool_response markers to be glued onto the assistant
+            // message that produced the call. Append to previous assistant
+            // entry instead of pushing a fresh ChatMessage; ChatML/Llama3
+            // templates render standalone tool messages so keep the push.
+            if (tpl_family == imp::ChatTemplateFamily::GEMMA &&
+                !chat_msgs.empty() && chat_msgs.back().role == "assistant") {
+                chat_msgs.back().content += content;
+            } else {
+                chat_msgs.push_back({"tool", content});
+            }
         } else if (role == "assistant" && msg.contains("tool_calls")) {
             // Assistant message with tool_calls — reconstruct model output format
             std::string content_str;
@@ -1219,6 +1235,21 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
                     int32_t token = evt.token_id;
 
+                    // Silently drop structural stop tokens that slipped through.
+                    // The engine's think-block implicit-close (Engine::should_stop)
+                    // passes ONE EOS-like token through to recover from empty
+                    // thinking. That token must not appear as user-visible content
+                    // (would render as "<|im_end|>" / "<|endoftext|>" in chat).
+                    if (!evt.is_last) {
+                        bool is_structural_stop = (token == snap_tok->eos_id());
+                        if (!is_structural_stop && snap_have_template) {
+                            for (int32_t stop_id : snap_stop_token_ids) {
+                                if (token == stop_id) { is_structural_stop = true; break; }
+                            }
+                        }
+                        if (is_structural_stop) continue;
+                    }
+
                     // Check stop conditions (EOS/stop tokens already detected by engine)
                     if (evt.is_last) {
                         // The engine marked this as the last token.
@@ -1348,9 +1379,22 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                             size_t complete = utf8_complete_len(reasoning_utf8_buf);
                             if (complete > kOverlap) {
                                 size_t emit_end = complete - kOverlap;
-                                std::string to_emit = reasoning_utf8_buf.substr(0, emit_end);
-                                reasoning_utf8_buf = reasoning_utf8_buf.substr(emit_end);
-                                if (!emit_reasoning(to_emit)) return false;
+                                // Walk emit_end back to a UTF-8 codepoint boundary —
+                                // the 7-byte overlap is geared to literal "</think>"
+                                // bytes, not codepoints, so it can land inside a
+                                // multibyte char (German umlauts, CJK, emoji), which
+                                // emits the lead byte alone and turns the trailing
+                                // continuation byte into a U+FFFD on the next flush
+                                // — visible to the user as "f��r" instead of "für".
+                                while (emit_end > 0 &&
+                                       (static_cast<unsigned char>(reasoning_utf8_buf[emit_end]) & 0xC0) == 0x80) {
+                                    --emit_end;
+                                }
+                                if (emit_end > 0) {
+                                    std::string to_emit = reasoning_utf8_buf.substr(0, emit_end);
+                                    reasoning_utf8_buf = reasoning_utf8_buf.substr(emit_end);
+                                    if (!emit_reasoning(to_emit)) return false;
+                                }
                             }
                             continue;
                         }
@@ -1727,11 +1771,17 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                     reasoning_utf8_buf.clear();
                 }
 
-                // If model exhausted tokens while still reasoning and never
+                // If the model exhausted tokens while still reasoning and never
                 // produced content, emit a notice so the user sees something
-                // instead of a blank response.
+                // instead of a blank response. Only fire this when max_tokens
+                // was actually the cause (finish == "length") — a model that
+                // naturally hit EOS during thinking will already have its
+                // reasoning_content delivered, and the notice would be
+                // misleading ("increase max_tokens" doesn't help when the model
+                // chose to stop).
                 if (think_phase == ThinkPhase::REASONING
-                    && utf8_buf.empty() && pending_text.empty()) {
+                    && utf8_buf.empty() && pending_text.empty()
+                    && finish && std::strcmp(finish, "length") == 0) {
                     std::string notice =
                         "[Reasoning truncated — increase max_tokens for a complete answer]";
                     sse_writer.write_content(notice, sink);
@@ -1874,6 +1924,20 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
 
                 int32_t token = evt.token_id;
 
+                // Silently drop structural stop tokens that slipped through.
+                // The engine's think-block implicit-close passes ONE EOS-like
+                // token through to recover from empty thinking; it must not
+                // appear as user-visible content.
+                if (!evt.is_last) {
+                    bool is_structural_stop = (token == snap_tok->eos_id());
+                    if (!is_structural_stop && snap_have_template) {
+                        for (int32_t stop_id : snap_stop_token_ids) {
+                            if (token == stop_id) { is_structural_stop = true; break; }
+                        }
+                    }
+                    if (is_structural_stop) continue;
+                }
+
                 // Check stop conditions
                 if (evt.is_last) {
                     if (token == snap_tok->eos_id()) {
@@ -1991,9 +2055,13 @@ void handle_chat_completions(const httplib::Request& req, httplib::Response& res
                 logprobs_obj = {{"content", content_logprobs}};
             }
 
-            // Parse tool calls from model output
+            // Parse tool calls from model output. Run even on finish=length:
+            // the model may have emitted a complete tool_call and then kept
+            // generating until the budget ran out (common before we hook the
+            // family-specific close marker as a stop token). The parser is
+            // tolerant of trailing garbage after the closing marker.
             std::vector<ParsedToolCall> tool_calls;
-            if (has_tools && strcmp(finish, "length") != 0) {
+            if (has_tools) {
                 auto [pre_content, parsed_calls] = parse_tool_calls(tpl_family, content, state.next_tool_call_id);
                 if (!parsed_calls.empty()) {
                     tool_calls = std::move(parsed_calls);
@@ -2104,7 +2172,7 @@ void handle_completions(const httplib::Request& req, httplib::Response& res,
     bool echo = body.value("echo", false);
     float min_p = body.value("min_p", 0.0f);
     float typical_p = body.value("typical_p", 1.0f);
-    float repetition_penalty = body.value("repetition_penalty", 1.0f);
+    float repetition_penalty = body.value("repetition_penalty", 1.05f);
     float frequency_penalty = body.value("frequency_penalty", 0.0f);
     float presence_penalty = body.value("presence_penalty", 0.0f);
     int repeat_last_n = body.value("repeat_last_n", 0);

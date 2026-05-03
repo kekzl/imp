@@ -22,7 +22,7 @@ weights scales linearly with decode throughput.
 | # | Option | Gain | VRAM | Qualität | Aufwand | Status |
 |---|---|---|---|---|---|---|
 | W1 | 2-bit Weight-Quant (AQLM, QuIP#, HQQ-2bit) | +30-60% decode | -50% | -0.5 bis -2 PPL | hoch (Calibration-Pipeline) | nicht da |
-| W2 | Speculative Decoding mit EAGLE-3 | +1.5-2.5× bei Accept >70% | +400MB (draft head) | gleich (lossless) | mittel (lib existiert) | Dead-End historisch, worth revisit |
+| W2 | Speculative Decoding (EAGLE-3 / self-spec / DFlash / TurboDraft) | +1.5-2.5× bei Accept >70% theoretisch | +draft head | gleich (lossless) | hoch | **abandoned** — alle Varianten getestet, single-5090 Decode ist bandwidth-bound, keine Variante amortisiert weight reads bei batch=1. Nur N-gram-Spec (W4) shipped. Siehe TODO.md. |
 | W3 | Medusa Heads (multi-token predict) | +1.3-2× | +300MB | gleich (verify lossless) | mittel | nicht da |
 | W4 | PLE / Prompt-Lookup (strukturierter Kontext) | 2-5× bei JSON/Code | 0 | gleich | klein | N-gram-Spec ist Variante davon |
 | W5 | Batch>1 Coalescing (continuous batching) | 2-8× Throughput | 0 | gleich | teilweise vorhanden | teilweise |
@@ -57,7 +57,7 @@ between kernels. Fusion removes round-trips to global memory.
 | A3 | In-place RMSNorm+Residual | -1 Alloc/layer | marginal | gleich | klein | vorhanden |
 | A4 | FP16-Accum für Logits (statt FP32) | -50% Logits-Write | 0 | -0.1% top-1 | klein | teilweise |
 | A5 | Fused Attention-Out + Residual + RMSNorm | -2 Kernel-Launches | 0 | gleich | mittel | teilweise |
-| A6 | Fused MoE Routing (alles ohne D2H) | Graph-Safe MoE | 0 | gleich | mittel | teilweise (Gemma-4 Fast-Path) |
+| A6 | Fused MoE Routing (alles ohne D2H) | Graph-Safe MoE | 0 | gleich | mittel | **vorhanden für NVFP4 prequant MoE** (`cache_moe_native_nvfp4`, PR #85): Qwen3.6-NVFP4, Gemma-4-NVFP4, Qwen3-Coder-NVFP4. Legacy GGUF MoE bleibt graph-incompatible — D2H expert-routing memcpy pro Layer pro Token (open work item). |
 
 ## MoE-spezifisch
 
@@ -86,46 +86,52 @@ effektive Wartezeit auf Traffic.
 
 ## Top-Kandidaten — ROI-sortiert, noch nicht geshippt
 
-1. **K1-fix INT4 KV Decode-Kernel** — KV-Cache bereits geshippt aber **Perf-Regression**:
-   -4% @ short ctx, -22% @ 20K ctx (Validation 2026-04-24). Kernel-Investigation
-   nötig — Dequant-Overhead + Scale-Traffic überwiegen Bandwidth-Ersparnis.
-   Wenn fixbar: echter 2× Win @ langer ctx.
-2. **W2 EAGLE-3 Revisit** — dead_ends.md markiert alte Version gescheitert,
-   aber active development bei EAGLE-Repo. Bei Accept-Rate >70%: 1.5-2×
-   decode.
+1. **K1-fix INT4 KV Decode-Kernel** — KV-Cache geshippt aber **Perf-Regression**:
+   -4% @ short ctx, -22% @ 20K ctx. Kernel-Investigation nötig — Dequant-Overhead
+   + Scale-Traffic überwiegen Bandwidth-Ersparnis. Wenn fixbar: echter 2×
+   Win @ langer ctx.
+2. **A6-Generalize MoE Fast-Path für GGUF** — der NVFP4-prequant Fast-Path
+   (`cache_moe_native_nvfp4`) eliminiert die D2H-Routing-Sync und ermöglicht
+   CUDA Graphs für 200+ tok/s decode. Auf GGUF MoE (Qwen3-Coder Q6, Gemma-4
+   Q4_K_M) feuert immer noch der legacy expert-routing Pfad mit D2H pro
+   Layer pro Token. Generalisierung = High-Impact, Medium-High Aufwand.
 3. **K5 Token-Eviction (H2O)** — lange Kontexte, moderate Qualitätsverluste,
    ~1 Woche Arbeit. Orthogonal zu K4/K6.
 4. **M1 Expert-Prefetch** — MoE-Modelle mit Host-Experts. Pipeline-Parallelism
    zwischen Router-Output und Expert-Load. Braucht separaten Copy-Stream
    + Events für Cross-Layer-Overlap.
-5. **W3 Medusa Heads** — lossless, orthogonal zu EAGLE, kleinere VRAM-Kosten.
+5. **`mxf4nvf4.block_scale.scale_vec::4X.m16n8k64` MMA-Integration** —
+   MXFP4 FMHA-Upgrade für 2-4× prefill attention. Layouts byte-exact
+   verified (PR #55), Integration ist der offene Schritt.
 
 ## Was bereits gewonnen wurde (Referenz)
 
+- **NVFP4 prequant decode fast-path (PR #85 + #88)**: Qwen3-Coder-30B-A3B
+  51→**272 tok/s** (5.3×), Qwen3.6-35B-A3B 117–142→**217**, Gemma-4-26B
+  157–180→**213**, Mistral-3.2-24B 81→**101**. CUDA Graphs jetzt safe by
+  default für SafeTensors NVFP4.
 - FP8 Prefill Weight-Cache: +40-60% prefill (Q8_0 Modelle)
-- NVFP4 Decode Weight-Cache: +4.7-16% decode (prmt-LUT)
-- NVFP4 Prequant (Model Optimizer): 38 tok/s auf Qwen3-Coder-30B-A3B
-- FP8 KV Cache: 50% KV-Traffic (stabil mit deterministic GEMM workaround)
+- NVFP4 Decode Weight-Cache: +4.7-16% decode (prmt-LUT auf Q8_0 dense)
+- FP8 KV Cache: 50% KV-Traffic (PR #89 fixed warmup-calibration bug;
+  Llama-3.2 / Qwen3.5 GDN coherent post-fix)
 - MXFP4 FMHA Prefill: +7-18% über FP8 (seq>=1024)
 - MoE Persistent Work-Queue: -38% TC kernel time
-- CUDA Graphs (Verify + Vision + ExecUpdate): Launch-Overhead-Reduktion
+- CUDA Graphs (Verify + Vision + ExecUpdate, PR #53): Launch-Overhead-Reduktion
+- Cold-Start-Reduktion (PR #97): 24s→18s auf Qwen3.6-NVFP4 — skip MTP/visual
+  shards, MAP_POPULATE, deeper pinned ring, cudaMemGetInfo cache für Pass 2.
 
-## Counterintuitive finding: Q6_K beats NVFP4 on decode at 30B
+## Q6_K vs NVFP4 auf 30B-MoE
 
-Verified 2026-04-24 on Qwen3-Coder-30B-A3B (same model, same HW):
-
-| Quant | pp512 tok/s | tg256 tok/s |
-|---|---|---|
-| Q6_K | 1893 | **87** |
-| NVFP4 | **13471** | 43 |
-
-NVFP4 wins prefill 7×, Q6_K wins decode 2×. Workload-dependent — NVFP4
-only default for RAG/long-ctx, Q6_K better for chat/code/agentic.
-See `memory/nvfp4_vs_q6k_moe_2026_04_24.md`.
+Pre-PR-#88 hat Q6_K NVFP4 im Decode geschlagen (87 vs 43 tok/s) wegen des
+FP16-dequant + cuBLAS-fallback Pfads im damaligen NVFP4-Code. Post-PR-#88
+mit dem CUTLASS-NVFP4×NVFP4-Cache + MoE fast-path ist NVFP4 mit **272
+tok/s** klar vorn (Q6_K bei 234). Workload-Empfehlung: **NVFP4 ist die
+default Wahl auf Blackwell** für alle MoE-Größen — der counterintuitive
+Q6-Vorsprung war ein Implementierungs-Artefakt, nicht ein Format-Tradeoff.
 
 ## Referenzen
 
 - `docs/SM120_OPTIMIZATION_STATUS.md` — Bottleneck-Analyse Decode/Prefill
-- `CHANGELOG.md` — frühere Optimierungsphasen, jetzt versions-getaggt
-- Memory: `perf_optimizations.md`, `dead_ends.md`, `turbodraft.md`,
-  `nvfp4_prequant_status.md`, `gdn_debug_status.md`
+- `docs/RECOMMENDED_MODELS.md` — getestete Modelle + tok/s pro Quant
+- `CHANGELOG.md` — frühere Optimierungsphasen, jetzt PR-getaggt
+- `TODO.md` — offene Bugs + abandoned Speculative-Decoding-Optionen
