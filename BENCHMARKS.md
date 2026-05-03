@@ -1,10 +1,20 @@
 # Benchmarks
 
-All benchmarks on a single **NVIDIA RTX 5090** (32 GB GDDR7, Blackwell sm_120f).
-Models loaded from GGUF or SafeTensors (NVFP4 prequant). Each test runs 3 repetitions; averages reported.
+## Methodology
 
-- **imp v0.7+** — CUDA 13.2.1, CUTLASS v4.4.2, NVFP4 decode + FP8 prefill (default for non-GDN), FP16 prefill (GDN), FP8 FMHA long-context path post PR #33, NVFP4-prequant MoE decode fast-path post PR #85
-- **llama.cpp** b8445+ — flash attention enabled, full GPU offload (`-ngl 99`)
+All numbers come from one machine, one run series. Reproducing them on a different RTX 5090, driver, or `imp:test` build will give different numbers — sometimes meaningfully so. The CI gate in `tests/perf_baseline.json` is the authoritative regression check; everything below is descriptive.
+
+| | |
+|---|---|
+| Hardware | Single NVIDIA RTX 5090, 32 GB GDDR7, Blackwell `sm_120f`, custom water loop |
+| Toolchain | CUDA 13.2.1, CUTLASS v4.4.2, GCC 13, RelWithDebInfo or Release Docker build |
+| imp config | NVFP4 decode cache + FP8 prefill (non-GDN) / FP16 prefill (GDN), CUDA Graphs on (where the model supports it) |
+| llama.cpp | `b8445+`, flash attention on, full offload (`-ngl 99`) |
+| Sampling | Greedy (temp = 0) |
+| Repetitions | 3 (decode); pp512 numbers vary up to ±2.6× across container restarts due to cuBLAS algorithm selection |
+| Reported | Mean of repetitions; decode (`tg256`) is the reliable A/B signal |
+
+Refresh the CI baseline with `scripts/gen_perf_baseline.sh` after any intentional perf change.
 
 ## Decode Throughput (tg256)
 
