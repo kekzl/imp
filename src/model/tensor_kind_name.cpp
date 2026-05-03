@@ -1,4 +1,4 @@
-#include "imp/tensor_kind.h"
+#include "core/tensor_kind.h"
 
 namespace imp {
 

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "imp/tensor_kind.h"
-#include "imp/storage_tier.h"
+#include "core/tensor_kind.h"
+#include "core/storage_tier.h"
 
 #include <cstdint>
 #include <cuda_fp16.h>

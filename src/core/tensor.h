@@ -1,7 +1,7 @@
 #pragma once
 
 #include "core/qtype.h"
-#include "imp/tensor_kind.h"
+#include "core/tensor_kind.h"
 #include <cstdint>
 #include <cstddef>
 #include <cassert>

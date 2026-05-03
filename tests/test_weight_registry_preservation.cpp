@@ -1,8 +1,8 @@
 #include "runtime/storage_planner.h"
 #include "model/model_config.h"
 #include "model/model.h"
-#include "imp/tensor_kind.h"
-#include "imp/storage_tier.h"
+#include "core/tensor_kind.h"
+#include "core/storage_tier.h"
 
 #include <gtest/gtest.h>
 #include <cstdint>

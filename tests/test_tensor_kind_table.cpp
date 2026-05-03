@@ -1,5 +1,5 @@
 #include "model/tensor_kind_table.h"
-#include "imp/storage_tier.h"
+#include "core/storage_tier.h"
 
 #include <gtest/gtest.h>
 

@@ -1,4 +1,3 @@
-// include/imp/storage_tier.h
 #pragma once
 
 #include <cstdint>

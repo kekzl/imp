@@ -1,6 +1,6 @@
 #pragma once
 
-#include "imp/tensor_kind.h"
+#include "core/tensor_kind.h"
 #include <string_view>
 
 namespace imp {

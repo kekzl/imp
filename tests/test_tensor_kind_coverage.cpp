@@ -1,6 +1,6 @@
 #include "model/gguf_loader.h"
 #include "model/tensor_kind_matcher.h"
-#include "imp/tensor_kind.h"
+#include "core/tensor_kind.h"
 
 #include <gtest/gtest.h>
 #include <filesystem>
