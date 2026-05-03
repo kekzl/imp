@@ -1,7 +1,11 @@
 # Benchmarks
 
-All benchmarks on a single **NVIDIA RTX 5090** (32 GB GDDR7, Blackwell sm_120f).
-Models loaded from GGUF or SafeTensors (NVFP4 prequant). Each test runs 3 repetitions; averages reported.
+All numbers below were measured on a single **NVIDIA RTX 5090** (32 GB GDDR7,
+Blackwell GB202, sm_120f). The same binary runs unchanged on **RTX PRO 5000
+Blackwell** (48 GB) and **RTX PRO 6000 Blackwell** (96 GB) — identical
+`sm_120f` architecture, identical kernels; the workstation cards just fit
+larger MoE models without expert offload. Models loaded from GGUF or
+SafeTensors (NVFP4 prequant). Each test runs 3 repetitions; averages reported.
 
 - **imp v0.7+** — CUDA 13.2.1, CUTLASS v4.4.2, NVFP4 decode + FP8 prefill (default for non-GDN), FP16 prefill (GDN), FP8 FMHA long-context path post PR #33, NVFP4-prequant MoE decode fast-path post PR #85
 - **llama.cpp** b8445+ — flash attention enabled, full GPU offload (`-ngl 99`)
@@ -132,9 +136,10 @@ Memo: `memory/kv_dtype_tradeoffs_2026_04_24.md`.
 
 | Spec | Value |
 |------|-------|
-| GPU | NVIDIA GeForce RTX 5090 |
+| GPU (this benchmark) | NVIDIA GeForce RTX 5090 |
+| Other supported GPUs (same `sm_120f`) | RTX PRO 5000 Blackwell (48 GB), RTX PRO 6000 Blackwell (96 GB) |
 | Architecture | Blackwell (GB202), sm_120 |
-| VRAM | 32 GB GDDR7, 512-bit, 1792 GB/s |
+| VRAM | 32 GB GDDR7, 512-bit, 1792 GB/s (RTX 5090) |
 | SMs | 170 |
 | CUDA Cores | 21,760 |
 | Tensor Cores | 680 (5th gen) |
